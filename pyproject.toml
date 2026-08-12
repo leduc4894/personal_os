@@ -70,26 +70,31 @@ cmd = "ruff format --check src apps tests tools"
 [tool.poe.tasks.python-lint]
 cmd = "ruff check src apps tests tools"
 
+# TypeScript subtasks run through Poe's shell task type so the ``pnpm`` program
+# resolves on every platform. On Windows CI, pnpm/action-setup installs pnpm as
+# a ``pnpm.cmd`` shim that Poe cannot spawn directly via CreateProcess (the
+# shell is required to resolve the .cmd extension); on Unix the shell finds the
+# pnpm executable just the same.
 [tool.poe.tasks.typescript-format]
-cmd = "pnpm run format"
+shell = "pnpm run format"
 
 [tool.poe.tasks.typescript-format-check]
-cmd = "pnpm run format:check"
+shell = "pnpm run format:check"
 
 [tool.poe.tasks.typescript-lint]
-cmd = "pnpm run lint"
+shell = "pnpm run lint"
 
 [tool.poe.tasks.python-type-check]
 cmd = "mypy src apps/api/src apps/mcp/src apps/worker/src tools"
 
 [tool.poe.tasks.typescript-type-check]
-cmd = "pnpm run type-check"
+shell = "pnpm run type-check"
 
 [tool.poe.tasks.python-test]
 cmd = "pytest --cov --cov-report=term-missing"
 
 [tool.poe.tasks.typescript-test]
-cmd = "pnpm run test"
+shell = "pnpm run test"
 
 [tool.poe.tasks.import-boundaries]
 cmd = "lint-imports"
@@ -101,7 +106,7 @@ cmd = "pytest tests/contract/test_architecture_boundaries.py -q"
 cmd = "uv build --all-packages --clear"
 
 [tool.poe.tasks.typescript-build]
-cmd = "pnpm run build"
+shell = "pnpm run build"
 env = { NEXT_TELEMETRY_DISABLED = "1" }
 
 [tool.poe.tasks.format]
