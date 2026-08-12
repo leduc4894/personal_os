@@ -1,0 +1,9 @@
+{
+  "id": "knowledge-workspace",
+  "name": "Knowledge Workspace",
+  "version": "0.1.0",
+  "minAppVersion": "1.13.1",
+  "description": "Bootstrap shell for the private knowledge workspace.",
+  "author": "Workspace owner",
+  "isDesktopOnly": false
+}

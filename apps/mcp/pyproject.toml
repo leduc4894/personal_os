@@ -1,0 +1,12 @@
+[project]
+name = "mcp-runtime"
+version = "0.1.0"
+requires-python = ">=3.14,<3.15"
+dependencies = ["knowledge-core==0.1.0"]
+
+[project.scripts]
+personal-mcp = "mcp_runtime.command:main"
+
+[build-system]
+requires = ["uv_build==0.11.32"]
+build-backend = "uv_build"

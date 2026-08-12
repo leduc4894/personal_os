@@ -138,7 +138,7 @@ Repository quality tooling exact-pins:
 | Dependency | Version |
 |---|---:|
 | TypeScript | `6.0.3` |
-| ESLint | `10.8.1` |
+| ESLint | `9.39.5` |
 | typescript-eslint | `8.67.0` |
 | Vitest | `4.1.10` |
 | `@vitest/coverage-v8` | `4.1.10` |
@@ -171,6 +171,10 @@ Testing Library is not installed because this spec introduces no UI behavior.
 - Dependency upgrades use a separately reviewed pull request with release-note and compatibility evidence.
 - Automated dependency-upgrade tooling is not configured by this spec.
 - Unreviewed lifecycle or postinstall scripts are forbidden. pnpm build-script allowlists may include only the exact native build packages required by the selected Next.js/esbuild dependency graph, as resolved in the lockfile; every allowlist change requires review.
+
+### 6.4 Version revisions realized during implementation
+
+ESLint was revised from the originally specified `10.8.1` to `9.39.5` (latest 9.x, exact pin) after implementation proved ESLint 10 runtime-incompatible with the pinned `eslint-config-next@16.3.0`: the Web lint gate crashed with `TypeError: scopeManager.addGlobals is not a function`, and the plugins bundled in `eslint-config-next@16.3.0` (`eslint-plugin-react@7.37.5`, `eslint-plugin-jsx-a11y@6.10.2`, `eslint-plugin-import@2.32.0`) all declare peer dependency ranges capped at ESLint `^9`. No gate or strictness was weakened; `9.39.5` is the minimal exact pin that makes the mandated lint gate functional. Evidence: `pnpm-lock.yaml` pins `eslint@9.39.5` for both TypeScript members, and the Ubuntu and Windows quality matrix both exit `0` on the final commit. This satisfies the section 12 requirement that a baseline version decision be revised explicitly with release-note, lockfile and compatibility evidence.
 
 ## 7. Composition-root contracts
 

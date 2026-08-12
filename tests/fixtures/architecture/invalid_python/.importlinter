@@ -1,0 +1,13 @@
+[importlinter]
+root_packages =
+    source_package
+    forbidden_package
+include_external_packages = True
+
+[importlinter:contract:source-forbids-forbidden]
+name = Source package must not import the forbidden package
+type = forbidden
+source_modules =
+    source_package
+forbidden_modules =
+    forbidden_package

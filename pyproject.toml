@@ -1,0 +1,142 @@
+[project]
+name = "knowledge-core"
+version = "0.1.0"
+requires-python = ">=3.14,<3.15"
+dependencies = []
+
+[build-system]
+requires = ["uv_build==0.11.32"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+  "import-linter==2.13",
+  "mypy==2.3.0",
+  "poethepoet==0.48.0",
+  "pytest==9.1.1",
+  "pytest-cov==7.1.0",
+  "pyyaml==6.0.3",
+  "ruff==0.15.22",
+]
+
+[tool.uv]
+required-version = "==0.11.32"
+
+[tool.uv.workspace]
+members = ["apps/api", "apps/mcp", "apps/worker"]
+
+[tool.uv.sources]
+knowledge-core = { workspace = true }
+
+[tool.uv.build-backend]
+module-name = "personal_os"
+
+[tool.pytest.ini_options]
+addopts = ["--strict-config", "--strict-markers"]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+src = ["src", "apps", "tests", "tools"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+files = ["src", "apps/api/src", "apps/mcp/src", "apps/worker/src", "tools"]
+
+[tool.coverage.run]
+branch = true
+source = ["personal_os", "api_runtime", "mcp_runtime", "workflow_worker"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+
+# --- Poe command graph -------------------------------------------------------
+# Private leaf tasks (one tool invocation each) compose into the eight public
+# gates that `uv run poe verify` runs in order: format-check, lint, type-check,
+# boundary-check, test, build. Coverage is diagnostic only (no fail_under).
+
+[tool.poe.tasks.python-format]
+cmd = "ruff format src apps tests tools"
+
+[tool.poe.tasks.python-format-check]
+cmd = "ruff format --check src apps tests tools"
+
+[tool.poe.tasks.python-lint]
+cmd = "ruff check src apps tests tools"
+
+# TypeScript subtasks run through Poe's shell task type so the ``pnpm`` program
+# resolves on every platform. On Windows CI, pnpm/action-setup installs pnpm as
+# a ``pnpm.cmd`` shim that Poe cannot spawn directly via CreateProcess (the
+# shell is required to resolve the .cmd extension); on Unix the shell finds the
+# pnpm executable just the same.
+[tool.poe.tasks.typescript-format]
+shell = "pnpm run format"
+
+[tool.poe.tasks.typescript-format-check]
+shell = "pnpm run format:check"
+
+[tool.poe.tasks.typescript-lint]
+shell = "pnpm run lint"
+
+[tool.poe.tasks.python-type-check]
+cmd = "mypy src apps/api/src apps/mcp/src apps/worker/src tools"
+
+[tool.poe.tasks.typescript-type-check]
+shell = "pnpm run type-check"
+
+[tool.poe.tasks.python-test]
+cmd = "pytest --cov --cov-report=term-missing"
+
+[tool.poe.tasks.typescript-test]
+shell = "pnpm run test"
+
+[tool.poe.tasks.import-boundaries]
+cmd = "lint-imports"
+
+[tool.poe.tasks.boundary-contract-tests]
+cmd = "pytest tests/contract/test_architecture_boundaries.py -q"
+
+[tool.poe.tasks.python-build]
+cmd = "uv build --all-packages --clear"
+
+[tool.poe.tasks.typescript-build]
+shell = "pnpm run build"
+env = { NEXT_TELEMETRY_DISABLED = "1" }
+
+[tool.poe.tasks.format]
+sequence = ["python-format", "typescript-format"]
+default_item_type = "ref"
+
+[tool.poe.tasks.format-check]
+sequence = ["python-format-check", "typescript-format-check"]
+default_item_type = "ref"
+
+[tool.poe.tasks.lint]
+sequence = ["python-lint", "typescript-lint"]
+default_item_type = "ref"
+
+[tool.poe.tasks.type-check]
+sequence = ["python-type-check", "typescript-type-check"]
+default_item_type = "ref"
+
+[tool.poe.tasks.test]
+sequence = ["python-test", "typescript-test"]
+default_item_type = "ref"
+
+[tool.poe.tasks.boundary-check]
+sequence = ["import-boundaries", "boundary-contract-tests"]
+default_item_type = "ref"
+
+[tool.poe.tasks.build]
+sequence = ["python-build", "typescript-build"]
+default_item_type = "ref"
+
+[tool.poe.tasks.verify]
+sequence = ["format-check", "lint", "type-check", "boundary-check", "test", "build"]
+default_item_type = "ref"
