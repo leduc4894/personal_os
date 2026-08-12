@@ -6,5 +6,13 @@
   "engines": {
     "node": ">=24.18.0 <25",
     "pnpm": "10.34.0"
+  },
+  "scripts": {
+    "build": "pnpm --recursive --if-present run build",
+    "format": "pnpm --recursive --if-present run format",
+    "format:check": "pnpm --recursive --if-present run format:check",
+    "lint": "pnpm --recursive --if-present run lint",
+    "test": "pnpm --recursive --if-present run test",
+    "type-check": "pnpm --recursive --if-present run type-check"
   }
 }

@@ -1,0 +1,33 @@
+[importlinter]
+root_packages =
+    personal_os
+    api_runtime
+    mcp_runtime
+    workflow_worker
+include_external_packages = True
+
+[importlinter:contract:domain-does-not-import-composition-or-infrastructure]
+name = Core package does not import composition roots or infrastructure SDKs
+type = forbidden
+source_modules =
+    personal_os
+forbidden_modules =
+    api_runtime
+    mcp_runtime
+    workflow_worker
+    fastapi
+    sqlalchemy
+    temporalio
+    mcp
+    qdrant_client
+    neo4j
+    redis
+    boto3
+
+[importlinter:contract:composition-roots-are-independent]
+name = Python composition roots do not import one another
+type = independence
+modules =
+    api_runtime
+    mcp_runtime
+    workflow_worker

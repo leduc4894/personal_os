@@ -54,3 +54,83 @@ source = ["personal_os", "api_runtime", "mcp_runtime", "workflow_worker"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
+
+# --- Poe command graph -------------------------------------------------------
+# Private leaf tasks (one tool invocation each) compose into the eight public
+# gates that `uv run poe verify` runs in order: format-check, lint, type-check,
+# boundary-check, test, build. Coverage is diagnostic only (no fail_under).
+
+[tool.poe.tasks.python-format]
+cmd = "ruff format src apps tests tools"
+
+[tool.poe.tasks.python-format-check]
+cmd = "ruff format --check src apps tests tools"
+
+[tool.poe.tasks.python-lint]
+cmd = "ruff check src apps tests tools"
+
+[tool.poe.tasks.typescript-format]
+cmd = "pnpm run format"
+
+[tool.poe.tasks.typescript-format-check]
+cmd = "pnpm run format:check"
+
+[tool.poe.tasks.typescript-lint]
+cmd = "pnpm run lint"
+
+[tool.poe.tasks.python-type-check]
+cmd = "mypy src apps/api/src apps/mcp/src apps/worker/src tools"
+
+[tool.poe.tasks.typescript-type-check]
+cmd = "pnpm run type-check"
+
+[tool.poe.tasks.python-test]
+cmd = "pytest --cov --cov-report=term-missing"
+
+[tool.poe.tasks.typescript-test]
+cmd = "pnpm run test"
+
+[tool.poe.tasks.import-boundaries]
+cmd = "lint-imports"
+
+[tool.poe.tasks.boundary-contract-tests]
+cmd = "pytest tests/contract/test_architecture_boundaries.py -q"
+
+[tool.poe.tasks.python-build]
+cmd = "uv build --all-packages --clear"
+
+[tool.poe.tasks.typescript-build]
+cmd = "pnpm run build"
+env = { NEXT_TELEMETRY_DISABLED = "1" }
+
+[tool.poe.tasks.format]
+sequence = ["python-format", "typescript-format"]
+default_item_type = "ref"
+
+[tool.poe.tasks.format-check]
+sequence = ["python-format-check", "typescript-format-check"]
+default_item_type = "ref"
+
+[tool.poe.tasks.lint]
+sequence = ["python-lint", "typescript-lint"]
+default_item_type = "ref"
+
+[tool.poe.tasks.type-check]
+sequence = ["python-type-check", "typescript-type-check"]
+default_item_type = "ref"
+
+[tool.poe.tasks.test]
+sequence = ["python-test", "typescript-test"]
+default_item_type = "ref"
+
+[tool.poe.tasks.boundary-check]
+sequence = ["import-boundaries", "boundary-contract-tests"]
+default_item_type = "ref"
+
+[tool.poe.tasks.build]
+sequence = ["python-build", "typescript-build"]
+default_item_type = "ref"
+
+[tool.poe.tasks.verify]
+sequence = ["format-check", "lint", "type-check", "boundary-check", "test", "build"]
+default_item_type = "ref"

@@ -1,0 +1,32 @@
+# Fixture: a synthetic Poe task graph that mirrors the real public gate order
+# (format-check, lint, type-check, boundary-check, test, build) but whose final
+# `build` task exits 23. Used only by test_quality_orchestration.py to prove that
+# poe propagates the first failing task's nonzero exit through the `verify`
+# sequence and surfaces the failing task name. NOT part of the real workspace.
+
+[project]
+name = "failing-pipeline-fixture"
+version = "0.0.0"
+requires-python = ">=3.14"
+
+[tool.poe.tasks.format-check]
+cmd = "python -c \"pass\""
+
+[tool.poe.tasks.lint]
+cmd = "python -c \"pass\""
+
+[tool.poe.tasks.type-check]
+cmd = "python -c \"pass\""
+
+[tool.poe.tasks.boundary-check]
+cmd = "python -c \"pass\""
+
+[tool.poe.tasks.test]
+cmd = "python -c \"pass\""
+
+[tool.poe.tasks.build]
+cmd = "python -c \"print('build'); raise SystemExit(23)\""
+
+[tool.poe.tasks.verify]
+sequence = ["format-check", "lint", "type-check", "boundary-check", "test", "build"]
+default_item_type = "ref"
