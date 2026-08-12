@@ -2,6 +2,25 @@ version = 1
 revision = 3
 requires-python = "==3.14.*"
 
+[manifest]
+members = [
+    "api-runtime",
+    "knowledge-core",
+    "mcp-runtime",
+    "workflow-worker",
+]
+
+[[package]]
+name = "api-runtime"
+version = "0.1.0"
+source = { editable = "apps/api" }
+dependencies = [
+    { name = "knowledge-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "knowledge-core", editable = "." }]
+
 [[package]]
 name = "ast-serialize"
 version = "0.8.0"
@@ -260,6 +279,17 @@ wheels = [
 ]
 
 [[package]]
+name = "mcp-runtime"
+version = "0.1.0"
+source = { editable = "apps/mcp" }
+dependencies = [
+    { name = "knowledge-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "knowledge-core", editable = "." }]
+
+[[package]]
 name = "mdurl"
 version = "0.1.2"
 source = { registry = "https://pypi.org/simple" }
@@ -468,3 +498,14 @@ sdist = { url = "https://files.pythonhosted.org/packages/f6/cc/6253133b5bb138fc3
 wheels = [
     { url = "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl", hash = "sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8", size = 45571, upload-time = "2026-07-02T08:40:04.659Z" },
 ]
+
+[[package]]
+name = "workflow-worker"
+version = "0.1.0"
+source = { editable = "apps/worker" }
+dependencies = [
+    { name = "knowledge-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "knowledge-core", editable = "." }]

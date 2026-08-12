@@ -21,6 +21,12 @@ dev = [
 [tool.uv]
 required-version = "==0.11.32"
 
+[tool.uv.workspace]
+members = ["apps/api", "apps/mcp", "apps/worker"]
+
+[tool.uv.sources]
+knowledge-core = { workspace = true }
+
 [tool.uv.build-backend]
 module-name = "personal_os"
 
