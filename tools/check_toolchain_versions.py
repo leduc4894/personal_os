@@ -14,6 +14,7 @@ real system versions.
 
 from __future__ import annotations
 
+import shutil
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from subprocess import CompletedProcess, run
@@ -72,15 +73,24 @@ def verify_toolchain(
 
 def _run_command(command: Sequence[str]) -> CompletedProcess[str]:
     # No shell: the program is resolved directly by the OS, matching the
-    # contract and avoiding shell-injection surface. The ``python`` probe is
-    # resolved through the running interpreter's absolute path
-    # (``sys.executable``) so it works on runners where bare ``python`` is not
-    # directly executable — notably Windows CI, whose App Execution Alias stub
-    # raises FileNotFoundError when spawned without a shell. Because CI invokes
-    # this checker via ``uv run python``, ``sys.executable`` is the pinned
-    # CPython 3.14.6, so the probe still verifies the exact version.
-    resolved = [sys.executable if part == "python" else part for part in command]
-    return run(resolved, capture_output=True, text=True, check=False)
+    # contract and avoiding shell-injection surface.
+    program, arguments = command[0], list(command[1:])
+    # ``python``: probe the running interpreter's absolute path. CI invokes this
+    # checker via ``uv run python``, so ``sys.executable`` is the pinned CPython
+    # 3.14.6; bare ``python`` is not directly executable on Windows runners (App
+    # Execution Alias stub) nor the right version when it is. Every other tool is
+    # resolved via PATH (and PATHEXT on Windows) to target the binary the runner
+    # actually installed, wherever setup-* placed it.
+    resolved_program = sys.executable if program == "python" else shutil.which(program) or program
+    launch = [resolved_program, *arguments]
+    # Windows .cmd/.bat shims (e.g. an npm-installed pnpm) cannot be executed by
+    # CreateProcess directly. Launch them through cmd.exe with the resolved
+    # absolute path and the controlled argument list. This stays free of shell-
+    # injection surface (no interpolation; arguments come from EXPECTED_OUTPUTS)
+    # and is the standard non-shell way to spawn a .cmd shim on Windows.
+    if sys.platform == "win32" and resolved_program.lower().endswith((".cmd", ".bat")):
+        launch = ["cmd", "/c", resolved_program, *arguments]
+    return run(launch, capture_output=True, text=True, check=False)
 
 
 def main() -> int:
