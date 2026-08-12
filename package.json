@@ -1,0 +1,10 @@
+{
+  "name": "knowledge-workspace-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.34.0",
+  "engines": {
+    "node": ">=24.18.0 <25",
+    "pnpm": "10.34.0"
+  }
+}
