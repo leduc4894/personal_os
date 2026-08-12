@@ -72,8 +72,15 @@ def verify_toolchain(
 
 def _run_command(command: Sequence[str]) -> CompletedProcess[str]:
     # No shell: the program is resolved directly by the OS, matching the
-    # contract and avoiding shell-injection surface.
-    return run(list(command), capture_output=True, text=True, check=False)
+    # contract and avoiding shell-injection surface. The ``python`` probe is
+    # resolved through the running interpreter's absolute path
+    # (``sys.executable``) so it works on runners where bare ``python`` is not
+    # directly executable — notably Windows CI, whose App Execution Alias stub
+    # raises FileNotFoundError when spawned without a shell. Because CI invokes
+    # this checker via ``uv run python``, ``sys.executable`` is the pinned
+    # CPython 3.14.6, so the probe still verifies the exact version.
+    resolved = [sys.executable if part == "python" else part for part in command]
+    return run(resolved, capture_output=True, text=True, check=False)
 
 
 def main() -> int:
