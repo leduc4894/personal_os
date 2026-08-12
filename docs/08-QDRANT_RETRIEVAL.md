@@ -68,7 +68,7 @@ Không tạo point cho note header rỗng. Parent section được hydrate khi c
 }
 ```
 
-`chunk_text` nằm trong Qdrant để rerank/context nhanh nhưng không canonical; citation cuối có thể hydrate từ S3/R2 để bảo đảm exact version.
+`chunk_text` nằm trong Qdrant để rerank/context nhanh nhưng không canonical; citation cuối có thể hydrate từ active canonical object store để bảo đảm exact version.
 
 ## 4. Hierarchical filtering
 

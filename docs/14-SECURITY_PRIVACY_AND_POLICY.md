@@ -66,7 +66,8 @@ Approval bind proposal hash, source ID, base version, user và expiry. Nếu bas
 
 - Chỉ reverse proxy public HTTPS endpoint cần thiết.
 - PostgreSQL, Qdrant, Neo4j, Redis và Temporal không public Internet.
-- R2 bucket private và dùng scoped credentials/presigned URLs.
+- R2 hoặc MinIO bucket private và dùng scoped credentials/presigned URLs; credential của backend inactive không cấp quyền ghi cho application runtime.
+- Object-store cutover chạy trong maintenance/read-only mode, verify exact inventory/hash/size và ghi audit; dependency failure không được kích hoạt automatic failover.
 - Admin operational UIs đi qua VPN/SSH tunnel hoặc authenticated proxy.
 - Host-to-host observability traffic dùng private network và authenticated OTLP/scrape boundary.
 

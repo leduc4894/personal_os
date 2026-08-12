@@ -7,7 +7,7 @@
 | Backend | Python, FastAPI, Pydantic |
 | Domain persistence | SQLAlchemy, Alembic |
 | Canonical state | PostgreSQL |
-| Canonical bytes | Private Cloudflare R2 hoặc S3-compatible storage |
+| Canonical bytes | Private S3-compatible storage: Cloudflare R2 mặc định, MinIO Community local/test hoặc controlled fallback |
 | Search projection | Qdrant |
 | Graph projection | Neo4j |
 | Durable workflows | Temporal Python SDK |
@@ -18,6 +18,24 @@
 | Containers | Docker Compose; reverse proxy bằng Traefik hoặc Caddy |
 
 Không dùng floating `latest` tag trong production. Exact versions được pin trong lockfile và deployment manifest.
+
+### Phase 1 infrastructure baseline
+
+Baseline được kiểm tra ngày 2026-08-12, ưu tiên current patched release hoặc LTS khi current feature release chưa tích lũy đủ patch:
+
+| Component | Version | Rationale |
+|---|---|---|
+| PostgreSQL | `18.4` | Current supported minor của PostgreSQL 18 |
+| Qdrant | `1.18.2` | Current patched release |
+| Neo4j Community | `5.26.28` LTS | Single-instance Community Edition, LTS thay cho monthly current release |
+| Redis Open Source | `8.6.4` | Patched GA release; Phase 1 không cần tính năng mới chỉ có trong 8.8 |
+| Temporal Server | `1.31.2` | Current patched server release |
+| Temporal UI | `2.53.0` | Current UI release tương thích Temporal Server 1.31.2 |
+| Temporal CLI | `1.8.0` | Current administrative CLI release |
+| MinIO Community | `RELEASE.2025-10-15T17-29-55Z` | Bản Community cuối; repository đã archive và chỉ dùng với explicit risk acceptance |
+
+Compose và deployment manifest pin exact tag cùng image digest. Nâng version đi qua pull request riêng, review release notes, compatibility/migration tests và rollback evidence; không tự động nâng production.
+MinIO Community release cuối không còn official prebuilt container artifact theo release instruction; project phải reproducibly build từ exact signed source tag, scan/SBOM/attest image và pin internal registry digest trước khi Compose sử dụng.
 
 ## 2. Web App
 

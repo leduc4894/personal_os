@@ -52,7 +52,7 @@ Request rate, p50/p95 latency theo stage, candidate counts, degraded modes, zero
 
 ### Storage
 
-PostgreSQL size/connections, Qdrant points/index bytes/RAM, Neo4j store/heap, Redis memory, disk usage và R2 request/cost.
+PostgreSQL size/connections, Qdrant points/index bytes/RAM, Neo4j store/heap, Redis memory, disk usage và object-store request/bytes/cost theo low-cardinality backend kind.
 
 Không dùng source ID, path, query hoặc tag làm Prometheus label có cardinality cao.
 

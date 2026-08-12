@@ -6,7 +6,7 @@ Một content version hợp lệ là phép nối giữa:
 
 ```text
 PostgreSQL version record
-  + immutable S3/R2 object
+  + immutable object trong active canonical object store
   + verified SHA-256 and byte size
 ```
 
@@ -26,7 +26,26 @@ objects/sha256/{first_2}/{next_2}/{sha256}
 - Trùng bytes giữa nhiều source/version được deduplicate tự nhiên.
 - Encryption, retention và lifecycle do bucket policy quản lý.
 
-## 3. Stable identities
+## 3. Backend modes and controlled cutover
+
+- Cloudflare R2 là production default.
+- MinIO Community là backend local/test và production fallback có explicit risk acceptance vì upstream Community repository đã archive.
+- MinIO production fallback chạy ngoài Host A, trên persistent storage và failure domain riêng, qua private network và backup riêng.
+- Application dùng một S3-compatible adapter và cùng contract test suite cho cả hai backend.
+- Chỉ một backend được active và writable tại một thời điểm; lỗi request không được kích hoạt automatic failover.
+
+Cutover bắt buộc chạy theo thứ tự:
+
+1. Đưa canonical writes về maintenance/read-only và ghi cutover intent có audit.
+2. Xác định exact source backend, target backend và canonical checkpoint.
+3. Replicate exact object keys và metadata cần thiết.
+4. Verify inventory, SHA-256 và byte size trên target.
+5. Đổi active backend configuration bằng secret/config deployment được kiểm soát.
+6. Chạy canonical read/write smoke và fail-closed integrity checks.
+7. Mở lại writes khi target pass; nếu fail thì rollback configuration khi source vẫn còn authoritative.
+8. Giữ source backend read-only theo retention cho đến khi cutover evidence và backup pass.
+
+## 4. Stable identities
 
 ```text
 user_id             UUID
@@ -40,7 +59,7 @@ chunk_id            deterministic ID trong source version lineage
 
 Path, URL, title và filename là mutable attributes.
 
-## 4. Source model
+## 5. Source model
 
 ```text
 source_id
@@ -59,7 +78,7 @@ deleted_at
 
 `source_type` ban đầu gồm `markdown`, `text`, `pdf`, `image`, `audio`, `web`, `youtube`.
 
-## 5. Version model
+## 6. Version model
 
 ```text
 source_version_id
@@ -78,9 +97,9 @@ committed_at
 
 `content_version` tăng đơn điệu trong phạm vi source. Optimistic concurrency dùng `base_version_id`, không dùng timestamp để quyết định thắng thua.
 
-## 6. Derived artifacts
+## 7. Derived artifacts
 
-OCR text, transcript, parsed document, thumbnail và extracted metadata có thể lưu trong R2 nhưng luôn là derived artifacts:
+OCR text, transcript, parsed document, thumbnail và extracted metadata có thể lưu trong active object store nhưng luôn là derived artifacts:
 
 ```text
 artifacts/{source_version_id}/{artifact_kind}/{pipeline_hash}
@@ -88,7 +107,7 @@ artifacts/{source_version_id}/{artifact_kind}/{pipeline_hash}
 
 Mỗi artifact tham chiếu source version, provider/model/version và input hash. Xóa artifact không làm mất canonical source.
 
-## 7. Write paths
+## 8. Write paths
 
 ### Obsidian human edit
 
@@ -116,7 +135,7 @@ proposal → policy check → diff → user approval
 
 AI không ghi trực tiếp vào Vault filesystem.
 
-## 8. Deletion
+## 9. Deletion
 
 Delete là tombstone trước, physical GC sau:
 
@@ -125,6 +144,6 @@ Delete là tombstone trước, physical GC sau:
 3. Giữ version/object theo retention.
 4. GC chỉ xóa object không còn reference, không có hold và đã qua grace period.
 
-## 9. Recovery rule
+## 10. Recovery rule
 
-Qdrant, Neo4j, Redis, logs hoặc Temporal history không bao giờ được dùng để phát minh lại canonical content. Khi canonical object thiếu, hệ thống đánh dấu integrity failure và yêu cầu resync/restore từ canonical backup.
+Qdrant, Neo4j, Redis, logs hoặc Temporal history không bao giờ được dùng để phát minh lại canonical content. Khi object trong active canonical store thiếu, hệ thống đánh dấu integrity failure và yêu cầu resync/restore từ canonical backup; không tự đọc backend inactive để che giấu lỗi cutover.

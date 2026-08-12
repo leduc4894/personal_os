@@ -2,7 +2,7 @@
 
 ## 1. Vai trò
 
-PostgreSQL là canonical application state và correctness authority cho source identity, versions, policy, projection route, workflow intent, audit và approvals. Content bytes lớn nằm trong private S3/R2.
+PostgreSQL là canonical application state và correctness authority cho source identity, versions, policy, projection route, workflow intent, audit và approvals. Content bytes lớn nằm trong active private S3-compatible object store.
 
 ## 2. Core tables
 

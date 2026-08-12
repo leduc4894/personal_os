@@ -22,7 +22,7 @@ load canonical references
 
 ### WorkspaceReconcileWorkflow
 
-So sánh plugin manifest, PostgreSQL current versions, S3/R2 objects và projection checkpoints; tạo repair actions có giới hạn.
+So sánh plugin manifest, PostgreSQL current versions, active canonical object store và projection checkpoints; tạo repair actions có giới hạn.
 
 ### ProjectionRebuildWorkflow
 
@@ -62,7 +62,7 @@ Temporal là retry owner cho external calls. Provider SDK retries bị tắt ho�
 | Conflict | stale base, fencing mismatch | non-retryable; cần replan |
 | Policy | denied content/provider | terminal |
 | Invalid | schema/hash mismatch | terminal + alert |
-| Dependency outage | Qdrant/R2/Neo4j down | bounded retry rồi pending repair |
+| Dependency outage | Qdrant/object store/Neo4j down | bounded retry rồi pending repair; không tự chuyển object-store backend |
 
 Mỗi call có timeout riêng; workflow có overall deadline và cancellation behavior.
 
@@ -108,4 +108,4 @@ Worker restart không mất workflow. Temporal outage không làm mất canonica
 - Activity idempotency và crash-after-commit.
 - Cancellation/continue-as-new.
 - Fencing rejection.
-- Live Temporal + PostgreSQL + R2 + Qdrant + Neo4j workflow.
+- Live Temporal + PostgreSQL + active S3-compatible object store + Qdrant + Neo4j workflow.

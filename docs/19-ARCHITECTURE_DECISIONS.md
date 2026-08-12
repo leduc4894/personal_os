@@ -2,7 +2,7 @@
 
 ## ADR-001 — Canonical state is split by responsibility
 
-**Decision:** S3/R2 giữ immutable bytes; PostgreSQL giữ identity/version/current pointer/policy. Cả hai tạo thành canonical boundary.
+**Decision:** Active private S3-compatible object store giữ immutable bytes; PostgreSQL giữ identity/version/current pointer/policy. Cloudflare R2 là production default và cả hai thành phần tạo thành canonical boundary.
 
 **Reason:** Object storage tối ưu durable bytes; relational database tối ưu transactional state. Obsidian và Web App là clients, không phải backend authority.
 
@@ -80,7 +80,7 @@
 
 ## ADR-014 — Two small hosts and managed object/error storage
 
-**Decision:** Host A chạy Personal OS, Host B chạy observability; R2 giữ bytes và Sentry Cloud giữ errors-only.
+**Decision:** Host A chạy Personal OS, Host B chạy observability; Cloudflare R2 mặc định giữ bytes và Sentry Cloud giữ errors-only.
 
 **Reason:** Tách failure domain vừa đủ, tránh disk/GPU/Sentry self-host overhead quá mức.
 
@@ -95,3 +95,9 @@
 **Decision:** Baseline, contracts và tests chỉ mô tả target system có thể bootstrap từ empty environment.
 
 **Reason:** Giữ implementation surface nhỏ, nhất quán và có thể kiểm chứng từ đầu.
+
+## ADR-017 — One active S3-compatible canonical object store
+
+**Decision:** Cloudflare R2 là production default. MinIO Community phục vụ local/test và có thể là production fallback trên failure domain riêng sau explicit risk acceptance. Tại một thời điểm chỉ một backend được application cấp quyền ghi; chuyển backend là maintenance operation có replication, inventory/hash/size verification, configuration activation, smoke test và audit. Không automatic failover theo request.
+
+**Reason:** Một S3-compatible contract giữ domain portable nhưng dual-write hoặc opportunistic failover có thể tạo split-brain giữa PostgreSQL pointer và object bytes. MinIO Community repository đã archive nên fallback này cần pin bản cuối, kiểm soát exposure, backup và replacement trigger.

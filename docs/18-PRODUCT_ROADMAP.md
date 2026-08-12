@@ -4,7 +4,7 @@ Mỗi milestone tạo phần mềm chạy được, có acceptance, migration, r
 
 ## Milestone 0 — Foundation
 
-Scope: repository skeleton, contracts, PostgreSQL baseline, S3/R2 CAS, auth, config, CI và local Docker dependencies.
+Scope: repository skeleton, contracts, PostgreSQL baseline, S3-compatible CAS, R2/MinIO backend modes, auth, config, CI và local Docker dependencies.
 
 Exit:
 

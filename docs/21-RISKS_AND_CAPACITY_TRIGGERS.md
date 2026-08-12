@@ -6,6 +6,10 @@
 
 Mitigation: publish protocol verify object trước transaction, periodic inventory reconcile, restore-tested manifests và fail-closed reads.
 
+### Active object-store backends diverge
+
+Mitigation: chỉ một backend writable, không automatic failover, controlled cutover trong maintenance/read-only mode, exact-key replication, inventory/hash/size verification và auditable activation.
+
 ### Concurrent Obsidian/Web edits
 
 Mitigation: exact base version, three-way conflict, atomic client apply và no silent last-write-wins.
@@ -48,13 +52,17 @@ Mitigation: content-hash cache, incremental indexing, batching, transcript/OCR o
 
 Mitigation: modular monolith, Compose, projections rebuildable, automated backup/restore and avoid optional services until their milestone.
 
+### MinIO Community is archived
+
+Mitigation: pin bản cuối `RELEASE.2025-10-15T17-29-55Z`, reproducibly build/scan/SBOM/attest container từ signed source tag, cô lập private network, không xem đây là maintained dependency, giữ R2 là production default và bắt buộc re-evaluate replacement nếu có CVE chưa được vá hoặc incompatibility.
+
 ### Host B failure hides alerts
 
 Mitigation: Host A heartbeat check plus Telegram path; use external dead-man service only if outage notification guarantee becomes necessary.
 
 ### Disk exhaustion
 
-Mitigation: R2 for bytes/backups, bounded telemetry retention, disk forecast alerts, compaction headroom and exact cleanup workflows.
+Mitigation: external active object store cho bytes/backups, bounded telemetry retention, disk forecast alerts, compaction headroom and exact cleanup workflows.
 
 ## 5. Capacity triggers
 
@@ -76,3 +84,4 @@ Mitigation: R2 for bytes/backups, bounded telemetry retention, disk forecast ale
 - Do not add GPU until OCR/STT benchmark shows API or CPU path violates latency/cost target.
 - Do not add Qdrant payload index without real filter frequency/selectivity evidence.
 - Do not introduce multi-user tenancy before product scope changes explicitly.
+- Do not activate archived MinIO Community for production without recorded risk acceptance, verified backup và replacement trigger.

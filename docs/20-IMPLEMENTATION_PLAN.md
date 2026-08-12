@@ -53,14 +53,48 @@ Mỗi domain package chứa contracts, service, repository ports và errors củ
 
 ### Phase 1 — Bootstrap and canonical core
 
+Design specs được viết, review và triển khai lần lượt theo dependency order:
+
+1. `phase-one-workspace-bootstrap-design.md`
+2. `runtime-configuration-and-diagnostics-design.md`
+3. `local-service-stack-design.md`
+4. `canonical-postgresql-baseline-design.md`
+5. `content-addressable-object-storage-design.md`
+6. `source-version-commit-and-idempotency-design.md`
+7. `canonical-core-acceptance-and-recovery-design.md`
+
+Infrastructure baseline được kiểm tra ngày 2026-08-12 và ưu tiên patched/LTS stability:
+
+| Component | Pinned version |
+|---|---|
+| PostgreSQL | `18.4` |
+| Qdrant | `1.18.2` |
+| Neo4j Community | `5.26.28` LTS |
+| Redis Open Source | `8.6.4` |
+| Temporal Server | `1.31.2` |
+| Temporal UI | `2.53.0` |
+| Temporal CLI | `1.8.0` |
+| MinIO Community | `RELEASE.2025-10-15T17-29-55Z` |
+
+Compose và deployment manifests pin exact image tag cùng digest, không dùng floating tag. Upgrade đi qua pull request riêng với release-note review, compatibility/migration tests và rollback evidence. MinIO Community là archived dependency đã chấp nhận rủi ro, không phải maintained production default.
+MinIO Community release cuối phải được reproducibly build từ exact signed source tag, scan/SBOM/attest và pin internal registry digest vì release này không cung cấp official prebuilt container artifact.
+
 Deliverables:
 
 1. Python/TypeScript workspaces, lint/type/test CI.
 2. Settings + secret-file loading, structured errors/logging.
 3. PostgreSQL empty baseline for identity, source/version/object, events và audit.
-4. S3/R2 CAS adapter with streaming SHA-256 verification.
+4. S3-compatible CAS adapter with streaming SHA-256 verification và cùng contract suite cho MinIO/R2.
 5. Source version transaction và idempotent event service.
-6. Local Compose for PostgreSQL, Qdrant, Neo4j, Redis, Temporal.
+6. Local Compose for PostgreSQL, Qdrant, Neo4j Community single-instance, Redis, Temporal Server/UI/admin tools và MinIO.
+7. Internal CLI cho bootstrap và canonical smoke; Phase 1 không tạo public HTTP API tạm thời.
+
+Deployment constraints:
+
+- Temporal persistence dùng cùng PostgreSQL server trong local/single-host deployment nhưng có database, user, migration và backup scope riêng với canonical application database.
+- MinIO là local/test backend. Cloudflare R2 là production default; MinIO Community production fallback phải chạy ngoài Host A trên persistent storage/failure domain và backup riêng.
+- Chỉ một canonical object-store backend được active và writable. Dependency failure không tự chuyển backend.
+- Controlled cutover chạy trong maintenance/read-only mode: audit intent, replicate exact keys, verify inventory/hash/size, activate target config, smoke test rồi mới mở writes.
 
 Acceptance:
 
@@ -68,6 +102,8 @@ Acceptance:
 - Commit/read an immutable source version.
 - Duplicate idempotency key returns same committed result.
 - Corrupt/missing object cannot become current.
+- MinIO contract suite pass; live Cloudflare R2 pipeline pass cùng portable contract trước production activation.
+- Controlled cutover smoke chứng minh không có dual-write/split-brain và không mở writes trước khi target inventory pass.
 - Migration upgrade/downgrade and backup smoke pass.
 
 ### Phase 2 — Obsidian sync
