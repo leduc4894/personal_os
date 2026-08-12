@@ -1,0 +1,63 @@
+"""Exact environment snapshot loading with safe error mapping."""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Mapping
+from typing import Final
+
+from pydantic import ValidationError
+
+from personal_os.diagnostics.events import SafeToken
+from personal_os.error_contracts.codes import ErrorCode
+from personal_os.error_contracts.exceptions import ConfigurationError
+from personal_os.runtime_configuration.models import RuntimeSettings, ServiceName
+
+ENVIRONMENT_PREFIX: Final[str] = "KNOWLEDGE_"
+ENVIRONMENT_FIELDS: Final[Mapping[str, str]] = {
+    "KNOWLEDGE_ENVIRONMENT": "environment",
+    "KNOWLEDGE_LOG_LEVEL": "log_level",
+    "KNOWLEDGE_SECRET_ROOT": "secret_root",
+}
+
+
+def load_runtime_settings(
+    service_name: ServiceName,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> RuntimeSettings:
+    """Load a frozen :class:`RuntimeSettings` from an exact environment snapshot.
+
+    ``environ`` defaults to ``os.environ`` read at call time (never at import
+    time). Any ``KNOWLEDGE_``-prefixed key outside the closed field map raises
+    :class:`ConfigurationError` without echoing the offending name or value.
+    """
+    source = dict(os.environ if environ is None else environ)
+    unknown_count = sum(
+        key.startswith(ENVIRONMENT_PREFIX) and key not in ENVIRONMENT_FIELDS for key in source
+    )
+    if unknown_count:
+        raise ConfigurationError(
+            ErrorCode.CONFIGURATION_UNKNOWN_KEY,
+            safe_details={"count": unknown_count},
+        )
+    values = {
+        field_name: source[environment_name]
+        for environment_name, field_name in ENVIRONMENT_FIELDS.items()
+        if environment_name in source
+    }
+    try:
+        # Pydantic validates the heterogeneous env values at runtime; mypy cannot
+        # statically prove the dynamic dict maps onto the typed model fields.
+        return RuntimeSettings(service_name=service_name, **values)  # type: ignore[arg-type]
+    except ValidationError as cause:
+        field_names = tuple(
+            SafeToken.parse(str(error["loc"][0]))
+            for error in cause.errors(include_input=False, include_url=False)
+            if error["loc"]
+        )
+        mapped = ConfigurationError(
+            ErrorCode.CONFIGURATION_INVALID,
+            safe_details={"count": len(cause.errors()), "field_names": field_names},
+        )
+        raise mapped from cause
