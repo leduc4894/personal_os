@@ -8,8 +8,14 @@ from personal_os.command_shell import CommandIdentity, run_bootstrap_command
 IDENTITY = CommandIdentity("personal-api", "API process shell")
 
 
+def _check_runtime() -> int:
+    from api_runtime.runtime_check import run
+
+    return run()
+
+
 def run(argv: Sequence[str] | None = None) -> int:
-    return run_bootstrap_command(IDENTITY, argv)
+    return run_bootstrap_command(IDENTITY, argv, runtime_check=_check_runtime)
 
 
 def main() -> NoReturn:

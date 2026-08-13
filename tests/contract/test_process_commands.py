@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from importlib.metadata import entry_points
 from pathlib import Path
 
@@ -18,11 +19,16 @@ COMMAND_IDS = [command for command, _, _ in COMMANDS]
 
 
 def _run_module(
-    module_name: str, arguments: Sequence[str], cwd: Path
+    module_name: str,
+    arguments: Sequence[str],
+    cwd: Path,
+    *,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-m", module_name, *arguments],
         cwd=cwd,
+        env=None if env is None else dict(env),
         check=False,
         capture_output=True,
         text=True,
@@ -109,3 +115,57 @@ def test_console_script_entry_point_maps_to_declared_module(
     matches = [entry for entry in entry_points(group="console_scripts") if entry.name == command]
     assert len(matches) == 1
     assert matches[0].value == f"{module_name}:main"
+
+
+def _hostile_secret_environment(secret_root: Path) -> dict[str, str]:
+    """An inherited-looking environment that would fail or leak if settings loaded.
+
+    Every inherited ``KNOWLEDGE_*`` key is removed, then the secret root is pointed
+    at a directory whose single secret file carries a unique sentinel value, and an
+    invalid log level is injected. Any parsing path that loaded settings would trip
+    the invalid log level (exit 78 / crash); any path that read the secret would
+    echo the sentinel. Shell-only parsing paths do neither.
+    """
+    environment = {
+        key: value for key, value in os.environ.items() if not key.startswith("KNOWLEDGE_")
+    }
+    environment["KNOWLEDGE_SECRET_ROOT"] = str(secret_root)
+    environment["KNOWLEDGE_LOG_LEVEL"] = "do-not-emit-invalid-level"
+    return environment
+
+
+@pytest.mark.parametrize(
+    ("command", "module_name", "description"),
+    COMMANDS,
+    ids=COMMAND_IDS,
+)
+def test_parsing_paths_never_read_secret_file_or_load_settings(
+    command: str,
+    module_name: str,
+    description: str,
+    tmp_path: Path,
+) -> None:
+    del command, description
+    sentinel_value = "do-not-emit-secret-value"
+    sentinel_name = "database-password"
+    (tmp_path / sentinel_name).write_text(sentinel_value, encoding="utf-8")
+    env = _hostile_secret_environment(tmp_path)
+
+    # No args / --help / --version must still succeed (exit 0) despite the hostile
+    # environment: they parse without selecting check-runtime, so no settings load.
+    for argv in ([], ["--help"], ["--version"]):
+        completed = _run_module(module_name, argv, tmp_path, env=env)
+        assert completed.returncode == 0, completed.stderr
+        assert sentinel_value not in completed.stdout
+        assert sentinel_value not in completed.stderr
+        assert sentinel_name not in completed.stdout
+        assert sentinel_name not in completed.stderr
+
+    # Invalid syntax must still exit 2 with usage on stderr and no traceback,
+    # proving the parser error path also never loads settings or reads the secret.
+    invalid = _run_module(module_name, ["--invalid"], tmp_path, env=env)
+    assert invalid.returncode == 2, invalid.stdout
+    assert "unrecognized arguments" in invalid.stderr
+    assert "Traceback" not in invalid.stderr
+    assert sentinel_value not in invalid.stdout + invalid.stderr
+    assert sentinel_name not in invalid.stdout + invalid.stderr
