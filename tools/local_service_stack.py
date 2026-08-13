@@ -2363,7 +2363,7 @@ def _validate_path_owner(path: Path, path_stat: os.stat_result) -> None:
 
 
 def _is_current_windows_user_owner(path: Path) -> bool:
-    """Compare the path owner SID with the current process-token user SID."""
+    """Compare the path owner SID with the current process-token owner SID."""
     if sys.platform != "win32":
         return True
     try:
@@ -2373,7 +2373,7 @@ def _is_current_windows_user_owner(path: Path) -> bool:
         advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         token_query = 0x0008
-        token_user = 1
+        token_owner = 4
         error_insufficient_buffer = 122
 
         kernel32.GetCurrentProcess.restype = wintypes.HANDLE
@@ -2409,11 +2409,8 @@ def _is_current_windows_user_owner(path: Path) -> bool:
         advapi32.EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
         advapi32.EqualSid.restype = wintypes.BOOL
 
-        class SidAndAttributes(ctypes.Structure):
-            _fields_ = [("sid", ctypes.c_void_p), ("attributes", wintypes.DWORD)]
-
-        class TokenUser(ctypes.Structure):
-            _fields_ = [("user", SidAndAttributes)]
+        class TokenOwner(ctypes.Structure):
+            _fields_ = [("owner", ctypes.c_void_p)]
 
         token = wintypes.HANDLE()
         if not advapi32.OpenProcessToken(
@@ -2422,19 +2419,19 @@ def _is_current_windows_user_owner(path: Path) -> bool:
             return False
         try:
             required_size = wintypes.DWORD()
-            advapi32.GetTokenInformation(token, token_user, None, 0, ctypes.byref(required_size))
+            advapi32.GetTokenInformation(token, token_owner, None, 0, ctypes.byref(required_size))
             if ctypes.get_last_error() != error_insufficient_buffer or not required_size.value:
                 return False
             token_buffer = ctypes.create_string_buffer(required_size.value)
             if not advapi32.GetTokenInformation(
                 token,
-                token_user,
+                token_owner,
                 ctypes.cast(token_buffer, ctypes.c_void_p),
                 required_size,
                 ctypes.byref(required_size),
             ):
                 return False
-            token_user_data = ctypes.cast(token_buffer, ctypes.POINTER(TokenUser)).contents
+            token_owner_data = ctypes.cast(token_buffer, ctypes.POINTER(TokenOwner)).contents
             owner_sid = ctypes.c_void_p()
             security_descriptor = ctypes.c_void_p()
             result = advapi32.GetNamedSecurityInfoW(
@@ -2450,7 +2447,7 @@ def _is_current_windows_user_owner(path: Path) -> bool:
             if result != 0 or not owner_sid.value:
                 return False
             try:
-                return bool(advapi32.EqualSid(owner_sid, token_user_data.user.sid))
+                return bool(advapi32.EqualSid(owner_sid, token_owner_data.owner))
             finally:
                 if security_descriptor.value:
                     kernel32.LocalFree(security_descriptor)

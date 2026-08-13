@@ -230,10 +230,11 @@ def test_local_stack_workflow_installs_verified_compose_on_both_platforms() -> N
     assert text.count("v2.30.0") >= 2
     assert "1cddcb3399cc68c385796a6ab441ab5734d4c6a0cb4713bd2bf3f0d384550a38" in text
     assert "07ed10572bed0c42e5477bd33f9eb8f1b1c640d83120cc59feb7ce28f0c1bf86" in text
-    assert "ProgramFiles" in text or "PROGRAMFILES" in text
     jobs = _job_blocks(text)
     assert "grep -Ex 'v?2\\.30\\.0'" in jobs["ubuntu-config"]
     assert '$composeVersion -notin @("2.30.0", "v2.30.0")' in jobs["windows-config"]
+    assert '$dockerConfig = Join-Path $env:RUNNER_TEMP "docker-config"' in jobs["windows-config"]
+    assert "DOCKER_CONFIG=$dockerConfig" in jobs["windows-config"]
 
 
 def test_local_stack_config_jobs_cover_defaults_overrides_and_safe_failures() -> None:

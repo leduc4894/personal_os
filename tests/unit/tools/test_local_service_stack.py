@@ -365,6 +365,7 @@ def test_windows_boundary_accepts_regular_non_symlink_secret_files(
     paths = resolve_stack_paths(tmp_path)
     bootstrap_secret_set(paths)
     monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(stack_module, "_is_current_windows_user_owner", lambda path: True)
 
     assert inspect_secret_set(paths) is SecretSetState.COMPLETE
 

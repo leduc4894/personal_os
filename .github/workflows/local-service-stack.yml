@@ -139,9 +139,12 @@ jobs:
           if ($actualHash -cne $expectedHash) {
             throw "Docker Compose checksum mismatch"
           }
-          $pluginDirectory = Join-Path $env:ProgramFiles "Docker\cli-plugins"
+          $dockerConfig = Join-Path $env:RUNNER_TEMP "docker-config"
+          $pluginDirectory = Join-Path $dockerConfig "cli-plugins"
           New-Item -ItemType Directory -Path $pluginDirectory -Force | Out-Null
           Copy-Item $downloadPath (Join-Path $pluginDirectory "docker-compose.exe") -Force
+          $env:DOCKER_CONFIG = $dockerConfig
+          Add-Content -Path $env:GITHUB_ENV -Value "DOCKER_CONFIG=$dockerConfig"
           $composeVersion = docker compose version --short
           if ($LASTEXITCODE -ne 0 -or $composeVersion -notin @("2.30.0", "v2.30.0")) {
             throw "Pinned Docker Compose was not selected"
