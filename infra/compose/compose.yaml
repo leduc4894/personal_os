@@ -335,7 +335,6 @@ secrets:
 networks:
   service-backplane:
     driver: bridge
-    internal: true
 
 volumes:
   postgres-data:

@@ -1761,8 +1761,7 @@ def test_reset_intersects_project_and_volume_labels_without_or_filter_semantics(
 
     assert result["removed_volumes"] == 5
     assert not any(
-        len([part for part in command if part.startswith("label=")]) > 1
-        for command in calls
+        len([part for part in command if part.startswith("label=")]) > 1 for command in calls
     )
 
 

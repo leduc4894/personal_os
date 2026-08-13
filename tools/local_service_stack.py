@@ -2011,9 +2011,8 @@ def _execute_cli_command(
     if command == "reset":
         is_noninteractive = cast(bool, arguments.non_interactive)
         if is_noninteractive:
-            if (
-                context.environment.get("CI") != "true"
-                or not context.project_name.startswith("knowledge-ci-")
+            if context.environment.get("CI") != "true" or not context.project_name.startswith(
+                "knowledge-ci-"
             ):
                 raise StackFailure(StackExitCode.CLI, "noninteractive_reset_forbidden")
         elif not is_interactive:

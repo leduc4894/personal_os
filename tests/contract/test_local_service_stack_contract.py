@@ -4,6 +4,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -283,7 +284,7 @@ def test_compose_has_exact_topology() -> None:
         "temporal-schema-setup",
         "temporal-namespace-bootstrap",
     }
-    assert compose["networks"] == {"service-backplane": {"driver": "bridge", "internal": True}}
+    assert compose["networks"] == {"service-backplane": {"driver": "bridge"}}
     assert set(compose["volumes"]) == {
         "postgres-data",
         "qdrant-data",
@@ -344,6 +345,99 @@ def test_every_publication_is_loopback_and_approved() -> None:
     assert set(publications) == set(allowed.values())
     assert len(publications) == len(allowed)
     assert all(publication.startswith("127.0.0.1:${") for publication in publications)
+
+
+def test_service_backplane_publishes_a_real_loopback_port(
+    tmp_path: Path,
+) -> None:
+    docker = _require_docker_contract()
+    compose = _read_yaml(COMPOSE_PATH)
+    project_name = f"knowledge-contract-publication-{uuid.uuid4().hex[:12]}"
+    contract_compose_path = tmp_path / "compose.yaml"
+    contract_compose_path.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "publication-probe": {
+                        "image": compose["services"]["redis"]["image"],
+                        "command": [
+                            "redis-server",
+                            "--protected-mode",
+                            "no",
+                            "--save",
+                            "",
+                            "--appendonly",
+                            "no",
+                        ],
+                        "ports": ["127.0.0.1::6379"],
+                        "networks": ["service-backplane"],
+                        "healthcheck": {
+                            "test": ["CMD", "redis-cli", "PING"],
+                            "interval": "1s",
+                            "timeout": "1s",
+                            "retries": 20,
+                        },
+                    }
+                },
+                "networks": compose["networks"],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    compose_command = [
+        docker,
+        "compose",
+        "--file",
+        str(contract_compose_path),
+        "--project-name",
+        project_name,
+    ]
+
+    try:
+        _run_checked(
+            [
+                *compose_command,
+                "up",
+                "--detach",
+                "--wait",
+                "--wait-timeout",
+                "30",
+            ],
+            timeout_seconds=90,
+        )
+        publication = _run_checked(
+            [*compose_command, "port", "publication-probe", "6379"]
+        ).stdout.strip()
+        host, port_text = publication.rsplit(":", 1)
+
+        assert host == "127.0.0.1"
+        with socket.create_connection((host, int(port_text)), timeout=10) as connection:
+            connection.sendall(b"*1\r\n$4\r\nPING\r\n")
+            assert connection.recv(64) == b"+PONG\r\n"
+    finally:
+        down = subprocess.run(
+            [*compose_command, "down", "--remove-orphans", "--timeout", "10"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert down.returncode == 0
+        for resource_command in (
+            [docker, "ps", "--all"],
+            [docker, "network", "ls"],
+            [docker, "volume", "ls"],
+        ):
+            residue = _run_checked(
+                [
+                    *resource_command,
+                    "--filter",
+                    f"label=com.docker.compose.project={project_name}",
+                    "--quiet",
+                ]
+            )
+            assert residue.stdout == ""
 
 
 def test_lock_is_unique_immutable_and_amd64() -> None:
