@@ -173,3 +173,17 @@ class InternalApplicationError(ApplicationError):
     """Unexpected internal failure mapped at a composition boundary."""
 
     allowed_codes = frozenset({ErrorCode.INTERNAL_ERROR})
+
+
+class DatabaseMigrationError(ApplicationError):
+    """Safe migration configuration, dependency and schema failures."""
+
+    allowed_codes = frozenset(
+        {
+            ErrorCode.DATABASE_MIGRATION_CONFIGURATION_INVALID,
+            ErrorCode.DATABASE_CONNECTION_UNAVAILABLE,
+            ErrorCode.DATABASE_MIGRATION_BUSY,
+            ErrorCode.DATABASE_SCHEMA_CONTRACT_INVALID,
+            ErrorCode.DATABASE_DESTRUCTIVE_DOWNGRADE_REFUSED,
+        }
+    )

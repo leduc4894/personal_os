@@ -11,13 +11,16 @@ import yaml  # type: ignore[import-untyped]
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES_ROOT = REPO_ROOT / "tests" / "fixtures"
 
-# A canonical exact Python pin: ``name==x.y[.z...]``. Two- and three-component
-# versions are both legitimate exact pins (e.g. ``import-linter==2.13``); the
-# rule rejects wildcards, ranges, markers, extras, prereleases and VCS URLs by
-# anchoring the whole specifier to this shape.
+# A canonical exact Python pin: ``name==x.y[.z...]`` or ``name[extra]==x.y[.z...]``.
+# Two- and three-component versions are both legitimate exact pins (e.g.
+# ``import-linter==2.13``); the optional ``[extra,...]`` clause permits a pinned
+# extras selection only. The rule rejects wildcards, ranges, environment
+# markers, prereleases and VCS URLs by anchoring the whole specifier to this
+# shape.
 _PYTHON_NAME = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+_PYTHON_EXTRAS = r"(?:\[[A-Za-z0-9._-]+(?:,[A-Za-z0-9._-]+)*\])?"
 _VERSION = r"\d+(?:\.\d+)*"
-PYTHON_PIN_RE = re.compile(rf"^{_PYTHON_NAME}=={_VERSION}$")
+PYTHON_PIN_RE = re.compile(rf"^{_PYTHON_NAME}{_PYTHON_EXTRAS}=={_VERSION}$")
 # A canonical exact npm pin: a bare ``x.y[.z...]`` version literal with no
 # caret, tilde, wildcard, range, prerelease, tag or package alias.
 NPM_PIN_RE = re.compile(rf"^{_VERSION}$")
@@ -71,8 +74,8 @@ def test_python_registry_dependencies_are_exact_pins() -> None:
                 violations.append(f"{manifest.relative_to(REPO_ROOT)}: {spec!r}")
     assert not violations, (
         "Python dependencies must be exact name==version pins "
-        "(no ranges, wildcards, markers, extras, prereleases or VCS URLs):\n"
-        + "\n".join(violations)
+        "(optionally with a pinned [extra] list; no ranges, wildcards, markers, "
+        "prereleases or VCS URLs):\n" + "\n".join(violations)
     )
 
 

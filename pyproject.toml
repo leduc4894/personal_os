@@ -3,8 +3,11 @@ name = "knowledge-core"
 version = "0.1.0"
 requires-python = ">=3.14,<3.15"
 dependencies = [
+  "alembic==1.18.5",
   "pydantic==2.13.4",
   "pydantic-settings==2.14.2",
+  "psycopg[binary]==3.3.4",
+  "SQLAlchemy==2.0.51",
 ]
 
 [build-system]
@@ -43,6 +46,7 @@ addopts = [
   "not local_stack",
 ]
 testpaths = ["tests"]
+pythonpath = ["."]
 markers = [
   "local_stack: requires a reachable Linux Docker Engine and may create disposable containers and volumes",
 ]
@@ -50,7 +54,7 @@ markers = [
 [tool.ruff]
 target-version = "py314"
 line-length = 100
-src = ["src", "apps", "tests", "tools"]
+src = ["src", "apps", "migrations", "tests", "tools"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
@@ -61,7 +65,7 @@ strict = true
 explicit_package_bases = true
 mypy_path = ["src", "apps/api/src", "apps/mcp/src", "apps/worker/src"]
 exclude = ["^tests[/\\\\]fixtures[/\\\\]"]
-files = ["src", "apps/api/src", "apps/mcp/src", "apps/worker/src", "tools"]
+files = ["src", "apps/api/src", "apps/mcp/src", "apps/worker/src", "migrations", "tools"]
 
 [tool.coverage.run]
 branch = true
