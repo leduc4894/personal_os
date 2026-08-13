@@ -18,6 +18,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 IMAGE_LOCK_PATH = REPO_ROOT / "infra" / "compose" / "images.lock.yaml"
 COMPOSE_PATH = REPO_ROOT / "infra" / "compose" / "compose.yaml"
 SCRIPT_DIRECTORY = REPO_ROOT / "infra" / "compose" / "scripts"
+LOCAL_STACK_DESIGN_PATH = (
+    REPO_ROOT / "docs" / "superpowers" / "specs" / "local-service-stack-design.md"
+)
+LOCAL_STACK_PLAN_PATH = (
+    REPO_ROOT / "docs" / "superpowers" / "plans" / "2026-08-13-local-service-stack.md"
+)
 DOCKER_CONTRACT_ENVIRONMENT = "KNOWLEDGE_LOCAL_DOCKER_CONTRACT"
 DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 APPROVED_IMAGES = {
@@ -282,6 +288,34 @@ def test_compose_has_exact_topology() -> None:
     assert all(
         service["networks"] == ["service-backplane"] for service in compose["services"].values()
     )
+
+
+def test_canonical_docs_authorize_exact_five_volume_reset_contract() -> None:
+    expected_volumes = {
+        "postgres-data",
+        "qdrant-data",
+        "neo4j-data",
+        "redis-data",
+        "temporal-health-tools",
+    }
+    design = LOCAL_STACK_DESIGN_PATH.read_text(encoding="utf-8")
+    volume_contract = design.split("## 10. Persistent volumes and restart behavior", 1)[1].split(
+        "## 11.", 1
+    )[0]
+    reset_contract = design.split("## 15. Reset safety", 1)[1].split("## 16.", 1)[0]
+    plan = LOCAL_STACK_PLAN_PATH.read_text(encoding="utf-8")
+    reset_plan = plan.split("- [ ] **Step 4: Implement exact-label reset**", 1)[1].split(
+        "- [ ] **Step 5:", 1
+    )[0]
+
+    assert {volume for volume in expected_volumes if f"`{volume}`" in volume_contract} == (
+        expected_volumes
+    )
+    assert "rebuildable" in volume_contract.lower()
+    assert {volume for volume in expected_volumes if volume in reset_contract} == expected_volumes
+    assert "unknown labeled volumes" in reset_contract.lower()
+    assert {volume for volume in expected_volumes if volume in reset_plan} == expected_volumes
+    assert "Reject unknown labeled volumes" in reset_plan
 
 
 def test_every_publication_is_loopback_and_approved() -> None:
@@ -666,6 +700,7 @@ def test_postgres_provision_reconciles_public_membership_and_bypassrls_drift(
 ALTER ROLE knowledge_app BYPASSRLS;
 GRANT temporal_service TO knowledge_app;
 GRANT knowledge_app TO stack_admin;
+GRANT CONNECT ON DATABASE postgres TO PUBLIC;
 GRANT CONNECT ON DATABASE knowledge TO PUBLIC;
 GRANT CONNECT ON DATABASE temporal TO PUBLIC;
 GRANT CONNECT ON DATABASE temporal_visibility TO PUBLIC;
@@ -707,7 +742,7 @@ SELECT databases.datname || ':' || EXISTS (
       AND privileges.privilege_type = 'CONNECT'
 )
 FROM pg_database AS databases
-WHERE datname IN ('knowledge', 'temporal', 'temporal_visibility')
+WHERE datname IN ('knowledge', 'postgres', 'temporal', 'temporal_visibility')
 ORDER BY datname;
 """,
     )
@@ -717,6 +752,7 @@ ORDER BY datname;
         "temporal_service:false",
         "0",
         "knowledge:false",
+        "postgres:false",
         "temporal:false",
         "temporal_visibility:false",
     ]
@@ -758,7 +794,7 @@ def test_postgres_provision_never_emits_secret_values_on_failure(
         assert str(provisioned_postgresql[secret_name]) not in combined_output
 
 
-def test_locked_images_contain_every_committed_healthcheck_binary(tmp_path: Path) -> None:
+def test_locked_health_binaries_include_a_working_temporal_grpc_bridge(tmp_path: Path) -> None:
     docker = _require_docker_contract()
     compose = _read_yaml(COMPOSE_PATH)
     services = compose["services"]
@@ -819,6 +855,8 @@ def test_locked_images_contain_every_committed_healthcheck_binary(tmp_path: Path
         assert probe.returncode == 0, f"{service_name} lacks health binary {binary}"
 
     volume_name = f"knowledge-contract-temporal-health-{uuid.uuid4().hex[:12]}"
+    network_name = f"knowledge-contract-temporal-health-{uuid.uuid4().hex[:12]}"
+    server_name = f"knowledge-contract-temporal-health-{uuid.uuid4().hex[:12]}"
     fake_tools_directory = tmp_path / "contract-bin"
     fake_tools_directory.mkdir()
     (fake_tools_directory / "temporal-sql-tool").write_text(
@@ -840,6 +878,7 @@ esac
     )
     _run_checked([docker, "volume", "create", volume_name])
     try:
+        _run_checked([docker, "network", "create", network_name])
         install_probe = subprocess.run(
             [
                 docker,
@@ -870,25 +909,82 @@ esac
             timeout=30,
         )
         assert install_probe.returncode == 0
-        execution_probe = subprocess.run(
+        _run_checked(
             [
                 docker,
                 "run",
+                "--detach",
                 "--rm",
-                "--volume",
-                f"{volume_name}:/opt/knowledge/health:ro",
+                "--name",
+                server_name,
+                "--network",
+                network_name,
+                "--network-alias",
+                "temporal-health-backend",
                 "--entrypoint",
-                "/opt/knowledge/health/temporal",
-                services["temporal"]["image"],
-                "--version",
+                "/usr/local/bin/temporal",
+                services["temporal-cli"]["image"],
+                "--log-level",
+                "error",
+                "server",
+                "start-dev",
+                "--headless",
+                "--ip",
+                "0.0.0.0",
             ],
+            timeout_seconds=30,
+        )
+        deadline = time.monotonic() + 30
+        while True:
+            execution_probe = subprocess.run(
+                [
+                    docker,
+                    "run",
+                    "--rm",
+                    "--network",
+                    network_name,
+                    "--volume",
+                    f"{volume_name}:/opt/knowledge/health:ro",
+                    "--entrypoint",
+                    "/opt/knowledge/health/temporal",
+                    services["temporal"]["image"],
+                    "--address",
+                    "temporal-health-backend:7233",
+                    "--client-connect-timeout",
+                    "2s",
+                    "--command-timeout",
+                    "2s",
+                    "--color",
+                    "never",
+                    "--disable-config-file",
+                    "operator",
+                    "cluster",
+                    "health",
+                ],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+            )
+            if execution_probe.returncode == 0 or time.monotonic() >= deadline:
+                break
+            time.sleep(0.5)
+        assert execution_probe.returncode == 0
+    finally:
+        subprocess.run(
+            [docker, "rm", "--force", "--volumes", server_name],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=30,
         )
-        assert execution_probe.returncode == 0
-    finally:
+        subprocess.run(
+            [docker, "network", "rm", network_name],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
         subprocess.run(
             [docker, "volume", "rm", "--force", volume_name],
             check=False,

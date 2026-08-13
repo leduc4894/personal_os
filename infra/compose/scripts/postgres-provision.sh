@@ -108,7 +108,7 @@ SELECT format(
     format('%I', database_name)
 )
 FROM (
-    VALUES ('knowledge'), ('temporal'), ('temporal_visibility')
+    VALUES ('postgres'), ('knowledge'), ('temporal'), ('temporal_visibility')
 ) AS expected_databases(database_name)
 \gexec
 
