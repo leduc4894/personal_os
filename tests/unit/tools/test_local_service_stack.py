@@ -11,6 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[3]))
 
+from tools import local_service_stack as stack_module
 from tools.local_service_stack import (
     SECRET_SPECS,
     SecretSetState,
@@ -146,6 +147,77 @@ def test_remove_secret_set_after_reset_removes_only_complete_set(tmp_path: Path)
 
     assert remove_secret_set_after_reset(paths) is SecretSetState.MISSING
     assert not paths.secret_directory.exists()
+
+
+@pytest.mark.parametrize(
+    ("filename", "replacement"),
+    [
+        ("postgres_admin_password", ""),
+        ("postgres_application_password", "A" * 32),
+        ("neo4j_auth", "not-a-native-neo4j-auth"),
+        ("qdrant_config.yaml", "service:\n  api_key: mismatched-key\n"),
+    ],
+)
+def test_existing_secret_content_must_be_complete_native_and_nontrivial(
+    tmp_path: Path, filename: str, replacement: str
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    bootstrap_secret_set(paths)
+    (paths.secret_directory / filename).write_text(replacement, encoding="ascii")
+
+    with pytest.raises(StackFailure) as raised:
+        bootstrap_secret_set(paths)
+
+    assert str(raised.value) == "invalid_secret_set"
+    assert filename not in str(raised.value)
+    if replacement:
+        assert replacement not in str(raised.value)
+
+
+def test_rejects_secret_directory_reparse_redirect_before_inspection(tmp_path: Path) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    redirect = tmp_path / "redirect"
+    redirect.mkdir()
+    local_directory = paths.secret_directory.parent
+    try:
+        local_directory.symlink_to(redirect, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory reparse-point creation is unavailable")
+
+    with pytest.raises(StackFailure) as raised:
+        inspect_secret_set(paths)
+
+    assert str(raised.value) == "invalid_secret_directory"
+    assert str(local_directory) not in str(raised.value)
+
+
+def test_windows_owner_boundary_refuses_non_owner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    bootstrap_secret_set(paths)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(stack_module, "_is_current_windows_user_owner", lambda path: False)
+
+    with pytest.raises(StackFailure, match="unsafe_secret_set"):
+        inspect_secret_set(paths)
+
+
+def test_parent_flush_failure_after_rename_returns_reusable_complete_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    flush_directory = stack_module._flush_directory
+
+    def fail_only_parent(directory: Path) -> None:
+        if directory == paths.secret_directory.parent and paths.secret_directory.exists():
+            raise StackFailure(StackExitCode.CONTRACT, "secret_set_creation_failed")
+        flush_directory(directory)
+
+    monkeypatch.setattr(stack_module, "_flush_directory", fail_only_parent)
+
+    assert bootstrap_secret_set(paths) is SecretSetState.COMPLETE
+    assert inspect_secret_set(paths) is SecretSetState.COMPLETE
 
 
 def test_resolve_stack_paths_stays_beneath_repository(tmp_path: Path) -> None:

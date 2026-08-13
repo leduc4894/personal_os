@@ -26,6 +26,7 @@ _MAX_PORT = 65535
 _PROJECT_NAME_PATTERN = re.compile(r"knowledge-(?:local|ci-[a-z0-9][a-z0-9-]{0,40})")
 _SECRET_ALPHABET: Final = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 _SECRET_BYTE_COUNT: Final = 32
+_MIN_DISTINCT_SECRET_CHARACTERS: Final = 8
 _QDRANT_CONFIG_FILENAME: Final = "qdrant_config.yaml"
 
 
@@ -205,6 +206,7 @@ def inspect_secret_set(paths: StackPaths) -> SecretSetState:
         _validate_private_directory(secret_directory, secret_stat, require_mode=True)
         for child, child_stat in child_stats:
             _validate_private_file(child, child_stat, require_mode=True)
+        _validate_complete_secret_contents(secret_directory)
         return SecretSetState.COMPLETE
     return SecretSetState.PARTIAL
 
@@ -224,6 +226,7 @@ def bootstrap_secret_set(
     _create_or_validate_local_directory(local_directory)
     staging_directory: Path | None = None
     created_files: list[Path] = []
+    has_renamed_secret_set = False
     try:
         staging_directory = Path(
             tempfile.mkdtemp(prefix=".stack-secrets-staging-", dir=local_directory)
@@ -242,8 +245,15 @@ def bootstrap_secret_set(
         _flush_directory(staging_directory)
         os.rename(staging_directory, secret_directory)
         staging_directory = None
+        has_renamed_secret_set = True
         _flush_directory(local_directory)
     except StackFailure:
+        if has_renamed_secret_set:
+            try:
+                if inspect_secret_set(paths) is SecretSetState.COMPLETE:
+                    return SecretSetState.COMPLETE
+            except StackFailure:
+                pass
         raise
     except (OSError, ValueError):
         raise StackFailure(StackExitCode.CONTRACT, "secret_set_creation_failed") from None
@@ -463,6 +473,13 @@ def _validate_secret_directory_location(paths: StackPaths) -> Path:
     expected_directory = repository_root / ".local" / "stack-secrets"
     if paths.secret_directory != expected_directory:
         raise StackFailure(StackExitCode.INTERNAL, "invalid_secret_directory")
+    try:
+        resolved_secret_directory = expected_directory.resolve(strict=False)
+        resolved_secret_directory.relative_to(repository_root)
+    except (OSError, ValueError):
+        raise StackFailure(StackExitCode.INTERNAL, "invalid_secret_directory") from None
+    if resolved_secret_directory != expected_directory:
+        raise StackFailure(StackExitCode.INTERNAL, "invalid_secret_directory")
     return expected_directory
 
 
@@ -496,15 +513,164 @@ def _validate_private_file(
 
 
 def _validate_path_owner(path: Path, path_stat: os.stat_result) -> None:
+    if sys.platform == "win32":
+        if not _is_current_windows_user_owner(path):
+            raise StackFailure(StackExitCode.CONTRACT, "unsafe_secret_set")
+        return
     if hasattr(os, "getuid"):
         if path_stat.st_uid != os.getuid():
             raise StackFailure(StackExitCode.CONTRACT, "unsafe_secret_set")
         return
-    # pathlib does not expose NTFS ownership on every supported Windows
-    # runtime. The canonical repository path plus the regular-file and
-    # non-symlink checks above remain the enforceable Docker Desktop mount
-    # boundary; POSIX ownership is checked where the platform provides it.
-    return
+    raise StackFailure(StackExitCode.CONTRACT, "unsafe_secret_set")
+
+
+def _is_current_windows_user_owner(path: Path) -> bool:
+    """Compare the path owner SID with the current process-token user SID."""
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        token_query = 0x0008
+        token_user = 1
+        error_insufficient_buffer = 122
+
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.LocalFree.restype = ctypes.c_void_p
+        advapi32.OpenProcessToken.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.HANDLE),
+        ]
+        advapi32.OpenProcessToken.restype = wintypes.BOOL
+        advapi32.GetTokenInformation.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        advapi32.GetTokenInformation.restype = wintypes.BOOL
+        advapi32.GetNamedSecurityInfoW.argtypes = [
+            wintypes.LPWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+        advapi32.EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        advapi32.EqualSid.restype = wintypes.BOOL
+
+        class SidAndAttributes(ctypes.Structure):
+            _fields_ = [("sid", ctypes.c_void_p), ("attributes", wintypes.DWORD)]
+
+        class TokenUser(ctypes.Structure):
+            _fields_ = [("user", SidAndAttributes)]
+
+        token = wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(
+            kernel32.GetCurrentProcess(), token_query, ctypes.byref(token)
+        ):
+            return False
+        try:
+            required_size = wintypes.DWORD()
+            advapi32.GetTokenInformation(
+                token, token_user, None, 0, ctypes.byref(required_size)
+            )
+            if ctypes.get_last_error() != error_insufficient_buffer or not required_size.value:
+                return False
+            token_buffer = ctypes.create_string_buffer(required_size.value)
+            if not advapi32.GetTokenInformation(
+                token,
+                token_user,
+                ctypes.cast(token_buffer, ctypes.c_void_p),
+                required_size,
+                ctypes.byref(required_size),
+            ):
+                return False
+            token_user_data = ctypes.cast(
+                token_buffer, ctypes.POINTER(TokenUser)
+            ).contents
+            owner_sid = ctypes.c_void_p()
+            security_descriptor = ctypes.c_void_p()
+            result = advapi32.GetNamedSecurityInfoW(
+                str(path),
+                1,
+                1,
+                ctypes.byref(owner_sid),
+                None,
+                None,
+                None,
+                ctypes.byref(security_descriptor),
+            )
+            if result != 0 or not owner_sid.value:
+                return False
+            try:
+                return bool(advapi32.EqualSid(owner_sid, token_user_data.user.sid))
+            finally:
+                if security_descriptor.value:
+                    kernel32.LocalFree(security_descriptor)
+        finally:
+            kernel32.CloseHandle(token)
+    except (AttributeError, OSError, TypeError):
+        return False
+
+
+def _validate_complete_secret_contents(secret_directory: Path) -> None:
+    try:
+        contents = {
+            filename: (secret_directory / filename).read_text(encoding="ascii")
+            for filename in _SECRET_FILENAMES
+        }
+    except (OSError, UnicodeError):
+        raise StackFailure(StackExitCode.CONTRACT, "invalid_secret_set") from None
+
+    has_valid_passwords = all(
+        _is_valid_secret_value(contents[spec.filename])
+        for spec in SECRET_SPECS
+        if spec.kind is SecretKind.PASSWORD
+    )
+    neo4j_auth = contents["neo4j_auth"]
+    has_valid_neo4j_auth = neo4j_auth.startswith("neo4j/") and _is_valid_secret_value(
+        neo4j_auth.removeprefix("neo4j/")
+    )
+    redis_acl = contents["redis_acl"]
+    redis_prefix = "user default off\nuser knowledge on >"
+    redis_suffix = " ~* +@all\n"
+    has_valid_redis_acl = (
+        redis_acl.startswith(redis_prefix)
+        and redis_acl.endswith(redis_suffix)
+        and _is_valid_secret_value(redis_acl[len(redis_prefix) : -len(redis_suffix)])
+    )
+    qdrant_key = contents["qdrant_api_key"]
+    has_valid_qdrant_config = (
+        contents[_QDRANT_CONFIG_FILENAME] == f"service:\n  api_key: {qdrant_key}\n"
+    )
+    if not (
+        has_valid_passwords
+        and has_valid_neo4j_auth
+        and has_valid_redis_acl
+        and has_valid_qdrant_config
+    ):
+        raise StackFailure(StackExitCode.CONTRACT, "invalid_secret_set")
+
+
+def _is_valid_secret_value(value: str) -> bool:
+    return (
+        len(value) == _SECRET_BYTE_COUNT
+        and all(character in _SECRET_ALPHABET for character in value)
+        and len(set(value)) >= _MIN_DISTINCT_SECRET_CHARACTERS
+    )
 
 
 def _validate_private_mode(path_stat: os.stat_result, expected_mode: int) -> None:
