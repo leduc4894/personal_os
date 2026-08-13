@@ -108,6 +108,30 @@ cmd = "pytest tests/contract/test_architecture_boundaries.py -q"
 [tool.poe.tasks.python-build]
 cmd = "uv build --all-packages --clear"
 
+[tool.poe.tasks.stack-bootstrap]
+cmd = "uv run python tools/local_service_stack.py bootstrap"
+
+[tool.poe.tasks.stack-config]
+cmd = "uv run python tools/local_service_stack.py config"
+
+[tool.poe.tasks.stack-up]
+cmd = "uv run python tools/local_service_stack.py up"
+
+[tool.poe.tasks.stack-status]
+cmd = "uv run python tools/local_service_stack.py status"
+
+[tool.poe.tasks.stack-verify]
+cmd = "uv run python tools/local_service_stack.py verify"
+
+[tool.poe.tasks.stack-down]
+cmd = "uv run python tools/local_service_stack.py down"
+
+[tool.poe.tasks.stack-reset]
+cmd = "uv run python tools/local_service_stack.py reset"
+
+[tool.poe.tasks.stack-smoke]
+cmd = "uv run python tools/local_service_stack.py smoke"
+
 [tool.poe.tasks.typescript-build]
 shell = "pnpm run build"
 env = { NEXT_TELEMETRY_DISABLED = "1" }

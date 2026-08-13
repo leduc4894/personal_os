@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import os
@@ -16,12 +17,12 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date
 from enum import IntEnum, StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from typing import BinaryIO, Final, Protocol, cast
+from typing import BinaryIO, Final, Never, Protocol, cast
 
 import yaml  # type: ignore[import-untyped]
 
@@ -31,9 +32,16 @@ _MAX_PORT = 65535
 _MIN_COMPOSE_VERSION: Final = (2, 30, 0)
 _PREREQUISITE_TIMEOUT_SECONDS: Final = 10.0
 _COMPOSE_CONFIG_TIMEOUT_SECONDS: Final = 30.0
+_COMPOSE_PS_TEMPLATE: Final = (
+    '{"Service":{{json .Service}},"State":{{json .State}},'
+    '"Health":{{json .Health}},"ExitCode":{{json .ExitCode}}}'
+)
 _STACK_STARTUP_DEADLINE_SECONDS: Final = 180.0
 _STACK_STATUS_TIMEOUT_SECONDS: Final = 10.0
 _STACK_DOWN_TIMEOUT_SECONDS: Final = 45.0
+_SEMANTIC_PROBE_TIMEOUT_SECONDS: Final = 10.0
+_SEMANTIC_VERIFY_DEADLINE_SECONDS: Final = 30.0
+_VOLUME_OPERATION_TIMEOUT_SECONDS: Final = 30.0
 _PROJECT_NAME_PATTERN = re.compile(r"knowledge-(?:local|ci-[a-z0-9][a-z0-9-]{0,40})")
 _COMPOSE_VERSION_PATTERN = re.compile(
     r"(?:Docker Compose version )?v?(\d+)\.(\d+)\.(\d+)"
@@ -79,6 +87,21 @@ _STABLE_CONTAINER_STATES: Final = frozenset(
     {"created", "running", "restarting", "exited", "paused", "dead", "removing"}
 )
 _STABLE_HEALTH_STATES: Final = frozenset({"healthy", "unhealthy", "starting", "none"})
+_RESET_VOLUME_LABELS: Final = (
+    "postgres-data",
+    "qdrant-data",
+    "neo4j-data",
+    "redis-data",
+    "temporal-health-tools",
+)
+_PROBE_SERVICES: Final = (
+    "postgresql",
+    "qdrant",
+    "neo4j",
+    "redis",
+    "temporal",
+    "temporal-ui",
+)
 
 
 class StackExitCode(IntEnum):
@@ -215,6 +238,16 @@ class CommandResult:
     return_code: int
     stdout: str
     stderr: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeResult:
+    """One redacted authenticated semantic-readiness result."""
+
+    service: str
+    is_ready: bool
+    result_code: str
+    latency_ms: int
 
 
 class CommandRunner(Protocol):
@@ -763,7 +796,7 @@ def stack_up(
     )
     if startup_result.return_code != 0:
         raise StackFailure(StackExitCode.STARTUP, "stack_startup_failed")
-    return _wait_for_stack_until(
+    status = _wait_for_stack_until(
         context,
         runner=runner,
         deadline_monotonic=deadline_monotonic,
@@ -771,6 +804,16 @@ def stack_up(
         clock=time.monotonic,
         sleep=time.sleep,
     )
+    _run_semantic_probes(
+        context,
+        runner=runner,
+        deadline_monotonic=min(
+            deadline_monotonic,
+            time.monotonic() + _SEMANTIC_VERIFY_DEADLINE_SECONDS,
+        ),
+        clock=time.monotonic,
+    )
+    return status
 
 
 def wait_for_stack(
@@ -810,6 +853,92 @@ def stack_status(
     )
 
 
+def verify_stack(
+    context: StackContext,
+    *,
+    runner: CommandRunner = run_command,
+    deadline_seconds: float = _SEMANTIC_VERIFY_DEADLINE_SECONDS,
+) -> tuple[ProbeResult, ...]:
+    """Run only authenticated, redacted semantic probes against a ready stack."""
+    _validate_lifecycle_project(context)
+    _validate_deadline(deadline_seconds)
+    check_prerequisites(context, runner=runner)
+    deadline_monotonic = time.monotonic() + deadline_seconds
+    status = _read_stack_status(
+        context,
+        runner=runner,
+        timeout_seconds=min(
+            _STACK_STATUS_TIMEOUT_SECONDS,
+            _remaining_seconds(deadline_monotonic, time.monotonic),
+        ),
+    )
+    if status["state"] == "absent":
+        raise StackFailure(StackExitCode.CLI, "stack_absent")
+    if status["state"] != "ready":
+        raise StackFailure(StackExitCode.READINESS, "stack_not_ready")
+    return _run_semantic_probes(
+        context,
+        runner=runner,
+        deadline_monotonic=deadline_monotonic,
+        clock=time.monotonic,
+    )
+
+
+def reset_stack(
+    context: StackContext,
+    *,
+    confirm_project: str,
+    rotate_secrets: bool = False,
+    runner: CommandRunner = run_command,
+) -> dict[str, object]:
+    """Delete only the exact five doubly-labeled project volumes after confirmation."""
+    _validate_lifecycle_project(context)
+    if confirm_project != context.project_name:
+        raise StackFailure(StackExitCode.CLI, "reset_confirmation_mismatch")
+    check_prerequisites(context, runner=runner)
+    resolved_volumes = _resolve_reset_volumes(context, runner)
+    if rotate_secrets and not resolved_volumes:
+        raise StackFailure(StackExitCode.CONTRACT, "secret_rotation_requires_volume_deletion")
+
+    down_result = _run_lifecycle_command(
+        runner,
+        [*compose_arguments(context), "down", "--remove-orphans", "--timeout", "30"],
+        timeout_seconds=_STACK_DOWN_TIMEOUT_SECONDS,
+        context=context,
+    )
+    if down_result.return_code != 0:
+        raise StackFailure(StackExitCode.STARTUP, "stack_down_failed")
+
+    resolved_after_down = _resolve_reset_volumes(context, runner)
+    if resolved_after_down != resolved_volumes:
+        raise StackFailure(StackExitCode.CONTRACT, "project_volume_set_changed")
+
+    for volume_name in resolved_volumes:
+        removal_result = _run_lifecycle_command(
+            runner,
+            ("docker", "volume", "rm", volume_name),
+            timeout_seconds=_VOLUME_OPERATION_TIMEOUT_SECONDS,
+            context=context,
+        )
+        if removal_result.return_code != 0:
+            raise StackFailure(StackExitCode.STARTUP, "volume_removal_failed")
+
+    if _list_project_volumes(context, runner):
+        raise StackFailure(StackExitCode.STARTUP, "volume_removal_incomplete")
+
+    secret_state = "preserved"
+    if rotate_secrets:
+        remove_secret_set_after_reset(context.paths)
+        secret_state = "removed"
+    return {
+        "project": context.project_name,
+        "state": "absent",
+        "removed_volumes": len(resolved_volumes),
+        "secrets": secret_state,
+        "result_code": "stack_reset_complete",
+    }
+
+
 def stack_down(context: StackContext, *, runner: CommandRunner = run_command) -> None:
     """Remove only project containers and network while preserving all volumes/secrets."""
     _validate_lifecycle_project(context)
@@ -822,6 +951,261 @@ def stack_down(context: StackContext, *, runner: CommandRunner = run_command) ->
     )
     if result.return_code != 0:
         raise StackFailure(StackExitCode.STARTUP, "stack_down_failed")
+
+
+def _run_semantic_probes(
+    context: StackContext,
+    *,
+    runner: CommandRunner,
+    deadline_monotonic: float,
+    clock: Callable[[], float],
+) -> tuple[ProbeResult, ...]:
+    probe_results: list[ProbeResult] = []
+    for service in _PROBE_SERVICES:
+        started_monotonic = clock()
+        timeout_seconds = min(
+            _SEMANTIC_PROBE_TIMEOUT_SECONDS,
+            _remaining_seconds(deadline_monotonic, clock),
+        )
+        arguments, success_code = _semantic_probe_arguments(context, service)
+        try:
+            raw_result = runner(
+                arguments,
+                timeout_seconds=timeout_seconds,
+                environment=_command_environment(context),
+            )
+        except StackFailure as failure:
+            exit_code = (
+                StackExitCode.CONTRACT
+                if failure.exit_code is StackExitCode.CONTRACT
+                else StackExitCode.READINESS
+            )
+            raise StackFailure(exit_code, _probe_failure_code(service)) from None
+        except Exception:
+            raise StackFailure(
+                StackExitCode.READINESS,
+                _probe_failure_code(service),
+            ) from None
+        return_code = raw_result.return_code
+        has_success_marker = raw_result.stdout.strip() == success_code
+        del raw_result
+        if return_code != 0:
+            exit_code = StackExitCode.CONTRACT if return_code == 65 else StackExitCode.READINESS
+            raise StackFailure(exit_code, _probe_failure_code(service))
+        if not has_success_marker:
+            raise StackFailure(StackExitCode.CONTRACT, _probe_failure_code(service))
+        latency_ms = max(0, int((clock() - started_monotonic) * 1000))
+        probe_results.append(ProbeResult(service, True, success_code, latency_ms))
+    return tuple(probe_results)
+
+
+def _semantic_probe_arguments(context: StackContext, service: str) -> tuple[tuple[str, ...], str]:
+    success_code = f"{service.replace('-', '_')}_contract_ready"
+    if service == "temporal-ui":
+        probe_script = (
+            "import sys, urllib.error, urllib.request\n"
+            "try:\n"
+            "    response = urllib.request.urlopen(sys.argv[2], timeout=8)\n"
+            "except urllib.error.HTTPError as error:\n"
+            "    error.close()\n"
+            "    sys.exit(65)\n"
+            "except (OSError, urllib.error.URLError):\n"
+            "    sys.exit(75)\n"
+            "status = response.status\n"
+            "response.close()\n"
+            "sys.stdout.write(sys.argv[3] + '\\n') if status == 200 else sys.exit(65)"
+        )
+        return (
+            sys.executable,
+            "-c",
+            probe_script,
+            "temporal-ui",
+            f"http://127.0.0.1:{context.ports['TEMPORAL_UI_PORT']}/healthz",
+            success_code,
+        ), success_code
+
+    scripts = {
+        "postgresql": _postgresql_probe_script(success_code),
+        "qdrant": _qdrant_probe_script(success_code),
+        "neo4j": _neo4j_probe_script(success_code),
+        "redis": _redis_probe_script(success_code),
+        "temporal": _temporal_probe_script(success_code),
+    }
+    script = scripts.get(service)
+    if script is None:
+        raise StackFailure(StackExitCode.INTERNAL, "probe_invariant_failed")
+    shell = "/bin/bash" if service == "qdrant" else "/bin/sh"
+    target_service = "temporal-cli" if service == "temporal" else service
+    return (
+        *compose_arguments(context),
+        "exec",
+        "--no-TTY",
+        target_service,
+        shell,
+        "-ec",
+        script,
+    ), success_code
+
+
+def _probe_failure_code(service: str) -> str:
+    return f"{service.replace('-', '_')}_contract_failed"
+
+
+def _postgresql_probe_script(success_code: str) -> str:
+    return "\n".join(
+        (
+            "admin_password=$(cat /run/secrets/postgres_admin_password) || exit 75",
+            "application_password=$(cat /run/secrets/postgres_application_password) || exit 75",
+            "temporal_password=$(cat /run/secrets/postgres_temporal_password) || exit 75",
+            '[ -n "$admin_password" ] && [ -n "$application_password" ] '
+            '&& [ -n "$temporal_password" ] || exit 65',
+            'contract=$(PGPASSWORD="$admin_password" psql -XAtq --host 127.0.0.1 '
+            "--port 5432 --username stack_admin --dbname postgres --set ON_ERROR_STOP=1 "
+            "--command \"SELECT (current_user = 'stack_admin' "
+            "AND has_database_privilege('knowledge_app', 'knowledge', 'CONNECT') "
+            "AND NOT has_database_privilege('knowledge_app', 'temporal', 'CONNECT') "
+            "AND NOT has_database_privilege('knowledge_app', 'temporal_visibility', 'CONNECT') "
+            "AND has_database_privilege('temporal_service', 'temporal', 'CONNECT') "
+            "AND has_database_privilege('temporal_service', 'temporal_visibility', 'CONNECT') "
+            "AND NOT has_database_privilege('temporal_service', 'knowledge', 'CONNECT') "
+            "AND (SELECT count(*) = 3 FROM pg_database WHERE "
+            "(datname, pg_get_userbyid(datdba)) IN (('knowledge', 'knowledge_app'), "
+            "('temporal', 'temporal_service'), "
+            "('temporal_visibility', 'temporal_service'))))::int\" 2>/dev/null) || exit 75",
+            '[ "$contract" = 1 ] || exit 65',
+            'application_identity=$(PGPASSWORD="$application_password" psql -XAtq '
+            "--host 127.0.0.1 --port 5432 --username knowledge_app --dbname knowledge "
+            "--set ON_ERROR_STOP=1 --command \"SELECT (current_user = 'knowledge_app')::int\" "
+            "2>/dev/null) || exit 75",
+            '[ "$application_identity" = 1 ] || exit 65',
+            'temporal_identity=$(PGPASSWORD="$temporal_password" psql -XAtq '
+            "--host 127.0.0.1 --port 5432 --username temporal_service --dbname temporal "
+            "--set ON_ERROR_STOP=1 --command \"SELECT (current_user = 'temporal_service')::int\" "
+            "2>/dev/null) || exit 75",
+            '[ "$temporal_identity" = 1 ] || exit 65',
+            'temporal_visibility_identity=$(PGPASSWORD="$temporal_password" psql -XAtq '
+            "--host 127.0.0.1 --port 5432 --username temporal_service "
+            "--dbname temporal_visibility --set ON_ERROR_STOP=1 "
+            "--command \"SELECT (current_user = 'temporal_service')::int\" 2>/dev/null) "
+            "|| exit 75",
+            '[ "$temporal_visibility_identity" = 1 ] || exit 65',
+            'if PGPASSWORD="$application_password" psql -XAtq --host 127.0.0.1 '
+            "--port 5432 --username knowledge_app --dbname temporal --command 'SELECT 1' "
+            ">/dev/null 2>&1; then exit 65; fi",
+            'if PGPASSWORD="$application_password" psql -XAtq --host 127.0.0.1 '
+            "--port 5432 --username knowledge_app --dbname temporal_visibility "
+            "--command 'SELECT 1' >/dev/null 2>&1; then exit 65; fi",
+            'if PGPASSWORD="$temporal_password" psql -XAtq --host 127.0.0.1 '
+            "--port 5432 --username temporal_service --dbname knowledge --command 'SELECT 1' "
+            ">/dev/null 2>&1; then exit 65; fi",
+            "unset admin_password application_password temporal_password",
+            "unset contract application_identity temporal_identity temporal_visibility_identity",
+            f"printf '%s\\n' {success_code}",
+        )
+    )
+
+
+def _qdrant_probe_script(success_code: str) -> str:
+    return "\n".join(
+        (
+            "api_key=$(sed -n 's/^  api_key: //p' /run/secrets/qdrant_config.yaml) || exit 75",
+            '[ -n "$api_key" ] || exit 65',
+            "http_status() {",
+            "  api_key_header=$1",
+            "  exec 3<>/dev/tcp/127.0.0.1/6333 || return 75",
+            '  if [ -n "$api_key_header" ]; then',
+            "    printf 'GET /collections HTTP/1.1\\r\\nHost: localhost\\r\\n"
+            'api-key: %s\\r\\nConnection: close\\r\\n\\r\\n\' "$api_key_header" >&3',
+            "  else",
+            "    printf 'GET /collections HTTP/1.1\\r\\nHost: localhost\\r\\n"
+            "Connection: close\\r\\n\\r\\n' >&3",
+            "  fi",
+            "  IFS=' ' read -r _ status _ <&3 || return 75",
+            "  exec 3<&- 3>&-",
+            "  printf '%s' \"$status\"",
+            "}",
+            'authenticated=$(http_status "$api_key") || exit 75',
+            "unauthenticated=$(http_status '') || exit 75",
+            "unset api_key",
+            '[ "$authenticated" = 200 ] || exit 75',
+            'case "$unauthenticated" in 401|403) ;; *) exit 65 ;; esac',
+            f"printf '%s\\n' {success_code}",
+        )
+    )
+
+
+def _neo4j_probe_script(success_code: str) -> str:
+    return "\n".join(
+        (
+            "neo4j_auth=$(cat /run/secrets/neo4j_auth) || exit 75",
+            "neo4j_password=${neo4j_auth#neo4j/}",
+            "scalar=$(cypher-shell --address bolt://127.0.0.1:7687 --username neo4j "
+            '--password "$neo4j_password" --format plain '
+            "'RETURN 1 AS scalar') || exit 75",
+            "plugins=$(cypher-shell --address bolt://127.0.0.1:7687 --username neo4j "
+            '--password "$neo4j_password" --format plain '
+            "\"SHOW PROCEDURES YIELD name WHERE name STARTS WITH 'apoc.' "
+            "OR name STARTS WITH 'gds.' RETURN count(name) AS enabled_plugins\") || exit 75",
+            "if cypher-shell --address bolt://127.0.0.1:7687 --username neo4j "
+            "--password invalid-probe-credential --format plain 'RETURN 1' "
+            ">/dev/null 2>&1; then exit 65; fi",
+            "unset neo4j_auth neo4j_password",
+            "[ \"$(printf '%s\\n' \"$scalar\" | tail -n 1 | tr -d '\\r')\" = 1 ] || exit 65",
+            "[ \"$(printf '%s\\n' \"$plugins\" | tail -n 1 | tr -d '\\r')\" = 0 ] || exit 65",
+            f"printf '%s\\n' {success_code}",
+        )
+    )
+
+
+def _redis_probe_script(success_code: str) -> str:
+    return "\n".join(
+        (
+            "redis_password=$(sed -n 's/^user knowledge on >\\([^ ]*\\).*/\\1/p' "
+            "/run/secrets/redis_acl) || exit 75",
+            '[ -n "$redis_password" ] || exit 65',
+            "probe_key=__knowledge_stack_verify__$$",
+            'trap \'redis-cli --no-auth-warning --user knowledge --pass "$redis_password" '
+            'DEL "$probe_key" >/dev/null 2>&1 || true\' EXIT HUP INT TERM',
+            '[ "$(redis-cli --raw --no-auth-warning --user knowledge '
+            '--pass "$redis_password" PING)" = PONG ] || exit 75',
+            '[ "$(redis-cli --raw --no-auth-warning --user knowledge '
+            '--pass "$redis_password" SET "$probe_key" ready)" = OK ] || exit 75',
+            '[ "$(redis-cli --raw --no-auth-warning --user knowledge '
+            '--pass "$redis_password" GET "$probe_key")" = ready ] || exit 75',
+            "unauthenticated=$(redis-cli --raw PING 2>/dev/null || true)",
+            '[ "$unauthenticated" != PONG ] || exit 65',
+            '[ "$(redis-cli --raw --no-auth-warning --user knowledge '
+            '--pass "$redis_password" CONFIG GET appendonly | tail -n 1)" = yes ] || exit 65',
+            '[ "$(redis-cli --raw --no-auth-warning --user knowledge '
+            '--pass "$redis_password" CONFIG GET maxmemory | tail -n 1)" = 134217728 ] || exit 65',
+            '[ "$(redis-cli --raw --no-auth-warning --user knowledge '
+            '--pass "$redis_password" CONFIG GET maxmemory-policy | tail -n 1)" '
+            "= noeviction ] || exit 65",
+            f"printf '%s\\n' {success_code}",
+        )
+    )
+
+
+def _temporal_probe_script(success_code: str) -> str:
+    return "\n".join(
+        (
+            "temporal --address temporal:7233 --namespace knowledge "
+            "--client-connect-timeout 5s --command-timeout 8s --color never "
+            "--disable-config-file operator cluster health >/dev/null 2>&1 || exit 75",
+            "description=$(temporal --address temporal:7233 --namespace knowledge "
+            "--client-connect-timeout 5s --command-timeout 8s --color never "
+            "--disable-config-file --output json operator namespace describe) || exit 75",
+            "compact=$(printf '%s' \"$description\" | tr -d '\\r\\n ')",
+            "unset description",
+            "printf '%s' \"$compact\" | grep -Eq "
+            '\'"state":"(NAMESPACE_STATE_)?REGISTERED"\' || exit 65',
+            "printf '%s' \"$compact\" | grep -Eq "
+            '\'"(retention|workflowExecutionRetentionTtl|workflowExecutionRetentionPeriod)":'
+            '("(7d|168h|168h0m|168h0m0s|604800|604800s)"|'
+            '\\{"seconds":"?604800"?)\' || exit 65',
+            f"printf '%s\\n' {success_code}",
+        )
+    )
 
 
 def _validate_lifecycle_project(context: StackContext) -> None:
@@ -874,9 +1258,7 @@ def _parse_compose_version(
         raise StackFailure(StackExitCode.PREREQUISITE, "compose_version_invalid")
     major, minor, patch, raw_prerelease = matched.groups()
     compose_version = (int(major), int(minor), int(patch))
-    compose_prerelease = (
-        tuple(raw_prerelease.split(".")) if raw_prerelease is not None else None
-    )
+    compose_prerelease = tuple(raw_prerelease.split(".")) if raw_prerelease is not None else None
     return compose_version, compose_prerelease
 
 
@@ -914,6 +1296,60 @@ def _list_project_volumes(context: StackContext, runner: CommandRunner) -> tuple
         result_code="volume_inspection_failed",
     )
     return tuple(line for line in result.stdout.splitlines() if line)
+
+
+def _inspect_project_volume_label(
+    context: StackContext,
+    runner: CommandRunner,
+    volume_name: str,
+) -> str:
+    result = _run_prerequisite_command(
+        runner,
+        (
+            "docker",
+            "volume",
+            "inspect",
+            "--format",
+            '{{index .Labels "com.docker.compose.project"}}\t'
+            '{{index .Labels "com.docker.compose.volume"}}',
+            volume_name,
+        ),
+        context,
+        result_code="volume_inspection_failed",
+    )
+    label_rows = tuple(line for line in result.stdout.splitlines() if line)
+    del result
+    if len(label_rows) != 1:
+        raise StackFailure(StackExitCode.CONTRACT, "project_volume_label_invalid")
+    labels = label_rows[0].split("\t", maxsplit=1)
+    if len(labels) != 2 or labels[0] != context.project_name or not labels[1]:
+        raise StackFailure(StackExitCode.CONTRACT, "project_volume_label_invalid")
+    return labels[1]
+
+
+def _resolve_reset_volumes(
+    context: StackContext,
+    runner: CommandRunner,
+) -> tuple[str, ...]:
+    project_volumes = set(_list_project_volumes(context, runner))
+    if not project_volumes:
+        return ()
+    volumes_by_label: dict[str, set[str]] = {label: set() for label in _RESET_VOLUME_LABELS}
+    for volume_name in project_volumes:
+        volume_label = _inspect_project_volume_label(context, runner, volume_name)
+        if volume_label not in volumes_by_label:
+            raise StackFailure(StackExitCode.CONTRACT, "unexpected_project_volume")
+        volumes_by_label[volume_label].add(volume_name)
+    if any(len(names) > 1 for names in volumes_by_label.values()):
+        raise StackFailure(StackExitCode.CONTRACT, "project_volume_label_ambiguous")
+    resolved_volumes = set().union(*volumes_by_label.values())
+    if (
+        any(len(names) != 1 for names in volumes_by_label.values())
+        or resolved_volumes != project_volumes
+        or len(resolved_volumes) != len(_RESET_VOLUME_LABELS)
+    ):
+        raise StackFailure(StackExitCode.CONTRACT, "project_volume_set_incomplete")
+    return tuple(sorted(resolved_volumes))
 
 
 def _run_compose_config(context: StackContext, runner: CommandRunner) -> None:
@@ -993,7 +1429,7 @@ def _read_stack_status(
 ) -> dict[str, object]:
     result = _run_lifecycle_command(
         runner,
-        [*compose_arguments(context), "ps", "--all", "--format", "json"],
+        [*compose_arguments(context), "ps", "--all", "--format", _COMPOSE_PS_TEMPLATE],
         timeout_seconds=timeout_seconds,
         context=context,
     )
@@ -1478,3 +1914,162 @@ def _drain_readers_until_deadline(
     for reader_thread in reader_threads:
         remaining_seconds = max(0.0, deadline_monotonic - time.monotonic())
         reader_thread.join(timeout=remaining_seconds)
+
+
+class _HelpRequested(Exception):
+    pass
+
+
+class _CliParser(argparse.ArgumentParser):
+    def error(self, message: str) -> Never:
+        del message
+        raise StackFailure(StackExitCode.CLI, "invalid_cli")
+
+    def exit(self, status: int = 0, message: str | None = None) -> Never:
+        if status == 0:
+            if message:
+                self._print_message(message, sys.stdout)
+            raise _HelpRequested
+        raise StackFailure(StackExitCode.CLI, "invalid_cli")
+
+
+def _build_cli_parser() -> argparse.ArgumentParser:
+    parser = _CliParser(
+        prog="local_service_stack",
+        description="Operate the authenticated project-scoped local service stack.",
+        exit_on_error=False,
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    for command in ("bootstrap", "config", "up", "status", "verify", "down", "smoke"):
+        command_parser = subparsers.add_parser(command, exit_on_error=False)
+        command_parser.add_argument("--project-name", default="knowledge-local")
+    reset_parser = subparsers.add_parser("reset", exit_on_error=False)
+    reset_parser.add_argument("--project-name", required=True)
+    reset_parser.add_argument("--confirm-project", required=True)
+    reset_parser.add_argument("--rotate-secrets", action="store_true")
+    reset_parser.add_argument("--non-interactive", action="store_true")
+    return parser
+
+
+def _cli_context(project_name: str) -> StackContext:
+    environment = dict(os.environ)
+    return StackContext(
+        paths=resolve_stack_paths(Path(__file__).resolve().parents[1]),
+        project_name=project_name,
+        ports=resolve_ports(environment),
+        environment=environment,
+    )
+
+
+def _execute_cli_command(
+    arguments: argparse.Namespace,
+    *,
+    runner: CommandRunner,
+    is_interactive: bool,
+) -> tuple[dict[str, object], StackExitCode]:
+    project_name = cast(str, arguments.project_name)
+    context = _cli_context(project_name)
+    command = cast(str, arguments.command)
+    if command == "bootstrap":
+        _validate_lifecycle_project(context)
+        bootstrap_secret_set(context.paths)
+        return {
+            "project": context.project_name,
+            "state": "ready",
+            "secret_set": "complete",
+            "result_code": "secret_set_ready",
+        }, StackExitCode.OK
+    if command == "config":
+        validate_compose_config(context, runner=runner)
+        return {
+            "project": context.project_name,
+            "state": "valid",
+            "result_code": "stack_config_valid",
+        }, StackExitCode.OK
+    if command == "up":
+        status = stack_up(context, runner=runner)
+        return status, StackExitCode.OK
+    if command == "status":
+        status = stack_status(context, runner=runner)
+        exit_code = StackExitCode.CLI if status["state"] == "absent" else StackExitCode.OK
+        return status, exit_code
+    if command == "verify":
+        probes = verify_stack(context, runner=runner)
+        return {
+            "project": context.project_name,
+            "state": "ready",
+            "probes": [asdict(probe) for probe in probes],
+            "result_code": "stack_verified",
+        }, StackExitCode.OK
+    if command == "down":
+        stack_down(context, runner=runner)
+        return {
+            "project": context.project_name,
+            "state": "absent",
+            "result_code": "stack_down_complete",
+        }, StackExitCode.OK
+    if command == "reset":
+        is_noninteractive = cast(bool, arguments.non_interactive)
+        if is_noninteractive:
+            if (
+                context.environment.get("CI") != "true"
+                or not context.project_name.startswith("knowledge-ci-")
+            ):
+                raise StackFailure(StackExitCode.CLI, "noninteractive_reset_forbidden")
+        elif not is_interactive:
+            raise StackFailure(StackExitCode.CLI, "interactive_confirmation_required")
+        return reset_stack(
+            context,
+            confirm_project=cast(str, arguments.confirm_project),
+            rotate_secrets=cast(bool, arguments.rotate_secrets),
+            runner=runner,
+        ), StackExitCode.OK
+    if command == "smoke":
+        raise StackFailure(StackExitCode.INTERNAL, "smoke_not_implemented")
+    raise StackFailure(StackExitCode.CLI, "invalid_cli")
+
+
+def _print_json(payload: Mapping[str, object]) -> None:
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    runner: CommandRunner = run_command,
+    is_interactive: bool | None = None,
+) -> int:
+    """Run one lifecycle command and emit only one stable JSON result document."""
+    parser = _build_cli_parser()
+    try:
+        parsed_arguments = parser.parse_args(argv)
+        payload, exit_code = _execute_cli_command(
+            parsed_arguments,
+            runner=runner,
+            is_interactive=sys.stdin.isatty() if is_interactive is None else is_interactive,
+        )
+    except _HelpRequested:
+        return int(StackExitCode.OK)
+    except (argparse.ArgumentError, StackFailure) as failure:
+        if isinstance(failure, StackFailure):
+            exit_code = failure.exit_code
+            result_code = failure.result_code
+            if exit_code is StackExitCode.CLI and result_code in {
+                "duplicate_port",
+                "invalid_port",
+            }:
+                exit_code = StackExitCode.PREREQUISITE
+        else:
+            exit_code = StackExitCode.CLI
+            result_code = "invalid_cli"
+        _print_json({"result_code": result_code, "state": "error"})
+        return int(exit_code)
+    except Exception:
+        _print_json({"result_code": "lifecycle_internal_error", "state": "error"})
+        return int(StackExitCode.INTERNAL)
+    _print_json(payload)
+    return int(exit_code)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

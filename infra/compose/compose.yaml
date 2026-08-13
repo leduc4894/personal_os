@@ -28,6 +28,8 @@ services:
       - log_min_error_statement=panic
     secrets:
       - postgres_admin_password
+      - postgres_application_password
+      - postgres_temporal_password
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:

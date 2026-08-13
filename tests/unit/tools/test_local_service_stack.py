@@ -732,6 +732,13 @@ def _successful_lifecycle_runner(
             return stack_module.CommandResult(0, "linux/amd64\n", "")
         if "ps" in command:
             return stack_module.CommandResult(0, ps_output or _healthy_ps_output(), "")
+        probe_service = _semantic_probe_service(command)
+        if probe_service is not None:
+            return stack_module.CommandResult(
+                0,
+                f"{probe_service.replace('-', '_')}_contract_ready\n",
+                "",
+            )
         return stack_module.CommandResult(0, "", "")
 
     return run
@@ -818,9 +825,7 @@ def test_prerequisites_accept_stable_minimum_and_newer_versions(
     "version",
     ["2.30.0-rc.1", "v2.30.0-beta.2", "Docker Compose version v2.30.0-alpha"],
 )
-def test_prerequisites_reject_compose_2_30_0_prerelease(
-    stack_context: Any, version: str
-) -> None:
+def test_prerequisites_reject_compose_2_30_0_prerelease(stack_context: Any, version: str) -> None:
     def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
         return stack_module.CommandResult(0, version, "")
 
@@ -943,6 +948,14 @@ def test_up_preflight_order_precedes_first_mutating_command(
         if "up" in command:
             operations.append("compose_up")
             return stack_module.CommandResult(0, "", "")
+        probe_service = _semantic_probe_service(command)
+        if probe_service is not None:
+            operations.append(f"probe_{probe_service}")
+            return stack_module.CommandResult(
+                0,
+                f"{probe_service.replace('-', '_')}_contract_ready\n",
+                "",
+            )
         operations.append("compose_ps")
         return stack_module.CommandResult(0, _healthy_ps_output(), "")
 
@@ -1207,6 +1220,37 @@ def test_malformed_status_never_echoes_raw_output(stack_context: Any) -> None:
     assert raw_secret not in str(raised.value)
 
 
+def test_status_projects_stable_fields_before_bounded_capture(stack_context: Any) -> None:
+    calls: list[tuple[str, ...]] = []
+    expected_template = (
+        '{"Service":{{json .Service}},"State":{{json .State}},'
+        '"Health":{{json .Health}},"ExitCode":{{json .ExitCode}}}'
+    )
+
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        command = tuple(arguments)
+        calls.append(command)
+        if command[-2:] == ("version", "--short"):
+            return stack_module.CommandResult(0, "2.30.0", "")
+        if command[:3] == ("docker", "version", "--format"):
+            return stack_module.CommandResult(0, "linux/amd64", "")
+        if "ps" in command and command[-1] == expected_template:
+            return stack_module.CommandResult(0, _healthy_ps_output(), "")
+        if "ps" in command:
+            return stack_module.CommandResult(
+                0,
+                '{"Service":"postgresql","Command":"' + ("x" * 8150),
+                "",
+            )
+        pytest.fail(f"unexpected status command: {command}")
+
+    status = stack_module.stack_status(stack_context, runner=runner)
+
+    assert status["state"] == "ready"
+    ps_call = next(command for command in calls if "ps" in command)
+    assert ps_call[-2:] == ("--format", expected_template)
+
+
 def test_lifecycle_never_forwards_r2_environment(
     monkeypatch: pytest.MonkeyPatch, stack_context: Any
 ) -> None:
@@ -1244,3 +1288,826 @@ def test_down_never_removes_volumes_images_secrets_or_health_tools(
     assert {
         path.name: path.read_bytes() for path in stack_context.paths.secret_directory.iterdir()
     } == secret_before
+
+
+_EXPECTED_RESET_VOLUMES = {
+    "knowledge-local_postgres-data",
+    "knowledge-local_qdrant-data",
+    "knowledge-local_neo4j-data",
+    "knowledge-local_redis-data",
+    "knowledge-local_temporal-health-tools",
+}
+
+
+def _semantic_probe_service(command: tuple[str, ...]) -> str | None:
+    if "exec" in command and "--no-TTY" in command:
+        container_service = command[command.index("--no-TTY") + 1]
+        if container_service == "temporal-cli" and "temporal_contract_ready" in command[-1]:
+            return "temporal"
+        return container_service
+    if command and command[0] == sys.executable and "temporal-ui" in command:
+        return "temporal-ui"
+    return None
+
+
+def _semantic_probe_runner(
+    *, failing_service: str | None = None, raw_output: str = "", return_code: int = 1
+) -> Any:
+    def run(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        command = tuple(arguments)
+        if command[:2] == ("docker", "compose") and command[-2:] == ("version", "--short"):
+            return stack_module.CommandResult(0, "2.30.0\n", "")
+        if command[:3] == ("docker", "version", "--format"):
+            return stack_module.CommandResult(0, "linux/amd64\n", "")
+        if "ps" in command:
+            return stack_module.CommandResult(0, _healthy_ps_output(), "")
+        if command[:2] == ("docker", "compose") and any(
+            operation in command for operation in ("config", "up", "down")
+        ):
+            return stack_module.CommandResult(0, "", "")
+        service = _semantic_probe_service(command)
+        if service is None:
+            pytest.fail(f"unexpected semantic command: {command}")
+        if service == failing_service:
+            return stack_module.CommandResult(return_code, raw_output, raw_output)
+        return stack_module.CommandResult(
+            0,
+            f"{service.replace('-', '_')}_contract_ready\n",
+            "",
+        )
+
+    return run
+
+
+def test_verify_returns_only_fixed_redacted_probe_results(stack_context: Any) -> None:
+    results = stack_module.verify_stack(
+        stack_context,
+        runner=_semantic_probe_runner(raw_output="DO_NOT_LEAK"),
+    )
+
+    assert [result.service for result in results] == [
+        "postgresql",
+        "qdrant",
+        "neo4j",
+        "redis",
+        "temporal",
+        "temporal-ui",
+    ]
+    assert all(result.is_ready for result in results)
+    assert all(result.result_code.endswith("_contract_ready") for result in results)
+    assert all(type(result.latency_ms) is int and result.latency_ms >= 0 for result in results)
+    assert all(
+        set(result.__dataclass_fields__)
+        == {
+            "service",
+            "is_ready",
+            "result_code",
+            "latency_ms",
+        }
+        for result in results
+    )
+    assert "DO_NOT_LEAK" not in repr(results)
+
+
+@pytest.mark.parametrize(
+    ("probe", "expected_code"),
+    [
+        ("postgresql", "postgresql_contract_failed"),
+        ("qdrant", "qdrant_contract_failed"),
+        ("neo4j", "neo4j_contract_failed"),
+        ("redis", "redis_contract_failed"),
+        ("temporal", "temporal_contract_failed"),
+        ("temporal-ui", "temporal_ui_contract_failed"),
+    ],
+)
+def test_verify_maps_each_probe_to_fixed_redacted_code(
+    stack_context: Any, probe: str, expected_code: str
+) -> None:
+    with pytest.raises(StackFailure) as raised:
+        stack_module.verify_stack(
+            stack_context,
+            runner=_semantic_probe_runner(failing_service=probe, raw_output="DO_NOT_LEAK"),
+        )
+
+    assert raised.value.exit_code is StackExitCode.READINESS
+    assert str(raised.value) == expected_code
+    assert "DO_NOT_LEAK" not in str(raised.value)
+
+
+def test_verify_maps_explicit_probe_contract_drift_to_contract(stack_context: Any) -> None:
+    with pytest.raises(StackFailure) as raised:
+        stack_module.verify_stack(
+            stack_context,
+            runner=_semantic_probe_runner(failing_service="redis", return_code=65),
+        )
+
+    assert raised.value.exit_code is StackExitCode.CONTRACT
+    assert str(raised.value) == "redis_contract_failed"
+
+
+def test_verify_uses_argument_arrays_and_bounded_probe_deadlines(stack_context: Any) -> None:
+    calls: list[tuple[tuple[str, ...], float]] = []
+    base_runner = _semantic_probe_runner()
+
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        calls.append((tuple(arguments), timeout_seconds))
+        return base_runner(
+            arguments,
+            timeout_seconds=timeout_seconds,
+            environment=environment,
+        )
+
+    stack_module.verify_stack(stack_context, runner=runner)
+
+    probe_calls = [call for call in calls if _semantic_probe_service(call[0]) is not None]
+    assert len(probe_calls) == 6
+    assert all(0 < timeout_seconds <= 10 for _, timeout_seconds in probe_calls)
+    compose_exec_calls = [
+        command for command, _ in probe_calls if command[:2] == ("docker", "compose")
+    ]
+    assert all("exec" in command and "--no-TTY" in command for command in compose_exec_calls)
+    assert all("DO_NOT_LEAK" not in part for command, _ in probe_calls for part in command)
+
+
+def test_qdrant_probe_constructs_authenticated_header_with_real_crlf(stack_context: Any) -> None:
+    base_runner = _semantic_probe_runner()
+
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        command = tuple(arguments)
+        if _semantic_probe_service(command) == "qdrant":
+            probe_script = command[-1]
+            if "api-key: %s\\r\\nConnection: close" not in probe_script:
+                return stack_module.CommandResult(75, "", "")
+        return base_runner(
+            arguments,
+            timeout_seconds=timeout_seconds,
+            environment=environment,
+        )
+
+    results = stack_module.verify_stack(stack_context, runner=runner)
+
+    assert next(result for result in results if result.service == "qdrant").is_ready
+
+
+def test_postgresql_probe_authenticates_each_principal_and_denies_cross_database_access(
+    stack_context: Any,
+) -> None:
+    arguments, _ = stack_module._semantic_probe_arguments(stack_context, "postgresql")
+    probe_script = arguments[-1]
+
+    assert "cat /run/secrets/postgres_admin_password" in probe_script
+    assert "cat /run/secrets/postgres_application_password" in probe_script
+    assert "cat /run/secrets/postgres_temporal_password" in probe_script
+    assert "--username knowledge_app --dbname knowledge" in probe_script
+    assert "--username temporal_service --dbname temporal" in probe_script
+    assert "--username temporal_service --dbname temporal_visibility" in probe_script
+    assert "--username knowledge_app --dbname temporal" in probe_script
+    assert "--username knowledge_app --dbname temporal_visibility" in probe_script
+    assert "--username temporal_service --dbname knowledge" in probe_script
+    assert probe_script.count("then exit 65; fi") >= 3
+    assert "unset admin_password application_password temporal_password" in probe_script
+
+
+def test_neo4j_probe_requires_invalid_credential_rejection(stack_context: Any) -> None:
+    arguments, _ = stack_module._semantic_probe_arguments(stack_context, "neo4j")
+    probe_script = arguments[-1]
+
+    assert "if cypher-shell" in probe_script
+    assert "--password invalid-probe-credential" in probe_script
+    assert ">/dev/null 2>&1; then exit 65; fi" in probe_script
+
+
+def test_temporal_probe_executes_in_pinned_cli_toolbox(stack_context: Any) -> None:
+    arguments, success_code = stack_module._semantic_probe_arguments(stack_context, "temporal")
+
+    assert success_code == "temporal_contract_ready"
+    assert arguments[arguments.index("--no-TTY") + 1] == "temporal-cli"
+
+
+def test_temporal_probe_accepts_registered_namespace_enum(stack_context: Any) -> None:
+    base_runner = _semantic_probe_runner()
+
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        command = tuple(arguments)
+        if _semantic_probe_service(command) == "temporal":
+            probe_script = command[-1]
+            if "(NAMESPACE_STATE_)?REGISTERED" not in probe_script:
+                return stack_module.CommandResult(65, "", "")
+        return base_runner(
+            arguments,
+            timeout_seconds=timeout_seconds,
+            environment=environment,
+        )
+
+    results = stack_module.verify_stack(stack_context, runner=runner)
+
+    assert next(result for result in results if result.service == "temporal").is_ready
+
+
+def test_temporal_ui_http_error_is_contract_drift_not_transport_failure(
+    stack_context: Any,
+) -> None:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    ui_port = listener.getsockname()[1]
+
+    def respond_not_found() -> None:
+        connection, _ = listener.accept()
+        with connection:
+            connection.recv(4096)
+            connection.sendall(
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+
+    responder = threading.Thread(target=respond_not_found, daemon=True)
+    responder.start()
+    context = stack_module.StackContext(
+        stack_context.paths,
+        stack_context.project_name,
+        {**stack_context.ports, "TEMPORAL_UI_PORT": ui_port},
+        stack_context.environment,
+    )
+    arguments, _ = stack_module._semantic_probe_arguments(context, "temporal-ui")
+    try:
+        result = run_command(arguments, timeout_seconds=3.0)
+    finally:
+        listener.close()
+        responder.join(timeout=1.0)
+
+    assert result.return_code == 65
+    assert result.stdout == ""
+
+
+def test_verify_absent_stack_is_cli_failure(stack_context: Any) -> None:
+    calls: list[tuple[str, ...]] = []
+    base_runner = _successful_lifecycle_runner(ps_output="[]")
+
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        calls.append(tuple(arguments))
+        return base_runner(
+            arguments,
+            timeout_seconds=timeout_seconds,
+            environment=environment,
+        )
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.verify_stack(stack_context, runner=runner)
+
+    assert raised.value.exit_code is StackExitCode.CLI
+    assert str(raised.value) == "stack_absent"
+    assert not any(_semantic_probe_service(command) is not None for command in calls)
+
+
+def test_up_runs_semantic_verification_after_container_readiness(
+    monkeypatch: pytest.MonkeyPatch, stack_context: Any
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    base_runner = _semantic_probe_runner()
+    monkeypatch.setattr(stack_module, "validate_port_availability", lambda ports: None)
+
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        calls.append(tuple(arguments))
+        return base_runner(
+            arguments,
+            timeout_seconds=timeout_seconds,
+            environment=environment,
+        )
+
+    stack_module.stack_up(stack_context, runner=runner)
+
+    first_probe_index = next(
+        index for index, command in enumerate(calls) if _semantic_probe_service(command) is not None
+    )
+    readiness_index = max(index for index, command in enumerate(calls) if "ps" in command)
+    assert first_probe_index > readiness_index
+
+
+def test_up_caps_semantic_verification_to_thirty_second_aggregate_deadline(
+    monkeypatch: pytest.MonkeyPatch, stack_context: Any
+) -> None:
+    observed_deadlines: list[float] = []
+    monkeypatch.setattr(stack_module, "validate_port_availability", lambda ports: None)
+    monkeypatch.setattr(stack_module.time, "monotonic", lambda: 100.0)
+
+    def probes(
+        context: Any,
+        *,
+        runner: Any,
+        deadline_monotonic: float,
+        clock: Any,
+    ) -> tuple[Any, ...]:
+        del context, runner, clock
+        observed_deadlines.append(deadline_monotonic)
+        return ()
+
+    monkeypatch.setattr(stack_module, "_run_semantic_probes", probes)
+
+    stack_module.stack_up(
+        stack_context,
+        runner=_successful_lifecycle_runner(),
+        deadline_seconds=180.0,
+    )
+
+    assert observed_deadlines == [130.0]
+
+
+def _reset_runner(
+    calls: list[tuple[str, ...]],
+    *,
+    project_volumes: set[str] | None = None,
+    label_volumes: dict[str, set[str]] | None = None,
+    fail_remove_index: int | None = None,
+    inject_unknown_after_down: bool = False,
+) -> Any:
+    all_project_volumes = set(
+        _EXPECTED_RESET_VOLUMES if project_volumes is None else project_volumes
+    )
+    resolved_by_label = {
+        label: {f"knowledge-local_{label}"}
+        for label in (
+            "postgres-data",
+            "qdrant-data",
+            "neo4j-data",
+            "redis-data",
+            "temporal-health-tools",
+        )
+    }
+    if label_volumes is not None:
+        resolved_by_label = {label: set(names) for label, names in label_volumes.items()}
+    removed: set[str] = set()
+    remove_count = 0
+    has_run_down = False
+
+    def run(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        nonlocal has_run_down, remove_count
+        command = tuple(arguments)
+        calls.append(command)
+        if command[:2] == ("docker", "compose") and command[-2:] == ("version", "--short"):
+            return stack_module.CommandResult(0, "2.30.0\n", "")
+        if command[:3] == ("docker", "version", "--format"):
+            return stack_module.CommandResult(0, "linux/amd64\n", "")
+        if command[:4] == ("docker", "volume", "ls", "--quiet"):
+            volume_label_filter = next(
+                (part for part in command if part.startswith("label=com.docker.compose.volume=")),
+                None,
+            )
+            if volume_label_filter is None:
+                names = all_project_volumes - removed
+                if has_run_down and inject_unknown_after_down:
+                    names = {*names, "knowledge-local_concurrent-unknown"}
+            else:
+                logical_name = volume_label_filter.rsplit("=", maxsplit=1)[1]
+                names = resolved_by_label.get(logical_name, set()) - removed
+            return stack_module.CommandResult(0, "".join(f"{name}\n" for name in sorted(names)), "")
+        if command[:3] == ("docker", "volume", "inspect"):
+            volume_name = command[-1]
+            logical_names = [
+                label for label, names in resolved_by_label.items() if volume_name in names
+            ]
+            logical_name = logical_names[0] if len(logical_names) == 1 else "unknown"
+            return stack_module.CommandResult(
+                0,
+                f"knowledge-local\t{logical_name}\n",
+                "",
+            )
+        if command[:3] == ("docker", "volume", "rm"):
+            remove_count += 1
+            if remove_count == fail_remove_index:
+                return stack_module.CommandResult(1, "DO_NOT_LEAK", "DO_NOT_LEAK")
+            removed.add(command[3])
+            return stack_module.CommandResult(0, command[3], "")
+        if "down" in command:
+            has_run_down = True
+            return stack_module.CommandResult(0, "", "")
+        pytest.fail(f"unexpected reset command: {command}")
+
+    return run
+
+
+def test_reset_requires_exact_double_confirmation(stack_context: Any) -> None:
+    with pytest.raises(StackFailure) as raised:
+        stack_module.reset_stack(
+            stack_context,
+            confirm_project="knowledge-local-typo",
+            runner=lambda *args, **kwargs: pytest.fail("runner must not be called"),
+        )
+
+    assert raised.value.exit_code is StackExitCode.CLI
+    assert str(raised.value) == "reset_confirmation_mismatch"
+
+
+def test_reset_deletes_only_exact_labeled_project_volumes(stack_context: Any) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    result = stack_module.reset_stack(
+        stack_context,
+        confirm_project="knowledge-local",
+        runner=_reset_runner(calls),
+    )
+
+    removed_volumes = {command[3] for command in calls if command[:3] == ("docker", "volume", "rm")}
+    assert removed_volumes == _EXPECTED_RESET_VOLUMES
+    assert result == {
+        "project": "knowledge-local",
+        "state": "absent",
+        "removed_volumes": 5,
+        "secrets": "preserved",
+        "result_code": "stack_reset_complete",
+    }
+    down_index = next(index for index, command in enumerate(calls) if "down" in command)
+    first_remove_index = next(
+        index for index, command in enumerate(calls) if command[:3] == ("docker", "volume", "rm")
+    )
+    assert down_index < first_remove_index
+    exact_label_calls = [
+        command for command in calls[:down_index] if command[:3] == ("docker", "volume", "inspect")
+    ]
+    assert {command[-1] for command in exact_label_calls} == _EXPECTED_RESET_VOLUMES
+    assert all("com.docker.compose.project" in command[-2] for command in exact_label_calls)
+    assert all("com.docker.compose.volume" in command[-2] for command in exact_label_calls)
+    flat = " ".join(part for command in calls for part in command)
+    assert "prune" not in flat
+    assert "--force" not in flat
+
+
+def test_reset_intersects_project_and_volume_labels_without_or_filter_semantics(
+    stack_context: Any,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    base_runner = _reset_runner(calls)
+
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        command = tuple(arguments)
+        label_filters = [part for part in command if part.startswith("label=")]
+        if command[:4] == ("docker", "volume", "ls", "--quiet") and len(label_filters) == 2:
+            calls.append(command)
+            return stack_module.CommandResult(
+                0,
+                "".join(f"{name}\n" for name in sorted(_EXPECTED_RESET_VOLUMES)),
+                "",
+            )
+        return base_runner(
+            arguments,
+            timeout_seconds=timeout_seconds,
+            environment=environment,
+        )
+
+    result = stack_module.reset_stack(
+        stack_context,
+        confirm_project="knowledge-local",
+        runner=runner,
+    )
+
+    assert result["removed_volumes"] == 5
+    assert not any(
+        len([part for part in command if part.startswith("label=")]) > 1
+        for command in calls
+    )
+
+
+def test_reset_refuses_unknown_labeled_volume_before_down(stack_context: Any) -> None:
+    calls: list[tuple[str, ...]] = []
+    volumes = {*_EXPECTED_RESET_VOLUMES, "knowledge-local_unexpected-data"}
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.reset_stack(
+            stack_context,
+            confirm_project="knowledge-local",
+            runner=_reset_runner(calls, project_volumes=volumes),
+        )
+
+    assert raised.value.exit_code is StackExitCode.CONTRACT
+    assert str(raised.value) == "unexpected_project_volume"
+    assert not any("down" in command for command in calls)
+    assert not any(command[:3] == ("docker", "volume", "rm") for command in calls)
+
+
+def test_reset_refuses_partial_expected_volume_set_before_down(stack_context: Any) -> None:
+    calls: list[tuple[str, ...]] = []
+    volumes = _EXPECTED_RESET_VOLUMES - {"knowledge-local_temporal-health-tools"}
+    labels = {name.removeprefix("knowledge-local_"): {name} for name in volumes}
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.reset_stack(
+            stack_context,
+            confirm_project="knowledge-local",
+            runner=_reset_runner(calls, project_volumes=volumes, label_volumes=labels),
+        )
+
+    assert raised.value.exit_code is StackExitCode.CONTRACT
+    assert str(raised.value) == "project_volume_set_incomplete"
+    assert not any("down" in command for command in calls)
+
+
+def test_reset_rechecks_label_set_after_down_before_first_delete(stack_context: Any) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.reset_stack(
+            stack_context,
+            confirm_project="knowledge-local",
+            runner=_reset_runner(calls, inject_unknown_after_down=True),
+        )
+
+    assert raised.value.exit_code is StackExitCode.CONTRACT
+    assert str(raised.value) == "unexpected_project_volume"
+    assert any("down" in command for command in calls)
+    assert not any(command[:3] == ("docker", "volume", "rm") for command in calls)
+
+
+def test_reset_without_volumes_is_idempotent_but_cannot_rotate(
+    stack_context: Any,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    labels = {
+        label: set()
+        for label in (
+            "postgres-data",
+            "qdrant-data",
+            "neo4j-data",
+            "redis-data",
+            "temporal-health-tools",
+        )
+    }
+
+    result = stack_module.reset_stack(
+        stack_context,
+        confirm_project="knowledge-local",
+        runner=_reset_runner(calls, project_volumes=set(), label_volumes=labels),
+    )
+
+    assert result["removed_volumes"] == 0
+    assert result["secrets"] == "preserved"
+    with pytest.raises(StackFailure) as raised:
+        stack_module.reset_stack(
+            stack_context,
+            confirm_project="knowledge-local",
+            rotate_secrets=True,
+            runner=_reset_runner([], project_volumes=set(), label_volumes=labels),
+        )
+    assert raised.value.exit_code is StackExitCode.CONTRACT
+    assert str(raised.value) == "secret_rotation_requires_volume_deletion"
+
+
+def test_secret_rotation_occurs_only_after_all_volume_deletes_succeed(
+    stack_context: Any,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.reset_stack(
+            stack_context,
+            confirm_project="knowledge-local",
+            rotate_secrets=True,
+            runner=_reset_runner(calls, fail_remove_index=2),
+        )
+
+    assert raised.value.exit_code is StackExitCode.STARTUP
+    assert str(raised.value) == "volume_removal_failed"
+    assert stack_context.paths.secret_directory.exists()
+    assert "DO_NOT_LEAK" not in str(raised.value)
+
+
+def test_secret_rotation_removes_exact_secret_set_after_verified_deletion(
+    stack_context: Any,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    result = stack_module.reset_stack(
+        stack_context,
+        confirm_project="knowledge-local",
+        rotate_secrets=True,
+        runner=_reset_runner(calls),
+    )
+
+    assert result["secrets"] == "removed"
+    assert not stack_context.paths.secret_directory.exists()
+    last_remove_index = max(
+        index for index, command in enumerate(calls) if command[:3] == ("docker", "volume", "rm")
+    )
+    assert any(
+        command[:4] == ("docker", "volume", "ls", "--quiet")
+        for command in calls[last_remove_index + 1 :]
+    )
+
+
+def test_cli_never_prints_raw_exception(capsys: pytest.CaptureFixture[str]) -> None:
+    assert (
+        stack_module.main(
+            ["verify"],
+            runner=_semantic_probe_runner(failing_service="redis", raw_output="DO_NOT_LEAK"),
+        )
+        == 75
+    )
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out) == {
+        "result_code": "redis_contract_failed",
+        "state": "error",
+    }
+    assert "DO_NOT_LEAK" not in captured.out + captured.err
+
+
+def test_cli_syntax_errors_are_fixed_json_without_argparse_stderr(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert stack_module.main(["reset", "--confirm-project", "knowledge-local"]) == 2
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out) == {"result_code": "invalid_cli", "state": "error"}
+
+
+def test_cli_reset_refuses_non_tty_local_invocation_without_ci_flag(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert (
+        stack_module.main(
+            [
+                "reset",
+                "--project-name",
+                "knowledge-local",
+                "--confirm-project",
+                "knowledge-local",
+            ],
+            is_interactive=False,
+        )
+        == 2
+    )
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out) == {
+        "result_code": "interactive_confirmation_required",
+        "state": "error",
+    }
+
+
+def test_cli_noninteractive_reset_requires_ci_project_and_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("CI", "true")
+
+    assert (
+        stack_module.main(
+            [
+                "reset",
+                "--project-name",
+                "knowledge-local",
+                "--confirm-project",
+                "knowledge-local",
+                "--non-interactive",
+            ],
+            is_interactive=False,
+        )
+        == 2
+    )
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out) == {
+        "result_code": "noninteractive_reset_forbidden",
+        "state": "error",
+    }
+
+
+def test_cli_noninteractive_reset_accepts_explicit_ci_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("CI", "true")
+
+    assert (
+        stack_module.main(
+            [
+                "reset",
+                "--project-name",
+                "knowledge-ci-unit",
+                "--confirm-project",
+                "knowledge-ci-unit",
+                "--non-interactive",
+            ],
+            runner=_reset_runner([], project_volumes=set()),
+            is_interactive=False,
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out) == {
+        "project": "knowledge-ci-unit",
+        "removed_volumes": 0,
+        "result_code": "stack_reset_complete",
+        "secrets": "preserved",
+        "state": "absent",
+    }
+
+
+@pytest.mark.parametrize(
+    ("environment", "result_code"),
+    [
+        ({"POSTGRES_PORT": "not-a-port"}, "invalid_port"),
+        ({"POSTGRES_PORT": "15432", "REDIS_PORT": "15432"}, "duplicate_port"),
+    ],
+)
+def test_cli_maps_invalid_port_contract_to_prerequisite_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    environment: dict[str, str],
+    result_code: str,
+) -> None:
+    for variable, value in environment.items():
+        monkeypatch.setenv(variable, value)
+
+    assert stack_module.main(["config"]) == 64
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out) == {"result_code": result_code, "state": "error"}
+
+
+def test_cli_verify_success_has_fixed_redacted_json_schema(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert stack_module.main(["verify"], runner=_semantic_probe_runner()) == 0
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert captured.err == ""
+    assert set(payload) == {"project", "state", "probes", "result_code"}
+    assert payload["project"] == "knowledge-local"
+    assert payload["state"] == "ready"
+    assert payload["result_code"] == "stack_verified"
+    assert [probe["service"] for probe in payload["probes"]] == [
+        "postgresql",
+        "qdrant",
+        "neo4j",
+        "redis",
+        "temporal",
+        "temporal-ui",
+    ]
+    assert all(
+        set(probe) == {"service", "is_ready", "result_code", "latency_ms"}
+        for probe in payload["probes"]
+    )
+
+
+def test_cli_smoke_is_reserved_for_task_seven(capsys: pytest.CaptureFixture[str]) -> None:
+    assert stack_module.main(["smoke"]) == 70
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out) == {
+        "result_code": "smoke_not_implemented",
+        "state": "error",
+    }
+
+
+@pytest.mark.parametrize("exit_code", [0, 2, 64, 65, 69, 70, 75])
+def test_cli_exit_code_set_is_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    exit_code: int,
+) -> None:
+    if exit_code == 0:
+        runner = _semantic_probe_runner()
+        arguments = ["verify"]
+    elif exit_code == 2:
+        runner = _semantic_probe_runner()
+        arguments = ["unknown-command"]
+    else:
+        stack_exit_code = StackExitCode(exit_code)
+
+        def fail_verify(context: Any, *, runner: Any, **kwargs: Any) -> Any:
+            raise StackFailure(stack_exit_code, f"fixed_{exit_code}")
+
+        monkeypatch.setattr(stack_module, "verify_stack", fail_verify)
+        runner = _semantic_probe_runner()
+        arguments = ["verify"]
+
+    assert stack_module.main(arguments, runner=runner) == exit_code
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert isinstance(json.loads(captured.out), dict)
+
+
+def test_cli_unexpected_exception_is_redacted_internal_failure(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fail_verify(context: Any, *, runner: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("DO_NOT_LEAK")
+
+    monkeypatch.setattr(stack_module, "verify_stack", fail_verify)
+
+    assert stack_module.main(["verify"], runner=_semantic_probe_runner()) == 70
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out) == {
+        "result_code": "lifecycle_internal_error",
+        "state": "error",
+    }
+    assert "DO_NOT_LEAK" not in captured.out

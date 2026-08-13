@@ -5,7 +5,9 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys
 import time
+import tomllib
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -13,6 +15,10 @@ from typing import Any
 
 import pytest
 import yaml
+
+sys.path.insert(0, str(Path(__file__).parents[2]))
+
+from tools.local_service_stack import _postgresql_probe_script
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 IMAGE_LOCK_PATH = REPO_ROOT / "infra" / "compose" / "images.lock.yaml"
@@ -520,6 +526,11 @@ def test_postgres_18_provisioning_reconciles_exact_roles_databases_and_grants() 
     script = (SCRIPT_DIRECTORY / "postgres-provision.sh").read_text(encoding="utf-8")
 
     assert "postgres-data:/var/lib/postgresql" in postgresql["volumes"]
+    assert postgresql["secrets"] == [
+        "postgres_admin_password",
+        "postgres_application_password",
+        "postgres_temporal_password",
+    ]
     assert postgresql["environment"] == {
         "POSTGRES_USER": "stack_admin",
         "POSTGRES_DB": "postgres",
@@ -597,7 +608,11 @@ def test_services_use_only_required_secrets_commands_and_static_config() -> None
     compose = _read_yaml(COMPOSE_PATH)
     services = compose["services"]
     expected_secrets = {
-        "postgresql": ["postgres_admin_password"],
+        "postgresql": [
+            "postgres_admin_password",
+            "postgres_application_password",
+            "postgres_temporal_password",
+        ],
         "qdrant": [{"source": "qdrant_config", "target": "qdrant_config.yaml"}],
         "neo4j": ["neo4j_auth"],
         "redis": ["redis_acl"],
@@ -764,6 +779,61 @@ ORDER BY roles.rolname;
         "knowledge_app:false",
         "temporal_service:false",
     ]
+
+
+def test_postgresql_semantic_probe_executes_principal_authentication_and_denial(
+    provisioned_postgresql: dict[str, str | Path],
+) -> None:
+    docker = str(provisioned_postgresql["docker"])
+    container_name = str(provisioned_postgresql["container_name"])
+    probe_script = _postgresql_probe_script("postgresql_contract_ready")
+
+    ready = subprocess.run(
+        [docker, "exec", container_name, "/bin/sh", "-ec", probe_script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert ready.returncode == 0
+    assert ready.stdout == "postgresql_contract_ready\n"
+    assert ready.stderr == ""
+    assert all(
+        str(provisioned_postgresql[secret_name]) not in ready.stdout + ready.stderr
+        for secret_name in (
+            "postgres_admin_password",
+            "postgres_application_password",
+            "postgres_temporal_password",
+        )
+    )
+
+    drift = _postgres_admin_query(
+        docker,
+        container_name=container_name,
+        query="GRANT CONNECT ON DATABASE temporal TO knowledge_app;",
+    )
+    assert drift.returncode == 0
+
+    denied_contract = subprocess.run(
+        [docker, "exec", container_name, "/bin/sh", "-ec", probe_script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert denied_contract.returncode == 65
+    assert denied_contract.stdout == ""
+    assert all(
+        str(provisioned_postgresql[secret_name])
+        not in denied_contract.stdout + denied_contract.stderr
+        for secret_name in (
+            "postgres_admin_password",
+            "postgres_application_password",
+            "postgres_temporal_password",
+        )
+    )
 
 
 def test_postgres_provision_never_emits_secret_values_on_failure(
@@ -1000,3 +1070,30 @@ esac
             stderr=subprocess.DEVNULL,
             timeout=30,
         )
+
+
+def test_poe_local_stack_tasks_use_credential_free_cli_commands() -> None:
+    project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    tasks = project["tool"]["poe"]["tasks"]
+    expected_commands = {
+        f"stack-{command}": f"uv run python tools/local_service_stack.py {command}"
+        for command in (
+            "bootstrap",
+            "config",
+            "up",
+            "status",
+            "verify",
+            "down",
+            "reset",
+            "smoke",
+        )
+    }
+
+    assert {
+        task_name: tasks[task_name]["cmd"] for task_name in expected_commands
+    } == expected_commands
+    assert not any(
+        token in command.lower()
+        for command in expected_commands.values()
+        for token in ("password", "secret", "credential", "r2")
+    )
