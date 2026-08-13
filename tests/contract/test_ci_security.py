@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import yaml  # type: ignore[import-untyped]  # Pinned PyYAML does not ship type stubs.
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_DIRECTORY = REPO_ROOT / ".github" / "workflows"
 WORKFLOW_PATH = WORKFLOW_DIRECTORY / "quality.yml"
@@ -71,9 +73,18 @@ def _all_jobs_have_positive_timeouts(text: str) -> bool:
 def _has_job_level_permissions_override(text: str) -> bool:
     # The exact top-level contents:read block is the sole workflow authority.
     # Reject every job override so a later edit cannot widen one job silently.
+    try:
+        workflow = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return True
+    if not isinstance(workflow, dict):
+        return True
+    jobs = workflow.get("jobs")
+    if not isinstance(jobs, dict):
+        return True
     return any(
-        re.search(r"(?m)^    permissions\s*:", block) is not None
-        for block in _job_blocks(text).values()
+        isinstance(job_definition, dict) and "permissions" in job_definition
+        for job_definition in jobs.values()
     )
 
 
@@ -161,7 +172,12 @@ def test_all_workflows_are_least_privilege_and_sha_pinned() -> None:
 
 def test_permission_contract_rejects_job_level_override_mutation() -> None:
     text = LOCAL_STACK_WORKFLOW_PATH.read_text(encoding="utf-8")
-    for override in ("permissions:\n      contents: write", "permissions: read-all"):
+    for override in (
+        "permissions:\n      contents: write",
+        "permissions: read-all",
+        '"permissions": write-all',
+        "'permissions':\n      contents: write",
+    ):
         mutated = text.replace(
             "    runs-on: ubuntu-latest",
             f"    {override}\n    runs-on: ubuntu-latest",
