@@ -5,9 +5,11 @@ and verify the workspace. They are documentation-as-code: every required
 prerequisite, command and intentional exclusion is asserted here so a silent
 regression of the docs fails CI.
 
-The reserved test-layer READMEs (``integration``, ``end_to_end``, ``golden``,
+The still-reserved test-layer READMEs (``end_to_end``, ``golden``,
 ``performance``) are also asserted: they must state their owner and the future
 spec that will populate them, and must not ship an executable placeholder test.
+The local service-stack design now owns the integration layer's first executable
+``local_stack`` test, so that layer is intentionally no longer reserved.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ROOT_README = REPO_ROOT / "README.md"
+LOCAL_STACK_README = REPO_ROOT / "infra" / "compose" / "README.md"
 
 # Exact operator-facing prerequisites. These four strings must appear verbatim
 # in the root README; internal dev-dependency versions (ruff, mypy, eslint, ...)
@@ -93,7 +96,6 @@ APP_README_EXPECTATIONS = {
 # Reserved test layers. Each one is part of the canonical test hierarchy but
 # owns no executable test in this bootstrap spec.
 RESERVED_TEST_LAYERS = (
-    "tests/integration/README.md",
     "tests/end_to_end/README.md",
     "tests/golden/README.md",
     "tests/performance/README.md",
@@ -181,6 +183,54 @@ RUNTIME_CHECK_APPS = {
 }
 APP_SAFE_JSON_ANCHOR = "safe JSON"
 APP_NO_SETTINGS_DUMP_ANCHOR = "settings dump"
+
+# --- Local service stack operator contract ---------------------------------
+
+LOCAL_STACK_POE_COMMANDS = tuple(
+    f"uv run poe stack-{command}"
+    for command in (
+        "bootstrap",
+        "config",
+        "up",
+        "status",
+        "verify",
+        "down",
+        "reset",
+        "smoke",
+    )
+)
+
+LOCAL_STACK_SERVICE_VERSIONS = (
+    ("PostgreSQL", "18.4"),
+    ("Qdrant", "1.18.2"),
+    ("Neo4j", "5.26.28"),
+    ("Redis", "8.6.4"),
+    ("Temporal Server", "1.31.2"),
+    ("Temporal schema tools", "1.31.2"),
+    ("Temporal UI", "2.53.0"),
+    ("Temporal CLI", "1.8.0"),
+)
+
+LOCAL_STACK_PORT_OVERRIDES = (
+    ("POSTGRES_PORT", "5432"),
+    ("QDRANT_HTTP_PORT", "6333"),
+    ("QDRANT_GRPC_PORT", "6334"),
+    ("NEO4J_HTTP_PORT", "7474"),
+    ("NEO4J_BOLT_PORT", "7687"),
+    ("REDIS_PORT", "6379"),
+    ("TEMPORAL_GRPC_PORT", "7233"),
+    ("TEMPORAL_UI_PORT", "8080"),
+)
+
+LOCAL_STACK_EXIT_CODE_MEANINGS = (
+    ("0", "success"),
+    ("2", "syntax"),
+    ("64", "prerequisite"),
+    ("65", "contract"),
+    ("69", "startup"),
+    ("70", "internal"),
+    ("75", "readiness"),
+)
 
 
 def _read(path: Path) -> str:
@@ -388,3 +438,98 @@ def test_each_runtime_check_app_readme_documents_command_guarantees_and_exit_cod
     assert not offenders, (
         "composition-root check-runtime README contract violations:\n" + "\n".join(offenders)
     )
+
+
+def test_root_readme_documents_local_stack_prerequisites_and_all_poe_commands() -> None:
+    content = _read(ROOT_README)
+    missing_commands = [command for command in LOCAL_STACK_POE_COMMANDS if command not in content]
+    assert not missing_commands, (
+        f"root README must document all eight local-stack Poe commands: {missing_commands}"
+    )
+    for prerequisite in ("Docker Compose 2.30.0", "Linux containers", "linux/amd64"):
+        assert prerequisite in content, (
+            f"root README is missing local-stack prerequisite {prerequisite}"
+        )
+
+
+def test_local_stack_readme_documents_exact_service_versions_and_ports() -> None:
+    content = _read(LOCAL_STACK_README)
+    for service, version in LOCAL_STACK_SERVICE_VERSIONS:
+        assert any(service in line and version in line for line in content.splitlines()), (
+            f"local-stack README must pair {service} with {version}"
+        )
+    assert "linux/amd64" in content
+    for variable, default_port in LOCAL_STACK_PORT_OVERRIDES:
+        assert any(variable in line and default_port in line for line in content.splitlines()), (
+            f"local-stack README must pair {variable} with {default_port}"
+        )
+    assert "127.0.0.1" in content
+
+
+def test_local_stack_readme_documents_lifecycle_and_exact_reset_confirmation() -> None:
+    content = _read(LOCAL_STACK_README)
+    missing_commands = [command for command in LOCAL_STACK_POE_COMMANDS if command not in content]
+    assert not missing_commands, (
+        f"local-stack README must document all lifecycle commands: {missing_commands}"
+    )
+    exact_reset = (
+        "uv run python tools/local_service_stack.py reset "
+        "--project-name knowledge-local --confirm-project knowledge-local"
+    )
+    assert exact_reset in content
+    assert "--rotate-secrets" in content
+    assert "exact project name" in content.lower()
+
+
+def test_local_stack_readme_documents_persistence_and_five_volume_reset() -> None:
+    content = _read(LOCAL_STACK_README)
+    lower = content.lower()
+    assert any(
+        "down" in line.lower() and "preserves" in line.lower() and "secrets" in line.lower()
+        for line in content.splitlines()
+    )
+    for volume in (
+        "postgres-data",
+        "qdrant-data",
+        "neo4j-data",
+        "redis-data",
+        "temporal-health-tools",
+    ):
+        assert volume in content
+    assert "exact five" in lower
+    assert "rebuildable" in lower
+    assert "unknown labeled volumes" in lower
+
+
+def test_local_stack_readme_documents_terminal_secret_and_drift_recovery() -> None:
+    content = _read(LOCAL_STACK_README)
+    lower = content.lower()
+    for required in (
+        "partial secret set",
+        "missing secret set",
+        "existing project volumes",
+        "terminal",
+        "operator investigation",
+        "schema",
+        "namespace",
+        "drift",
+    ):
+        assert required in lower, f"local-stack recovery documentation is missing {required!r}"
+
+
+def test_local_stack_readme_documents_exit_codes_with_meanings() -> None:
+    content = _read(LOCAL_STACK_README)
+    for code, meaning in LOCAL_STACK_EXIT_CODE_MEANINGS:
+        assert any(code in line and meaning in line.lower() for line in content.splitlines()), (
+            f"local-stack README must pair exit code {code} with {meaning}"
+        )
+
+
+def test_local_stack_readme_documents_windows_ci_and_r2_boundary() -> None:
+    content = _read(LOCAL_STACK_README)
+    lower = content.lower()
+    assert "docker desktop" in lower and "linux containers" in lower
+    assert "only ubuntu ci" in lower and "real containers" in lower
+    assert "r2" in lower and "sole future canonical object store" in lower
+    for excluded in ("not configured", "not contacted", "not tested"):
+        assert excluded in lower
