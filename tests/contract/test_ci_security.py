@@ -268,6 +268,7 @@ def test_local_stack_config_jobs_cover_defaults_overrides_and_safe_failures() ->
             )
     assert "git check-ignore --quiet --no-index .local/.ci-probe" in jobs["ubuntu-config"]
     assert "rm -rf -- .local" in jobs["ubuntu-config"]
+    assert "install -d -m 700 .local" in jobs["ubuntu-config"]
     assert "git check-ignore --quiet --no-index .local/.ci-probe" in jobs["windows-config"]
     assert 'Remove-Item -LiteralPath ".local" -Recurse -Force' in jobs["windows-config"]
     assert "$PSNativeCommandUseErrorActionPreference = $false" in jobs["windows-config"]

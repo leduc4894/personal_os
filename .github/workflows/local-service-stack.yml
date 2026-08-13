@@ -80,6 +80,7 @@ jobs:
           set -euo pipefail
           git check-ignore --quiet --no-index .local/.ci-probe
           rm -rf -- .local
+          install -d -m 700 .local
           mkdir -p .local/test-results
           output_file=.local/test-results/ubuntu-config-output.log
 
