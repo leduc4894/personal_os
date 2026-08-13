@@ -36,6 +36,16 @@ _SAFE_TOKEN_CHECK: Final[str] = r"~ '^[a-z][a-z0-9_.:-]*$'"
 
 _CREATE_SCHEMA_SQL: Final[str] = "CREATE SCHEMA knowledge AUTHORIZATION knowledge_app"
 _REVOKE_SCHEMA_SQL: Final[str] = "REVOKE ALL ON SCHEMA knowledge FROM PUBLIC"
+# PostgreSQL grants EXECUTE on functions to PUBLIC by default at creation time.
+# REVOKE ALL ON SCHEMA does not affect routine privileges, so the default grant
+# must be revoked explicitly after the trigger functions exist. Trigger functions
+# bind by OID and fire regardless of caller privilege, so this leaves the
+# immutability/append-only protection fully in force while satisfying the spec
+# requirement that PUBLIC holds no object privilege on ``knowledge``.
+_REVOKE_ROUTINE_EXECUTE_SQL: Final[str] = (
+    "REVOKE EXECUTE ON FUNCTION "
+    "knowledge.reject_immutable_update, knowledge.reject_audit_mutation FROM PUBLIC"
+)
 
 _REJECT_IMMUTABLE_UPDATE_FUNCTION_SQL: Final[str] = """
 CREATE FUNCTION knowledge.reject_immutable_update()
@@ -797,6 +807,7 @@ def upgrade() -> None:
     )
     op.execute(sa.text(_REJECT_IMMUTABLE_UPDATE_FUNCTION_SQL))
     op.execute(sa.text(_REJECT_AUDIT_MUTATION_FUNCTION_SQL))
+    op.execute(sa.text(_REVOKE_ROUTINE_EXECUTE_SQL))
     op.execute(sa.text(_CONTENT_OBJECTS_TRIGGER_SQL))
     op.execute(sa.text(_SOURCE_VERSIONS_TRIGGER_SQL))
     op.execute(sa.text(_SYNC_EVENTS_TRIGGER_SQL))

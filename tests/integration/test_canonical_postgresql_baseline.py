@@ -97,17 +97,6 @@ _EXPECTED_INDEXES: frozenset[str] = frozenset(
         "ix_audit_events__request",
     }
 )
-# Trigger functions keep PostgreSQL's default PUBLIC EXECUTE grant. It is inert
-# because PUBLIC lacks USAGE on the schema, so the functions are unreachable.
-# Revoking it is a candidate hardening (Task 4); the assertion below tolerates
-# its removal while still rejecting any other PUBLIC routine grant.
-_INERT_PUBLIC_ROUTINES: frozenset[tuple[str, str]] = frozenset(
-    {
-        ("reject_immutable_update", "EXECUTE"),
-        ("reject_audit_mutation", "EXECUTE"),
-    }
-)
-
 _CONSTRAINT_NAME_PATTERN = re.compile(r"^(?:pk|fk|uq|ck)_[a-z0-9_]+$")
 _INDEX_NAME_PATTERN = re.compile(r"^(?:pk|uq|ix)_[a-z0-9_]+$")
 # Word-boundary corpus scan: ``lease_token`` does NOT match because ``_`` is a
@@ -586,9 +575,10 @@ def _assert_ownership_grants_and_data_minimization(conn: psycopg.Connection[Any]
         f"PUBLIC holds table privileges: {public_table_privileges}"
     )
 
-    # PUBLIC routine privileges must be a subset of the inert trigger-function
-    # EXECUTE grants (unreachable without schema USAGE). Empty is also accepted,
-    # so revoking the default in a later revision keeps this assertion green.
+    # PUBLIC holds no routine/function privilege on application objects. The
+    # migration revokes the default EXECUTE grant the engine adds at function
+    # creation, so the spec requirement ("PUBLIC receives no object privileges
+    # on knowledge") is genuinely enforced, not merely tolerated.
     public_routine_privileges = {
         (row[0], row[1])
         for row in _rows(
@@ -597,9 +587,8 @@ def _assert_ownership_grants_and_data_minimization(conn: psycopg.Connection[Any]
             "WHERE routine_schema = 'knowledge' AND grantee = 'PUBLIC'",
         )
     }
-    unexpected_routines = public_routine_privileges - _INERT_PUBLIC_ROUTINES
-    assert not unexpected_routines, (
-        f"PUBLIC holds unexpected routine privileges: {unexpected_routines}"
+    assert not public_routine_privileges, (
+        f"PUBLIC holds routine privileges on knowledge: {public_routine_privileges}"
     )
 
     # Alembic bookkeeping lives in public; the application schema never owns it.
