@@ -304,6 +304,8 @@ class _SmokeOperations(Protocol):
 
     def verify_recovery(self, context: StackContext) -> None: ...
 
+    def ensure_redis_recovered(self, context: StackContext) -> None: ...
+
     def remove_markers(self, context: StackContext, markers: SmokeMarkerSet) -> None: ...
 
     def reset_after(self, context: StackContext) -> None: ...
@@ -1066,7 +1068,8 @@ def run_smoke_contract(
         operations = _DefaultSmokeOperations(runner)
 
     markers: SmokeMarkerSet | None = None
-    primary_failure: Exception | None = None
+    primary_failure: BaseException | None = None
+    is_redis_recovery_required = False
     try:
         operations.reset_before(context)
         operations.bootstrap(context)
@@ -1081,27 +1084,42 @@ def run_smoke_contract(
         operations.verify_markers(context, markers)
         operations.up(context)
         operations.verify(context)
+        is_redis_recovery_required = True
         operations.stop_redis(context)
-        try:
-            operations.verify_outage(context)
-        finally:
-            operations.start_redis(context)
+        operations.verify_outage(context)
+        operations.start_redis(context)
         operations.verify_recovery(context)
-    except Exception as failure:
+        is_redis_recovery_required = False
+    except BaseException as failure:
         primary_failure = failure
-        raise
-    finally:
-        marker_cleanup_failure: Exception | None = None
+
+    if is_redis_recovery_required:
         try:
-            try:
-                if markers is not None:
-                    operations.remove_markers(context, markers)
-            except Exception as failure:
-                marker_cleanup_failure = failure
-        finally:
-            operations.reset_after(context)
-        if primary_failure is None and marker_cleanup_failure is not None:
-            raise marker_cleanup_failure
+            operations.ensure_redis_recovered(context)
+        except BaseException as recovery_failure:
+            if primary_failure is None:
+                raise recovery_failure
+            raise primary_failure from recovery_failure
+
+    marker_cleanup_failure: BaseException | None = None
+    try:
+        if markers is not None:
+            operations.remove_markers(context, markers)
+    except BaseException as failure:
+        marker_cleanup_failure = failure
+
+    reset_failure: BaseException | None = None
+    try:
+        operations.reset_after(context)
+    except BaseException as failure:
+        reset_failure = failure
+
+    if primary_failure is not None:
+        raise primary_failure
+    if reset_failure is not None:
+        raise reset_failure
+    if marker_cleanup_failure is not None:
+        raise marker_cleanup_failure
 
 
 def _create_smoke_markers(
@@ -1636,6 +1654,11 @@ class _DefaultSmokeOperations:
         _start_smoke_redis(context, runner=self._runner)
 
     def verify_recovery(self, context: StackContext) -> None:
+        verify_stack(context, runner=self._runner)
+
+    def ensure_redis_recovered(self, context: StackContext) -> None:
+        with suppress(StackFailure):
+            _start_smoke_redis(context, runner=self._runner)
         verify_stack(context, runner=self._runner)
 
     def remove_markers(self, context: StackContext, markers: SmokeMarkerSet) -> None:

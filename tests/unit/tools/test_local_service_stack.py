@@ -2081,9 +2081,16 @@ def ci_stack_context(stack_context: Any) -> Any:
 
 
 class _RecordingSmokeOperations:
-    def __init__(self, events: list[str], *, fail_at: str | None = None) -> None:
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        fail_at: str | None = None,
+        recovery_fails: bool = False,
+    ) -> None:
         self._events = events
         self._fail_at = fail_at
+        self._recovery_fails = recovery_fails
         self._up_count = 0
         self._verify_count = 0
 
@@ -2148,6 +2155,12 @@ class _RecordingSmokeOperations:
         del context
         self._record("verify-recovery")
 
+    def ensure_redis_recovered(self, context: Any) -> None:
+        del context
+        self._events.append("ensure-redis-recovered")
+        if self._recovery_fails:
+            raise StackFailure(StackExitCode.READINESS, "redis_recovery_not_proven")
+
     def remove_markers(self, context: Any, markers: object) -> None:
         del context, markers
         self._record("remove-markers")
@@ -2200,24 +2213,54 @@ def test_smoke_finally_resets_after_mid_run_failure(ci_stack_context: Any) -> No
     assert events[-1] == "reset-after"
 
 
-def test_smoke_restarts_redis_before_cleanup_when_outage_assertion_fails(
+@pytest.mark.parametrize(
+    "failure_event",
+    ["stop-redis", "start-redis", "verify-recovery"],
+)
+def test_smoke_proves_redis_recovery_before_cleanup_and_preserves_primary_failure(
     ci_stack_context: Any,
+    failure_event: str,
 ) -> None:
     events: list[str] = []
 
-    with pytest.raises(StackFailure):
+    with pytest.raises(StackFailure) as raised:
         stack_module.run_smoke_contract(
             ci_stack_context,
-            operations=_RecordingSmokeOperations(events, fail_at="verify-outage"),
+            operations=_RecordingSmokeOperations(events, fail_at=failure_event),
         )
 
-    assert events[-5:] == [
-        "stop-redis",
-        "verify-outage",
-        "start-redis",
+    assert str(raised.value) == "fixed_smoke_failure"
+    assert events[-3:] == [
+        "ensure-redis-recovered",
         "remove-markers",
         "reset-after",
     ]
+
+
+@pytest.mark.parametrize(
+    "failure_event",
+    ["stop-redis", "start-redis", "verify-recovery"],
+)
+def test_smoke_fails_closed_without_reset_when_redis_recovery_cannot_be_proven(
+    ci_stack_context: Any,
+    failure_event: str,
+) -> None:
+    events: list[str] = []
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.run_smoke_contract(
+            ci_stack_context,
+            operations=_RecordingSmokeOperations(
+                events,
+                fail_at=failure_event,
+                recovery_fails=True,
+            ),
+        )
+
+    assert str(raised.value) == "fixed_smoke_failure"
+    assert events[-1] == "ensure-redis-recovered"
+    assert "remove-markers" not in events
+    assert "reset-after" not in events
 
 
 def test_smoke_removes_partial_marker_set_before_final_reset(
@@ -2469,6 +2512,51 @@ def test_smoke_redis_stop_and_start_are_exact_bounded_compose_operations(
     assert ((*prefix, "start", "redis"), 30.0) in calls
     assert all("reset" not in command and "down" not in command for command, _ in calls)
     assert all(0 < timeout_seconds <= 30 for _, timeout_seconds in calls)
+
+
+def test_default_redis_recovery_still_verifies_when_start_reports_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    ci_stack_context: Any,
+) -> None:
+    events: list[str] = []
+
+    def fail_start(context: Any, *, runner: Any) -> None:
+        del context, runner
+        events.append("start-failed")
+        raise StackFailure(StackExitCode.STARTUP, "smoke_redis_start_failed")
+
+    def verify(context: Any, *, runner: Any) -> tuple[Any, ...]:
+        del context, runner
+        events.append("verify-passed")
+        return ()
+
+    monkeypatch.setattr(stack_module, "_start_smoke_redis", fail_start)
+    monkeypatch.setattr(stack_module, "verify_stack", verify)
+    operations = stack_module._DefaultSmokeOperations(_successful_lifecycle_runner())
+
+    operations.ensure_redis_recovered(ci_stack_context)
+
+    assert events == ["start-failed", "verify-passed"]
+
+
+def test_default_redis_recovery_fails_when_full_verify_cannot_prove_health(
+    monkeypatch: pytest.MonkeyPatch,
+    ci_stack_context: Any,
+) -> None:
+    monkeypatch.setattr(stack_module, "_start_smoke_redis", lambda *args, **kwargs: None)
+
+    def fail_verify(context: Any, *, runner: Any) -> tuple[Any, ...]:
+        del context, runner
+        raise StackFailure(StackExitCode.READINESS, "redis_contract_failed")
+
+    monkeypatch.setattr(stack_module, "verify_stack", fail_verify)
+    operations = stack_module._DefaultSmokeOperations(_successful_lifecycle_runner())
+
+    with pytest.raises(StackFailure) as raised:
+        operations.ensure_redis_recovered(ci_stack_context)
+
+    assert raised.value.exit_code is StackExitCode.READINESS
+    assert str(raised.value) == "redis_contract_failed"
 
 
 def test_smoke_outage_requires_fixed_redis_readiness_failure(ci_stack_context: Any) -> None:
