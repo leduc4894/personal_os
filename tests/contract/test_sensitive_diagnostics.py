@@ -1,0 +1,413 @@
+"""Cross-layer leak corpus: distinct sentinels must never reach any diagnostic sink.
+
+Every scenario feeds a unique ``do-not-emit-*`` sentinel through one boundary of
+the diagnostics surface (settings, correlation context, dependency logging, error
+causes, hostile objects) and asserts the sentinel never appears in captured
+stdout, stderr, serialized return values, ``str(error)`` or ``repr(error)``. No
+test in this module is conditionally skipped.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import subprocess
+import sys
+from io import StringIO
+from pathlib import Path
+from uuid import UUID
+
+import pytest
+
+from personal_os.diagnostics.context import (
+    DiagnosticContext,
+    bind_diagnostic_context,
+    create_diagnostic_context,
+)
+from personal_os.diagnostics.events import EventName, SafeToken
+from personal_os.diagnostics.logging import (
+    DiagnosticLogger,
+    configure_diagnostics,
+    emit_emergency_application_error,
+    emit_emergency_internal_error,
+    reset_diagnostics_for_testing,
+)
+from personal_os.diagnostics.trace_context import resolve_trace_context
+from personal_os.error_contracts.codes import ErrorCode
+from personal_os.error_contracts.exceptions import ConfigurationError, SecretFileError
+from personal_os.runtime_configuration.loading import load_runtime_settings
+from personal_os.runtime_configuration.models import (
+    ConfiguredLogLevel,
+    RuntimeSettings,
+    ServiceName,
+)
+
+_SENTINELS = (
+    "do-not-emit-secret-value",
+    "do-not-emit-secret-filename",
+    "do-not-emit-resolved-root",
+    "do-not-emit-sibling-root",
+    "do-not-emit-client-request-id",
+    "do-not-emit-traceparent",
+    "do-not-emit-dependency-message",
+    "do-not-emit-dependency-argument",
+    "do-not-emit-cause-message",
+    "do-not-emit-exception-message",
+    "do-not-emit-exception-arg",
+    "do-not-emit-forbidden-field-value",
+    "do-not-emit-sensitive-pattern",
+    "do-not-emit-unknown-setting-name",
+)
+
+_FORBIDDEN_FIELD_NAMES = (
+    "password",
+    "token",
+    "secret",
+    "authorization",
+    "credential",
+    "cookie",
+    "content",
+    "body",
+    "query",
+    "vector",
+    "embedding",
+    "traceback",
+)
+
+_SENSITIVE_VALUE_PATTERNS = (
+    "Bearer do-not-emit-sensitive-pattern",
+    "eyJdo-not-emit-sensitive-pattern.aaa.bbb",
+    "-----BEGIN PRIVATE KEY-----do-not-emit-sensitive-pattern",
+    "https://user:do-not-emit-sensitive-pattern@host",
+    "x-amz-signature=do-not-emit-sensitive-pattern",
+)
+
+
+@pytest.fixture
+def runtime_settings(tmp_path: Path) -> RuntimeSettings:
+    return load_runtime_settings(
+        ServiceName.API,
+        environ={
+            "KNOWLEDGE_ENVIRONMENT": "test",
+            "KNOWLEDGE_SECRET_ROOT": str(tmp_path),
+        },
+    )
+
+
+@pytest.fixture(autouse=True)
+def _reset_diagnostics_after_each() -> None:
+    yield
+    reset_diagnostics_for_testing()
+
+
+def _configure(settings: RuntimeSettings) -> tuple[DiagnosticLogger, StringIO, StringIO]:
+    stdout = StringIO()
+    stderr = StringIO()
+    logger = configure_diagnostics(settings, stdout=stdout, stderr=stderr)
+    return logger, stdout, stderr
+
+
+def _blob(*streams: StringIO) -> str:
+    return "".join(stream.getvalue() for stream in streams)
+
+
+def _assert_no_sentinel(*blobs: str, sentinels: tuple[str, ...] = _SENTINELS) -> None:
+    combined = "\n".join(blobs)
+    for sentinel in sentinels:
+        assert sentinel not in combined, f"sentinel leaked: {sentinel}"
+
+
+def _all_records_parsable(*streams: StringIO) -> None:
+    for stream in streams:
+        for line in stream.getvalue().splitlines():
+            assert isinstance(json.loads(line), dict)
+
+
+# --- settings surface -------------------------------------------------------
+
+
+def test_invalid_settings_value_sentinel_does_not_leak(
+    runtime_settings: RuntimeSettings,
+) -> None:
+    sentinel = "do-not-emit-unknown-setting-name"
+    error: ConfigurationError | None = None
+    try:
+        load_runtime_settings(
+            ServiceName.API,
+            environ={
+                "KNOWLEDGE_ENVIRONMENT": sentinel,
+                "KNOWLEDGE_SECRET_ROOT": str(runtime_settings.secret_root),
+            },
+        )
+    except ConfigurationError as raised:
+        error = raised
+
+    assert error is not None
+    logger, stdout, stderr = _configure(runtime_settings)
+    logger.emit_application_error(error)
+    _all_records_parsable(stdout, stderr)
+    _assert_no_sentinel(_blob(stdout, stderr), str(error), repr(error), sentinels=(sentinel,))
+
+
+def test_secret_filename_and_value_never_serialized(
+    runtime_settings: RuntimeSettings,
+) -> None:
+    filename_sentinel = "do-not-emit-secret-filename"
+    value_sentinel = "do-not-emit-secret-value"
+    error = SecretFileError(
+        ErrorCode.SECRET_FILE_MISSING,
+        safe_details={"reason": SafeToken.parse("secret_file_missing")},
+    )
+    try:
+        raise RuntimeError(f"{filename_sentinel}={value_sentinel}") from None
+    except RuntimeError as cause:
+        try:
+            raise error from cause
+        except SecretFileError as captured:
+            error = captured
+
+    logger, stdout, stderr = _configure(runtime_settings)
+    logger.emit_application_error(error)
+    _all_records_parsable(stdout, stderr)
+    _assert_no_sentinel(
+        _blob(stdout, stderr),
+        str(error),
+        repr(error),
+        sentinels=(filename_sentinel, value_sentinel),
+    )
+
+
+# --- correlation context surface --------------------------------------------
+
+
+def test_rejected_client_request_id_and_traceparent_sentinels_never_leak(
+    runtime_settings: RuntimeSettings,
+) -> None:
+    client_sentinel = "do-not-emit-client-request-id"
+    trace_sentinel = "do-not-emit-traceparent"
+    resolved = create_diagnostic_context(
+        client_request_id=client_sentinel,
+        traceparent=trace_sentinel,
+    )
+    logger, stdout, stderr = _configure(runtime_settings)
+
+    with bind_diagnostic_context(resolved.context):
+        logger.emit(
+            EventName.RUNTIME_CONFIGURATION_VALIDATED,
+            {"configured_log_level": ConfiguredLogLevel.INFO},
+        )
+
+    _all_records_parsable(stdout, stderr)
+    _assert_no_sentinel(
+        _blob(stdout, stderr),
+        str(resolved),
+        repr(resolved),
+        repr(resolved.context),
+        sentinels=(client_sentinel, trace_sentinel),
+    )
+
+
+# --- forbidden field families and sensitive patterns ------------------------
+
+
+@pytest.mark.parametrize("field_name", _FORBIDDEN_FIELD_NAMES)
+def test_forbidden_field_family_rejected_without_leak(
+    runtime_settings: RuntimeSettings, field_name: str
+) -> None:
+    sentinel = "do-not-emit-forbidden-field-value"
+    logger, stdout, stderr = _configure(runtime_settings)
+    logger.emit(
+        EventName.RUNTIME_CONFIGURATION_VALIDATED,
+        {"configured_log_level": ConfiguredLogLevel.INFO, field_name: sentinel},
+    )
+    _all_records_parsable(stdout, stderr)
+    _assert_no_sentinel(_blob(stdout, stderr), sentinels=(sentinel,))
+    record = json.loads(_all_records_one(stdout, stderr))
+    assert record["event"] == "logging_payload_rejected"
+
+
+@pytest.mark.parametrize("value", _SENSITIVE_VALUE_PATTERNS)
+def test_sensitive_value_pattern_rejected_without_leak(
+    runtime_settings: RuntimeSettings, value: str
+) -> None:
+    logger, stdout, stderr = _configure(runtime_settings)
+    logger.emit(
+        EventName.RUNTIME_CONFIGURATION_VALIDATED,
+        {"configured_log_level": value},
+    )
+    _all_records_parsable(stdout, stderr)
+    _assert_no_sentinel(_blob(stdout, stderr), sentinels=("do-not-emit-sensitive-pattern",))
+
+
+def _all_records_one(stdout: StringIO, stderr: StringIO) -> str:
+    lines = stdout.getvalue().splitlines() + stderr.getvalue().splitlines()
+    assert len(lines) == 1
+    return lines[0]
+
+
+# --- dependency logging surface ---------------------------------------------
+
+
+def test_dependency_message_and_argument_sentinels_never_leak(
+    runtime_settings: RuntimeSettings,
+) -> None:
+    message_sentinel = "do-not-emit-dependency-message"
+    argument_sentinel = "do-not-emit-dependency-argument"
+    _, stdout, stderr = _configure(runtime_settings)
+    logging.getLogger("httpx.transport").warning(
+        "%s could not reach %s", message_sentinel, argument_sentinel
+    )
+    _all_records_parsable(stdout, stderr)
+    _assert_no_sentinel(
+        _blob(stdout, stderr),
+        sentinels=(message_sentinel, argument_sentinel),
+    )
+    record = json.loads(stdout.getvalue().splitlines()[0])
+    assert record["event"] == "dependency_log"
+    assert "message" not in record
+    assert "args" not in record
+
+
+# --- expected error causes and unexpected exceptions ------------------------
+
+
+def test_expected_error_cause_and_unexpected_exception_sentinels_never_leak(
+    runtime_settings: RuntimeSettings,
+) -> None:
+    cause_sentinel = "do-not-emit-cause-message"
+    exception_sentinel = "do-not-emit-exception-message"
+    argument_sentinel = "do-not-emit-exception-arg"
+
+    try:
+        raise ValueError(cause_sentinel)
+    except ValueError as cause:
+        try:
+            raise ConfigurationError(
+                ErrorCode.CONFIGURATION_INVALID, safe_details={"count": 1}
+            ) from cause
+        except ConfigurationError as application_error:
+            captured_application = application_error
+
+    try:
+        raise RuntimeError(exception_sentinel, argument_sentinel)
+    except RuntimeError as internal:
+        captured_internal = internal
+
+    # The source objects carry the sentinels (otherwise the boundary test is moot).
+    assert cause_sentinel in str(captured_application.__cause__)
+    assert exception_sentinel in str(captured_internal)
+    assert argument_sentinel in repr(captured_internal)
+
+    logger, stdout, stderr = _configure(runtime_settings)
+    logger.emit_application_error(captured_application)
+    logger.emit_internal_error(captured_internal)
+
+    _all_records_parsable(stdout, stderr)
+    # Only the diagnostic sinks are scanned: str/repr of a raw exception are the
+    # source, never a sink. ApplicationError str/repr never expose the cause, so
+    # they are scanned as an additional contract check.
+    _assert_no_sentinel(
+        _blob(stdout, stderr),
+        str(captured_application),
+        repr(captured_application),
+        sentinels=(cause_sentinel, exception_sentinel, argument_sentinel),
+    )
+
+
+# --- hostile objects --------------------------------------------------------
+
+
+def test_hostile_object_values_are_rejected_safely(
+    runtime_settings: RuntimeSettings,
+) -> None:
+    class HostileValue:
+        def __str__(self) -> str:
+            raise RuntimeError("do-not-emit-exception-message")
+
+        def __repr__(self) -> str:
+            raise RuntimeError("do-not-emit-exception-message")
+
+    hostile = HostileValue()
+    logger, stdout, stderr = _configure(runtime_settings)
+    logger.emit(
+        EventName.RUNTIME_CONFIGURATION_VALIDATED,
+        {"configured_log_level": ConfiguredLogLevel.INFO, "hostile": hostile},
+    )
+    logging.getLogger("httpx.transport").info("value=%s", hostile)
+    _all_records_parsable(stdout, stderr)
+    _assert_no_sentinel(_blob(stdout, stderr), sentinels=("do-not-emit-exception-message",))
+
+
+def test_hostile_dependency_argument_does_not_raise(
+    runtime_settings: RuntimeSettings,
+) -> None:
+    class HostileArg:
+        def __str__(self) -> str:
+            raise RuntimeError("do-not-emit-dependency-argument")
+
+    _, stdout, stderr = _configure(runtime_settings)
+    logging.getLogger("httpx.transport").info("calling %s", HostileArg())
+    _all_records_parsable(stdout, stderr)
+    _assert_no_sentinel(_blob(stdout, stderr), sentinels=("do-not-emit-dependency-argument",))
+
+
+# --- emergency helpers never leak -------------------------------------------
+
+
+def test_emergency_helpers_never_leak_context_or_exception_text(
+    runtime_settings: RuntimeSettings,
+) -> None:
+    emergency_stderr = StringIO()
+    context = DiagnosticContext(
+        request_id=UUID("123e4567-e89b-12d3-a456-426614174000"),
+        client_request_id=None,
+        trace=resolve_trace_context(
+            "00-abcdef1234567890abcdef1234567890-1234567890abcdef-01"
+        ).context,
+    )
+    cause_sentinel = "do-not-emit-cause-message"
+    internal_sentinel = "do-not-emit-exception-message"
+
+    try:
+        raise ValueError(cause_sentinel)
+    except ValueError as cause:
+        try:
+            raise ConfigurationError(
+                ErrorCode.CONFIGURATION_INVALID, safe_details={"count": 1}
+            ) from cause
+        except ConfigurationError as application_error:
+            captured_application = application_error
+
+    try:
+        raise RuntimeError(internal_sentinel)
+    except RuntimeError as internal:
+        captured_internal = internal
+
+    _configure(runtime_settings)
+    emit_emergency_application_error(
+        ServiceName.API, context, captured_application, stderr=emergency_stderr
+    )
+    emit_emergency_internal_error(
+        ServiceName.API, context, captured_internal, stderr=emergency_stderr
+    )
+    _all_records_parsable(emergency_stderr)
+    _assert_no_sentinel(
+        emergency_stderr.getvalue(),
+        sentinels=(cause_sentinel, internal_sentinel),
+    )
+
+
+# --- collection guard -------------------------------------------------------
+
+
+def test_file_collects_sentinel_scanning_tests() -> None:
+    """The leak corpus must collect tests when the file runs directly."""
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", str(Path(__file__)), "--collect-only", "-q"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    collected = [line for line in result.stdout.splitlines() if "::" in line]
+    assert len(collected) >= 10
