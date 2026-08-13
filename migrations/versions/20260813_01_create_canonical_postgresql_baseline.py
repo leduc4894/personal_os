@@ -427,7 +427,7 @@ def upgrade() -> None:
         sa.Column(
             "event_sequence",
             sa.BigInteger(),
-            identity=sa.Identity(always=True),
+            sa.Identity(always=True),
             nullable=False,
         ),
         sa.Column("source_id", sa.Uuid(), nullable=False),
