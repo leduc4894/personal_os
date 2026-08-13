@@ -791,14 +791,44 @@ def test_prerequisites_reject_compose_before_minimum(stack_context: Any, version
     assert str(raised.value) == "compose_version_unsupported"
 
 
-def test_prerequisites_accept_compose_2_30_0(stack_context: Any) -> None:
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ("2.30.0", (2, 30, 0)),
+        ("2.30.0+desktop.1", (2, 30, 0)),
+        ("2.31.0-rc.1", (2, 31, 0)),
+    ],
+)
+def test_prerequisites_accept_stable_minimum_and_newer_versions(
+    stack_context: Any, version: str, expected: tuple[int, int, int]
+) -> None:
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        return stack_module.CommandResult(0, version, "")
+
     versions = stack_module.check_prerequisites(
         stack_context,
-        runner=_successful_lifecycle_runner(),
+        runner=runner,
         require_engine=False,
     )
 
-    assert versions == stack_module.PrerequisiteVersions((2, 30, 0), "", "")
+    assert versions == stack_module.PrerequisiteVersions(expected, "", "")
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["2.30.0-rc.1", "v2.30.0-beta.2", "Docker Compose version v2.30.0-alpha"],
+)
+def test_prerequisites_reject_compose_2_30_0_prerelease(
+    stack_context: Any, version: str
+) -> None:
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        return stack_module.CommandResult(0, version, "")
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.check_prerequisites(stack_context, runner=runner, require_engine=False)
+
+    assert raised.value.exit_code is StackExitCode.PREREQUISITE
+    assert str(raised.value) == "compose_version_unsupported"
 
 
 @pytest.mark.parametrize(

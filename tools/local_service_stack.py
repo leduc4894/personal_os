@@ -36,7 +36,8 @@ _STACK_STATUS_TIMEOUT_SECONDS: Final = 10.0
 _STACK_DOWN_TIMEOUT_SECONDS: Final = 45.0
 _PROJECT_NAME_PATTERN = re.compile(r"knowledge-(?:local|ci-[a-z0-9][a-z0-9-]{0,40})")
 _COMPOSE_VERSION_PATTERN = re.compile(
-    r"(?:Docker Compose version )?v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?"
+    r"(?:Docker Compose version )?v?(\d+)\.(\d+)\.(\d+)"
+    r"(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?"
 )
 _SECRET_ALPHABET: Final = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 _SECRET_BYTE_COUNT: Final = 32
@@ -693,8 +694,10 @@ def check_prerequisites(
         context,
         result_code="compose_unavailable",
     )
-    compose_version = _parse_compose_version(compose_result.stdout)
-    if compose_version < _MIN_COMPOSE_VERSION:
+    compose_version, compose_prerelease = _parse_compose_version(compose_result.stdout)
+    if compose_version < _MIN_COMPOSE_VERSION or (
+        compose_version == _MIN_COMPOSE_VERSION and compose_prerelease is not None
+    ):
         raise StackFailure(StackExitCode.PREREQUISITE, "compose_version_unsupported")
 
     if not require_engine:
@@ -863,11 +866,18 @@ def _run_prerequisite_command(
     return result
 
 
-def _parse_compose_version(raw_version: str) -> tuple[int, int, int]:
+def _parse_compose_version(
+    raw_version: str,
+) -> tuple[tuple[int, int, int], tuple[str, ...] | None]:
     matched = _COMPOSE_VERSION_PATTERN.fullmatch(raw_version.strip())
     if matched is None:
         raise StackFailure(StackExitCode.PREREQUISITE, "compose_version_invalid")
-    return cast(tuple[int, int, int], tuple(int(part) for part in matched.groups()))
+    major, minor, patch, raw_prerelease = matched.groups()
+    compose_version = (int(major), int(minor), int(patch))
+    compose_prerelease = (
+        tuple(raw_prerelease.split(".")) if raw_prerelease is not None else None
+    )
+    return compose_version, compose_prerelease
 
 
 def _require_complete_secret_set(
