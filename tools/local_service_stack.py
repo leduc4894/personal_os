@@ -1272,9 +1272,7 @@ def _smoke_marker_commands(
     selected_scripts = scripts.get(stage)
     if selected_scripts is None:
         raise StackFailure(StackExitCode.INTERNAL, "smoke_marker_stage_invalid")
-    return tuple(
-        zip(("postgresql", "qdrant", "neo4j", "redis"), selected_scripts, strict=True)
-    )
+    return tuple(zip(("postgresql", "qdrant", "neo4j", "redis"), selected_scripts, strict=True))
 
 
 def _postgresql_smoke_create_script(markers: SmokeMarkerSet) -> str:
@@ -1282,12 +1280,12 @@ def _postgresql_smoke_create_script(markers: SmokeMarkerSet) -> str:
         (
             "application_password=$(cat /run/secrets/postgres_application_password) || exit 75",
             '[ -n "$application_password" ] || exit 65',
-            "sql=\"CREATE TABLE IF NOT EXISTS public.stack_smoke_marker "
+            'sql="CREATE TABLE IF NOT EXISTS public.stack_smoke_marker '
             "(marker_key text PRIMARY KEY, marker_value text NOT NULL); "
             "ALTER TABLE public.stack_smoke_marker OWNER TO knowledge_app; "
             "INSERT INTO public.stack_smoke_marker(marker_key, marker_value) "
             f"VALUES ('{markers.marker_key}', 'ready') ON CONFLICT (marker_key) "
-            "DO UPDATE SET marker_value = EXCLUDED.marker_value;\"",
+            'DO UPDATE SET marker_value = EXCLUDED.marker_value;"',
             'PGPASSWORD="$application_password" psql -XAtq --host 127.0.0.1 --port 5432 '
             "--username knowledge_app --dbname knowledge --set ON_ERROR_STOP=1 "
             '--command "$sql" >/dev/null 2>&1 || exit 75',
@@ -1304,14 +1302,14 @@ def _postgresql_smoke_verify_script(markers: SmokeMarkerSet) -> str:
             '[ -n "$application_password" ] || exit 65',
             'marker_count=$(PGPASSWORD="$application_password" psql -XAtq '
             "--host 127.0.0.1 --port 5432 --username knowledge_app --dbname knowledge "
-            "--set ON_ERROR_STOP=1 --command \"SELECT count(*) FROM "
+            '--set ON_ERROR_STOP=1 --command "SELECT count(*) FROM '
             "public.stack_smoke_marker WHERE "
             f"marker_key = '{markers.marker_key}' AND marker_value = 'ready'\" "
             "2>/dev/null) || exit 75",
             '[ "$marker_count" = 1 ] || exit 65',
             'table_owner=$(PGPASSWORD="$application_password" psql -XAtq '
             "--host 127.0.0.1 --port 5432 --username knowledge_app --dbname knowledge "
-            "--set ON_ERROR_STOP=1 --command \"SELECT tableowner FROM pg_tables WHERE "
+            '--set ON_ERROR_STOP=1 --command "SELECT tableowner FROM pg_tables WHERE '
             "schemaname = 'public' AND tablename = 'stack_smoke_marker'\" "
             "2>/dev/null) || exit 75",
             '[ "$table_owner" = knowledge_app ] || exit 65',
@@ -1392,7 +1390,7 @@ def _qdrant_smoke_script(
         "  exec 3<>/dev/tcp/127.0.0.1/6333 || return 75",
         "  printf '%s %s HTTP/1.1\\r\\nHost: localhost\\r\\napi-key: %s\\r\\n"
         "Content-Type: application/json\\r\\nContent-Length: %s\\r\\n"
-        "Connection: close\\r\\n\\r\\n%s' \"$method\" \"$path\" \"$api_key\" "
+        'Connection: close\\r\\n\\r\\n%s\' "$method" "$path" "$api_key" '
         '"${#body}" "$body" >&3',
         "  IFS=' ' read -r _ status _ <&3 || return 75",
         "  exec 3<&- 3>&-",
@@ -2483,10 +2481,12 @@ def _validate_complete_secret_contents(secret_directory: Path) -> None:
     redis_acl = contents["redis_acl"]
     redis_prefix = "user default off\nuser knowledge on >"
     redis_suffix = " ~* +@all\n"
+    redis_credential = redis_acl[len(redis_prefix) : -len(redis_suffix)]
     has_valid_redis_acl = (
         redis_acl.startswith(redis_prefix)
         and redis_acl.endswith(redis_suffix)
-        and _is_valid_secret_value(redis_acl[len(redis_prefix) : -len(redis_suffix)])
+        and _is_valid_secret_value(redis_credential)
+        and secrets.compare_digest(redis_credential, contents["redis_application_password"])
     )
     qdrant_key = contents["qdrant_api_key"]
     has_valid_qdrant_config = (
@@ -2531,15 +2531,15 @@ def _build_secret_contents(random_bytes: Callable[[int], bytes]) -> dict[str, by
     try:
         generated: dict[str, str] = {}
         for spec in SECRET_SPECS:
+            if spec.kind is SecretKind.REDIS_ACL:
+                continue
             password = _generate_secret_value(random_bytes)
             if spec.kind is SecretKind.PASSWORD:
                 generated[spec.filename] = password
-            elif spec.kind is SecretKind.NEO4J_AUTH:
-                generated[spec.filename] = f"neo4j/{password}"
             else:
-                generated[spec.filename] = (
-                    f"user default off\nuser knowledge on >{password} ~* +@all\n"
-                )
+                generated[spec.filename] = f"neo4j/{password}"
+        redis_password = generated["redis_application_password"]
+        generated["redis_acl"] = f"user default off\nuser knowledge on >{redis_password} ~* +@all\n"
         qdrant_key = generated["qdrant_api_key"]
         generated[_QDRANT_CONFIG_FILENAME] = f"service:\n  api_key: {qdrant_key}\n"
         return {filename: content.encode("ascii") for filename, content in generated.items()}

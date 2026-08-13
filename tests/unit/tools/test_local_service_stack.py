@@ -8,10 +8,10 @@ import threading
 import time
 from dataclasses import FrozenInstanceError
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 sys.path.insert(0, str(Path(__file__).parents[3]))
 
@@ -19,6 +19,8 @@ from tools import local_service_stack as stack_module
 from tools.local_service_stack import (
     SECRET_SPECS,
     SecretSetState,
+    SmokeMarkerSet,
+    StackContext,
     StackExitCode,
     StackFailure,
     bootstrap_secret_set,
@@ -301,6 +303,30 @@ def test_secret_values_use_required_native_shapes_and_boundaries(tmp_path: Path)
     assert all("r2" not in name.lower() for name in values)
 
 
+def test_redis_acl_credential_matches_application_password(tmp_path: Path) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    generation_index = 0
+
+    def distinct_random_bytes(count: int) -> bytes:
+        nonlocal generation_index
+        generated = bytes((offset + generation_index) % 256 for offset in range(count))
+        generation_index += 1
+        return generated
+
+    bootstrap_secret_set(paths, random_bytes=distinct_random_bytes)
+    redis_acl = (paths.secret_directory / "redis_acl").read_text(encoding="ascii")
+    redis_password = (paths.secret_directory / "redis_application_password").read_text(
+        encoding="ascii"
+    )
+    redis_prefix = "user default off\nuser knowledge on >"
+    redis_suffix = " ~* +@all\n"
+    has_matching_redis_credential = (
+        redis_acl[len(redis_prefix) : -len(redis_suffix)] == redis_password
+    )
+
+    assert has_matching_redis_credential
+
+
 def test_secret_set_rejects_symlink_without_leaking_secret_or_path(tmp_path: Path) -> None:
     paths = resolve_stack_paths(tmp_path)
     paths.secret_directory.mkdir(parents=True)
@@ -357,6 +383,10 @@ def test_remove_secret_set_after_reset_removes_only_complete_set(tmp_path: Path)
         ("postgres_admin_password", ""),
         ("postgres_application_password", "A" * 32),
         ("neo4j_auth", "not-a-native-neo4j-auth"),
+        (
+            "redis_acl",
+            "user default off\nuser knowledge on >ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef ~* +@all\n",
+        ),
         ("qdrant_config.yaml", "service:\n  api_key: mismatched-key\n"),
     ],
 )
@@ -560,7 +590,7 @@ class _TimedOutProcess:
 
     def wait(self, timeout: float | None = None) -> int:
         if not self.was_killed:
-            raise subprocess.TimeoutExpired(["blocked-reader"], timeout)
+            raise subprocess.TimeoutExpired(["blocked-reader"], timeout or 0.0)
         return -9
 
     def kill(self) -> None:
@@ -756,9 +786,9 @@ def test_stack_context_is_frozen_and_copies_mutable_inputs(tmp_path: Path) -> No
     assert context.ports == {"POSTGRES_PORT": 15432}
     assert context.environment == {"PATH": "safe"}
     with pytest.raises(FrozenInstanceError):
-        context.project_name = "knowledge-ci-mutated"
+        context.project_name = "knowledge-ci-mutated"  # type: ignore[misc]
     with pytest.raises(TypeError):
-        context.ports["POSTGRES_PORT"] = 35432
+        cast(dict[str, int], context.ports)["POSTGRES_PORT"] = 35432
 
 
 def test_compose_arguments_are_array_based_and_project_scoped(stack_context: Any) -> None:
@@ -1132,8 +1162,12 @@ def test_status_output_has_stable_non_secret_shape(stack_context: Any) -> None:
     assert status["project"] == "knowledge-local"
     assert status["state"] == "ready"
     assert status["result_code"] == "stack_ready"
-    assert list(status["services"]) == sorted(_RUNTIME_SERVICES)
-    assert list(status["initializers"]) == sorted(_INITIALIZER_SERVICES)
+    services = status["services"]
+    initializers = status["initializers"]
+    assert isinstance(services, dict)
+    assert isinstance(initializers, dict)
+    assert list(services) == sorted(_RUNTIME_SERVICES)
+    assert list(initializers) == sorted(_INITIALIZER_SERVICES)
     assert "password" not in json.dumps(status).lower()
 
 
@@ -1175,7 +1209,9 @@ def test_status_drops_raw_compose_fields_and_unknown_values(stack_context: Any) 
     assert raw_secret not in rendered
     assert "Image" not in rendered
     assert "Command" not in rendered
-    assert status["services"]["neo4j"] == {"state": "unknown", "health": "unknown"}
+    services = status["services"]
+    assert isinstance(services, dict)
+    assert services["neo4j"] == {"state": "unknown", "health": "unknown"}
 
 
 def test_status_is_degraded_when_one_runtime_service_has_stopped(stack_context: Any) -> None:
@@ -1588,7 +1624,7 @@ def test_up_caps_semantic_verification_to_thirty_second_aggregate_deadline(
 ) -> None:
     observed_deadlines: list[float] = []
     monkeypatch.setattr(stack_module, "validate_port_availability", lambda ports: None)
-    monkeypatch.setattr(stack_module.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
 
     def probes(
         context: Any,
@@ -1819,7 +1855,7 @@ def test_reset_without_volumes_is_idempotent_but_cannot_rotate(
     stack_context: Any,
 ) -> None:
     calls: list[tuple[str, ...]] = []
-    labels = {
+    labels: dict[str, set[str]] = {
         label: set()
         for label in (
             "postgres-data",
@@ -2099,73 +2135,76 @@ class _RecordingSmokeOperations:
         if event == self._fail_at:
             raise StackFailure(StackExitCode.READINESS, "fixed_smoke_failure")
 
-    def reset_before(self, context: Any) -> None:
+    def reset_before(self, context: StackContext) -> None:
         del context
         self._record("reset-before")
 
-    def bootstrap(self, context: Any) -> None:
+    def bootstrap(self, context: StackContext) -> None:
         del context
         self._record("bootstrap")
 
-    def config(self, context: Any) -> None:
+    def config(self, context: StackContext) -> None:
         del context
         self._record("config")
 
-    def up(self, context: Any) -> None:
+    def up(self, context: StackContext) -> None:
         del context
         self._up_count += 1
         self._record(("up-first", "up-second", "up-idempotent")[self._up_count - 1])
 
-    def verify(self, context: Any) -> None:
+    def verify(self, context: StackContext) -> None:
         del context
         self._verify_count += 1
-        self._record(
-            ("verify-first", "verify-second", "verify-idempotent")[self._verify_count - 1]
+        self._record(("verify-first", "verify-second", "verify-idempotent")[self._verify_count - 1])
+
+    def new_markers(self, context: StackContext) -> SmokeMarkerSet:
+        del context
+        return SmokeMarkerSet(
+            marker_key="recording",
+            qdrant_collection="recording",
+            qdrant_point_id=1,
+            redis_key="recording",
         )
 
-    def new_markers(self, context: Any) -> object:
-        del context
-        return object()
-
-    def create_markers(self, context: Any, markers: object) -> None:
+    def create_markers(self, context: StackContext, markers: SmokeMarkerSet) -> None:
         del context, markers
         self._record("create-markers")
 
-    def down_preserve(self, context: Any) -> None:
+    def down_preserve(self, context: StackContext) -> None:
         del context
         self._record("down-preserve")
 
-    def verify_markers(self, context: Any, markers: object) -> None:
+    def verify_markers(self, context: StackContext, markers: SmokeMarkerSet) -> None:
         del context, markers
         self._record("verify-markers")
 
-    def stop_redis(self, context: Any) -> None:
+    def stop_redis(self, context: StackContext) -> None:
         del context
         self._record("stop-redis")
 
-    def verify_outage(self, context: Any) -> None:
+    def verify_outage(self, context: StackContext) -> None:
         del context
         self._record("verify-outage")
 
-    def start_redis(self, context: Any) -> None:
+    def start_redis(self, context: StackContext) -> None:
         del context
         self._record("start-redis")
 
-    def verify_recovery(self, context: Any) -> None:
+    def verify_recovery(self, context: StackContext) -> None:
         del context
         self._record("verify-recovery")
 
-    def ensure_redis_recovered(self, context: Any) -> None:
+    def ensure_redis_recovered(self, context: StackContext) -> None:
         del context
         self._events.append("ensure-redis-recovered")
         if self._recovery_fails:
             raise StackFailure(StackExitCode.READINESS, "redis_recovery_not_proven")
 
-    def remove_markers(self, context: Any, markers: object) -> None:
+    def remove_markers(self, context: StackContext, markers: SmokeMarkerSet) -> None:
         del context, markers
         self._record("remove-markers")
 
-    def reset_after(self, context: Any) -> None:
+    def reset_after(self, context: StackContext) -> None:
         del context
         self._record("reset-after")
 

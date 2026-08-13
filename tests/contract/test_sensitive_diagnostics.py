@@ -13,6 +13,7 @@ import json
 import logging
 import subprocess
 import sys
+from collections.abc import Iterator
 from io import StringIO
 from pathlib import Path
 from uuid import UUID
@@ -95,7 +96,7 @@ def runtime_settings(tmp_path: Path) -> RuntimeSettings:
 
 
 @pytest.fixture(autouse=True)
-def _reset_diagnostics_after_each() -> None:
+def _reset_diagnostics_after_each() -> Iterator[None]:
     yield
     reset_diagnostics_for_testing()
 

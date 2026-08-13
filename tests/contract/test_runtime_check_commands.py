@@ -186,8 +186,9 @@ def test_check_runtime_unknown_key_exits_seventy_eight_with_safe_count(
     assert record["event"] == "runtime_configuration_failed"
     assert record["result_code"] == "failed"
     assert record["environment"] is None
-    assert isinstance(record.get("count"), int)
-    assert record["count"] >= 1
+    count = record.get("count")
+    assert isinstance(count, int)
+    assert count >= 1
     assert "do-not-emit-unknown" not in completed.stdout + completed.stderr
 
 

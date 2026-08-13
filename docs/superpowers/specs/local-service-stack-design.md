@@ -805,7 +805,13 @@ tests/integration/test_local_service_stack.py
 
 The implementation also updates `.gitignore`, `pyproject.toml` Poe tasks and the root README. It does not modify Python runtime settings with database/service/R2 credentials; settings are introduced only by their owning adapter specs.
 
-## 20. Primary references
+## 20. Implementation verification report (2026-08-13)
+
+- Redis ACL generation now derives its embedded credential from the application password, and complete-set validation rejects any mismatch without exposing either value.
+- The exact strict command `uv run mypy src tools tests`, the focused local-stack unit/contract suite and `uv run poe verify` pass locally.
+- External acceptance remains open: this host has no reachable Docker daemon, so the authenticated full-stack smoke was not run, and no branch CI result exists for this final commit. The implementation is not declared complete until those same-commit gates pass.
+
+## 21. Primary references
 
 - [PostgreSQL 18.4 release](https://www.postgresql.org/docs/release/18.4/)
 - [PostgreSQL official image: PostgreSQL 18 data-volume change and `_FILE` secrets](https://hub.docker.com/_/postgres)

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 sys.path.insert(0, str(Path(__file__).parents[2]))
 
