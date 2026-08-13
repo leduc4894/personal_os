@@ -3,6 +3,8 @@ from __future__ import annotations
 import socket
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -129,6 +131,59 @@ def test_run_command_maps_timeout_without_raw_exception() -> None:
 
     assert raised.value.exit_code is StackExitCode.READINESS
     assert str(raised.value) == "subprocess_timeout"
+
+
+class _ReaderHeldPipe:
+    def __init__(self, release_reader: threading.Event) -> None:
+        self.release_reader = release_reader
+
+    def read(self, size: int) -> bytes:
+        self.release_reader.wait()
+        return b""
+
+    def close(self) -> None:
+        return None
+
+
+class _TimedOutProcess:
+    def __init__(self, release_reader: threading.Event) -> None:
+        self.stdout = _ReaderHeldPipe(release_reader)
+        self.stderr = _ReaderHeldPipe(release_reader)
+        self.was_killed = False
+
+    def wait(self, timeout: float | None = None) -> int:
+        if not self.was_killed:
+            raise subprocess.TimeoutExpired(["blocked-reader"], timeout)
+        return -9
+
+    def kill(self) -> None:
+        self.was_killed = True
+
+
+def test_timeout_does_not_wait_for_readers_held_after_process_termination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release_reader = threading.Event()
+    process = _TimedOutProcess(release_reader)
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: process)
+    release_timer = threading.Timer(0.2, release_reader.set)
+    release_timer.start()
+
+    try:
+        started_at = time.monotonic()
+        with pytest.raises(StackFailure) as raised:
+            run_command(["blocked-reader"], timeout_seconds=0.01)
+        elapsed_seconds = time.monotonic() - started_at
+    finally:
+        release_reader.set()
+        release_timer.cancel()
+
+    assert raised.value.exit_code is StackExitCode.READINESS
+    assert str(raised.value) == "subprocess_timeout"
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    assert process.was_killed
+    assert elapsed_seconds < 0.1
 
 
 def test_run_command_maps_missing_program_without_raw_exception() -> None:

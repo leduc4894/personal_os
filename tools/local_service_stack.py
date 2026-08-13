@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -207,6 +208,7 @@ def run_command(
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise StackFailure(StackExitCode.CLI, "invalid_timeout")
 
+    deadline_monotonic = time.monotonic() + timeout_seconds
     source_environment: Mapping[str, str] = os.environ if environment is None else environment
     effective_ports = resolve_ports(source_environment)
     clean_environment = sanitize_subprocess_environment(source_environment)
@@ -225,8 +227,10 @@ def run_command(
         raise StackFailure(StackExitCode.PREREQUISITE, "subprocess_unavailable")
 
     if process.stdout is None or process.stderr is None:
-        process.kill()
-        process.wait()
+        with suppress(OSError):
+            process.kill()
+        with suppress(OSError, subprocess.TimeoutExpired):
+            process.wait(timeout=0)
         raise StackFailure(StackExitCode.INTERNAL, "subprocess_capture_unavailable")
 
     stdout_buffer = bytearray()
@@ -245,19 +249,26 @@ def run_command(
     stderr_thread.start()
 
     has_timed_out = False
+    has_wait_failure = False
+    return_code: int | None = None
     try:
-        return_code = process.wait(timeout=timeout_seconds)
+        remaining_seconds = max(0.0, deadline_monotonic - time.monotonic())
+        return_code = process.wait(timeout=remaining_seconds)
     except subprocess.TimeoutExpired:
         has_timed_out = True
         with suppress(OSError):
             process.kill()
-        return_code = process.wait()
+        with suppress(OSError, subprocess.TimeoutExpired):
+            process.wait(timeout=0)
+    except OSError:
+        has_wait_failure = True
     finally:
-        stdout_thread.join()
-        stderr_thread.join()
+        _drain_readers_until_deadline((stdout_thread, stderr_thread), deadline_monotonic)
 
     if has_timed_out:
         raise StackFailure(StackExitCode.READINESS, "subprocess_timeout")
+    if has_wait_failure or return_code is None:
+        raise StackFailure(StackExitCode.PREREQUISITE, "subprocess_wait_failed")
 
     return CommandResult(
         return_code=return_code,
@@ -299,3 +310,17 @@ def _read_bounded_output(stream: BinaryIO, buffer: bytearray) -> None:
     finally:
         with suppress(OSError):
             stream.close()
+
+
+def _drain_readers_until_deadline(
+    reader_threads: Sequence[threading.Thread], deadline_monotonic: float
+) -> None:
+    """Wait only until the command deadline for reader threads to finish draining.
+
+    A descendant can retain a pipe after the direct child is terminated. Reader
+    threads remain daemons so they can finish draining later without extending
+    the lifecycle operation past its finite deadline.
+    """
+    for reader_thread in reader_threads:
+        remaining_seconds = max(0.0, deadline_monotonic - time.monotonic())
+        reader_thread.join(timeout=remaining_seconds)
