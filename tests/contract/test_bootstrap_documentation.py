@@ -119,6 +119,69 @@ RESERVED_LAYER_FORBIDDEN_TOKENS = (
 # executable placeholder test that the spec forbids.
 PLACEHOLDER_TEST_SUFFIXES = (".py", ".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx")
 
+# --- Runtime configuration & diagnostics contract ---------------------------
+# The runtime configuration and diagnostics spec (the composition-root
+# ``check-runtime`` command) is operator-facing and security-sensitive. The
+# following constants pin the README surface an operator relies on to run the
+# command safely. They are documentation-as-code for the same reason as the
+# bootstrap constants above: a silent regression of the operator contract fails
+# CI.
+
+# Unambiguous tokens the root README must document verbatim for the runtime
+# configuration contract: the three approved environment variables, the
+# production POSIX secret root, and the subcommand name.
+RUNTIME_CONFIGURATION_TOKENS = (
+    "KNOWLEDGE_ENVIRONMENT",
+    "KNOWLEDGE_LOG_LEVEL",
+    "KNOWLEDGE_SECRET_ROOT",
+    "/run/secrets",
+    "check-runtime",
+)
+
+# The four ``check-runtime`` exit codes paired with the meaning keyword each
+# must be documented alongside. Asserting the code plus its meaning keyword on a
+# single line keeps the test meaningful: the bare digit ``0`` would match almost
+# any README fragment, but ``0`` + ``success`` only matches the exit-code
+# contract. Meanings are linked, not duplicated, in the app READMEs.
+RUNTIME_EXIT_CODE_MEANINGS = (
+    ("0", "success"),
+    ("2", "syntax"),
+    ("70", "internal"),
+    ("78", "configuration"),
+)
+
+# Settings sources and secret transports the runtime contract explicitly
+# rejects. The root README must document each as an unsupported/prohibited path
+# so an operator never attempts to configure secrets through them.
+UNSUPPORTED_CONFIG_TRANSPORTS = (
+    ".env",
+    "TOML",
+    "YAML",
+    "JSON",
+)
+# Prohibition markers; at least one must appear so the unsupported transports
+# are framed as a rejection rather than an option.
+PROHIBITION_MARKERS = (
+    "unsupported",
+    "not supported",
+    "prohibited",
+    "forbidden",
+    "must not",
+    "never",
+)
+
+# Each composition-root README must document its exact ``check-runtime``
+# command, the safe-JSON and no-settings-dump guarantees, and list the four exit
+# codes. Full security rules live in the root contract; the app README links
+# back rather than duplicating them incompletely.
+RUNTIME_CHECK_APPS = {
+    "apps/api/README.md": "personal-api check-runtime",
+    "apps/mcp/README.md": "personal-mcp check-runtime",
+    "apps/worker/README.md": "personal-worker check-runtime",
+}
+APP_SAFE_JSON_ANCHOR = "safe JSON"
+APP_NO_SETTINGS_DUMP_ANCHOR = "settings dump"
+
 
 def _read(path: Path) -> str:
     assert path.exists(), f"required documentation file is missing: {path}"
@@ -253,3 +316,75 @@ def test_reserved_test_layers_contain_no_executable_placeholder_tests() -> None:
                     f"{entry}: reserved test layer must not contain an executable placeholder test"
                 )
     assert not offenders, "reserved test-layer placeholder violations:\n" + "\n".join(offenders)
+
+
+def test_root_readme_documents_runtime_configuration_tokens() -> None:
+    content = _read(ROOT_README)
+    missing = [token for token in RUNTIME_CONFIGURATION_TOKENS if token not in content]
+    assert not missing, (
+        "root README must document the runtime configuration contract tokens "
+        f"(approved env vars, POSIX secret root, subcommand); missing: {missing}"
+    )
+
+
+def test_root_readme_documents_runtime_exit_codes_with_meanings() -> None:
+    content = _read(ROOT_README)
+    offenders: list[str] = []
+    for code, meaning in RUNTIME_EXIT_CODE_MEANINGS:
+        # Each exit code must be documented on a line that also carries its
+        # meaning keyword, so the contract cannot degrade to a bare digit that
+        # happens to appear elsewhere in the README.
+        if not any(code in line and meaning in line.lower() for line in content.splitlines()):
+            offenders.append(f"exit code '{code}' paired with meaning '{meaning}'")
+    assert not offenders, (
+        "root README must document all four check-runtime exit codes with their "
+        f"meanings; missing: {offenders}"
+    )
+
+
+def test_root_readme_documents_unsupported_config_and_secret_transports() -> None:
+    content = _read(ROOT_README)
+    lower = content.lower()
+    offenders: list[str] = []
+    for transport in UNSUPPORTED_CONFIG_TRANSPORTS:
+        if transport.lower() not in lower:
+            offenders.append(transport)
+    # Plaintext secret environment variables and command-line secret values must
+    # also be marked unsupported.
+    if "plaintext" not in lower or "secret" not in lower:
+        offenders.append("plaintext secret environment variables")
+    if "command line" not in lower and "command-line" not in lower:
+        offenders.append("command-line secret values")
+    # At least one prohibition marker must frame these as rejected, not optional.
+    if not any(marker in lower for marker in PROHIBITION_MARKERS):
+        offenders.append("a prohibition marker (unsupported/prohibited/...)")
+    assert not offenders, (
+        "root README must document unsupported config/secret transports as "
+        f"prohibited; missing: {offenders}"
+    )
+
+
+def test_each_runtime_check_app_readme_documents_command_guarantees_and_exit_codes() -> None:
+    offenders: list[str] = []
+    for relative_path, command in RUNTIME_CHECK_APPS.items():
+        path = REPO_ROOT / relative_path
+        if not path.exists():
+            offenders.append(f"{relative_path}: README missing")
+            continue
+        content = path.read_text(encoding="utf-8")
+        if command not in content:
+            offenders.append(f"{relative_path}: missing command '{command}'")
+        if APP_SAFE_JSON_ANCHOR.lower() not in content.lower():
+            offenders.append(f"{relative_path}: missing safe-JSON-output statement")
+        if APP_NO_SETTINGS_DUMP_ANCHOR.lower() not in content.lower():
+            offenders.append(f"{relative_path}: missing no-settings-dump statement")
+        # The four exit codes must be listed; the word ``exit`` anchors them as
+        # exit-code context rather than incidental digits.
+        if "exit" not in content.lower():
+            offenders.append(f"{relative_path}: missing 'exit' context anchor")
+        for code, _meaning in RUNTIME_EXIT_CODE_MEANINGS:
+            if code not in content:
+                offenders.append(f"{relative_path}: missing exit code '{code}'")
+    assert not offenders, (
+        "composition-root check-runtime README contract violations:\n" + "\n".join(offenders)
+    )

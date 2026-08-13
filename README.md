@@ -78,6 +78,60 @@ uv run --package mcp-runtime personal-mcp --version
 uv run --package workflow-worker personal-worker
 ```
 
+## Runtime configuration & diagnostics
+
+Each Python process shell exposes a `check-runtime` subcommand that loads and
+validates the runtime configuration snapshot and emits exactly one structured
+diagnostic line. It is the operator-facing health check for the composition
+root.
+
+### Approved environment variables
+
+The runtime reads exactly three environment variables. Any other `KNOWLEDGE_`
+prefixed key is rejected as a configuration error.
+
+| Variable | Default | Allowed values |
+| --- | --- | --- |
+| `KNOWLEDGE_ENVIRONMENT` | `local` | `local`, `test`, `staging`, `production` |
+| `KNOWLEDGE_LOG_LEVEL` | `info` | `debug`, `info`, `warning`, `error` |
+| `KNOWLEDGE_SECRET_ROOT` | `/run/secrets` | absolute path |
+
+`KNOWLEDGE_SECRET_ROOT` defaults to the production POSIX secret root
+`/run/secrets`. That path is not absolute on Windows, so Windows and local-test
+runs must set `KNOWLEDGE_SECRET_ROOT` to an explicit absolute directory.
+
+### Secret files
+
+Secrets are file-only and load only from beneath `KNOWLEDGE_SECRET_ROOT`. Each
+secret file must be a regular file bounded beneath the root, at most 64 KiB,
+UTF-8 encoded with no byte-order mark, with at most one optional trailing
+newline and a non-empty value. Plaintext secret environment variables, `.env`
+files, TOML/YAML/JSON settings files and command-line secret values are not
+supported and must not be used.
+
+### Structured diagnostics
+
+Every process emits one JSON object per line. Records at `debug`, `info` and
+`warning` route to stdout; `error` and `critical` route to stderr. Each record
+carries a server-generated `request_id` (UUIDv7) and `trace_id` (32-character
+lowercase hexadecimal W3C trace id). Raw content, queries, vectors, tokens,
+file paths, exception text and settings dumps are never emitted.
+
+### Commands and exit codes
+
+```bash
+personal-api check-runtime
+personal-mcp check-runtime
+personal-worker check-runtime
+```
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | Success — runtime configuration validated. |
+| `2` | CLI syntax error. |
+| `70` | Unexpected internal error. |
+| `78` | Configuration or secret error. |
+
 ## Build outputs
 
 | Artifact | Location |
@@ -92,10 +146,14 @@ source on every install. The Obsidian plugin ships exactly two artifacts:
 
 ## Intentionally out of scope
 
-This bootstrap deliberately does not provide:
+Runtime configuration loading, secret-file loading and structured diagnostics
+are provided by this workspace (see *Runtime configuration & diagnostics*
+above). The following remain deliberately absent and belong to later specs:
 
-- configuration loading and secret management;
 - databases (PostgreSQL), object storage (S3/R2) or any Docker services;
+- provider SDKs, concrete provider credentials and remote secret managers;
+- framework adapters and HTTP/MCP/Temporal request/trace propagation, plus
+  OpenTelemetry exporters and log-shipping deployment;
 - API, MCP or workflow behavior (no FastAPI routes, MCP tools, or Temporal
   workflows/activities);
 - product UI beyond the static bootstrap page, including the Obsidian plugin's
