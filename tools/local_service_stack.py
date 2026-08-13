@@ -5,22 +5,28 @@ from __future__ import annotations
 import math
 import os
 import re
+import secrets
 import socket
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 from pathlib import Path
-from typing import BinaryIO, Protocol
+from typing import BinaryIO, Final, Protocol
 
 _MAX_CAPTURE_BYTES = 8192
 _MIN_PORT = 1024
 _MAX_PORT = 65535
 _PROJECT_NAME_PATTERN = re.compile(r"knowledge-(?:local|ci-[a-z0-9][a-z0-9-]{0,40})")
+_SECRET_ALPHABET: Final = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+_SECRET_BYTE_COUNT: Final = 32
+_QDRANT_CONFIG_FILENAME: Final = "qdrant_config.yaml"
 
 
 class StackExitCode(IntEnum):
@@ -55,6 +61,45 @@ class StackPaths:
     image_lock: Path
     secret_directory: Path
     state_directory: Path
+
+
+class SecretKind(StrEnum):
+    """The native format required by a local-service secret file."""
+
+    PASSWORD = "password"
+    NEO4J_AUTH = "neo4j_auth"
+    REDIS_ACL = "redis_acl"
+
+
+class SecretSetState(StrEnum):
+    """Safe observable state of the local secret directory."""
+
+    MISSING = "missing"
+    PARTIAL = "partial"
+    COMPLETE = "complete"
+
+
+@dataclass(frozen=True, slots=True)
+class SecretSpec:
+    """One required file in the atomic local-secret set."""
+
+    filename: str
+    kind: SecretKind
+
+
+SECRET_SPECS: Final = (
+    SecretSpec("postgres_admin_password", SecretKind.PASSWORD),
+    SecretSpec("postgres_application_password", SecretKind.PASSWORD),
+    SecretSpec("postgres_temporal_password", SecretKind.PASSWORD),
+    SecretSpec("qdrant_api_key", SecretKind.PASSWORD),
+    SecretSpec("neo4j_auth", SecretKind.NEO4J_AUTH),
+    SecretSpec("redis_acl", SecretKind.REDIS_ACL),
+    SecretSpec("redis_application_password", SecretKind.PASSWORD),
+)
+
+_SECRET_FILENAMES: Final = frozenset(spec.filename for spec in SECRET_SPECS) | {
+    _QDRANT_CONFIG_FILENAME
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +170,126 @@ _ALLOWED_SUBPROCESS_ENVIRONMENT_KEYS = frozenset(
         *_PORT_VARIABLES,
     }
 )
+
+
+def inspect_secret_set(paths: StackPaths) -> SecretSetState:
+    """Return the safe state of the exact local secret set without reading values."""
+    secret_directory = _validate_secret_directory_location(paths)
+    local_directory = secret_directory.parent
+    local_stat = _lstat_or_failure(local_directory, "secret_set_inspection_failed")
+    if local_stat is None:
+        return SecretSetState.MISSING
+    _validate_private_directory(local_directory, local_stat)
+
+    secret_stat = _lstat_or_failure(secret_directory, "secret_set_inspection_failed")
+    if secret_stat is None:
+        return SecretSetState.MISSING
+    _validate_private_directory(secret_directory, secret_stat)
+
+    found_filenames: set[str] = set()
+    child_stats: list[tuple[Path, os.stat_result]] = []
+    try:
+        children = tuple(secret_directory.iterdir())
+    except OSError:
+        raise StackFailure(StackExitCode.CONTRACT, "secret_set_inspection_failed") from None
+    for child in children:
+        child_stat = _lstat_or_failure(child, "secret_set_inspection_failed")
+        if child_stat is None:
+            raise StackFailure(StackExitCode.CONTRACT, "secret_set_inspection_failed")
+        _validate_private_file(child, child_stat)
+        child_stats.append((child, child_stat))
+        found_filenames.add(child.name)
+
+    if found_filenames == _SECRET_FILENAMES:
+        _validate_private_directory(local_directory, local_stat, require_mode=True)
+        _validate_private_directory(secret_directory, secret_stat, require_mode=True)
+        for child, child_stat in child_stats:
+            _validate_private_file(child, child_stat, require_mode=True)
+        return SecretSetState.COMPLETE
+    return SecretSetState.PARTIAL
+
+
+def bootstrap_secret_set(
+    paths: StackPaths, *, random_bytes: Callable[[int], bytes] = secrets.token_bytes
+) -> SecretSetState:
+    """Atomically create or safely reuse the complete local secret set."""
+    state = inspect_secret_set(paths)
+    if state is SecretSetState.COMPLETE:
+        return state
+    if state is SecretSetState.PARTIAL:
+        raise StackFailure(StackExitCode.CONTRACT, "partial_secret_set")
+
+    secret_directory = _validate_secret_directory_location(paths)
+    local_directory = secret_directory.parent
+    _create_or_validate_local_directory(local_directory)
+    staging_directory: Path | None = None
+    created_files: list[Path] = []
+    try:
+        staging_directory = Path(
+            tempfile.mkdtemp(prefix=".stack-secrets-staging-", dir=local_directory)
+        )
+        _set_private_mode(staging_directory, 0o700)
+        staging_stat = _lstat_or_failure(staging_directory, "secret_set_creation_failed")
+        if staging_stat is None:
+            raise StackFailure(StackExitCode.CONTRACT, "secret_set_creation_failed")
+        _validate_private_directory(staging_directory, staging_stat, require_mode=True)
+
+        secret_contents = _build_secret_contents(random_bytes)
+        for filename, content in secret_contents.items():
+            secret_path = staging_directory / filename
+            created_files.append(secret_path)
+            _write_private_secret_file(secret_path, content)
+        _flush_directory(staging_directory)
+        os.rename(staging_directory, secret_directory)
+        staging_directory = None
+        _flush_directory(local_directory)
+    except StackFailure:
+        raise
+    except (OSError, ValueError):
+        raise StackFailure(StackExitCode.CONTRACT, "secret_set_creation_failed") from None
+    finally:
+        if staging_directory is not None:
+            _remove_staging_files(staging_directory, created_files)
+
+    state = inspect_secret_set(paths)
+    if state is not SecretSetState.COMPLETE:
+        raise StackFailure(StackExitCode.CONTRACT, "secret_set_creation_failed")
+    return state
+
+
+def validate_secret_set(
+    paths: StackPaths, *, list_project_volumes: Callable[[], Sequence[str]]
+) -> SecretSetState:
+    """Refuse missing credentials when existing volumes could depend on them."""
+    state = inspect_secret_set(paths)
+    if state is SecretSetState.PARTIAL:
+        raise StackFailure(StackExitCode.CONTRACT, "partial_secret_set")
+    if state is SecretSetState.MISSING:
+        try:
+            has_project_volumes = bool(tuple(list_project_volumes()))
+        except Exception:
+            raise StackFailure(StackExitCode.PREREQUISITE, "volume_inspection_failed") from None
+        if has_project_volumes:
+            raise StackFailure(StackExitCode.CONTRACT, "secret_set_missing_with_volumes")
+    return state
+
+
+def remove_secret_set_after_reset(paths: StackPaths) -> SecretSetState:
+    """Remove only an exact complete set after its project reset has succeeded."""
+    state = inspect_secret_set(paths)
+    if state is SecretSetState.MISSING:
+        return state
+    if state is SecretSetState.PARTIAL:
+        raise StackFailure(StackExitCode.CONTRACT, "partial_secret_set")
+
+    secret_directory = _validate_secret_directory_location(paths)
+    try:
+        for filename in _SECRET_FILENAMES:
+            (secret_directory / filename).unlink()
+        secret_directory.rmdir()
+    except OSError:
+        raise StackFailure(StackExitCode.CONTRACT, "secret_set_removal_failed") from None
+    return SecretSetState.MISSING
 
 
 def resolve_stack_paths(repository_root: Path) -> StackPaths:
@@ -287,6 +452,150 @@ def _resolve_beneath(repository_root: Path, *parts: str) -> Path:
     if not is_beneath_repository:
         raise StackFailure(StackExitCode.INTERNAL, "invalid_stack_path")
     return candidate
+
+
+def _validate_secret_directory_location(paths: StackPaths) -> Path:
+    """Prove that callers cannot redirect secret writes outside the repository contract."""
+    try:
+        repository_root = paths.repository_root.resolve(strict=False)
+    except OSError:
+        raise StackFailure(StackExitCode.INTERNAL, "invalid_secret_directory") from None
+    expected_directory = repository_root / ".local" / "stack-secrets"
+    if paths.secret_directory != expected_directory:
+        raise StackFailure(StackExitCode.INTERNAL, "invalid_secret_directory")
+    return expected_directory
+
+
+def _lstat_or_failure(path: Path, result_code: str) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise StackFailure(StackExitCode.CONTRACT, result_code) from None
+
+
+def _validate_private_directory(
+    path: Path, path_stat: os.stat_result, *, require_mode: bool = False
+) -> None:
+    if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISDIR(path_stat.st_mode):
+        raise StackFailure(StackExitCode.CONTRACT, "unsafe_secret_set")
+    _validate_path_owner(path, path_stat)
+    if require_mode:
+        _validate_private_mode(path_stat, 0o700)
+
+
+def _validate_private_file(
+    path: Path, path_stat: os.stat_result, *, require_mode: bool = False
+) -> None:
+    if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
+        raise StackFailure(StackExitCode.CONTRACT, "unsafe_secret_set")
+    _validate_path_owner(path, path_stat)
+    if require_mode:
+        _validate_private_mode(path_stat, 0o600)
+
+
+def _validate_path_owner(path: Path, path_stat: os.stat_result) -> None:
+    if hasattr(os, "getuid"):
+        if path_stat.st_uid != os.getuid():
+            raise StackFailure(StackExitCode.CONTRACT, "unsafe_secret_set")
+        return
+    # pathlib does not expose NTFS ownership on every supported Windows
+    # runtime. The canonical repository path plus the regular-file and
+    # non-symlink checks above remain the enforceable Docker Desktop mount
+    # boundary; POSIX ownership is checked where the platform provides it.
+    return
+
+
+def _validate_private_mode(path_stat: os.stat_result, expected_mode: int) -> None:
+    if sys.platform != "win32" and stat.S_IMODE(path_stat.st_mode) != expected_mode:
+        raise StackFailure(StackExitCode.CONTRACT, "unsafe_secret_set")
+
+
+def _create_or_validate_local_directory(local_directory: Path) -> None:
+    try:
+        local_directory.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    except OSError:
+        raise StackFailure(StackExitCode.CONTRACT, "secret_set_creation_failed") from None
+    local_stat = _lstat_or_failure(local_directory, "secret_set_creation_failed")
+    if local_stat is None:
+        raise StackFailure(StackExitCode.CONTRACT, "secret_set_creation_failed")
+    _validate_private_directory(local_directory, local_stat, require_mode=True)
+
+
+def _build_secret_contents(random_bytes: Callable[[int], bytes]) -> dict[str, bytes]:
+    try:
+        generated: dict[str, str] = {}
+        for spec in SECRET_SPECS:
+            password = _generate_secret_value(random_bytes)
+            if spec.kind is SecretKind.PASSWORD:
+                generated[spec.filename] = password
+            elif spec.kind is SecretKind.NEO4J_AUTH:
+                generated[spec.filename] = f"neo4j/{password}"
+            else:
+                generated[spec.filename] = (
+                    f"user default off\nuser knowledge on >{password} ~* +@all\n"
+                )
+        qdrant_key = generated["qdrant_api_key"]
+        generated[_QDRANT_CONFIG_FILENAME] = f"service:\n  api_key: {qdrant_key}\n"
+        return {filename: content.encode("ascii") for filename, content in generated.items()}
+    except Exception:
+        raise StackFailure(StackExitCode.CONTRACT, "secret_generation_failed") from None
+
+
+def _generate_secret_value(random_bytes: Callable[[int], bytes]) -> str:
+    generated_bytes = random_bytes(_SECRET_BYTE_COUNT)
+    if not isinstance(generated_bytes, bytes) or len(generated_bytes) != _SECRET_BYTE_COUNT:
+        raise ValueError("invalid generated secret")
+    return "".join(_SECRET_ALPHABET[byte & 0b0011_1111] for byte in generated_bytes)
+
+
+def _write_private_secret_file(path: Path, content: bytes) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    secret_file: BinaryIO | None = None
+    try:
+        secret_file = os.fdopen(descriptor, "wb")
+        with secret_file:
+            secret_file.write(content)
+            secret_file.flush()
+            os.fsync(secret_file.fileno())
+    except Exception:
+        if secret_file is None:
+            with suppress(OSError):
+                os.close(descriptor)
+        raise StackFailure(StackExitCode.CONTRACT, "secret_set_creation_failed") from None
+
+
+def _flush_directory(directory: Path) -> None:
+    if sys.platform == "win32":
+        return
+    try:
+        descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        raise StackFailure(StackExitCode.CONTRACT, "secret_set_creation_failed") from None
+
+
+def _set_private_mode(path: Path, mode: int) -> None:
+    if sys.platform == "win32":
+        return
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        raise StackFailure(StackExitCode.CONTRACT, "secret_set_creation_failed") from None
+
+
+def _remove_staging_files(staging_directory: Path, created_files: Sequence[Path]) -> None:
+    for created_file in reversed(created_files):
+        with suppress(OSError):
+            created_file.unlink()
+    with suppress(OSError):
+        staging_directory.rmdir()
 
 
 def _parse_port(raw_port: str) -> int:

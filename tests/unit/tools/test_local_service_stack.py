@@ -12,15 +12,140 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[3]))
 
 from tools.local_service_stack import (
+    SECRET_SPECS,
+    SecretSetState,
     StackExitCode,
     StackFailure,
+    bootstrap_secret_set,
+    inspect_secret_set,
+    remove_secret_set_after_reset,
     resolve_ports,
     resolve_stack_paths,
     run_command,
     sanitize_subprocess_environment,
     validate_port_availability,
     validate_project_name,
+    validate_secret_set,
 )
+
+
+def test_bootstrap_creates_exact_complete_secret_set(tmp_path: Path) -> None:
+    paths = resolve_stack_paths(tmp_path)
+
+    assert (
+        bootstrap_secret_set(paths, random_bytes=lambda count: bytes(range(count)))
+        is SecretSetState.COMPLETE
+    )
+    assert {path.name for path in paths.secret_directory.iterdir()} == {
+        spec.filename for spec in SECRET_SPECS
+    } | {"qdrant_config.yaml"}
+
+
+def test_bootstrap_reuses_complete_set_byte_for_byte(tmp_path: Path) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    bootstrap_secret_set(paths)
+    before = {path.name: path.read_bytes() for path in paths.secret_directory.iterdir()}
+
+    assert bootstrap_secret_set(paths) is SecretSetState.COMPLETE
+    assert {path.name: path.read_bytes() for path in paths.secret_directory.iterdir()} == before
+
+
+def test_partial_secret_set_is_terminal_and_not_rewritten(tmp_path: Path) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    paths.secret_directory.mkdir(parents=True)
+    partial = paths.secret_directory / "postgres_admin_password"
+    partial.write_text("unchanged", encoding="ascii")
+
+    with pytest.raises(StackFailure, match="partial_secret_set"):
+        bootstrap_secret_set(paths)
+
+    assert partial.read_text(encoding="ascii") == "unchanged"
+
+
+def test_missing_secrets_with_existing_volume_is_terminal(tmp_path: Path) -> None:
+    paths = resolve_stack_paths(tmp_path)
+
+    with pytest.raises(StackFailure, match="secret_set_missing_with_volumes"):
+        validate_secret_set(paths, list_project_volumes=lambda: ("knowledge-local_postgres-data",))
+
+
+def test_secret_values_use_required_native_shapes_and_boundaries(tmp_path: Path) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    bootstrap_secret_set(paths, random_bytes=lambda count: bytes(range(count)))
+    values = {
+        path.name: path.read_text(encoding="ascii") for path in paths.secret_directory.iterdir()
+    }
+    password_names = {
+        "postgres_admin_password",
+        "postgres_application_password",
+        "postgres_temporal_password",
+        "qdrant_api_key",
+        "redis_application_password",
+    }
+
+    alphabet = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+    assert all(set(values[name]) <= alphabet for name in password_names)
+    assert all(len(values[name]) == 32 and "\n" not in values[name] for name in password_names)
+    assert values["neo4j_auth"].startswith("neo4j/")
+    assert len(values["neo4j_auth"]) == len("neo4j/") + 32
+    assert "\n" not in values["neo4j_auth"]
+    assert values["redis_acl"].startswith("user default off\nuser knowledge on >")
+    assert values["redis_acl"].endswith(" ~* +@all\n")
+    assert values["redis_acl"].count("\n") == 2
+    assert values["qdrant_config.yaml"].startswith("service:\n  api_key: ")
+    assert values["qdrant_config.yaml"].endswith("\n")
+    assert not values["qdrant_config.yaml"].endswith("\n\n")
+    assert all("r2" not in name.lower() for name in values)
+
+
+def test_secret_set_rejects_symlink_without_leaking_secret_or_path(tmp_path: Path) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    paths.secret_directory.mkdir(parents=True)
+    secret_value = "secret-value-that-must-not-leak"
+    target = tmp_path / "target"
+    target.write_text(secret_value, encoding="ascii")
+    link = paths.secret_directory / "postgres_admin_password"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+
+    with pytest.raises(StackFailure) as raised:
+        bootstrap_secret_set(paths)
+
+    assert str(raised.value) == "unsafe_secret_set"
+    assert secret_value not in str(raised.value)
+    assert str(link) not in str(raised.value)
+    assert link.name not in str(raised.value)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX permission bits are not a Windows contract"
+)
+def test_created_secret_set_uses_private_posix_permissions(tmp_path: Path) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    bootstrap_secret_set(paths)
+
+    assert paths.secret_directory.stat().st_mode & 0o777 == 0o700
+    assert all(path.stat().st_mode & 0o777 == 0o600 for path in paths.secret_directory.iterdir())
+
+
+def test_windows_boundary_accepts_regular_non_symlink_secret_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    bootstrap_secret_set(paths)
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    assert inspect_secret_set(paths) is SecretSetState.COMPLETE
+
+
+def test_remove_secret_set_after_reset_removes_only_complete_set(tmp_path: Path) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    bootstrap_secret_set(paths)
+
+    assert remove_secret_set_after_reset(paths) is SecretSetState.MISSING
+    assert not paths.secret_directory.exists()
 
 
 def test_resolve_stack_paths_stays_beneath_repository(tmp_path: Path) -> None:
