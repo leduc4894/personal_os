@@ -830,6 +830,1038 @@ def _assert_allowed_behaviors(conn: psycopg.Connection[Any]) -> None:
     )
 
 
+# --- Task 4: negative invariants (savepoint-isolated rejection evidence) -----
+#
+# Every baseline invariant is proven by executing ONE mutation inside its own
+# savepoint, asserting the expected SQLSTATE (and, for the two approved trigger
+# messages only, the fixed message), then rolling the savepoint back. The
+# committed valid graph is therefore never mutated, so the row counts stay exact.
+
+_UNIQUE_VIOLATION: str = "23505"
+_CHECK_VIOLATION: str = "23514"
+_FOREIGN_KEY_VIOLATION: str = "23503"
+# PostgreSQL 18 now emits 23001 (restrict_violation) when a DELETE/UPDATE of a
+# parent row is blocked by a RESTRICT foreign-key action, distinct from 23503
+# (foreign_key_violation), which covers an INSERT/UPDATE of a child row that
+# references a missing parent. Every baseline foreign key is ON DELETE RESTRICT,
+# so every parent-delete rejection lands here.
+_RESTRICT_VIOLATION: str = "23001"
+_TRIGGER_PROTECTION: str = "55000"
+_IMMUTABLE_MESSAGE: str = "immutable_row_update_rejected"
+_AUDIT_MESSAGE: str = "audit_events_append_only"
+
+# Distinct UUIDs for negative-case rows. Each case runs in a rolled-back
+# savepoint, so a single id is reused safely across cases; setup ids are kept
+# apart from the "bad" id only within the same savepoint.
+_BAD_USER_ID = UUID("a0000000-0000-0000-0000-000000000001")
+_BAD_WORKSPACE_ID = UUID("a0000000-0000-0000-0000-000000000002")
+_BAD_SOURCE_ID = UUID("a0000000-0000-0000-0000-000000000003")
+_BAD_SOURCE_VERSION_ID = UUID("a0000000-0000-0000-0000-000000000004")
+_BAD_CONTENT_OBJECT_ID = UUID("a0000000-0000-0000-0000-000000000005")
+_BAD_EVENT_ID = UUID("a0000000-0000-0000-0000-000000000006")
+_BAD_INTENT_ID = UUID("a0000000-0000-0000-0000-000000000007")
+_BAD_AUDIT_EVENT_ID = UUID("a0000000-0000-0000-0000-000000000008")
+_BAD_DEVICE_ID = UUID("a0000000-0000-0000-0000-000000000009")
+_SETUP_USER_ID = UUID("a0000000-0000-0000-0000-000000000010")
+_SETUP_WORKSPACE_ID = UUID("a0000000-0000-0000-0000-000000000011")
+_SETUP_SOURCE_ID = UUID("a0000000-0000-0000-0000-000000000012")
+_SETUP_SOURCE_VERSION_ID = UUID("a0000000-0000-0000-0000-000000000013")
+_GEN_SEQUENCE_EVENT_ID = UUID("a0000000-0000-0000-0000-000000000014")
+_RANDOM_UUID = UUID("a0000000-0000-0000-0000-000000000015")
+_VALID_AUDIT_USER_ID = UUID("a0000000-0000-0000-0000-000000000016")
+_VALID_AUDIT_DEVICE_ID = UUID("a0000000-0000-0000-0000-000000000017")
+_VALID_AUDIT_SYSTEM_ID = UUID("a0000000-0000-0000-0000-000000000018")
+_VALID_AUDIT_WORKFLOW_ID = UUID("a0000000-0000-0000-0000-000000000019")
+_SETUP_EVENT_ID = UUID("a0000000-0000-0000-0000-00000000001a")
+
+_NEG_CONTENT_HASH: str = hashlib.sha256(b"task4-negative-canonical-bytes").hexdigest()
+_NEG_CONTENT_OBJECT_KEY: str = (
+    f"objects/sha256/{_NEG_CONTENT_HASH[:2]}/{_NEG_CONTENT_HASH[2:4]}/{_NEG_CONTENT_HASH}"
+)
+_UPPER_HEX_HASH: str = "A" + "0" * 63
+_UPPER_HEX_KEY: str = (
+    f"objects/sha256/{_UPPER_HEX_HASH[:2]}/{_UPPER_HEX_HASH[2:4]}/{_UPPER_HEX_HASH}"
+)
+_SHORT_HASH: str = "abc123"
+_SHORT_KEY: str = f"objects/sha256/{_SHORT_HASH[:2]}/{_SHORT_HASH[2:4]}/{_SHORT_HASH}"
+_MISMATCH_OBJECT_KEY: str = f"objects/sha256/zz/zz/{_NEG_CONTENT_HASH}"
+
+_INSERT_SETUP_USER_SQL = (
+    "INSERT INTO knowledge.users (user_id, username, display_name) "
+    "VALUES (%s, %s, 'Setup User')"
+)
+_INSERT_SETUP_WORKSPACE_SQL = (
+    "INSERT INTO knowledge.workspaces "
+    "(workspace_id, owner_user_id, workspace_key, display_name) "
+    "VALUES (%s, %s, %s, 'Setup Workspace')"
+)
+_INSERT_SETUP_SOURCE_PENDING_SQL = (
+    "INSERT INTO knowledge.sources (source_id, workspace_id, source_type, title) "
+    "VALUES (%s, %s, 'markdown', 'Setup source')"
+)
+_INSERT_SETUP_SOURCE_VERSION_SQL = (
+    "INSERT INTO knowledge.source_versions "
+    "(source_version_id, workspace_id, source_id, content_object_id, content_version, "
+    "author_kind, author_id) VALUES (%s, %s, %s, %s, 1, 'user', %s)"
+)
+# A fresh event under the committed source, used as the projection-intent anchor
+# for intent negative cases. The committed graph already owns both a qdrant and
+# a neo4j intent for the main event, so any new intent must anchor on a different
+# event to avoid colliding on (workspace_id, event_id, projection_kind) before the
+# targeted check can fire.
+_INSERT_SETUP_EVENT_SQL = (
+    "INSERT INTO knowledge.sync_events "
+    "(event_id, workspace_id, source_id, device_id, idempotency_key, "
+    "request_fingerprint, event_type) "
+    "VALUES (%s, %s, %s, %s, 'setup-event', %s, 'create')"
+)
+_SETUP_EVENT_SETUP: tuple[str, tuple[Any, ...]] = (
+    _INSERT_SETUP_EVENT_SQL,
+    (_SETUP_EVENT_ID, _WORKSPACE_ID, _SOURCE_ID, _DEVICE_ID, _REQUEST_FINGERPRINT),
+)
+
+
+class _MutationAcceptedButShouldReject(Exception):
+    """Control-flow sentinel forcing savepoint rollback for an accepted mutation."""
+
+
+def _assert_rejected(
+    conn: psycopg.Connection[Any],
+    sql: str,
+    params: Sequence[Any] = (),
+    *,
+    expected_sqlstate: str,
+    expected_message: str | None = None,
+    setup: Sequence[tuple[str, Sequence[Any]]] = (),
+) -> None:
+    """Execute one mutation inside an isolated savepoint and assert rejection.
+
+    ``setup`` statements create supporting rows in the same savepoint before the
+    mutation. The savepoint rolls back on every path, so the committed valid
+    graph never changes. Only the two approved trigger messages may be asserted
+    via ``expected_message``; no other vendor text is ever matched.
+    """
+    caught: psycopg.Error | None = None
+    try:
+        with conn.transaction():
+            with conn.cursor() as cursor:
+                for setup_sql, setup_params in setup:
+                    cursor.execute(setup_sql, tuple(setup_params))
+                cursor.execute(sql, tuple(params))
+            raise _MutationAcceptedButShouldReject
+    except _MutationAcceptedButShouldReject:
+        pytest.fail(f"expected SQLSTATE {expected_sqlstate} but the mutation was accepted")
+    except psycopg.Error as err:
+        caught = err
+    assert caught is not None, "psycopg.Error was not raised by the mutation"
+    assert caught.sqlstate == expected_sqlstate, (
+        f"expected SQLSTATE {expected_sqlstate}, got {caught.sqlstate}"
+    )
+    if expected_message is not None:
+        assert expected_message in str(caught), (
+            f"expected trigger message {expected_message!r} not in error: {str(caught)!r}"
+        )
+
+
+def _audit_insert_sql(
+    *,
+    actor_kind: str = "user",
+    actor_id: UUID | None = _USER_ID,
+    actor_reference: str | None = None,
+    action: str = "source.version.commit",
+    target_kind: str = "source_version",
+    result: str = "succeeded",
+    reason_code: str | None = None,
+    trace_id: str | None = None,
+    safe_diff_hash: str | None = None,
+    audit_event_id: UUID = _BAD_AUDIT_EVENT_ID,
+) -> tuple[str, tuple[Any, ...]]:
+    """Build a parameterized audit_events INSERT from the given field overrides."""
+    columns: list[str] = [
+        "audit_event_id", "workspace_id", "actor_kind", "actor_id",
+        "actor_reference", "action", "target_kind", "target_id",
+        "request_id", "result",
+    ]
+    values: list[Any] = [
+        audit_event_id, _WORKSPACE_ID, actor_kind, actor_id, actor_reference,
+        action, target_kind, _SOURCE_VERSION_ID, _REQUEST_ID, result,
+    ]
+    for column_name, value in (
+        ("reason_code", reason_code),
+        ("trace_id", trace_id),
+        ("safe_diff_hash", safe_diff_hash),
+    ):
+        if value is not None:
+            columns.append(column_name)
+            values.append(value)
+    placeholders = ", ".join(["%s"] * len(values))
+    statement = (
+        f"INSERT INTO knowledge.audit_events ({', '.join(columns)}) "
+        f"VALUES ({placeholders})"
+    )
+    return statement, tuple(values)
+
+
+def _intent_insert_sql(
+    *,
+    projection_kind: str = "qdrant",
+    operation: str = "upsert",
+    status: str = "pending",
+    attempt_count: int = 0,
+    source_version_id: UUID | None = _SOURCE_VERSION_ID,
+    source_id: UUID = _SOURCE_ID,
+    event_id: UUID = _EVENT_ID,
+    projection_intent_id: UUID = _BAD_INTENT_ID,
+    lease_token: UUID | None = None,
+    last_error_code: str | None = None,
+) -> tuple[str, tuple[Any, ...]]:
+    """Build a parameterized projection_intents INSERT from field overrides."""
+    columns: list[str] = [
+        "projection_intent_id", "workspace_id", "event_id", "source_id",
+        "source_version_id", "projection_kind", "operation", "status",
+        "attempt_count",
+    ]
+    values: list[Any] = [
+        projection_intent_id, _WORKSPACE_ID, event_id, source_id,
+        source_version_id, projection_kind, operation, status, attempt_count,
+    ]
+    for column_name, value in (
+        ("lease_token", lease_token),
+        ("last_error_code", last_error_code),
+    ):
+        if value is not None:
+            columns.append(column_name)
+            values.append(value)
+    placeholders = ", ".join(["%s"] * len(values))
+    statement = (
+        f"INSERT INTO knowledge.projection_intents ({', '.join(columns)}) "
+        f"VALUES ({placeholders})"
+    )
+    return statement, tuple(values)
+
+
+def _assert_intent_rejected(
+    conn: psycopg.Connection[Any],
+    *,
+    expected_sqlstate: str,
+    expected_message: str | None = None,
+    extra_setup: Sequence[tuple[str, Sequence[Any]]] = (),
+    **overrides: Any,
+) -> None:
+    """Assert a projection-intent mutation is rejected.
+
+    The intent is anchored on the fresh ``_SETUP_EVENT_ID`` (created in the same
+    savepoint), so it never collides with the committed qdrant/neo4j intents on
+    ``_EVENT_ID``. ``extra_setup`` adds further supporting rows when needed.
+    """
+    sql, params = _intent_insert_sql(event_id=_SETUP_EVENT_ID, **overrides)
+    setup: list[tuple[str, Sequence[Any]]] = [_SETUP_EVENT_SETUP, *extra_setup]
+    _assert_rejected(
+        conn,
+        sql,
+        params,
+        expected_sqlstate=expected_sqlstate,
+        expected_message=expected_message,
+        setup=setup,
+    )
+
+
+def _assert_identity_and_ownership_invariants(conn: psycopg.Connection[Any]) -> None:
+    # Duplicate username / workspace owner / workspace key.
+    _assert_rejected(
+        conn,
+        "INSERT INTO knowledge.users (user_id, username, display_name) "
+        "VALUES (%s, 'owner', 'Dup')",
+        (_BAD_USER_ID,),
+        expected_sqlstate=_UNIQUE_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        "INSERT INTO knowledge.workspaces "
+        "(workspace_id, owner_user_id, workspace_key, display_name) "
+        "VALUES (%s, %s, 'dup-owner-key', 'Dup')",
+        (_BAD_WORKSPACE_ID, _USER_ID),
+        expected_sqlstate=_UNIQUE_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        "INSERT INTO knowledge.workspaces "
+        "(workspace_id, owner_user_id, workspace_key, display_name) "
+        "VALUES (%s, %s, 'primary', 'Dup')",
+        (_BAD_WORKSPACE_ID, _BAD_USER_ID),
+        expected_sqlstate=_UNIQUE_VIOLATION,
+        setup=[
+            (
+                "INSERT INTO knowledge.users (user_id, username, display_name) "
+                "VALUES (%s, 'second-owner', 'Second')",
+                (_BAD_USER_ID,),
+            ),
+        ],
+    )
+
+    # Device whose (workspace_id, user_id) does not identify the workspace owner.
+    _assert_rejected(
+        conn,
+        "INSERT INTO knowledge.devices "
+        "(device_id, workspace_id, user_id, device_name, device_kind) "
+        "VALUES (%s, %s, %s, 'Rogue', 'obsidian')",
+        (_BAD_DEVICE_ID, _WORKSPACE_ID, _BAD_USER_ID),
+        expected_sqlstate=_FOREIGN_KEY_VIOLATION,
+    )
+
+    # Invalid device kind / status / last-seen / revocation combinations.
+    _assert_rejected(
+        conn,
+        "INSERT INTO knowledge.devices "
+        "(device_id, workspace_id, user_id, device_name, device_kind) "
+        "VALUES (%s, %s, %s, 'Phone', 'mobile')",
+        (_BAD_DEVICE_ID, _WORKSPACE_ID, _USER_ID),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        "INSERT INTO knowledge.devices "
+        "(device_id, workspace_id, user_id, device_name, device_kind, status) "
+        "VALUES (%s, %s, %s, 'Phone', 'obsidian', 'paused')",
+        (_BAD_DEVICE_ID, _WORKSPACE_ID, _USER_ID),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        "INSERT INTO knowledge.devices "
+        "(device_id, workspace_id, user_id, device_name, device_kind, last_seen_at) "
+        "VALUES (%s, %s, %s, 'Phone', 'obsidian', CURRENT_TIMESTAMP - interval '1 hour')",
+        (_BAD_DEVICE_ID, _WORKSPACE_ID, _USER_ID),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        "INSERT INTO knowledge.devices "
+        "(device_id, workspace_id, user_id, device_name, device_kind, status) "
+        "VALUES (%s, %s, %s, 'Phone', 'obsidian', 'revoked')",
+        (_BAD_DEVICE_ID, _WORKSPACE_ID, _USER_ID),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        "INSERT INTO knowledge.devices "
+        "(device_id, workspace_id, user_id, device_name, device_kind, status, revoked_at) "
+        "VALUES (%s, %s, %s, 'Phone', 'obsidian', 'active', CURRENT_TIMESTAMP)",
+        (_BAD_DEVICE_ID, _WORKSPACE_ID, _USER_ID),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        "INSERT INTO knowledge.devices "
+        "(device_id, workspace_id, user_id, device_name, device_kind, status, revoked_at) "
+        "VALUES (%s, %s, %s, 'Phone', 'obsidian', 'revoked', "
+        "CURRENT_TIMESTAMP - interval '1 hour')",
+        (_BAD_DEVICE_ID, _WORKSPACE_ID, _USER_ID),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+
+    # Physical parent deletes blocked by lineage foreign keys (RESTRICT).
+    _assert_rejected(
+        conn,
+        "DELETE FROM knowledge.users WHERE user_id = %s",
+        (_USER_ID,),
+        expected_sqlstate=_RESTRICT_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        "DELETE FROM knowledge.workspaces WHERE workspace_id = %s",
+        (_WORKSPACE_ID,),
+        expected_sqlstate=_RESTRICT_VIOLATION,
+    )
+
+
+def _assert_content_and_source_version_invariants(conn: psycopg.Connection[Any]) -> None:
+    content_insert = (
+        "INSERT INTO knowledge.content_objects "
+        "(content_object_id, content_hash, object_key, byte_size, media_type, verified_at) "
+        "VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)"
+    )
+
+    # Uppercase / short SHA-256 and a mismatched object key.
+    _assert_rejected(
+        conn,
+        content_insert,
+        (_BAD_CONTENT_OBJECT_ID, _UPPER_HEX_HASH, _UPPER_HEX_KEY, 42,
+         "text/markdown"),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        content_insert,
+        (_BAD_CONTENT_OBJECT_ID, _SHORT_HASH, _SHORT_KEY, 42,
+         "text/markdown"),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        content_insert,
+        (_BAD_CONTENT_OBJECT_ID, _NEG_CONTENT_HASH, _MISMATCH_OBJECT_KEY, 42,
+         "text/markdown"),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+
+    # Negative byte size and parameterized / uppercase / invalid media type.
+    _assert_rejected(
+        conn,
+        content_insert,
+        (_BAD_CONTENT_OBJECT_ID, _NEG_CONTENT_HASH, _NEG_CONTENT_OBJECT_KEY, -1,
+         "text/markdown"),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        content_insert,
+        (_BAD_CONTENT_OBJECT_ID, _NEG_CONTENT_HASH, _NEG_CONTENT_OBJECT_KEY, 42,
+         "text/markdown; charset=utf-8"),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        content_insert,
+        (_BAD_CONTENT_OBJECT_ID, _NEG_CONTENT_HASH, _NEG_CONTENT_OBJECT_KEY, 42,
+         "Text/Markdown"),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        content_insert,
+        (_BAD_CONTENT_OBJECT_ID, _NEG_CONTENT_HASH, _NEG_CONTENT_OBJECT_KEY, 42,
+         "notamimetype"),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+
+    # Verification timestamp after creation.
+    _assert_rejected(
+        conn,
+        "INSERT INTO knowledge.content_objects "
+        "(content_object_id, content_hash, object_key, byte_size, media_type, "
+        "verified_at, created_at) "
+        "VALUES (%s, %s, %s, 42, 'text/markdown', CURRENT_TIMESTAMP, "
+        "CURRENT_TIMESTAMP - interval '1 hour')",
+        (_BAD_CONTENT_OBJECT_ID, _NEG_CONTENT_HASH, _NEG_CONTENT_OBJECT_KEY),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+
+    # Duplicate global content hash (and its derived object key).
+    _assert_rejected(
+        conn,
+        content_insert,
+        (_BAD_CONTENT_OBJECT_ID, _CONTENT_HASH, _CONTENT_OBJECT_KEY, 42,
+         "text/markdown"),
+        expected_sqlstate=_UNIQUE_VIOLATION,
+    )
+
+    # Invalid source type / state / deleted / current-pointer combinations.
+    _assert_rejected(
+        conn,
+        "INSERT INTO knowledge.sources (source_id, workspace_id, source_type, title) "
+        "VALUES (%s, %s, 'docx', 'Bad type')",
+        (_BAD_SOURCE_ID, _WORKSPACE_ID),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        "INSERT INTO knowledge.sources "
+        "(source_id, workspace_id, source_type, title, sync_state) "
+        "VALUES (%s, %s, 'markdown', 'Bad state', 'frozen')",
+        (_BAD_SOURCE_ID, _WORKSPACE_ID),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        "INSERT INTO knowledge.sources "
+        "(source_id, workspace_id, source_type, title, sync_state) "
+        "VALUES (%s, %s, 'markdown', 'Bad', 'deleted')",
+        (_BAD_SOURCE_ID, _WORKSPACE_ID),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        "INSERT INTO knowledge.sources "
+        "(source_id, workspace_id, source_type, title, sync_state, deleted_at) "
+        "VALUES (%s, %s, 'markdown', 'Bad', 'pending', CURRENT_TIMESTAMP)",
+        (_BAD_SOURCE_ID, _WORKSPACE_ID),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        "INSERT INTO knowledge.sources "
+        "(source_id, workspace_id, source_type, title, sync_state) "
+        "VALUES (%s, %s, 'markdown', 'Bad', 'active')",
+        (_BAD_SOURCE_ID, _WORKSPACE_ID),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        "UPDATE knowledge.sources SET current_version_id = %s WHERE source_id = %s",
+        (_SETUP_SOURCE_VERSION_ID, _SETUP_SOURCE_ID),
+        expected_sqlstate=_CHECK_VIOLATION,
+        setup=[
+            (_INSERT_SETUP_SOURCE_PENDING_SQL, (_SETUP_SOURCE_ID, _WORKSPACE_ID)),
+            (
+                _INSERT_SETUP_SOURCE_VERSION_SQL,
+                (_SETUP_SOURCE_VERSION_ID, _WORKSPACE_ID, _SETUP_SOURCE_ID,
+                 _CONTENT_OBJECT_ID, _USER_ID),
+            ),
+        ],
+    )
+
+    # Current pointer from another source / workspace.
+    _assert_rejected(
+        conn,
+        "UPDATE knowledge.sources "
+        "SET sync_state = 'active', current_version_id = %s WHERE source_id = %s",
+        (_SOURCE_VERSION_ID, _SETUP_SOURCE_ID),
+        expected_sqlstate=_FOREIGN_KEY_VIOLATION,
+        setup=[
+            (_INSERT_SETUP_SOURCE_PENDING_SQL, (_SETUP_SOURCE_ID, _WORKSPACE_ID)),
+            (
+                _INSERT_SETUP_SOURCE_VERSION_SQL,
+                (_SETUP_SOURCE_VERSION_ID, _WORKSPACE_ID, _SETUP_SOURCE_ID,
+                 _CONTENT_OBJECT_ID, _USER_ID),
+            ),
+        ],
+    )
+    _assert_rejected(
+        conn,
+        "UPDATE knowledge.sources "
+        "SET sync_state = 'active', current_version_id = %s WHERE source_id = %s",
+        (_SOURCE_VERSION_ID, _SETUP_SOURCE_ID),
+        expected_sqlstate=_FOREIGN_KEY_VIOLATION,
+        setup=[
+            (_INSERT_SETUP_USER_SQL, (_SETUP_USER_ID, "setup-user")),
+            (
+                _INSERT_SETUP_WORKSPACE_SQL,
+                (_SETUP_WORKSPACE_ID, _SETUP_USER_ID, "setup-workspace"),
+            ),
+            (_INSERT_SETUP_SOURCE_PENDING_SQL, (_SETUP_SOURCE_ID, _SETUP_WORKSPACE_ID)),
+            (
+                _INSERT_SETUP_SOURCE_VERSION_SQL,
+                (_SETUP_SOURCE_VERSION_ID, _SETUP_WORKSPACE_ID, _SETUP_SOURCE_ID,
+                 _CONTENT_OBJECT_ID, _SETUP_USER_ID),
+            ),
+        ],
+    )
+
+    source_version_insert = (
+        "INSERT INTO knowledge.source_versions "
+        "(source_version_id, workspace_id, source_id, content_object_id, content_version, "
+        "parent_version_id, author_kind, author_id) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+    )
+
+    # Duplicate / nonpositive per-source content version.
+    _assert_rejected(
+        conn,
+        source_version_insert,
+        (_BAD_SOURCE_VERSION_ID, _WORKSPACE_ID, _SOURCE_ID, _CONTENT_OBJECT_ID,
+         1, None, "user", _USER_ID),
+        expected_sqlstate=_UNIQUE_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        source_version_insert,
+        (_BAD_SOURCE_VERSION_ID, _WORKSPACE_ID, _SOURCE_ID, _CONTENT_OBJECT_ID,
+         0, None, "user", _USER_ID),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+
+    # Parent version from another source / workspace and self-parent.
+    _assert_rejected(
+        conn,
+        source_version_insert,
+        (_BAD_SOURCE_VERSION_ID, _WORKSPACE_ID, _SOURCE_ID, _CONTENT_OBJECT_ID,
+         2, _SETUP_SOURCE_VERSION_ID, "user", _USER_ID),
+        expected_sqlstate=_FOREIGN_KEY_VIOLATION,
+        setup=[
+            (_INSERT_SETUP_SOURCE_PENDING_SQL, (_SETUP_SOURCE_ID, _WORKSPACE_ID)),
+            (
+                _INSERT_SETUP_SOURCE_VERSION_SQL,
+                (_SETUP_SOURCE_VERSION_ID, _WORKSPACE_ID, _SETUP_SOURCE_ID,
+                 _CONTENT_OBJECT_ID, _USER_ID),
+            ),
+        ],
+    )
+    _assert_rejected(
+        conn,
+        source_version_insert,
+        (_BAD_SOURCE_VERSION_ID, _WORKSPACE_ID, _SOURCE_ID, _CONTENT_OBJECT_ID,
+         2, _SETUP_SOURCE_VERSION_ID, "user", _USER_ID),
+        expected_sqlstate=_FOREIGN_KEY_VIOLATION,
+        setup=[
+            (_INSERT_SETUP_USER_SQL, (_SETUP_USER_ID, "setup-user")),
+            (
+                _INSERT_SETUP_WORKSPACE_SQL,
+                (_SETUP_WORKSPACE_ID, _SETUP_USER_ID, "setup-workspace"),
+            ),
+            (_INSERT_SETUP_SOURCE_PENDING_SQL, (_SETUP_SOURCE_ID, _SETUP_WORKSPACE_ID)),
+            (
+                _INSERT_SETUP_SOURCE_VERSION_SQL,
+                (_SETUP_SOURCE_VERSION_ID, _SETUP_WORKSPACE_ID, _SETUP_SOURCE_ID,
+                 _CONTENT_OBJECT_ID, _SETUP_USER_ID),
+            ),
+        ],
+    )
+    _assert_rejected(
+        conn,
+        source_version_insert,
+        (_BAD_SOURCE_VERSION_ID, _WORKSPACE_ID, _SOURCE_ID, _CONTENT_OBJECT_ID,
+         2, _BAD_SOURCE_VERSION_ID, "user", _USER_ID),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+
+    # Nonexistent content object (content objects are global CAS metadata).
+    _assert_rejected(
+        conn,
+        source_version_insert,
+        (_BAD_SOURCE_VERSION_ID, _WORKSPACE_ID, _SOURCE_ID, _RANDOM_UUID,
+         2, None, "user", _USER_ID),
+        expected_sqlstate=_FOREIGN_KEY_VIOLATION,
+    )
+
+    # Invalid author-kind / author-id combinations.
+    _assert_rejected(
+        conn,
+        source_version_insert,
+        (_BAD_SOURCE_VERSION_ID, _WORKSPACE_ID, _SOURCE_ID, _CONTENT_OBJECT_ID,
+         2, None, "admin", _USER_ID),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        source_version_insert,
+        (_BAD_SOURCE_VERSION_ID, _WORKSPACE_ID, _SOURCE_ID, _CONTENT_OBJECT_ID,
+         2, None, "system", _USER_ID),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        source_version_insert,
+        (_BAD_SOURCE_VERSION_ID, _WORKSPACE_ID, _SOURCE_ID, _CONTENT_OBJECT_ID,
+         2, None, "user", None),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+
+    # Immutability: UPDATE of content_objects and source_versions.
+    _assert_rejected(
+        conn,
+        "UPDATE knowledge.content_objects SET byte_size = byte_size "
+        "WHERE content_object_id = %s",
+        (_CONTENT_OBJECT_ID,),
+        expected_sqlstate=_TRIGGER_PROTECTION,
+        expected_message=_IMMUTABLE_MESSAGE,
+    )
+    _assert_rejected(
+        conn,
+        "UPDATE knowledge.source_versions SET content_version = content_version "
+        "WHERE source_version_id = %s",
+        (_SOURCE_VERSION_ID,),
+        expected_sqlstate=_TRIGGER_PROTECTION,
+        expected_message=_IMMUTABLE_MESSAGE,
+    )
+
+    # Referenced content object / source version / source cannot be deleted.
+    _assert_rejected(
+        conn,
+        "DELETE FROM knowledge.content_objects WHERE content_object_id = %s",
+        (_CONTENT_OBJECT_ID,),
+        expected_sqlstate=_RESTRICT_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        "DELETE FROM knowledge.source_versions WHERE source_version_id = %s",
+        (_SOURCE_VERSION_ID,),
+        expected_sqlstate=_RESTRICT_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        "DELETE FROM knowledge.sources WHERE source_id = %s",
+        (_SOURCE_ID,),
+        expected_sqlstate=_RESTRICT_VIOLATION,
+    )
+
+
+def _assert_event_and_intent_invariants(conn: psycopg.Connection[Any]) -> None:
+    event_insert = (
+        "INSERT INTO knowledge.sync_events "
+        "(event_id, workspace_id, source_id, device_id, idempotency_key, "
+        "request_fingerprint, event_type) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s)"
+    )
+
+    # Duplicate event ID.
+    _assert_rejected(
+        conn,
+        event_insert,
+        (_EVENT_ID, _WORKSPACE_ID, _SOURCE_ID, _DEVICE_ID, "dup-event-id",
+         _REQUEST_FINGERPRINT, "create"),
+        expected_sqlstate=_UNIQUE_VIOLATION,
+    )
+
+    # Generated event sequence: an insert WITHOUT event_sequence succeeds and
+    # yields a server-generated positive bigint (then rolls back).
+    generated_sequence: object = None
+    try:
+        with conn.transaction():
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    event_insert,
+                    (_GEN_SEQUENCE_EVENT_ID, _WORKSPACE_ID, _SOURCE_ID, _DEVICE_ID,
+                     "generated-sequence", _REQUEST_FINGERPRINT, "create"),
+                )
+                cursor.execute(
+                    "SELECT event_sequence FROM knowledge.sync_events "
+                    "WHERE event_id = %s",
+                    (_GEN_SEQUENCE_EVENT_ID,),
+                )
+                row = cursor.fetchone()
+            assert row is not None, "generated event row must exist"
+            generated_sequence = row[0]
+            assert isinstance(generated_sequence, int) and generated_sequence > 0, (
+                f"event_sequence must be a generated positive bigint, got {generated_sequence}"
+            )
+            raise _AcceptedAndRolledBack
+    except _AcceptedAndRolledBack:
+        pass
+
+    # Duplicate workspace idempotency key.
+    _assert_rejected(
+        conn,
+        event_insert,
+        (_BAD_EVENT_ID, _WORKSPACE_ID, _SOURCE_ID, _DEVICE_ID, "create-canonical-1",
+         _REQUEST_FINGERPRINT, "create"),
+        expected_sqlstate=_UNIQUE_VIOLATION,
+    )
+
+    # Event device / committed version / base version from another workspace/source.
+    _assert_rejected(
+        conn,
+        event_insert,
+        (_BAD_EVENT_ID, _WORKSPACE_ID, _SOURCE_ID, _BAD_DEVICE_ID, "bad-device",
+         _REQUEST_FINGERPRINT, "create"),
+        expected_sqlstate=_FOREIGN_KEY_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        "INSERT INTO knowledge.sync_events "
+        "(event_id, workspace_id, source_id, device_id, committed_version_id, "
+        "idempotency_key, request_fingerprint, event_type) "
+        "VALUES (%s, %s, %s, %s, %s, 'bad-committed', %s, 'create')",
+        (_BAD_EVENT_ID, _WORKSPACE_ID, _SOURCE_ID, _DEVICE_ID,
+         _SETUP_SOURCE_VERSION_ID, _REQUEST_FINGERPRINT),
+        expected_sqlstate=_FOREIGN_KEY_VIOLATION,
+        setup=[
+            (_INSERT_SETUP_SOURCE_PENDING_SQL, (_SETUP_SOURCE_ID, _WORKSPACE_ID)),
+            (
+                _INSERT_SETUP_SOURCE_VERSION_SQL,
+                (_SETUP_SOURCE_VERSION_ID, _WORKSPACE_ID, _SETUP_SOURCE_ID,
+                 _CONTENT_OBJECT_ID, _USER_ID),
+            ),
+        ],
+    )
+    _assert_rejected(
+        conn,
+        "INSERT INTO knowledge.sync_events "
+        "(event_id, workspace_id, source_id, device_id, base_version_id, "
+        "idempotency_key, request_fingerprint, event_type) "
+        "VALUES (%s, %s, %s, %s, %s, 'bad-base', %s, 'create')",
+        (_BAD_EVENT_ID, _WORKSPACE_ID, _SOURCE_ID, _DEVICE_ID,
+         _SETUP_SOURCE_VERSION_ID, _REQUEST_FINGERPRINT),
+        expected_sqlstate=_FOREIGN_KEY_VIOLATION,
+        setup=[
+            (_INSERT_SETUP_SOURCE_PENDING_SQL, (_SETUP_SOURCE_ID, _WORKSPACE_ID)),
+            (
+                _INSERT_SETUP_SOURCE_VERSION_SQL,
+                (_SETUP_SOURCE_VERSION_ID, _WORKSPACE_ID, _SETUP_SOURCE_ID,
+                 _CONTENT_OBJECT_ID, _USER_ID),
+            ),
+        ],
+    )
+
+    # Malformed idempotency key / request fingerprint / event type.
+    _assert_rejected(
+        conn,
+        event_insert,
+        (_BAD_EVENT_ID, _WORKSPACE_ID, _SOURCE_ID, _DEVICE_ID, "has space",
+         _REQUEST_FINGERPRINT, "create"),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        event_insert,
+        (_BAD_EVENT_ID, _WORKSPACE_ID, _SOURCE_ID, _DEVICE_ID, "bad-fingerprint",
+         "ABC123", "create"),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        event_insert,
+        (_BAD_EVENT_ID, _WORKSPACE_ID, _SOURCE_ID, _DEVICE_ID, "bad-type",
+         _REQUEST_FINGERPRINT, "purge"),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+
+    # Immutability: UPDATE of sync_events.
+    _assert_rejected(
+        conn,
+        "UPDATE knowledge.sync_events SET event_type = event_type WHERE event_id = %s",
+        (_EVENT_ID,),
+        expected_sqlstate=_TRIGGER_PROTECTION,
+        expected_message=_IMMUTABLE_MESSAGE,
+    )
+
+    # Duplicate (workspace_id, event_id, projection_kind): collides with the
+    # committed qdrant intent on the main event.
+    _assert_rejected(
+        conn,
+        *_intent_insert_sql(),
+        expected_sqlstate=_UNIQUE_VIOLATION,
+    )
+
+    # Intent whose event belongs to another source. The fresh setup event lives
+    # under the committed source, but the intent claims the second source.
+    _assert_intent_rejected(
+        conn,
+        source_id=_SETUP_SOURCE_ID,
+        source_version_id=None,
+        operation="delete",
+        expected_sqlstate=_FOREIGN_KEY_VIOLATION,
+        extra_setup=[
+            (_INSERT_SETUP_SOURCE_PENDING_SQL, (_SETUP_SOURCE_ID, _WORKSPACE_ID)),
+        ],
+    )
+
+    # Invalid projection kind / operation / status.
+    _assert_intent_rejected(
+        conn, projection_kind="weaviate", expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_intent_rejected(
+        conn, operation="merge", expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_intent_rejected(
+        conn, status="running", expected_sqlstate=_CHECK_VIOLATION,
+    )
+
+    # Negative attempt count and timestamp order.
+    _assert_intent_rejected(
+        conn, attempt_count=-1, expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        "INSERT INTO knowledge.projection_intents "
+        "(projection_intent_id, workspace_id, event_id, source_id, source_version_id, "
+        "projection_kind, operation, status, available_at) "
+        "VALUES (%s, %s, %s, %s, %s, 'qdrant', 'upsert', 'pending', "
+        "CURRENT_TIMESTAMP - interval '1 hour')",
+        (_BAD_INTENT_ID, _WORKSPACE_ID, _SETUP_EVENT_ID, _SOURCE_ID, _SOURCE_VERSION_ID),
+        expected_sqlstate=_CHECK_VIOLATION,
+        setup=[_SETUP_EVENT_SETUP],
+    )
+
+    # Upsert without version.
+    _assert_intent_rejected(
+        conn, source_version_id=None, expected_sqlstate=_CHECK_VIOLATION,
+    )
+
+    # Lease fields inconsistent with status.
+    _assert_intent_rejected(
+        conn, status="leased", expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_intent_rejected(
+        conn, status="pending", lease_token=_BAD_DEVICE_ID,
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        "INSERT INTO knowledge.projection_intents "
+        "(projection_intent_id, workspace_id, event_id, source_id, source_version_id, "
+        "projection_kind, operation, status, lease_token, leased_until) "
+        "VALUES (%s, %s, %s, %s, %s, 'qdrant', 'upsert', 'leased', %s, CURRENT_TIMESTAMP)",
+        (_BAD_INTENT_ID, _WORKSPACE_ID, _SETUP_EVENT_ID, _SOURCE_ID, _SOURCE_VERSION_ID,
+         _BAD_DEVICE_ID),
+        expected_sqlstate=_CHECK_VIOLATION,
+        setup=[_SETUP_EVENT_SETUP],
+    )
+
+    # Invalid dispatched fields.
+    _assert_intent_rejected(
+        conn, status="dispatched", expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        "INSERT INTO knowledge.projection_intents "
+        "(projection_intent_id, workspace_id, event_id, source_id, source_version_id, "
+        "projection_kind, operation, status, dispatched_at) "
+        "VALUES (%s, %s, %s, %s, %s, 'qdrant', 'upsert', 'pending', CURRENT_TIMESTAMP)",
+        (_BAD_INTENT_ID, _WORKSPACE_ID, _SETUP_EVENT_ID, _SOURCE_ID, _SOURCE_VERSION_ID),
+        expected_sqlstate=_CHECK_VIOLATION,
+        setup=[_SETUP_EVENT_SETUP],
+    )
+
+    # Terminal without error and unsafe error token.
+    _assert_intent_rejected(
+        conn, status="terminal", expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_intent_rejected(
+        conn, status="terminal", last_error_code="Bad Code!",
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+
+
+def _assert_audit_invariants(conn: psycopg.Connection[Any]) -> None:
+    # Every valid actor shape is accepted (then rolled back).
+    _assert_accepted_then_rollback(
+        conn,
+        [
+            _audit_insert_sql(
+                actor_kind="user", actor_id=_USER_ID, actor_reference=None,
+                audit_event_id=_VALID_AUDIT_USER_ID,
+            ),
+            _audit_insert_sql(
+                actor_kind="device", actor_id=_DEVICE_ID, actor_reference=None,
+                audit_event_id=_VALID_AUDIT_DEVICE_ID,
+            ),
+            _audit_insert_sql(
+                actor_kind="system", actor_id=None, actor_reference=None,
+                audit_event_id=_VALID_AUDIT_SYSTEM_ID,
+            ),
+            _audit_insert_sql(
+                actor_kind="workflow", actor_id=None, actor_reference="github-actions",
+                audit_event_id=_VALID_AUDIT_WORKFLOW_ID,
+            ),
+        ],
+    )
+
+    # Invalid actor combinations.
+    _assert_rejected(
+        conn, *_audit_insert_sql(actor_kind="user", actor_id=None, actor_reference=None),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        *_audit_insert_sql(
+            actor_kind="user", actor_id=_USER_ID, actor_reference="github-actions"
+        ),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn, *_audit_insert_sql(actor_kind="device", actor_id=None, actor_reference=None),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn, *_audit_insert_sql(actor_kind="system", actor_id=_USER_ID, actor_reference=None),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        *_audit_insert_sql(actor_kind="system", actor_id=None, actor_reference="github-actions"),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        *_audit_insert_sql(
+            actor_kind="workflow", actor_id=_USER_ID, actor_reference="github-actions"
+        ),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn, *_audit_insert_sql(actor_kind="workflow", actor_id=None, actor_reference=None),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn, *_audit_insert_sql(actor_kind="service", actor_id=None, actor_reference=None),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+
+    # Unsafe / empty action, target, reference and reason tokens.
+    _assert_rejected(
+        conn, *_audit_insert_sql(action="Bad Action!"),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn, *_audit_insert_sql(action=""),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn, *_audit_insert_sql(target_kind="Bad Target"),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn, *_audit_insert_sql(target_kind=""),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        *_audit_insert_sql(
+            actor_kind="workflow", actor_id=None, actor_reference="Bad Ref"
+        ),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn, *_audit_insert_sql(reason_code="Bad Reason"),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+
+    # Zero / uppercase / short trace ID.
+    _assert_rejected(
+        conn, *_audit_insert_sql(trace_id="0" * 32),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn, *_audit_insert_sql(trace_id="A" + "0" * 31),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn, *_audit_insert_sql(trace_id="abc123"),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+
+    # Invalid diff hash and result.
+    _assert_rejected(
+        conn, *_audit_insert_sql(safe_diff_hash="abc123"),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn, *_audit_insert_sql(result="success"),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+
+    # Append-only: UPDATE and DELETE both rejected by the trigger.
+    _assert_rejected(
+        conn,
+        "UPDATE knowledge.audit_events SET result = result WHERE audit_event_id = %s",
+        (_AUDIT_EVENT_ID,),
+        expected_sqlstate=_TRIGGER_PROTECTION,
+        expected_message=_AUDIT_MESSAGE,
+    )
+    _assert_rejected(
+        conn,
+        "DELETE FROM knowledge.audit_events WHERE audit_event_id = %s",
+        (_AUDIT_EVENT_ID,),
+        expected_sqlstate=_TRIGGER_PROTECTION,
+        expected_message=_AUDIT_MESSAGE,
+    )
+
+
+def _assert_negative_invariants(conn: psycopg.Connection[Any]) -> None:
+    """Run every baseline negative case inside one transaction.
+
+    Each ``_assert_rejected`` call opens its own nested savepoint, so the four
+    groups are fully isolated from one another and from the committed valid
+    graph. The outer transaction commits nothing.
+    """
+    with conn.transaction():
+        _assert_identity_and_ownership_invariants(conn)
+        _assert_content_and_source_version_invariants(conn)
+        _assert_event_and_intent_invariants(conn)
+        _assert_audit_invariants(conn)
+
+
 # --- The lifecycle test ------------------------------------------------------
 
 
@@ -861,6 +1893,24 @@ def test_canonical_postgresql_baseline_upgrade_catalog_and_valid_graph(
     _assert_allowed_behaviors(conn)
     assert _row_counts(conn) == [1, 1, 1, 1, 1, 1, 1, 2, 1], (
         "allowed cases must not persist rows"
+    )
+
+    # Task 4: every baseline invariant is database-enforced. Each mutation runs
+    # in its own savepoint and is rolled back, so the committed valid graph is
+    # never mutated.
+    _assert_negative_invariants(conn)
+    assert _row_counts(conn) == [1, 1, 1, 1, 1, 1, 1, 2, 1], (
+        "negative cases must not persist rows"
+    )
+    # The current-version pointer is restored after the lineage/pointer cases.
+    with conn.cursor() as _pointer_cursor:
+        _pointer_cursor.execute(
+            "SELECT current_version_id FROM knowledge.sources WHERE source_id = %s",
+            (_SOURCE_ID,),
+        )
+        _restored_pointer = _pointer_cursor.fetchone()[0]
+    assert _restored_pointer == _SOURCE_VERSION_ID, (
+        "source current-version pointer must remain intact after negative cases"
     )
 
     # Step 4: catalog fingerprint stable across two reads (data is not catalog).
