@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -42,6 +43,10 @@ _STACK_DOWN_TIMEOUT_SECONDS: Final = 45.0
 _SEMANTIC_PROBE_TIMEOUT_SECONDS: Final = 10.0
 _SEMANTIC_VERIFY_DEADLINE_SECONDS: Final = 30.0
 _VOLUME_OPERATION_TIMEOUT_SECONDS: Final = 30.0
+_SMOKE_MARKER_TIMEOUT_SECONDS: Final = 10.0
+_SMOKE_TOKEN_BYTE_COUNT: Final = 12
+_SMOKE_REDIS_OPERATION_TIMEOUT_SECONDS: Final = 30.0
+_SMOKE_REDIS_RECOVERY_DEADLINE_SECONDS: Final = 30.0
 _PROJECT_NAME_PATTERN = re.compile(r"knowledge-(?:local|ci-[a-z0-9][a-z0-9-]{0,40})")
 _COMPOSE_VERSION_PATTERN = re.compile(
     r"(?:Docker Compose version )?v?(\d+)\.(\d+)\.(\d+)"
@@ -250,6 +255,16 @@ class ProbeResult:
     latency_ms: int
 
 
+@dataclass(frozen=True, slots=True)
+class SmokeMarkerSet:
+    """Safe test-only names and identifiers for one disposable smoke run."""
+
+    marker_key: str
+    qdrant_collection: str
+    qdrant_point_id: int
+    redis_key: str
+
+
 class CommandRunner(Protocol):
     """Callable contract for bounded lifecycle command execution."""
 
@@ -260,6 +275,38 @@ class CommandRunner(Protocol):
         timeout_seconds: float,
         environment: Mapping[str, str] | None = None,
     ) -> CommandResult: ...
+
+
+class _SmokeOperations(Protocol):
+    def reset_before(self, context: StackContext) -> None: ...
+
+    def bootstrap(self, context: StackContext) -> None: ...
+
+    def config(self, context: StackContext) -> None: ...
+
+    def up(self, context: StackContext) -> None: ...
+
+    def verify(self, context: StackContext) -> None: ...
+
+    def new_markers(self, context: StackContext) -> SmokeMarkerSet: ...
+
+    def create_markers(self, context: StackContext, markers: SmokeMarkerSet) -> None: ...
+
+    def down_preserve(self, context: StackContext) -> None: ...
+
+    def verify_markers(self, context: StackContext, markers: SmokeMarkerSet) -> None: ...
+
+    def stop_redis(self, context: StackContext) -> None: ...
+
+    def verify_outage(self, context: StackContext) -> None: ...
+
+    def start_redis(self, context: StackContext) -> None: ...
+
+    def verify_recovery(self, context: StackContext) -> None: ...
+
+    def remove_markers(self, context: StackContext, markers: SmokeMarkerSet) -> None: ...
+
+    def reset_after(self, context: StackContext) -> None: ...
 
 
 class _SocketHandle(Protocol):
@@ -816,6 +863,56 @@ def stack_up(
     return status
 
 
+def _repeat_smoke_stack_up(
+    context: StackContext,
+    *,
+    runner: CommandRunner,
+    deadline_seconds: float = _STACK_STARTUP_DEADLINE_SECONDS,
+) -> dict[str, object]:
+    """Repeat Compose up only after this exact running project verifies successfully."""
+    _validate_lifecycle_project(context)
+    _validate_deadline(deadline_seconds)
+    verify_stack(context, runner=runner)
+    validate_image_lock(context.paths)
+    _run_compose_config(context, runner)
+
+    deadline_monotonic = time.monotonic() + deadline_seconds
+    result = _run_lifecycle_command(
+        runner,
+        [
+            *compose_arguments(context),
+            "up",
+            "--detach",
+            "--remove-orphans",
+            "--wait",
+            "--wait-timeout",
+            str(int(deadline_seconds)),
+        ],
+        timeout_seconds=_remaining_seconds(deadline_monotonic, time.monotonic),
+        context=context,
+    )
+    if result.return_code != 0:
+        raise StackFailure(StackExitCode.STARTUP, "stack_startup_failed")
+    status = _wait_for_stack_until(
+        context,
+        runner=runner,
+        deadline_monotonic=deadline_monotonic,
+        poll_interval_seconds=1.0,
+        clock=time.monotonic,
+        sleep=time.sleep,
+    )
+    _run_semantic_probes(
+        context,
+        runner=runner,
+        deadline_monotonic=min(
+            deadline_monotonic,
+            time.monotonic() + _SEMANTIC_VERIFY_DEADLINE_SECONDS,
+        ),
+        clock=time.monotonic,
+    )
+    return status
+
+
 def wait_for_stack(
     context: StackContext,
     *,
@@ -874,14 +971,15 @@ def verify_stack(
     )
     if status["state"] == "absent":
         raise StackFailure(StackExitCode.CLI, "stack_absent")
-    if status["state"] != "ready":
-        raise StackFailure(StackExitCode.READINESS, "stack_not_ready")
-    return _run_semantic_probes(
+    probes = _run_semantic_probes(
         context,
         runner=runner,
         deadline_monotonic=deadline_monotonic,
         clock=time.monotonic,
     )
+    if status["state"] != "ready":
+        raise StackFailure(StackExitCode.READINESS, "stack_not_ready")
+    return probes
 
 
 def reset_stack(
@@ -951,6 +1049,606 @@ def stack_down(context: StackContext, *, runner: CommandRunner = run_command) ->
     )
     if result.return_code != 0:
         raise StackFailure(StackExitCode.STARTUP, "stack_down_failed")
+
+
+def run_smoke_contract(
+    context: StackContext,
+    *,
+    operations: _SmokeOperations | None = None,
+    runner: CommandRunner = run_command,
+) -> None:
+    """Run the CI-only disposable smoke sequence with guaranteed final reset."""
+    if context.environment.get("CI") != "true" or not context.project_name.startswith(
+        "knowledge-ci-"
+    ):
+        raise StackFailure(StackExitCode.CLI, "smoke_requires_ci_project")
+    if operations is None:
+        operations = _DefaultSmokeOperations(runner)
+
+    markers: SmokeMarkerSet | None = None
+    primary_failure: Exception | None = None
+    try:
+        operations.reset_before(context)
+        operations.bootstrap(context)
+        operations.config(context)
+        operations.up(context)
+        operations.verify(context)
+        markers = operations.new_markers(context)
+        operations.create_markers(context, markers)
+        operations.down_preserve(context)
+        operations.up(context)
+        operations.verify(context)
+        operations.verify_markers(context, markers)
+        operations.up(context)
+        operations.verify(context)
+        operations.stop_redis(context)
+        try:
+            operations.verify_outage(context)
+        finally:
+            operations.start_redis(context)
+        operations.verify_recovery(context)
+    except Exception as failure:
+        primary_failure = failure
+        raise
+    finally:
+        marker_cleanup_failure: Exception | None = None
+        try:
+            try:
+                if markers is not None:
+                    operations.remove_markers(context, markers)
+            except Exception as failure:
+                marker_cleanup_failure = failure
+        finally:
+            operations.reset_after(context)
+        if primary_failure is None and marker_cleanup_failure is not None:
+            raise marker_cleanup_failure
+
+
+def _create_smoke_markers(
+    context: StackContext,
+    *,
+    runner: CommandRunner,
+    markers: SmokeMarkerSet | None = None,
+    token_bytes: Callable[[int], bytes] = secrets.token_bytes,
+) -> SmokeMarkerSet:
+    markers = _new_smoke_markers(token_bytes=token_bytes) if markers is None else markers
+    _validate_smoke_markers(markers)
+    try:
+        _run_smoke_marker_commands(
+            context,
+            runner=runner,
+            commands=_smoke_marker_commands(markers, stage="create"),
+            success_code="smoke_markers_created",
+            failure_code="smoke_marker_create_failed",
+        )
+    except StackFailure:
+        with suppress(StackFailure):
+            _remove_smoke_markers(context, markers, runner=runner)
+        raise
+    return markers
+
+
+def _new_smoke_markers(
+    *,
+    token_bytes: Callable[[int], bytes] = secrets.token_bytes,
+) -> SmokeMarkerSet:
+    token = token_bytes(_SMOKE_TOKEN_BYTE_COUNT).hex()
+    markers = SmokeMarkerSet(
+        marker_key=token,
+        qdrant_collection=f"stack_smoke_marker_{token}",
+        qdrant_point_id=1,
+        redis_key=f"stack:smoke:{token}",
+    )
+    _validate_smoke_markers(markers)
+    return markers
+
+
+def _verify_smoke_markers(
+    context: StackContext,
+    markers: SmokeMarkerSet,
+    *,
+    runner: CommandRunner,
+) -> None:
+    _validate_smoke_markers(markers)
+    _run_smoke_marker_commands(
+        context,
+        runner=runner,
+        commands=_smoke_marker_commands(markers, stage="verify"),
+        success_code="smoke_markers_verified",
+        failure_code="smoke_marker_verify_failed",
+    )
+
+
+def _remove_smoke_markers(
+    context: StackContext,
+    markers: SmokeMarkerSet,
+    *,
+    runner: CommandRunner,
+) -> None:
+    _validate_smoke_markers(markers)
+    _run_smoke_marker_commands(
+        context,
+        runner=runner,
+        commands=_smoke_marker_commands(markers, stage="remove"),
+        success_code="smoke_markers_removed",
+        failure_code="smoke_marker_remove_failed",
+        continue_on_failure=True,
+    )
+
+
+def _run_smoke_marker_commands(
+    context: StackContext,
+    *,
+    runner: CommandRunner,
+    commands: Sequence[tuple[str, str]],
+    success_code: str,
+    failure_code: str,
+    continue_on_failure: bool = False,
+) -> None:
+    has_failed = False
+    for service, script in commands:
+        shell = "/bin/bash" if service == "qdrant" else "/bin/sh"
+        arguments = (
+            *compose_arguments(context),
+            "exec",
+            "--no-TTY",
+            service,
+            shell,
+            "-ec",
+            script,
+        )
+        try:
+            result = runner(
+                arguments,
+                timeout_seconds=_SMOKE_MARKER_TIMEOUT_SECONDS,
+                environment=_command_environment(context),
+            )
+            is_success = result.return_code == 0 and result.stdout.strip() == success_code
+            del result
+        except Exception:
+            is_success = False
+        if not is_success:
+            has_failed = True
+            if not continue_on_failure:
+                break
+    if has_failed:
+        raise StackFailure(StackExitCode.READINESS, failure_code)
+
+
+def _validate_smoke_markers(markers: SmokeMarkerSet) -> None:
+    if not re.fullmatch(r"[0-9a-f]{24}", markers.marker_key):
+        raise StackFailure(StackExitCode.CONTRACT, "smoke_marker_invalid")
+    if markers.qdrant_collection != f"stack_smoke_marker_{markers.marker_key}":
+        raise StackFailure(StackExitCode.CONTRACT, "smoke_marker_invalid")
+    if markers.qdrant_point_id != 1:
+        raise StackFailure(StackExitCode.CONTRACT, "smoke_marker_invalid")
+    if markers.redis_key != f"stack:smoke:{markers.marker_key}":
+        raise StackFailure(StackExitCode.CONTRACT, "smoke_marker_invalid")
+
+
+def _smoke_marker_commands(
+    markers: SmokeMarkerSet,
+    *,
+    stage: str,
+) -> tuple[tuple[str, str], ...]:
+    scripts = {
+        "create": (
+            _postgresql_smoke_create_script(markers),
+            _qdrant_smoke_create_script(markers),
+            _neo4j_smoke_create_script(markers),
+            _redis_smoke_create_script(markers),
+        ),
+        "verify": (
+            _postgresql_smoke_verify_script(markers),
+            _qdrant_smoke_verify_script(markers),
+            _neo4j_smoke_verify_script(markers),
+            _redis_smoke_verify_script(markers),
+        ),
+        "remove": (
+            _postgresql_smoke_remove_script(markers),
+            _qdrant_smoke_remove_script(markers),
+            _neo4j_smoke_remove_script(markers),
+            _redis_smoke_remove_script(markers),
+        ),
+    }
+    selected_scripts = scripts.get(stage)
+    if selected_scripts is None:
+        raise StackFailure(StackExitCode.INTERNAL, "smoke_marker_stage_invalid")
+    return tuple(
+        zip(("postgresql", "qdrant", "neo4j", "redis"), selected_scripts, strict=True)
+    )
+
+
+def _postgresql_smoke_create_script(markers: SmokeMarkerSet) -> str:
+    return "\n".join(
+        (
+            "application_password=$(cat /run/secrets/postgres_application_password) || exit 75",
+            '[ -n "$application_password" ] || exit 65',
+            "sql=\"CREATE TABLE IF NOT EXISTS public.stack_smoke_marker "
+            "(marker_key text PRIMARY KEY, marker_value text NOT NULL); "
+            "ALTER TABLE public.stack_smoke_marker OWNER TO knowledge_app; "
+            "INSERT INTO public.stack_smoke_marker(marker_key, marker_value) "
+            f"VALUES ('{markers.marker_key}', 'ready') ON CONFLICT (marker_key) "
+            "DO UPDATE SET marker_value = EXCLUDED.marker_value;\"",
+            'PGPASSWORD="$application_password" psql -XAtq --host 127.0.0.1 --port 5432 '
+            "--username knowledge_app --dbname knowledge --set ON_ERROR_STOP=1 "
+            '--command "$sql" >/dev/null 2>&1 || exit 75',
+            "unset application_password sql",
+            "printf '%s\\n' smoke_markers_created",
+        )
+    )
+
+
+def _postgresql_smoke_verify_script(markers: SmokeMarkerSet) -> str:
+    return "\n".join(
+        (
+            "application_password=$(cat /run/secrets/postgres_application_password) || exit 75",
+            '[ -n "$application_password" ] || exit 65',
+            'marker_count=$(PGPASSWORD="$application_password" psql -XAtq '
+            "--host 127.0.0.1 --port 5432 --username knowledge_app --dbname knowledge "
+            "--set ON_ERROR_STOP=1 --command \"SELECT count(*) FROM "
+            "public.stack_smoke_marker WHERE "
+            f"marker_key = '{markers.marker_key}' AND marker_value = 'ready'\" "
+            "2>/dev/null) || exit 75",
+            '[ "$marker_count" = 1 ] || exit 65',
+            'table_owner=$(PGPASSWORD="$application_password" psql -XAtq '
+            "--host 127.0.0.1 --port 5432 --username knowledge_app --dbname knowledge "
+            "--set ON_ERROR_STOP=1 --command \"SELECT tableowner FROM pg_tables WHERE "
+            "schemaname = 'public' AND tablename = 'stack_smoke_marker'\" "
+            "2>/dev/null) || exit 75",
+            '[ "$table_owner" = knowledge_app ] || exit 65',
+            "unset application_password marker_count table_owner",
+            "printf '%s\\n' smoke_markers_verified",
+        )
+    )
+
+
+def _postgresql_smoke_remove_script(markers: SmokeMarkerSet) -> str:
+    return "\n".join(
+        (
+            "application_password=$(cat /run/secrets/postgres_application_password) || exit 75",
+            '[ -n "$application_password" ] || exit 65',
+            'PGPASSWORD="$application_password" psql -XAtq --host 127.0.0.1 --port 5432 '
+            "--username knowledge_app --dbname knowledge --set ON_ERROR_STOP=1 "
+            '--command "DROP TABLE IF EXISTS public.stack_smoke_marker;" '
+            ">/dev/null 2>&1 || exit 75",
+            "unset application_password",
+            "printf '%s\\n' smoke_markers_removed",
+        )
+    )
+
+
+def _qdrant_smoke_create_script(markers: SmokeMarkerSet) -> str:
+    return _qdrant_smoke_script(
+        (
+            (
+                "PUT",
+                f"/collections/{markers.qdrant_collection}",
+                '{"vectors":{"size":4,"distance":"Cosine"}}',
+            ),
+            (
+                "PUT",
+                f"/collections/{markers.qdrant_collection}/points?wait=true",
+                f'{{"points":[{{"id":{markers.qdrant_point_id},"vector":[1,0,0,0]}}]}}',
+            ),
+        ),
+        success_code="smoke_markers_created",
+    )
+
+
+def _qdrant_smoke_verify_script(markers: SmokeMarkerSet) -> str:
+    return _qdrant_smoke_script(
+        (
+            (
+                "GET",
+                f"/collections/{markers.qdrant_collection}/points/{markers.qdrant_point_id}",
+                "",
+            ),
+        ),
+        success_code="smoke_markers_verified",
+    )
+
+
+def _qdrant_smoke_remove_script(markers: SmokeMarkerSet) -> str:
+    return _qdrant_smoke_script(
+        (("DELETE", f"/collections/{markers.qdrant_collection}", ""),),
+        success_code="smoke_markers_removed",
+        expected_statuses=(200, 404),
+    )
+
+
+def _qdrant_smoke_script(
+    requests: Sequence[tuple[str, str, str]],
+    *,
+    success_code: str,
+    expected_statuses: tuple[int, ...] = (200,),
+) -> str:
+    status_pattern = "|".join(str(status) for status in expected_statuses)
+    lines = [
+        "api_key=$(sed -n 's/^  api_key: //p' /run/secrets/qdrant_config.yaml) || exit 75",
+        '[ -n "$api_key" ] || exit 65',
+        "request() {",
+        "  method=$1",
+        "  path=$2",
+        "  body=$3",
+        "  exec 3<>/dev/tcp/127.0.0.1/6333 || return 75",
+        "  printf '%s %s HTTP/1.1\\r\\nHost: localhost\\r\\napi-key: %s\\r\\n"
+        "Content-Type: application/json\\r\\nContent-Length: %s\\r\\n"
+        "Connection: close\\r\\n\\r\\n%s' \"$method\" \"$path\" \"$api_key\" "
+        '"${#body}" "$body" >&3',
+        "  IFS=' ' read -r _ status _ <&3 || return 75",
+        "  exec 3<&- 3>&-",
+        f'  case "$status" in {status_pattern}) ;; *) return 75 ;; esac',
+        "}",
+    ]
+    lines.extend(
+        f"request '{method}' '{path}' '{body}' || exit 75" for method, path, body in requests
+    )
+    lines.extend(("unset api_key", f"printf '%s\\n' {success_code}"))
+    return "\n".join(lines)
+
+
+def _neo4j_smoke_create_script(markers: SmokeMarkerSet) -> str:
+    return _neo4j_smoke_script(
+        "MERGE (marker:StackSmokeMarker "
+        f"{{marker_key: '{markers.marker_key}'}}) SET marker.marker_value = 'ready' "
+        "RETURN count(marker) AS marker_count",
+        expected_scalar="1",
+        success_code="smoke_markers_created",
+    )
+
+
+def _neo4j_smoke_verify_script(markers: SmokeMarkerSet) -> str:
+    return _neo4j_smoke_script(
+        "MATCH (marker:StackSmokeMarker "
+        f"{{marker_key: '{markers.marker_key}', marker_value: 'ready'}}) "
+        "RETURN count(marker) AS marker_count",
+        expected_scalar="1",
+        success_code="smoke_markers_verified",
+    )
+
+
+def _neo4j_smoke_remove_script(markers: SmokeMarkerSet) -> str:
+    return _neo4j_smoke_script(
+        "MATCH (marker:StackSmokeMarker "
+        f"{{marker_key: '{markers.marker_key}'}}) WITH collect(marker) AS markers "
+        "FOREACH (marker IN markers | DELETE marker) RETURN size(markers) AS marker_count",
+        expected_scalars=("0", "1"),
+        success_code="smoke_markers_removed",
+    )
+
+
+def _neo4j_smoke_script(
+    query: str,
+    *,
+    expected_scalar: str | None = None,
+    expected_scalars: tuple[str, ...] = (),
+    success_code: str,
+) -> str:
+    scalar_pattern = "|".join(expected_scalars or ((expected_scalar,) if expected_scalar else ()))
+    return "\n".join(
+        (
+            "neo4j_auth=$(cat /run/secrets/neo4j_auth) || exit 75",
+            "neo4j_password=${neo4j_auth#neo4j/}",
+            "result=$(cypher-shell --address bolt://127.0.0.1:7687 --username neo4j "
+            f'--password "$neo4j_password" --format plain "{query}" 2>/dev/null) '
+            "|| exit 75",
+            f"printf '%s\\n' \"$result\" | tr -d '\\r' | grep -Eq '^({scalar_pattern})$' "
+            "|| exit 65",
+            "unset neo4j_auth neo4j_password result",
+            f"printf '%s\\n' {success_code}",
+        )
+    )
+
+
+def _redis_smoke_create_script(markers: SmokeMarkerSet) -> str:
+    return _redis_smoke_script(
+        f'SET "{markers.redis_key}" ready',
+        expected_scalar="OK",
+        success_code="smoke_markers_created",
+    )
+
+
+def _redis_smoke_verify_script(markers: SmokeMarkerSet) -> str:
+    return _redis_smoke_script(
+        f'GET "{markers.redis_key}"',
+        expected_scalar="ready",
+        success_code="smoke_markers_verified",
+    )
+
+
+def _redis_smoke_remove_script(markers: SmokeMarkerSet) -> str:
+    return _redis_smoke_script(
+        f'DEL "{markers.redis_key}"',
+        expected_scalars=("0", "1"),
+        success_code="smoke_markers_removed",
+    )
+
+
+def _redis_smoke_script(
+    command: str,
+    *,
+    expected_scalar: str | None = None,
+    expected_scalars: tuple[str, ...] = (),
+    success_code: str,
+) -> str:
+    scalar_pattern = "|".join(expected_scalars or ((expected_scalar,) if expected_scalar else ()))
+    return "\n".join(
+        (
+            "redis_password=$(sed -n 's/^user knowledge on >\\([^ ]*\\).*/\\1/p' "
+            "/run/secrets/redis_acl) || exit 75",
+            '[ -n "$redis_password" ] || exit 65',
+            "result=$(redis-cli --raw --no-auth-warning --user knowledge "
+            f'--pass "$redis_password" {command} 2>/dev/null) || exit 75',
+            f'case "$result" in {scalar_pattern}) ;; *) exit 65 ;; esac',
+            "unset redis_password result",
+            f"printf '%s\\n' {success_code}",
+        )
+    )
+
+
+def _stop_smoke_redis(
+    context: StackContext,
+    *,
+    runner: CommandRunner,
+) -> None:
+    result = _run_lifecycle_command(
+        runner,
+        [*compose_arguments(context), "stop", "--timeout", "15", "redis"],
+        timeout_seconds=_SMOKE_REDIS_OPERATION_TIMEOUT_SECONDS,
+        context=context,
+    )
+    if result.return_code != 0:
+        raise StackFailure(StackExitCode.STARTUP, "smoke_redis_stop_failed")
+
+
+def _verify_smoke_redis_outage(
+    context: StackContext,
+    *,
+    runner: CommandRunner,
+) -> None:
+    try:
+        verify_stack(context, runner=runner)
+    except StackFailure as failure:
+        if (
+            failure.exit_code is StackExitCode.READINESS
+            and failure.result_code == "redis_contract_failed"
+        ):
+            return
+    raise StackFailure(StackExitCode.READINESS, "smoke_redis_outage_not_detected")
+
+
+def _start_smoke_redis(
+    context: StackContext,
+    *,
+    runner: CommandRunner,
+) -> None:
+    result = _run_lifecycle_command(
+        runner,
+        [*compose_arguments(context), "start", "redis"],
+        timeout_seconds=_SMOKE_REDIS_OPERATION_TIMEOUT_SECONDS,
+        context=context,
+    )
+    if result.return_code != 0:
+        raise StackFailure(StackExitCode.STARTUP, "smoke_redis_start_failed")
+    wait_for_stack(
+        context,
+        runner=runner,
+        deadline_seconds=_SMOKE_REDIS_RECOVERY_DEADLINE_SECONDS,
+    )
+
+
+def _assert_smoke_project_absent(
+    context: StackContext,
+    *,
+    runner: CommandRunner,
+) -> None:
+    project_filter = f"label=com.docker.compose.project={context.project_name}"
+    inventory_commands = (
+        ("docker", "container", "ls", "--all", "--quiet", "--filter", project_filter),
+        ("docker", "network", "ls", "--quiet", "--filter", project_filter),
+        ("docker", "volume", "ls", "--quiet", "--filter", project_filter),
+    )
+    for command in inventory_commands:
+        result = _run_lifecycle_command(
+            runner,
+            command,
+            timeout_seconds=_STACK_STATUS_TIMEOUT_SECONDS,
+            context=context,
+        )
+        has_resources = bool(result.stdout.strip())
+        return_code = result.return_code
+        del result
+        if return_code != 0:
+            raise StackFailure(StackExitCode.STARTUP, "smoke_cleanup_inventory_failed")
+        if has_resources:
+            raise StackFailure(StackExitCode.STARTUP, "smoke_cleanup_incomplete")
+
+
+def _smoke_secret_fingerprint(paths: StackPaths) -> str:
+    try:
+        secret_state = inspect_secret_set(paths)
+    except StackFailure:
+        raise StackFailure(StackExitCode.CONTRACT, "smoke_secret_set_changed") from None
+    if secret_state is not SecretSetState.COMPLETE:
+        raise StackFailure(StackExitCode.CONTRACT, "smoke_secret_set_changed")
+    digest = hashlib.sha256()
+    try:
+        for filename in sorted(_SECRET_FILENAMES):
+            digest.update(filename.encode("ascii"))
+            digest.update(b"\0")
+            digest.update((paths.secret_directory / filename).read_bytes())
+            digest.update(b"\0")
+    except OSError:
+        raise StackFailure(StackExitCode.CONTRACT, "smoke_secret_set_changed") from None
+    return digest.hexdigest()
+
+
+class _DefaultSmokeOperations:
+    def __init__(self, runner: CommandRunner) -> None:
+        self._runner = runner
+        self._secret_fingerprint: str | None = None
+        self._startup_count = 0
+
+    def reset_before(self, context: StackContext) -> None:
+        reset_stack(context, confirm_project=context.project_name, runner=self._runner)
+
+    def bootstrap(self, context: StackContext) -> None:
+        bootstrap_secret_set(context.paths)
+        self._secret_fingerprint = _smoke_secret_fingerprint(context.paths)
+
+    def config(self, context: StackContext) -> None:
+        validate_compose_config(context, runner=self._runner)
+
+    def up(self, context: StackContext) -> None:
+        self._startup_count += 1
+        if self._startup_count <= 2:
+            stack_up(context, runner=self._runner)
+            return
+        if self._startup_count == 3:
+            _repeat_smoke_stack_up(context, runner=self._runner)
+            return
+        raise StackFailure(StackExitCode.INTERNAL, "smoke_startup_count_invalid")
+
+    def verify(self, context: StackContext) -> None:
+        verify_stack(context, runner=self._runner)
+
+    def new_markers(self, context: StackContext) -> SmokeMarkerSet:
+        del context
+        return _new_smoke_markers()
+
+    def create_markers(self, context: StackContext, markers: SmokeMarkerSet) -> None:
+        _create_smoke_markers(context, runner=self._runner, markers=markers)
+
+    def down_preserve(self, context: StackContext) -> None:
+        stack_down(context, runner=self._runner)
+
+    def verify_markers(self, context: StackContext, markers: SmokeMarkerSet) -> None:
+        _verify_smoke_markers(context, markers, runner=self._runner)
+
+    def stop_redis(self, context: StackContext) -> None:
+        _stop_smoke_redis(context, runner=self._runner)
+
+    def verify_outage(self, context: StackContext) -> None:
+        _verify_smoke_redis_outage(context, runner=self._runner)
+
+    def start_redis(self, context: StackContext) -> None:
+        _start_smoke_redis(context, runner=self._runner)
+
+    def verify_recovery(self, context: StackContext) -> None:
+        verify_stack(context, runner=self._runner)
+
+    def remove_markers(self, context: StackContext, markers: SmokeMarkerSet) -> None:
+        _remove_smoke_markers(context, markers, runner=self._runner)
+
+    def reset_after(self, context: StackContext) -> None:
+        reset_stack(context, confirm_project=context.project_name, runner=self._runner)
+        _assert_smoke_project_absent(context, runner=self._runner)
+        if (
+            self._secret_fingerprint is not None
+            and _smoke_secret_fingerprint(context.paths) != self._secret_fingerprint
+        ):
+            raise StackFailure(StackExitCode.CONTRACT, "smoke_secret_set_changed")
 
 
 def _run_semantic_probes(
@@ -1940,9 +2638,12 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         exit_on_error=False,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("bootstrap", "config", "up", "status", "verify", "down", "smoke"):
+    for command in ("bootstrap", "config", "up", "status", "verify", "down"):
         command_parser = subparsers.add_parser(command, exit_on_error=False)
         command_parser.add_argument("--project-name", default="knowledge-local")
+    smoke_parser = subparsers.add_parser("smoke", exit_on_error=False)
+    smoke_parser.add_argument("--project-name", required=True)
+    smoke_parser.add_argument("--confirm-project", required=True)
     reset_parser = subparsers.add_parser("reset", exit_on_error=False)
     reset_parser.add_argument("--project-name", required=True)
     reset_parser.add_argument("--confirm-project", required=True)
@@ -2024,7 +2725,14 @@ def _execute_cli_command(
             runner=runner,
         ), StackExitCode.OK
     if command == "smoke":
-        raise StackFailure(StackExitCode.INTERNAL, "smoke_not_implemented")
+        if cast(str, arguments.confirm_project) != context.project_name:
+            raise StackFailure(StackExitCode.CLI, "smoke_confirmation_mismatch")
+        run_smoke_contract(context, runner=runner)
+        return {
+            "project": context.project_name,
+            "state": "absent",
+            "result_code": "stack_smoke_complete",
+        }, StackExitCode.OK
     raise StackFailure(StackExitCode.CLI, "invalid_cli")
 
 

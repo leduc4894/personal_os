@@ -1,27 +1,25 @@
-# Reserved: integration tests
+# Local service stack integration
 
-**Status:** Reserved directory — no executable tests in this bootstrap.
+**Status:** One executable disposable-stack test is owned here.
 
 ## Owner
 
-This directory is owned by the Phase One workspace **bootstrap** spec
-(`docs/superpowers/specs/phase-one-workspace-bootstrap-design.md`). It exists
-to preserve the canonical Python test hierarchy
-(`unit`, `contract`, `integration`, `end_to_end`, `golden`, `performance`)
-without populating layers that have no behavior to verify yet.
+The local service stack spec owns only `test_local_service_stack.py`. It proves
+authenticated startup, persistence across `down`/`up`, repeated initializer
+idempotence, Redis outage detection and recovery, and exact final cleanup.
 
 ## Future acceptance source
 
-Integration tests are added by a **later spec** that introduces the first
-cross-module behavior worth exercising (for example: API route → repository →
-database, or MCP tool → domain service). Until that spec lands, this
-directory intentionally contains only this README.
+All other future integration layers remain reserved for their owning specs.
+They must add executable behavior tests only when the corresponding production
+contract exists.
 
-## What is forbidden here during bootstrap
+## Runtime boundary
 
-- No `test_*.py`, `*.test.ts`, `*.spec.ts` or any other executable test file.
-- No `conftest.py` that autocollects placeholder tests.
-- No fixture that silently passes with zero assertions.
+- The test requires a reachable Linux `amd64` Docker Engine.
+- `CI=true` and an exact disposable `knowledge-ci-*` project name are required.
+- The project is reset in `finally`; no local or production project is accepted.
+- Cloudflare R2 and provider credentials are outside this test's scope.
 
-A later spec is responsible for adding real tests with real assertions; until
-then, pytest collects nothing from this directory.
+Placeholder tests, zero-assertion fixtures and unrelated cross-module coverage
+remain forbidden.

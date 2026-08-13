@@ -35,8 +35,11 @@ knowledge-core = { workspace = true }
 module-name = "personal_os"
 
 [tool.pytest.ini_options]
-addopts = ["--strict-config", "--strict-markers"]
+addopts = ["--strict-config", "--strict-markers", "--import-mode=importlib"]
 testpaths = ["tests"]
+markers = [
+  "local_stack: requires a reachable Linux Docker Engine and may create disposable containers and volumes",
+]
 
 [tool.ruff]
 target-version = "py314"
@@ -94,7 +97,7 @@ cmd = "mypy src apps/api/src apps/mcp/src apps/worker/src tools"
 shell = "pnpm run type-check"
 
 [tool.poe.tasks.python-test]
-cmd = "pytest --cov --cov-report=term-missing"
+cmd = "pytest -m 'not local_stack' --cov --cov-report=term-missing"
 
 [tool.poe.tasks.typescript-test]
 shell = "pnpm run test"

@@ -2055,15 +2055,511 @@ def test_cli_verify_success_has_fixed_redacted_json_schema(
     )
 
 
-def test_cli_smoke_is_reserved_for_task_seven(capsys: pytest.CaptureFixture[str]) -> None:
-    assert stack_module.main(["smoke"]) == 70
+def test_cli_smoke_requires_explicit_project_confirmation(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("CI", "true")
+
+    assert stack_module.main(["smoke", "--project-name", "knowledge-ci-unit"]) == 2
 
     captured = capsys.readouterr()
     assert captured.err == ""
     assert json.loads(captured.out) == {
-        "result_code": "smoke_not_implemented",
+        "result_code": "invalid_cli",
         "state": "error",
     }
+
+
+@pytest.fixture
+def ci_stack_context(stack_context: Any) -> Any:
+    return stack_module.StackContext(
+        stack_context.paths,
+        "knowledge-ci-unit",
+        stack_context.ports,
+        {**stack_context.environment, "CI": "true"},
+    )
+
+
+class _RecordingSmokeOperations:
+    def __init__(self, events: list[str], *, fail_at: str | None = None) -> None:
+        self._events = events
+        self._fail_at = fail_at
+        self._up_count = 0
+        self._verify_count = 0
+
+    def _record(self, event: str) -> None:
+        self._events.append(event)
+        if event == self._fail_at:
+            raise StackFailure(StackExitCode.READINESS, "fixed_smoke_failure")
+
+    def reset_before(self, context: Any) -> None:
+        del context
+        self._record("reset-before")
+
+    def bootstrap(self, context: Any) -> None:
+        del context
+        self._record("bootstrap")
+
+    def config(self, context: Any) -> None:
+        del context
+        self._record("config")
+
+    def up(self, context: Any) -> None:
+        del context
+        self._up_count += 1
+        self._record(("up-first", "up-second", "up-idempotent")[self._up_count - 1])
+
+    def verify(self, context: Any) -> None:
+        del context
+        self._verify_count += 1
+        self._record(
+            ("verify-first", "verify-second", "verify-idempotent")[self._verify_count - 1]
+        )
+
+    def new_markers(self, context: Any) -> object:
+        del context
+        return object()
+
+    def create_markers(self, context: Any, markers: object) -> None:
+        del context, markers
+        self._record("create-markers")
+
+    def down_preserve(self, context: Any) -> None:
+        del context
+        self._record("down-preserve")
+
+    def verify_markers(self, context: Any, markers: object) -> None:
+        del context, markers
+        self._record("verify-markers")
+
+    def stop_redis(self, context: Any) -> None:
+        del context
+        self._record("stop-redis")
+
+    def verify_outage(self, context: Any) -> None:
+        del context
+        self._record("verify-outage")
+
+    def start_redis(self, context: Any) -> None:
+        del context
+        self._record("start-redis")
+
+    def verify_recovery(self, context: Any) -> None:
+        del context
+        self._record("verify-recovery")
+
+    def remove_markers(self, context: Any, markers: object) -> None:
+        del context, markers
+        self._record("remove-markers")
+
+    def reset_after(self, context: Any) -> None:
+        del context
+        self._record("reset-after")
+
+
+def test_smoke_runs_exact_contract_order(ci_stack_context: Any) -> None:
+    events: list[str] = []
+    run_smoke_contract = getattr(stack_module, "run_smoke_contract", None)
+    assert callable(run_smoke_contract), "smoke orchestration is absent"
+
+    run_smoke_contract(ci_stack_context, operations=_RecordingSmokeOperations(events))
+
+    assert events == [
+        "reset-before",
+        "bootstrap",
+        "config",
+        "up-first",
+        "verify-first",
+        "create-markers",
+        "down-preserve",
+        "up-second",
+        "verify-second",
+        "verify-markers",
+        "up-idempotent",
+        "verify-idempotent",
+        "stop-redis",
+        "verify-outage",
+        "start-redis",
+        "verify-recovery",
+        "remove-markers",
+        "reset-after",
+    ]
+
+
+def test_smoke_finally_resets_after_mid_run_failure(ci_stack_context: Any) -> None:
+    events: list[str] = []
+    run_smoke_contract = getattr(stack_module, "run_smoke_contract", None)
+    assert callable(run_smoke_contract), "smoke orchestration is absent"
+
+    with pytest.raises(StackFailure):
+        run_smoke_contract(
+            ci_stack_context,
+            operations=_RecordingSmokeOperations(events, fail_at="verify-markers"),
+        )
+
+    assert events[-1] == "reset-after"
+
+
+def test_smoke_restarts_redis_before_cleanup_when_outage_assertion_fails(
+    ci_stack_context: Any,
+) -> None:
+    events: list[str] = []
+
+    with pytest.raises(StackFailure):
+        stack_module.run_smoke_contract(
+            ci_stack_context,
+            operations=_RecordingSmokeOperations(events, fail_at="verify-outage"),
+        )
+
+    assert events[-5:] == [
+        "stop-redis",
+        "verify-outage",
+        "start-redis",
+        "remove-markers",
+        "reset-after",
+    ]
+
+
+def test_smoke_removes_partial_marker_set_before_final_reset(
+    ci_stack_context: Any,
+) -> None:
+    events: list[str] = []
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.run_smoke_contract(
+            ci_stack_context,
+            operations=_RecordingSmokeOperations(events, fail_at="create-markers"),
+        )
+
+    assert str(raised.value) == "fixed_smoke_failure"
+    assert events[-3:] == ["create-markers", "remove-markers", "reset-after"]
+
+
+def test_smoke_is_ci_only(stack_context: Any) -> None:
+    events: list[str] = []
+    run_smoke_contract = getattr(stack_module, "run_smoke_contract", None)
+    assert callable(run_smoke_contract), "smoke orchestration is absent"
+
+    with pytest.raises(StackFailure) as raised:
+        run_smoke_contract(stack_context, operations=_RecordingSmokeOperations(events))
+
+    assert raised.value.exit_code is StackExitCode.CLI
+    assert events == []
+
+
+def _smoke_marker_runner(
+    calls: list[tuple[tuple[str, ...], float]],
+    *,
+    stage: str,
+    failing_service: str | None = None,
+) -> Any:
+    def run(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        del environment
+        command = tuple(arguments)
+        calls.append((command, timeout_seconds))
+        service = command[command.index("--no-TTY") + 1]
+        if service == failing_service:
+            return stack_module.CommandResult(1, "DO_NOT_LEAK", "DO_NOT_LEAK")
+        return stack_module.CommandResult(0, f"smoke_markers_{stage}\n", "")
+
+    return run
+
+
+def test_create_smoke_markers_uses_authenticated_in_container_clients_with_deadlines(
+    ci_stack_context: Any,
+) -> None:
+    calls: list[tuple[tuple[str, ...], float]] = []
+    create_markers = getattr(stack_module, "_create_smoke_markers", None)
+    assert callable(create_markers), "authenticated marker creation is absent"
+
+    markers = create_markers(
+        ci_stack_context,
+        runner=_smoke_marker_runner(calls, stage="created"),
+        token_bytes=lambda count: bytes(range(count)),
+    )
+
+    assert markers == stack_module.SmokeMarkerSet(
+        marker_key="000102030405060708090a0b",
+        qdrant_collection="stack_smoke_marker_000102030405060708090a0b",
+        qdrant_point_id=1,
+        redis_key="stack:smoke:000102030405060708090a0b",
+    )
+    assert {command[command.index("--no-TTY") + 1] for command, _ in calls} == {
+        "postgresql",
+        "qdrant",
+        "neo4j",
+        "redis",
+    }
+    assert all(0 < timeout_seconds <= 10 for _, timeout_seconds in calls)
+    scripts = {command[command.index("--no-TTY") + 1]: command[-1] for command, _ in calls}
+    assert "postgres_application_password" in scripts["postgresql"]
+    assert "qdrant_config.yaml" in scripts["qdrant"]
+    assert "neo4j_auth" in scripts["neo4j"]
+    assert "redis_acl" in scripts["redis"]
+    assert all("DO_NOT_LEAK" not in part for command, _ in calls for part in command)
+
+
+@pytest.mark.parametrize("failing_service", ["qdrant", "neo4j", "redis"])
+def test_partial_marker_creation_rolls_back_all_exact_marker_types(
+    ci_stack_context: Any,
+    failing_service: str,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        del timeout_seconds, environment
+        command = tuple(arguments)
+        service = command[command.index("--no-TTY") + 1]
+        script = command[-1]
+        stage = "remove" if "smoke_markers_removed" in script else "create"
+        calls.append((stage, service))
+        if stage == "create" and service == failing_service:
+            return stack_module.CommandResult(1, "DO_NOT_LEAK", "DO_NOT_LEAK")
+        return stack_module.CommandResult(0, f"smoke_markers_{stage}d\n", "")
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module._create_smoke_markers(
+            ci_stack_context,
+            runner=runner,
+            token_bytes=lambda count: bytes(range(count)),
+        )
+
+    assert str(raised.value) == "smoke_marker_create_failed"
+    assert calls[-4:] == [
+        ("remove", "postgresql"),
+        ("remove", "qdrant"),
+        ("remove", "neo4j"),
+        ("remove", "redis"),
+    ]
+
+
+def test_verify_smoke_markers_maps_dependency_output_to_fixed_failure(
+    ci_stack_context: Any,
+) -> None:
+    calls: list[tuple[tuple[str, ...], float]] = []
+    verify_markers = getattr(stack_module, "_verify_smoke_markers", None)
+    assert callable(verify_markers), "authenticated marker verification is absent"
+    markers = stack_module.SmokeMarkerSet(
+        marker_key="a" * 24,
+        qdrant_collection=f"stack_smoke_marker_{'a' * 24}",
+        qdrant_point_id=1,
+        redis_key=f"stack:smoke:{'a' * 24}",
+    )
+
+    with pytest.raises(StackFailure) as raised:
+        verify_markers(
+            ci_stack_context,
+            markers,
+            runner=_smoke_marker_runner(calls, stage="verified", failing_service="qdrant"),
+        )
+
+    assert raised.value.exit_code is StackExitCode.READINESS
+    assert str(raised.value) == "smoke_marker_verify_failed"
+    assert "DO_NOT_LEAK" not in str(raised.value)
+
+
+def test_remove_smoke_markers_deletes_all_four_exact_marker_types(
+    ci_stack_context: Any,
+) -> None:
+    calls: list[tuple[tuple[str, ...], float]] = []
+    remove_markers = getattr(stack_module, "_remove_smoke_markers", None)
+    assert callable(remove_markers), "authenticated marker cleanup is absent"
+    markers = stack_module.SmokeMarkerSet(
+        marker_key="b" * 24,
+        qdrant_collection=f"stack_smoke_marker_{'b' * 24}",
+        qdrant_point_id=1,
+        redis_key=f"stack:smoke:{'b' * 24}",
+    )
+
+    remove_markers(
+        ci_stack_context,
+        markers,
+        runner=_smoke_marker_runner(calls, stage="removed"),
+    )
+
+    assert [command[command.index("--no-TTY") + 1] for command, _ in calls] == [
+        "postgresql",
+        "qdrant",
+        "neo4j",
+        "redis",
+    ]
+
+
+def test_verify_reports_stopped_redis_as_redis_contract_failure(stack_context: Any) -> None:
+    stopped_rows = json.loads(_healthy_ps_output())
+    for row in stopped_rows:
+        if row["Service"] == "redis":
+            row.update({"State": "exited", "Health": "", "ExitCode": 0})
+    base_runner = _semantic_probe_runner(failing_service="redis")
+
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        command = tuple(arguments)
+        if "ps" in command:
+            return stack_module.CommandResult(0, json.dumps(stopped_rows), "")
+        return base_runner(
+            arguments,
+            timeout_seconds=timeout_seconds,
+            environment=environment,
+        )
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.verify_stack(stack_context, runner=runner)
+
+    assert raised.value.exit_code is StackExitCode.READINESS
+    assert str(raised.value) == "redis_contract_failed"
+
+
+def test_cli_smoke_runs_contract_with_exact_ci_confirmation(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    observed_projects: list[str] = []
+
+    def smoke(context: Any, *, runner: Any) -> None:
+        del runner
+        observed_projects.append(context.project_name)
+
+    monkeypatch.setattr(stack_module, "run_smoke_contract", smoke)
+    monkeypatch.setenv("CI", "true")
+
+    assert (
+        stack_module.main(
+            [
+                "smoke",
+                "--project-name",
+                "knowledge-ci-unit",
+                "--confirm-project",
+                "knowledge-ci-unit",
+            ]
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out) == {
+        "project": "knowledge-ci-unit",
+        "result_code": "stack_smoke_complete",
+        "state": "absent",
+    }
+    assert observed_projects == ["knowledge-ci-unit"]
+
+
+def test_smoke_redis_stop_and_start_are_exact_bounded_compose_operations(
+    ci_stack_context: Any,
+) -> None:
+    calls: list[tuple[tuple[str, ...], float]] = []
+    stop_redis = getattr(stack_module, "_stop_smoke_redis", None)
+    start_redis = getattr(stack_module, "_start_smoke_redis", None)
+    assert callable(stop_redis), "bounded Redis outage operation is absent"
+    assert callable(start_redis), "bounded Redis recovery operation is absent"
+
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        del environment
+        command = tuple(arguments)
+        calls.append((command, timeout_seconds))
+        if "ps" in command:
+            return stack_module.CommandResult(0, _healthy_ps_output(), "")
+        return stack_module.CommandResult(0, "", "")
+
+    stop_redis(ci_stack_context, runner=runner)
+    start_redis(ci_stack_context, runner=runner)
+
+    prefix = tuple(stack_module.compose_arguments(ci_stack_context))
+    assert ((*prefix, "stop", "--timeout", "15", "redis"), 30.0) in calls
+    assert ((*prefix, "start", "redis"), 30.0) in calls
+    assert all("reset" not in command and "down" not in command for command, _ in calls)
+    assert all(0 < timeout_seconds <= 30 for _, timeout_seconds in calls)
+
+
+def test_smoke_outage_requires_fixed_redis_readiness_failure(ci_stack_context: Any) -> None:
+    verify_outage = getattr(stack_module, "_verify_smoke_redis_outage", None)
+    assert callable(verify_outage), "Redis outage assertion is absent"
+    stopped_rows = json.loads(_healthy_ps_output())
+    for row in stopped_rows:
+        if row["Service"] == "redis":
+            row.update({"State": "exited", "Health": "", "ExitCode": 0})
+    base_runner = _semantic_probe_runner(failing_service="redis")
+
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        command = tuple(arguments)
+        if "ps" in command:
+            return stack_module.CommandResult(0, json.dumps(stopped_rows), "")
+        return base_runner(
+            arguments,
+            timeout_seconds=timeout_seconds,
+            environment=environment,
+        )
+
+    verify_outage(ci_stack_context, runner=runner)
+
+
+def test_smoke_cleanup_inventory_uses_only_exact_project_label(
+    ci_stack_context: Any,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    assert_cleanup = getattr(stack_module, "_assert_smoke_project_absent", None)
+    assert callable(assert_cleanup), "exact final Docker inventory assertion is absent"
+
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        del timeout_seconds, environment
+        calls.append(tuple(arguments))
+        return stack_module.CommandResult(0, "", "")
+
+    assert_cleanup(ci_stack_context, runner=runner)
+
+    expected_filter = "label=com.docker.compose.project=knowledge-ci-unit"
+    assert calls == [
+        ("docker", "container", "ls", "--all", "--quiet", "--filter", expected_filter),
+        ("docker", "network", "ls", "--quiet", "--filter", expected_filter),
+        ("docker", "volume", "ls", "--quiet", "--filter", expected_filter),
+    ]
+
+
+def test_default_smoke_cleanup_rejects_changed_complete_secret_set(
+    monkeypatch: pytest.MonkeyPatch, ci_stack_context: Any
+) -> None:
+    default_operations = getattr(stack_module, "_DefaultSmokeOperations", None)
+    assert default_operations is not None, "default smoke operations are absent"
+    monkeypatch.setattr(stack_module, "reset_stack", lambda *args, **kwargs: {})
+
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        del arguments, timeout_seconds, environment
+        return stack_module.CommandResult(0, "", "")
+
+    operations = default_operations(runner)
+    operations.bootstrap(ci_stack_context)
+    secret_path = ci_stack_context.paths.secret_directory / "redis_application_password"
+    original = secret_path.read_text(encoding="ascii")
+    secret_path.write_text(f"{original}x", encoding="ascii")
+
+    with pytest.raises(StackFailure) as raised:
+        operations.reset_after(ci_stack_context)
+
+    assert raised.value.exit_code is StackExitCode.CONTRACT
+    assert str(raised.value) == "smoke_secret_set_changed"
+
+
+def test_smoke_idempotent_up_reuses_ports_owned_by_verified_project(
+    monkeypatch: pytest.MonkeyPatch, ci_stack_context: Any
+) -> None:
+    repeat_up = getattr(stack_module, "_repeat_smoke_stack_up", None)
+    assert callable(repeat_up), "already-running smoke startup is absent"
+    calls: list[tuple[tuple[str, ...], float, dict[str, str]]] = []
+
+    def reject_port_recheck(ports: Any) -> None:
+        del ports
+        pytest.fail("an already-running verified project owns its published ports")
+
+    monkeypatch.setattr(stack_module, "validate_port_availability", reject_port_recheck)
+
+    repeat_up(ci_stack_context, runner=_successful_lifecycle_runner(calls))
+
+    compose_prefix = tuple(stack_module.compose_arguments(ci_stack_context))
+    assert any(
+        command[: len(compose_prefix)] == compose_prefix and "up" in command
+        for command, _, _ in calls
+    )
+    assert any(_semantic_probe_service(command) is not None for command, _, _ in calls)
 
 
 @pytest.mark.parametrize("exit_code", [0, 2, 64, 65, 69, 70, 75])
