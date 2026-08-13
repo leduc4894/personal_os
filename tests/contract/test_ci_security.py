@@ -404,9 +404,7 @@ def _canonical_postgresql_cleanup_is_always_gated(text: str) -> bool:
         "docker container ls -a --filter",
         "docker network ls --filter",
         "docker volume ls --filter",
-        '[[ -n "$remaining_containers"'
-        ' || -n "$remaining_networks"'
-        ' || -n "$remaining_volumes" ]]',
+        '[[ -n "$remaining_containers" || -n "$remaining_networks" || -n "$remaining_volumes" ]]',
     )
     return all(token in cleanup for token in required_tokens)
 
@@ -467,9 +465,7 @@ def test_canonical_postgresql_windows_static_job_is_purely_static() -> None:
         "uv run mypy migrations",
         'python-version: "3.14.6"',
     ):
-        assert required_command in static_job, (
-            f"windows-static job is missing {required_command!r}"
-        )
+        assert required_command in static_job, f"windows-static job is missing {required_command!r}"
     assert "docker" not in static_job.lower(), (
         "the Windows job must stay static and never install or start Docker"
     )

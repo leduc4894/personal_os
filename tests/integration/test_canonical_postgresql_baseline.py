@@ -299,8 +299,14 @@ def _build_alembic_environment(port: int) -> dict[str, str]:
 
 def _run_stack_steps(project_name: str) -> None:
     steps: tuple[tuple[str, ...], ...] = (
-        ("reset", "--project-name", project_name, "--confirm-project", project_name,
-         "--non-interactive"),
+        (
+            "reset",
+            "--project-name",
+            project_name,
+            "--confirm-project",
+            project_name,
+            "--non-interactive",
+        ),
         ("bootstrap", "--project-name", project_name),
         ("config", "--project-name", project_name),
         ("up", "--project-name", project_name),
@@ -361,8 +367,16 @@ def baseline_stack() -> Iterator[BaselineStack]:
             connection.close()
         _run_gated_downgrade_if_at_head(alembic_env)
         with suppress(Exception):
-            main(["reset", "--project-name", project_name, "--confirm-project",
-                  project_name, "--non-interactive"])
+            main(
+                [
+                    "reset",
+                    "--project-name",
+                    project_name,
+                    "--confirm-project",
+                    project_name,
+                    "--non-interactive",
+                ]
+            )
         _assert_project_absent(project_name)
 
 
@@ -482,9 +496,7 @@ def _names(conn: psycopg.Connection[Any], sql: str) -> frozenset[str]:
 
 
 def _assert_exact_object_set(conn: psycopg.Connection[Any]) -> None:
-    tables = _names(
-        conn, "SELECT tablename FROM pg_tables WHERE schemaname = 'knowledge'"
-    )
+    tables = _names(conn, "SELECT tablename FROM pg_tables WHERE schemaname = 'knowledge'")
     assert tables == _EXPECTED_TABLES, f"unexpected tables: {tables ^ _EXPECTED_TABLES}"
 
     functions = _names(
@@ -514,9 +526,7 @@ def _assert_exact_object_set(conn: psycopg.Connection[Any]) -> None:
     for table in _EXPECTED_TABLES:
         assert f"pk_{table}" in constraint_names, f"missing primary key for {table}"
 
-    index_names = _names(
-        conn, "SELECT indexname FROM pg_indexes WHERE schemaname = 'knowledge'"
-    )
+    index_names = _names(conn, "SELECT indexname FROM pg_indexes WHERE schemaname = 'knowledge'")
     for name in index_names:
         assert _INDEX_NAME_PATTERN.match(name), f"index name breaks grammar: {name}"
     assert index_names >= _EXPECTED_INDEXES, "missing documented query indexes"
@@ -538,18 +548,23 @@ def _assert_exact_object_set(conn: psycopg.Connection[Any]) -> None:
 
 def _assert_ownership_grants_and_data_minimization(conn: psycopg.Connection[Any]) -> None:
     # Owners: schema, every table and every function owned by knowledge_app.
-    assert _scalar(
-        conn,
-        "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'knowledge'",
-    ) == _APPLICATION_USER
+    assert (
+        _scalar(
+            conn,
+            "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'knowledge'",
+        )
+        == _APPLICATION_USER
+    )
     table_owners = {
-        row[0] for row in _rows(
+        row[0]
+        for row in _rows(
             conn, "SELECT DISTINCT tableowner FROM pg_tables WHERE schemaname = 'knowledge'"
         )
     }
     assert table_owners == {_APPLICATION_USER}, f"unexpected table owners: {table_owners}"
     function_owners = {
-        row[0] for row in _rows(
+        row[0]
+        for row in _rows(
             conn,
             "SELECT DISTINCT pg_get_userbyid(proowner) FROM pg_proc p "
             "JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'knowledge'",
@@ -572,9 +587,7 @@ def _assert_ownership_grants_and_data_minimization(conn: psycopg.Connection[Any]
         "SELECT table_name, privilege_type FROM information_schema.table_privileges "
         "WHERE table_schema = 'knowledge' AND grantee = 'PUBLIC'",
     )
-    assert not public_table_privileges, (
-        f"PUBLIC holds table privileges: {public_table_privileges}"
-    )
+    assert not public_table_privileges, f"PUBLIC holds table privileges: {public_table_privileges}"
 
     # PUBLIC holds no routine/function privilege on application objects. The
     # migration revokes the default EXECUTE grant the engine adds at function
@@ -603,8 +616,7 @@ def _assert_ownership_grants_and_data_minimization(conn: psycopg.Connection[Any]
         row[0]
         for row in _rows(
             conn,
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_schema = 'knowledge'",
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = 'knowledge'",
         )
         if _FORBIDDEN_COLUMN_PATTERN.search(row[0])
     )
@@ -623,8 +635,7 @@ def _assert_ownership_grants_and_data_minimization(conn: psycopg.Connection[Any]
 
 
 _INSERT_USER_SQL = (
-    "INSERT INTO knowledge.users (user_id, username, display_name) "
-    "VALUES (%s, 'owner', 'Owner')"
+    "INSERT INTO knowledge.users (user_id, username, display_name) VALUES (%s, 'owner', 'Owner')"
 )
 _INSERT_WORKSPACE_SQL = (
     "INSERT INTO knowledge.workspaces "
@@ -702,8 +713,14 @@ def _insert_valid_graph(conn: psycopg.Connection[Any]) -> None:
         cursor.execute(_ACTIVATE_SOURCE_SQL, (_SOURCE_VERSION_ID, _SOURCE_ID))
         cursor.execute(
             _INSERT_SYNC_EVENT_SQL,
-            (_EVENT_ID, _WORKSPACE_ID, _SOURCE_ID, _DEVICE_ID, _SOURCE_VERSION_ID,
-             _REQUEST_FINGERPRINT),
+            (
+                _EVENT_ID,
+                _WORKSPACE_ID,
+                _SOURCE_ID,
+                _DEVICE_ID,
+                _SOURCE_VERSION_ID,
+                _REQUEST_FINGERPRINT,
+            ),
         )
         cursor.execute(
             _INSERT_QDRANT_INTENT_SQL,
@@ -758,8 +775,13 @@ def _assert_allowed_behaviors(conn: psycopg.Connection[Any]) -> None:
             (_INSERT_SOURCE_PENDING_SQL, (_ALT_SOURCE_ID, _WORKSPACE_ID)),
             (
                 _INSERT_SOURCE_VERSION_SQL,
-                (_ALT_SOURCE_VERSION_ID, _WORKSPACE_ID, _ALT_SOURCE_ID, _CONTENT_OBJECT_ID,
-                 _USER_ID),
+                (
+                    _ALT_SOURCE_VERSION_ID,
+                    _WORKSPACE_ID,
+                    _ALT_SOURCE_ID,
+                    _CONTENT_OBJECT_ID,
+                    _USER_ID,
+                ),
             ),
         ],
     )
@@ -773,8 +795,14 @@ def _assert_allowed_behaviors(conn: psycopg.Connection[Any]) -> None:
                 "(source_version_id, workspace_id, source_id, content_object_id, "
                 "content_version, parent_version_id, author_kind, author_id) "
                 "VALUES (%s, %s, %s, %s, 2, %s, 'user', %s)",
-                (_ALT_VERSION_TWO_ID, _WORKSPACE_ID, _SOURCE_ID, _CONTENT_OBJECT_ID,
-                 _SOURCE_VERSION_ID, _USER_ID),
+                (
+                    _ALT_VERSION_TWO_ID,
+                    _WORKSPACE_ID,
+                    _SOURCE_ID,
+                    _CONTENT_OBJECT_ID,
+                    _SOURCE_VERSION_ID,
+                    _USER_ID,
+                ),
             ),
         ],
     )
@@ -809,8 +837,13 @@ def _assert_allowed_behaviors(conn: psycopg.Connection[Any]) -> None:
                 "(projection_intent_id, workspace_id, event_id, source_id, source_version_id, "
                 "projection_kind, operation) "
                 "VALUES (%s, %s, %s, %s, %s, 'qdrant', 'delete')",
-                (_DELETE_INTENT_ID, _WORKSPACE_ID, _DELETE_EVENT_ID, _SOURCE_ID,
-                 _SOURCE_VERSION_ID),
+                (
+                    _DELETE_INTENT_ID,
+                    _WORKSPACE_ID,
+                    _DELETE_EVENT_ID,
+                    _SOURCE_ID,
+                    _SOURCE_VERSION_ID,
+                ),
             ),
         ],
     )
@@ -888,8 +921,7 @@ _SHORT_KEY: str = f"objects/sha256/{_SHORT_HASH[:2]}/{_SHORT_HASH[2:4]}/{_SHORT_
 _MISMATCH_OBJECT_KEY: str = f"objects/sha256/zz/zz/{_NEG_CONTENT_HASH}"
 
 _INSERT_SETUP_USER_SQL = (
-    "INSERT INTO knowledge.users (user_id, username, display_name) "
-    "VALUES (%s, %s, 'Setup User')"
+    "INSERT INTO knowledge.users (user_id, username, display_name) VALUES (%s, %s, 'Setup User')"
 )
 _INSERT_SETUP_WORKSPACE_SQL = (
     "INSERT INTO knowledge.workspaces "
@@ -979,13 +1011,28 @@ def _audit_insert_sql(
 ) -> tuple[str, tuple[Any, ...]]:
     """Build a parameterized audit_events INSERT from the given field overrides."""
     columns: list[str] = [
-        "audit_event_id", "workspace_id", "actor_kind", "actor_id",
-        "actor_reference", "action", "target_kind", "target_id",
-        "request_id", "result",
+        "audit_event_id",
+        "workspace_id",
+        "actor_kind",
+        "actor_id",
+        "actor_reference",
+        "action",
+        "target_kind",
+        "target_id",
+        "request_id",
+        "result",
     ]
     values: list[Any] = [
-        audit_event_id, _WORKSPACE_ID, actor_kind, actor_id, actor_reference,
-        action, target_kind, _SOURCE_VERSION_ID, _REQUEST_ID, result,
+        audit_event_id,
+        _WORKSPACE_ID,
+        actor_kind,
+        actor_id,
+        actor_reference,
+        action,
+        target_kind,
+        _SOURCE_VERSION_ID,
+        _REQUEST_ID,
+        result,
     ]
     for column_name, value in (
         ("reason_code", reason_code),
@@ -996,10 +1043,7 @@ def _audit_insert_sql(
             columns.append(column_name)
             values.append(value)
     placeholders = ", ".join(["%s"] * len(values))
-    statement = (
-        f"INSERT INTO knowledge.audit_events ({', '.join(columns)}) "
-        f"VALUES ({placeholders})"
-    )
+    statement = f"INSERT INTO knowledge.audit_events ({', '.join(columns)}) VALUES ({placeholders})"
     return statement, tuple(values)
 
 
@@ -1018,13 +1062,26 @@ def _intent_insert_sql(
 ) -> tuple[str, tuple[Any, ...]]:
     """Build a parameterized projection_intents INSERT from field overrides."""
     columns: list[str] = [
-        "projection_intent_id", "workspace_id", "event_id", "source_id",
-        "source_version_id", "projection_kind", "operation", "status",
+        "projection_intent_id",
+        "workspace_id",
+        "event_id",
+        "source_id",
+        "source_version_id",
+        "projection_kind",
+        "operation",
+        "status",
         "attempt_count",
     ]
     values: list[Any] = [
-        projection_intent_id, _WORKSPACE_ID, event_id, source_id,
-        source_version_id, projection_kind, operation, status, attempt_count,
+        projection_intent_id,
+        _WORKSPACE_ID,
+        event_id,
+        source_id,
+        source_version_id,
+        projection_kind,
+        operation,
+        status,
+        attempt_count,
     ]
     for column_name, value in (
         ("lease_token", lease_token),
@@ -1035,8 +1092,7 @@ def _intent_insert_sql(
             values.append(value)
     placeholders = ", ".join(["%s"] * len(values))
     statement = (
-        f"INSERT INTO knowledge.projection_intents ({', '.join(columns)}) "
-        f"VALUES ({placeholders})"
+        f"INSERT INTO knowledge.projection_intents ({', '.join(columns)}) VALUES ({placeholders})"
     )
     return statement, tuple(values)
 
@@ -1071,8 +1127,7 @@ def _assert_identity_and_ownership_invariants(conn: psycopg.Connection[Any]) -> 
     # Duplicate username / workspace owner / workspace key.
     _assert_rejected(
         conn,
-        "INSERT INTO knowledge.users (user_id, username, display_name) "
-        "VALUES (%s, 'owner', 'Dup')",
+        "INSERT INTO knowledge.users (user_id, username, display_name) VALUES (%s, 'owner', 'Dup')",
         (_BAD_USER_ID,),
         expected_sqlstate=_UNIQUE_VIOLATION,
     )
@@ -1187,22 +1242,19 @@ def _assert_content_and_source_version_invariants(conn: psycopg.Connection[Any])
     _assert_rejected(
         conn,
         content_insert,
-        (_BAD_CONTENT_OBJECT_ID, _UPPER_HEX_HASH, _UPPER_HEX_KEY, 42,
-         "text/markdown"),
+        (_BAD_CONTENT_OBJECT_ID, _UPPER_HEX_HASH, _UPPER_HEX_KEY, 42, "text/markdown"),
         expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
         conn,
         content_insert,
-        (_BAD_CONTENT_OBJECT_ID, _SHORT_HASH, _SHORT_KEY, 42,
-         "text/markdown"),
+        (_BAD_CONTENT_OBJECT_ID, _SHORT_HASH, _SHORT_KEY, 42, "text/markdown"),
         expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
         conn,
         content_insert,
-        (_BAD_CONTENT_OBJECT_ID, _NEG_CONTENT_HASH, _MISMATCH_OBJECT_KEY, 42,
-         "text/markdown"),
+        (_BAD_CONTENT_OBJECT_ID, _NEG_CONTENT_HASH, _MISMATCH_OBJECT_KEY, 42, "text/markdown"),
         expected_sqlstate=_CHECK_VIOLATION,
     )
 
@@ -1210,29 +1262,31 @@ def _assert_content_and_source_version_invariants(conn: psycopg.Connection[Any])
     _assert_rejected(
         conn,
         content_insert,
-        (_BAD_CONTENT_OBJECT_ID, _NEG_CONTENT_HASH, _NEG_CONTENT_OBJECT_KEY, -1,
-         "text/markdown"),
+        (_BAD_CONTENT_OBJECT_ID, _NEG_CONTENT_HASH, _NEG_CONTENT_OBJECT_KEY, -1, "text/markdown"),
         expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
         conn,
         content_insert,
-        (_BAD_CONTENT_OBJECT_ID, _NEG_CONTENT_HASH, _NEG_CONTENT_OBJECT_KEY, 42,
-         "text/markdown; charset=utf-8"),
+        (
+            _BAD_CONTENT_OBJECT_ID,
+            _NEG_CONTENT_HASH,
+            _NEG_CONTENT_OBJECT_KEY,
+            42,
+            "text/markdown; charset=utf-8",
+        ),
         expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
         conn,
         content_insert,
-        (_BAD_CONTENT_OBJECT_ID, _NEG_CONTENT_HASH, _NEG_CONTENT_OBJECT_KEY, 42,
-         "Text/Markdown"),
+        (_BAD_CONTENT_OBJECT_ID, _NEG_CONTENT_HASH, _NEG_CONTENT_OBJECT_KEY, 42, "Text/Markdown"),
         expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
         conn,
         content_insert,
-        (_BAD_CONTENT_OBJECT_ID, _NEG_CONTENT_HASH, _NEG_CONTENT_OBJECT_KEY, 42,
-         "notamimetype"),
+        (_BAD_CONTENT_OBJECT_ID, _NEG_CONTENT_HASH, _NEG_CONTENT_OBJECT_KEY, 42, "notamimetype"),
         expected_sqlstate=_CHECK_VIOLATION,
     )
 
@@ -1252,8 +1306,7 @@ def _assert_content_and_source_version_invariants(conn: psycopg.Connection[Any])
     _assert_rejected(
         conn,
         content_insert,
-        (_BAD_CONTENT_OBJECT_ID, _CONTENT_HASH, _CONTENT_OBJECT_KEY, 42,
-         "text/markdown"),
+        (_BAD_CONTENT_OBJECT_ID, _CONTENT_HASH, _CONTENT_OBJECT_KEY, 42, "text/markdown"),
         expected_sqlstate=_UNIQUE_VIOLATION,
     )
 
@@ -1306,8 +1359,13 @@ def _assert_content_and_source_version_invariants(conn: psycopg.Connection[Any])
             (_INSERT_SETUP_SOURCE_PENDING_SQL, (_SETUP_SOURCE_ID, _WORKSPACE_ID)),
             (
                 _INSERT_SETUP_SOURCE_VERSION_SQL,
-                (_SETUP_SOURCE_VERSION_ID, _WORKSPACE_ID, _SETUP_SOURCE_ID,
-                 _CONTENT_OBJECT_ID, _USER_ID),
+                (
+                    _SETUP_SOURCE_VERSION_ID,
+                    _WORKSPACE_ID,
+                    _SETUP_SOURCE_ID,
+                    _CONTENT_OBJECT_ID,
+                    _USER_ID,
+                ),
             ),
         ],
     )
@@ -1323,8 +1381,13 @@ def _assert_content_and_source_version_invariants(conn: psycopg.Connection[Any])
             (_INSERT_SETUP_SOURCE_PENDING_SQL, (_SETUP_SOURCE_ID, _WORKSPACE_ID)),
             (
                 _INSERT_SETUP_SOURCE_VERSION_SQL,
-                (_SETUP_SOURCE_VERSION_ID, _WORKSPACE_ID, _SETUP_SOURCE_ID,
-                 _CONTENT_OBJECT_ID, _USER_ID),
+                (
+                    _SETUP_SOURCE_VERSION_ID,
+                    _WORKSPACE_ID,
+                    _SETUP_SOURCE_ID,
+                    _CONTENT_OBJECT_ID,
+                    _USER_ID,
+                ),
             ),
         ],
     )
@@ -1343,8 +1406,13 @@ def _assert_content_and_source_version_invariants(conn: psycopg.Connection[Any])
             (_INSERT_SETUP_SOURCE_PENDING_SQL, (_SETUP_SOURCE_ID, _SETUP_WORKSPACE_ID)),
             (
                 _INSERT_SETUP_SOURCE_VERSION_SQL,
-                (_SETUP_SOURCE_VERSION_ID, _SETUP_WORKSPACE_ID, _SETUP_SOURCE_ID,
-                 _CONTENT_OBJECT_ID, _SETUP_USER_ID),
+                (
+                    _SETUP_SOURCE_VERSION_ID,
+                    _SETUP_WORKSPACE_ID,
+                    _SETUP_SOURCE_ID,
+                    _CONTENT_OBJECT_ID,
+                    _SETUP_USER_ID,
+                ),
             ),
         ],
     )
@@ -1360,15 +1428,31 @@ def _assert_content_and_source_version_invariants(conn: psycopg.Connection[Any])
     _assert_rejected(
         conn,
         source_version_insert,
-        (_BAD_SOURCE_VERSION_ID, _WORKSPACE_ID, _SOURCE_ID, _CONTENT_OBJECT_ID,
-         1, None, "user", _USER_ID),
+        (
+            _BAD_SOURCE_VERSION_ID,
+            _WORKSPACE_ID,
+            _SOURCE_ID,
+            _CONTENT_OBJECT_ID,
+            1,
+            None,
+            "user",
+            _USER_ID,
+        ),
         expected_sqlstate=_UNIQUE_VIOLATION,
     )
     _assert_rejected(
         conn,
         source_version_insert,
-        (_BAD_SOURCE_VERSION_ID, _WORKSPACE_ID, _SOURCE_ID, _CONTENT_OBJECT_ID,
-         0, None, "user", _USER_ID),
+        (
+            _BAD_SOURCE_VERSION_ID,
+            _WORKSPACE_ID,
+            _SOURCE_ID,
+            _CONTENT_OBJECT_ID,
+            0,
+            None,
+            "user",
+            _USER_ID,
+        ),
         expected_sqlstate=_CHECK_VIOLATION,
     )
 
@@ -1376,23 +1460,44 @@ def _assert_content_and_source_version_invariants(conn: psycopg.Connection[Any])
     _assert_rejected(
         conn,
         source_version_insert,
-        (_BAD_SOURCE_VERSION_ID, _WORKSPACE_ID, _SOURCE_ID, _CONTENT_OBJECT_ID,
-         2, _SETUP_SOURCE_VERSION_ID, "user", _USER_ID),
+        (
+            _BAD_SOURCE_VERSION_ID,
+            _WORKSPACE_ID,
+            _SOURCE_ID,
+            _CONTENT_OBJECT_ID,
+            2,
+            _SETUP_SOURCE_VERSION_ID,
+            "user",
+            _USER_ID,
+        ),
         expected_sqlstate=_FOREIGN_KEY_VIOLATION,
         setup=[
             (_INSERT_SETUP_SOURCE_PENDING_SQL, (_SETUP_SOURCE_ID, _WORKSPACE_ID)),
             (
                 _INSERT_SETUP_SOURCE_VERSION_SQL,
-                (_SETUP_SOURCE_VERSION_ID, _WORKSPACE_ID, _SETUP_SOURCE_ID,
-                 _CONTENT_OBJECT_ID, _USER_ID),
+                (
+                    _SETUP_SOURCE_VERSION_ID,
+                    _WORKSPACE_ID,
+                    _SETUP_SOURCE_ID,
+                    _CONTENT_OBJECT_ID,
+                    _USER_ID,
+                ),
             ),
         ],
     )
     _assert_rejected(
         conn,
         source_version_insert,
-        (_BAD_SOURCE_VERSION_ID, _WORKSPACE_ID, _SOURCE_ID, _CONTENT_OBJECT_ID,
-         2, _SETUP_SOURCE_VERSION_ID, "user", _USER_ID),
+        (
+            _BAD_SOURCE_VERSION_ID,
+            _WORKSPACE_ID,
+            _SOURCE_ID,
+            _CONTENT_OBJECT_ID,
+            2,
+            _SETUP_SOURCE_VERSION_ID,
+            "user",
+            _USER_ID,
+        ),
         expected_sqlstate=_FOREIGN_KEY_VIOLATION,
         setup=[
             (_INSERT_SETUP_USER_SQL, (_SETUP_USER_ID, "setup-user")),
@@ -1403,16 +1508,29 @@ def _assert_content_and_source_version_invariants(conn: psycopg.Connection[Any])
             (_INSERT_SETUP_SOURCE_PENDING_SQL, (_SETUP_SOURCE_ID, _SETUP_WORKSPACE_ID)),
             (
                 _INSERT_SETUP_SOURCE_VERSION_SQL,
-                (_SETUP_SOURCE_VERSION_ID, _SETUP_WORKSPACE_ID, _SETUP_SOURCE_ID,
-                 _CONTENT_OBJECT_ID, _SETUP_USER_ID),
+                (
+                    _SETUP_SOURCE_VERSION_ID,
+                    _SETUP_WORKSPACE_ID,
+                    _SETUP_SOURCE_ID,
+                    _CONTENT_OBJECT_ID,
+                    _SETUP_USER_ID,
+                ),
             ),
         ],
     )
     _assert_rejected(
         conn,
         source_version_insert,
-        (_BAD_SOURCE_VERSION_ID, _WORKSPACE_ID, _SOURCE_ID, _CONTENT_OBJECT_ID,
-         2, _BAD_SOURCE_VERSION_ID, "user", _USER_ID),
+        (
+            _BAD_SOURCE_VERSION_ID,
+            _WORKSPACE_ID,
+            _SOURCE_ID,
+            _CONTENT_OBJECT_ID,
+            2,
+            _BAD_SOURCE_VERSION_ID,
+            "user",
+            _USER_ID,
+        ),
         expected_sqlstate=_CHECK_VIOLATION,
     )
 
@@ -1420,8 +1538,16 @@ def _assert_content_and_source_version_invariants(conn: psycopg.Connection[Any])
     _assert_rejected(
         conn,
         source_version_insert,
-        (_BAD_SOURCE_VERSION_ID, _WORKSPACE_ID, _SOURCE_ID, _RANDOM_UUID,
-         2, None, "user", _USER_ID),
+        (
+            _BAD_SOURCE_VERSION_ID,
+            _WORKSPACE_ID,
+            _SOURCE_ID,
+            _RANDOM_UUID,
+            2,
+            None,
+            "user",
+            _USER_ID,
+        ),
         expected_sqlstate=_FOREIGN_KEY_VIOLATION,
     )
 
@@ -1429,30 +1555,53 @@ def _assert_content_and_source_version_invariants(conn: psycopg.Connection[Any])
     _assert_rejected(
         conn,
         source_version_insert,
-        (_BAD_SOURCE_VERSION_ID, _WORKSPACE_ID, _SOURCE_ID, _CONTENT_OBJECT_ID,
-         2, None, "admin", _USER_ID),
+        (
+            _BAD_SOURCE_VERSION_ID,
+            _WORKSPACE_ID,
+            _SOURCE_ID,
+            _CONTENT_OBJECT_ID,
+            2,
+            None,
+            "admin",
+            _USER_ID,
+        ),
         expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
         conn,
         source_version_insert,
-        (_BAD_SOURCE_VERSION_ID, _WORKSPACE_ID, _SOURCE_ID, _CONTENT_OBJECT_ID,
-         2, None, "system", _USER_ID),
+        (
+            _BAD_SOURCE_VERSION_ID,
+            _WORKSPACE_ID,
+            _SOURCE_ID,
+            _CONTENT_OBJECT_ID,
+            2,
+            None,
+            "system",
+            _USER_ID,
+        ),
         expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
         conn,
         source_version_insert,
-        (_BAD_SOURCE_VERSION_ID, _WORKSPACE_ID, _SOURCE_ID, _CONTENT_OBJECT_ID,
-         2, None, "user", None),
+        (
+            _BAD_SOURCE_VERSION_ID,
+            _WORKSPACE_ID,
+            _SOURCE_ID,
+            _CONTENT_OBJECT_ID,
+            2,
+            None,
+            "user",
+            None,
+        ),
         expected_sqlstate=_CHECK_VIOLATION,
     )
 
     # Immutability: UPDATE of content_objects and source_versions.
     _assert_rejected(
         conn,
-        "UPDATE knowledge.content_objects SET byte_size = byte_size "
-        "WHERE content_object_id = %s",
+        "UPDATE knowledge.content_objects SET byte_size = byte_size WHERE content_object_id = %s",
         (_CONTENT_OBJECT_ID,),
         expected_sqlstate=_TRIGGER_PROTECTION,
         expected_message=_IMMUTABLE_MESSAGE,
@@ -1499,8 +1648,15 @@ def _assert_event_and_intent_invariants(conn: psycopg.Connection[Any]) -> None:
     _assert_rejected(
         conn,
         event_insert,
-        (_EVENT_ID, _WORKSPACE_ID, _SOURCE_ID, _DEVICE_ID, "dup-event-id",
-         _REQUEST_FINGERPRINT, "create"),
+        (
+            _EVENT_ID,
+            _WORKSPACE_ID,
+            _SOURCE_ID,
+            _DEVICE_ID,
+            "dup-event-id",
+            _REQUEST_FINGERPRINT,
+            "create",
+        ),
         expected_sqlstate=_UNIQUE_VIOLATION,
     )
 
@@ -1512,12 +1668,18 @@ def _assert_event_and_intent_invariants(conn: psycopg.Connection[Any]) -> None:
             with conn.cursor() as cursor:
                 cursor.execute(
                     event_insert,
-                    (_GEN_SEQUENCE_EVENT_ID, _WORKSPACE_ID, _SOURCE_ID, _DEVICE_ID,
-                     "generated-sequence", _REQUEST_FINGERPRINT, "create"),
+                    (
+                        _GEN_SEQUENCE_EVENT_ID,
+                        _WORKSPACE_ID,
+                        _SOURCE_ID,
+                        _DEVICE_ID,
+                        "generated-sequence",
+                        _REQUEST_FINGERPRINT,
+                        "create",
+                    ),
                 )
                 cursor.execute(
-                    "SELECT event_sequence FROM knowledge.sync_events "
-                    "WHERE event_id = %s",
+                    "SELECT event_sequence FROM knowledge.sync_events WHERE event_id = %s",
                     (_GEN_SEQUENCE_EVENT_ID,),
                 )
                 row = cursor.fetchone()
@@ -1534,8 +1696,15 @@ def _assert_event_and_intent_invariants(conn: psycopg.Connection[Any]) -> None:
     _assert_rejected(
         conn,
         event_insert,
-        (_BAD_EVENT_ID, _WORKSPACE_ID, _SOURCE_ID, _DEVICE_ID, "create-canonical-1",
-         _REQUEST_FINGERPRINT, "create"),
+        (
+            _BAD_EVENT_ID,
+            _WORKSPACE_ID,
+            _SOURCE_ID,
+            _DEVICE_ID,
+            "create-canonical-1",
+            _REQUEST_FINGERPRINT,
+            "create",
+        ),
         expected_sqlstate=_UNIQUE_VIOLATION,
     )
 
@@ -1543,8 +1712,15 @@ def _assert_event_and_intent_invariants(conn: psycopg.Connection[Any]) -> None:
     _assert_rejected(
         conn,
         event_insert,
-        (_BAD_EVENT_ID, _WORKSPACE_ID, _SOURCE_ID, _BAD_DEVICE_ID, "bad-device",
-         _REQUEST_FINGERPRINT, "create"),
+        (
+            _BAD_EVENT_ID,
+            _WORKSPACE_ID,
+            _SOURCE_ID,
+            _BAD_DEVICE_ID,
+            "bad-device",
+            _REQUEST_FINGERPRINT,
+            "create",
+        ),
         expected_sqlstate=_FOREIGN_KEY_VIOLATION,
     )
     _assert_rejected(
@@ -1553,15 +1729,26 @@ def _assert_event_and_intent_invariants(conn: psycopg.Connection[Any]) -> None:
         "(event_id, workspace_id, source_id, device_id, committed_version_id, "
         "idempotency_key, request_fingerprint, event_type) "
         "VALUES (%s, %s, %s, %s, %s, 'bad-committed', %s, 'create')",
-        (_BAD_EVENT_ID, _WORKSPACE_ID, _SOURCE_ID, _DEVICE_ID,
-         _SETUP_SOURCE_VERSION_ID, _REQUEST_FINGERPRINT),
+        (
+            _BAD_EVENT_ID,
+            _WORKSPACE_ID,
+            _SOURCE_ID,
+            _DEVICE_ID,
+            _SETUP_SOURCE_VERSION_ID,
+            _REQUEST_FINGERPRINT,
+        ),
         expected_sqlstate=_FOREIGN_KEY_VIOLATION,
         setup=[
             (_INSERT_SETUP_SOURCE_PENDING_SQL, (_SETUP_SOURCE_ID, _WORKSPACE_ID)),
             (
                 _INSERT_SETUP_SOURCE_VERSION_SQL,
-                (_SETUP_SOURCE_VERSION_ID, _WORKSPACE_ID, _SETUP_SOURCE_ID,
-                 _CONTENT_OBJECT_ID, _USER_ID),
+                (
+                    _SETUP_SOURCE_VERSION_ID,
+                    _WORKSPACE_ID,
+                    _SETUP_SOURCE_ID,
+                    _CONTENT_OBJECT_ID,
+                    _USER_ID,
+                ),
             ),
         ],
     )
@@ -1571,15 +1758,26 @@ def _assert_event_and_intent_invariants(conn: psycopg.Connection[Any]) -> None:
         "(event_id, workspace_id, source_id, device_id, base_version_id, "
         "idempotency_key, request_fingerprint, event_type) "
         "VALUES (%s, %s, %s, %s, %s, 'bad-base', %s, 'create')",
-        (_BAD_EVENT_ID, _WORKSPACE_ID, _SOURCE_ID, _DEVICE_ID,
-         _SETUP_SOURCE_VERSION_ID, _REQUEST_FINGERPRINT),
+        (
+            _BAD_EVENT_ID,
+            _WORKSPACE_ID,
+            _SOURCE_ID,
+            _DEVICE_ID,
+            _SETUP_SOURCE_VERSION_ID,
+            _REQUEST_FINGERPRINT,
+        ),
         expected_sqlstate=_FOREIGN_KEY_VIOLATION,
         setup=[
             (_INSERT_SETUP_SOURCE_PENDING_SQL, (_SETUP_SOURCE_ID, _WORKSPACE_ID)),
             (
                 _INSERT_SETUP_SOURCE_VERSION_SQL,
-                (_SETUP_SOURCE_VERSION_ID, _WORKSPACE_ID, _SETUP_SOURCE_ID,
-                 _CONTENT_OBJECT_ID, _USER_ID),
+                (
+                    _SETUP_SOURCE_VERSION_ID,
+                    _WORKSPACE_ID,
+                    _SETUP_SOURCE_ID,
+                    _CONTENT_OBJECT_ID,
+                    _USER_ID,
+                ),
             ),
         ],
     )
@@ -1588,22 +1786,43 @@ def _assert_event_and_intent_invariants(conn: psycopg.Connection[Any]) -> None:
     _assert_rejected(
         conn,
         event_insert,
-        (_BAD_EVENT_ID, _WORKSPACE_ID, _SOURCE_ID, _DEVICE_ID, "has space",
-         _REQUEST_FINGERPRINT, "create"),
+        (
+            _BAD_EVENT_ID,
+            _WORKSPACE_ID,
+            _SOURCE_ID,
+            _DEVICE_ID,
+            "has space",
+            _REQUEST_FINGERPRINT,
+            "create",
+        ),
         expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
         conn,
         event_insert,
-        (_BAD_EVENT_ID, _WORKSPACE_ID, _SOURCE_ID, _DEVICE_ID, "bad-fingerprint",
-         "ABC123", "create"),
+        (
+            _BAD_EVENT_ID,
+            _WORKSPACE_ID,
+            _SOURCE_ID,
+            _DEVICE_ID,
+            "bad-fingerprint",
+            "ABC123",
+            "create",
+        ),
         expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
         conn,
         event_insert,
-        (_BAD_EVENT_ID, _WORKSPACE_ID, _SOURCE_ID, _DEVICE_ID, "bad-type",
-         _REQUEST_FINGERPRINT, "purge"),
+        (
+            _BAD_EVENT_ID,
+            _WORKSPACE_ID,
+            _SOURCE_ID,
+            _DEVICE_ID,
+            "bad-type",
+            _REQUEST_FINGERPRINT,
+            "purge",
+        ),
         expected_sqlstate=_CHECK_VIOLATION,
     )
 
@@ -1639,18 +1858,26 @@ def _assert_event_and_intent_invariants(conn: psycopg.Connection[Any]) -> None:
 
     # Invalid projection kind / operation / status.
     _assert_intent_rejected(
-        conn, projection_kind="weaviate", expected_sqlstate=_CHECK_VIOLATION,
+        conn,
+        projection_kind="weaviate",
+        expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_intent_rejected(
-        conn, operation="merge", expected_sqlstate=_CHECK_VIOLATION,
+        conn,
+        operation="merge",
+        expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_intent_rejected(
-        conn, status="running", expected_sqlstate=_CHECK_VIOLATION,
+        conn,
+        status="running",
+        expected_sqlstate=_CHECK_VIOLATION,
     )
 
     # Negative attempt count and timestamp order.
     _assert_intent_rejected(
-        conn, attempt_count=-1, expected_sqlstate=_CHECK_VIOLATION,
+        conn,
+        attempt_count=-1,
+        expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
         conn,
@@ -1666,15 +1893,21 @@ def _assert_event_and_intent_invariants(conn: psycopg.Connection[Any]) -> None:
 
     # Upsert without version.
     _assert_intent_rejected(
-        conn, source_version_id=None, expected_sqlstate=_CHECK_VIOLATION,
+        conn,
+        source_version_id=None,
+        expected_sqlstate=_CHECK_VIOLATION,
     )
 
     # Lease fields inconsistent with status.
     _assert_intent_rejected(
-        conn, status="leased", expected_sqlstate=_CHECK_VIOLATION,
+        conn,
+        status="leased",
+        expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_intent_rejected(
-        conn, status="pending", lease_token=_BAD_DEVICE_ID,
+        conn,
+        status="pending",
+        lease_token=_BAD_DEVICE_ID,
         expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
@@ -1683,15 +1916,23 @@ def _assert_event_and_intent_invariants(conn: psycopg.Connection[Any]) -> None:
         "(projection_intent_id, workspace_id, event_id, source_id, source_version_id, "
         "projection_kind, operation, status, lease_token, leased_until) "
         "VALUES (%s, %s, %s, %s, %s, 'qdrant', 'upsert', 'leased', %s, CURRENT_TIMESTAMP)",
-        (_BAD_INTENT_ID, _WORKSPACE_ID, _SETUP_EVENT_ID, _SOURCE_ID, _SOURCE_VERSION_ID,
-         _BAD_DEVICE_ID),
+        (
+            _BAD_INTENT_ID,
+            _WORKSPACE_ID,
+            _SETUP_EVENT_ID,
+            _SOURCE_ID,
+            _SOURCE_VERSION_ID,
+            _BAD_DEVICE_ID,
+        ),
         expected_sqlstate=_CHECK_VIOLATION,
         setup=[_SETUP_EVENT_SETUP],
     )
 
     # Invalid dispatched fields.
     _assert_intent_rejected(
-        conn, status="dispatched", expected_sqlstate=_CHECK_VIOLATION,
+        conn,
+        status="dispatched",
+        expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
         conn,
@@ -1706,10 +1947,14 @@ def _assert_event_and_intent_invariants(conn: psycopg.Connection[Any]) -> None:
 
     # Terminal without error and unsafe error token.
     _assert_intent_rejected(
-        conn, status="terminal", expected_sqlstate=_CHECK_VIOLATION,
+        conn,
+        status="terminal",
+        expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_intent_rejected(
-        conn, status="terminal", last_error_code="Bad Code!",
+        conn,
+        status="terminal",
+        last_error_code="Bad Code!",
         expected_sqlstate=_CHECK_VIOLATION,
     )
 
@@ -1720,19 +1965,27 @@ def _assert_audit_invariants(conn: psycopg.Connection[Any]) -> None:
         conn,
         [
             _audit_insert_sql(
-                actor_kind="user", actor_id=_USER_ID, actor_reference=None,
+                actor_kind="user",
+                actor_id=_USER_ID,
+                actor_reference=None,
                 audit_event_id=_VALID_AUDIT_USER_ID,
             ),
             _audit_insert_sql(
-                actor_kind="device", actor_id=_DEVICE_ID, actor_reference=None,
+                actor_kind="device",
+                actor_id=_DEVICE_ID,
+                actor_reference=None,
                 audit_event_id=_VALID_AUDIT_DEVICE_ID,
             ),
             _audit_insert_sql(
-                actor_kind="system", actor_id=None, actor_reference=None,
+                actor_kind="system",
+                actor_id=None,
+                actor_reference=None,
                 audit_event_id=_VALID_AUDIT_SYSTEM_ID,
             ),
             _audit_insert_sql(
-                actor_kind="workflow", actor_id=None, actor_reference="github-actions",
+                actor_kind="workflow",
+                actor_id=None,
+                actor_reference="github-actions",
                 audit_event_id=_VALID_AUDIT_WORKFLOW_ID,
             ),
         ],
@@ -1740,22 +1993,23 @@ def _assert_audit_invariants(conn: psycopg.Connection[Any]) -> None:
 
     # Invalid actor combinations.
     _assert_rejected(
-        conn, *_audit_insert_sql(actor_kind="user", actor_id=None, actor_reference=None),
+        conn,
+        *_audit_insert_sql(actor_kind="user", actor_id=None, actor_reference=None),
         expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
         conn,
-        *_audit_insert_sql(
-            actor_kind="user", actor_id=_USER_ID, actor_reference="github-actions"
-        ),
+        *_audit_insert_sql(actor_kind="user", actor_id=_USER_ID, actor_reference="github-actions"),
         expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
-        conn, *_audit_insert_sql(actor_kind="device", actor_id=None, actor_reference=None),
+        conn,
+        *_audit_insert_sql(actor_kind="device", actor_id=None, actor_reference=None),
         expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
-        conn, *_audit_insert_sql(actor_kind="system", actor_id=_USER_ID, actor_reference=None),
+        conn,
+        *_audit_insert_sql(actor_kind="system", actor_id=_USER_ID, actor_reference=None),
         expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
@@ -1771,64 +2025,74 @@ def _assert_audit_invariants(conn: psycopg.Connection[Any]) -> None:
         expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
-        conn, *_audit_insert_sql(actor_kind="workflow", actor_id=None, actor_reference=None),
+        conn,
+        *_audit_insert_sql(actor_kind="workflow", actor_id=None, actor_reference=None),
         expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
-        conn, *_audit_insert_sql(actor_kind="service", actor_id=None, actor_reference=None),
+        conn,
+        *_audit_insert_sql(actor_kind="service", actor_id=None, actor_reference=None),
         expected_sqlstate=_CHECK_VIOLATION,
     )
 
     # Unsafe / empty action, target, reference and reason tokens.
     _assert_rejected(
-        conn, *_audit_insert_sql(action="Bad Action!"),
-        expected_sqlstate=_CHECK_VIOLATION,
-    )
-    _assert_rejected(
-        conn, *_audit_insert_sql(action=""),
-        expected_sqlstate=_CHECK_VIOLATION,
-    )
-    _assert_rejected(
-        conn, *_audit_insert_sql(target_kind="Bad Target"),
-        expected_sqlstate=_CHECK_VIOLATION,
-    )
-    _assert_rejected(
-        conn, *_audit_insert_sql(target_kind=""),
+        conn,
+        *_audit_insert_sql(action="Bad Action!"),
         expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
         conn,
-        *_audit_insert_sql(
-            actor_kind="workflow", actor_id=None, actor_reference="Bad Ref"
-        ),
+        *_audit_insert_sql(action=""),
         expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
-        conn, *_audit_insert_sql(reason_code="Bad Reason"),
+        conn,
+        *_audit_insert_sql(target_kind="Bad Target"),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        *_audit_insert_sql(target_kind=""),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        *_audit_insert_sql(actor_kind="workflow", actor_id=None, actor_reference="Bad Ref"),
+        expected_sqlstate=_CHECK_VIOLATION,
+    )
+    _assert_rejected(
+        conn,
+        *_audit_insert_sql(reason_code="Bad Reason"),
         expected_sqlstate=_CHECK_VIOLATION,
     )
 
     # Zero / uppercase / short trace ID.
     _assert_rejected(
-        conn, *_audit_insert_sql(trace_id="0" * 32),
+        conn,
+        *_audit_insert_sql(trace_id="0" * 32),
         expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
-        conn, *_audit_insert_sql(trace_id="A" + "0" * 31),
+        conn,
+        *_audit_insert_sql(trace_id="A" + "0" * 31),
         expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
-        conn, *_audit_insert_sql(trace_id="abc123"),
+        conn,
+        *_audit_insert_sql(trace_id="abc123"),
         expected_sqlstate=_CHECK_VIOLATION,
     )
 
     # Invalid diff hash and result.
     _assert_rejected(
-        conn, *_audit_insert_sql(safe_diff_hash="abc123"),
+        conn,
+        *_audit_insert_sql(safe_diff_hash="abc123"),
         expected_sqlstate=_CHECK_VIOLATION,
     )
     _assert_rejected(
-        conn, *_audit_insert_sql(result="success"),
+        conn,
+        *_audit_insert_sql(result="success"),
         expected_sqlstate=_CHECK_VIOLATION,
     )
 
@@ -1892,17 +2156,13 @@ def test_canonical_postgresql_baseline_upgrade_catalog_and_valid_graph(
 
     # Step 3: allowed-behavior cases (each accepted, then rolled back).
     _assert_allowed_behaviors(conn)
-    assert _row_counts(conn) == [1, 1, 1, 1, 1, 1, 1, 2, 1], (
-        "allowed cases must not persist rows"
-    )
+    assert _row_counts(conn) == [1, 1, 1, 1, 1, 1, 1, 2, 1], "allowed cases must not persist rows"
 
     # Task 4: every baseline invariant is database-enforced. Each mutation runs
     # in its own savepoint and is rolled back, so the committed valid graph is
     # never mutated.
     _assert_negative_invariants(conn)
-    assert _row_counts(conn) == [1, 1, 1, 1, 1, 1, 1, 2, 1], (
-        "negative cases must not persist rows"
-    )
+    assert _row_counts(conn) == [1, 1, 1, 1, 1, 1, 1, 2, 1], "negative cases must not persist rows"
     # The current-version pointer is restored after the lineage/pointer cases.
     with conn.cursor() as _pointer_cursor:
         _pointer_cursor.execute(
@@ -1934,9 +2194,7 @@ def test_canonical_postgresql_baseline_upgrade_catalog_and_valid_graph(
     )
 
 
-def _alembic_failure(
-    description: str, result: subprocess.CompletedProcess[str]
-) -> str:
+def _alembic_failure(description: str, result: subprocess.CompletedProcess[str]) -> str:
     """Build a leak-safe assertion message from captured Alembic output.
 
     Alembic output is leak-safe by design (no DSN/secret); including it here is
@@ -1968,9 +2226,7 @@ def _current_revision(conn: psycopg.Connection[Any]) -> str | None:
 
 
 def _knowledge_table_count(conn: psycopg.Connection[Any]) -> int:
-    return int(
-        _scalar(conn, "SELECT count(*) FROM pg_tables WHERE schemaname = 'knowledge'")
-    )
+    return int(_scalar(conn, "SELECT count(*) FROM pg_tables WHERE schemaname = 'knowledge'"))
 
 
 def _baseline_revision_applied(conn: psycopg.Connection[Any]) -> bool:
@@ -1978,8 +2234,7 @@ def _baseline_revision_applied(conn: psycopg.Connection[Any]) -> bool:
         return False
     count = _scalar(
         conn,
-        "SELECT count(*) FROM public.alembic_version "
-        f"WHERE version_num = '{_BASELINE_REVISION}'",
+        f"SELECT count(*) FROM public.alembic_version WHERE version_num = '{_BASELINE_REVISION}'",
     )
     return bool(count)
 
@@ -2093,16 +2348,13 @@ def test_concurrent_upgrade_blocks_on_advisory_lock_then_succeeds(
     try:
         with holder.cursor() as cursor:
             cursor.execute(
-                "SELECT pg_advisory_xact_lock("
-                "hashtextextended('knowledge-schema-migration', 0))"
+                "SELECT pg_advisory_xact_lock(hashtextextended('knowledge-schema-migration', 0))"
             )
         start = time.monotonic()
         blocked = run_alembic(["upgrade", "head"], alembic_env)
         elapsed = time.monotonic() - start
 
-        assert blocked.returncode != 0, (
-            "upgrade must not succeed while the advisory lock is held"
-        )
+        assert blocked.returncode != 0, "upgrade must not succeed while the advisory lock is held"
         assert elapsed >= 4.0, f"upgrade gave up after {elapsed:.1f}s (< 4s lower bound)"
         assert elapsed <= 15.0, f"upgrade hung for {elapsed:.1f}s (> 15s upper bound)"
 
@@ -2388,9 +2640,7 @@ def test_first_upgrade_interrupted_after_ddl_leaves_base_or_head(
     # abandoned transaction.
     time.sleep(1.0)
 
-    table_set = _names(
-        conn, "SELECT tablename FROM pg_tables WHERE schemaname = 'knowledge'"
-    )
+    table_set = _names(conn, "SELECT tablename FROM pg_tables WHERE schemaname = 'knowledge'")
     if table_set:
         # Head case: the server committed the migration transaction before the
         # terminate landed. The catalog must be the exact head, never a subset.
