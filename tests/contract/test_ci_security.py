@@ -11,6 +11,15 @@ WORKFLOW_TEXT = WORKFLOW_PATH.read_text(encoding="utf-8")
 
 # A non-local ``uses:`` reference must be repo@<exactly 40 lowercase hex chars>.
 SHA_PINNED_RE = re.compile(r"^[A-Za-z0-9._/-]+@[0-9a-f]{40}$")
+LOCAL_STACK_CONFIG_JOB_NAMES = ("ubuntu-config", "windows-config")
+LOCAL_STACK_LEAKAGE_TOKENS = (
+    "postgres_admin_password",
+    "qdrant_api_key",
+    "qdrant_config.yaml",
+    "secret-value-that-must-not-leak",
+    "must-not-be-forwarded",
+    "R2",
+)
 
 
 def _uses_references(text: str) -> list[str]:
@@ -57,6 +66,30 @@ def _all_jobs_have_positive_timeouts(text: str) -> bool:
         if timeout is None or int(timeout.group(1)) <= 0:
             return False
     return True
+
+
+def _has_job_level_permissions_override(text: str) -> bool:
+    # The exact top-level contents:read block is the sole workflow authority.
+    # Reject every job override so a later edit cannot widen one job silently.
+    return any(
+        re.search(r"(?m)^    permissions\s*:", block) is not None
+        for block in _job_blocks(text).values()
+    )
+
+
+def _workflow_is_least_privilege_and_sha_pinned(text: str) -> bool:
+    return (
+        _top_level_permissions(text) == ["  contents: read"]
+        and not _has_job_level_permissions_override(text)
+        and "pull_request_target" not in text
+        and _all_jobs_have_positive_timeouts(text)
+        and all(_is_sha_pinned(ref) for ref in _uses_references(text))
+    )
+
+
+def _config_jobs_scan_for(text: str, leakage_token: str) -> bool:
+    jobs = _job_blocks(text)
+    return all(leakage_token in jobs.get(job_name, "") for job_name in LOCAL_STACK_CONFIG_JOB_NAMES)
 
 
 def test_triggers_cover_pull_request_and_push_to_master_without_target() -> None:
@@ -123,10 +156,19 @@ def test_all_workflows_are_least_privilege_and_sha_pinned() -> None:
     assert workflow_paths, "at least one workflow must exist"
     for path in workflow_paths:
         text = path.read_text(encoding="utf-8")
-        assert _top_level_permissions(text) == ["  contents: read"], path
-        assert "pull_request_target" not in text, path
-        assert _all_jobs_have_positive_timeouts(text), path
-        assert all(_is_sha_pinned(ref) for ref in _uses_references(text)), path
+        assert _workflow_is_least_privilege_and_sha_pinned(text), path
+
+
+def test_permission_contract_rejects_job_level_override_mutation() -> None:
+    text = LOCAL_STACK_WORKFLOW_PATH.read_text(encoding="utf-8")
+    for override in ("permissions:\n      contents: write", "permissions: read-all"):
+        mutated = text.replace(
+            "    runs-on: ubuntu-latest",
+            f"    {override}\n    runs-on: ubuntu-latest",
+            1,
+        )
+        assert mutated != text
+        assert not _workflow_is_least_privilege_and_sha_pinned(mutated)
 
 
 def test_local_stack_workflow_never_receives_provider_secrets() -> None:
@@ -175,7 +217,7 @@ def test_local_stack_workflow_installs_verified_compose_on_both_platforms() -> N
 def test_local_stack_config_jobs_cover_defaults_overrides_and_safe_failures() -> None:
     text = LOCAL_STACK_WORKFLOW_PATH.read_text(encoding="utf-8")
     jobs = _job_blocks(text)
-    for job_name in ("ubuntu-config", "windows-config"):
+    for job_name in LOCAL_STACK_CONFIG_JOB_NAMES:
         assert job_name in jobs
         block = jobs[job_name]
         for required in (
@@ -197,17 +239,18 @@ def test_local_stack_config_jobs_cover_defaults_overrides_and_safe_failures() ->
             "git status --porcelain",
         ):
             assert required in block, f"{job_name} is missing {required!r}"
-        for leakage_token in (
-            "postgres_admin_password",
-            "qdrant_api_key",
-            "secret-value-that-must-not-leak",
-            "must-not-be-forwarded",
-            "R2",
-        ):
+        for leakage_token in LOCAL_STACK_LEAKAGE_TOKENS:
             assert leakage_token in block, (
                 f"{job_name} must scan sanitized output for {leakage_token!r}"
             )
     assert "$PSNativeCommandUseErrorActionPreference = $false" in jobs["windows-config"]
+
+
+def test_config_leakage_contract_rejects_missing_qdrant_config_scan_mutation() -> None:
+    text = LOCAL_STACK_WORKFLOW_PATH.read_text(encoding="utf-8")
+    mutated = text.replace("qdrant_config.yaml", "", 1)
+    assert mutated != text
+    assert not _config_jobs_scan_for(mutated, "qdrant_config.yaml")
 
 
 def test_local_stack_smoke_has_exact_cleanup_and_junit_only_artifact() -> None:

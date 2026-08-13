@@ -104,7 +104,7 @@ jobs:
           test "$duplicate_status" -eq 64
 
           if grep --extended-regexp --ignore-case --quiet \
-            'postgres_admin_password|postgres_application_password|postgres_temporal_password|qdrant_api_key|neo4j_auth|redis_acl|redis_application_password|secret-value-that-must-not-leak|password=must-not-escape|must-not-be-forwarded|R2|cloudflare' \
+            'postgres_admin_password|postgres_application_password|postgres_temporal_password|qdrant_api_key|qdrant_config.yaml|neo4j_auth|redis_acl|redis_application_password|secret-value-that-must-not-leak|password=must-not-escape|must-not-be-forwarded|R2|cloudflare' \
             "$output_file"; then
             echo 'sanitized lifecycle output contained forbidden material' >&2
             exit 1
@@ -203,6 +203,7 @@ jobs:
             "postgres_application_password",
             "postgres_temporal_password",
             "qdrant_api_key",
+            "qdrant_config.yaml",
             "neo4j_auth",
             "redis_acl",
             "redis_application_password",
