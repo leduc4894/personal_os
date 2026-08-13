@@ -447,7 +447,7 @@ The database can enforce unique ordinals but cannot prove “next ordinal equals
 
 Constraints:
 
-- Primary key `event_id`; unique `(workspace_id, event_id)`.
+- Primary key `event_id`; unique `(workspace_id, event_id)` and unique `(workspace_id, source_id, event_id)` for the projection-intent event/source containment foreign key.
 - Unique `event_sequence` and unique `(workspace_id, idempotency_key)`.
 - Composite source, device, committed-version and base-version foreign keys all include `workspace_id`; version foreign keys also include `source_id`.
 - Device is nullable for Web/system operations.
@@ -671,7 +671,7 @@ At minimum, live tests prove PostgreSQL rejects:
 - current version from another source or workspace;
 - duplicate/nonpositive per-source content version;
 - parent version from another source/workspace and self-parent;
-- content object from another workspace;
+- nonexistent content object; content objects are global CAS metadata and deliberately have no workspace boundary;
 - invalid author-kind/author-id combination;
 - duplicate event ID, event sequence and workspace idempotency key;
 - event device/version/base from another workspace/source;
