@@ -17,6 +17,8 @@ SQL_PASSWORD=$sql_password
 export SQL_PASSWORD
 unset sql_password
 
+install -m 0755 /usr/local/bin/temporal /opt/knowledge/health/temporal
+
 tool_output=/tmp/temporal-schema-tool.$$.log
 trap 'rm -f "$tool_output"' EXIT HUP INT TERM
 

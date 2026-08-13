@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import os
 import re
+import secrets
 import shutil
 import subprocess
+import time
+import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 IMAGE_LOCK_PATH = REPO_ROOT / "infra" / "compose" / "images.lock.yaml"
 COMPOSE_PATH = REPO_ROOT / "infra" / "compose" / "compose.yaml"
 SCRIPT_DIRECTORY = REPO_ROOT / "infra" / "compose" / "scripts"
+DOCKER_CONTRACT_ENVIRONMENT = "KNOWLEDGE_LOCAL_DOCKER_CONTRACT"
 DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 APPROVED_IMAGES = {
     "postgresql": (
@@ -50,10 +56,203 @@ APPROVED_IMAGES = {
 }
 
 
+def _require_docker_contract() -> str:
+    if os.environ.get(DOCKER_CONTRACT_ENVIRONMENT) != "1":
+        pytest.skip(f"set {DOCKER_CONTRACT_ENVIRONMENT}=1 to run Docker contracts")
+
+    docker = shutil.which("docker")
+    if docker is None:
+        pytest.fail("Docker contracts were requested but the Docker CLI is unavailable")
+    daemon = subprocess.run(
+        [docker, "info", "--format", "{{.ServerVersion}}"],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=15,
+    )
+    if daemon.returncode != 0:
+        pytest.fail("Docker contracts were requested but the Docker daemon is unavailable")
+    return docker
+
+
 def _read_yaml(path: Path) -> dict[str, Any]:
     loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert isinstance(loaded, dict)
     return loaded
+
+
+def test_docker_contract_requires_explicit_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(DOCKER_CONTRACT_ENVIRONMENT, raising=False)
+
+    def fail_on_docker_discovery(_command: str) -> str:
+        pytest.fail("Docker discovery must not run without explicit opt-in")
+
+    monkeypatch.setattr(shutil, "which", fail_on_docker_discovery)
+    with pytest.raises(pytest.skip.Exception):
+        _require_docker_contract()
+
+
+def _run_checked(
+    command: list[str], *, timeout_seconds: int = 60
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+    )
+
+
+def _run_postgres_provision(
+    docker: str,
+    *,
+    network_name: str,
+    secrets_directory: Path,
+) -> subprocess.CompletedProcess[str]:
+    services = _read_yaml(COMPOSE_PATH)["services"]
+    provision_service = services["postgres-provision"]
+    script_path = SCRIPT_DIRECTORY / "postgres-provision.sh"
+    return subprocess.run(
+        [
+            docker,
+            "run",
+            "--rm",
+            "--network",
+            network_name,
+            "--mount",
+            f"type=bind,source={secrets_directory},target=/run/secrets,readonly",
+            "--mount",
+            f"type=bind,source={script_path},target=/opt/knowledge/bin/postgres-provision.sh,readonly",
+            "--entrypoint",
+            "/bin/sh",
+            provision_service["image"],
+            "/opt/knowledge/bin/postgres-provision.sh",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def _postgres_admin_query(
+    docker: str,
+    *,
+    container_name: str,
+    query: str,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            docker,
+            "exec",
+            "-i",
+            container_name,
+            "/bin/sh",
+            "-ec",
+            "PGPASSWORD=$(cat /run/secrets/postgres_admin_password); "
+            "export PGPASSWORD; "
+            "exec psql -XAtq -v ON_ERROR_STOP=1 --host 127.0.0.1 --port 5432 "
+            "--username stack_admin --dbname postgres",
+        ],
+        input=query,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+@pytest.fixture
+def provisioned_postgresql(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[dict[str, str | Path]]:
+    docker = _require_docker_contract()
+    suffix = uuid.uuid4().hex[:12]
+    container_name = f"knowledge-contract-postgres-{suffix}"
+    network_name = f"knowledge-contract-network-{suffix}"
+    secrets_directory = tmp_path_factory.mktemp("postgres-contract-secrets")
+    passwords = {
+        "postgres_admin_password": f"admin_{secrets.token_hex(24)}",
+        "postgres_application_password": f"application_{secrets.token_hex(24)}",
+        "postgres_temporal_password": f"temporal_{secrets.token_hex(24)}",
+    }
+    for secret_name, secret_value in passwords.items():
+        (secrets_directory / secret_name).write_text(secret_value, encoding="utf-8")
+
+    services = _read_yaml(COMPOSE_PATH)["services"]
+    postgresql = services["postgresql"]
+    _run_checked([docker, "network", "create", network_name])
+    try:
+        start_command = [
+            docker,
+            "run",
+            "--detach",
+            "--rm",
+            "--name",
+            container_name,
+            "--network",
+            network_name,
+            "--network-alias",
+            "postgresql",
+            "--mount",
+            f"type=bind,source={secrets_directory},target=/run/secrets,readonly",
+        ]
+        for environment_name, environment_value in postgresql["environment"].items():
+            start_command.extend(["--env", f"{environment_name}={environment_value}"])
+        start_command.extend(
+            [
+                postgresql["image"],
+                *postgresql["command"],
+                "-c",
+                "shared_preload_libraries=passwordcheck",
+            ]
+        )
+        _run_checked(start_command, timeout_seconds=90)
+
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            readiness = subprocess.run(
+                [docker, "exec", container_name, "pg_isready", "--host", "127.0.0.1"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+            if readiness.returncode == 0:
+                break
+            time.sleep(0.5)
+        else:
+            pytest.fail("disposable PostgreSQL did not become ready")
+
+        provision = _run_postgres_provision(
+            docker,
+            network_name=network_name,
+            secrets_directory=secrets_directory,
+        )
+        assert provision.returncode == 0, provision.stderr
+        yield {
+            "docker": docker,
+            "container_name": container_name,
+            "network_name": network_name,
+            "secrets_directory": secrets_directory,
+            **passwords,
+        }
+    finally:
+        subprocess.run(
+            [docker, "rm", "--force", "--volumes", container_name],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+        subprocess.run(
+            [docker, "network", "rm", network_name],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
 
 
 def test_compose_has_exact_topology() -> None:
@@ -78,6 +277,7 @@ def test_compose_has_exact_topology() -> None:
         "qdrant-data",
         "neo4j-data",
         "redis-data",
+        "temporal-health-tools",
     }
     assert all(
         service["networks"] == ["service-backplane"] for service in compose["services"].values()
@@ -155,6 +355,7 @@ def test_services_have_exact_storage_and_resource_contracts() -> None:
             "./config/temporal/dynamicconfig.yaml:/etc/temporal/dynamicconfig.yaml:ro",
             "./scripts/temporal-secret-entrypoint.sh:"
             "/opt/knowledge/bin/temporal-secret-entrypoint.sh:ro",
+            "temporal-health-tools:/opt/knowledge/health:ro",
         ],
         "temporal-ui": [],
         "temporal-cli": [],
@@ -176,7 +377,8 @@ def test_initializers_are_bounded_one_shot_jobs_with_read_only_scripts() -> None
             "./scripts/postgres-provision.sh:/opt/knowledge/bin/postgres-provision.sh:ro"
         ),
         "temporal-schema-setup": (
-            "./scripts/temporal-schema-setup.sh:/opt/knowledge/bin/temporal-schema-setup.sh:ro"
+            "./scripts/temporal-schema-setup.sh:/opt/knowledge/bin/temporal-schema-setup.sh:ro",
+            "temporal-health-tools:/opt/knowledge/health",
         ),
         "temporal-namespace-bootstrap": (
             "./scripts/temporal-namespace-bootstrap.sh:"
@@ -189,7 +391,10 @@ def test_initializers_are_bounded_one_shot_jobs_with_read_only_scripts() -> None
         assert service["restart"] == "no"
         assert service["mem_limit"] == "512m"
         assert service["cpus"] == 0.5
-        assert service["volumes"] == [expected_script]
+        expected_volumes = (
+            list(expected_script) if isinstance(expected_script, tuple) else [expected_script]
+        )
+        assert service["volumes"] == expected_volumes
 
 
 def test_credentials_are_file_backed_and_not_environment_selected() -> None:
@@ -299,6 +504,8 @@ def test_postgres_18_provisioning_reconciles_exact_roles_databases_and_grants() 
         "log_min_duration_statement=-1",
         "-c",
         "log_parameter_max_length=0",
+        "-c",
+        "log_min_error_statement=panic",
     ]
     for contract_fragment in (
         "psql -XAtq -v ON_ERROR_STOP=1",
@@ -433,7 +640,7 @@ def test_long_running_services_have_exact_health_contracts() -> None:
         "qdrant": ("10s", "bash"),
         "neo4j": ("60s", "cypher-shell"),
         "redis": ("10s", "redis-cli"),
-        "temporal": ("60s", "nc"),
+        "temporal": ("60s", "/opt/knowledge/health/temporal"),
         "temporal-ui": ("30s", "wget"),
         "temporal-cli": ("30s", "temporal"),
     }
@@ -446,10 +653,113 @@ def test_long_running_services_have_exact_health_contracts() -> None:
         assert healthcheck["start_period"] == start_period
         assert healthcheck["test"][0] == "CMD-SHELL"
         assert re.search(rf"\bexec {re.escape(binary)}\b", healthcheck["test"][1])
-    assert '"$$(hostname)" 7233' in services["temporal"]["healthcheck"]["test"][1]
+    assert "operator cluster health" in services["temporal"]["healthcheck"]["test"][1]
+    assert '--address "$$(hostname):7233"' in services["temporal"]["healthcheck"]["test"][1]
 
 
-def test_locked_images_contain_every_committed_healthcheck_binary() -> None:
+def test_postgres_provision_reconciles_public_membership_and_bypassrls_drift(
+    provisioned_postgresql: dict[str, str | Path],
+) -> None:
+    docker = str(provisioned_postgresql["docker"])
+    container_name = str(provisioned_postgresql["container_name"])
+    drift_query = """
+ALTER ROLE knowledge_app BYPASSRLS;
+GRANT temporal_service TO knowledge_app;
+GRANT knowledge_app TO stack_admin;
+GRANT CONNECT ON DATABASE knowledge TO PUBLIC;
+GRANT CONNECT ON DATABASE temporal TO PUBLIC;
+GRANT CONNECT ON DATABASE temporal_visibility TO PUBLIC;
+"""
+    drift = _postgres_admin_query(
+        docker,
+        container_name=container_name,
+        query=drift_query,
+    )
+    assert drift.returncode == 0, drift.stderr
+
+    provision = _run_postgres_provision(
+        docker,
+        network_name=str(provisioned_postgresql["network_name"]),
+        secrets_directory=Path(provisioned_postgresql["secrets_directory"]),
+    )
+    assert provision.returncode == 0, provision.stderr
+
+    state = _postgres_admin_query(
+        docker,
+        container_name=container_name,
+        query="""
+SELECT rolname || ':' || rolbypassrls
+FROM pg_roles
+WHERE rolname IN ('knowledge_app', 'temporal_service')
+ORDER BY rolname;
+SELECT COUNT(*)
+FROM pg_auth_members members
+JOIN pg_roles member_role ON member_role.oid = members.member
+JOIN pg_roles granted_role ON granted_role.oid = members.roleid
+WHERE member_role.rolname IN ('knowledge_app', 'temporal_service')
+   OR granted_role.rolname IN ('knowledge_app', 'temporal_service');
+SELECT databases.datname || ':' || EXISTS (
+    SELECT 1
+    FROM aclexplode(
+        COALESCE(databases.datacl, acldefault('d', databases.datdba))
+    ) AS privileges
+    WHERE privileges.grantee = 0
+      AND privileges.privilege_type = 'CONNECT'
+)
+FROM pg_database AS databases
+WHERE datname IN ('knowledge', 'temporal', 'temporal_visibility')
+ORDER BY datname;
+""",
+    )
+    assert state.returncode == 0, state.stderr
+    assert state.stdout.splitlines() == [
+        "knowledge_app:false",
+        "temporal_service:false",
+        "0",
+        "knowledge:false",
+        "temporal:false",
+        "temporal_visibility:false",
+    ]
+
+
+def test_postgres_provision_never_emits_secret_values_on_failure(
+    provisioned_postgresql: dict[str, str | Path],
+) -> None:
+    docker = str(provisioned_postgresql["docker"])
+    container_name = str(provisioned_postgresql["container_name"])
+    application_password = "leaky"
+    secrets_directory = Path(provisioned_postgresql["secrets_directory"])
+    (secrets_directory / "postgres_application_password").write_text(
+        application_password,
+        encoding="utf-8",
+    )
+
+    provision = _run_postgres_provision(
+        docker,
+        network_name=str(provisioned_postgresql["network_name"]),
+        secrets_directory=secrets_directory,
+    )
+    logs = subprocess.run(
+        [docker, "logs", container_name],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    combined_output = "\n".join((provision.stdout, provision.stderr, logs.stdout, logs.stderr))
+
+    assert provision.returncode != 0
+    assert application_password not in combined_output
+    for secret_name in (
+        "postgres_admin_password",
+        "postgres_application_password",
+        "postgres_temporal_password",
+    ):
+        assert str(provisioned_postgresql[secret_name]) not in combined_output
+
+
+def test_locked_images_contain_every_committed_healthcheck_binary(tmp_path: Path) -> None:
+    docker = _require_docker_contract()
     compose = _read_yaml(COMPOSE_PATH)
     services = compose["services"]
     long_running_services = {
@@ -468,19 +778,6 @@ def test_locked_images_contain_every_committed_healthcheck_binary() -> None:
         assert matches
         health_binaries[service_name] = matches[0]
 
-    docker = shutil.which("docker")
-    if docker is None:
-        pytest.skip("Docker CLI is not installed")
-    daemon = subprocess.run(
-        [docker, "info", "--format", "{{.ServerVersion}}"],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=15,
-    )
-    if daemon.returncode != 0:
-        pytest.skip("Docker daemon is unavailable")
-
     locked_references = {
         f"{entry['tagged_reference']}@{entry['manifest_digest']}"
         for entry in _read_yaml(IMAGE_LOCK_PATH)["images"]
@@ -496,6 +793,11 @@ def test_locked_images_contain_every_committed_healthcheck_binary() -> None:
         assert pull.returncode == 0
 
     for service_name, binary in health_binaries.items():
+        probe_image = services[service_name]["image"]
+        probe_binary = binary
+        if service_name == "temporal":
+            probe_image = services["temporal-schema-setup"]["image"]
+            probe_binary = "/usr/local/bin/temporal"
         probe = subprocess.run(
             [
                 docker,
@@ -503,11 +805,11 @@ def test_locked_images_contain_every_committed_healthcheck_binary() -> None:
                 "--rm",
                 "--entrypoint",
                 "/bin/sh",
-                services[service_name]["image"],
+                probe_image,
                 "-ec",
                 'command -v "$1" >/dev/null',
                 "healthcheck",
-                binary,
+                probe_binary,
             ],
             check=False,
             stdout=subprocess.DEVNULL,
@@ -515,3 +817,82 @@ def test_locked_images_contain_every_committed_healthcheck_binary() -> None:
             timeout=30,
         )
         assert probe.returncode == 0, f"{service_name} lacks health binary {binary}"
+
+    volume_name = f"knowledge-contract-temporal-health-{uuid.uuid4().hex[:12]}"
+    fake_tools_directory = tmp_path / "contract-bin"
+    fake_tools_directory.mkdir()
+    (fake_tools_directory / "temporal-sql-tool").write_text(
+        """#!/bin/sh
+case " $* " in
+    *" setup-schema "*) exit 1 ;;
+    *" --database temporal_visibility "*) printf '%s\\n' 'current version 1.14' ;;
+        *) printf '%s\\n' 'current version 1.19' ;;
+esac
+""",
+        encoding="utf-8",
+        newline="\n",
+    )
+    secrets_directory = tmp_path / "secrets"
+    secrets_directory.mkdir()
+    (secrets_directory / "postgres_temporal_password").write_text(
+        f"temporal_{secrets.token_hex(24)}",
+        encoding="utf-8",
+    )
+    _run_checked([docker, "volume", "create", volume_name])
+    try:
+        install_probe = subprocess.run(
+            [
+                docker,
+                "run",
+                "--rm",
+                "--user",
+                services["temporal-schema-setup"]["user"],
+                "--volume",
+                f"{volume_name}:/opt/knowledge/health",
+                "--mount",
+                f"type=bind,source={secrets_directory},target=/run/secrets,readonly",
+                "--mount",
+                f"type=bind,source={fake_tools_directory},target=/contract-bin,readonly",
+                "--mount",
+                "type=bind,"
+                f"source={SCRIPT_DIRECTORY / 'temporal-schema-setup.sh'},"
+                "target=/opt/knowledge/bin/temporal-schema-setup.sh,readonly",
+                "--env",
+                "PATH=/contract-bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "--entrypoint",
+                "/bin/sh",
+                services["temporal-schema-setup"]["image"],
+                "/opt/knowledge/bin/temporal-schema-setup.sh",
+            ],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+        assert install_probe.returncode == 0
+        execution_probe = subprocess.run(
+            [
+                docker,
+                "run",
+                "--rm",
+                "--volume",
+                f"{volume_name}:/opt/knowledge/health:ro",
+                "--entrypoint",
+                "/opt/knowledge/health/temporal",
+                services["temporal"]["image"],
+                "--version",
+            ],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+        assert execution_probe.returncode == 0
+    finally:
+        subprocess.run(
+            [docker, "volume", "rm", "--force", volume_name],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )

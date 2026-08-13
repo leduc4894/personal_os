@@ -41,7 +41,7 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'knowledge_app')
 \gexec
 
 SELECT format(
-    'ALTER ROLE %s WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD %s',
+    'ALTER ROLE %s WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %s',
     format('%I', 'knowledge_app'),
     format('%L', :'knowledge_application_password')
 )
@@ -56,10 +56,22 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'temporal_service')
 \gexec
 
 SELECT format(
-    'ALTER ROLE %s WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD %s',
+    'ALTER ROLE %s WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %s',
     format('%I', 'temporal_service'),
     format('%L', :'temporal_service_password')
 )
+\gexec
+
+SELECT format(
+    'REVOKE %s FROM %s',
+    format('%I', granted_role.rolname),
+    format('%I', member_role.rolname)
+)
+FROM pg_auth_members AS memberships
+JOIN pg_roles AS granted_role ON granted_role.oid = memberships.roleid
+JOIN pg_roles AS member_role ON member_role.oid = memberships.member
+WHERE granted_role.rolname IN ('knowledge_app', 'temporal_service')
+   OR member_role.rolname IN ('knowledge_app', 'temporal_service')
 \gexec
 
 SELECT format(

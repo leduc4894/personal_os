@@ -24,6 +24,8 @@ services:
       - log_min_duration_statement=-1
       - -c
       - log_parameter_max_length=0
+      - -c
+      - log_min_error_statement=panic
     secrets:
       - postgres_admin_password
     ports:
@@ -180,13 +182,17 @@ services:
     volumes:
       - ./config/temporal/dynamicconfig.yaml:/etc/temporal/dynamicconfig.yaml:ro
       - ./scripts/temporal-secret-entrypoint.sh:/opt/knowledge/bin/temporal-secret-entrypoint.sh:ro
+      - temporal-health-tools:/opt/knowledge/health:ro
     depends_on:
       temporal-schema-setup:
         condition: service_completed_successfully
     healthcheck:
       test:
         - CMD-SHELL
-        - exec nc -z -w 2 "$$(hostname)" 7233
+        - >-
+          exec /opt/knowledge/health/temporal --address "$$(hostname):7233"
+          --client-connect-timeout 2s --command-timeout 2s
+          --color never --disable-config-file operator cluster health
       interval: 5s
       timeout: 3s
       retries: 20
@@ -274,10 +280,12 @@ services:
     restart: "no"
     mem_limit: 512m
     cpus: 0.5
+    user: root
     secrets:
       - postgres_temporal_password
     volumes:
       - ./scripts/temporal-schema-setup.sh:/opt/knowledge/bin/temporal-schema-setup.sh:ro
+      - temporal-health-tools:/opt/knowledge/health
     networks:
       - service-backplane
     entrypoint:
@@ -332,3 +340,4 @@ volumes:
   qdrant-data:
   neo4j-data:
   redis-data:
+  temporal-health-tools:
