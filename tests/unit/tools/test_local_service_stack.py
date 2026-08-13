@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+import subprocess
 import sys
 from pathlib import Path
 
@@ -109,6 +110,8 @@ def test_closes_every_opened_socket_when_port_binding_fails() -> None:
 
     assert raised.value.exit_code is StackExitCode.PREREQUISITE
     assert str(raised.value) == "port_unavailable"
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
     assert all(opened_socket.closed for opened_socket in created)
 
 
@@ -134,6 +137,38 @@ def test_run_command_maps_missing_program_without_raw_exception() -> None:
 
     assert raised.value.exit_code is StackExitCode.PREREQUISITE
     assert str(raised.value) == "subprocess_unavailable"
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
+def test_run_command_rejects_invalid_port_before_process_launch() -> None:
+    with pytest.raises(StackFailure) as raised:
+        run_command(
+            [sys.executable, "-c", "raise SystemExit(0)"],
+            timeout_seconds=1.0,
+            environment={"POSTGRES_PORT": "1023"},
+        )
+
+    assert raised.value.exit_code is StackExitCode.CLI
+    assert str(raised.value) == "invalid_port"
+
+
+def test_run_command_captures_output_without_subprocess_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_unbounded_capture(*args: object, **kwargs: object) -> None:
+        pytest.fail("subprocess.run buffers unbounded output")
+
+    monkeypatch.setattr(subprocess, "run", fail_unbounded_capture)
+
+    result = run_command(
+        [sys.executable, "-c", "import sys; print('x' * 9000); print('y' * 9000, file=sys.stderr)"],
+        timeout_seconds=1.0,
+    )
+
+    assert result.return_code == 0
+    assert len(result.stdout.encode("utf-8")) == 8192
+    assert len(result.stderr.encode("utf-8")) == 8192
 
 
 def test_run_command_truncates_captured_output() -> None:

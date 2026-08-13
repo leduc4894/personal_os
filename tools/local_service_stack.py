@@ -8,11 +8,13 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
-from typing import Protocol
+from typing import BinaryIO, Protocol
 
 _MAX_CAPTURE_BYTES = 8192
 _MIN_PORT = 1024
@@ -165,15 +167,23 @@ def validate_port_availability(
     """Ensure all effective host ports can bind on loopback without leaking errors."""
     create_socket = socket.socket if socket_factory is None else socket_factory
     for port in ports.values():
-        candidate_socket = create_socket(socket.AF_INET, socket.SOCK_STREAM)
+        candidate_socket: _SocketHandle | None = None
+        is_unavailable = False
         try:
+            candidate_socket = create_socket(socket.AF_INET, socket.SOCK_STREAM)
             if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
                 candidate_socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
             candidate_socket.bind(("127.0.0.1", port))
-        except OSError as cause:
-            raise StackFailure(StackExitCode.PREREQUISITE, "port_unavailable") from cause
+        except OSError:
+            is_unavailable = True
         finally:
-            candidate_socket.close()
+            if candidate_socket is not None:
+                try:
+                    candidate_socket.close()
+                except OSError:
+                    is_unavailable = True
+        if is_unavailable:
+            raise StackFailure(StackExitCode.PREREQUISITE, "port_unavailable")
 
 
 def sanitize_subprocess_environment(environment: Mapping[str, str]) -> dict[str, str]:
@@ -198,35 +208,73 @@ def run_command(
         raise StackFailure(StackExitCode.CLI, "invalid_timeout")
 
     source_environment: Mapping[str, str] = os.environ if environment is None else environment
+    effective_ports = resolve_ports(source_environment)
     clean_environment = sanitize_subprocess_environment(source_environment)
-    try:
-        completed = subprocess.run(
+    clean_environment.update({variable: str(port) for variable, port in effective_ports.items()})
+
+    process: subprocess.Popen[bytes] | None = None
+    with suppress(OSError, ValueError):
+        process = subprocess.Popen(
             list(arguments),
             shell=False,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=clean_environment,
         )
-    except subprocess.TimeoutExpired as cause:
-        raise StackFailure(StackExitCode.READINESS, "subprocess_timeout") from cause
-    except OSError as cause:
-        raise StackFailure(StackExitCode.PREREQUISITE, "subprocess_unavailable") from cause
+    if process is None:
+        raise StackFailure(StackExitCode.PREREQUISITE, "subprocess_unavailable")
+
+    if process.stdout is None or process.stderr is None:
+        process.kill()
+        process.wait()
+        raise StackFailure(StackExitCode.INTERNAL, "subprocess_capture_unavailable")
+
+    stdout_buffer = bytearray()
+    stderr_buffer = bytearray()
+    stdout_thread = threading.Thread(
+        target=_read_bounded_output,
+        args=(process.stdout, stdout_buffer),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_read_bounded_output,
+        args=(process.stderr, stderr_buffer),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+
+    has_timed_out = False
+    try:
+        return_code = process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        has_timed_out = True
+        with suppress(OSError):
+            process.kill()
+        return_code = process.wait()
+    finally:
+        stdout_thread.join()
+        stderr_thread.join()
+
+    if has_timed_out:
+        raise StackFailure(StackExitCode.READINESS, "subprocess_timeout")
 
     return CommandResult(
-        return_code=completed.returncode,
-        stdout=_truncate_output(completed.stdout),
-        stderr=_truncate_output(completed.stderr),
+        return_code=return_code,
+        stdout=stdout_buffer.decode("utf-8", errors="replace"),
+        stderr=stderr_buffer.decode("utf-8", errors="replace"),
     )
 
 
 def _resolve_beneath(repository_root: Path, *parts: str) -> Path:
     candidate = (repository_root.joinpath(*parts)).resolve(strict=False)
+    is_beneath_repository = True
     try:
         candidate.relative_to(repository_root)
-    except ValueError as cause:
-        raise StackFailure(StackExitCode.INTERNAL, "invalid_stack_path") from cause
+    except ValueError:
+        is_beneath_repository = False
+    if not is_beneath_repository:
+        raise StackFailure(StackExitCode.INTERNAL, "invalid_stack_path")
     return candidate
 
 
@@ -239,5 +287,15 @@ def _parse_port(raw_port: str) -> int:
     return port
 
 
-def _truncate_output(output: str) -> str:
-    return output.encode("utf-8")[:_MAX_CAPTURE_BYTES].decode("utf-8", errors="ignore")
+def _read_bounded_output(stream: BinaryIO, buffer: bytearray) -> None:
+    """Drain one pipe while retaining at most the safe diagnostics budget."""
+    try:
+        while chunk := stream.read(_MAX_CAPTURE_BYTES):
+            remaining_bytes = _MAX_CAPTURE_BYTES - len(buffer)
+            if remaining_bytes > 0:
+                buffer.extend(chunk[:remaining_bytes])
+    except OSError:
+        return
+    finally:
+        with suppress(OSError):
+            stream.close()
