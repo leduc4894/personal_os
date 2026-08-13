@@ -2,15 +2,15 @@
 
 ## Canonical bytes
 
-Immutable source content stored in the active private S3-compatible object store and addressed by content hash. Cloudflare R2 is the production default; MinIO Community is local/test or a controlled fallback.
+Immutable source content stored in the private Cloudflare R2 production bucket and addressed by content hash.
 
-## Active canonical object store
+## Canonical object store
 
-The single S3-compatible backend currently authorized for canonical reads and writes. R2 and MinIO must never be writable concurrently by the application.
+The private Cloudflare R2 bucket authorized for canonical reads and writes. Production and test/CI use separate buckets and credentials.
 
-## Controlled object-store cutover
+## R2 test prefix
 
-An audited maintenance operation that replicates exact keys, verifies inventory/hash/size, switches the configured active backend and passes integrity smoke tests before writes resume. It is not request-time automatic failover.
+A unique exact prefix inside the dedicated R2 test bucket for one trusted integration run. Cleanup may delete only objects under that run's prefix.
 
 ## Canonical application state
 

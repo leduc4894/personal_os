@@ -6,9 +6,9 @@
 
 Mitigation: publish protocol verify object trước transaction, periodic inventory reconcile, restore-tested manifests và fail-closed reads.
 
-### Active object-store backends diverge
+### Cloudflare R2 unavailable or account access lost
 
-Mitigation: chỉ một backend writable, không automatic failover, controlled cutover trong maintenance/read-only mode, exact-key replication, inventory/hash/size verification và auditable activation.
+Mitigation: bucket-scoped credentials, production/test isolation, bounded retry, fail-closed publication, inventory/hash/size reconciliation, credential recovery runbook và restore-tested backup evidence. Không che giấu incident bằng automatic failover.
 
 ### Concurrent Obsidian/Web edits
 
@@ -52,9 +52,9 @@ Mitigation: content-hash cache, incremental indexing, batching, transcript/OCR o
 
 Mitigation: modular monolith, Compose, projections rebuildable, automated backup/restore and avoid optional services until their milestone.
 
-### MinIO Community is archived
+### Cloudflare R2 provider concentration
 
-Mitigation: pin bản cuối `RELEASE.2025-10-15T17-29-55Z`, reproducibly build/scan/SBOM/attest container từ signed source tag, cô lập private network, không xem đây là maintained dependency, giữ R2 là production default và bắt buộc re-evaluate replacement nếu có CVE chưa được vá hoặc incompatibility.
+Mitigation: production/test buckets và credentials tách biệt, least privilege, billing/availability alerts, periodic inventory/checksum sampling, account recovery controls và restore drill. Hệ thống chấp nhận rằng R2 outage làm operation cần object bytes fail closed; provider khác chỉ được xem xét qua ADR/spec mới, không phải hidden fallback.
 
 ### Host B failure hides alerts
 
@@ -62,7 +62,7 @@ Mitigation: Host A heartbeat check plus Telegram path; use external dead-man ser
 
 ### Disk exhaustion
 
-Mitigation: external active object store cho bytes/backups, bounded telemetry retention, disk forecast alerts, compaction headroom and exact cleanup workflows.
+Mitigation: Cloudflare R2 cho canonical bytes, approved backup target, bounded telemetry retention, disk forecast alerts, compaction headroom and exact cleanup workflows.
 
 ## 5. Capacity triggers
 
@@ -84,4 +84,4 @@ Mitigation: external active object store cho bytes/backups, bounded telemetry re
 - Do not add GPU until OCR/STT benchmark shows API or CPU path violates latency/cost target.
 - Do not add Qdrant payload index without real filter frequency/selectivity evidence.
 - Do not introduce multi-user tenancy before product scope changes explicitly.
-- Do not activate archived MinIO Community for production without recorded risk acceptance, verified backup và replacement trigger.
+- Do not add another canonical object-store provider, dual-write or fallback without a new ADR, owning spec, migration protocol and integrity tests.

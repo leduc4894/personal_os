@@ -22,7 +22,7 @@ load canonical references
 
 ### WorkspaceReconcileWorkflow
 
-So sánh plugin manifest, PostgreSQL current versions, active canonical object store và projection checkpoints; tạo repair actions có giới hạn.
+So sánh plugin manifest, PostgreSQL current versions, Cloudflare R2 inventory và projection checkpoints; tạo repair actions có giới hạn.
 
 ### ProjectionRebuildWorkflow
 
@@ -108,4 +108,4 @@ Worker restart không mất workflow. Temporal outage không làm mất canonica
 - Activity idempotency và crash-after-commit.
 - Cancellation/continue-as-new.
 - Fencing rejection.
-- Live Temporal + PostgreSQL + active S3-compatible object store + Qdrant + Neo4j workflow.
+- Live Temporal + PostgreSQL + Cloudflare R2 test bucket + Qdrant + Neo4j workflow.

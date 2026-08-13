@@ -150,7 +150,7 @@ Runtime configuration loading, secret-file loading and structured diagnostics
 are provided by this workspace (see *Runtime configuration & diagnostics*
 above). The following remain deliberately absent and belong to later specs:
 
-- databases (PostgreSQL), object storage (S3/R2) or any Docker services;
+- databases (PostgreSQL), Cloudflare R2 object storage or any Docker services;
 - provider SDKs, concrete provider credentials and remote secret managers;
 - framework adapters and HTTP/MCP/Temporal request/trace propagation, plus
   OpenTelemetry exporters and log-shipping deployment;

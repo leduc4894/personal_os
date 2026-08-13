@@ -4,7 +4,7 @@
 
 - Unit: normalization, parser, chunker, filter compiler, ranking và policy.
 - Contract: API, MCP, provider adapters, payload/graph contracts.
-- Integration: PostgreSQL, MinIO S3-compatible store, Qdrant, Neo4j, Redis, Temporal; Cloudflare R2 compatibility chạy trong live backend pipeline riêng.
+- Integration: PostgreSQL, Qdrant, Neo4j, Redis và Temporal trong disposable Docker stack; Cloudflare R2 chạy trong live object-storage pipeline riêng.
 - End-to-end: Obsidian sync/Web edit đến retrieval/citation.
 - Live provider: OpenAI, Cohere, OCR/STT cloud nếu bật.
 - Performance: indexing throughput, retrieval latency, memory/disk growth.
@@ -67,12 +67,14 @@ Mỗi schema change chạy empty upgrade, application smoke, data fixture upgrad
 
 ## 9. Wipe-and-rebuild drills
 
-- Xóa disposable Qdrant collection rồi rebuild từ PostgreSQL + active canonical object store.
+- Xóa disposable Qdrant collection rồi rebuild từ PostgreSQL + Cloudflare R2.
 - Xóa disposable Neo4j database rồi rebuild.
 - So sánh contract hash, manifest IDs, counts và golden results.
 - Không seed từ snapshot projection trong correctness drill.
 
-Object-store contract suite chạy cùng cases trên MinIO và Cloudflare R2: streaming put/get, head, multipart, exact key, SHA-256/size verification, deduplication, missing/corrupt fail-closed và presigned behavior nếu contract bật. Controlled-cutover test phải chứng minh không có thời điểm hai backend cùng writable và không mở writes trước khi target inventory pass.
+Object-storage unit/contract suite dùng fake/in-memory test double và không cần network. Live Cloudflare R2 pipeline chạy cùng behavior cases trên bucket test: streaming put/get, head, multipart, exact key, conditional create, SHA-256/size verification, deduplication, missing/corrupt fail-closed và presigned behavior nếu contract bật.
+
+Live R2 tests dùng credentials chỉ truy cập bucket test, exact prefix theo CI run và cleanup chính prefix đó. Job chỉ chạy trên trusted branch, schedule hoặc manual dispatch; pull request từ fork không nhận secrets. Acceptance bắt buộc thiếu credentials phải báo blocked/fail rõ ràng, không âm thầm skip. Production bucket và credentials không xuất hiện trong test pipeline.
 
 ## 10. CI gates
 

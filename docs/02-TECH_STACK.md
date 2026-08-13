@@ -7,7 +7,7 @@
 | Backend | Python, FastAPI, Pydantic |
 | Domain persistence | SQLAlchemy, Alembic |
 | Canonical state | PostgreSQL |
-| Canonical bytes | Private S3-compatible storage: Cloudflare R2 mặc định, MinIO Community local/test hoặc controlled fallback |
+| Canonical bytes | Private Cloudflare R2 buckets, tách production và test/CI |
 | Search projection | Qdrant |
 | Graph projection | Neo4j |
 | Durable workflows | Temporal Python SDK |
@@ -32,10 +32,8 @@ Baseline được kiểm tra ngày 2026-08-12, ưu tiên current patched release
 | Temporal Server | `1.31.2` | Current patched server release |
 | Temporal UI | `2.53.0` | Current UI release tương thích Temporal Server 1.31.2 |
 | Temporal CLI | `1.8.0` | Current administrative CLI release |
-| MinIO Community | `RELEASE.2025-10-15T17-29-55Z` | Bản Community cuối; repository đã archive và chỉ dùng với explicit risk acceptance |
 
-Compose và deployment manifest pin exact tag cùng image digest. Nâng version đi qua pull request riêng, review release notes, compatibility/migration tests và rollback evidence; không tự động nâng production.
-MinIO Community release cuối không còn official prebuilt container artifact theo release instruction; project phải reproducibly build từ exact signed source tag, scan/SBOM/attest image và pin internal registry digest trước khi Compose sử dụng.
+Compose và deployment manifest pin exact tag cùng image digest. Nâng version đi qua pull request riêng, review release notes, compatibility/migration tests và rollback evidence; không tự động nâng production. Cloudflare R2 là managed dependency ngoài Compose và được kiểm soát bằng bucket-scoped credentials cùng live compatibility tests.
 
 ## 2. Web App
 

@@ -53,7 +53,7 @@ Codex, Claude và các AI client khác truy cập tri thức qua MCP hoặc API 
 
 ## Bất biến kiến trúc
 
-- Private S3-compatible object store giữ canonical content bytes bất biến; Cloudflare R2 là mặc định production và MinIO Community là local/test hoặc controlled fallback.
+- Private Cloudflare R2 giữ canonical content bytes bất biến; production và test/CI dùng bucket cùng credentials tách biệt.
 - PostgreSQL giữ canonical identity, version, policy và application state.
 - Obsidian và Web App là hai client chỉnh sửa cùng một logical workspace.
 - Qdrant và Neo4j là projection có thể xóa và rebuild.

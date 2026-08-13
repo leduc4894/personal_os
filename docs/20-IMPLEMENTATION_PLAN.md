@@ -74,27 +74,25 @@ Infrastructure baseline được kiểm tra ngày 2026-08-12 và ưu tiên patch
 | Temporal Server | `1.31.2` |
 | Temporal UI | `2.53.0` |
 | Temporal CLI | `1.8.0` |
-| MinIO Community | `RELEASE.2025-10-15T17-29-55Z` |
 
-Compose và deployment manifests pin exact image tag cùng digest, không dùng floating tag. Upgrade đi qua pull request riêng với release-note review, compatibility/migration tests và rollback evidence. MinIO Community là archived dependency đã chấp nhận rủi ro, không phải maintained production default.
-MinIO Community release cuối phải được reproducibly build từ exact signed source tag, scan/SBOM/attest và pin internal registry digest vì release này không cung cấp official prebuilt container artifact.
+Compose và deployment manifests pin exact image tag cùng digest, không dùng floating tag. Upgrade đi qua pull request riêng với release-note review, compatibility/migration tests và rollback evidence. Cloudflare R2 là managed dependency ngoài Compose; production và test/CI dùng bucket cùng credentials tách biệt.
 
 Deliverables:
 
 1. Python/TypeScript workspaces, lint/type/test CI.
 2. Settings + secret-file loading, structured errors/logging.
 3. PostgreSQL empty baseline for identity, source/version/object, events và audit.
-4. S3-compatible CAS adapter with streaming SHA-256 verification và cùng contract suite cho MinIO/R2.
+4. Cloudflare R2 CAS adapter with streaming SHA-256 verification, offline contract tests và live test-bucket pipeline.
 5. Source version transaction và idempotent event service.
-6. Local Compose for PostgreSQL, Qdrant, Neo4j Community single-instance, Redis, Temporal Server/UI/admin tools và MinIO.
+6. Local Compose for PostgreSQL, Qdrant, Neo4j Community single-instance, Redis và Temporal Server/UI/admin tools.
 7. Internal CLI cho bootstrap và canonical smoke; Phase 1 không tạo public HTTP API tạm thời.
 
 Deployment constraints:
 
 - Temporal persistence dùng cùng PostgreSQL server trong local/single-host deployment nhưng có database, user, migration và backup scope riêng với canonical application database.
-- MinIO là local/test backend. Cloudflare R2 là production default; MinIO Community production fallback phải chạy ngoài Host A trên persistent storage/failure domain và backup riêng.
-- Chỉ một canonical object-store backend được active và writable. Dependency failure không tự chuyển backend.
-- Controlled cutover chạy trong maintenance/read-only mode: audit intent, replicate exact keys, verify inventory/hash/size, activate target config, smoke test rồi mới mở writes.
+- Cloudflare R2 là canonical object store duy nhất; production và test/CI dùng private bucket cùng bucket-scoped credentials tách biệt.
+- R2 dependency failure dùng bounded retry rồi fail closed; không có backend fallback, dual-write hoặc controlled cutover.
+- PostgreSQL không publish version/current pointer tới object chưa được ghi và verify exact key, SHA-256 cùng byte size.
 
 Acceptance:
 
@@ -102,8 +100,8 @@ Acceptance:
 - Commit/read an immutable source version.
 - Duplicate idempotency key returns same committed result.
 - Corrupt/missing object cannot become current.
-- MinIO contract suite pass; live Cloudflare R2 pipeline pass cùng portable contract trước production activation.
-- Controlled cutover smoke chứng minh không có dual-write/split-brain và không mở writes trước khi target inventory pass.
+- Offline object-storage contract suite và live Cloudflare R2 test-bucket pipeline pass trước production activation.
+- Production/test credentials không có quyền chéo; live test cleanup chỉ xóa exact CI run prefix.
 - Migration upgrade/downgrade and backup smoke pass.
 
 ### Phase 2 — Obsidian sync

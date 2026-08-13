@@ -1,6 +1,6 @@
 # Deployment, Backup and Recovery
 
-## 1. Primary topology and fallback storage
+## 1. Primary topology
 
 ### Host A — Personal OS
 
@@ -11,7 +11,7 @@
 No GPU required
 ```
 
-Chạy reverse proxy, API, MCP, worker, Web App, PostgreSQL, Qdrant, Neo4j, Temporal, Redis và Alloy agent. Original files/attachments không lưu lâu dài trên disk; chúng nằm trong active private S3-compatible object store.
+Chạy reverse proxy, API, MCP, worker, Web App, PostgreSQL, Qdrant, Neo4j, Temporal, Redis và Alloy agent. Original files/attachments không lưu lâu dài trên disk; chúng nằm trong private Cloudflare R2 production bucket.
 
 ### Host B — Observability
 
@@ -24,9 +24,7 @@ No GPU
 
 Chạy Prometheus, Grafana, Loki, Tempo, Alertmanager, Alloy gateway và exporters. Sentry dùng cloud errors-only để tránh full self-hosted bundle quá nặng cho một người dùng.
 
-### Optional MinIO fallback storage
-
-Cloudflare R2 là production default. Nếu dùng MinIO Community làm production fallback, MinIO phải chạy ngoài Host A trên persistent storage/failure domain riêng, chỉ reachable qua private network và có backup riêng. MinIO Community repository đã archive; bản `RELEASE.2025-10-15T17-29-55Z` chỉ được activate sau explicit risk acceptance. Đây không phải host thứ ba bắt buộc khi R2 đang active.
+Cloudflare R2 là canonical object store duy nhất. Production và test/CI dùng bucket cùng credentials tách biệt. R2 outage là dependency incident: application dùng bounded retry rồi fail closed và chờ provider phục hồi; không có fallback host, backend cutover, dual-write hoặc request-time failover.
 
 ## 2. Capacity allocation
 
@@ -54,17 +52,16 @@ Host B tăng disk hoặc giảm retention khi growth forecast vượt 30 ngày; 
 
 ### Canonical object store
 
-- Cloudflare R2 là backend mặc định; MinIO Community là controlled fallback, không phải automatic failover target.
-- Bucket versioning nếu active provider hỗ trợ.
+- Cloudflare R2 production bucket là canonical bytes authority duy nhất.
 - Lifecycle/retention và delete protection cho canonical objects.
 - Inventory manifest gồm object key, hash, size và last modified.
-- Backup nằm trên failure domain khác active backend nếu dữ liệu quan trọng.
+- Backup/restore evidence phải xử lý rõ vendor/account concentration risk; một bản copy quan trọng chỉ nằm trong cùng account R2 không được xem là failure-domain độc lập.
 
 ### PostgreSQL
 
-- Encrypted daily logical backup lên backup object store; R2 là mặc định, còn khi MinIO active thì backup target phải tách khỏi MinIO storage đó.
+- Encrypted daily logical backup lên backup object store đã phê duyệt; credential và retention tách khỏi application runtime.
 - WAL/PITR nếu chấp nhận vận hành thêm; nếu không, ghi rõ RPO 24 giờ.
-- Backup manifest bind database schema revision và active object-store inventory checkpoint.
+- Backup manifest bind database schema revision và Cloudflare R2 inventory checkpoint.
 
 ### Qdrant and Neo4j
 
@@ -89,7 +86,7 @@ Projection RTO        dependent on corpus/provider rate; benchmark required
 
 1. Provision clean network/hosts and exact pinned software.
 2. Restore PostgreSQL and verify schema.
-3. Verify/restore active canonical object-store objects against manifest.
+3. Verify/restore Cloudflare R2 canonical objects against manifest.
 4. Start Temporal/Redis and application in maintenance mode.
 5. Rebuild Qdrant and Neo4j from canonical checkpoint.
 6. Run integrity, policy and golden retrieval gates.
@@ -98,18 +95,18 @@ Projection RTO        dependent on corpus/provider rate; benchmark required
 
 Projection snapshots không được activate nếu không match restored PostgreSQL checkpoint và contract hash.
 
-## 7. Controlled object-store cutover
+## 7. Cloudflare R2 outage and recovery
 
-1. Resolve và audit exact source backend, target backend và canonical checkpoint.
-2. Đưa canonical writes vào maintenance/read-only; reads tiếp tục từ source nếu integrity còn pass.
-3. Replicate exact object keys từ source sang target bằng scoped credentials.
-4. Verify inventory count, object key, SHA-256 và byte size; missing/mismatch là terminal failure.
-5. Backup active-backend configuration và deploy target endpoint/credentials; application không giữ đồng thời hai write credentials.
-6. Chạy canonical read/write smoke, idempotency test và missing/corrupt fail-closed test trên target.
-7. Mở lại writes và ghi audit evidence khi toàn bộ gate pass.
-8. Giữ source read-only theo retention; rollback chỉ khi source vẫn match pre-cutover checkpoint và chưa có target-only committed write.
+1. Xác định incident là network, credential, bucket policy, account hoặc provider outage mà không log secret/path.
+2. Giữ mọi write chưa verify ở trạng thái chưa publish; PostgreSQL không trỏ current tới object thiếu.
+3. Temporal thực hiện bounded retry cho lỗi retryable, sau đó giữ workflow ở trạng thái resumable/degraded.
+4. Các operation không cần object bytes có thể tiếp tục; operation đọc/ghi bytes trả structured dependency unavailable.
+5. Khôi phục đúng R2 endpoint, bucket và bucket-scoped credential; không tự tạo bucket hoặc nới quyền.
+6. Chạy authenticated read/write/integrity smoke trên exact environment.
+7. Resume workflow backlog và reconcile PostgreSQL references với R2 inventory.
+8. Ghi incident/recovery evidence và unresolved integrity gaps.
 
-Không có request-time automatic failover. Nếu target validation fail, hệ thống giữ maintenance/read-only và không tự ghi sang backend khác.
+Không có request-time automatic failover hoặc provider khác để thử. Nếu R2 validation fail, các operation cần object bytes tiếp tục fail closed.
 
 ## 8. Deployment rules
 
@@ -123,4 +120,4 @@ Không có request-time automatic failover. Nếu target validation fail, hệ t
 
 ## 9. Backup verification
 
-Ít nhất hàng tháng restore PostgreSQL + sampled/all objects vào disposable environment và rebuild projections. Backup không được xem là tốt chỉ vì upload thành công. Nếu MinIO là production fallback candidate, drill phải kiểm tra S3 compatibility và controlled cutover trước khi coi candidate sẵn sàng.
+Ít nhất hàng tháng restore PostgreSQL + sampled/all R2 objects vào disposable environment và rebuild projections. Backup không được xem là tốt chỉ vì upload thành công. Drill phải kiểm tra exact inventory/hash/size, bucket/credential isolation và khả năng resume workflow sau R2 outage.

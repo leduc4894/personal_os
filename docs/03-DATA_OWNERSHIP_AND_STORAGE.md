@@ -6,7 +6,7 @@ Một content version hợp lệ là phép nối giữa:
 
 ```text
 PostgreSQL version record
-  + immutable object trong active canonical object store
+  + immutable object trong Cloudflare R2
   + verified SHA-256 and byte size
 ```
 
@@ -24,26 +24,27 @@ objects/sha256/{first_2}/{next_2}/{sha256}
 - SHA-256 tính trên exact uploaded bytes.
 - Byte size và media type được verify trước khi publish version.
 - Trùng bytes giữa nhiều source/version được deduplicate tự nhiên.
-- Encryption, retention và lifecycle do bucket policy quản lý.
+- Encryption, retention và lifecycle do R2 bucket policy quản lý.
 
-## 3. Backend modes and controlled cutover
+## 3. Cloudflare R2 deployment boundary
 
-- Cloudflare R2 là production default.
-- MinIO Community là backend local/test và production fallback có explicit risk acceptance vì upstream Community repository đã archive.
-- MinIO production fallback chạy ngoài Host A, trên persistent storage và failure domain riêng, qua private network và backup riêng.
-- Application dùng một S3-compatible adapter và cùng contract test suite cho cả hai backend.
-- Chỉ một backend được active và writable tại một thời điểm; lỗi request không được kích hoạt automatic failover.
+- Cloudflare R2 là canonical object store duy nhất cho local, test/CI và production.
+- Production và test/CI dùng hai private bucket khác nhau, credentials khác nhau và không có quyền chéo.
+- Credentials chỉ có Object Read & Write trên đúng bucket; application không có quyền tạo/xóa bucket, đổi public access, lifecycle hoặc bucket policy.
+- R2 endpoint có dạng `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`; S3 region cố định là `auto`.
+- Credentials được nạp từ secret files/manager, không từ `.env`, CLI argument hoặc committed configuration.
+- Local/CI test ghi dưới exact run prefix trong bucket test và chỉ cleanup prefix đó.
+- Không có backend fallback, dual-write, inactive credential hoặc controlled cutover.
+- R2 timeout, authentication failure, bucket drift hoặc outage đều fail closed; application không tự tạo bucket hoặc thử provider khác.
 
-Cutover bắt buộc chạy theo thứ tự:
+Object publication bắt buộc chạy theo thứ tự:
 
-1. Đưa canonical writes về maintenance/read-only và ghi cutover intent có audit.
-2. Xác định exact source backend, target backend và canonical checkpoint.
-3. Replicate exact object keys và metadata cần thiết.
-4. Verify inventory, SHA-256 và byte size trên target.
-5. Đổi active backend configuration bằng secret/config deployment được kiểm soát.
-6. Chạy canonical read/write smoke và fail-closed integrity checks.
-7. Mở lại writes khi target pass; nếu fail thì rollback configuration khi source vẫn còn authoritative.
-8. Giữ source backend read-only theo retention cho đến khi cutover evidence và backup pass.
+1. Stream bytes tới content-addressed R2 key với bounded timeout/retry.
+2. Verify exact key, SHA-256 và byte size bằng `HEAD`/bounded read contract.
+3. Chỉ sau verification mới commit PostgreSQL version/current pointer và durable projection intent.
+4. Nếu upload hoặc verification fail, không publish pointer và giữ operation retryable/terminal theo typed error contract.
+
+R2 cung cấp strong consistency cho object read-after-write, delete và list. Correctness vẫn dựa trên explicit hash/size verification, không dựa riêng vào provider guarantee.
 
 ## 4. Stable identities
 
@@ -99,7 +100,7 @@ committed_at
 
 ## 7. Derived artifacts
 
-OCR text, transcript, parsed document, thumbnail và extracted metadata có thể lưu trong active object store nhưng luôn là derived artifacts:
+OCR text, transcript, parsed document, thumbnail và extracted metadata có thể lưu trong R2 nhưng luôn là derived artifacts:
 
 ```text
 artifacts/{source_version_id}/{artifact_kind}/{pipeline_hash}
@@ -146,4 +147,4 @@ Delete là tombstone trước, physical GC sau:
 
 ## 10. Recovery rule
 
-Qdrant, Neo4j, Redis, logs hoặc Temporal history không bao giờ được dùng để phát minh lại canonical content. Khi object trong active canonical store thiếu, hệ thống đánh dấu integrity failure và yêu cầu resync/restore từ canonical backup; không tự đọc backend inactive để che giấu lỗi cutover.
+Qdrant, Neo4j, Redis, logs hoặc Temporal history không bao giờ được dùng để phát minh lại canonical content. Khi object trong R2 thiếu, hệ thống đánh dấu integrity failure và yêu cầu resync/restore từ verified backup; không thử provider khác để che giấu lỗi.

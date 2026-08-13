@@ -3,7 +3,7 @@
 ## 1. Source-of-truth hierarchy
 
 ```text
-Canonical content bytes       Active private S3-compatible object store
+Canonical content bytes       Private Cloudflare R2 bucket
 Canonical application state   PostgreSQL
 Editable clients              Obsidian + Web App
 Search projection             Qdrant
@@ -12,14 +12,14 @@ Workflow history              Temporal
 Ephemeral state               Redis
 ```
 
-Active canonical object store và PostgreSQL tạo thành canonical boundary:
+Cloudflare R2 và PostgreSQL tạo thành canonical boundary:
 
-- Object store giữ immutable bytes được address bằng SHA-256.
+- R2 giữ immutable bytes được address bằng SHA-256.
 - PostgreSQL giữ source identity, version order, current pointer, policy, ownership, audit và object reference.
 
 Một object trong object store không tự nói nó thuộc source nào hoặc đang current. Một PostgreSQL row không có object hợp lệ cũng không tạo thành content version hoàn chỉnh.
 
-Cloudflare R2 là backend production mặc định. MinIO Community được dùng cho local/test và có thể làm production fallback đã chấp nhận rủi ro. Mỗi deployment chỉ có một active backend được quyền ghi tại một thời điểm; không tự động failover giữa R2 và MinIO. Cutover phải chạy trong maintenance/read-only mode, replicate exact object keys, verify inventory/hash/size, đổi cấu hình có audit rồi chạy smoke test trước khi mở lại writes.
+Cloudflare R2 là canonical object store duy nhất cho local, test/CI và production. Production và test/CI dùng bucket cùng credentials tách biệt. Không có backend fallback, dual-write hoặc object-store cutover. Khi R2 không khả dụng, mọi operation cần object bytes fail closed; hệ thống không publish PostgreSQL pointer tới object chưa được ghi và verify.
 
 ## 2. Data flow
 
@@ -30,7 +30,7 @@ flowchart LR
     C["Codex / Claude via MCP"] --> M["MCP adapter"]
     M --> A
     A --> P[(PostgreSQL)]
-    A --> R[(Active private S3-compatible object store)]
+    A --> R[(Cloudflare R2)]
     P --> T["Temporal workflows"]
     R --> T
     T --> Q[(Qdrant)]
@@ -73,7 +73,7 @@ Các process dùng chung domain package và contracts. Không process nào lưu 
 | Thành phần | Sở hữu | Không được sở hữu |
 |---|---|---|
 | PostgreSQL | Identity, version, policy, workflow intent, audit, registry, route | Dense/sparse search chính |
-| Active object store | Immutable source bytes và derived artifact lớn | Current pointer hoặc authorization |
+| Cloudflare R2 | Immutable source bytes và derived artifact lớn | Current pointer hoặc authorization |
 | Qdrant | Chunk vectors và payload phục vụ retrieval | Canonical source |
 | Neo4j | Rebuildable nodes/edges cho traversal | User, token, sync event |
 | Temporal | Durable workflow execution/history | Business records dài hạn |
@@ -91,6 +91,7 @@ Canonical write hoàn tất khi object bytes đã được ghi và verify hash, 
 - Dense provider lỗi: retry; nếu policy cho phép thì dùng sparse-only query.
 - Reranker lỗi: dùng fused order và đánh dấu degraded.
 - Temporal lỗi: write intent vẫn nằm trong PostgreSQL và được dispatch lại.
+- Cloudflare R2 lỗi: bounded retry cho lỗi tạm thời; read/write cần object bytes fail closed sau deadline và không chuyển provider.
 - Canonical object bytes thiếu hoặc hash sai: fail closed, không lấy projection làm nguồn phục hồi.
 
 ## 8. Boundary rules

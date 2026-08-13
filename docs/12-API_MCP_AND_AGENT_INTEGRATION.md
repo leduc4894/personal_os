@@ -2,7 +2,7 @@
 
 ## 1. Adapter rule
 
-FastAPI và MCP là adapters gọi cùng domain services. Không adapter nào query PostgreSQL, Qdrant, Neo4j hoặc active object store trực tiếp nếu đã có service tương ứng.
+FastAPI và MCP là adapters gọi cùng domain services. Không adapter nào query PostgreSQL, Qdrant, Neo4j hoặc Cloudflare R2 trực tiếp nếu đã có service tương ứng.
 
 ## 2. API groups
 

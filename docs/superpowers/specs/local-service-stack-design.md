@@ -8,32 +8,29 @@
 
 ## 1. Objective
 
-Provide one reproducible Docker Compose stack for every stateful dependency required by the Phase 1 local and integration environment:
+Provide one reproducible Docker Compose stack for the stateful services required by the Phase 1 local and integration environment:
 
-- PostgreSQL canonical state and Temporal persistence.
-- Qdrant rebuildable search projection.
-- Neo4j Community Edition rebuildable graph projection.
-- Redis ephemeral cache and coordination state.
+- PostgreSQL for canonical application state and Temporal persistence.
+- Qdrant for the rebuildable search projection.
+- Neo4j Community Edition for the rebuildable graph projection.
+- Redis for ephemeral cache and coordination state.
 - Temporal Server, UI, schema tools and CLI administration.
-- MinIO Community as the local/test S3-compatible object store.
 
-An empty development machine with the pinned toolchain must be able to create credentials, build the approved MinIO image, start the complete stack, wait for semantic readiness and preserve data across a normal stop/start cycle without using committed secrets or exposing a service to the LAN.
+An empty development machine with the pinned toolchain must be able to create local service credentials, start the complete stack, wait for authenticated semantic readiness and preserve selected service state across a normal stop/start cycle without committed secrets or LAN exposure.
 
-This design creates infrastructure only. It does not create application tables, object-addressing behavior, projection schemas or application service adapters.
+Cloudflare R2 is the only canonical object store, but it is a managed dependency outside this Compose topology. This design neither receives R2 credentials nor contacts an R2 bucket. The later content-addressable object-storage design owns R2 configuration, credentials, upload/read behavior and live test-bucket integration.
 
 ## 2. Scope
 
 This design owns:
 
 - One canonical Compose topology under `infra/compose/`.
-- Exact service versions, immutable registry-image digests and image provenance metadata.
-- A reproducible source build for the final MinIO Community release.
-- Loopback-only host publishing and private container networking.
+- Exact service versions and immutable registry-image digests.
+- Loopback-only host publishing and one private container network.
 - Named volumes and safe local reset behavior.
 - Generated file-backed credentials and service authentication.
 - PostgreSQL role/database provisioning without application tables.
 - Temporal schema initialization and namespace provisioning.
-- MinIO bucket, versioning and scoped application-credential bootstrap.
 - Container health checks and authenticated semantic readiness probes.
 - Conservative CPU and memory guardrails for a 16 GB development host.
 - Cross-platform lifecycle commands for Linux and Windows Docker Desktop.
@@ -41,33 +38,33 @@ This design owns:
 
 This design does not own:
 
+- Cloudflare R2 endpoint, bucket names, credentials or live tests.
 - API, MCP, worker, Web App or Obsidian containers.
 - Alembic application migrations or canonical PostgreSQL tables.
-- Python database, Redis, Qdrant, Neo4j, Temporal or S3 adapters.
+- Python database, Redis, Qdrant, Neo4j, Temporal or R2 adapters.
 - Qdrant collections, payload indexes or production projection routes.
 - Neo4j constraints, indexes, nodes or relationships.
-- Redis business keys or any durable business state in Redis.
-- Content-addressable object keys, streaming upload or Cloudflare R2 access.
-- Controlled R2/MinIO cutover execution.
-- Production MinIO fallback deployment.
-- Reverse proxy, public TLS or production two-host Compose manifests.
+- Redis business keys or durable business state in Redis.
+- Content-addressable object keys, streaming upload or corruption handling.
+- Object-store fallback, dual-write or provider cutover.
+- Reverse proxy, public TLS or production two-host deployment.
 - Backup/PITR/restore automation.
 - Prometheus, Grafana, Loki, Tempo, Alloy, Alertmanager or Sentry.
 - Production resource sizing or trace sampling.
 
 ## 3. Selected approach
 
-Use one canonical Compose file with explicit long-running services and idempotent one-shot initialization jobs. A Python lifecycle tool validates preconditions and supplies the same commands on Linux and Windows.
+Use one canonical Compose file with explicit long-running services and idempotent one-shot initialization jobs. A typed Python lifecycle tool validates preconditions and supplies the same commands on Linux and Windows.
 
 The default stack starts every selected dependency, including Temporal UI and the Temporal CLI toolbox. There are no optional profiles in this baseline.
 
 Rejected alternatives:
 
-1. Splitting the stack across several composable files would reduce the resources used for a narrow task but multiply the supported topology combinations and allow networks, credentials, health semantics and versions to drift.
-2. Replacing Temporal with its development server would be lighter but would not exercise the PostgreSQL-backed server, schema initialization or recovery topology required by the canonical architecture.
-3. Using disposable Qdrant, Neo4j or Redis storage would make startup simple but would fail to prove the agreed local persistence lifecycle.
-4. Using the older prebuilt MinIO `RELEASE.2025-09-07T16-13-09Z` image would avoid a build but omit the privilege-escalation fix shipped in `RELEASE.2025-10-15T17-29-55Z`.
-5. Using an unofficial community image for the last MinIO release would transfer trust to an unapproved maintainer and would not satisfy the source-provenance requirement.
+1. Splitting the stack across several composable files would multiply supported topology combinations and allow networks, credentials, health semantics and versions to drift.
+2. Replacing Temporal with its development server would not exercise the PostgreSQL-backed server, schema initialization or recovery topology required by the canonical architecture.
+3. Using disposable Qdrant, Neo4j or Redis storage would fail to prove the agreed local persistence lifecycle.
+4. Running MinIO locally would add an archived source dependency, reproducible image build, patching, backup and security maintenance to a one-person system. Cloudflare R2 is now the sole canonical object store.
+5. Adding another local S3 emulator would create a second behavior contract without providing production recovery. Offline adapter tests use a test double; live compatibility tests use the dedicated R2 test bucket.
 
 ## 4. Topology
 
@@ -81,7 +78,6 @@ redis
 temporal
 temporal-ui
 temporal-cli
-minio
 ```
 
 ### 4.2 One-shot services
@@ -90,7 +86,6 @@ minio
 postgres-provision
 temporal-schema-setup
 temporal-namespace-bootstrap
-minio-bucket-bootstrap
 ```
 
 `temporal-schema-setup` uses the Temporal administrative image and exits after applying the Temporal and visibility schemas. `temporal-cli` is a separate long-running toolbox based on the approved CLI image. The toolbox stays inert between operator commands and proves its connection through its health check.
@@ -106,20 +101,17 @@ postgresql healthy
               -> temporal-ui ready
               -> temporal-cli ready
 
-minio healthy
-  -> minio-bucket-bootstrap completed
-
 qdrant healthy
 neo4j healthy
 redis healthy
 ```
 
-Qdrant, Neo4j and Redis do not depend on PostgreSQL or Temporal. MinIO does not depend on the canonical database. Application processes run on the host during this phase and reach dependencies through loopback-published ports.
+Qdrant, Neo4j and Redis do not depend on PostgreSQL or Temporal. Application processes run on the host during this phase and reach dependencies through loopback-published ports.
 
 ### 4.4 Compose identity
 
 - Compose services do not set `container_name`.
-- The lifecycle tool uses the local project name `knowledge-local`.
+- The lifecycle tool uses project name `knowledge-local` locally.
 - CI project names match `knowledge-ci-<bounded-lowercase-token>`.
 - Compose applies its project prefix to containers, network and volumes.
 - Parallel CI jobs use different validated project names.
@@ -129,22 +121,18 @@ Qdrant, Neo4j and Redis do not depend on PostgreSQL or Temporal. MinIO does not 
 
 ```text
 infra/
-├── compose/
-│   ├── compose.yaml
-│   ├── images.lock.yaml
-│   ├── README.md
-│   ├── config/
-│   │   ├── temporal/
-│   │   │   └── dynamicconfig.yaml
-│   └── scripts/
-│       ├── postgres-provision.sh
-│       ├── temporal-schema-setup.sh
-│       ├── temporal-namespace-bootstrap.sh
-│       ├── temporal-secret-entrypoint.sh
-│       └── minio-bucket-bootstrap.sh
-└── minio/
-    ├── Dockerfile
-    └── source.lock
+└── compose/
+    ├── compose.yaml
+    ├── images.lock.yaml
+    ├── README.md
+    ├── config/
+    │   └── temporal/
+    │       └── dynamicconfig.yaml
+    └── scripts/
+        ├── postgres-provision.sh
+        ├── temporal-schema-setup.sh
+        ├── temporal-namespace-bootstrap.sh
+        └── temporal-secret-entrypoint.sh
 
 tools/
 └── local_service_stack.py
@@ -163,13 +151,12 @@ Generated local artifacts live only under:
 ```text
 .local/
 ├── stack-secrets/
-├── stack-state/
-└── stack-build/
+└── stack-state/
 ```
 
-The repository ignores `.local/` as a whole. No generated credential, rendered secret configuration, image tarball, build context or state file is committed.
+The repository ignores `.local/` as a whole. No generated credential, rendered secret configuration, environment dump or state file is committed.
 
-`stack-state` may store only non-sensitive schema versions, project identity, image IDs and build-result digests. It must not contain a credential, rendered Compose document, environment dump or absolute secret path.
+`stack-state` may store only non-sensitive schema versions and project identity. It must not contain a credential, rendered Compose document, environment dump or absolute secret path.
 
 ## 6. Version and image contract
 
@@ -180,21 +167,15 @@ The repository ignores `.local/` as a whole. No generated credential, rendered s
 | PostgreSQL | `postgres:18.4-bookworm` | Canonical and Temporal databases |
 | Qdrant | `qdrant/qdrant:v1.18.2` | Search projection service |
 | Neo4j Community | `neo4j:5.26.28-community` | Single-instance graph projection |
-| Redis Open Source | `redis:8.6.4-bookworm` | Ephemeral cache/coordination |
+| Redis Open Source | `redis:8.6.4` | Ephemeral cache/coordination |
 | Temporal Server | `temporalio/server:1.31.2` | Durable workflow server |
 | Temporal schema tools | `temporalio/admin-tools:1.31.2` | PostgreSQL schema setup/update |
 | Temporal UI | `temporalio/ui:2.53.0` | Local workflow administration UI |
 | Temporal CLI | `temporalio/temporal:1.8.0` | Operator CLI toolbox |
-| MinIO Client | `minio/mc:RELEASE.2025-08-13T08-35-41Z` | Bucket/user/policy bootstrap |
-| MinIO Community | `RELEASE.2025-10-15T17-29-55Z` | Local/test object store |
 
-The MinIO source revision is exactly:
+The official `redis:8.6.4-bookworm` tag does not exist. The approved exact Redis tag is `redis:8.6.4`; its manifest is pinned like every other registry image.
 
-```text
-9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a
-```
-
-Neo4j uses the explicit Community tag and installs no APOC, Graph Data Science or downloaded plugin. Redis uses the Open Source official image. Temporal does not use `auto-setup` or `server start-dev`.
+Neo4j uses the explicit Community tag and installs no APOC, Graph Data Science or downloaded plugin. Redis uses the official Open Source image. Temporal does not use `auto-setup` or `server start-dev`.
 
 ### 6.2 Registry pinning
 
@@ -219,30 +200,11 @@ supported_platforms
 verified_at
 ```
 
-A contract test checks that every registry image in Compose matches exactly one lock entry and that every lock entry is consumed. The lock contains no registry credential.
+A contract test checks that every registry image in Compose matches exactly one lock entry and every lock entry is consumed. The lock contains no registry credential.
 
-`linux/amd64` is the required container platform for Linux hosts, Ubuntu CI and Windows Docker Desktop in Linux-container mode. `linux/arm64` may be added to the same lock only after every upstream manifest and the reproducible MinIO build pass the full smoke contract on that platform; this spec does not claim ARM acceptance initially.
+`linux/amd64` is the required platform for Linux hosts, Ubuntu CI and Windows Docker Desktop in Linux-container mode. `linux/arm64` may be added only after every manifest and full smoke contract pass on that platform.
 
-### 6.3 MinIO source build
-
-The final Community release is source-only. Local use follows this reproducible path:
-
-1. Fetch the exact upstream source revision into an isolated staging directory.
-2. Verify the pinned full commit and upstream verified signature evidence.
-3. Verify the committed source-archive SHA-256 in `source.lock`.
-4. Build from the verified local source with network disabled during the compilation/image stages.
-5. Pin builder and runtime base images by immutable digest.
-6. Produce an image tagged only as the approved local MinIO release.
-7. Apply OCI labels for source URL, revision, version, license and build timestamp.
-8. Record the resulting local image ID and provenance digest in non-sensitive stack state.
-
-`stack up` refuses a MinIO image whose labels, image ID or source revision differ from the current build evidence. It never pulls the same local tag from an external registry as a fallback.
-
-CI creates an SBOM and vulnerability report for this image. A high or critical finding fails unless an exact reviewed exception names the CVE, affected package, local exposure, compensating controls, owner, expiry no later than 30 days and replacement trigger. Blanket `ignore-unfixed` behavior is forbidden.
-
-This local image is not automatically production-ready. Production fallback activation additionally requires publication to a controlled registry, supply-chain attestation, immutable registry digest, backup evidence and the explicit archived-dependency risk acceptance defined by canonical operations documentation.
-
-### 6.4 Upgrade policy
+### 6.3 Upgrade policy
 
 An upgrade is a dedicated pull request that changes version and digest together and includes:
 
@@ -252,7 +214,6 @@ An upgrade is a dedicated pull request that changes version and digest together 
 - Empty bootstrap and persisted-volume restart smoke.
 - Temporal Server/UI/CLI compatibility evidence where applicable.
 - Rollback or forward-only recovery note.
-- Updated SBOM and vulnerability evidence for MinIO.
 
 No automated dependency update may merge an image change without these gates.
 
@@ -270,7 +231,7 @@ Compose creates one project-scoped bridge network named logically `service-backp
 - Static config mounts are read-only.
 - Only data directories use writable named volumes.
 
-Local service traffic is plaintext because it stays inside the project bridge or the host loopback boundary. Authentication remains enabled. This exception is local/test-only and is not a production TLS decision.
+Local service traffic is plaintext because it stays inside the project bridge or host loopback boundary. Authentication remains enabled. This local/test exception is not a production TLS decision.
 
 ### 7.2 Default host ports
 
@@ -284,8 +245,6 @@ Local service traffic is plaintext because it stays inside the project bridge or
 | `REDIS_PORT` | `6379` | `6379` | Redis |
 | `TEMPORAL_GRPC_PORT` | `7233` | `7233` | Temporal frontend |
 | `TEMPORAL_UI_PORT` | `8080` | `8080` | Temporal UI |
-| `MINIO_API_PORT` | `9000` | `9000` | MinIO S3 API |
-| `MINIO_CONSOLE_PORT` | `9001` | `9001` | MinIO Console |
 
 Each publication renders as:
 
@@ -293,7 +252,7 @@ Each publication renders as:
 127.0.0.1:${VARIABLE:-default}:container_port
 ```
 
-These ten names are the complete port-override allowlist. Credentials, image references, volume names, service hostnames and security switches cannot be overridden through environment variables.
+These eight names are the complete port-override allowlist. Credentials, image references, volume names, service hostnames and security switches cannot be overridden through environment variables.
 
 The lifecycle tool validates every effective port before Compose execution:
 
@@ -318,10 +277,6 @@ qdrant_api_key
 neo4j_auth
 redis_acl
 redis_application_password
-minio_root_user
-minio_root_password
-minio_application_access_key
-minio_application_secret_key
 ```
 
 Fixed non-secret principals are:
@@ -333,20 +288,21 @@ PostgreSQL Temporal       temporal_service
 Neo4j user                neo4j
 Redis application user    knowledge
 Temporal namespace        knowledge
-MinIO bucket              canonical-objects
 ```
 
-Passwords, the Qdrant API key and secret access keys use a cryptographically secure generator and at least 192 bits of entropy. MinIO root/application access-key identifiers use exactly 20 uppercase ASCII alphanumeric characters; they are identifiers rather than authentication secrets but remain file-backed to keep the credential pair together. Values use an ASCII alphabet accepted without shell escaping by every owning service. Files contain no terminal newline.
+Passwords and the Qdrant API key use a cryptographically secure generator and at least 192 bits of entropy. Values use an ASCII alphabet accepted without shell escaping by every owning service. Files contain no terminal newline except `redis_acl`, whose native multi-line grammar requires line delimiters.
 
-`neo4j_auth` contains the exact native Docker secret shape `neo4j/<generated-password>`. `redis_acl` disables the default user and enables only the named `knowledge` user with its generated password. Qdrant receives a generated secret configuration file derived atomically from its API-key secret; the rendered secret configuration remains in `.local/stack-secrets/` and is mounted read-only.
+`neo4j_auth` contains the exact native Docker secret shape `neo4j/<generated-password>`. `redis_acl` disables the default user and enables only the named `knowledge` user. Qdrant receives a generated secret configuration file derived atomically from its API-key secret; the rendered secret configuration remains in `.local/stack-secrets/` and is mounted read-only.
+
+R2 credentials are deliberately absent. They belong to the object-storage adapter secret contract and must never be copied into Compose or stack lifecycle state.
 
 ### 8.2 Creation behavior
 
-- The tool resolves the repository root and proves the secret directory remains under `<workspace>/.local/stack-secrets`.
-- Generation occurs in a sibling staging directory followed by an atomic rename.
+- The tool resolves the repository root and proves the secret directory remains beneath `<workspace>/.local/stack-secrets`.
+- Generation occurs in a sibling staging directory followed by atomic rename.
 - An already complete set is reused byte-for-byte.
 - Existing files are never overwritten by `bootstrap` or `up`.
-- A partial set is terminal. The tool does not guess whether regeneration is safe.
+- A partial set is terminal; the tool does not guess whether regeneration is safe.
 - A missing set while project volumes exist is terminal.
 - Secret filenames, absolute paths and values are absent from normal/error output.
 - On POSIX, directories use `0700` and files use `0600`.
@@ -356,7 +312,7 @@ Passwords, the Qdrant API key and secret access keys use a cryptographically sec
 
 Compose declares credentials through top-level `secrets:` entries.
 
-- Native `*_FILE` support is used for PostgreSQL, Neo4j and MinIO.
+- Native `*_FILE` support is used for PostgreSQL and Neo4j.
 - Redis reads a mounted ACL file.
 - Qdrant reads a mounted generated configuration file.
 - Temporal adapters read the PostgreSQL password file inside the container immediately before `exec` of the fixed command.
@@ -367,11 +323,11 @@ No credential is accepted from a host environment variable, `.env`, CLI argument
 
 ### 8.4 Rotation
 
-Changing a file alone is not credential rotation because persisted PostgreSQL, Neo4j, Redis and MinIO state may still retain the old credential.
+Changing a file alone is not credential rotation because persisted PostgreSQL, Neo4j and Redis state may retain the old credential.
 
 - `bootstrap` never rotates.
 - `stack reset` keeps secrets by default.
-- `stack reset --rotate-secrets` first deletes the exact project volumes successfully, then removes the exact validated secret set.
+- `stack reset --rotate-secrets` first deletes the exact project volumes successfully, then removes the exact validated local-stack secret set.
 - The next `bootstrap` creates a new atomic set.
 - In-place rotation of a populated local stack is deferred until an owning credential-rotation spec exists.
 
@@ -379,7 +335,7 @@ Changing a file alone is not credential rotation because persisted PostgreSQL, N
 
 ### 9.1 PostgreSQL
 
-The PostgreSQL 18 image stores its version-specific `PGDATA` beneath `/var/lib/postgresql`; therefore the named volume mounts at `/var/lib/postgresql`, not the PostgreSQL 17-and-earlier `/var/lib/postgresql/data` path.
+The PostgreSQL 18 image stores version-specific `PGDATA` beneath `/var/lib/postgresql`; the named volume mounts at `/var/lib/postgresql`, not the PostgreSQL 17-and-earlier `/var/lib/postgresql/data` path.
 
 The primary container initializes only the `stack_admin` superuser. After authenticated readiness, `postgres-provision` idempotently ensures:
 
@@ -401,18 +357,18 @@ Rules:
 
 ### 9.2 Temporal
 
-`temporal-schema-setup` runs the official `temporal-sql-tool` workflow against both Temporal databases using the PostgreSQL 12+ plugin supported by Temporal. The plugin name does not downgrade the PostgreSQL server; it identifies the compatible Temporal SQL dialect family.
+`temporal-schema-setup` runs the official `temporal-sql-tool` workflow against both Temporal databases using the PostgreSQL 12+ plugin supported by Temporal. The plugin name identifies the compatible Temporal SQL dialect family; it does not downgrade PostgreSQL.
 
 The job:
 
 1. Reads the Temporal database password from its mounted secret.
 2. Detects whether each schema is absent or already versioned.
-3. Creates an absent schema from the exact Server `1.31.2` schema assets.
+3. Creates an absent schema from exact Server `1.31.2` schema assets.
 4. Applies supported updates only when the existing version is behind.
 5. Fails when the version is ahead, corrupt or incompatible.
 6. Verifies both schema-version tables before exiting `0`.
 
-Temporal Server starts only after this job exits successfully. It uses the same PostgreSQL server but separate database and role boundaries from application state.
+Temporal Server starts only after this job succeeds. It uses the same PostgreSQL server but separate database and role boundaries from application state.
 
 `temporal-namespace-bootstrap` waits for the frontend API, then idempotently ensures:
 
@@ -421,7 +377,7 @@ namespace  knowledge
 retention  7 days
 ```
 
-An existing namespace with another retention is a configuration drift failure, not silently modified.
+An existing namespace with another retention is configuration drift and fails instead of being silently modified.
 
 Temporal UI connects only to `temporal:7233`. Temporal CLI uses the same internal address and defaults operator commands to namespace `knowledge`. Neither component receives PostgreSQL credentials.
 
@@ -435,7 +391,7 @@ Qdrant runs single-node with:
 - REST on `6333` and gRPC on `6334`.
 - Cluster peer port `6335` unpublished.
 - Admin API key enabled from the mounted generated configuration.
-- CORS disabled unless a later UI requirement explicitly changes the contract.
+- CORS disabled unless a later UI requirement changes the contract.
 - No collection, alias, payload index or vector schema at bootstrap.
 
 Qdrant `/livez`, `/healthz` and `/readyz` are intentionally public health endpoints even when API-key authentication is enabled. Container health uses `/readyz`; semantic readiness separately performs an authenticated API operation. A negative probe to a protected endpoint without `api-key` must fail.
@@ -452,7 +408,7 @@ Neo4j runs one Community Edition instance with:
 - No downloaded plugin and no `NEO4J_PLUGINS` setting.
 - No application constraint, index, label, node or relationship.
 
-Community Edition has one native administrative user and no Enterprise RBAC. The later graph adapter must still use a separate application credential if the canonical deployment spec adds a supported boundary; this local baseline does not imply production least-privilege parity.
+Community Edition has one native administrative user and no Enterprise RBAC. This local baseline does not imply production least-privilege parity.
 
 Heap initial/max size and page cache are explicitly configured so their sum leaves native-memory headroom below the container cap.
 
@@ -460,7 +416,7 @@ Heap initial/max size and page cache are explicitly configured so their sum leav
 
 Redis runs standalone with:
 
-- Persistent `/data` named volume as selected for local lifecycle continuity.
+- Persistent `/data` named volume for selected local lifecycle continuity.
 - An ACL file that disables the default user.
 - One authenticated `knowledge` user.
 - Protected mode enabled.
@@ -469,32 +425,7 @@ Redis runs standalone with:
 - Bounded memory consistent with its container cap.
 - Persistence enabled sufficiently to prove local stop/start continuity.
 
-The Redis volume does not make Redis canonical. Application correctness must tolerate Redis loss, flush or eviction according to the canonical architecture.
-
-### 9.6 MinIO Community
-
-MinIO runs single-node with:
-
-- The approved locally built image and exact source revision.
-- Persistent `/data` named volume.
-- S3 API on `9000` and Console on `9001`, both loopback-only.
-- Root identity loaded through file-backed secrets.
-- Browser/console access enabled only for local administration.
-- Anonymous access disabled.
-
-`minio-bucket-bootstrap` idempotently ensures:
-
-```text
-bucket             canonical-objects
-anonymous policy   none
-versioning         enabled
-application user   generated scoped access key
-application policy read/write/list only within canonical-objects
-```
-
-The job does not create an object, content-addressable prefix, retention rule or lifecycle deletion policy. Those contracts belong to the content-addressable object-storage spec.
-
-The application credential is distinct from the root credential. Later application settings consume only the scoped credential.
+The Redis volume does not make Redis canonical. Application correctness must tolerate Redis loss, flush or eviction.
 
 ## 10. Persistent volumes and restart behavior
 
@@ -504,7 +435,6 @@ The application credential is distinct from the root credential. Later applicati
 | `qdrant-data` | `/qdrant/storage` | Rebuildable projection |
 | `neo4j-data` | `/data` | Rebuildable projection |
 | `redis-data` | `/data` | Ephemeral/non-canonical state |
-| `minio-data` | `/data` | Local/test canonical bytes |
 
 `docker compose down` does not delete these volumes. Long-running services use `restart: unless-stopped`. One-shot initialization jobs use `restart: "no"`; retry happens only through a later explicit lifecycle invocation.
 
@@ -523,20 +453,19 @@ These limits protect a 16 GB development host. They are not production sizing ev
 | Temporal Server | 1 GB | 1.5 |
 | Temporal UI | 256 MB | 0.5 |
 | Temporal CLI | 128 MB | 0.25 |
-| MinIO | 1 GB | 1.0 |
 | Each one-shot job | 512 MB | 0.5 |
 
 Compose uses non-Swarm limits supported by local Docker Compose. It does not rely only on `deploy.resources` semantics that a local engine might ignore.
 
-Neo4j heap/page-cache configuration, PostgreSQL shared buffers and Redis maximum memory must stay below their caps with explicit native-memory headroom. A process killed for exceeding its limit is unhealthy and makes stack readiness fail.
+Neo4j heap/page-cache configuration, PostgreSQL shared buffers and Redis maximum memory stay below their caps with explicit native-memory headroom. A process killed for exceeding its limit is unhealthy and makes stack readiness fail.
 
-Phase 10 replaces these guardrails only after measured capacity evidence.
+The production operations spec may replace these guardrails only after measured capacity evidence.
 
 ## 12. Health and semantic readiness
 
 ### 12.1 Two levels
 
-Container health answers whether the service process can accept a basic local request. Stack readiness answers whether the authenticated contract needed by future application code works.
+Container health answers whether the service process accepts a basic local request. Stack readiness answers whether the authenticated contract needed by future application code works.
 
 Health alone never makes the stack ready.
 
@@ -544,14 +473,13 @@ Health alone never makes the stack ready.
 
 | Service | Container health |
 |---|---|
-| PostgreSQL | authenticated `SELECT 1` through local socket/TCP |
+| PostgreSQL | Authenticated `SELECT 1` through local socket/TCP |
 | Qdrant | HTTP `/readyz` |
-| Neo4j | authenticated `RETURN 1` through `cypher-shell` |
-| Redis | authenticated `PING` through `redis-cli` |
-| Temporal Server | frontend port/process health inside the Server image |
-| Temporal UI | local HTTP readiness |
+| Neo4j | Authenticated `RETURN 1` through `cypher-shell` |
+| Redis | Authenticated `PING` through `redis-cli` |
+| Temporal Server | Frontend port/process health inside the Server image |
+| Temporal UI | Local HTTP readiness |
 | Temporal CLI | `temporal operator cluster health` against internal Server |
-| MinIO | `/minio/health/ready` |
 
 Secrets used by a health check are read from mounted files at execution time and never embedded in the health command stored in image/Compose configuration.
 
@@ -563,15 +491,16 @@ Checks use bounded intervals, timeouts, retries and start periods. Neo4j and Tem
 
 | Component | Required verification |
 |---|---|
-| PostgreSQL | Authenticate as the intended principal and `SELECT 1` in `knowledge`, `temporal` and `temporal_visibility`; confirm cross-database privilege denial |
+| PostgreSQL | Authenticate intended principals in all three databases; confirm cross-database privilege denial |
 | Qdrant | Authenticated protected API request; equivalent request without key is denied |
 | Neo4j | Authenticated `RETURN 1`; invalid/no credential is denied |
 | Redis | Authenticated `PING`; default/unauthenticated client is denied |
 | Temporal | Cluster health and exact `knowledge` namespace/7-day retention describe |
 | Temporal UI | HTTP success through the effective loopback port |
-| MinIO | Authenticated bucket existence, private policy, versioning and scoped-user policy; anonymous list is denied |
 
 Verification is read-only except for bounded integration-test markers in the dedicated smoke workflow. It prints no settings dump, credential, secret path or raw vendor exception.
+
+R2 readiness is not part of `stack verify`. The owning object-storage adapter provides a separate authenticated `check-runtime`/live contract against the selected R2 environment.
 
 ## 13. Lifecycle interface
 
@@ -581,13 +510,12 @@ The supported entrypoint is:
 uv run python tools/local_service_stack.py <command>
 ```
 
-Starting containers requires a reachable Linux-container Docker Engine and Docker Compose CLI `>=2.30.0`. Static `config` validation requires the pinned Compose CLI but not a running engine. The lifecycle tool checks capabilities and version before mutation rather than assuming a vendor-specific Docker Desktop release.
+Starting containers requires a reachable Linux-container Docker Engine and Docker Compose CLI `>=2.30.0`. Static `config` validation requires the pinned Compose CLI but not a running engine. The lifecycle tool checks capabilities and version before mutation.
 
 Poe exposes matching tasks:
 
 ```text
 stack-bootstrap
-stack-build-minio
 stack-config
 stack-up
 stack-status
@@ -601,12 +529,11 @@ stack-smoke
 
 | Command | Contract |
 |---|---|
-| `bootstrap` | Create or validate the atomic secret set without starting Docker services |
-| `build-minio` | Stage verified source, build the approved image and record provenance |
-| `config` | Validate tools, port overrides, secret completeness, lock/Compose agreement and rendered Compose syntax |
+| `bootstrap` | Create or validate the atomic local-service secret set without starting Docker services |
+| `config` | Validate tools, ports, secrets, image-lock agreement and rendered Compose syntax |
 | `up` | Run preflight, start the dependency graph, wait and run semantic verification |
 | `status` | Return sanitized service/init/health/readiness state |
-| `verify` | Re-run every semantic readiness probe |
+| `verify` | Re-run every local-service semantic readiness probe |
 | `down` | Stop/remove project containers and network while retaining volumes and secrets |
 | `reset` | Delete exact project containers/network/volumes after confirmation; retain secrets by default |
 | `smoke` | Execute the disposable full-stack integration contract in a CI-scoped project |
@@ -618,7 +545,6 @@ Docker and Compose prerequisite check
 -> port validation and collision detection
 -> secret-set validation
 -> registry tag/digest validation
--> MinIO image/provenance validation
 -> docker compose config --quiet
 -> docker compose up
 -> wait for init jobs and health
@@ -626,7 +552,7 @@ Docker and Compose prerequisite check
 -> ready
 ```
 
-It does not automatically build MinIO, change a port, regenerate a secret, choose another image, delete a resource or weaken authentication.
+It does not contact R2, change a port, regenerate a secret, choose another image, delete a resource or weaken authentication.
 
 ### 13.2 Process safety
 
@@ -645,7 +571,7 @@ It does not automatically build MinIO, change a port, regenerate a secret, choos
 | `0` | Requested lifecycle operation succeeded |
 | `2` | CLI syntax or argument error |
 | `64` | Docker/Compose prerequisite, invalid port or port collision |
-| `65` | Secret, configuration, image-lock or provenance contract failure |
+| `65` | Secret, configuration or image-lock contract failure |
 | `69` | Container startup or initialization job failure |
 | `70` | Unexpected lifecycle-tool failure |
 | `75` | Semantic readiness failed or timed out |
@@ -654,18 +580,16 @@ The lifecycle tool maps raw subprocess failures to this closed result set. It ne
 
 ## 14. Failure behavior
 
-- Missing Docker or unsupported Compose is terminal before any resource mutation.
+- Missing Docker or unsupported Compose is terminal before mutation.
 - Invalid or occupied ports are terminal before Compose starts a container.
 - A missing/partial secret set is terminal; no default credential is substituted.
 - An image tag/digest mismatch is terminal; no floating pull occurs.
-- MinIO source/build/provenance mismatch is terminal.
 - PostgreSQL role/database drift that cannot be reconciled non-destructively is terminal.
 - Temporal schema ahead/corrupt/incompatible is terminal.
 - Temporal namespace retention drift is terminal.
-- MinIO bucket/policy drift that cannot be reconciled without broadening privilege is terminal.
 - A one-shot job failure prevents dependent services from satisfying readiness.
 - A container marked healthy while its authenticated semantic probe fails leaves the stack `not ready` and returns `75`.
-- Dependency failure never triggers deletion, recreation, object-store failover or switch to an inactive backend.
+- Dependency failure never triggers deletion, recreation or object-store behavior.
 - Vendor exceptions and command output are not copied unfiltered into lifecycle diagnostics.
 
 Failure output may contain only bounded stable metadata such as:
@@ -705,7 +629,7 @@ explicit non-interactive confirmation flag is present
 resolved resources all carry that exact project label
 ```
 
-Reset never calls Docker system/volume/image prune, uses no wildcard, and does not delete an image. If volume deletion partially fails, secret rotation does not run.
+Reset never calls Docker system/volume/image prune, uses no wildcard and does not delete an image. If volume deletion partially fails, secret rotation does not run. Reset has no access to an R2 bucket and cannot delete R2 objects.
 
 ## 16. Test strategy
 
@@ -713,15 +637,14 @@ Reset never calls Docker system/volume/image prune, uses no wildcard, and does n
 
 Tests parse the canonical/rendered Compose model and prove:
 
-- The exact eight long-running and four one-shot services exist.
-- Every upstream registry image has exact tag and digest.
+- Exact seven long-running and three one-shot services exist.
+- Every registry image has exact tag and digest.
 - Every image lock entry is consumed exactly once.
-- MinIO uses the approved local image/provenance path.
 - No `latest`, floating tag or host-selected image exists.
 - No explicit `container_name` exists.
 - No privileged mode, host networking, Docker socket or broad host bind mount exists.
 - Every published port binds `127.0.0.1`.
-- Only the ten approved port variables occur.
+- Only the eight approved port variables occur.
 - Every persistent directory maps to the exact named volume.
 - Credential consumers declare the required Compose secret.
 - No plaintext credential-like field exists in Compose/config.
@@ -730,11 +653,12 @@ Tests parse the canonical/rendered Compose model and prove:
 - PostgreSQL 18 volume path is `/var/lib/postgresql`.
 - Qdrant peer port `6335` is not published.
 - Static mounts are read-only.
+- No MinIO image, service, volume, secret, script, port or profile exists.
 
 ### 16.2 Lifecycle unit tests
 
 - Atomic first secret generation and complete-set reuse.
-- Partial secret set rejection.
+- Partial secret-set rejection.
 - Existing-volume plus missing-secret rejection.
 - POSIX permission enforcement and explicit Windows boundary behavior.
 - Default, valid custom, malformed, duplicate and occupied ports.
@@ -742,33 +666,32 @@ Tests parse the canonical/rendered Compose model and prove:
 - Argument-array subprocess invocation.
 - Bounded timeout and cancellation.
 - Exit-code mapping for every failure class.
-- Sentinel-bearing subprocess errors are absent from output.
+- Sentinel-bearing subprocess errors absent from output.
 - Reset exact-label resolution and refusal on foreign resources.
 - Secret rotation does not occur after failed volume deletion.
-- MinIO revision/label/image-ID mismatch rejection.
 
 ### 16.3 Full-stack smoke
 
 The Ubuntu smoke starts from an empty CI-scoped project:
 
-1. Generate credentials.
-2. Build and verify exact MinIO source.
-3. Start the complete Compose graph.
-4. Wait for all init and health contracts.
-5. Run all semantic readiness and unauthenticated-denial probes.
-6. Confirm the three PostgreSQL database/role boundaries.
-7. Confirm both Temporal schemas and the exact namespace retention.
-8. Confirm the private/versioned MinIO bucket and scoped credential.
-9. Create exact disposable markers in PostgreSQL, Qdrant, Neo4j, Redis and MinIO.
-10. Stop with `down`, start again and prove every selected marker persists.
-11. Re-run all initialization jobs and prove idempotency.
-12. Stop one dependency, prove `verify` returns `75`, restart it and prove recovery.
-13. Remove exact disposable markers.
-14. Reset only the CI project and prove no labeled resource remains.
+1. Generate local service credentials.
+2. Start the complete Compose graph.
+3. Wait for all init and health contracts.
+4. Run all semantic readiness and unauthenticated-denial probes.
+5. Confirm the three PostgreSQL database/role boundaries.
+6. Confirm both Temporal schemas and exact namespace retention.
+7. Create exact disposable markers in PostgreSQL, Qdrant, Neo4j and Redis.
+8. Stop with `down`, start again and prove every selected marker persists.
+9. Re-run all initialization jobs and prove idempotency.
+10. Stop one dependency, prove `verify` returns `75`, restart it and prove recovery.
+11. Remove exact disposable markers.
+12. Reset only the CI project and prove no labeled resource remains.
 
-Marker names contain a unique CI run token. Cleanup uses exact names and runs in `finally`. It never touches an application table, production-shaped Qdrant collection, production Neo4j label or canonical object prefix.
+Marker names contain a unique CI run token. Cleanup uses exact names and runs in `finally`. It never touches an application table, production-shaped Qdrant collection or production Neo4j label.
 
 Redis marker persistence proves the selected local lifecycle only; it is not a correctness or durability guarantee.
+
+The local-stack smoke never contacts R2. Live R2 behavior belongs to the content-addressable object-storage pipeline and uses the dedicated test bucket with exact run-prefix cleanup.
 
 ### 16.4 Leakage and security tests
 
@@ -780,7 +703,7 @@ Redis marker persistence proves the selected local lifecycle only; it is not a c
 - Health endpoints deliberately public by upstream design are limited to health metadata.
 - Host port inspection shows only `127.0.0.1` publication.
 - Containers cannot access the Docker socket.
-- MinIO SBOM, vulnerability and source-provenance checks pass.
+- Compose and lifecycle artifacts contain no R2 credential, bucket or endpoint.
 
 ## 17. CI contract
 
@@ -804,49 +727,50 @@ The full-stack workflow runs:
 - Nightly on the default branch.
 - On manual dispatch.
 
-The workflow uses a unique CI project name, finite job timeout and BuildKit cache for the verified MinIO source build. It uploads sanitized test reports, SBOM and vulnerability evidence. Raw service logs are not uploaded automatically.
+The workflow uses a unique CI project name and finite job timeout. It uploads only sanitized test reports. Raw service logs and environment dumps are not uploaded automatically.
 
 Before this design is considered implemented, a full smoke must pass on the same final commit. A nightly result from another commit is insufficient.
 
 ### 17.3 Existing quality gate
 
-Static/unit contracts join the existing `uv run --all-packages --frozen poe verify` graph. The heavy Docker smoke remains a separate workflow as required by canonical testing guidance. Neither job may collect zero required tests or replace a failed assertion with a warning.
+Static/unit contracts join the existing `uv run --all-packages --frozen poe verify` graph. The heavy Docker smoke remains a separate workflow. Neither job may collect zero required tests or replace a failed assertion with a warning.
+
+The local-stack workflow receives no Cloudflare secret. The later live R2 workflow runs only on trusted contexts with test-bucket credentials and is not part of this Compose job.
 
 ## 18. Acceptance criteria
 
-Implementation is complete only when all of these criteria pass on the same final commit:
+Implementation is complete only when all criteria pass on the same final commit:
 
-1. The repository contains one canonical Compose topology with the exact approved services and initialization jobs.
-2. Every upstream image has an exact version tag and immutable manifest digest matching the image lock.
-3. MinIO is built from exact commit `9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a` with verified source, pinned bases, OCI labels, SBOM and vulnerability evidence.
-4. No `.env`, plaintext credential, unofficial MinIO image or floating tag is used.
-5. Secret bootstrap is atomic, idempotent, non-overwriting and safe on Linux and the documented Windows boundary.
-6. PostgreSQL, Qdrant, Neo4j, Redis and MinIO require authentication for protected operations.
-7. Every published port binds only `127.0.0.1`; Qdrant peer and all unneeded ports remain unpublished.
-8. The ten approved host-port overrides validate correctly without becoming Python `KNOWLEDGE_*` runtime settings.
-9. PostgreSQL contains separate `knowledge`, `temporal` and `temporal_visibility` databases with the approved non-superuser ownership boundaries and no application tables.
-10. Temporal Server uses PostgreSQL schemas managed by one-shot tools, not `auto-setup` or the development server.
-11. The `knowledge` namespace exists with exactly seven-day retention and bootstrap is idempotent.
-12. MinIO contains the private, versioned `canonical-objects` bucket and a scoped non-root application credential without creating CAS objects.
-13. Qdrant and Neo4j start empty; Redis contains no application-owned bootstrap data.
-14. Every service has bounded health checks, semantic readiness and a resource cap consistent with the 16 GB host guardrail.
-15. `down/up` preserves selected service markers and repeated initialization does not destroy or duplicate state.
-16. A dependency outage makes `verify` fail with code `75` and never triggers destructive recovery or backend failover.
-17. Reset deletes only exact project-labeled resources after the required confirmation and never prunes global Docker state.
-18. Lifecycle diagnostics and CI artifacts contain no sentinel credential, secret path or raw vendor exception text.
-19. Static/config validation passes on Ubuntu and Windows; full authenticated integration smoke passes on Ubuntu.
-20. Root and infrastructure READMEs document prerequisites, ports, commands, persistence, safe reset and the MinIO archived-dependency warning.
+1. The repository contains one canonical Compose topology with exact approved services and initialization jobs.
+2. Every registry image has an exact version tag and immutable manifest digest matching the image lock.
+3. No `.env`, plaintext credential, floating tag, MinIO artifact or R2 credential is used by the stack.
+4. Secret bootstrap is atomic, idempotent, non-overwriting and safe on Linux and the documented Windows boundary.
+5. PostgreSQL, Qdrant, Neo4j and Redis require authentication for protected operations.
+6. Every published port binds only `127.0.0.1`; Qdrant peer and all unneeded ports remain unpublished.
+7. The eight approved host-port overrides validate correctly without becoming Python `KNOWLEDGE_*` runtime settings.
+8. PostgreSQL contains separate `knowledge`, `temporal` and `temporal_visibility` databases with approved non-superuser ownership boundaries and no application tables.
+9. Temporal Server uses PostgreSQL schemas managed by one-shot tools, not `auto-setup` or the development server.
+10. The `knowledge` namespace exists with exactly seven-day retention and bootstrap is idempotent.
+11. Qdrant and Neo4j start empty; Redis contains no application-owned bootstrap data.
+12. Every service has bounded health checks, semantic readiness and a resource cap consistent with the 16 GB host guardrail.
+13. `down/up` preserves selected service markers and repeated initialization does not destroy or duplicate state.
+14. A dependency outage makes `verify` fail with code `75` and never triggers destructive recovery or object-store behavior.
+15. Reset deletes only exact project-labeled resources after required confirmation, never prunes global Docker state and cannot access R2.
+16. Lifecycle diagnostics and CI artifacts contain no sentinel credential, secret path or raw vendor exception text.
+17. Static/config validation passes on Ubuntu and Windows; full authenticated integration smoke passes on Ubuntu.
+18. Root and infrastructure READMEs document prerequisites, ports, commands, persistence, safe reset and the explicit R2-outside-Compose boundary.
 
 ## 19. Expected deliverables
 
 ```text
 infra/compose/compose.yaml
 infra/compose/images.lock.yaml
-infra/compose/config/
-infra/compose/scripts/
+infra/compose/config/temporal/dynamicconfig.yaml
+infra/compose/scripts/postgres-provision.sh
+infra/compose/scripts/temporal-schema-setup.sh
+infra/compose/scripts/temporal-namespace-bootstrap.sh
+infra/compose/scripts/temporal-secret-entrypoint.sh
 infra/compose/README.md
-infra/minio/Dockerfile
-infra/minio/source.lock
 tools/local_service_stack.py
 tests/unit/tools/test_local_service_stack.py
 tests/contract/test_local_service_stack_contract.py
@@ -854,7 +778,7 @@ tests/integration/test_local_service_stack.py
 .github/workflows/local-service-stack.yml
 ```
 
-The implementation also updates `.gitignore`, `pyproject.toml` Poe tasks and the root README. It does not modify Python runtime settings with database/service credentials; those settings are introduced only by their owning adapter specs.
+The implementation also updates `.gitignore`, `pyproject.toml` Poe tasks and the root README. It does not modify Python runtime settings with database/service/R2 credentials; settings are introduced only by their owning adapter specs.
 
 ## 20. Primary references
 
@@ -869,6 +793,6 @@ The implementation also updates `.gitignore`, `pyproject.toml` Poe tasks and the
 - [Temporal current PostgreSQL Compose sample](https://github.com/temporalio/samples-server/blob/main/compose/docker-compose-postgres.yml)
 - [Temporal UI 2.53.0 release](https://github.com/temporalio/ui/releases/tag/v2.53.0)
 - [Temporal CLI 1.8.0 release](https://github.com/temporalio/cli/releases/tag/v1.8.0)
-- [MinIO final Community release](https://github.com/minio/minio/releases/tag/RELEASE.2025-10-15T17-29-55Z)
-- [MinIO source-only Community distribution](https://github.com/minio/minio#source-only-distribution)
+- [Cloudflare R2 S3 credentials](https://developers.cloudflare.com/r2/get-started/s3/)
+- [Cloudflare R2 consistency model](https://developers.cloudflare.com/r2/reference/consistency/)
 - [Docker Compose trust model](https://docs.docker.com/compose/trust-model/)

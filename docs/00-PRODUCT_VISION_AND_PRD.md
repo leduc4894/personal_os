@@ -53,7 +53,7 @@ Multi-user collaboration, billing và public knowledge sharing không thuộc ph
 ## 6. Non-functional requirements
 
 - Idempotent: replay cùng event không tạo duplicate version, chunk, point hoặc edge.
-- Rebuildable: Qdrant và Neo4j có thể phục hồi từ PostgreSQL + active canonical object store tương thích S3.
+- Rebuildable: Qdrant và Neo4j có thể phục hồi từ PostgreSQL + canonical bytes trong Cloudflare R2.
 - Fail closed: policy hoặc canonical bytes không rõ ràng thì không index và không trả nội dung.
 - Single-user efficient: không đưa vào kiến trúc các thành phần chỉ phục vụ hyperscale.
 - Provider-portable: embedding, reranking, OCR, speech-to-text và LLM qua interface.

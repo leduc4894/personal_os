@@ -2,7 +2,7 @@
 
 ## ADR-001 — Canonical state is split by responsibility
 
-**Decision:** Active private S3-compatible object store giữ immutable bytes; PostgreSQL giữ identity/version/current pointer/policy. Cloudflare R2 là production default và cả hai thành phần tạo thành canonical boundary.
+**Decision:** Private Cloudflare R2 giữ immutable bytes; PostgreSQL giữ identity/version/current pointer/policy. Hai thành phần tạo thành canonical boundary.
 
 **Reason:** Object storage tối ưu durable bytes; relational database tối ưu transactional state. Obsidian và Web App là clients, không phải backend authority.
 
@@ -96,8 +96,16 @@
 
 **Reason:** Giữ implementation surface nhỏ, nhất quán và có thể kiểm chứng từ đầu.
 
-## ADR-017 — One active S3-compatible canonical object store
+## ADR-017 — One active S3-compatible canonical object store (superseded)
+
+**Status:** Superseded by ADR-018. Giữ record này để giải thích quyết định cũ; không được dùng làm implementation contract.
 
 **Decision:** Cloudflare R2 là production default. MinIO Community phục vụ local/test và có thể là production fallback trên failure domain riêng sau explicit risk acceptance. Tại một thời điểm chỉ một backend được application cấp quyền ghi; chuyển backend là maintenance operation có replication, inventory/hash/size verification, configuration activation, smoke test và audit. Không automatic failover theo request.
 
 **Reason:** Một S3-compatible contract giữ domain portable nhưng dual-write hoặc opportunistic failover có thể tạo split-brain giữa PostgreSQL pointer và object bytes. MinIO Community repository đã archive nên fallback này cần pin bản cuối, kiểm soát exposure, backup và replacement trigger.
+
+## ADR-018 — Cloudflare R2 is the only canonical object store
+
+**Decision:** Cloudflare R2 là canonical object store duy nhất cho local, test/CI và production. Production và test/CI dùng private bucket cùng bucket-scoped credentials tách biệt. Không triển khai MinIO, provider fallback, dual-write hoặc object-store cutover. R2 dependency failure dùng bounded retry rồi fail closed; PostgreSQL không publish pointer tới object chưa verify.
+
+**Reason:** Hệ thống cá nhân không cần gánh source build, patching, backup và vận hành một MinIO Community dependency đã archive. Một managed backend giảm đáng kể operational surface và loại split-brain/fallback state machine; đổi lại hệ thống chấp nhận Cloudflare/account concentration risk và cần live R2 tests cùng restore evidence.
