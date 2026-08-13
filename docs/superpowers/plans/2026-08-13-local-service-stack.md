@@ -371,6 +371,7 @@ def test_compose_has_exact_topology() -> None:
     assert set(compose["networks"]) == {"service-backplane"}
     assert set(compose["volumes"]) == {
         "postgres-data", "qdrant-data", "neo4j-data", "redis-data",
+        "temporal-health-tools",
     }
 
 
@@ -432,13 +433,14 @@ Immediately before the implementation commit, run `docker buildx imagetools insp
 
 - [ ] **Step 4: Create the static Compose skeleton**
 
-Set `name: knowledge-local`. Reference every image as `<tag>@<digest>`, set `platform: linux/amd64`, one private bridge network and four volumes. Declare top-level file secrets under `../../.local/stack-secrets/`. Add the exact eight loopback publications and persistent mounts:
+Set `name: knowledge-local`. Reference every image as `<tag>@<digest>`, set `platform: linux/amd64`, one private bridge network and exactly five named volumes: four service-data volumes plus the rebuildable, non-canonical `temporal-health-tools` bridge. Declare top-level file secrets under `../../.local/stack-secrets/`. Add the exact eight loopback publications and data mounts:
 
 ```text
 postgres-data:/var/lib/postgresql
 qdrant-data:/qdrant/storage
 neo4j-data:/data
 redis-data:/data
+temporal-health-tools (declared here; Task 4 mounts and populates it)
 ```
 
 Long-running resource contracts:
@@ -558,7 +560,7 @@ temporal           OWNER temporal_service
 temporal_visibility OWNER temporal_service
 ```
 
-Use `format('%I', ...)` for identifiers and `format('%L', ...)` for passwords inside server-side SQL. Revoke `PUBLIC` connect/create rights, grant each role only its own database, explicitly revoke cross-database connect, and do not create application tables. Re-running reconciles password/ownership/grants and exits zero without dropping data.
+Use `format('%I', ...)` for identifiers and `format('%L', ...)` for passwords inside server-side SQL. Revoke `PUBLIC` connect/create rights from `postgres`, `knowledge`, `temporal` and `temporal_visibility`, grant each role only its own database, explicitly revoke cross-database connect, and do not create application tables. Re-running reconciles password/ownership/grants and exits zero without dropping data.
 
 - [ ] **Step 4: Implement version-aware Temporal schema and namespace bootstrap**
 
@@ -573,7 +575,7 @@ For both `temporal` and `temporal_visibility`, `temporal-schema-setup.sh` invoke
 - Qdrant mounts generated `qdrant_config.yaml` read-only and persists `/qdrant/storage`; container health targets the intentionally public `/readyz`; semantic readiness separately requires the API key and proves an equivalent protected request without it is rejected.
 - Neo4j mounts `neo4j_auth`, disables plugins, configures heap/page cache within 2560m, persists `/data`, and probes with `cypher-shell` using the secret.
 - Redis starts with `--aclfile /run/secrets/redis_acl --appendonly yes --maxmemory 128mb --maxmemory-policy noeviction --protected-mode yes`; health uses authenticated `redis-cli PING` as `knowledge`.
-- Temporal server uses SQL persistence for both stores and a fixed mounted dynamic config; health probes gRPC using the pinned CLI/admin tooling.
+- Temporal server uses SQL persistence for both stores and a fixed mounted dynamic config; `temporal-schema-setup` copies the pinned admin-tools CLI into the rebuildable `temporal-health-tools` volume, the Server mounts it read-only, and health invokes the actual gRPC cluster-health RPC.
 - Temporal UI points only at `temporal:7233` and health checks its local HTTP readiness endpoint.
 - Temporal CLI stays long-running with a fixed sleep/idle command and health checks authenticated connectivity to namespace `knowledge`; no Docker socket is mounted.
 
@@ -762,6 +764,7 @@ def test_reset_deletes_only_exact_labeled_project_volumes(context: StackContext)
     assert removed_volumes(calls) == {
         "knowledge-local_postgres-data", "knowledge-local_qdrant-data",
         "knowledge-local_neo4j-data", "knowledge-local_redis-data",
+        "knowledge-local_temporal-health-tools",
     }
 
 
@@ -813,10 +816,10 @@ Require both `--project-name <name>` and `--confirm-project <same-name>`. Query 
 
 ```text
 com.docker.compose.project=<exact project>
-com.docker.compose.volume in {postgres-data,qdrant-data,neo4j-data,redis-data}
+com.docker.compose.volume in {postgres-data,qdrant-data,neo4j-data,redis-data,temporal-health-tools}
 ```
 
-Reject unknown labeled volumes. Run non-destructive Compose down first, remove only resolved names returned by both labels, verify deletion, then optionally remove `.local/stack-secrets` through `remove_secret_set_after_reset()`. Never enumerate broad filesystem paths or use globs.
+Treat `temporal-health-tools` as an expected rebuildable, non-canonical project volume, not as unknown drift. Reject unknown labeled volumes before deleting any volume; this means every other project-labeled volume outside the exact five-name allowlist. Run non-destructive Compose down first, remove only the five resolved names returned by both labels, verify deletion of all five (including `temporal-health-tools`), then optionally remove `.local/stack-secrets` through `remove_secret_set_after_reset()`. Never enumerate broad filesystem paths or use globs.
 
 - [ ] **Step 5: Add argparse and Poe command surface**
 
@@ -1099,7 +1102,7 @@ git commit -m "ci: verify local service stack"
 
 ## Final Acceptance Checklist
 
-- [ ] Exactly 7 long-running services, 3 init jobs, 4 volumes, 1 private network and 8 loopback publications are present.
+- [ ] Exactly 7 long-running services, 3 init jobs, 5 volumes (four service-data plus rebuildable `temporal-health-tools`), 1 private network and 8 loopback publications are present.
 - [ ] All eight image lock entries resolve to the reviewed manifest digests on `linux/amd64`.
 - [ ] Secret bootstrap is atomic, reuses a complete set and refuses partial/missing-with-volume states.
 - [ ] PostgreSQL privileges deny cross-database access; no application schema exists yet.

@@ -229,7 +229,8 @@ Compose creates one project-scoped bridge network named logically `service-backp
 - No container mounts the Docker socket.
 - No container mounts the repository root, host root or user home.
 - Static config mounts are read-only.
-- Only data directories use writable named volumes.
+- Writable named volumes are limited to the four service data directories and the
+  rebuildable Temporal health-tool bridge populated by its one-shot initializer.
 
 Local service traffic is plaintext because it stays inside the project bridge or host loopback boundary. Authentication remains enabled. This local/test exception is not a production TLS decision.
 
@@ -435,8 +436,13 @@ The Redis volume does not make Redis canonical. Application correctness must tol
 | `qdrant-data` | `/qdrant/storage` | Rebuildable projection |
 | `neo4j-data` | `/data` | Rebuildable projection |
 | `redis-data` | `/data` | Ephemeral/non-canonical state |
+| `temporal-health-tools` | `/opt/knowledge/health` | Rebuildable pinned health binary; non-data and non-canonical |
 
-`docker compose down` does not delete these volumes. Long-running services use `restart: unless-stopped`. One-shot initialization jobs use `restart: "no"`; retry happens only through a later explicit lifecycle invocation.
+These are the exact five project volumes. `temporal-schema-setup` populates
+`temporal-health-tools`; Temporal Server mounts it read-only and can rebuild it from the
+pinned admin-tools image. `docker compose down` does not delete these volumes. Long-running
+services use `restart: unless-stopped`. One-shot initialization jobs use `restart: "no"`;
+retry happens only through a later explicit lifecycle invocation.
 
 No bind mount is used for database data. This avoids host-filesystem ownership and Windows/WSL consistency problems.
 
@@ -477,7 +483,7 @@ Health alone never makes the stack ready.
 | Qdrant | HTTP `/readyz` |
 | Neo4j | Authenticated `RETURN 1` through `cypher-shell` |
 | Redis | Authenticated `PING` through `redis-cli` |
-| Temporal Server | Frontend port/process health inside the Server image |
+| Temporal Server | gRPC cluster health using pinned CLI/admin tooling bridged read-only from `temporal-health-tools` |
 | Temporal UI | Local HTTP readiness |
 | Temporal CLI | `temporal operator cluster health` against internal Server |
 
@@ -620,6 +626,21 @@ Before deletion, the lifecycle tool:
 6. Shows a count and logical resource types without absolute storage paths.
 7. Requires the operator to type the exact project name.
 
+The only accepted logical volume labels are:
+
+```text
+postgres-data
+qdrant-data
+neo4j-data
+redis-data
+temporal-health-tools
+```
+
+After non-destructive Compose down detaches them, reset deletes every resolved volume in
+that exact set, including the rebuildable health-tool volume, and verifies each is absent.
+Any other project-labeled volumes are unknown labeled volumes and make reset refuse all
+volume deletion.
+
 Non-interactive reset is allowed only when all are true:
 
 ```text
@@ -646,6 +667,8 @@ Tests parse the canonical/rendered Compose model and prove:
 - Every published port binds `127.0.0.1`.
 - Only the eight approved port variables occur.
 - Every persistent directory maps to the exact named volume.
+- Exactly five named volumes exist: four service-data volumes plus the rebuildable,
+  non-canonical `temporal-health-tools` bridge.
 - Credential consumers declare the required Compose secret.
 - No plaintext credential-like field exists in Compose/config.
 - Every long-running service has a health check, restart policy and resource cap.
@@ -755,7 +778,9 @@ Implementation is complete only when all criteria pass on the same final commit:
 12. Every service has bounded health checks, semantic readiness and a resource cap consistent with the 16 GB host guardrail.
 13. `down/up` preserves selected service markers and repeated initialization does not destroy or duplicate state.
 14. A dependency outage makes `verify` fail with code `75` and never triggers destructive recovery or object-store behavior.
-15. Reset deletes only exact project-labeled resources after required confirmation, never prunes global Docker state and cannot access R2.
+15. Reset deletes only the exact five project-labeled volumes (including
+    `temporal-health-tools`) after required confirmation, refuses unknown labeled volumes,
+    never prunes global Docker state and cannot access R2.
 16. Lifecycle diagnostics and CI artifacts contain no sentinel credential, secret path or raw vendor exception text.
 17. Static/config validation passes on Ubuntu and Windows; full authenticated integration smoke passes on Ubuntu.
 18. Root and infrastructure READMEs document prerequisites, ports, commands, persistence, safe reset and the explicit R2-outside-Compose boundary.
@@ -780,7 +805,13 @@ tests/integration/test_local_service_stack.py
 
 The implementation also updates `.gitignore`, `pyproject.toml` Poe tasks and the root README. It does not modify Python runtime settings with database/service/R2 credentials; settings are introduced only by their owning adapter specs.
 
-## 20. Primary references
+## 20. Implementation verification report (2026-08-13)
+
+- Redis ACL generation now derives its embedded credential from the application password, and complete-set validation rejects any mismatch without exposing either value.
+- The exact strict command `uv run mypy src tools tests`, the focused local-stack unit/contract suite and `uv run poe verify` pass locally.
+- External acceptance remains open: this host has no reachable Docker daemon, so the authenticated full-stack smoke was not run, and no branch CI result exists for this final commit. The implementation is not declared complete until those same-commit gates pass.
+
+## 21. Primary references
 
 - [PostgreSQL 18.4 release](https://www.postgresql.org/docs/release/18.4/)
 - [PostgreSQL official image: PostgreSQL 18 data-volume change and `_FILE` secrets](https://hub.docker.com/_/postgres)

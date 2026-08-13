@@ -54,7 +54,7 @@ def test_settings_are_frozen(tmp_path: Path) -> None:
         environ={"KNOWLEDGE_SECRET_ROOT": str(tmp_path)},
     )
     with pytest.raises(Exception, match="frozen"):
-        settings.log_level = ConfiguredLogLevel.DEBUG  # type: ignore[misc]
+        settings.log_level = ConfiguredLogLevel.DEBUG
 
 
 def test_empty_environment_value_is_rejected_as_invalid(tmp_path: Path) -> None:

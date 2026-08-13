@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REAL_PYPROJECT = REPO_ROOT / "pyproject.toml"
@@ -26,7 +26,7 @@ FAILURE_SWALLOWING_TOKENS = (
 
 def _load_real_poe_tasks() -> dict[str, dict[str, Any]]:
     data = tomllib.loads(REAL_PYPROJECT.read_text(encoding="utf-8"))
-    return data["tool"]["poe"]["tasks"]
+    return cast(dict[str, dict[str, Any]], data["tool"]["poe"]["tasks"])
 
 
 def test_real_verify_sequence_matches_public_gate_order() -> None:

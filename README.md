@@ -17,10 +17,15 @@ every push and pull request; a mismatched major, minor or patch fails the build.
 | Node.js | `Node.js 24.18.0` |
 | pnpm | `pnpm 10.34.0` |
 
-These are the only operator-facing prerequisites. Internal development
-dependencies (formatters, linters, type checkers, test runners) are pinned in
-`pyproject.toml`, `package.json` and the committed lockfiles; they are not
-installed manually by operators.
+These are the exact language and package-manager prerequisites. Internal
+development dependencies (formatters, linters, type checkers, test runners)
+are pinned in `pyproject.toml`, `package.json` and the committed lockfiles; they
+are not installed manually by operators.
+
+The local service stack additionally requires a Linux `linux/amd64` Docker
+Engine and Docker Compose 2.30.0 (the reviewed CI pin; the lifecycle tool
+accepts Compose `>=2.30.0`). On Windows, use Docker Desktop with Linux containers;
+Windows containers are not supported by this stack.
 
 ## Fresh install (frozen lockfiles)
 
@@ -38,6 +43,32 @@ must leave both lockfiles byte-for-byte unchanged:
 ```bash
 git diff --exit-code -- uv.lock pnpm-lock.yaml
 ```
+
+## Local service stack
+
+The authenticated Docker Compose stack provides PostgreSQL, Qdrant, Neo4j,
+Redis and Temporal for local development. It publishes eight endpoints only on
+`127.0.0.1`, keeps generated credentials outside Git and does not configure or
+contact Cloudflare R2. Detailed ports, service versions, failure recovery and
+safe reset rules live in [`infra/compose/README.md`](infra/compose/README.md).
+
+Bootstrap once, then use the normal lifecycle commands from the repository
+root:
+
+```bash
+uv run poe stack-bootstrap  # create or validate the atomic local credential set
+uv run poe stack-config     # validate Compose without contacting the Docker Engine
+uv run poe stack-up         # start, wait for health, then verify authenticated readiness
+uv run poe stack-status     # return sanitized project state
+uv run poe stack-verify     # repeat all semantic readiness probes
+uv run poe stack-down       # remove containers/network; preserve volumes and credentials
+uv run poe stack-reset      # destructive; requires exact project confirmation arguments
+uv run poe stack-smoke      # CI-only disposable persistence/recovery contract
+```
+
+`stack-reset` and `stack-smoke` need the explicit arguments documented in the
+infrastructure runbook. Do not invoke Docker Compose directly: doing so skips
+port, image-lock, credential-state and project-identity validation.
 
 ## Quality commands
 
@@ -150,7 +181,7 @@ Runtime configuration loading, secret-file loading and structured diagnostics
 are provided by this workspace (see *Runtime configuration & diagnostics*
 above). The following remain deliberately absent and belong to later specs:
 
-- databases (PostgreSQL), Cloudflare R2 object storage or any Docker services;
+- application database schemas/adapters and Cloudflare R2 object storage behavior;
 - provider SDKs, concrete provider credentials and remote secret managers;
 - framework adapters and HTTP/MCP/Temporal request/trace propagation, plus
   OpenTelemetry exporters and log-shipping deployment;
@@ -177,5 +208,7 @@ apps/worker/              # personal-worker composition shell
 apps/web/                 # Next.js Web App shell
 apps/obsidian-plugin/     # Obsidian plugin shell
 tests/                    # canonical test hierarchy (unit, contract, reserved layers)
+infra/compose/            # authenticated local dependency stack and operator runbook
 .github/workflows/quality.yml   # Ubuntu + Windows quality matrix
+.github/workflows/local-service-stack.yml  # config portability + Ubuntu Docker smoke
 ```

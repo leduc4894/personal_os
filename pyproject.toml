@@ -35,8 +35,17 @@ knowledge-core = { workspace = true }
 module-name = "personal_os"
 
 [tool.pytest.ini_options]
-addopts = ["--strict-config", "--strict-markers"]
+addopts = [
+  "--strict-config",
+  "--strict-markers",
+  "--import-mode=importlib",
+  "-m",
+  "not local_stack",
+]
 testpaths = ["tests"]
+markers = [
+  "local_stack: requires a reachable Linux Docker Engine and may create disposable containers and volumes",
+]
 
 [tool.ruff]
 target-version = "py314"
@@ -49,6 +58,9 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 [tool.mypy]
 python_version = "3.14"
 strict = true
+explicit_package_bases = true
+mypy_path = ["src", "apps/api/src", "apps/mcp/src", "apps/worker/src"]
+exclude = ["^tests[/\\\\]fixtures[/\\\\]"]
 files = ["src", "apps/api/src", "apps/mcp/src", "apps/worker/src", "tools"]
 
 [tool.coverage.run]
@@ -107,6 +119,30 @@ cmd = "pytest tests/contract/test_architecture_boundaries.py -q"
 
 [tool.poe.tasks.python-build]
 cmd = "uv build --all-packages --clear"
+
+[tool.poe.tasks.stack-bootstrap]
+cmd = "uv run python tools/local_service_stack.py bootstrap"
+
+[tool.poe.tasks.stack-config]
+cmd = "uv run python tools/local_service_stack.py config"
+
+[tool.poe.tasks.stack-up]
+cmd = "uv run python tools/local_service_stack.py up"
+
+[tool.poe.tasks.stack-status]
+cmd = "uv run python tools/local_service_stack.py status"
+
+[tool.poe.tasks.stack-verify]
+cmd = "uv run python tools/local_service_stack.py verify"
+
+[tool.poe.tasks.stack-down]
+cmd = "uv run python tools/local_service_stack.py down"
+
+[tool.poe.tasks.stack-reset]
+cmd = "uv run python tools/local_service_stack.py reset"
+
+[tool.poe.tasks.stack-smoke]
+cmd = "uv run python tools/local_service_stack.py smoke"
 
 [tool.poe.tasks.typescript-build]
 shell = "pnpm run build"
