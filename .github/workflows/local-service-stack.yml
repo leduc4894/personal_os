@@ -291,8 +291,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .local/test-results
-          uv run pytest tests/integration/test_local_service_stack.py -m local_stack -q \
-            --junitxml=.local/test-results/local-service-stack.xml
+          if ! uv run pytest tests/integration/test_local_service_stack.py -m local_stack -q \
+            --junitxml=.local/test-results/local-service-stack.xml; then
+            docker compose --project-name "$LOCAL_STACK_TEST_PROJECT" \
+              --file infra/compose/compose.yaml ps --all --format json || true
+            exit 1
+          fi
       - name: Reset exact project and assert cleanup
         if: always()
         shell: bash

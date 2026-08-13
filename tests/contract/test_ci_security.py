@@ -292,6 +292,8 @@ def test_local_stack_smoke_has_exact_cleanup_and_junit_only_artifact() -> None:
         'bootstrap --project-name "$LOCAL_STACK_TEST_PROJECT"',
         'config --project-name "$LOCAL_STACK_TEST_PROJECT"',
         "pytest tests/integration/test_local_service_stack.py -m local_stack -q",
+        "docker compose --project-name \"$LOCAL_STACK_TEST_PROJECT\"",
+        "ps --all --format json",
         '--confirm-project "$LOCAL_STACK_TEST_PROJECT"',
         "--non-interactive",
         "docker container ls -a --filter",
