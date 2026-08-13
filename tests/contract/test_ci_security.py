@@ -82,10 +82,9 @@ def _has_job_level_permissions_override(text: str) -> bool:
     jobs = workflow.get("jobs")
     if not isinstance(jobs, dict):
         return True
-    return any(
-        isinstance(job_definition, dict) and "permissions" in job_definition
-        for job_definition in jobs.values()
-    )
+    if any(not isinstance(job_definition, dict) for job_definition in jobs.values()):
+        return True
+    return any("permissions" in job_definition for job_definition in jobs.values())
 
 
 def _workflow_is_least_privilege_and_sha_pinned(text: str) -> bool:
@@ -185,6 +184,13 @@ def test_permission_contract_rejects_job_level_override_mutation() -> None:
         )
         assert mutated != text
         assert not _workflow_is_least_privilege_and_sha_pinned(mutated)
+
+
+def test_permission_contract_rejects_scalar_job_definition_mutation() -> None:
+    text = LOCAL_STACK_WORKFLOW_PATH.read_text(encoding="utf-8")
+    mutated = text.replace("  ubuntu-config:\n", "  ubuntu-config: |\n", 1)
+    assert mutated != text
+    assert not _workflow_is_least_privilege_and_sha_pinned(mutated)
 
 
 def test_local_stack_workflow_never_receives_provider_secrets() -> None:
