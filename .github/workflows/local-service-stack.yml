@@ -78,6 +78,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git check-ignore --quiet .local
+          rm -rf -- .local
           mkdir -p .local/test-results
           output_file=.local/test-results/ubuntu-config-output.log
 
@@ -164,6 +166,11 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $false
+          git check-ignore --quiet .local
+          if ($LASTEXITCODE -ne 0) {
+            throw ".local must remain an ignored local-state directory"
+          }
+          Remove-Item -LiteralPath ".local" -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path ".local/test-results" -Force | Out-Null
           $outputFile = ".local/test-results/windows-config-output.log"
 
