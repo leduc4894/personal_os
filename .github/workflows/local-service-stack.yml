@@ -78,7 +78,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git check-ignore --quiet .local
+          git check-ignore --quiet --no-index .local
           rm -rf -- .local
           mkdir -p .local/test-results
           output_file=.local/test-results/ubuntu-config-output.log
@@ -166,7 +166,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $false
-          git check-ignore --quiet .local
+          git check-ignore --quiet --no-index .local
           if ($LASTEXITCODE -ne 0) {
             throw ".local must remain an ignored local-state directory"
           }

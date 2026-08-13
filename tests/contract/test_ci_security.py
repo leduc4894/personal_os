@@ -266,9 +266,9 @@ def test_local_stack_config_jobs_cover_defaults_overrides_and_safe_failures() ->
             assert leakage_token in block, (
                 f"{job_name} must scan sanitized output for {leakage_token!r}"
             )
-    assert "git check-ignore --quiet .local" in jobs["ubuntu-config"]
+    assert "git check-ignore --quiet --no-index .local" in jobs["ubuntu-config"]
     assert "rm -rf -- .local" in jobs["ubuntu-config"]
-    assert "git check-ignore --quiet .local" in jobs["windows-config"]
+    assert "git check-ignore --quiet --no-index .local" in jobs["windows-config"]
     assert 'Remove-Item -LiteralPath ".local" -Recurse -Force' in jobs["windows-config"]
     assert "$PSNativeCommandUseErrorActionPreference = $false" in jobs["windows-config"]
 
