@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Final
+from typing import Final, cast
 from uuid import UUID
 
 _SAFE_TOKEN_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,63}$")
@@ -154,3 +154,63 @@ EVENT_DEFINITIONS: Final[Mapping[EventName, EventDefinition]] = MappingProxyType
 
 if set(EVENT_DEFINITIONS) != set(EventName):
     raise RuntimeError("event definition registry is incomplete")
+
+_REJECT_UNKNOWN_FIELD: Final = SafeToken.parse("unknown_field")
+_REJECT_MISSING_FIELD: Final = SafeToken.parse("missing_field")
+_REJECT_UNSAFE_VALUE: Final = SafeToken.parse("unsafe_value")
+
+
+@dataclass(frozen=True, slots=True)
+class DiagnosticEvent:
+    """Accepted diagnostic event bound to its registry definition and frozen fields."""
+
+    definition: EventDefinition
+    fields: Mapping[str, SafeDiagnosticValue]
+
+
+@dataclass(frozen=True, slots=True)
+class RejectedDiagnosticPayload:
+    """Constant rejection summary emitted when an untrusted payload fails validation.
+
+    Only the rejection reason and offending count survive; the offending key,
+    value, type representation or exception message is never retained.
+    """
+
+    reason: SafeToken
+    count: int
+
+
+def build_registered_event(
+    event_name: EventName,
+    fields: Mapping[str, object],
+) -> DiagnosticEvent | RejectedDiagnosticPayload:
+    """Validate an untrusted payload against the registered event contract.
+
+    The caller field set must equal the union of the definition's required and
+    allowed fields, and every value must conform to the closed safe-value union
+    without forbidden keys, sensitive shapes or unbounded structure. The
+    function never raises for untrusted diagnostic data, never retains the
+    caller's mutable mapping and never copies offending data into the result.
+    """
+    from personal_os.diagnostics.redaction import _is_safe_diagnostic_value
+
+    definition = EVENT_DEFINITIONS[event_name]
+    allowed = definition.required_fields | definition.allowed_fields
+    caller_keys = set(fields.keys())
+    unknown = caller_keys - allowed
+    if unknown:
+        return RejectedDiagnosticPayload(reason=_REJECT_UNKNOWN_FIELD, count=len(unknown))
+    missing = definition.required_fields - caller_keys
+    if missing:
+        return RejectedDiagnosticPayload(reason=_REJECT_MISSING_FIELD, count=len(missing))
+
+    accepted: dict[str, SafeDiagnosticValue] = {}
+    unsafe_count = 0
+    for key, value in fields.items():
+        if _is_safe_diagnostic_value(value):
+            accepted[key] = cast(SafeDiagnosticValue, value)
+        else:
+            unsafe_count += 1
+    if unsafe_count:
+        return RejectedDiagnosticPayload(reason=_REJECT_UNSAFE_VALUE, count=unsafe_count)
+    return DiagnosticEvent(definition=definition, fields=MappingProxyType(accepted))
