@@ -23,6 +23,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -1946,3 +1947,460 @@ def _alembic_failure(
         f"--- stdout ---\n{result.stdout}\n"
         f"--- stderr ---\n{result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 5: recovery behavior
+#
+# Each test owns a disposable ``baseline_stack`` fixture instance and proves one
+# recovery guarantee: destructive-gate refusal, no-op upgrade, bounded advisory
+# lock, two-process first-upgrade race, late-failure rollback through the
+# sanctioned in-process seam, restrictive downgrade + dependent-view rollback,
+# and interruption atomicity.
+# ---------------------------------------------------------------------------
+
+
+def _current_revision(conn: psycopg.Connection[Any]) -> str | None:
+    """Return the current alembic_version row, or None when absent/empty."""
+    if not _relation_exists(conn, "public.alembic_version"):
+        return None
+    return _scalar(conn, "SELECT version_num FROM public.alembic_version LIMIT 1")
+
+
+def _knowledge_table_count(conn: psycopg.Connection[Any]) -> int:
+    return int(
+        _scalar(conn, "SELECT count(*) FROM pg_tables WHERE schemaname = 'knowledge'")
+    )
+
+
+def _baseline_revision_applied(conn: psycopg.Connection[Any]) -> bool:
+    if not _relation_exists(conn, "public.alembic_version"):
+        return False
+    count = _scalar(
+        conn,
+        "SELECT count(*) FROM public.alembic_version "
+        f"WHERE version_num = '{_BASELINE_REVISION}'",
+    )
+    return bool(count)
+
+
+def _venv_alembic_command() -> list[str]:
+    """Return the venv-local alembic executable path.
+
+    Used for the concurrency test where ``uv run`` would serialize two
+    subprocesses on its project lock; the venv's own alembic entry point has no
+    such lock so both subprocesses truly race on the advisory lock.
+    """
+    bin_dir = Path(sys.executable).parent
+    candidate = bin_dir / ("alembic.exe" if sys.platform == "win32" else "alembic")
+    if not candidate.exists():
+        candidate = bin_dir / "alembic"
+    return [str(candidate)]
+
+
+def _assert_captured_output_is_leak_safe(
+    captured: str, *, password: str, sentinel: str | None = None
+) -> None:
+    """Assert no password, URL, driver text, SQLSTATE or sentinel leaks."""
+    assert password not in captured, "captured output leaked the application password"
+    assert "://" not in captured, "captured output leaked a URL scheme"
+    lowered = captured.lower()
+    assert "psycopg" not in lowered, "captured output leaked raw driver text"
+    assert "sqlstate" not in lowered, "captured output leaked a SQLSTATE token"
+    assert password not in lowered
+    if sentinel is not None:
+        assert sentinel not in captured, "captured output leaked the test sentinel"
+
+
+def test_upgrade_head_is_a_noop_when_already_at_head(
+    baseline_stack: BaselineStack,
+) -> None:
+    """Step 1: ``upgrade head`` at head is a no-op; row counts/fingerprint unchanged."""
+    conn = baseline_stack.connection
+    alembic_env = baseline_stack.alembic_env
+
+    upgrade = run_alembic(["upgrade", "head"], alembic_env)
+    assert upgrade.returncode == 0, _alembic_failure("first upgrade head", upgrade)
+    _insert_valid_graph(conn)
+
+    fingerprint_before = _catalog_fingerprint(conn)
+    counts_before = _row_counts(conn)
+    assert _current_revision(conn) == _BASELINE_REVISION
+
+    noop = run_alembic(["upgrade", "head"], alembic_env)
+    assert noop.returncode == 0, _alembic_failure("no-op upgrade head", noop)
+
+    assert _current_revision(conn) == _BASELINE_REVISION
+    assert _row_counts(conn) == counts_before, "no-op upgrade changed row counts"
+    assert _catalog_fingerprint(conn) == fingerprint_before, (
+        "no-op upgrade changed the catalog fingerprint"
+    )
+
+
+def test_downgrade_without_destructive_authorization_is_refused(
+    baseline_stack: BaselineStack,
+) -> None:
+    """Step 1: ``downgrade base`` without ``-x`` is refused before any DDL, no leak."""
+    conn = baseline_stack.connection
+    alembic_env = baseline_stack.alembic_env
+    password = _read_application_password()
+
+    upgrade = run_alembic(["upgrade", "head"], alembic_env)
+    assert upgrade.returncode == 0, _alembic_failure("upgrade head", upgrade)
+    _insert_valid_graph(conn)
+
+    fingerprint_before = _catalog_fingerprint(conn)
+    counts_before = _row_counts(conn)
+    assert _current_revision(conn) == _BASELINE_REVISION
+
+    refusal = run_alembic(["downgrade", "base"], alembic_env)
+    assert refusal.returncode != 0, "unauthorized downgrade must not return zero"
+
+    captured = refusal.stdout + refusal.stderr
+    assert "database_destructive_downgrade_refused" in captured, (
+        "captured output must carry the registered refusal code"
+    )
+    assert "Destructive database downgrade is not authorized" in captured, (
+        "captured output must carry the registered refusal safe message"
+    )
+    _assert_captured_output_is_leak_safe(captured, password=password)
+
+    assert _current_revision(conn) == _BASELINE_REVISION
+    assert _row_counts(conn) == counts_before, "refused downgrade changed row counts"
+    assert _catalog_fingerprint(conn) == fingerprint_before
+
+
+def test_concurrent_upgrade_blocks_on_advisory_lock_then_succeeds(
+    baseline_stack: BaselineStack,
+) -> None:
+    """Step 2: a held advisory lock bounds the upgrade to a safe busy result."""
+    conn = baseline_stack.connection
+    alembic_env = baseline_stack.alembic_env
+    password = _read_application_password()
+    port = baseline_stack.port
+
+    assert not _schema_exists(conn), "must start at base"
+
+    holder = psycopg.connect(
+        host=_DATABASE_HOST,
+        port=port,
+        user=_APPLICATION_USER,
+        password=password,
+        dbname=_APPLICATION_DATABASE,
+        sslmode=_SSL_MODE,
+        application_name=f"{_ALEMBIC_APPLICATION_NAME}-lock-holder",
+    )
+    try:
+        with holder.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock("
+                "hashtextextended('knowledge-schema-migration', 0))"
+            )
+        start = time.monotonic()
+        blocked = run_alembic(["upgrade", "head"], alembic_env)
+        elapsed = time.monotonic() - start
+
+        assert blocked.returncode != 0, (
+            "upgrade must not succeed while the advisory lock is held"
+        )
+        assert elapsed >= 4.0, f"upgrade gave up after {elapsed:.1f}s (< 4s lower bound)"
+        assert elapsed <= 15.0, f"upgrade hung for {elapsed:.1f}s (> 15s upper bound)"
+
+        captured = blocked.stdout + blocked.stderr
+        assert "database_migration_busy" in captured, (
+            f"expected database_migration_busy in output: {captured!r}"
+        )
+        _assert_captured_output_is_leak_safe(captured, password=password)
+
+        # No object was created or dropped while blocked.
+        assert not _schema_exists(conn), "blocked upgrade must not create any object"
+    finally:
+        with suppress(psycopg.Error):
+            holder.rollback()
+            holder.close()
+
+    # After the holder releases, the same command succeeds.
+    succeeding = run_alembic(["upgrade", "head"], alembic_env)
+    assert succeeding.returncode == 0, _alembic_failure("upgrade after lock release", succeeding)
+    assert _schema_exists(conn)
+    _assert_exact_object_set(conn)
+
+
+def test_two_first_upgrade_processes_leave_exactly_one_head(
+    baseline_stack: BaselineStack,
+) -> None:
+    """Step 2: two concurrent first-upgrade processes leave one head, no duplicates."""
+    conn = baseline_stack.connection
+    alembic_env = baseline_stack.alembic_env
+
+    assert not _schema_exists(conn), "must start at base"
+
+    command_base = [*_venv_alembic_command(), "upgrade", "head"]
+    processes = [
+        subprocess.Popen(
+            command_base,
+            cwd=str(_WORKTREE_ROOT),
+            env=dict(alembic_env),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(2)
+    ]
+    try:
+        for proc in processes:
+            proc.communicate(timeout=90)
+    except subprocess.TimeoutExpired:
+        for proc in processes:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate(timeout=10)
+        raise
+
+    success_count = sum(1 for proc in processes if proc.returncode == 0)
+    assert success_count >= 1, (
+        "at least one first-upgrade must succeed; codes="
+        f"{tuple(proc.returncode for proc in processes)}"
+    )
+
+    # Final state: exactly one head, exact catalog, no duplicate objects.
+    assert _current_revision(conn) == _BASELINE_REVISION
+    assert _knowledge_table_count(conn) == 9, (
+        "two first-upgrade attempts must leave exactly nine tables, no duplicates"
+    )
+    _assert_exact_object_set(conn)
+
+
+def test_late_upgrade_failure_rolls_back_the_whole_schema(
+    baseline_stack: BaselineStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Step 3: a late failure via the sanctioned seam rolls back the whole schema."""
+    conn = baseline_stack.connection
+    alembic_env = baseline_stack.alembic_env
+
+    assert not _schema_exists(conn), "must start at base"
+
+    # The Python API reads KNOWLEDGE_* from os.environ inside the test process.
+    for key in list(os.environ):
+        if key.startswith("KNOWLEDGE_"):
+            monkeypatch.delenv(key)
+    for key, value in alembic_env.items():
+        monkeypatch.setenv(key, value)
+
+    from alembic import command
+    from alembic.config import Config
+    from alembic.util import CommandError
+
+    sentinel = "LATE_FAILURE_SENTINEL_a8f3b2c1"
+
+    def failing_before_verify_hook() -> None:
+        raise RuntimeError(sentinel)
+
+    failing_config = Config(str(_WORKTREE_ROOT / "alembic.ini"))
+    failing_config.attributes["canonical_baseline_before_verify"] = failing_before_verify_hook
+
+    with pytest.raises(CommandError) as exc_info:
+        command.upgrade(failing_config, "head")
+
+    rendered = f"{exc_info.value}"
+    assert sentinel not in rendered, "mapped error leaked the injected exception sentinel"
+    assert "database_schema_contract_invalid" in rendered, (
+        "late failure must map to the safe schema-contract code"
+    )
+
+    # Transaction rolled back completely: schema absent, no applied revision.
+    assert not _schema_exists(conn), "knowledge schema must be absent after rollback"
+    assert not _baseline_revision_applied(conn), (
+        "alembic_version must carry no applied revision after rollback"
+    )
+
+    # Remove the hook: normal upgrade succeeds.
+    clean_config = Config(str(_WORKTREE_ROOT / "alembic.ini"))
+    command.upgrade(clean_config, "head")
+
+    assert _schema_exists(conn)
+    assert _baseline_revision_applied(conn)
+    _assert_exact_object_set(conn)
+
+
+def test_restrictive_downgrade_re_upgrade_and_dependent_view_rollback(
+    baseline_stack: BaselineStack,
+) -> None:
+    """Step 4: RESTRICT-only downgrade, fingerprint A==B, dependent-view rollback."""
+    conn = baseline_stack.connection
+    alembic_env = baseline_stack.alembic_env
+
+    # 1-4: fingerprint A, gated downgrade (fully absent), re-upgrade B == A.
+    upgrade = run_alembic(["upgrade", "head"], alembic_env)
+    assert upgrade.returncode == 0, _alembic_failure("first upgrade head", upgrade)
+    fingerprint_a = _catalog_fingerprint(conn)
+    _assert_exact_object_set(conn)
+
+    downgrade = run_alembic(["-x", "allow_destructive=true", "downgrade", "base"], alembic_env)
+    assert downgrade.returncode == 0, _alembic_failure("first gated downgrade", downgrade)
+    assert not _schema_exists(conn), "knowledge schema must be absent after gated downgrade"
+    assert _knowledge_table_count(conn) == 0
+
+    re_upgrade = run_alembic(["upgrade", "head"], alembic_env)
+    assert re_upgrade.returncode == 0, _alembic_failure("re-upgrade head", re_upgrade)
+    fingerprint_b = _catalog_fingerprint(conn)
+    assert fingerprint_b == fingerprint_a, (
+        "re-upgrade fingerprint must match the first upgrade fingerprint (A == B)"
+    )
+
+    # 5: create an unexpected dependent view on an application table.
+    with conn.cursor() as cursor:
+        cursor.execute(
+            "CREATE VIEW knowledge.ci_dependent_audit_view AS "
+            "SELECT workspace_id, action FROM knowledge.audit_events"
+        )
+    assert _relation_exists(conn, "knowledge.ci_dependent_audit_view")
+
+    # 6: gated downgrade MUST fail (RESTRICT) and roll back completely.
+    blocked_downgrade = run_alembic(
+        ["-x", "allow_destructive=true", "downgrade", "base"], alembic_env
+    )
+    assert blocked_downgrade.returncode != 0, (
+        "gated downgrade must fail when a dependent object exists"
+    )
+    # Exact head + view intact: the entire downgrade transaction rolled back.
+    assert _knowledge_table_count(conn) == 9, (
+        "blocked downgrade must leave all nine tables in place"
+    )
+    _assert_exact_object_set(conn)
+    assert _relation_exists(conn, "knowledge.ci_dependent_audit_view"), (
+        "the dependent view must survive the rolled-back downgrade"
+    )
+
+    # 7: explicitly drop only the test view.
+    with conn.cursor() as cursor:
+        cursor.execute("DROP VIEW knowledge.ci_dependent_audit_view")
+    assert not _relation_exists(conn, "knowledge.ci_dependent_audit_view")
+
+    # 8: gated downgrade now succeeds.
+    clean_downgrade = run_alembic(
+        ["-x", "allow_destructive=true", "downgrade", "base"], alembic_env
+    )
+    assert clean_downgrade.returncode == 0, _alembic_failure(
+        "gated downgrade after dropping the view", clean_downgrade
+    )
+    assert not _schema_exists(conn)
+
+    # 9: final re-upgrade: exact head + fingerprint.
+    final_upgrade = run_alembic(["upgrade", "head"], alembic_env)
+    assert final_upgrade.returncode == 0, _alembic_failure("final re-upgrade", final_upgrade)
+    fingerprint_c = _catalog_fingerprint(conn)
+    assert fingerprint_c == fingerprint_a, (
+        "final re-upgrade fingerprint must match the original (C == A)"
+    )
+    _assert_exact_object_set(conn)
+
+
+# --- Step 5: interruption atomicity ------------------------------------------
+#
+# Module-level slot for the ready event and the hook/target functions. spawn
+# re-imports this module in the child; the target sets the slot before calling
+# command.upgrade so the hook can fire the event from inside the open migration
+# transaction, then block until the parent terminates the child.
+
+_interruption_ready_event: Any = None
+
+
+def _interruption_before_verify_hook() -> None:
+    """Signal readiness then block so the parent can terminate mid-transaction."""
+    event = _interruption_ready_event
+    if event is not None:
+        event.set()
+    # Block indefinitely; the parent terminates us while the migration
+    # transaction is still open so the server must either roll back (abandon) or
+    # have already committed (race). Either outcome is acceptable; a subset is not.
+    while True:
+        time.sleep(0.2)
+
+
+def _run_first_upgrade_under_interruption(
+    ready_event: Any,
+    worktree_root: str,
+    alembic_env: Mapping[str, str],
+) -> None:
+    """Child target: run upgrade with a blocking before-verify hook."""
+    global _interruption_ready_event
+    _interruption_ready_event = ready_event
+
+    # Replace KNOWLEDGE_* env in the spawned child with the sanitized fixture env.
+    for key in list(os.environ):
+        if key.startswith("KNOWLEDGE_"):
+            os.environ.pop(key, None)
+    os.environ.update(dict(alembic_env))
+
+    from alembic import command
+    from alembic.config import Config
+
+    config = Config(str(Path(worktree_root) / "alembic.ini"))
+    config.attributes["canonical_baseline_before_verify"] = _interruption_before_verify_hook
+    with suppress(BaseException):
+        # The parent terminates us mid-transaction; any propagated exception
+        # (including SystemExit from a forceful terminate) is expected.
+        command.upgrade(config, "head")
+
+
+def test_first_upgrade_interrupted_after_ddl_leaves_base_or_head(
+    baseline_stack: BaselineStack,
+) -> None:
+    """Step 5: interrupt the client after DDL begins; the DB is base or head, never partial."""
+    import multiprocessing
+
+    conn = baseline_stack.connection
+    alembic_env = baseline_stack.alembic_env
+
+    assert not _schema_exists(conn), "must start at base for the interruption test"
+
+    spawn_context = multiprocessing.get_context("spawn")
+    ready_event: Any = spawn_context.Event()
+    child: Any = spawn_context.Process(
+        target=_run_first_upgrade_under_interruption,
+        args=(ready_event, str(_WORKTREE_ROOT), dict(alembic_env)),
+        daemon=True,
+    )
+    child.start()
+    try:
+        signaled = ready_event.wait(timeout=60)
+        if not signaled:
+            child.terminate()
+            child.join(timeout=10)
+            pytest.fail(
+                "upgrade child did not reach the before-verify hook within 60s; "
+                f"child alive={child.is_alive()} exitcode={child.exitcode}"
+            )
+        # The hook has fired: every CREATE TABLE/FUNCTION/TRIGGER has executed
+        # inside the open migration transaction. Terminate the client now so the
+        # server must either commit (race) or roll back (abandon).
+        child.terminate()
+    finally:
+        if child.is_alive():
+            child.terminate()
+        child.join(timeout=30)
+
+    assert not child.is_alive(), "interrupted upgrade child did not exit after terminate"
+
+    # Give the PostgreSQL backend a beat to detect the dead socket and abort the
+    # abandoned transaction.
+    time.sleep(1.0)
+
+    table_set = _names(
+        conn, "SELECT tablename FROM pg_tables WHERE schemaname = 'knowledge'"
+    )
+    if table_set:
+        # Head case: the server committed the migration transaction before the
+        # terminate landed. The catalog must be the exact head, never a subset.
+        assert table_set == _EXPECTED_TABLES, (
+            f"interrupted upgrade exposed a partial baseline: {sorted(table_set)}"
+        )
+        assert _current_revision(conn) == _BASELINE_REVISION
+    else:
+        # Base case: the server aborted the transaction. No knowledge object
+        # may remain; in particular, no subset of the nine tables.
+        assert not _schema_exists(conn), (
+            "interrupted upgrade left the knowledge schema with no tables"
+        )

@@ -16,7 +16,7 @@ from migrations.database_migration_runtime import (
 from pydantic import SecretStr
 from sqlalchemy.engine import URL
 
-from personal_os.error_contracts.codes import ErrorCode
+from personal_os.error_contracts.codes import ErrorCategory, ErrorCode
 from personal_os.error_contracts.exceptions import (
     DatabaseMigrationError,
     SecretFileError,
@@ -362,3 +362,78 @@ def test_mapped_validation_failure_never_leaks_input_values(tmp_path: Path) -> N
     assert error.error_code is ErrorCode.DATABASE_MIGRATION_CONFIGURATION_INVALID
     rendered = f"{error!r} {error} {error.to_safe_dict()}"
     assert sentinel_value not in rendered
+
+
+# --- Task 5: migration error-code contract for the recovery surface ---------
+#
+# env.py cannot be imported outside an active Alembic context (``context.config``
+# is absent at module import), so the destructive-gate refusal, advisory-lock
+# busy mapping and late-failure mapping are proven end-to-end by the disposable
+# PostgreSQL integration tests. These unit tests pin the closed error registry
+# that env.py renders: the five migration codes carry only fixed safe messages,
+# never accept detail fields (so no host/DSN/sentinel can leak through them),
+# and the refusal/busy codes carry the exact retryability and category the
+# recovery behavior depends on.
+
+
+def test_migration_error_codes_carry_only_fixed_safe_messages() -> None:
+    """Every migration code renders a fixed message with no detail-leak surface."""
+    for code in (
+        ErrorCode.DATABASE_MIGRATION_CONFIGURATION_INVALID,
+        ErrorCode.DATABASE_CONNECTION_UNAVAILABLE,
+        ErrorCode.DATABASE_MIGRATION_BUSY,
+        ErrorCode.DATABASE_SCHEMA_CONTRACT_INVALID,
+        ErrorCode.DATABASE_DESTRUCTIVE_DOWNGRADE_REFUSED,
+    ):
+        error = DatabaseMigrationError(code)
+        rendered = f"{error!r} {error} {error.to_safe_dict()}"
+        assert code.value in rendered, code
+        assert error.safe_message in rendered, code
+        # The five migration codes allow no detail fields, so no string can ever
+        # smuggle a host, password, DSN, SQLSTATE or sentinel through the typed
+        # error itself. env.py raises ``CommandError`` from these codes only.
+        assert not error.safe_details, code
+
+
+def test_destructive_downgrade_refusal_is_non_retryable_authorization() -> None:
+    error = DatabaseMigrationError(ErrorCode.DATABASE_DESTRUCTIVE_DOWNGRADE_REFUSED)
+    assert error.category is ErrorCategory.AUTHORIZATION
+    assert error.is_retryable is False
+    text = str(error)
+    assert "database_destructive_downgrade_refused" in text
+    assert "Destructive database downgrade is not authorized" in text
+
+
+def test_migration_busy_is_retryable_dependency() -> None:
+    error = DatabaseMigrationError(ErrorCode.DATABASE_MIGRATION_BUSY)
+    assert error.category is ErrorCategory.DEPENDENCY
+    assert error.is_retryable is True
+    text = str(error)
+    assert "database_migration_busy" in text
+    assert "Another database migration is in progress" in text
+
+
+def test_database_migration_error_suppresses_chained_cause_text() -> None:
+    """A DatabaseMigrationError never carries chained-cause text in its render."""
+    sentinel = "SENTINEL_CAUSE_TEXT_4242"
+
+    try:
+        raise RuntimeError(sentinel)
+    except RuntimeError:
+        error = DatabaseMigrationError(ErrorCode.DATABASE_SCHEMA_CONTRACT_INVALID)
+
+    rendered = f"{error!r} {error} {error.to_safe_dict()}"
+    assert sentinel not in rendered
+    assert "database_schema_contract_invalid" in rendered
+    assert "The canonical database schema contract is invalid" in rendered
+
+
+def test_connect_arguments_bounded_lock_timeout_supports_busy_failure() -> None:
+    """The 5s lock_timeout is the upper bound for the advisory-lock busy mapping."""
+    settings = load_database_migration_settings(environ={"KNOWLEDGE_SECRET_ROOT": str(Path.cwd())})
+    options = build_database_connect_arguments(settings)["options"]
+    assert isinstance(options, str)
+    assert "lock_timeout=5000" in options
+    assert "statement_timeout=60000" in options
+    assert "idle_in_transaction_session_timeout=60000" in options
+    assert "connect_timeout" in build_database_connect_arguments(settings)

@@ -148,6 +148,13 @@ def run_migrations_online() -> None:
         _raise_command_error(_classify_operational_failure(error))
     except SQLAlchemyError:
         _raise_command_error(DatabaseMigrationError(ErrorCode.DATABASE_SCHEMA_CONTRACT_INVALID))
+    except Exception:
+        # Any unexpected failure (including the sanctioned in-process
+        # ``canonical_baseline_before_verify`` test seam, which raises a plain
+        # exception carrying a sentinel) is mapped to a safe code. ``from None``
+        # suppresses the original so a sentinel, vendor text or other unexpected
+        # content never reaches an operator or CI log.
+        _raise_command_error(DatabaseMigrationError(ErrorCode.DATABASE_SCHEMA_CONTRACT_INVALID))
 
 
 if context.is_offline_mode():

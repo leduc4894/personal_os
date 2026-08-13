@@ -127,6 +127,31 @@ END;
 $$
 """
 
+# The ONLY sanctioned test seam for late-failure rollback recovery. It is read
+# exclusively from the in-process Alembic ``Config.attributes`` mapping, which is
+# populated ONLY by Python API callers (``config.attributes[...] = callable``).
+# It is never read from an environment variable, a CLI ``-x`` argument or any
+# provider-controlled branch. A normal CLI upgrade leaves the attribute absent,
+# so the hook is a harmless no-op for every production run.
+_BEFORE_VERIFY_HOOK_ATTRIBUTE: Final[str] = "canonical_baseline_before_verify"
+
+
+def _invoke_before_verify_hook() -> None:
+    """Invoke the optional in-process before-verify hook if it is present.
+
+    The hook fires immediately before the final catalog verification so a test
+    can simulate a late failure after every CREATE has executed but before the
+    transaction commits. Because the migration runs inside one transactional
+    DDL block, any exception raised by the hook rolls the whole baseline back.
+    """
+    migration_context = op.get_context()
+    context_config = getattr(migration_context, "config", None)
+    if context_config is None:
+        return
+    hook = context_config.attributes.get(_BEFORE_VERIFY_HOOK_ATTRIBUTE)
+    if callable(hook):
+        hook()
+
 
 def upgrade() -> None:
     op.execute(sa.text(_CREATE_SCHEMA_SQL))
@@ -812,6 +837,10 @@ def upgrade() -> None:
     op.execute(sa.text(_SOURCE_VERSIONS_TRIGGER_SQL))
     op.execute(sa.text(_SYNC_EVENTS_TRIGGER_SQL))
     op.execute(sa.text(_AUDIT_EVENTS_TRIGGER_SQL))
+    # Sanctioned in-process seam: fires after every CREATE has executed inside
+    # the open migration transaction but before the final catalog verification.
+    # Unreachable from CLI/env; absent for every production upgrade.
+    _invoke_before_verify_hook()
     op.execute(sa.text(_FINAL_CATALOG_ASSERTION_SQL))
 
 
