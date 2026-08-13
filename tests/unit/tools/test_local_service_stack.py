@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import socket
 import subprocess
 import sys
 import threading
 import time
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
 
@@ -522,6 +524,14 @@ def test_subprocess_environment_omits_credentials_and_r2() -> None:
     assert clean == {"PATH": "safe"}
 
 
+def test_subprocess_environment_retains_windows_compose_plugin_root() -> None:
+    clean = sanitize_subprocess_environment(
+        {"PROGRAMFILES": r"C:\Program Files", "R2_SECRET_ACCESS_KEY": "secret"}
+    )
+
+    assert clean == {"PROGRAMFILES": r"C:\Program Files"}
+
+
 def test_run_command_maps_timeout_without_raw_exception() -> None:
     with pytest.raises(StackFailure) as raised:
         run_command([sys.executable, "-c", "import time; time.sleep(5)"], timeout_seconds=0.01)
@@ -632,3 +642,575 @@ def test_run_command_truncates_captured_output() -> None:
     assert result.return_code == 0
     assert len(result.stdout.encode("utf-8")) == 8192
     assert len(result.stderr.encode("utf-8")) == 8192
+
+
+_RUNTIME_SERVICES = (
+    "neo4j",
+    "postgresql",
+    "qdrant",
+    "redis",
+    "temporal",
+    "temporal-cli",
+    "temporal-ui",
+)
+_INITIALIZER_SERVICES = (
+    "postgres-provision",
+    "temporal-namespace-bootstrap",
+    "temporal-schema-setup",
+)
+
+
+@pytest.fixture
+def stack_context(tmp_path: Path) -> Any:
+    paths = resolve_stack_paths(tmp_path)
+    _write_yaml(paths.image_lock, _valid_lock_document())
+    _write_yaml(
+        paths.compose_file,
+        {
+            "services": {
+                "postgresql": {
+                    "image": f"postgres:18.4-bookworm@sha256:{'a' * 64}",
+                    "platform": "linux/amd64",
+                }
+            }
+        },
+    )
+    bootstrap_secret_set(paths, random_bytes=lambda count: bytes(range(count)))
+    ports = {
+        binding.variable: 15000 + index for index, binding in enumerate(stack_module.PORT_BINDINGS)
+    }
+    return stack_module.StackContext(
+        paths=paths,
+        project_name="knowledge-local",
+        ports=ports,
+        environment={"PATH": "safe", "R2_SECRET_ACCESS_KEY": "must-not-be-forwarded"},
+    )
+
+
+def _healthy_ps_output() -> str:
+    rows = [
+        {"Service": service, "State": "running", "Health": "healthy", "ExitCode": 0}
+        for service in _RUNTIME_SERVICES
+    ]
+    rows.extend(
+        {"Service": service, "State": "exited", "Health": "", "ExitCode": 0}
+        for service in _INITIALIZER_SERVICES
+    )
+    return json.dumps(rows)
+
+
+def _starting_ps_output() -> str:
+    rows = [
+        {"Service": service, "State": "running", "Health": "starting", "ExitCode": 0}
+        for service in _RUNTIME_SERVICES
+    ]
+    rows.extend(
+        {"Service": service, "State": "running", "Health": "", "ExitCode": 0}
+        for service in _INITIALIZER_SERVICES
+    )
+    return json.dumps(rows)
+
+
+def _successful_lifecycle_runner(
+    calls: list[tuple[tuple[str, ...], float, dict[str, str]]] | None = None,
+    *,
+    ps_output: str | None = None,
+) -> Any:
+    def run(
+        arguments: Any,
+        *,
+        timeout_seconds: float,
+        environment: Any = None,
+    ) -> Any:
+        command = tuple(arguments)
+        forwarded_environment = dict(environment or {})
+        if calls is not None:
+            calls.append((command, timeout_seconds, forwarded_environment))
+        if command[:2] == ("docker", "compose") and command[-2:] == ("version", "--short"):
+            return stack_module.CommandResult(0, "2.30.0\n", "")
+        if command[:3] == ("docker", "version", "--format"):
+            return stack_module.CommandResult(0, "linux/amd64\n", "")
+        if "ps" in command:
+            return stack_module.CommandResult(0, ps_output or _healthy_ps_output(), "")
+        return stack_module.CommandResult(0, "", "")
+
+    return run
+
+
+def test_stack_context_is_frozen_and_copies_mutable_inputs(tmp_path: Path) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    ports = {"POSTGRES_PORT": 15432}
+    environment = {"PATH": "safe"}
+
+    context = stack_module.StackContext(paths, "knowledge-local", ports, environment)
+    ports["POSTGRES_PORT"] = 25432
+    environment["PATH"] = "changed"
+
+    assert context.ports == {"POSTGRES_PORT": 15432}
+    assert context.environment == {"PATH": "safe"}
+    with pytest.raises(FrozenInstanceError):
+        context.project_name = "knowledge-ci-mutated"
+    with pytest.raises(TypeError):
+        context.ports["POSTGRES_PORT"] = 35432
+
+
+def test_compose_arguments_are_array_based_and_project_scoped(stack_context: Any) -> None:
+    assert stack_module.compose_arguments(stack_context) == [
+        "docker",
+        "compose",
+        "--file",
+        str(stack_context.paths.compose_file),
+        "--project-name",
+        "knowledge-local",
+    ]
+
+
+def test_every_compose_invocation_is_explicitly_project_scoped(
+    monkeypatch: pytest.MonkeyPatch, stack_context: Any
+) -> None:
+    calls: list[tuple[tuple[str, ...], float, dict[str, str]]] = []
+    monkeypatch.setattr(stack_module, "validate_port_availability", lambda ports: None)
+
+    stack_module.stack_up(stack_context, runner=_successful_lifecycle_runner(calls))
+
+    compose_prefix = tuple(stack_module.compose_arguments(stack_context))
+    compose_calls = [command for command, _, _ in calls if command[:2] == ("docker", "compose")]
+    assert compose_calls
+    assert all(command[: len(compose_prefix)] == compose_prefix for command in compose_calls)
+
+
+@pytest.mark.parametrize("version", ["2.29.0", "v2.29.99", "Docker Compose version v2.29.7"])
+def test_prerequisites_reject_compose_before_minimum(stack_context: Any, version: str) -> None:
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        return stack_module.CommandResult(0, version, "")
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.check_prerequisites(stack_context, runner=runner, require_engine=False)
+
+    assert raised.value.exit_code is StackExitCode.PREREQUISITE
+    assert str(raised.value) == "compose_version_unsupported"
+
+
+def test_prerequisites_accept_compose_2_30_0(stack_context: Any) -> None:
+    versions = stack_module.check_prerequisites(
+        stack_context,
+        runner=_successful_lifecycle_runner(),
+        require_engine=False,
+    )
+
+    assert versions == stack_module.PrerequisiteVersions((2, 30, 0), "", "")
+
+
+@pytest.mark.parametrize(
+    ("engine", "result_code"),
+    [
+        ("windows/amd64", "engine_os_unsupported"),
+        ("linux/arm64", "engine_architecture_unsupported"),
+    ],
+)
+def test_prerequisites_reject_unsupported_engine(
+    stack_context: Any, engine: str, result_code: str
+) -> None:
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        if tuple(arguments)[-2:] == ("version", "--short"):
+            return stack_module.CommandResult(0, "2.30.0", "")
+        return stack_module.CommandResult(0, engine, "")
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.check_prerequisites(stack_context, runner=runner)
+
+    assert raised.value.exit_code is StackExitCode.PREREQUISITE
+    assert str(raised.value) == result_code
+
+
+def test_daemon_unavailable_maps_to_prerequisite(stack_context: Any) -> None:
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        if tuple(arguments)[-2:] == ("version", "--short"):
+            return stack_module.CommandResult(0, "2.30.0", "")
+        return stack_module.CommandResult(1, "daemon output must not escape", "secret error")
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.check_prerequisites(stack_context, runner=runner)
+
+    assert raised.value.exit_code is StackExitCode.PREREQUISITE
+    assert str(raised.value) == "engine_unavailable"
+    assert "daemon" not in str(raised.value)
+    assert "secret" not in str(raised.value)
+
+
+def test_ci_project_is_rejected_without_ci_environment(stack_context: Any) -> None:
+    context = stack_module.StackContext(
+        stack_context.paths,
+        "knowledge-ci-run-1",
+        stack_context.ports,
+        {"PATH": "safe"},
+    )
+    calls: list[tuple[tuple[str, ...], float, dict[str, str]]] = []
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.stack_status(context, runner=_successful_lifecycle_runner(calls))
+
+    assert raised.value.exit_code is StackExitCode.CLI
+    assert str(raised.value) == "ci_project_requires_ci"
+    assert calls == []
+
+
+def test_config_validation_does_not_contact_engine(
+    monkeypatch: pytest.MonkeyPatch, stack_context: Any
+) -> None:
+    calls: list[tuple[tuple[str, ...], float, dict[str, str]]] = []
+    monkeypatch.setattr(stack_module, "validate_port_availability", lambda ports: None)
+
+    stack_module.validate_compose_config(stack_context, runner=_successful_lifecycle_runner(calls))
+
+    commands = [call[0] for call in calls]
+    assert any(command[-2:] == ("version", "--short") for command in commands)
+    assert not any(command[:3] == ("docker", "version", "--format") for command in commands)
+    assert commands[-1] == (
+        *stack_module.compose_arguments(stack_context),
+        "config",
+        "--quiet",
+    )
+
+
+def test_up_preflight_order_precedes_first_mutating_command(
+    monkeypatch: pytest.MonkeyPatch, stack_context: Any
+) -> None:
+    operations: list[str] = []
+    original_validate_project = stack_module.validate_project_name
+
+    def validate_project(name: str) -> str:
+        operations.append("validate_project")
+        return original_validate_project(name)
+
+    def validate_ports(ports: Any) -> None:
+        operations.append("validate_ports")
+
+    def validate_secrets(paths: Any, *, list_project_volumes: Any) -> Any:
+        operations.append("validate_secrets")
+        return SecretSetState.COMPLETE
+
+    def validate_lock(paths: Any) -> tuple[Any, ...]:
+        operations.append("validate_lock")
+        return ()
+
+    monkeypatch.setattr(stack_module, "validate_project_name", validate_project)
+    monkeypatch.setattr(stack_module, "validate_port_availability", validate_ports)
+    monkeypatch.setattr(stack_module, "validate_secret_set", validate_secrets)
+    monkeypatch.setattr(stack_module, "validate_image_lock", validate_lock)
+
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        command = tuple(arguments)
+        if command[:2] == ("docker", "compose") and command[-2:] == ("version", "--short"):
+            operations.append("check_compose")
+            return stack_module.CommandResult(0, "2.30.0", "")
+        if command[:3] == ("docker", "version", "--format"):
+            operations.append("check_engine")
+            return stack_module.CommandResult(0, "linux/amd64", "")
+        if "config" in command:
+            operations.append("compose_config")
+            return stack_module.CommandResult(0, "", "")
+        if "up" in command:
+            operations.append("compose_up")
+            return stack_module.CommandResult(0, "", "")
+        operations.append("compose_ps")
+        return stack_module.CommandResult(0, _healthy_ps_output(), "")
+
+    stack_module.stack_up(stack_context, runner=runner)
+
+    assert operations[:7] == [
+        "validate_project",
+        "check_compose",
+        "check_engine",
+        "validate_ports",
+        "validate_secrets",
+        "validate_lock",
+        "compose_config",
+    ]
+    assert operations.index("compose_up") > operations.index("compose_config")
+
+
+def test_up_validates_project_before_deadline(stack_context: Any) -> None:
+    context = stack_module.StackContext(
+        stack_context.paths,
+        "unsafe-project",
+        stack_context.ports,
+        stack_context.environment,
+    )
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.stack_up(
+            context,
+            runner=lambda *args, **kwargs: pytest.fail("runner must not be called"),
+            deadline_seconds=0,
+        )
+
+    assert raised.value.exit_code is StackExitCode.CLI
+    assert str(raised.value) == "invalid_project_name"
+
+
+def test_up_missing_secrets_checks_exact_project_volumes_before_mutation(
+    monkeypatch: pytest.MonkeyPatch, stack_context: Any
+) -> None:
+    calls: list[tuple[tuple[str, ...], float, dict[str, str]]] = []
+    monkeypatch.setattr(stack_module, "validate_port_availability", lambda ports: None)
+    for secret_file in stack_context.paths.secret_directory.iterdir():
+        secret_file.unlink()
+    stack_context.paths.secret_directory.rmdir()
+
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        command = tuple(arguments)
+        calls.append((command, timeout_seconds, dict(environment or {})))
+        if command[:2] == ("docker", "compose") and command[-2:] == ("version", "--short"):
+            return stack_module.CommandResult(0, "2.30.0", "")
+        if command[:3] == ("docker", "version", "--format"):
+            return stack_module.CommandResult(0, "linux/amd64", "")
+        if command[:3] == ("docker", "volume", "ls"):
+            return stack_module.CommandResult(0, "knowledge-local_postgres-data\n", "")
+        pytest.fail(f"unexpected command boundary: {command[:3]}")
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.stack_up(stack_context, runner=runner)
+
+    assert raised.value.exit_code is StackExitCode.CONTRACT
+    assert str(raised.value) == "secret_set_missing_with_volumes"
+    volume_call = next(
+        command for command, _, _ in calls if command[:3] == ("docker", "volume", "ls")
+    )
+    assert volume_call == (
+        "docker",
+        "volume",
+        "ls",
+        "--quiet",
+        "--filter",
+        "label=com.docker.compose.project=knowledge-local",
+    )
+    assert not any("up" in command or "down" in command for command, _, _ in calls)
+
+
+def test_up_uses_bounded_wait_flags_and_outer_deadline(
+    monkeypatch: pytest.MonkeyPatch, stack_context: Any
+) -> None:
+    calls: list[tuple[tuple[str, ...], float, dict[str, str]]] = []
+    monkeypatch.setattr(stack_module, "validate_port_availability", lambda ports: None)
+
+    stack_module.stack_up(stack_context, runner=_successful_lifecycle_runner(calls))
+
+    up_call = next(call for call in calls if "up" in call[0])
+    assert up_call[0] == (
+        *stack_module.compose_arguments(stack_context),
+        "up",
+        "--detach",
+        "--remove-orphans",
+        "--wait",
+        "--wait-timeout",
+        "180",
+    )
+    assert 0 < up_call[1] <= 180
+    ps_call = next(call for call in calls if "ps" in call[0])
+    assert 0 < ps_call[1] <= up_call[1]
+
+
+def test_up_failure_maps_to_startup_without_automatic_down(
+    monkeypatch: pytest.MonkeyPatch, stack_context: Any
+) -> None:
+    calls: list[tuple[tuple[str, ...], float, dict[str, str]]] = []
+    monkeypatch.setattr(stack_module, "validate_port_availability", lambda ports: None)
+
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        command = tuple(arguments)
+        calls.append((command, timeout_seconds, dict(environment or {})))
+        if command[:2] == ("docker", "compose") and command[-2:] == ("version", "--short"):
+            return stack_module.CommandResult(0, "2.30.0", "")
+        if command[:3] == ("docker", "version", "--format"):
+            return stack_module.CommandResult(0, "linux/amd64", "")
+        if "up" in command:
+            return stack_module.CommandResult(1, "raw startup output", "secret startup error")
+        return stack_module.CommandResult(0, "", "")
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.stack_up(stack_context, runner=runner)
+
+    assert raised.value.exit_code is StackExitCode.STARTUP
+    assert str(raised.value) == "stack_startup_failed"
+    assert not any("down" in call[0] or "volume" in call[0] for call in calls)
+
+
+def test_wait_timeout_returns_temporary_without_down_or_reset(stack_context: Any) -> None:
+    calls: list[tuple[tuple[str, ...], float, dict[str, str]]] = []
+    now = [0.0]
+
+    def clock() -> float:
+        return now[0]
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.wait_for_stack(
+            stack_context,
+            runner=_successful_lifecycle_runner(calls, ps_output=_starting_ps_output()),
+            deadline_seconds=2,
+            poll_interval_seconds=0.5,
+            clock=clock,
+            sleep=sleep,
+        )
+
+    assert raised.value.exit_code is StackExitCode.READINESS
+    assert str(raised.value) == "stack_readiness_timeout"
+    assert not any("down" in call[0] or "volume" in call[0] for call in calls)
+    assert len(calls) <= 4
+
+
+def test_init_nonzero_maps_to_startup(stack_context: Any) -> None:
+    rows = json.loads(_healthy_ps_output())
+    failed_initializer = next(row for row in rows if row["Service"] == "temporal-schema-setup")
+    failed_initializer["ExitCode"] = 17
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.wait_for_stack(
+            stack_context,
+            runner=_successful_lifecycle_runner(ps_output=json.dumps(rows)),
+            deadline_seconds=1,
+        )
+
+    assert raised.value.exit_code is StackExitCode.STARTUP
+    assert str(raised.value) == "initializer_failed"
+    assert "17" not in str(raised.value)
+
+
+def test_status_output_has_stable_non_secret_shape(stack_context: Any) -> None:
+    status = stack_module.stack_status(
+        stack_context,
+        runner=_successful_lifecycle_runner(ps_output=_healthy_ps_output()),
+    )
+
+    assert set(status) == {"project", "state", "services", "initializers", "result_code"}
+    assert status["project"] == "knowledge-local"
+    assert status["state"] == "ready"
+    assert status["result_code"] == "stack_ready"
+    assert list(status["services"]) == sorted(_RUNTIME_SERVICES)
+    assert list(status["initializers"]) == sorted(_INITIALIZER_SERVICES)
+    assert "password" not in json.dumps(status).lower()
+
+
+def test_status_absence_has_explicit_stable_mapping(stack_context: Any) -> None:
+    status = stack_module.stack_status(
+        stack_context,
+        runner=_successful_lifecycle_runner(ps_output="[]"),
+    )
+
+    assert status == {
+        "project": "knowledge-local",
+        "state": "absent",
+        "services": {},
+        "initializers": {},
+        "result_code": "stack_absent",
+    }
+
+
+def test_status_drops_raw_compose_fields_and_unknown_values(stack_context: Any) -> None:
+    raw_secret = "password=must-not-escape"
+    rows = json.loads(_healthy_ps_output())
+    rows[0].update(
+        {
+            "ID": raw_secret,
+            "Image": raw_secret,
+            "Command": raw_secret,
+            "Mounts": raw_secret,
+            "State": raw_secret,
+            "Health": raw_secret,
+        }
+    )
+
+    status = stack_module.stack_status(
+        stack_context,
+        runner=_successful_lifecycle_runner(ps_output=json.dumps(rows)),
+    )
+    rendered = json.dumps(status)
+
+    assert raw_secret not in rendered
+    assert "Image" not in rendered
+    assert "Command" not in rendered
+    assert status["services"]["neo4j"] == {"state": "unknown", "health": "unknown"}
+
+
+def test_status_is_degraded_when_one_runtime_service_has_stopped(stack_context: Any) -> None:
+    rows = json.loads(_healthy_ps_output())
+    stopped_service = next(row for row in rows if row["Service"] == "redis")
+    stopped_service.update({"State": "exited", "Health": ""})
+
+    status = stack_module.stack_status(
+        stack_context,
+        runner=_successful_lifecycle_runner(ps_output=json.dumps(rows)),
+    )
+
+    assert status["state"] == "degraded"
+    assert status["result_code"] == "stack_degraded"
+
+
+def test_status_rejects_duplicate_service_rows(stack_context: Any) -> None:
+    rows = json.loads(_healthy_ps_output())
+    rows.append(dict(rows[0]))
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.stack_status(
+            stack_context,
+            runner=_successful_lifecycle_runner(ps_output=json.dumps(rows)),
+        )
+
+    assert raised.value.exit_code is StackExitCode.READINESS
+    assert str(raised.value) == "stack_status_invalid"
+
+
+def test_malformed_status_never_echoes_raw_output(stack_context: Any) -> None:
+    raw_secret = "password=must-not-escape"
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.stack_status(
+            stack_context,
+            runner=_successful_lifecycle_runner(ps_output=raw_secret),
+        )
+
+    assert raised.value.exit_code is StackExitCode.READINESS
+    assert str(raised.value) == "stack_status_invalid"
+    assert raw_secret not in str(raised.value)
+
+
+def test_lifecycle_never_forwards_r2_environment(
+    monkeypatch: pytest.MonkeyPatch, stack_context: Any
+) -> None:
+    calls: list[tuple[tuple[str, ...], float, dict[str, str]]] = []
+    monkeypatch.setattr(stack_module, "validate_port_availability", lambda ports: None)
+
+    stack_module.stack_up(stack_context, runner=_successful_lifecycle_runner(calls))
+
+    assert all("R2_SECRET_ACCESS_KEY" not in environment for _, _, environment in calls)
+    assert all("must-not-be-forwarded" not in environment.values() for _, _, environment in calls)
+
+
+def test_down_never_removes_volumes_images_secrets_or_health_tools(
+    stack_context: Any,
+) -> None:
+    calls: list[tuple[tuple[str, ...], float, dict[str, str]]] = []
+    secret_before = {
+        path.name: path.read_bytes() for path in stack_context.paths.secret_directory.iterdir()
+    }
+
+    stack_module.stack_down(stack_context, runner=_successful_lifecycle_runner(calls))
+
+    assert calls[-1][0] == (
+        *stack_module.compose_arguments(stack_context),
+        "down",
+        "--remove-orphans",
+        "--timeout",
+        "30",
+    )
+    flat = " ".join(part for command, _, _ in calls for part in command)
+    assert "--volumes" not in flat
+    assert "--rmi" not in flat
+    assert not any(command[:2] == ("docker", "volume") for command, _, _ in calls)
+    assert "temporal-health-tools" not in flat
+    assert {
+        path.name: path.read_bytes() for path in stack_context.paths.secret_directory.iterdir()
+    } == secret_before

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -19,6 +20,7 @@ from dataclasses import dataclass
 from datetime import date
 from enum import IntEnum, StrEnum
 from pathlib import Path
+from types import MappingProxyType
 from typing import BinaryIO, Final, Protocol, cast
 
 import yaml  # type: ignore[import-untyped]
@@ -26,7 +28,16 @@ import yaml  # type: ignore[import-untyped]
 _MAX_CAPTURE_BYTES = 8192
 _MIN_PORT = 1024
 _MAX_PORT = 65535
+_MIN_COMPOSE_VERSION: Final = (2, 30, 0)
+_PREREQUISITE_TIMEOUT_SECONDS: Final = 10.0
+_COMPOSE_CONFIG_TIMEOUT_SECONDS: Final = 30.0
+_STACK_STARTUP_DEADLINE_SECONDS: Final = 180.0
+_STACK_STATUS_TIMEOUT_SECONDS: Final = 10.0
+_STACK_DOWN_TIMEOUT_SECONDS: Final = 45.0
 _PROJECT_NAME_PATTERN = re.compile(r"knowledge-(?:local|ci-[a-z0-9][a-z0-9-]{0,40})")
+_COMPOSE_VERSION_PATTERN = re.compile(
+    r"(?:Docker Compose version )?v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?"
+)
 _SECRET_ALPHABET: Final = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 _SECRET_BYTE_COUNT: Final = 32
 _MIN_DISTINCT_SECRET_CHARACTERS: Final = 8
@@ -45,6 +56,28 @@ _IMAGE_LOCK_ENTRY_KEYS: Final = frozenset(
     }
 )
 _SUPPORTED_IMAGE_PLATFORMS: Final = ("linux/amd64",)
+_RUNTIME_SERVICE_NAMES: Final = frozenset(
+    {
+        "postgresql",
+        "qdrant",
+        "neo4j",
+        "redis",
+        "temporal",
+        "temporal-ui",
+        "temporal-cli",
+    }
+)
+_INITIALIZER_SERVICE_NAMES: Final = frozenset(
+    {
+        "postgres-provision",
+        "temporal-schema-setup",
+        "temporal-namespace-bootstrap",
+    }
+)
+_STABLE_CONTAINER_STATES: Final = frozenset(
+    {"created", "running", "restarting", "exited", "paused", "dead", "removing"}
+)
+_STABLE_HEALTH_STATES: Final = frozenset({"healthy", "unhealthy", "starting", "none"})
 
 
 class StackExitCode(IntEnum):
@@ -79,6 +112,33 @@ class StackPaths:
     image_lock: Path
     secret_directory: Path
     state_directory: Path
+
+
+@dataclass(frozen=True, slots=True)
+class PrerequisiteVersions:
+    """Validated local lifecycle dependency versions and capabilities."""
+
+    compose: tuple[int, int, int]
+    engine_os: str
+    engine_architecture: str
+
+
+@dataclass(frozen=True, slots=True)
+class StackContext:
+    """Immutable, project-scoped input to every local lifecycle operation."""
+
+    paths: StackPaths
+    project_name: str
+    ports: Mapping[str, int]
+    environment: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "ports", MappingProxyType(dict(self.ports)))
+        object.__setattr__(
+            self,
+            "environment",
+            MappingProxyType(sanitize_subprocess_environment(self.environment)),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +257,8 @@ _ALLOWED_SUBPROCESS_ENVIRONMENT_KEYS = frozenset(
         "SYSTEMROOT",
         "WINDIR",
         "COMSPEC",
+        "PROGRAMFILES",
+        "ProgramFiles",
         "TMP",
         "TEMP",
         "DOCKER_HOST",
@@ -212,7 +274,7 @@ def load_image_lock(image_lock_path: Path) -> tuple[ImageLockEntry, ...]:
     """Parse and strictly validate the local-stack immutable image lock."""
     try:
         loaded: object = yaml.safe_load(image_lock_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, yaml.YAMLError):
+    except OSError, UnicodeError, yaml.YAMLError:
         raise StackFailure(StackExitCode.CONTRACT, "image_lock_invalid") from None
     if not isinstance(loaded, dict):
         raise StackFailure(StackExitCode.CONTRACT, "image_lock_invalid")
@@ -243,7 +305,7 @@ def validate_image_lock(paths: StackPaths) -> tuple[ImageLockEntry, ...]:
     entries = load_image_lock(paths.image_lock)
     try:
         loaded: object = yaml.safe_load(paths.compose_file.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, yaml.YAMLError):
+    except OSError, UnicodeError, yaml.YAMLError:
         raise StackFailure(StackExitCode.CONTRACT, "image_lock_mismatch") from None
     if not isinstance(loaded, dict):
         raise StackFailure(StackExitCode.CONTRACT, "image_lock_mismatch")
@@ -409,7 +471,7 @@ def bootstrap_secret_set(
             except StackFailure:
                 pass
         raise
-    except (OSError, ValueError):
+    except OSError, ValueError:
         raise StackFailure(StackExitCode.CONTRACT, "secret_set_creation_failed") from None
     finally:
         if staging_directory is not None:
@@ -606,6 +668,463 @@ def run_command(
     )
 
 
+def compose_arguments(context: StackContext) -> list[str]:
+    """Build the explicit project- and file-scoped Compose command prefix."""
+    return [
+        "docker",
+        "compose",
+        "--file",
+        str(context.paths.compose_file),
+        "--project-name",
+        context.project_name,
+    ]
+
+
+def check_prerequisites(
+    context: StackContext,
+    *,
+    runner: CommandRunner = run_command,
+    require_engine: bool = True,
+) -> PrerequisiteVersions:
+    """Require a supported Compose CLI and, when needed, Linux amd64 Docker."""
+    compose_result = _run_prerequisite_command(
+        runner,
+        [*compose_arguments(context), "version", "--short"],
+        context,
+        result_code="compose_unavailable",
+    )
+    compose_version = _parse_compose_version(compose_result.stdout)
+    if compose_version < _MIN_COMPOSE_VERSION:
+        raise StackFailure(StackExitCode.PREREQUISITE, "compose_version_unsupported")
+
+    if not require_engine:
+        return PrerequisiteVersions(compose_version, "", "")
+
+    engine_result = _run_prerequisite_command(
+        runner,
+        ("docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"),
+        context,
+        result_code="engine_unavailable",
+    )
+    engine_capability = engine_result.stdout.strip().lower().split("/", maxsplit=1)
+    if len(engine_capability) != 2 or not all(engine_capability):
+        raise StackFailure(StackExitCode.PREREQUISITE, "engine_capability_invalid")
+    engine_os, engine_architecture = engine_capability
+    if engine_os != "linux":
+        raise StackFailure(StackExitCode.PREREQUISITE, "engine_os_unsupported")
+    if engine_architecture != "amd64":
+        raise StackFailure(StackExitCode.PREREQUISITE, "engine_architecture_unsupported")
+    return PrerequisiteVersions(compose_version, engine_os, engine_architecture)
+
+
+def validate_compose_config(context: StackContext, *, runner: CommandRunner = run_command) -> None:
+    """Validate the complete static stack contract without contacting the engine."""
+    _validate_lifecycle_project(context)
+    check_prerequisites(context, runner=runner, require_engine=False)
+    validate_port_availability(context.ports)
+    _require_complete_secret_set(context, runner=runner, inspect_project_volumes=False)
+    validate_image_lock(context.paths)
+    _run_compose_config(context, runner)
+
+
+def stack_up(
+    context: StackContext,
+    *,
+    runner: CommandRunner = run_command,
+    deadline_seconds: float = _STACK_STARTUP_DEADLINE_SECONDS,
+) -> dict[str, object]:
+    """Run fail-fast preflight, bounded Compose startup and init inspection."""
+    _validate_lifecycle_project(context)
+    _validate_deadline(deadline_seconds)
+    check_prerequisites(context, runner=runner)
+    validate_port_availability(context.ports)
+    _require_complete_secret_set(context, runner=runner, inspect_project_volumes=True)
+    validate_image_lock(context.paths)
+    _run_compose_config(context, runner)
+
+    deadline_monotonic = time.monotonic() + deadline_seconds
+    startup_arguments = [
+        *compose_arguments(context),
+        "up",
+        "--detach",
+        "--remove-orphans",
+        "--wait",
+        "--wait-timeout",
+        str(int(deadline_seconds)),
+    ]
+    startup_result = _run_lifecycle_command(
+        runner,
+        startup_arguments,
+        timeout_seconds=_remaining_seconds(deadline_monotonic, time.monotonic),
+        context=context,
+    )
+    if startup_result.return_code != 0:
+        raise StackFailure(StackExitCode.STARTUP, "stack_startup_failed")
+    return _wait_for_stack_until(
+        context,
+        runner=runner,
+        deadline_monotonic=deadline_monotonic,
+        poll_interval_seconds=1.0,
+        clock=time.monotonic,
+        sleep=time.sleep,
+    )
+
+
+def wait_for_stack(
+    context: StackContext,
+    *,
+    runner: CommandRunner = run_command,
+    deadline_seconds: float = _STACK_STARTUP_DEADLINE_SECONDS,
+    poll_interval_seconds: float = 1.0,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict[str, object]:
+    """Wait within one finite deadline for health and all initializers to settle."""
+    _validate_lifecycle_project(context)
+    _validate_deadline(deadline_seconds)
+    if not math.isfinite(poll_interval_seconds) or poll_interval_seconds <= 0:
+        raise StackFailure(StackExitCode.CLI, "invalid_poll_interval")
+    return _wait_for_stack_until(
+        context,
+        runner=runner,
+        deadline_monotonic=clock() + deadline_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        clock=clock,
+        sleep=sleep,
+    )
+
+
+def stack_status(
+    context: StackContext, *, runner: CommandRunner = run_command
+) -> dict[str, object]:
+    """Return only stable, non-secret lifecycle state for the exact project."""
+    _validate_lifecycle_project(context)
+    check_prerequisites(context, runner=runner)
+    return _read_stack_status(
+        context,
+        runner=runner,
+        timeout_seconds=_STACK_STATUS_TIMEOUT_SECONDS,
+    )
+
+
+def stack_down(context: StackContext, *, runner: CommandRunner = run_command) -> None:
+    """Remove only project containers and network while preserving all volumes/secrets."""
+    _validate_lifecycle_project(context)
+    check_prerequisites(context, runner=runner)
+    result = _run_lifecycle_command(
+        runner,
+        [*compose_arguments(context), "down", "--remove-orphans", "--timeout", "30"],
+        timeout_seconds=_STACK_DOWN_TIMEOUT_SECONDS,
+        context=context,
+    )
+    if result.return_code != 0:
+        raise StackFailure(StackExitCode.STARTUP, "stack_down_failed")
+
+
+def _validate_lifecycle_project(context: StackContext) -> None:
+    validate_project_name(context.project_name)
+    if context.project_name.startswith("knowledge-ci-") and context.environment.get("CI") != "true":
+        raise StackFailure(StackExitCode.CLI, "ci_project_requires_ci")
+
+
+def _command_environment(context: StackContext) -> dict[str, str]:
+    environment = sanitize_subprocess_environment(context.environment)
+    environment.update(
+        {
+            variable: str(context.ports[variable])
+            for variable in _PORT_VARIABLES
+            if variable in context.ports
+        }
+    )
+    return environment
+
+
+def _run_prerequisite_command(
+    runner: CommandRunner,
+    arguments: Sequence[str],
+    context: StackContext,
+    *,
+    result_code: str,
+) -> CommandResult:
+    try:
+        result = runner(
+            arguments,
+            timeout_seconds=_PREREQUISITE_TIMEOUT_SECONDS,
+            environment=_command_environment(context),
+        )
+    except StackFailure as failure:
+        if failure.exit_code is StackExitCode.CLI:
+            raise
+        raise StackFailure(StackExitCode.PREREQUISITE, result_code) from None
+    except Exception:
+        raise StackFailure(StackExitCode.PREREQUISITE, result_code) from None
+    if result.return_code != 0:
+        raise StackFailure(StackExitCode.PREREQUISITE, result_code)
+    return result
+
+
+def _parse_compose_version(raw_version: str) -> tuple[int, int, int]:
+    matched = _COMPOSE_VERSION_PATTERN.fullmatch(raw_version.strip())
+    if matched is None:
+        raise StackFailure(StackExitCode.PREREQUISITE, "compose_version_invalid")
+    return cast(tuple[int, int, int], tuple(int(part) for part in matched.groups()))
+
+
+def _require_complete_secret_set(
+    context: StackContext,
+    *,
+    runner: CommandRunner,
+    inspect_project_volumes: bool,
+) -> None:
+    def list_project_volumes() -> Sequence[str]:
+        if inspect_project_volumes:
+            return _list_project_volumes(context, runner)
+        return ()
+
+    state = validate_secret_set(
+        context.paths,
+        list_project_volumes=list_project_volumes,
+    )
+    if state is not SecretSetState.COMPLETE:
+        raise StackFailure(StackExitCode.CONTRACT, "secret_set_missing")
+
+
+def _list_project_volumes(context: StackContext, runner: CommandRunner) -> tuple[str, ...]:
+    result = _run_prerequisite_command(
+        runner,
+        (
+            "docker",
+            "volume",
+            "ls",
+            "--quiet",
+            "--filter",
+            f"label=com.docker.compose.project={context.project_name}",
+        ),
+        context,
+        result_code="volume_inspection_failed",
+    )
+    return tuple(line for line in result.stdout.splitlines() if line)
+
+
+def _run_compose_config(context: StackContext, runner: CommandRunner) -> None:
+    result = _run_lifecycle_command(
+        runner,
+        [*compose_arguments(context), "config", "--quiet"],
+        timeout_seconds=_COMPOSE_CONFIG_TIMEOUT_SECONDS,
+        context=context,
+    )
+    if result.return_code != 0:
+        raise StackFailure(StackExitCode.CONTRACT, "compose_config_invalid")
+
+
+def _run_lifecycle_command(
+    runner: CommandRunner,
+    arguments: Sequence[str],
+    *,
+    timeout_seconds: float,
+    context: StackContext,
+) -> CommandResult:
+    try:
+        return runner(
+            arguments,
+            timeout_seconds=timeout_seconds,
+            environment=_command_environment(context),
+        )
+    except StackFailure:
+        raise
+    except Exception:
+        raise StackFailure(StackExitCode.INTERNAL, "lifecycle_internal_error") from None
+
+
+def _wait_for_stack_until(
+    context: StackContext,
+    *,
+    runner: CommandRunner,
+    deadline_monotonic: float,
+    poll_interval_seconds: float,
+    clock: Callable[[], float],
+    sleep: Callable[[float], None],
+) -> dict[str, object]:
+    while True:
+        remaining_seconds = _remaining_seconds(deadline_monotonic, clock)
+        status = _read_stack_status(
+            context,
+            runner=runner,
+            timeout_seconds=min(_STACK_STATUS_TIMEOUT_SECONDS, remaining_seconds),
+        )
+        if _status_has_failed_initializer(status):
+            raise StackFailure(StackExitCode.STARTUP, "initializer_failed")
+        state = status["state"]
+        if state == "ready":
+            return status
+        if state in {"degraded", "stopped"}:
+            raise StackFailure(StackExitCode.READINESS, "stack_readiness_failed")
+        remaining_after_status = _remaining_seconds(deadline_monotonic, clock)
+        sleep(min(poll_interval_seconds, remaining_after_status))
+
+
+def _remaining_seconds(deadline_monotonic: float, clock: Callable[[], float]) -> float:
+    remaining_seconds = deadline_monotonic - clock()
+    if remaining_seconds <= 0:
+        raise StackFailure(StackExitCode.READINESS, "stack_readiness_timeout")
+    return remaining_seconds
+
+
+def _validate_deadline(deadline_seconds: float) -> None:
+    if not math.isfinite(deadline_seconds) or deadline_seconds <= 0:
+        raise StackFailure(StackExitCode.CLI, "invalid_deadline")
+
+
+def _read_stack_status(
+    context: StackContext,
+    *,
+    runner: CommandRunner,
+    timeout_seconds: float,
+) -> dict[str, object]:
+    result = _run_lifecycle_command(
+        runner,
+        [*compose_arguments(context), "ps", "--all", "--format", "json"],
+        timeout_seconds=timeout_seconds,
+        context=context,
+    )
+    if result.return_code != 0:
+        raise StackFailure(StackExitCode.READINESS, "stack_status_unavailable")
+    rows = _parse_compose_ps(result.stdout)
+    services: dict[str, dict[str, object]] = {}
+    initializers: dict[str, dict[str, object]] = {}
+    for row in rows:
+        service_name = row.get("Service")
+        if not isinstance(service_name, str):
+            raise StackFailure(StackExitCode.READINESS, "stack_status_invalid")
+        state = _stable_container_state(row.get("State"))
+        if service_name in _RUNTIME_SERVICE_NAMES:
+            if service_name in services:
+                raise StackFailure(StackExitCode.READINESS, "stack_status_invalid")
+            services[service_name] = {
+                "state": state,
+                "health": _stable_health_state(row.get("Health")),
+            }
+        elif service_name in _INITIALIZER_SERVICE_NAMES:
+            if service_name in initializers:
+                raise StackFailure(StackExitCode.READINESS, "stack_status_invalid")
+            initializers[service_name] = {
+                "state": state,
+                "exit_code": _stable_exit_code(row.get("ExitCode")),
+            }
+        else:
+            raise StackFailure(StackExitCode.READINESS, "stack_status_invalid")
+
+    sorted_services = {name: services[name] for name in sorted(services)}
+    sorted_initializers = {name: initializers[name] for name in sorted(initializers)}
+    aggregate_state = _aggregate_stack_state(sorted_services, sorted_initializers)
+    return {
+        "project": context.project_name,
+        "state": aggregate_state,
+        "services": sorted_services,
+        "initializers": sorted_initializers,
+        "result_code": f"stack_{aggregate_state}",
+    }
+
+
+def _parse_compose_ps(raw_status: str) -> list[dict[str, object]]:
+    try:
+        loaded: object = json.loads(raw_status)
+    except json.JSONDecodeError, TypeError:
+        loaded_rows: list[object] = []
+        try:
+            loaded_rows = [json.loads(line) for line in raw_status.splitlines() if line.strip()]
+        except json.JSONDecodeError, TypeError:
+            raise StackFailure(StackExitCode.READINESS, "stack_status_invalid") from None
+        loaded = loaded_rows
+    if isinstance(loaded, dict):
+        loaded = [loaded]
+    if not isinstance(loaded, list):
+        raise StackFailure(StackExitCode.READINESS, "stack_status_invalid")
+    rows: list[dict[str, object]] = []
+    for raw_row in loaded:
+        if not isinstance(raw_row, dict):
+            raise StackFailure(StackExitCode.READINESS, "stack_status_invalid")
+        rows.append(cast(dict[str, object], raw_row))
+    return rows
+
+
+def _stable_container_state(raw_state: object) -> str:
+    if not isinstance(raw_state, str):
+        return "unknown"
+    normalized = raw_state.lower()
+    return normalized if normalized in _STABLE_CONTAINER_STATES else "unknown"
+
+
+def _stable_health_state(raw_health: object) -> str:
+    if raw_health == "":
+        return "none"
+    if not isinstance(raw_health, str):
+        return "unknown"
+    normalized = raw_health.lower()
+    return normalized if normalized in _STABLE_HEALTH_STATES else "unknown"
+
+
+def _stable_exit_code(raw_exit_code: object) -> int | None:
+    if type(raw_exit_code) is int and -255 <= raw_exit_code <= 255:
+        return raw_exit_code
+    return None
+
+
+def _aggregate_stack_state(
+    services: Mapping[str, Mapping[str, object]],
+    initializers: Mapping[str, Mapping[str, object]],
+) -> str:
+    if not services and not initializers:
+        return "absent"
+    if _has_failed_initializer(initializers):
+        return "degraded"
+    if any(
+        service["state"] in {"dead", "unknown"} or service["health"] in {"unhealthy", "unknown"}
+        for service in services.values()
+    ):
+        return "degraded"
+    is_ready = (
+        set(services) == _RUNTIME_SERVICE_NAMES
+        and set(initializers) == _INITIALIZER_SERVICE_NAMES
+        and all(
+            service["state"] == "running" and service["health"] == "healthy"
+            for service in services.values()
+        )
+        and all(
+            initializer["state"] == "exited" and initializer["exit_code"] == 0
+            for initializer in initializers.values()
+        )
+    )
+    if is_ready:
+        return "ready"
+    if services and all(service["state"] == "exited" for service in services.values()):
+        return "stopped"
+    if any(service["state"] == "exited" for service in services.values()):
+        return "degraded"
+    if any(
+        service["state"] in {"created", "running", "restarting", "paused"}
+        for service in (*services.values(), *initializers.values())
+    ):
+        return "starting"
+    return "degraded"
+
+
+def _has_failed_initializer(
+    initializers: Mapping[str, Mapping[str, object]],
+) -> bool:
+    return any(
+        initializer["state"] == "exited" and initializer["exit_code"] not in {None, 0}
+        for initializer in initializers.values()
+    )
+
+
+def _status_has_failed_initializer(status: Mapping[str, object]) -> bool:
+    initializers = status.get("initializers")
+    if not isinstance(initializers, dict):
+        raise StackFailure(StackExitCode.INTERNAL, "status_invariant_failed")
+    return _has_failed_initializer(cast(dict[str, dict[str, object]], initializers))
+
+
 def _resolve_beneath(repository_root: Path, *parts: str) -> Path:
     candidate = (repository_root.joinpath(*parts)).resolve(strict=False)
     is_beneath_repository = True
@@ -630,7 +1149,7 @@ def _validate_secret_directory_location(paths: StackPaths) -> Path:
     try:
         resolved_secret_directory = expected_directory.resolve(strict=False)
         resolved_secret_directory.relative_to(repository_root)
-    except (OSError, ValueError):
+    except OSError, ValueError:
         raise StackFailure(StackExitCode.INTERNAL, "invalid_secret_directory") from None
     if resolved_secret_directory != expected_directory:
         raise StackFailure(StackExitCode.INTERNAL, "invalid_secret_directory")
@@ -738,9 +1257,7 @@ def _is_current_windows_user_owner(path: Path) -> bool:
             return False
         try:
             required_size = wintypes.DWORD()
-            advapi32.GetTokenInformation(
-                token, token_user, None, 0, ctypes.byref(required_size)
-            )
+            advapi32.GetTokenInformation(token, token_user, None, 0, ctypes.byref(required_size))
             if ctypes.get_last_error() != error_insufficient_buffer or not required_size.value:
                 return False
             token_buffer = ctypes.create_string_buffer(required_size.value)
@@ -752,9 +1269,7 @@ def _is_current_windows_user_owner(path: Path) -> bool:
                 ctypes.byref(required_size),
             ):
                 return False
-            token_user_data = ctypes.cast(
-                token_buffer, ctypes.POINTER(TokenUser)
-            ).contents
+            token_user_data = ctypes.cast(token_buffer, ctypes.POINTER(TokenUser)).contents
             owner_sid = ctypes.c_void_p()
             security_descriptor = ctypes.c_void_p()
             result = advapi32.GetNamedSecurityInfoW(
@@ -776,7 +1291,7 @@ def _is_current_windows_user_owner(path: Path) -> bool:
                     kernel32.LocalFree(security_descriptor)
         finally:
             kernel32.CloseHandle(token)
-    except (AttributeError, OSError, TypeError):
+    except AttributeError, OSError, TypeError:
         return False
 
 
@@ -786,7 +1301,7 @@ def _validate_complete_secret_contents(secret_directory: Path) -> None:
             filename: (secret_directory / filename).read_text(encoding="ascii")
             for filename in _SECRET_FILENAMES
         }
-    except (OSError, UnicodeError):
+    except OSError, UnicodeError:
         raise StackFailure(StackExitCode.CONTRACT, "invalid_secret_set") from None
 
     has_valid_passwords = all(
