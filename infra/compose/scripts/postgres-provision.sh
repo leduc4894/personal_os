@@ -119,6 +119,8 @@ SELECT format(
 )
 FROM (
     VALUES
+        ('postgres', 'knowledge_app'),
+        ('postgres', 'temporal_service'),
         ('knowledge', 'temporal_service'),
         ('temporal', 'knowledge_app'),
         ('temporal_visibility', 'knowledge_app')

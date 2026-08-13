@@ -691,7 +691,7 @@ def test_long_running_services_have_exact_health_contracts() -> None:
     assert '--address "$$(hostname):7233"' in services["temporal"]["healthcheck"]["test"][1]
 
 
-def test_postgres_provision_reconciles_public_membership_and_bypassrls_drift(
+def test_postgres_provision_reconciles_database_and_role_privilege_drift(
     provisioned_postgresql: dict[str, str | Path],
 ) -> None:
     docker = str(provisioned_postgresql["docker"])
@@ -701,6 +701,8 @@ ALTER ROLE knowledge_app BYPASSRLS;
 GRANT temporal_service TO knowledge_app;
 GRANT knowledge_app TO stack_admin;
 GRANT CONNECT ON DATABASE postgres TO PUBLIC;
+GRANT CONNECT ON DATABASE postgres TO knowledge_app;
+GRANT CONNECT ON DATABASE postgres TO temporal_service;
 GRANT CONNECT ON DATABASE knowledge TO PUBLIC;
 GRANT CONNECT ON DATABASE temporal TO PUBLIC;
 GRANT CONNECT ON DATABASE temporal_visibility TO PUBLIC;
@@ -744,6 +746,10 @@ SELECT databases.datname || ':' || EXISTS (
 FROM pg_database AS databases
 WHERE datname IN ('knowledge', 'postgres', 'temporal', 'temporal_visibility')
 ORDER BY datname;
+SELECT roles.rolname || ':' || has_database_privilege(roles.rolname, 'postgres', 'CONNECT')
+FROM pg_roles AS roles
+WHERE roles.rolname IN ('knowledge_app', 'temporal_service')
+ORDER BY roles.rolname;
 """,
     )
     assert state.returncode == 0, state.stderr
@@ -755,6 +761,8 @@ ORDER BY datname;
         "postgres:false",
         "temporal:false",
         "temporal_visibility:false",
+        "knowledge_app:false",
+        "temporal_service:false",
     ]
 
 
