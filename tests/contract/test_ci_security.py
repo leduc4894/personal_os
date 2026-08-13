@@ -9,7 +9,42 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_DIRECTORY = REPO_ROOT / ".github" / "workflows"
 WORKFLOW_PATH = WORKFLOW_DIRECTORY / "quality.yml"
 LOCAL_STACK_WORKFLOW_PATH = WORKFLOW_DIRECTORY / "local-service-stack.yml"
+CANONICAL_POSTGRESQL_WORKFLOW_PATH = WORKFLOW_DIRECTORY / "canonical-postgresql-baseline.yml"
 WORKFLOW_TEXT = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+CANONICAL_POSTGRESQL_STATIC_JOB_NAME = "windows-static"
+CANONICAL_POSTGRESQL_LIFECYCLE_JOB_NAME = "ubuntu-lifecycle"
+CANONICAL_POSTGRESQL_JUNIT_ARTIFACT_PATH = ".local/test-results/canonical-postgresql-baseline.xml"
+CANONICAL_POSTGRESQL_PROJECT_TEMPLATE = (
+    "knowledge-ci-${{ github.run_id }}-${{ github.run_attempt }}"
+)
+CANONICAL_POSTGRESQL_STATIC_TEST_COMMAND = (
+    "uv run pytest tests/unit/migrations/test_database_migration_runtime.py"
+    " tests/contract/test_canonical_postgresql_migration_contract.py"
+    " tests/contract/test_ci_security.py -q"
+)
+CANONICAL_POSTGRESQL_STATIC_LINT_COMMAND = (
+    "uv run ruff check migrations tests/unit/migrations"
+    " tests/contract/test_canonical_postgresql_migration_contract.py"
+)
+# No provider credential, deployment surface, dump or log capture may appear.
+CANONICAL_POSTGRESQL_FORBIDDEN_MATERIAL: tuple[str, ...] = (
+    "secrets.",
+    "R2",
+    "cloudflare",
+    "pg_dump",
+    "docker logs",
+    "docker inspect",
+    "deploy",
+    "publish",
+    "services:",
+    "environment:",
+)
+# Only the sanitized JUnit report may leave the runner.
+CANONICAL_POSTGRESQL_FORBIDDEN_ARTIFACTS: tuple[str, ...] = (
+    ".local/stack-secrets",
+    ".env",
+)
 
 # A non-local ``uses:`` reference must be repo@<exactly 40 lowercase hex chars>.
 SHA_PINNED_RE = re.compile(r"^[A-Za-z0-9._/-]+@[0-9a-f]{40}$")
@@ -314,3 +349,256 @@ def test_local_stack_smoke_has_exact_cleanup_and_junit_only_artifact() -> None:
         "compose-render",
     ):
         assert forbidden_artifact not in smoke
+
+
+# ---------------------------------------------------------------------------
+# Canonical PostgreSQL baseline workflow contract (Task 7)
+# ---------------------------------------------------------------------------
+
+
+def _canonical_postgresql_workflow_text() -> str:
+    return CANONICAL_POSTGRESQL_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+
+def _canonical_postgresql_step_block(text: str, job_name: str, step_name: str) -> str:
+    jobs = _job_blocks(text)
+    pattern = re.compile(
+        rf"(?ms)^      - name: {re.escape(step_name)}\n(?P<body>.*?)(?=^      - |\Z)"
+    )
+    match = pattern.search(jobs.get(job_name, ""))
+    return "" if match is None else match.group("body")
+
+
+def _canonical_postgresql_is_free_of_forbidden_material(text: str) -> bool:
+    return all(token not in text for token in CANONICAL_POSTGRESQL_FORBIDDEN_MATERIAL)
+
+
+def _canonical_postgresql_artifact_scope_is_junit_only(text: str) -> bool:
+    if text.count("actions/upload-artifact@") != 1:
+        return False
+    if any(token in text for token in CANONICAL_POSTGRESQL_FORBIDDEN_ARTIFACTS):
+        return False
+    uploaded_paths = re.findall(r"(?m)^ +path: (.+)$", text)
+    return uploaded_paths == [CANONICAL_POSTGRESQL_JUNIT_ARTIFACT_PATH]
+
+
+def _canonical_postgresql_project_identity_is_ci_scoped(text: str) -> bool:
+    return (
+        CANONICAL_POSTGRESQL_PROJECT_TEMPLATE in text
+        and "knowledge-local" not in text
+        and "^knowledge-ci-[0-9]+-[0-9]+$" in text
+        and "${#LOCAL_STACK_TEST_PROJECT} > 63" in text
+    )
+
+
+def _canonical_postgresql_cleanup_is_always_gated(text: str) -> bool:
+    cleanup = _canonical_postgresql_step_block(
+        text,
+        CANONICAL_POSTGRESQL_LIFECYCLE_JOB_NAME,
+        "Reset exact project and assert cleanup",
+    )
+    required_tokens = (
+        "if: always()",
+        '--confirm-project "$LOCAL_STACK_TEST_PROJECT"',
+        "--non-interactive",
+        "docker container ls -a --filter",
+        "docker network ls --filter",
+        "docker volume ls --filter",
+        '[[ -n "$remaining_containers"'
+        ' || -n "$remaining_networks"'
+        ' || -n "$remaining_volumes" ]]',
+    )
+    return all(token in cleanup for token in required_tokens)
+
+
+def test_canonical_postgresql_workflow_is_least_privilege_and_sha_pinned() -> None:
+    text = _canonical_postgresql_workflow_text()
+    assert _workflow_is_least_privilege_and_sha_pinned(text)
+    assert _top_level_permissions(text) == ["  contents: read"]
+    assert not _has_job_level_permissions_override(text)
+
+
+def test_canonical_postgresql_workflow_triggers_are_bounded_and_path_filtered() -> None:
+    text = _canonical_postgresql_workflow_text()
+    required_trigger_tokens = (
+        "pull_request:",
+        "push:",
+        "branches: [master]",
+        "schedule:",
+        "workflow_dispatch:",
+        "migrations/**",
+        "docs/superpowers/specs/canonical-postgresql-baseline-design.md",
+        "tests/unit/migrations/test_database_migration_runtime.py",
+        "tests/contract/test_canonical_postgresql_migration_contract.py",
+        "tests/contract/test_ci_security.py",
+        "tests/integration/test_canonical_postgresql_baseline.py",
+        "pyproject.toml",
+        "uv.lock",
+        "infra/compose/compose.yaml",
+        "infra/compose/scripts/postgres-provision.sh",
+        "infra/compose/images.lock.yaml",
+        ".github/workflows/canonical-postgresql-baseline.yml",
+        "cancel-in-progress: true",
+    )
+    missing = [token for token in required_trigger_tokens if token not in text]
+    assert not missing, f"canonical PostgreSQL workflow contract is incomplete: {missing}"
+
+
+def test_canonical_postgresql_workflow_declares_exactly_two_jobs_with_timeouts() -> None:
+    text = _canonical_postgresql_workflow_text()
+    jobs = _job_blocks(text)
+    assert tuple(jobs) == (
+        CANONICAL_POSTGRESQL_STATIC_JOB_NAME,
+        CANONICAL_POSTGRESQL_LIFECYCLE_JOB_NAME,
+    )
+    assert _all_jobs_have_positive_timeouts(text)
+    assert "runs-on: windows-latest" in jobs[CANONICAL_POSTGRESQL_STATIC_JOB_NAME]
+    assert "runs-on: ubuntu-latest" in jobs[CANONICAL_POSTGRESQL_LIFECYCLE_JOB_NAME]
+
+
+def test_canonical_postgresql_windows_static_job_is_purely_static() -> None:
+    text = _canonical_postgresql_workflow_text()
+    static_job = _job_blocks(text)[CANONICAL_POSTGRESQL_STATIC_JOB_NAME]
+    for required_command in (
+        "uv sync --all-packages --frozen",
+        "uv run alembic heads",
+        CANONICAL_POSTGRESQL_STATIC_TEST_COMMAND,
+        CANONICAL_POSTGRESQL_STATIC_LINT_COMMAND,
+        "uv run mypy migrations",
+        'python-version: "3.14.6"',
+    ):
+        assert required_command in static_job, (
+            f"windows-static job is missing {required_command!r}"
+        )
+    assert "docker" not in static_job.lower(), (
+        "the Windows job must stay static and never install or start Docker"
+    )
+    assert "secrets." not in static_job, "the Windows job must not read any secret"
+
+
+def test_canonical_postgresql_ubuntu_lifecycle_job_uses_pinned_stack() -> None:
+    text = _canonical_postgresql_workflow_text()
+    lifecycle_job = _job_blocks(text)[CANONICAL_POSTGRESQL_LIFECYCLE_JOB_NAME]
+    assert 'CI: "true"' in lifecycle_job
+    assert CANONICAL_POSTGRESQL_PROJECT_TEMPLATE in lifecycle_job
+    assert "uv sync --all-packages --frozen" in lifecycle_job
+    assert "mkdir -p .local/test-results" in lifecycle_job
+    assert (
+        "pytest tests/integration/test_canonical_postgresql_baseline.py -m local_stack -q"
+        in lifecycle_job
+    )
+    assert f"--junitxml={CANONICAL_POSTGRESQL_JUNIT_ARTIFACT_PATH}" in lifecycle_job
+    # The pinned Compose binary and checksum must be copied verbatim.
+    assert "v2.30.0" in lifecycle_job
+    assert "1cddcb3399cc68c385796a6ab441ab5734d4c6a0cb4713bd2bf3f0d384550a38" in lifecycle_job
+    assert "grep -Ex 'v?2\\.30\\.0'" in lifecycle_job
+    assert lifecycle_job.count("if: always()") >= 2
+
+
+def test_canonical_postgresql_workflow_carries_no_secrets_or_provider_material() -> None:
+    text = _canonical_postgresql_workflow_text()
+    assert _canonical_postgresql_is_free_of_forbidden_material(text)
+
+
+def test_canonical_postgresql_artifact_is_junit_only_with_exact_flags() -> None:
+    text = _canonical_postgresql_workflow_text()
+    assert _canonical_postgresql_artifact_scope_is_junit_only(text)
+    upload_step = _canonical_postgresql_step_block(
+        text,
+        CANONICAL_POSTGRESQL_LIFECYCLE_JOB_NAME,
+        "Upload sanitized JUnit report",
+    )
+    assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" in upload_step
+    for required_flag in (
+        "if: always()",
+        "include-hidden-files: true",
+        "if-no-files-found: ignore",
+        "retention-days: 7",
+    ):
+        assert required_flag in upload_step
+
+
+def test_canonical_postgresql_project_identity_is_disposable_ci_scoped() -> None:
+    text = _canonical_postgresql_workflow_text()
+    assert _canonical_postgresql_project_identity_is_ci_scoped(text)
+
+
+def test_canonical_postgresql_cleanup_is_always_gated_and_label_exhaustive() -> None:
+    text = _canonical_postgresql_workflow_text()
+    assert _canonical_postgresql_cleanup_is_always_gated(text)
+
+
+def test_canonical_postgresql_contract_rejects_job_write_permission_mutation() -> None:
+    text = _canonical_postgresql_workflow_text()
+    for override in (
+        "permissions:\n      contents: write",
+        "permissions: read-all",
+        '"permissions": write-all',
+    ):
+        mutated = text.replace(
+            "    runs-on: windows-latest",
+            f"    {override}\n    runs-on: windows-latest",
+            1,
+        )
+        assert mutated != text
+        assert not _workflow_is_least_privilege_and_sha_pinned(mutated)
+
+
+def test_canonical_postgresql_contract_rejects_unpinned_action_mutation() -> None:
+    text = _canonical_postgresql_workflow_text()
+    for unpinned in (
+        "actions/checkout@v7",
+        "astral-sh/setup-uv@main",
+    ):
+        mutated = text.replace(
+            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            unpinned,
+            1,
+        )
+        assert mutated != text
+        assert not _workflow_is_least_privilege_and_sha_pinned(mutated)
+
+
+def test_canonical_postgresql_contract_rejects_local_project_mutation() -> None:
+    text = _canonical_postgresql_workflow_text()
+    mutated = text.replace(
+        "LOCAL_STACK_TEST_PROJECT: knowledge-ci-",
+        "LOCAL_STACK_TEST_PROJECT: knowledge-local-",
+        1,
+    )
+    assert mutated != text
+    assert not _canonical_postgresql_project_identity_is_ci_scoped(mutated)
+
+
+def test_canonical_postgresql_contract_rejects_missing_always_cleanup_mutation() -> None:
+    text = _canonical_postgresql_workflow_text()
+    mutated = text.replace("        if: always()\n", "", 1)
+    assert mutated != text
+    assert not _canonical_postgresql_cleanup_is_always_gated(mutated)
+
+
+def test_canonical_postgresql_contract_rejects_provider_secret_mutation() -> None:
+    text = _canonical_postgresql_workflow_text()
+    mutated = text.replace(
+        'CI: "true"',
+        'CI: "true"\n      R2_ACCOUNT_TOKEN: ${{ secrets.R2_ACCOUNT_TOKEN }}',
+        1,
+    )
+    assert mutated != text
+    assert not _canonical_postgresql_is_free_of_forbidden_material(mutated)
+
+
+def test_canonical_postgresql_contract_rejects_widened_artifact_mutation() -> None:
+    text = _canonical_postgresql_workflow_text()
+    for widened in (
+        f"          path: {CANONICAL_POSTGRESQL_JUNIT_ARTIFACT_PATH}\n"
+        "            - .local/stack-secrets",
+        "          path: .local",
+    ):
+        mutated = text.replace(
+            f"          path: {CANONICAL_POSTGRESQL_JUNIT_ARTIFACT_PATH}",
+            widened,
+            1,
+        )
+        assert mutated != text
+        assert not _canonical_postgresql_artifact_scope_is_junit_only(mutated)
