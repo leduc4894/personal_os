@@ -112,6 +112,113 @@ The workflow supplies its validated `knowledge-ci-*` project and exact
 confirmation arguments. Operators do not use this command against a normal
 local project.
 
+## Canonical database migration runbook
+
+The four Poe commands below are the only supported way to run Alembic against
+the canonical PostgreSQL baseline. They are leaf commands with no sequence and
+no environment injection, and they never embed a password, connection URL,
+machine-specific path or production host.
+
+| Command | Maps to |
+| --- | --- |
+| `uv run poe database-heads` | `alembic heads` |
+| `uv run poe database-current` | `alembic current --check-heads` |
+| `uv run poe database-upgrade` | `alembic upgrade head` |
+| `uv run poe database-downgrade` | `alembic -x allow_destructive=true downgrade base` |
+
+`database-heads` reads only the local migration script directory. It never
+loads migration settings, never opens a database connection and never reads a
+secret, so it runs with no `KNOWLEDGE_*` environment set.
+
+`database-current`, `database-upgrade` and `database-downgrade` are online
+commands: they load the frozen migration settings, read the bounded password
+file beneath `KNOWLEDGE_SECRET_ROOT`, and connect over the loopback stack. The
+connection URL is built in memory and never rendered or printed.
+
+### Local baseline upgrade
+
+From the repository root, run the full local sequence on PowerShell:
+
+```powershell
+uv run poe stack-bootstrap
+uv run poe stack-up
+$env:KNOWLEDGE_ENVIRONMENT='local'
+$env:KNOWLEDGE_SECRET_ROOT=(Resolve-Path '.local/stack-secrets').Path
+uv run poe database-heads
+uv run poe database-upgrade
+uv run poe database-current
+```
+
+The Linux equivalent pins the secret root to an absolute `realpath` so the
+migration settings validator accepts it:
+
+```bash
+uv run poe stack-bootstrap
+uv run poe stack-up
+export KNOWLEDGE_ENVIRONMENT='local'
+export KNOWLEDGE_SECRET_ROOT="$(realpath .local/stack-secrets)"
+uv run poe database-heads
+uv run poe database-upgrade
+uv run poe database-current
+```
+
+`database-heads` must report exactly one head, `20260813_01`, both before and
+after the upgrade. `database-current` exits non-zero if the applied revision is
+not a head.
+
+### Disposable-development reset (destructive)
+
+Downgrade destroys every canonical row and every canonical table, then drops
+the `knowledge` schema with `RESTRICT`. It exists only to rebuild a throwaway
+local database from a clean base. Never run it against a populated stack, and
+never in staging or production.
+
+The downgrade command is gated: the online Alembic environment refuses it
+unless the exact `-x allow_destructive=true` argument is present, and it is the
+only command above that carries that argument. In a disposable local
+environment only:
+
+```powershell
+$env:KNOWLEDGE_ENVIRONMENT='local'
+$env:KNOWLEDGE_SECRET_ROOT=(Resolve-Path '.local/stack-secrets').Path
+uv run poe database-downgrade
+```
+
+Linux:
+
+```bash
+export KNOWLEDGE_ENVIRONMENT='local'
+export KNOWLEDGE_SECRET_ROOT="$(realpath .local/stack-secrets)"
+uv run poe database-downgrade
+```
+
+For a full teardown that also removes Docker volumes and rotates secrets, use
+the `stack-reset` path in *Safe reset and credential rotation* instead of
+relying on downgrade alone.
+
+### Staging and production
+
+Staging and production are out of scope for this local runbook beyond the fixed
+contract: they require `KNOWLEDGE_DATABASE_SSL_MODE=verify-full`, a verified
+backup taken before the change, and explicit deployment authorization. The
+downgrade command is never authorized there. The CA-file contract that
+`verify-full` depends on is owned by a later object and is intentionally not
+described here.
+
+### Safe failure codes
+
+Online migration commands emit only the closed error-code set below. Each code
+has one registered safe message; the connection URL, raw driver error, SQL
+parameters and vendor message text are never printed. Investigate by code only.
+
+| Code | Meaning |
+| --- | --- |
+| `database_migration_configuration_invalid` | An unknown `KNOWLEDGE_*` key, a value that fails validation, or an unreadable password file. |
+| `database_connection_unavailable` | The canonical database could not be reached within the bounded connect timeout (retryable). |
+| `database_migration_busy` | The schema-migration advisory lock is held by another migration (retryable). |
+| `database_schema_contract_invalid` | Wrong database name, unsupported PostgreSQL major, or an applied revision that is not a head. |
+| `database_destructive_downgrade_refused` | A downgrade was attempted without the exact `allow_destructive=true` authorization. |
+
 ## Safe reset and credential rotation
 
 Reset is destructive. Supply the exact project name twice; `--confirm-project`

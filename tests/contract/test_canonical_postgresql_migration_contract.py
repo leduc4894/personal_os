@@ -11,9 +11,10 @@ import ast
 import configparser
 import os
 import re
+import tomllib
 from collections.abc import Iterator
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
@@ -25,6 +26,7 @@ ENV_PY_PATH: Path = MIGRATIONS_PATH / "env.py"
 REVISION_PATH: Path = (
     MIGRATIONS_PATH / "versions" / "20260813_01_create_canonical_postgresql_baseline.py"
 )
+PYPROJECT_PATH: Path = REPO_ROOT / "pyproject.toml"
 
 BASELINE_REVISION: str = "20260813_01"
 SCHEMA_NAME: str = "knowledge"
@@ -1017,3 +1019,84 @@ def test_foreign_keys_all_restrict_deletes() -> None:
     ]
     for foreign_key in foreign_keys:
         assert foreign_key.ondelete == "RESTRICT", foreign_key.constraint_name
+
+
+# ---------------------------------------------------------------------------
+# Poe database command contract (Task 6)
+# ---------------------------------------------------------------------------
+
+EXPECTED_DATABASE_COMMANDS: dict[str, str] = {
+    "database-heads": "alembic heads",
+    "database-current": "alembic current --check-heads",
+    "database-upgrade": "alembic upgrade head",
+    "database-downgrade": "alembic -x allow_destructive=true downgrade base",
+}
+
+# No Poe task may embed a password, connection URL, machine-specific absolute
+# path or production host. The check scans every string in every task body
+# (cmd, shell, sequence entries and env keys/values), not just the new commands.
+FORBIDDEN_POE_SUBSTRINGS: tuple[str, ...] = (
+    "://",
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "credential",
+    "database_url",
+    "/users/",
+    "/home/",
+    "c:\\",
+    "d:\\",
+    "c:/",
+    "d:/",
+    ".prod",
+    "production.",
+)
+
+
+def _load_poe_tasks() -> dict[str, dict[str, Any]]:
+    with PYPROJECT_PATH.open("rb") as handle:
+        data = tomllib.load(handle)
+    return data["tool"]["poe"]["tasks"]
+
+
+def _iter_task_strings(value: Any) -> Iterator[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, nested in value.items():
+            yield key
+            yield from _iter_task_strings(nested)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _iter_task_strings(item)
+
+
+def test_poe_exposes_the_four_canonical_database_commands() -> None:
+    tasks = _load_poe_tasks()
+    for name, expected_command in EXPECTED_DATABASE_COMMANDS.items():
+        assert name in tasks, name
+        task = tasks[name]
+        assert isinstance(task, dict), name
+        # The four commands are leaf ``cmd`` tasks with no env, shell or sequence.
+        assert set(task) == {"cmd"}, name
+        assert task["cmd"] == expected_command, name
+
+
+def test_database_commands_are_not_part_of_the_verify_sequence() -> None:
+    tasks = _load_poe_tasks()
+    sequence = tasks.get("verify", {}).get("sequence", [])
+    assert isinstance(sequence, list)
+    for name in EXPECTED_DATABASE_COMMANDS:
+        assert name not in sequence, name
+
+
+def test_no_poe_task_embeds_a_secret_url_or_machine_specific_path() -> None:
+    tasks = _load_poe_tasks()
+    for name, task in tasks.items():
+        scanned = list(_iter_task_strings(task))
+        assert scanned, name
+        for text in scanned:
+            lowered = text.lower()
+            for forbidden in FORBIDDEN_POE_SUBSTRINGS:
+                assert forbidden not in lowered, (name, forbidden)

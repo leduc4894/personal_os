@@ -148,6 +148,18 @@ cmd = "uv run python tools/local_service_stack.py reset"
 [tool.poe.tasks.stack-smoke]
 cmd = "uv run python tools/local_service_stack.py smoke"
 
+[tool.poe.tasks.database-heads]
+cmd = "alembic heads"
+
+[tool.poe.tasks.database-current]
+cmd = "alembic current --check-heads"
+
+[tool.poe.tasks.database-upgrade]
+cmd = "alembic upgrade head"
+
+[tool.poe.tasks.database-downgrade]
+cmd = "alembic -x allow_destructive=true downgrade base"
+
 [tool.poe.tasks.typescript-build]
 shell = "pnpm run build"
 env = { NEXT_TELEMETRY_DISABLED = "1" }
