@@ -11,6 +11,19 @@ services:
       POSTGRES_USER: stack_admin
       POSTGRES_DB: postgres
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_admin_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=scram-sha-256
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - password_encryption=scram-sha-256
+      - -c
+      - log_statement=none
+      - -c
+      - log_min_duration_statement=-1
+      - -c
+      - log_parameter_max_length=0
     secrets:
       - postgres_admin_password
     ports:
@@ -19,6 +32,17 @@ services:
       - postgres-data:/var/lib/postgresql
     networks:
       - service-backplane
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          PGPASSWORD="$$(cat /run/secrets/postgres_admin_password)"
+          exec psql -XAtq --host 127.0.0.1 --port 5432
+          --username stack_admin --dbname postgres -c 'SELECT 1'
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
 
   qdrant:
     image: qdrant/qdrant:v1.18.2@sha256:75eab8c4ba42096724fdcfde8b4de0b5713d529dde32f285a1f86fdcb2c9e50c
@@ -29,6 +53,12 @@ services:
     secrets:
       - source: qdrant_config
         target: qdrant_config.yaml
+    entrypoint:
+      - /qdrant/entrypoint.sh
+    command:
+      - --config-path
+      - /run/secrets/qdrant_config.yaml
+      - --disable-telemetry
     ports:
       - "127.0.0.1:${QDRANT_HTTP_PORT:-6333}:6333"
       - "127.0.0.1:${QDRANT_GRPC_PORT:-6334}:6334"
@@ -36,6 +66,18 @@ services:
       - qdrant-data:/qdrant/storage
     networks:
       - service-backplane
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          exec bash -ec 'exec 3<>/dev/tcp/127.0.0.1/6333;
+          printf "GET /readyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3;
+          IFS= read -r status <&3;
+          [[ "$$status" == "HTTP/1.1 200"* ]]'
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
 
   neo4j:
     image: neo4j:5.26.28-community@sha256:ff32db30b2baff97971e441b46bfd9c832c1b62c970398ef579244c06b21d357
@@ -45,6 +87,11 @@ services:
     cpus: 2.0
     environment:
       NEO4J_AUTH_FILE: /run/secrets/neo4j_auth
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1024m
+      NEO4J_server_memory_pagecache_size: 1024m
+      NEO4J_server_https_enabled: "false"
+      NEO4J_dbms_usage__report_enabled: "false"
     secrets:
       - neo4j_auth
     ports:
@@ -54,6 +101,18 @@ services:
       - neo4j-data:/data
     networks:
       - service-backplane
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          neo4j_auth="$$(cat /run/secrets/neo4j_auth)";
+          neo4j_password="$${neo4j_auth#neo4j/}";
+          exec cypher-shell --address bolt://127.0.0.1:7687
+          --username neo4j --password "$$neo4j_password" 'RETURN 1'
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 60s
 
   redis:
     image: redis:8.6.4@sha256:a051e4f48a5d0ceda6554974f3ad0f5369f4479197f36829332c1325cecad2b7
@@ -63,12 +122,36 @@ services:
     cpus: 0.5
     secrets:
       - redis_acl
+    command:
+      - redis-server
+      - --aclfile
+      - /run/secrets/redis_acl
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 128mb
+      - --maxmemory-policy
+      - noeviction
+      - --protected-mode
+      - "yes"
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
     networks:
       - service-backplane
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          redis_password="$$(sed -n 's/^user knowledge on >\([^ ]*\).*/\1/p'
+          /run/secrets/redis_acl)";
+          exec redis-cli --no-auth-warning --user knowledge
+          --pass "$$redis_password" PING
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
 
   temporal:
     image: temporalio/server:1.31.2@sha256:b5ecdb8282bededae2a10c36e8d862e27d0bc2d247fc73c5416025997ab4a1da
@@ -78,10 +161,36 @@ services:
     cpus: 1.5
     secrets:
       - postgres_temporal_password
+    entrypoint:
+      - /bin/sh
+      - /opt/knowledge/bin/temporal-secret-entrypoint.sh
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: temporal_service
+      POSTGRES_SEEDS: postgresql
+      DBNAME: temporal
+      VISIBILITY_DBNAME: temporal_visibility
+      DYNAMIC_CONFIG_FILE_PATH: /etc/temporal/dynamicconfig.yaml
+      NUM_HISTORY_SHARDS: "4"
     ports:
       - "127.0.0.1:${TEMPORAL_GRPC_PORT:-7233}:7233"
     networks:
       - service-backplane
+    volumes:
+      - ./config/temporal/dynamicconfig.yaml:/etc/temporal/dynamicconfig.yaml:ro
+      - ./scripts/temporal-secret-entrypoint.sh:/opt/knowledge/bin/temporal-secret-entrypoint.sh:ro
+    depends_on:
+      temporal-schema-setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - exec nc -z -w 2 "$$(hostname)" 7233
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 60s
 
   temporal-ui:
     image: temporalio/ui:2.53.0@sha256:810eba47f77a89b0e64e2e751478ca585d037bbd90c0951a2974a92a6c5adeb9
@@ -95,6 +204,17 @@ services:
       - "127.0.0.1:${TEMPORAL_UI_PORT:-8080}:8080"
     networks:
       - service-backplane
+    depends_on:
+      temporal-namespace-bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - exec wget --quiet --spider http://127.0.0.1:8080/healthz
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
 
   temporal-cli:
     image: temporalio/temporal:1.8.0@sha256:2c344b4a39b4489fc6944db095f628f0c30659836faf11780a4dc435599e80e3
@@ -105,8 +225,27 @@ services:
     environment:
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: knowledge
+    entrypoint:
+      - /bin/sh
+      - -ec
+    command:
+      - exec sleep 2147483647
     networks:
       - service-backplane
+    depends_on:
+      temporal-namespace-bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          exec temporal --address temporal:7233 --namespace knowledge
+          --client-connect-timeout 2s --command-timeout 2s
+          --color never --disable-config-file operator cluster health
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
 
   postgres-provision:
     image: postgres:18.4-bookworm@sha256:882236b897e39051d2368c5ccc6cda944904723506b2dfc97f2a8f5bc9afa382
@@ -122,6 +261,12 @@ services:
       - ./scripts/postgres-provision.sh:/opt/knowledge/bin/postgres-provision.sh:ro
     networks:
       - service-backplane
+    entrypoint:
+      - /bin/sh
+      - /opt/knowledge/bin/postgres-provision.sh
+    depends_on:
+      postgresql:
+        condition: service_healthy
 
   temporal-schema-setup:
     image: temporalio/admin-tools:1.31.2@sha256:dbc5fcd6ee8f0f4d808bf765af9a87dea9d8a283abfdcfbd2fc148496ba66107
@@ -135,9 +280,15 @@ services:
       - ./scripts/temporal-schema-setup.sh:/opt/knowledge/bin/temporal-schema-setup.sh:ro
     networks:
       - service-backplane
+    entrypoint:
+      - /bin/sh
+      - /opt/knowledge/bin/temporal-schema-setup.sh
+    depends_on:
+      postgres-provision:
+        condition: service_completed_successfully
 
   temporal-namespace-bootstrap:
-    image: temporalio/admin-tools:1.31.2@sha256:dbc5fcd6ee8f0f4d808bf765af9a87dea9d8a283abfdcfbd2fc148496ba66107
+    image: temporalio/temporal:1.8.0@sha256:2c344b4a39b4489fc6944db095f628f0c30659836faf11780a4dc435599e80e3
     platform: linux/amd64
     restart: "no"
     mem_limit: 512m
@@ -146,6 +297,12 @@ services:
       - ./scripts/temporal-namespace-bootstrap.sh:/opt/knowledge/bin/temporal-namespace-bootstrap.sh:ro
     networks:
       - service-backplane
+    entrypoint:
+      - /bin/sh
+      - /opt/knowledge/bin/temporal-namespace-bootstrap.sh
+    depends_on:
+      temporal:
+        condition: service_healthy
 
 secrets:
   postgres_admin_password:
