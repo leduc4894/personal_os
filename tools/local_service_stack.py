@@ -16,9 +16,12 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import date
 from enum import IntEnum, StrEnum
 from pathlib import Path
-from typing import BinaryIO, Final, Protocol
+from typing import BinaryIO, Final, Protocol, cast
+
+import yaml  # type: ignore[import-untyped]
 
 _MAX_CAPTURE_BYTES = 8192
 _MIN_PORT = 1024
@@ -28,6 +31,20 @@ _SECRET_ALPHABET: Final = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0
 _SECRET_BYTE_COUNT: Final = 32
 _MIN_DISTINCT_SECRET_CHARACTERS: Final = 8
 _QDRANT_CONFIG_FILENAME: Final = "qdrant_config.yaml"
+_IMAGE_DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+_IMAGE_LOCK_KEYS: Final = frozenset({"version", "images"})
+_IMAGE_LOCK_ENTRY_KEYS: Final = frozenset(
+    {
+        "component",
+        "upstream_repository",
+        "version",
+        "tagged_reference",
+        "manifest_digest",
+        "supported_platforms",
+        "verified_at",
+    }
+)
+_SUPPORTED_IMAGE_PLATFORMS: Final = ("linux/amd64",)
 
 
 class StackExitCode(IntEnum):
@@ -62,6 +79,24 @@ class StackPaths:
     image_lock: Path
     secret_directory: Path
     state_directory: Path
+
+
+@dataclass(frozen=True, slots=True)
+class ImageLockEntry:
+    """One validated immutable registry-image lock entry."""
+
+    component: str
+    upstream_repository: str
+    version: str
+    tagged_reference: str
+    manifest_digest: str
+    supported_platforms: tuple[str, ...]
+    verified_at: str
+
+    @property
+    def locked_reference(self) -> str:
+        """Return the byte-identifying Compose registry reference."""
+        return f"{self.tagged_reference}@{self.manifest_digest}"
 
 
 class SecretKind(StrEnum):
@@ -171,6 +206,125 @@ _ALLOWED_SUBPROCESS_ENVIRONMENT_KEYS = frozenset(
         *_PORT_VARIABLES,
     }
 )
+
+
+def load_image_lock(image_lock_path: Path) -> tuple[ImageLockEntry, ...]:
+    """Parse and strictly validate the local-stack immutable image lock."""
+    try:
+        loaded: object = yaml.safe_load(image_lock_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError):
+        raise StackFailure(StackExitCode.CONTRACT, "image_lock_invalid") from None
+    if not isinstance(loaded, dict):
+        raise StackFailure(StackExitCode.CONTRACT, "image_lock_invalid")
+    document = cast(dict[object, object], loaded)
+    if set(document) != _IMAGE_LOCK_KEYS or type(document["version"]) is not int:
+        raise StackFailure(StackExitCode.CONTRACT, "image_lock_invalid")
+    if document["version"] != 1:
+        raise StackFailure(StackExitCode.CONTRACT, "image_lock_invalid")
+    raw_images = document["images"]
+    if not isinstance(raw_images, list) or not raw_images:
+        raise StackFailure(StackExitCode.CONTRACT, "image_lock_invalid")
+
+    entries: list[ImageLockEntry] = []
+    components: set[str] = set()
+    tagged_references: set[str] = set()
+    for raw_entry in raw_images:
+        entry = _parse_image_lock_entry(raw_entry)
+        if entry.component in components or entry.tagged_reference in tagged_references:
+            raise StackFailure(StackExitCode.CONTRACT, "image_lock_invalid")
+        components.add(entry.component)
+        tagged_references.add(entry.tagged_reference)
+        entries.append(entry)
+    return tuple(entries)
+
+
+def validate_image_lock(paths: StackPaths) -> tuple[ImageLockEntry, ...]:
+    """Require every Compose image to agree exactly with the immutable lock."""
+    entries = load_image_lock(paths.image_lock)
+    try:
+        loaded: object = yaml.safe_load(paths.compose_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError):
+        raise StackFailure(StackExitCode.CONTRACT, "image_lock_mismatch") from None
+    if not isinstance(loaded, dict):
+        raise StackFailure(StackExitCode.CONTRACT, "image_lock_mismatch")
+    document = cast(dict[object, object], loaded)
+    services = document.get("services")
+    if not isinstance(services, dict) or not services:
+        raise StackFailure(StackExitCode.CONTRACT, "image_lock_mismatch")
+
+    compose_references: set[str] = set()
+    for raw_service in services.values():
+        if not isinstance(raw_service, dict):
+            raise StackFailure(StackExitCode.CONTRACT, "image_lock_mismatch")
+        service = cast(dict[object, object], raw_service)
+        image = service.get("image")
+        if not isinstance(image, str) or service.get("platform") != "linux/amd64":
+            raise StackFailure(StackExitCode.CONTRACT, "image_lock_mismatch")
+        compose_references.add(image)
+
+    locked_references = {entry.locked_reference for entry in entries}
+    if compose_references != locked_references:
+        raise StackFailure(StackExitCode.CONTRACT, "image_lock_mismatch")
+    return entries
+
+
+def _parse_image_lock_entry(raw_entry: object) -> ImageLockEntry:
+    if not isinstance(raw_entry, dict):
+        raise StackFailure(StackExitCode.CONTRACT, "image_lock_invalid")
+    entry = cast(dict[object, object], raw_entry)
+    if set(entry) != _IMAGE_LOCK_ENTRY_KEYS:
+        raise StackFailure(StackExitCode.CONTRACT, "image_lock_invalid")
+
+    string_fields = (
+        "component",
+        "upstream_repository",
+        "version",
+        "tagged_reference",
+        "manifest_digest",
+        "verified_at",
+    )
+    values: dict[str, str] = {}
+    for field in string_fields:
+        value = entry[field]
+        if not isinstance(value, str) or not value or value.strip() != value:
+            raise StackFailure(StackExitCode.CONTRACT, "image_lock_invalid")
+        values[field] = value
+
+    repository = values["upstream_repository"]
+    tagged_reference = values["tagged_reference"]
+    repository_prefix = f"{repository}:"
+    if (
+        any(character.isspace() for character in repository)
+        or "@" in repository
+        or not tagged_reference.startswith(repository_prefix)
+        or "@" in tagged_reference
+    ):
+        raise StackFailure(StackExitCode.CONTRACT, "image_lock_invalid")
+    tag = tagged_reference[len(repository_prefix) :]
+    version = values["version"]
+    if tag not in {version, f"v{version}"}:
+        raise StackFailure(StackExitCode.CONTRACT, "image_lock_invalid")
+    if _IMAGE_DIGEST_PATTERN.fullmatch(values["manifest_digest"]) is None:
+        raise StackFailure(StackExitCode.CONTRACT, "image_lock_invalid")
+
+    raw_platforms = entry["supported_platforms"]
+    if raw_platforms != list(_SUPPORTED_IMAGE_PLATFORMS):
+        raise StackFailure(StackExitCode.CONTRACT, "image_lock_invalid")
+    try:
+        if date.fromisoformat(values["verified_at"]).isoformat() != values["verified_at"]:
+            raise ValueError
+    except ValueError:
+        raise StackFailure(StackExitCode.CONTRACT, "image_lock_invalid") from None
+
+    return ImageLockEntry(
+        component=values["component"],
+        upstream_repository=repository,
+        version=version,
+        tagged_reference=tagged_reference,
+        manifest_digest=values["manifest_digest"],
+        supported_platforms=_SUPPORTED_IMAGE_PLATFORMS,
+        verified_at=values["verified_at"],
+    )
 
 
 def inspect_secret_set(paths: StackPaths) -> SecretSetState:

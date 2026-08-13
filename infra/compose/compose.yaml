@@ -1,0 +1,177 @@
+name: knowledge-local
+
+services:
+  postgresql:
+    image: postgres:18.4-bookworm@sha256:882236b897e39051d2368c5ccc6cda944904723506b2dfc97f2a8f5bc9afa382
+    platform: linux/amd64
+    restart: unless-stopped
+    mem_limit: 1536m
+    cpus: 1.5
+    environment:
+      POSTGRES_USER: stack_admin
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_admin_password
+    secrets:
+      - postgres_admin_password
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    networks:
+      - service-backplane
+
+  qdrant:
+    image: qdrant/qdrant:v1.18.2@sha256:75eab8c4ba42096724fdcfde8b4de0b5713d529dde32f285a1f86fdcb2c9e50c
+    platform: linux/amd64
+    restart: unless-stopped
+    mem_limit: 3g
+    cpus: 2.0
+    secrets:
+      - source: qdrant_config
+        target: qdrant_config.yaml
+    ports:
+      - "127.0.0.1:${QDRANT_HTTP_PORT:-6333}:6333"
+      - "127.0.0.1:${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks:
+      - service-backplane
+
+  neo4j:
+    image: neo4j:5.26.28-community@sha256:ff32db30b2baff97971e441b46bfd9c832c1b62c970398ef579244c06b21d357
+    platform: linux/amd64
+    restart: unless-stopped
+    mem_limit: 2560m
+    cpus: 2.0
+    environment:
+      NEO4J_AUTH_FILE: /run/secrets/neo4j_auth
+    secrets:
+      - neo4j_auth
+    ports:
+      - "127.0.0.1:${NEO4J_HTTP_PORT:-7474}:7474"
+      - "127.0.0.1:${NEO4J_BOLT_PORT:-7687}:7687"
+    volumes:
+      - neo4j-data:/data
+    networks:
+      - service-backplane
+
+  redis:
+    image: redis:8.6.4@sha256:a051e4f48a5d0ceda6554974f3ad0f5369f4479197f36829332c1325cecad2b7
+    platform: linux/amd64
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.5
+    secrets:
+      - redis_acl
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - service-backplane
+
+  temporal:
+    image: temporalio/server:1.31.2@sha256:b5ecdb8282bededae2a10c36e8d862e27d0bc2d247fc73c5416025997ab4a1da
+    platform: linux/amd64
+    restart: unless-stopped
+    mem_limit: 1g
+    cpus: 1.5
+    secrets:
+      - postgres_temporal_password
+    ports:
+      - "127.0.0.1:${TEMPORAL_GRPC_PORT:-7233}:7233"
+    networks:
+      - service-backplane
+
+  temporal-ui:
+    image: temporalio/ui:2.53.0@sha256:810eba47f77a89b0e64e2e751478ca585d037bbd90c0951a2974a92a6c5adeb9
+    platform: linux/amd64
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.5
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    ports:
+      - "127.0.0.1:${TEMPORAL_UI_PORT:-8080}:8080"
+    networks:
+      - service-backplane
+
+  temporal-cli:
+    image: temporalio/temporal:1.8.0@sha256:2c344b4a39b4489fc6944db095f628f0c30659836faf11780a4dc435599e80e3
+    platform: linux/amd64
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.25
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: knowledge
+    networks:
+      - service-backplane
+
+  postgres-provision:
+    image: postgres:18.4-bookworm@sha256:882236b897e39051d2368c5ccc6cda944904723506b2dfc97f2a8f5bc9afa382
+    platform: linux/amd64
+    restart: "no"
+    mem_limit: 512m
+    cpus: 0.5
+    secrets:
+      - postgres_admin_password
+      - postgres_application_password
+      - postgres_temporal_password
+    volumes:
+      - ./scripts/postgres-provision.sh:/opt/knowledge/bin/postgres-provision.sh:ro
+    networks:
+      - service-backplane
+
+  temporal-schema-setup:
+    image: temporalio/admin-tools:1.31.2@sha256:dbc5fcd6ee8f0f4d808bf765af9a87dea9d8a283abfdcfbd2fc148496ba66107
+    platform: linux/amd64
+    restart: "no"
+    mem_limit: 512m
+    cpus: 0.5
+    secrets:
+      - postgres_temporal_password
+    volumes:
+      - ./scripts/temporal-schema-setup.sh:/opt/knowledge/bin/temporal-schema-setup.sh:ro
+    networks:
+      - service-backplane
+
+  temporal-namespace-bootstrap:
+    image: temporalio/admin-tools:1.31.2@sha256:dbc5fcd6ee8f0f4d808bf765af9a87dea9d8a283abfdcfbd2fc148496ba66107
+    platform: linux/amd64
+    restart: "no"
+    mem_limit: 512m
+    cpus: 0.5
+    volumes:
+      - ./scripts/temporal-namespace-bootstrap.sh:/opt/knowledge/bin/temporal-namespace-bootstrap.sh:ro
+    networks:
+      - service-backplane
+
+secrets:
+  postgres_admin_password:
+    file: ../../.local/stack-secrets/postgres_admin_password
+  postgres_application_password:
+    file: ../../.local/stack-secrets/postgres_application_password
+  postgres_temporal_password:
+    file: ../../.local/stack-secrets/postgres_temporal_password
+  qdrant_api_key:
+    file: ../../.local/stack-secrets/qdrant_api_key
+  qdrant_config:
+    file: ../../.local/stack-secrets/qdrant_config.yaml
+  neo4j_auth:
+    file: ../../.local/stack-secrets/neo4j_auth
+  redis_acl:
+    file: ../../.local/stack-secrets/redis_acl
+  redis_application_password:
+    file: ../../.local/stack-secrets/redis_application_password
+
+networks:
+  service-backplane:
+    driver: bridge
+    internal: true
+
+volumes:
+  postgres-data:
+  qdrant-data:
+  neo4j-data:
+  redis-data:

@@ -6,8 +6,10 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 
 sys.path.insert(0, str(Path(__file__).parents[3]))
 
@@ -28,6 +30,204 @@ from tools.local_service_stack import (
     validate_project_name,
     validate_secret_set,
 )
+
+
+def _valid_lock_document() -> dict[str, Any]:
+    return {
+        "version": 1,
+        "images": [
+            {
+                "component": "postgresql",
+                "upstream_repository": "postgres",
+                "version": "18.4-bookworm",
+                "tagged_reference": "postgres:18.4-bookworm",
+                "manifest_digest": f"sha256:{'a' * 64}",
+                "supported_platforms": ["linux/amd64"],
+                "verified_at": "2026-08-13",
+            }
+        ],
+    }
+
+
+def _write_yaml(path: Path, document: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+
+def test_load_image_lock_returns_typed_immutable_entries(tmp_path: Path) -> None:
+    lock_path = tmp_path / "images.lock.yaml"
+    _write_yaml(lock_path, _valid_lock_document())
+
+    entries = stack_module.load_image_lock(lock_path)
+
+    assert len(entries) == 1
+    assert entries[0].component == "postgresql"
+    assert entries[0].locked_reference == f"postgres:18.4-bookworm@sha256:{'a' * 64}"
+    assert entries[0].supported_platforms == ("linux/amd64",)
+
+
+def test_image_lock_rejects_unknown_top_level_key(tmp_path: Path) -> None:
+    lock_path = tmp_path / "images.lock.yaml"
+    document = _valid_lock_document()
+    document["unexpected"] = True
+    _write_yaml(lock_path, document)
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.load_image_lock(lock_path)
+
+    assert raised.value.exit_code is StackExitCode.CONTRACT
+    assert str(raised.value) == "image_lock_invalid"
+
+
+def test_image_lock_rejects_unknown_entry_key(tmp_path: Path) -> None:
+    lock_path = tmp_path / "images.lock.yaml"
+    document = _valid_lock_document()
+    document["images"][0]["unexpected"] = True
+    _write_yaml(lock_path, document)
+
+    with pytest.raises(StackFailure, match="image_lock_invalid"):
+        stack_module.load_image_lock(lock_path)
+
+
+def test_image_lock_rejects_duplicate_components(tmp_path: Path) -> None:
+    lock_path = tmp_path / "images.lock.yaml"
+    document = _valid_lock_document()
+    duplicate = dict(document["images"][0])
+    duplicate["tagged_reference"] = "example.invalid/postgres:18.4-bookworm"
+    duplicate["upstream_repository"] = "example.invalid/postgres"
+    document["images"].append(duplicate)
+    _write_yaml(lock_path, document)
+
+    with pytest.raises(StackFailure, match="image_lock_invalid"):
+        stack_module.load_image_lock(lock_path)
+
+
+def test_image_lock_rejects_duplicate_tagged_references(tmp_path: Path) -> None:
+    lock_path = tmp_path / "images.lock.yaml"
+    document = _valid_lock_document()
+    duplicate = dict(document["images"][0])
+    duplicate["component"] = "postgresql-copy"
+    document["images"].append(duplicate)
+    _write_yaml(lock_path, document)
+
+    with pytest.raises(StackFailure, match="image_lock_invalid"):
+        stack_module.load_image_lock(lock_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("manifest_digest", "sha256:not-a-digest"),
+        ("supported_platforms", ["linux/arm64"]),
+        ("supported_platforms", ["linux/amd64", "linux/arm64"]),
+    ],
+)
+def test_image_lock_rejects_invalid_digest_or_platform(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    lock_path = tmp_path / "images.lock.yaml"
+    document = _valid_lock_document()
+    document["images"][0][field] = value
+    _write_yaml(lock_path, document)
+
+    with pytest.raises(StackFailure, match="image_lock_invalid"):
+        stack_module.load_image_lock(lock_path)
+
+
+def test_validate_image_lock_rejects_wrong_digest_without_echoing_reference(
+    tmp_path: Path,
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    bad_reference = f"postgres:18.4-bookworm@sha256:{'b' * 64}"
+    document = _valid_lock_document()
+    document["images"][0]["manifest_digest"] = f"sha256:{'b' * 64}"
+    _write_yaml(paths.image_lock, document)
+    _write_yaml(
+        paths.compose_file,
+        {
+            "services": {
+                "postgresql": {
+                    "image": f"postgres:18.4-bookworm@sha256:{'a' * 64}",
+                    "platform": "linux/amd64",
+                }
+            }
+        },
+    )
+
+    with pytest.raises(StackFailure) as raised:
+        stack_module.validate_image_lock(paths)
+
+    assert raised.value.exit_code is StackExitCode.CONTRACT
+    assert str(raised.value) == "image_lock_mismatch"
+    assert bad_reference not in str(raised.value)
+
+
+def test_validate_image_lock_rejects_unconsumed_entry(tmp_path: Path) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    document = _valid_lock_document()
+    extra_entry = dict(document["images"][0])
+    extra_entry.update(
+        {
+            "component": "redis",
+            "upstream_repository": "redis",
+            "version": "8.6.4",
+            "tagged_reference": "redis:8.6.4",
+            "manifest_digest": f"sha256:{'c' * 64}",
+        }
+    )
+    document["images"].append(extra_entry)
+    _write_yaml(paths.image_lock, document)
+    _write_yaml(
+        paths.compose_file,
+        {
+            "services": {
+                "postgresql": {
+                    "image": f"postgres:18.4-bookworm@sha256:{'a' * 64}",
+                    "platform": "linux/amd64",
+                }
+            }
+        },
+    )
+
+    with pytest.raises(StackFailure, match="image_lock_mismatch"):
+        stack_module.validate_image_lock(paths)
+
+
+def test_validate_image_lock_accepts_one_entry_reused_by_multiple_init_jobs(
+    tmp_path: Path,
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    document = _valid_lock_document()
+    document["images"][0].update(
+        {
+            "component": "temporal-admin-tools",
+            "upstream_repository": "temporalio/admin-tools",
+            "version": "1.31.2",
+            "tagged_reference": "temporalio/admin-tools:1.31.2",
+        }
+    )
+    locked_reference = f"temporalio/admin-tools:1.31.2@sha256:{'a' * 64}"
+    _write_yaml(paths.image_lock, document)
+    _write_yaml(
+        paths.compose_file,
+        {
+            "services": {
+                "temporal-schema-setup": {
+                    "image": locked_reference,
+                    "platform": "linux/amd64",
+                },
+                "temporal-namespace-bootstrap": {
+                    "image": locked_reference,
+                    "platform": "linux/amd64",
+                },
+            }
+        },
+    )
+
+    entries = stack_module.validate_image_lock(paths)
+
+    assert len(entries) == 1
+    assert entries[0].component == "temporal-admin-tools"
 
 
 def test_bootstrap_creates_exact_complete_secret_set(tmp_path: Path) -> None:

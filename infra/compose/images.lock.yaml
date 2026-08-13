@@ -1,0 +1,58 @@
+version: 1
+images:
+  - component: postgresql
+    upstream_repository: postgres
+    version: 18.4-bookworm
+    tagged_reference: postgres:18.4-bookworm
+    manifest_digest: sha256:882236b897e39051d2368c5ccc6cda944904723506b2dfc97f2a8f5bc9afa382
+    supported_platforms: [linux/amd64]
+    verified_at: "2026-08-13"
+  - component: qdrant
+    upstream_repository: qdrant/qdrant
+    version: 1.18.2
+    tagged_reference: qdrant/qdrant:v1.18.2
+    manifest_digest: sha256:75eab8c4ba42096724fdcfde8b4de0b5713d529dde32f285a1f86fdcb2c9e50c
+    supported_platforms: [linux/amd64]
+    verified_at: "2026-08-13"
+  - component: neo4j
+    upstream_repository: neo4j
+    version: 5.26.28-community
+    tagged_reference: neo4j:5.26.28-community
+    manifest_digest: sha256:ff32db30b2baff97971e441b46bfd9c832c1b62c970398ef579244c06b21d357
+    supported_platforms: [linux/amd64]
+    verified_at: "2026-08-13"
+  - component: redis
+    upstream_repository: redis
+    version: 8.6.4
+    tagged_reference: redis:8.6.4
+    manifest_digest: sha256:a051e4f48a5d0ceda6554974f3ad0f5369f4479197f36829332c1325cecad2b7
+    supported_platforms: [linux/amd64]
+    verified_at: "2026-08-13"
+  - component: temporal-server
+    upstream_repository: temporalio/server
+    version: 1.31.2
+    tagged_reference: temporalio/server:1.31.2
+    manifest_digest: sha256:b5ecdb8282bededae2a10c36e8d862e27d0bc2d247fc73c5416025997ab4a1da
+    supported_platforms: [linux/amd64]
+    verified_at: "2026-08-13"
+  - component: temporal-admin-tools
+    upstream_repository: temporalio/admin-tools
+    version: 1.31.2
+    tagged_reference: temporalio/admin-tools:1.31.2
+    manifest_digest: sha256:dbc5fcd6ee8f0f4d808bf765af9a87dea9d8a283abfdcfbd2fc148496ba66107
+    supported_platforms: [linux/amd64]
+    verified_at: "2026-08-13"
+  - component: temporal-ui
+    upstream_repository: temporalio/ui
+    version: 2.53.0
+    tagged_reference: temporalio/ui:2.53.0
+    manifest_digest: sha256:810eba47f77a89b0e64e2e751478ca585d037bbd90c0951a2974a92a6c5adeb9
+    supported_platforms: [linux/amd64]
+    verified_at: "2026-08-13"
+  - component: temporal-cli
+    upstream_repository: temporalio/temporal
+    version: 1.8.0
+    tagged_reference: temporalio/temporal:1.8.0
+    manifest_digest: sha256:2c344b4a39b4489fc6944db095f628f0c30659836faf11780a4dc435599e80e3
+    supported_platforms: [linux/amd64]
+    verified_at: "2026-08-13"
