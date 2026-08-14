@@ -69,7 +69,9 @@ def classify_database_failure(cause: BaseException) -> DatabaseFailureKind:
 
     Pure and side-effect free: only the SQLSTATE and the exception shape are
     inspected, never the message text. Unknown database failures fail closed as
-    unclassified (never retried), and non-database exceptions are internal bugs.
+    unclassified: never retried and never treated as an uncertain commit
+    acknowledgement (only connection-class unavailability is), and
+    non-database exceptions are internal bugs.
     """
     sqlstate = _extract_sqlstate(cause)
     if sqlstate is not None:
@@ -122,12 +124,15 @@ class DatabaseRetryPolicy:
     :func:`map_database_failure` without propagating driver text.
 
     A write transaction may supply ``recover`` for the uncertain-commit case
-    (design section 9.4): when an ambiguous failure (unavailability or an
-    unclassified database failure) strikes, the recovery lookup runs on a fresh
-    bounded connection and decides the outcome from evidence only — a
+    (design section 9.4): when a connection-class failure (unavailability)
+    makes the commit acknowledgement uncertain, the recovery lookup runs on a
+    fresh bounded connection and decides the outcome from evidence only — a
     committed replay is returned, a retry happens only after the lookup proves
     absence, and an unavailable lookup raises the retryable
-    ``source_commit_outcome_unknown`` without ever claiming a rollback.
+    ``source_commit_outcome_unknown`` without ever claiming a rollback. Every
+    other database failure — business errors, integrity violations and any
+    other server-returned SQLSTATE on a healthy connection — proves a
+    deterministic rollback and never retries.
     """
 
     maximum_attempts: int = 3
@@ -155,9 +160,12 @@ class DatabaseRetryPolicy:
                     if attempt == self.maximum_attempts:
                         mapped = map_database_failure(cause, source_id=source_id)
                         raise mapped from cause
-                elif recover is not None:
-                    # The commit acknowledgement is uncertain: resolve the
-                    # outcome from evidence before deciding anything.
+                elif failure_kind is DatabaseFailureKind.UNAVAILABLE and recover is not None:
+                    # Only a connection-class failure makes the commit
+                    # acknowledgement uncertain. A server-returned SQLSTATE on
+                    # a healthy connection (for example an integrity
+                    # constraint violation) already proves a deterministic
+                    # rollback, so it maps directly below without retrying.
                     recovered = await self._resolve_uncertain_outcome(
                         recover, source_id=source_id
                     )
