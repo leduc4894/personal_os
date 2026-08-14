@@ -6,10 +6,16 @@ on:
       - migrations/**
       - alembic.ini
       - docs/superpowers/specs/canonical-postgresql-baseline-design.md
+      - apps/worker/src/workflow_worker/**
+      - apps/worker/pyproject.toml
+      - tests/unit/workflow_worker/**
       - tests/unit/migrations/test_database_migration_runtime.py
       - tests/contract/test_canonical_postgresql_migration_contract.py
       - tests/contract/test_ci_security.py
       - tests/integration/test_canonical_postgresql_baseline.py
+      - tests/integration/projection_dispatch/**
+      - src/personal_os/sources/**
+      - packages/postgresql-source-store/src/**
       - pyproject.toml
       - uv.lock
       - infra/compose/compose.yaml
@@ -22,10 +28,16 @@ on:
       - migrations/**
       - alembic.ini
       - docs/superpowers/specs/canonical-postgresql-baseline-design.md
+      - apps/worker/src/workflow_worker/**
+      - apps/worker/pyproject.toml
+      - tests/unit/workflow_worker/**
       - tests/unit/migrations/test_database_migration_runtime.py
       - tests/contract/test_canonical_postgresql_migration_contract.py
       - tests/contract/test_ci_security.py
       - tests/integration/test_canonical_postgresql_baseline.py
+      - tests/integration/projection_dispatch/**
+      - src/personal_os/sources/**
+      - packages/postgresql-source-store/src/**
       - pyproject.toml
       - uv.lock
       - infra/compose/compose.yaml
@@ -76,6 +88,8 @@ jobs:
     env:
       CI: "true"
       LOCAL_STACK_TEST_PROJECT: knowledge-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      TEMPORAL_GRPC_PORT: "17243"
+      TEMPORAL_UI_PORT: "18083"
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -117,6 +131,7 @@ jobs:
           set -euo pipefail
           mkdir -p .local/test-results
           uv run pytest tests/integration/test_canonical_postgresql_baseline.py -m local_stack -q \
+            tests/integration/projection_dispatch \
             --junitxml=.local/test-results/canonical-postgresql-baseline.xml
       - name: Reset exact project and assert cleanup
         if: always()
