@@ -1,0 +1,39 @@
+{
+  "create": {
+    "workspace_id": "018f47a0-7b00-7000-8000-000000000001",
+    "source_id": "018f47a0-7b00-7000-8000-000000000002",
+    "event_id": "018f47a0-7b00-7000-8000-000000000003",
+    "base_version_id": null,
+    "actor_kind": "device",
+    "actor_id": "018f47a0-7b00-7000-8000-000000000004",
+    "source_type": "markdown",
+    "title": "Ghi chú",
+    "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "content_size_bytes": 3,
+    "media_type": "text/plain",
+    "client_timestamp": "2026-08-14T03:11:12.123456Z",
+    "expected_request_fingerprint": "a7d604a619ccd19ac638debb20ca3ef11df106b2c64bb273a27400ee1f9c2888"
+  },
+  "update": {
+    "workspace_id": "018f47a0-7b00-7000-8000-000000000001",
+    "source_id": "018f47a0-7b00-7000-8000-000000000002",
+    "event_id": "018f47a0-7b00-7000-8000-000000000003",
+    "base_version_id": "018f47a0-7b00-7000-8000-000000000005",
+    "actor_kind": "device",
+    "actor_id": "018f47a0-7b00-7000-8000-000000000004",
+    "source_type": null,
+    "title": null,
+    "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "content_size_bytes": 3,
+    "media_type": "text/plain",
+    "client_timestamp": "2026-08-14T03:11:12.123456Z",
+    "expected_request_fingerprint": "2cd7344d34cac9cd342cd32b9256da2141bb191893c0b793ba877166d7211cba"
+  },
+  "safe_diff": {
+    "source_id": "018f47a0-7b00-7000-8000-000000000002",
+    "base_version_id": "018f47a0-7b00-7000-8000-000000000005",
+    "base_content_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "new_content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expected_safe_diff_hash": "530aebe6bdbef4057ee45b9bfa5ec6a0c7b30a0dad7133b15e925279800b1fee"
+  }
+}
