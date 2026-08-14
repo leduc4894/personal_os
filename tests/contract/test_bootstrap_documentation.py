@@ -232,6 +232,73 @@ LOCAL_STACK_EXIT_CODE_MEANINGS = (
     ("75", "readiness"),
 )
 
+# --- Object-storage runtime check operator contract -------------------------
+# The content-addressable object-storage spec adds a one-shot read-only R2
+# HeadBucket diagnostic command. The root README and the operations guide are
+# the operator contract for that command; these constants pin the surface.
+
+# The seven approved object-storage environment names. Credential values are
+# deliberately file-only: the two names ending in ``_FILE`` carry bounded secret
+# file names, never plaintext secret values.
+OBJECT_STORAGE_ENVIRONMENT_NAMES = (
+    "KNOWLEDGE_ENVIRONMENT",
+    "KNOWLEDGE_SECRET_ROOT",
+    "KNOWLEDGE_R2_ENDPOINT",
+    "KNOWLEDGE_R2_BUCKET_NAME",
+    "KNOWLEDGE_R2_ACCESS_KEY_ID_FILE",
+    "KNOWLEDGE_R2_SECRET_ACCESS_KEY_FILE",
+    "KNOWLEDGE_OBJECT_STORAGE_SPOOL_ROOT",
+)
+
+# Anchors for the object-storage contract statements the root README must
+# carry: the command name and its required flag, secret-file-only credentials,
+# the private bucket requirement, and the no-fallback/no-delete/no-list rules.
+OBJECT_STORAGE_COMMAND_TOKENS = (
+    "object-storage-check-runtime",
+    "--service",
+)
+OBJECT_STORAGE_CONTRACT_ANCHORS = (
+    "secret files",
+    "private bucket",
+    "no fallback",
+    "no delete",
+    "no list",
+)
+
+# The five object-storage runtime-check exit codes paired with the meaning
+# keyword each must be documented alongside (same line-pairing discipline as
+# the check-runtime codes above).
+OBJECT_STORAGE_EXIT_CODE_MEANINGS = (
+    ("0", "success"),
+    ("2", "syntax"),
+    ("69", "unavailable"),
+    ("70", "internal"),
+    ("78", "configuration"),
+)
+
+OBJECT_STORAGE_OPERATIONS_GUIDE = REPO_ROOT / "docs" / "operations" / "object-storage.md"
+
+# Operator guarantees the operations guide must state verbatim (case-insensitive
+# for prose anchors): offline startup validation, liveness/readiness never call
+# R2, only the explicit command performs HeadBucket, credential rotation needs a
+# process restart, spool storage must be encrypted/ephemeral, and production
+# and test buckets plus credentials never cross.
+OPERATIONS_GUIDE_ANCHORS = (
+    "without calling r2",
+    "liveness never calls r2",
+    "readiness does not call r2",
+    "only the explicit",
+    "headbucket",
+    "process restart",
+    "encrypted",
+    "ephemeral",
+    "never cross",
+)
+OPERATIONS_GUIDE_COMMAND_TOKENS = (
+    "object-storage-check-runtime",
+    "--service worker",
+)
+
 
 def _read(path: Path) -> str:
     assert path.exists(), f"required documentation file is missing: {path}"
@@ -533,3 +600,63 @@ def test_local_stack_readme_documents_windows_ci_and_r2_boundary() -> None:
     assert "r2" in lower and "sole future canonical object store" in lower
     for excluded in ("not configured", "not contacted", "not tested"):
         assert excluded in lower
+
+
+def test_root_readme_documents_all_seven_object_storage_environment_names() -> None:
+    content = _read(ROOT_README)
+    missing = [name for name in OBJECT_STORAGE_ENVIRONMENT_NAMES if name not in content]
+    assert not missing, (
+        "root README must document all seven approved object-storage environment "
+        f"names; missing: {missing}"
+    )
+
+
+def test_root_readme_documents_object_storage_runtime_check_contract() -> None:
+    content = _read(ROOT_README)
+    lower = content.lower()
+    offenders: list[str] = []
+    for token in OBJECT_STORAGE_COMMAND_TOKENS:
+        if token not in content:
+            offenders.append(f"command token '{token}'")
+    for anchor in OBJECT_STORAGE_CONTRACT_ANCHORS:
+        if anchor not in lower:
+            offenders.append(f"contract anchor '{anchor}'")
+    # Credentials must be framed as secret-file-only, never plaintext variables.
+    if "plaintext" not in lower or "secret" not in lower:
+        offenders.append("secret-file-only credentials statement")
+    assert not offenders, (
+        "root README must document the object-storage runtime-check contract "
+        f"(command, secret-file-only credentials, private bucket, no "
+        f"fallback/delete/list); missing: {offenders}"
+    )
+
+
+def test_root_readme_documents_object_storage_exit_codes_with_meanings() -> None:
+    content = _read(ROOT_README)
+    offenders = []
+    for code, meaning in OBJECT_STORAGE_EXIT_CODE_MEANINGS:
+        if not any(code in line and meaning in line.lower() for line in content.splitlines()):
+            offenders.append(f"exit code '{code}' paired with meaning '{meaning}'")
+    assert not offenders, (
+        "root README must document all five object-storage runtime-check exit "
+        f"codes with their meanings; missing: {offenders}"
+    )
+
+
+def test_operations_guide_states_the_r2_runtime_contract() -> None:
+    content = _read(OBJECT_STORAGE_OPERATIONS_GUIDE)
+    lower = content.lower()
+    offenders: list[str] = []
+    for token in OPERATIONS_GUIDE_COMMAND_TOKENS:
+        if token not in content:
+            offenders.append(f"command token '{token}'")
+    for anchor in OPERATIONS_GUIDE_ANCHORS:
+        if anchor not in lower:
+            offenders.append(f"guarantee anchor '{anchor}'")
+    assert not offenders, (
+        "docs/operations/object-storage.md must state the operator contract: "
+        "offline startup validation, liveness/readiness never call R2, only the "
+        "explicit command performs HeadBucket, rotation needs a process restart, "
+        "encrypted/ephemeral spool storage, and production/test buckets and "
+        f"credentials never cross; missing: {offenders}"
+    )

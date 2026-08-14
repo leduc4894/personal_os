@@ -163,6 +163,59 @@ personal-worker check-runtime
 | `70` | Unexpected internal error. |
 | `78` | Configuration or secret error. |
 
+## Object storage runtime check
+
+Cloudflare R2 is the canonical object store. Process startup validation is
+offline (it never calls R2 during startup), liveness never calls R2 and normal
+readiness does not call R2. The only `HeadBucket` probe in the system is the
+explicit one-shot diagnostic command:
+
+```bash
+uv run --package r2-object-storage object-storage-check-runtime --service worker
+```
+
+The command parses the required `--service` flag (`api`, `mcp` or `worker`)
+before reading any environment variable or secret file, runs the startup spool
+janitor, performs one bounded read-only `HeadBucket`, emits exactly one safe
+JSON diagnostic event and closes the client once. It is strictly read-only:
+no put, no get, no list, no delete — the production port has no delete, list,
+overwrite, copy, public-URL or presigned operation, and there is no fallback
+provider. The bucket must be a private bucket (public URLs and custom public
+domains are disabled).
+
+### Object storage environment variables
+
+The object-storage fragment reads exactly seven approved environment names; any
+other `KNOWLEDGE_*` key is a terminal configuration error.
+
+| Variable | Meaning |
+| --- | --- |
+| `KNOWLEDGE_ENVIRONMENT` | `local`, `test`, `staging`, `production` |
+| `KNOWLEDGE_SECRET_ROOT` | absolute secret root (production default `/run/secrets`) |
+| `KNOWLEDGE_R2_ENDPOINT` | canonical `https://<account-id>.r2.cloudflarestorage.com` |
+| `KNOWLEDGE_R2_BUCKET_NAME` | lowercase R2-compatible private bucket name |
+| `KNOWLEDGE_R2_ACCESS_KEY_ID_FILE` | access-key-id secret file name beneath the secret root |
+| `KNOWLEDGE_R2_SECRET_ACCESS_KEY_FILE` | secret-access-key secret file name beneath the secret root |
+| `KNOWLEDGE_OBJECT_STORAGE_SPOOL_ROOT` | absolute existing spool directory |
+
+R2 credentials are secret-file-only: the two `_FILE` variables name bounded
+files beneath `KNOWLEDGE_SECRET_ROOT`; plaintext secret environment variables
+and ambient AWS credential discovery are prohibited and ineffective. Credential
+rotation takes effect on process restart. Production and test buckets and
+credentials never cross. The full operator contract — spool storage, bucket
+isolation, failure posture — lives in
+[`docs/operations/object-storage.md`](docs/operations/object-storage.md).
+
+### Object storage exit codes
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | Success — the read-only probe completed. |
+| `2` | CLI syntax error, decided before any environment or secret read. |
+| `69` | Dependency/access unavailable — access denied, or unavailable after the bounded retry. |
+| `70` | Unexpected internal error. |
+| `78` | Configuration or secret error. |
+
 ## Build outputs
 
 | Artifact | Location |

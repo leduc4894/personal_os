@@ -149,6 +149,11 @@ cmd = "uv run python tools/local_service_stack.py reset"
 [tool.poe.tasks.stack-smoke]
 cmd = "uv run python tools/local_service_stack.py smoke"
 
+# One-shot read-only R2 HeadBucket diagnostic. This is the only command that
+# contacts R2; startup validation, liveness and normal readiness stay offline.
+[tool.poe.tasks.object-storage-check-runtime]
+cmd = "uv run --package r2-object-storage object-storage-check-runtime --service worker"
+
 [tool.poe.tasks.database-heads]
 cmd = "alembic heads"
 

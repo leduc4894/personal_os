@@ -10,6 +10,9 @@ dependencies = [
 [dependency-groups]
 dev = ["types-aiobotocore[s3]==3.9.0"]
 
+[project.scripts]
+object-storage-check-runtime = "r2_object_storage.runtime_check:main"
+
 [build-system]
 requires = ["uv_build==0.11.32"]
 build-backend = "uv_build"

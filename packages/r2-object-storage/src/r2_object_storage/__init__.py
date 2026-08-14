@@ -9,6 +9,7 @@ environment mapping and secret files.
 """
 
 from r2_object_storage.adapter import R2S3ObjectStore
+from r2_object_storage.runtime_check import run_object_storage_runtime_check
 from r2_object_storage.settings import (
     LoadedR2Credentials,
     ObjectStorageSettings,
@@ -20,4 +21,5 @@ __all__ = [
     "ObjectStorageSettings",
     "R2S3ObjectStore",
     "load_object_storage_settings",
+    "run_object_storage_runtime_check",
 ]
