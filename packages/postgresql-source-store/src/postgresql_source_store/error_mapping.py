@@ -166,9 +166,7 @@ class DatabaseRetryPolicy:
                     # a healthy connection (for example an integrity
                     # constraint violation) already proves a deterministic
                     # rollback, so it maps directly below without retrying.
-                    recovered = await self._resolve_uncertain_outcome(
-                        recover, source_id=source_id
-                    )
+                    recovered = await self._resolve_uncertain_outcome(recover, source_id=source_id)
                     if recovered is not None:
                         return recovered
                     # The lookup proved absence, so a retry cannot duplicate.
