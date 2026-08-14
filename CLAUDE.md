@@ -27,6 +27,20 @@ Với thay đổi không tầm thường, thực hiện theo thứ tự:
 Lưu tài liệu mới tại `docs/superpowers/plans/`, `docs/superpowers/specs/`, `docs/superpowers/tasks/` khi người dùng yêu cầu
 hoặc khi cần artifact lâu dài. Không tạo tài liệu quy trình cho chỉnh sửa hiển nhiên, nhỏ.
 
+## Handoff
+
+- Mỗi plan hoàn thành hoặc bị gián đoạn phải có đúng MỘT file handoff tại
+  `docs/handoff/YYYY-MM-DD-<domain-slug>.md`; không chia nhỏ thành nhiều file.
+  Chia section bên trong (trạng thái gate, quyết định, item trì hoãn, next actions) thay vì chia file.
+- Viết handoff khi: plan hoàn tất (trước khi dọn workspace làm việc), khi BLOCKED,
+  hoặc khi session kết thúc mà còn việc dở. Nội dung tối thiểu: commit SHA cuối,
+  trạng thái các gate kèm bằng chứng, các quyết định diễn giải spec kèm lý do,
+  danh sách item trì hoãn kèm phán quyết, và next actions.
+- Handoff là bản chụp một thời điểm: link tới tài liệu living (`docs/operations/`, README)
+  thay vì sao chép nội dung của chúng.
+- Nếu handoff vượt khoảng 400 dòng, phần vượt thuộc về tài liệu canonical —
+  cập nhật tài liệu đó và rút gọn handoff.
+
 ## Quy tắc đặt tên
 
 - Tên phải mô tả domain + vai trò, hành vi hoặc kết quả; dùng tiếng Anh nhất quán.
