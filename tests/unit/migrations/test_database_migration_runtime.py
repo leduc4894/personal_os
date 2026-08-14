@@ -110,6 +110,44 @@ def test_unknown_knowledge_key_maps_to_configuration_invalid_without_echo(
     assert sentinel_value not in rendered
 
 
+def test_database_loader_ignores_registered_r2_keys(tmp_path: Path) -> None:
+    settings = load_database_migration_settings(
+        environ={
+            "KNOWLEDGE_SECRET_ROOT": str(tmp_path),
+            "KNOWLEDGE_R2_BUCKET_NAME": "knowledge-test",
+            "KNOWLEDGE_R2_ENDPOINT": (
+                "https://abcdef0123456789abcdef0123456789.r2.cloudflarestorage.com"
+            ),
+            "KNOWLEDGE_OBJECT_STORAGE_SPOOL_ROOT": str(tmp_path),
+        }
+    )
+    assert settings.secret_root == tmp_path
+    assert settings.host == "127.0.0.1"
+    assert settings.database_name == "knowledge"
+
+
+def test_database_loader_still_rejects_typo_of_registered_key(tmp_path: Path) -> None:
+    with pytest.raises(DatabaseMigrationError) as exc_info:
+        load_database_migration_settings(
+            environ={
+                "KNOWLEDGE_SECRET_ROOT": str(tmp_path),
+                "KNOWLEDGE_R2_BUKCET_NAME": "knowledge-test",
+            }
+        )
+    assert exc_info.value.error_code is ErrorCode.DATABASE_MIGRATION_CONFIGURATION_INVALID
+
+
+def test_database_loader_rejects_plaintext_r2_secret_key(tmp_path: Path) -> None:
+    with pytest.raises(DatabaseMigrationError) as exc_info:
+        load_database_migration_settings(
+            environ={
+                "KNOWLEDGE_SECRET_ROOT": str(tmp_path),
+                "KNOWLEDGE_R2_SECRET_ACCESS_KEY": "do-not-emit-secret",
+            }
+        )
+    assert exc_info.value.error_code is ErrorCode.DATABASE_MIGRATION_CONFIGURATION_INVALID
+
+
 def test_port_must_be_inside_the_postgres_bind_range(tmp_path: Path) -> None:
     for bad_port in ("0", "65536", "-1", "not-a-port"):
         with pytest.raises(DatabaseMigrationError) as exc_info:

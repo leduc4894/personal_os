@@ -220,3 +220,41 @@ def test_database_password_key_is_rejected_as_unknown() -> None:
             environ={"KNOWLEDGE_DATABASE_PASSWORD": "hunter2"},
         )
     assert raised.value.error_code is ErrorCode.CONFIGURATION_UNKNOWN_KEY
+
+
+def test_runtime_loader_ignores_registered_r2_keys(tmp_path: Path) -> None:
+    settings = load_runtime_settings(
+        ServiceName.API,
+        environ={
+            "KNOWLEDGE_SECRET_ROOT": str(tmp_path),
+            "KNOWLEDGE_R2_BUCKET_NAME": "knowledge-test",
+        },
+    )
+    assert settings.secret_root == tmp_path
+    assert settings.environment is RuntimeEnvironment.LOCAL
+
+
+def test_runtime_loader_ignores_registered_database_keys(tmp_path: Path) -> None:
+    settings = load_runtime_settings(
+        ServiceName.API,
+        environ={
+            "KNOWLEDGE_SECRET_ROOT": str(tmp_path),
+            "KNOWLEDGE_DATABASE_HOST": "db.internal.example",
+            "KNOWLEDGE_DATABASE_PASSWORD_FILE": "postgres_application_password",
+            "KNOWLEDGE_DATABASE_SSL_MODE": "verify-full",
+        },
+    )
+    assert settings.secret_root == tmp_path
+    assert settings.environment is RuntimeEnvironment.LOCAL
+
+
+def test_runtime_loader_still_rejects_typo_of_registered_key(tmp_path: Path) -> None:
+    with pytest.raises(ConfigurationError) as raised:
+        load_runtime_settings(
+            ServiceName.API,
+            environ={
+                "KNOWLEDGE_SECRET_ROOT": str(tmp_path),
+                "KNOWLEDGE_R2_BUKCET_NAME": "knowledge-test",
+            },
+        )
+    assert raised.value.error_code is ErrorCode.CONFIGURATION_UNKNOWN_KEY

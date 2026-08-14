@@ -37,6 +37,9 @@ from sqlalchemy.engine import URL
 import personal_os.diagnostics.events  # noqa: F401
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import DatabaseMigrationError
+from personal_os.runtime_configuration.environment_names import (
+    KNOWN_KNOWLEDGE_ENVIRONMENT_NAMES,
+)
 from personal_os.runtime_configuration.models import RuntimeEnvironment
 from personal_os.runtime_configuration.secret_files import read_secret_file
 
@@ -178,15 +181,17 @@ def load_database_migration_settings(
     """Load a frozen :class:`DatabaseMigrationSettings` from an environment snapshot.
 
     ``environ`` defaults to ``os.environ`` read at call time (never at import
-    time). Any ``KNOWLEDGE_*`` key outside the closed field map, and every
-    Pydantic validation failure, maps to a
+    time). Any ``KNOWLEDGE_*`` key outside the repository-wide known-name
+    registry, and every Pydantic validation failure, maps to a
     :class:`DatabaseMigrationError` with no echoed key, value or input.
+    Registered names owned by another fragment (runtime, object storage) are
+    ignored; only this fragment's own field map is parsed.
     """
     source = dict(os.environ if environ is None else environ)
     unknown_count = sum(
         1
         for key in source
-        if key.startswith(_ENVIRONMENT_PREFIX) and key not in DATABASE_ENVIRONMENT_FIELDS
+        if key.startswith(_ENVIRONMENT_PREFIX) and key not in KNOWN_KNOWLEDGE_ENVIRONMENT_NAMES
     )
     if unknown_count:
         raise DatabaseMigrationError(ErrorCode.DATABASE_MIGRATION_CONFIGURATION_INVALID)

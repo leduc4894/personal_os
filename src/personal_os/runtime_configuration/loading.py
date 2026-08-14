@@ -11,6 +11,9 @@ from pydantic import ValidationError
 from personal_os.diagnostics.events import SafeToken
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import ConfigurationError
+from personal_os.runtime_configuration.environment_names import (
+    KNOWN_KNOWLEDGE_ENVIRONMENT_NAMES,
+)
 from personal_os.runtime_configuration.models import RuntimeSettings, ServiceName
 
 ENVIRONMENT_PREFIX: Final[str] = "KNOWLEDGE_"
@@ -29,12 +32,15 @@ def load_runtime_settings(
     """Load a frozen :class:`RuntimeSettings` from an exact environment snapshot.
 
     ``environ`` defaults to ``os.environ`` read at call time (never at import
-    time). Any ``KNOWLEDGE_``-prefixed key outside the closed field map raises
-    :class:`ConfigurationError` without echoing the offending name or value.
+    time). A ``KNOWLEDGE_``-prefixed key outside the repository-wide known-name
+    registry raises :class:`ConfigurationError` without echoing the offending
+    name or value. Registered names owned by another fragment (database,
+    object storage) are ignored; only this fragment's own field map is parsed.
     """
     source = dict(os.environ if environ is None else environ)
     unknown_count = sum(
-        key.startswith(ENVIRONMENT_PREFIX) and key not in ENVIRONMENT_FIELDS for key in source
+        key.startswith(ENVIRONMENT_PREFIX) and key not in KNOWN_KNOWLEDGE_ENVIRONMENT_NAMES
+        for key in source
     )
     if unknown_count:
         raise ConfigurationError(
