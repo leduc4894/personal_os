@@ -97,6 +97,12 @@ class EventName(StrEnum):
     OBJECT_STORAGE_OBJECT_DEDUPLICATED = "object_storage_object_deduplicated"
     OBJECT_STORAGE_INTEGRITY_FAILED = "object_storage_integrity_failed"
     OBJECT_STORAGE_SPOOL_CLEANUP_DEGRADED = "object_storage_spool_cleanup_degraded"
+    SOURCE_VERSION_PUBLISH_SUCCEEDED = "source_version_publish_succeeded"
+    SOURCE_VERSION_PUBLISH_REPLAYED = "source_version_publish_replayed"
+    SOURCE_VERSION_PUBLISH_REJECTED = "source_version_publish_rejected"
+    PROJECTION_INTENT_DISPATCHED = "projection_intent_dispatched"
+    PROJECTION_INTENT_DISPATCH_FAILED = "projection_intent_dispatch_failed"
+    PROJECTION_INTENT_LEASE_RECLAIMED = "projection_intent_lease_reclaimed"
 
 
 type SafeDiagnosticScalar = (
@@ -273,6 +279,145 @@ EVENT_DEFINITIONS: Final[Mapping[EventName, EventDefinition]] = MappingProxyType
                     "is_retryable",
                 }
             ),
+        ),
+        EventName.SOURCE_VERSION_PUBLISH_SUCCEEDED: EventDefinition(
+            level=DiagnosticLevel.INFO,
+            result_code=ResultCode.SUCCEEDED,
+            required_fields=frozenset(
+                {
+                    "operation",
+                    "outcome",
+                    "duration_ms",
+                    "attempt_count",
+                    "content_version",
+                    "source_id",
+                    "source_version_id",
+                    "event_id",
+                }
+            ),
+            allowed_fields=frozenset(
+                {
+                    "operation",
+                    "outcome",
+                    "duration_ms",
+                    "attempt_count",
+                    "content_version",
+                    "source_id",
+                    "source_version_id",
+                    "event_id",
+                }
+            ),
+        ),
+        EventName.SOURCE_VERSION_PUBLISH_REPLAYED: EventDefinition(
+            level=DiagnosticLevel.INFO,
+            result_code=ResultCode.SUCCEEDED,
+            required_fields=frozenset(
+                {
+                    "operation",
+                    "outcome",
+                    "duration_ms",
+                    "attempt_count",
+                    "content_version",
+                    "source_id",
+                    "source_version_id",
+                    "event_id",
+                }
+            ),
+            allowed_fields=frozenset(
+                {
+                    "operation",
+                    "outcome",
+                    "duration_ms",
+                    "attempt_count",
+                    "content_version",
+                    "source_id",
+                    "source_version_id",
+                    "event_id",
+                }
+            ),
+        ),
+        EventName.SOURCE_VERSION_PUBLISH_REJECTED: EventDefinition(
+            level=DiagnosticLevel.WARNING,
+            result_code=ResultCode.REJECTED,
+            required_fields=frozenset(
+                {
+                    "operation",
+                    "outcome",
+                    "duration_ms",
+                    "error_code",
+                    "error_category",
+                    "is_retryable",
+                }
+            ),
+            allowed_fields=frozenset(
+                {
+                    "operation",
+                    "outcome",
+                    "duration_ms",
+                    "error_code",
+                    "error_category",
+                    "is_retryable",
+                    "source_id",
+                    "event_id",
+                    "reason_code",
+                }
+            ),
+        ),
+        EventName.PROJECTION_INTENT_DISPATCHED: EventDefinition(
+            level=DiagnosticLevel.INFO,
+            result_code=ResultCode.SUCCEEDED,
+            required_fields=frozenset(
+                {
+                    "projection_kind",
+                    "outcome",
+                    "duration_ms",
+                    "attempt_count",
+                    "intent_id",
+                }
+            ),
+            allowed_fields=frozenset(
+                {
+                    "projection_kind",
+                    "outcome",
+                    "duration_ms",
+                    "attempt_count",
+                    "intent_id",
+                }
+            ),
+        ),
+        EventName.PROJECTION_INTENT_DISPATCH_FAILED: EventDefinition(
+            level=DiagnosticLevel.ERROR,
+            result_code=ResultCode.FAILED,
+            required_fields=frozenset(
+                {
+                    "projection_kind",
+                    "outcome",
+                    "duration_ms",
+                    "attempt_count",
+                    "intent_id",
+                    "error_code",
+                    "error_category",
+                    "is_retryable",
+                }
+            ),
+            allowed_fields=frozenset(
+                {
+                    "projection_kind",
+                    "outcome",
+                    "duration_ms",
+                    "attempt_count",
+                    "intent_id",
+                    "error_code",
+                    "error_category",
+                    "is_retryable",
+                }
+            ),
+        ),
+        EventName.PROJECTION_INTENT_LEASE_RECLAIMED: EventDefinition(
+            level=DiagnosticLevel.WARNING,
+            result_code=ResultCode.DEGRADED,
+            required_fields=frozenset({"projection_kind", "count"}),
+            allowed_fields=frozenset({"projection_kind", "count", "attempt_count"}),
         ),
     }
 )

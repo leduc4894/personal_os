@@ -46,6 +46,20 @@ class ErrorCode(StrEnum):
     OBJECT_STORAGE_OBJECT_MISSING = "object_storage_object_missing"
     OBJECT_STORAGE_INTEGRITY_FAILED = "object_storage_integrity_failed"
     OBJECT_STORAGE_METADATA_CONFLICT = "object_storage_metadata_conflict"
+    SOURCE_PUBLISH_INPUT_INVALID = "source_publish_input_invalid"
+    SOURCE_NOT_FOUND = "source_not_found"
+    SOURCE_ALREADY_EXISTS = "source_already_exists"
+    SOURCE_STATE_INVALID = "source_state_invalid"
+    SOURCE_VERSION_CONFLICT = "source_version_conflict"
+    SOURCE_IDEMPOTENCY_MISMATCH = "source_idempotency_mismatch"
+    SOURCE_EVENT_IDENTITY_MISMATCH = "source_event_identity_mismatch"
+    SOURCE_VERIFIED_RECEIPT_STALE = "source_verified_receipt_stale"
+    SOURCE_CONTENT_OBJECT_CONFLICT = "source_content_object_conflict"
+    SOURCE_CONCURRENCY_BUSY = "source_concurrency_busy"
+    SOURCE_CONCURRENCY_INVARIANT_FAILED = "source_concurrency_invariant_failed"
+    SOURCE_COMMIT_OUTCOME_UNKNOWN = "source_commit_outcome_unknown"
+    PROJECTION_DISPATCH_UNAVAILABLE = "projection_dispatch_unavailable"
+    PROJECTION_INTENT_CONTRACT_INVALID = "projection_intent_contract_invalid"
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +229,92 @@ ERROR_DEFINITIONS: Final[Mapping[ErrorCode, ErrorDefinition]] = MappingProxyType
             is_retryable=False,
             safe_message=("Existing canonical object metadata conflicts with expected metadata"),
             allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.SOURCE_PUBLISH_INPUT_INVALID: ErrorDefinition(
+            category=ErrorCategory.VALIDATION,
+            is_retryable=False,
+            safe_message="Source publication input is invalid",
+            allowed_detail_fields=frozenset({"reason"}),
+        ),
+        ErrorCode.SOURCE_NOT_FOUND: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The referenced source does not exist",
+            allowed_detail_fields=frozenset({"source_id"}),
+        ),
+        ErrorCode.SOURCE_ALREADY_EXISTS: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="A source with this identity already exists",
+            allowed_detail_fields=frozenset({"source_id"}),
+        ),
+        ErrorCode.SOURCE_STATE_INVALID: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The source is not in a state that accepts publication",
+            allowed_detail_fields=frozenset({"source_id", "source_state"}),
+        ),
+        ErrorCode.SOURCE_VERSION_CONFLICT: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The publication base conflicts with the current source version",
+            allowed_detail_fields=frozenset({"source_id", "current_version_id", "content_version"}),
+        ),
+        ErrorCode.SOURCE_IDEMPOTENCY_MISMATCH: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The idempotency key was reused with a different request",
+            allowed_detail_fields=frozenset({"source_id"}),
+        ),
+        ErrorCode.SOURCE_EVENT_IDENTITY_MISMATCH: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The event identity was reused with a different request",
+            allowed_detail_fields=frozenset({"source_id", "event_id"}),
+        ),
+        ErrorCode.SOURCE_VERIFIED_RECEIPT_STALE: ErrorDefinition(
+            category=ErrorCategory.VALIDATION,
+            is_retryable=False,
+            safe_message="The verified receipt is stale and must be reverified",
+            allowed_detail_fields=frozenset({"reason"}),
+        ),
+        ErrorCode.SOURCE_CONTENT_OBJECT_CONFLICT: ErrorDefinition(
+            category=ErrorCategory.INTEGRITY,
+            is_retryable=False,
+            safe_message=(
+                "Existing canonical content-object metadata conflicts with expected metadata"
+            ),
+            allowed_detail_fields=frozenset({"source_id"}),
+        ),
+        ErrorCode.SOURCE_CONCURRENCY_BUSY: ErrorDefinition(
+            category=ErrorCategory.DEPENDENCY,
+            is_retryable=True,
+            safe_message="Source publication concurrency limits are temporarily exhausted",
+            allowed_detail_fields=frozenset({"source_id"}),
+        ),
+        ErrorCode.SOURCE_CONCURRENCY_INVARIANT_FAILED: ErrorDefinition(
+            category=ErrorCategory.INTEGRITY,
+            is_retryable=False,
+            safe_message="A source publication concurrency invariant failed",
+            allowed_detail_fields=frozenset({"source_id"}),
+        ),
+        ErrorCode.SOURCE_COMMIT_OUTCOME_UNKNOWN: ErrorDefinition(
+            category=ErrorCategory.DEPENDENCY,
+            is_retryable=True,
+            safe_message="The publication commit outcome could not be determined",
+            allowed_detail_fields=frozenset({"source_id"}),
+        ),
+        ErrorCode.PROJECTION_DISPATCH_UNAVAILABLE: ErrorDefinition(
+            category=ErrorCategory.DEPENDENCY,
+            is_retryable=True,
+            safe_message="Projection dispatch is temporarily unavailable",
+            allowed_detail_fields=frozenset({"projection_kind"}),
+        ),
+        ErrorCode.PROJECTION_INTENT_CONTRACT_INVALID: ErrorDefinition(
+            category=ErrorCategory.INTEGRITY,
+            is_retryable=False,
+            safe_message="A projection intent violated its dispatch contract",
+            allowed_detail_fields=frozenset({"projection_kind"}),
         ),
     }
 )
