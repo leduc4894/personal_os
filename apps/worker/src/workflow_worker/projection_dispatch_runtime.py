@@ -41,6 +41,7 @@ from personal_os.runtime_configuration.environment_names import (
 )
 from personal_os.runtime_configuration.loading import load_runtime_settings
 from personal_os.runtime_configuration.models import RuntimeEnvironment, ServiceName
+from personal_os.sources.errors import ProjectionDispatchError
 from personal_os.sources.metrics import (
     ProjectionDispatchErrorCode,
     ProjectionDispatchOutcome,
@@ -63,6 +64,7 @@ from postgresql_source_store.settings import (
     read_database_runtime_password,
 )
 from workflow_worker.projection_workflow_starter import (
+    PROJECTION_WORKFLOW_START_TIMEOUT,
     PROJECTION_WORKFLOW_TASK_QUEUE,
     ProjectionWorkflowStarter,
     ProjectionWorkflowStartResult,
@@ -247,8 +249,10 @@ class ProjectionDispatchRuntime:
         claimed = await self._store.claim_batch(self._clock(), PROJECTION_CLAIM_BATCH_LIMIT)
         if not claimed:
             return 0
-        # Every start call carries its own caller-side RPC timeout, so waiting
-        # for the group waits at most the start-call bound per attempt.
+        # Every Temporal call inside the group — the start and any
+        # duplicate-run resolution describe — carries the pinned caller-side
+        # RPC timeout, so waiting for the group waits at most that bound per
+        # attempt.
         semaphore = asyncio.Semaphore(self._concurrency_limit)
 
         async def dispatch_bounded(intent: LeasedProjectionIntent) -> None:
@@ -495,7 +499,11 @@ async def run_projection_dispatcher_process() -> None:
     the bounded dispatch loop over the composition-owned engine, intent
     store, Temporal client and starter. Clients and pools are created here
     only — never at import time — and the engine is disposed on exit while
-    attempts with unknown outcomes stay leased for expiry.
+    attempts with unknown outcomes stay leased for expiry. The Temporal
+    connect carries the pinned caller-side bound (``Client.connect`` exposes
+    no timeout keyword, so the bound is applied with ``asyncio.wait_for``);
+    a connect that exceeds it surfaces as the retryable dispatch-unavailable
+    failure rather than hanging startup.
     """
     runtime_settings = load_runtime_settings(ServiceName.WORKER)
     database_settings = load_database_runtime_settings()
@@ -503,9 +511,13 @@ async def run_projection_dispatcher_process() -> None:
     require_dispatcher_activation_allowed(runtime_settings.environment, temporal_settings)
     password = read_database_runtime_password(database_settings)
     engine = create_source_store_engine(database_settings, password)
-    temporal_client = await TemporalClient.connect(
-        temporal_settings.target, namespace=temporal_settings.namespace
-    )
+    try:
+        temporal_client = await asyncio.wait_for(
+            TemporalClient.connect(temporal_settings.target, namespace=temporal_settings.namespace),
+            timeout=PROJECTION_WORKFLOW_START_TIMEOUT.total_seconds(),
+        )
+    except TimeoutError as cause:
+        raise ProjectionDispatchError(ErrorCode.PROJECTION_DISPATCH_UNAVAILABLE) from cause
     store = PostgresqlProjectionIntentStore(engine)
     starter = TemporalProjectionWorkflowStarter(temporal_client)
     shutdown = asyncio.Event()

@@ -6,9 +6,11 @@ section 11.3): it derives the deterministic workflow identity
 on the pinned ``source-ingestion`` task queue), builds the closed
 ``source_ingestion_reference/v1`` input carrying only the contract tag plus the
 workspace/event/source/source-version UUIDs, and starts executions with
-``Client.start_workflow()`` under a 10-second caller timeout, duplicate-run
-rejection (``REJECT_DUPLICATE``) for closed executions and ``USE_EXISTING`` for
-running ones. An already-started execution is resolved by describing it: the
+``Client.start_workflow()`` under the pinned 10-second caller timeout,
+duplicate-run rejection (``REJECT_DUPLICATE``) for closed executions and
+``USE_EXISTING`` for running ones; the duplicate-run resolution ``describe()``
+carries the same bound. An already-started execution is resolved by describing
+it: the
 exact deterministic execution — running, completed, or continued-as-new — is
 accepted as ``existing`` and never terminated or replaced; any other type or an
 abnormally closed execution is the terminal integrity failure. SDK exceptions
@@ -47,7 +49,9 @@ PROJECTION_WORKFLOW_ID_PREFIX: Final[str] = "source-ingestion"
 #: The input contract tag (design section 11.3).
 SOURCE_INGESTION_REFERENCE_CONTRACT: Final[str] = "source_ingestion_reference/v1"
 
-#: The caller-side bound for every start/describe call (design section 11.2).
+#: The caller-side bound for every Temporal RPC the dispatch path issues:
+#: the workflow start, the duplicate-run resolution describe, and (via
+#: ``asyncio.wait_for``) the process's client connect (design section 11.2).
 PROJECTION_WORKFLOW_START_TIMEOUT: Final[timedelta] = timedelta(seconds=10)
 
 #: The closed-execution states resolved as the exact deterministic execution
@@ -139,9 +143,18 @@ class TemporalProjectionWorkflowStarter:
     """Start one deterministic source-ingestion workflow per event.
 
     Holds only the composition-owned Temporal client and the pinned queue/timeout
-    bounds; it opens no connection itself. Every SDK exception is mapped to a
-    closed projection outcome with the provider error chained as the internal
-    cause only.
+    bounds; it opens no connection itself. Every Temporal RPC it issues — the
+    start and the duplicate-run resolution describe — carries the pinned
+    caller-side timeout, so no accepted-but-unanswered call can hang a caller.
+    Every SDK exception is mapped to a closed projection outcome with the
+    provider error chained as the internal cause only.
+
+    Under ``USE_EXISTING`` the server natively resolves a concurrently running
+    execution by returning its handle, which surfaces as ``STARTED``; the
+    ``EXISTING`` outcome is emitted only on the server-rejected duplicate-run
+    path (in practice a closed execution, or a rejection race) resolved by the
+    bounded describe. Both outcomes acknowledge dispatched identically, so no
+    extra disambiguating RPC is issued per start.
     """
 
     def __init__(
@@ -188,13 +201,18 @@ class TemporalProjectionWorkflowStarter:
     ) -> ProjectionWorkflowStartResult:
         """Resolve a rejected duplicate run by describing the existing execution.
 
-        The exact deterministic execution — same pinned type and task queue,
-        running, completed or continued-as-new — is accepted and never
-        terminated, replaced or signalled. Any other type, queue or an
-        abnormal closure is the terminal integrity failure.
+        The describe carries the same pinned caller-side timeout as the start,
+        so a hung resolution surfaces as the retryable unavailable failure
+        instead of blocking the dispatch group unboundedly. The exact
+        deterministic execution — same pinned type and task queue, running,
+        completed or continued-as-new — is accepted and never terminated,
+        replaced or signalled. Any other type, queue or an abnormal closure is
+        the terminal integrity failure.
         """
         try:
-            description = await self._client.get_workflow_handle(workflow_id).describe()
+            description = await self._client.get_workflow_handle(workflow_id).describe(
+                rpc_timeout=self._start_timeout
+            )
         except RPCError as describe_cause:
             raise self._map_rpc_error(describe_cause) from describe_cause
         except RPCTimeoutOrCancelledError as describe_cause:

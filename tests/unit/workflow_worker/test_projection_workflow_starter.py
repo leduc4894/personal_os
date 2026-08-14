@@ -208,6 +208,7 @@ class RecordedStart:
 class RecordedHandleCall:
     method: str
     workflow_id: str
+    rpc_timeout: timedelta | None = None
 
 
 class FakeWorkflowHandle:
@@ -215,8 +216,10 @@ class FakeWorkflowHandle:
         self._client = client
         self._workflow_id = workflow_id
 
-    async def describe(self) -> object:
-        self._client.handle_calls.append(RecordedHandleCall("describe", self._workflow_id))
+    async def describe(self, *, rpc_timeout: timedelta | None = None) -> object:
+        self._client.handle_calls.append(
+            RecordedHandleCall("describe", self._workflow_id, rpc_timeout)
+        )
         if self._client.describe_error is not None:
             raise self._client.describe_error
         assert self._client.description is not None
@@ -312,6 +315,12 @@ def test_start_uses_pinned_type_queue_policies_and_timeout() -> None:
 
 
 def test_running_execution_resolves_as_existing_under_use_existing() -> None:
+    # Modeling note: under USE_EXISTING the real server natively resolves a
+    # concurrently running execution by returning its handle, which the
+    # adapter surfaces as STARTED — no rejection, no describe. This test
+    # models the server-rejected duplicate-run path (a rejection race, or a
+    # server that does not apply the conflict policy) whose bounded describe
+    # then finds a RUNNING execution and resolves it as EXISTING.
     client = FakeTemporalClient(
         start_error=WorkflowAlreadyStartedError("wid", PROJECTION_WORKFLOW_TYPE_NAME),
         description=_FakeDescription(status=WorkflowExecutionStatus.RUNNING),
@@ -321,6 +330,9 @@ def test_running_execution_resolves_as_existing_under_use_existing() -> None:
 
     assert result is ProjectionWorkflowStartResult.EXISTING
     assert [call.method for call in client.handle_calls] == ["describe"]
+    # The resolution describe carries the same pinned caller-side bound as
+    # the start call, so it can never hang the dispatch group unboundedly.
+    assert client.handle_calls[0].rpc_timeout == timedelta(seconds=10)
 
 
 def test_exact_closed_deterministic_execution_resolves_accepted_never_replaced() -> None:
