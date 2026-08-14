@@ -135,6 +135,26 @@ def test_r2_workspace_member_has_exact_sdk_pins() -> None:
     assert manifest["dependency-groups"]["dev"] == ["types-aiobotocore[s3]==3.9.0"]
 
 
+def test_postgresql_source_store_has_exact_dependencies() -> None:
+    manifest = tomllib.loads(
+        (REPO_ROOT / "packages/postgresql-source-store/pyproject.toml").read_text("utf-8")
+    )
+    assert manifest["project"]["dependencies"] == [
+        "knowledge-core==0.1.0",
+        "psycopg[binary]==3.3.4",
+        "SQLAlchemy==2.0.51",
+    ]
+
+
+def test_worker_has_exact_publication_dependencies() -> None:
+    manifest = tomllib.loads((REPO_ROOT / "apps/worker/pyproject.toml").read_text("utf-8"))
+    assert manifest["project"]["dependencies"] == [
+        "knowledge-core==0.1.0",
+        "postgresql-source-store==0.1.0",
+        "temporalio==1.30.0",
+    ]
+
+
 def test_root_dev_group_pins_pytest_asyncio() -> None:
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert "pytest-asyncio==1.4.0" in data["dependency-groups"]["dev"]

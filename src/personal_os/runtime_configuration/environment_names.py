@@ -56,8 +56,22 @@ OBJECT_STORAGE_ENVIRONMENT_NAMES: Final[frozenset[str]] = frozenset(
     }
 )
 
+#: Temporal workflow fragment: the target address, namespace and task queue
+#: the worker registers against. The durable workflow engine is reachable only
+#: through these names; no plaintext credentials belong to this fragment.
+TEMPORAL_ENVIRONMENT_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "KNOWLEDGE_TEMPORAL_TARGET",
+        "KNOWLEDGE_TEMPORAL_NAMESPACE",
+        "KNOWLEDGE_TEMPORAL_TASK_QUEUE",
+    }
+)
+
 #: Repository-wide union of every approved ``KNOWLEDGE_*`` name. A loader treats
 #: any prefixed name outside this set as terminal ``configuration_unknown_key``.
 KNOWN_KNOWLEDGE_ENVIRONMENT_NAMES: Final[frozenset[str]] = frozenset(
-    RUNTIME_ENVIRONMENT_NAMES | DATABASE_ENVIRONMENT_NAMES | OBJECT_STORAGE_ENVIRONMENT_NAMES
+    RUNTIME_ENVIRONMENT_NAMES
+    | DATABASE_ENVIRONMENT_NAMES
+    | OBJECT_STORAGE_ENVIRONMENT_NAMES
+    | TEMPORAL_ENVIRONMENT_NAMES
 )

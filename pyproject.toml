@@ -30,10 +30,17 @@ dev = [
 required-version = "==0.11.32"
 
 [tool.uv.workspace]
-members = ["apps/api", "apps/mcp", "apps/worker", "packages/r2-object-storage"]
+members = [
+    "apps/api",
+    "apps/mcp",
+    "apps/worker",
+    "packages/r2-object-storage",
+    "packages/postgresql-source-store",
+]
 
 [tool.uv.sources]
 knowledge-core = { workspace = true }
+postgresql-source-store = { workspace = true }
 
 [tool.uv.build-backend]
 module-name = "personal_os"
@@ -56,7 +63,15 @@ markers = [
 [tool.ruff]
 target-version = "py314"
 line-length = 100
-src = ["src", "apps", "packages/r2-object-storage/src", "migrations", "tests", "tools"]
+src = [
+    "src",
+    "apps",
+    "packages/r2-object-storage/src",
+    "packages/postgresql-source-store/src",
+    "migrations",
+    "tests",
+    "tools",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
@@ -65,13 +80,36 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 python_version = "3.14"
 strict = true
 explicit_package_bases = true
-mypy_path = ["src", "apps/api/src", "apps/mcp/src", "apps/worker/src", "packages/r2-object-storage/src"]
+mypy_path = [
+    "src",
+    "apps/api/src",
+    "apps/mcp/src",
+    "apps/worker/src",
+    "packages/r2-object-storage/src",
+    "packages/postgresql-source-store/src",
+]
 exclude = ["^tests[/\\\\]fixtures[/\\\\]"]
-files = ["src", "apps/api/src", "apps/mcp/src", "apps/worker/src", "packages/r2-object-storage/src", "migrations", "tools"]
+files = [
+    "src",
+    "apps/api/src",
+    "apps/mcp/src",
+    "apps/worker/src",
+    "packages/r2-object-storage/src",
+    "packages/postgresql-source-store/src",
+    "migrations",
+    "tools",
+]
 
 [tool.coverage.run]
 branch = true
-source = ["personal_os", "api_runtime", "mcp_runtime", "workflow_worker", "r2_object_storage"]
+source = [
+    "personal_os",
+    "api_runtime",
+    "mcp_runtime",
+    "workflow_worker",
+    "r2_object_storage",
+    "postgresql_source_store",
+]
 
 [tool.coverage.report]
 show_missing = true
@@ -83,13 +121,13 @@ skip_covered = false
 # boundary-check, test, build. Coverage is diagnostic only (no fail_under).
 
 [tool.poe.tasks.python-format]
-cmd = "ruff format src apps packages/r2-object-storage/src tests tools"
+cmd = "ruff format src apps packages/r2-object-storage/src packages/postgresql-source-store/src tests tools"
 
 [tool.poe.tasks.python-format-check]
-cmd = "ruff format --check src apps packages/r2-object-storage/src tests tools"
+cmd = "ruff format --check src apps packages/r2-object-storage/src packages/postgresql-source-store/src tests tools"
 
 [tool.poe.tasks.python-lint]
-cmd = "ruff check src apps packages/r2-object-storage/src tests tools"
+cmd = "ruff check src apps packages/r2-object-storage/src packages/postgresql-source-store/src tests tools"
 
 # TypeScript subtasks run through Poe's shell task type so the ``pnpm`` program
 # resolves on every platform. On Windows CI, pnpm/action-setup installs pnpm as
@@ -106,7 +144,7 @@ shell = "pnpm run format:check"
 shell = "pnpm run lint"
 
 [tool.poe.tasks.python-type-check]
-cmd = "mypy src apps/api/src apps/mcp/src apps/worker/src packages/r2-object-storage/src tools"
+cmd = "mypy src apps/api/src apps/mcp/src apps/worker/src packages/r2-object-storage/src packages/postgresql-source-store/src tools"
 
 [tool.poe.tasks.typescript-type-check]
 shell = "pnpm run type-check"

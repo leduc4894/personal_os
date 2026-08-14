@@ -5,6 +5,7 @@ root_packages =
     mcp_runtime
     workflow_worker
     r2_object_storage
+    postgresql_source_store
 include_external_packages = True
 
 [importlinter:contract:domain-does-not-import-composition-or-infrastructure]
@@ -28,6 +29,7 @@ forbidden_modules =
     botocore
     aiohttp
     r2_object_storage
+    postgresql_source_store
 
 [importlinter:contract:composition-roots-are-independent]
 name = Python composition roots do not import one another
@@ -53,3 +55,30 @@ forbidden_modules =
     qdrant_client
     neo4j
     redis
+
+[importlinter:contract:postgresql-adapter-does-not-import-composition-or-infrastructure]
+name = PostgreSQL source-store adapter imports only core contracts and its approved SQL SDK graph
+type = forbidden
+source_modules =
+    postgresql_source_store
+forbidden_modules =
+    api_runtime
+    mcp_runtime
+    workflow_worker
+    r2_object_storage
+    temporalio
+    qdrant_client
+    neo4j
+    redis
+
+[importlinter:contract:temporal-sdk-imports-only-from-worker]
+name = Temporal SDK is imported only by the workflow worker composition root
+type = forbidden
+source_modules =
+    api_runtime
+    mcp_runtime
+    personal_os
+    r2_object_storage
+    postgresql_source_store
+forbidden_modules =
+    temporalio

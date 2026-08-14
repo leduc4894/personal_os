@@ -19,6 +19,7 @@ PYTHON_SOURCE_ROOTS = [
     REPO_ROOT / "apps" / "mcp" / "src",
     REPO_ROOT / "apps" / "worker" / "src",
     REPO_ROOT / "packages" / "r2-object-storage" / "src",
+    REPO_ROOT / "packages" / "postgresql-source-store" / "src",
     REPO_ROOT / "tools",
 ]
 
@@ -156,13 +157,23 @@ CORE_FORBIDDEN_SECTION = (
 R2_FORBIDDEN_SECTION = (
     "importlinter:contract:r2-adapter-does-not-import-composition-or-infrastructure"
 )
+POSTGRESQL_FORBIDDEN_SECTION = (
+    "importlinter:contract:postgresql-adapter-does-not-import-composition-or-infrastructure"
+)
+TEMPORAL_FORBIDDEN_SECTION = "importlinter:contract:temporal-sdk-imports-only-from-worker"
 
 
 def test_importlinter_core_contract_forbids_provider_packages() -> None:
     parser = configparser.ConfigParser()
     parser.read(REPO_ROOT / ".importlinter")
     forbidden = parser[CORE_FORBIDDEN_SECTION]["forbidden_modules"].split()
-    for provider in ("r2_object_storage", "aiobotocore", "botocore", "aiohttp"):
+    for provider in (
+        "r2_object_storage",
+        "postgresql_source_store",
+        "aiobotocore",
+        "botocore",
+        "aiohttp",
+    ):
         assert provider in forbidden, f"core forbidden contract must forbid importing {provider!r}"
 
 
@@ -192,6 +203,51 @@ def test_importlinter_r2_contract_isolates_adapter_from_composition_roots() -> N
         "r2 adapter forbidden contract must block every composition root and "
         f"infrastructure SDK, missing: {expected_forbidden - forbidden}"
     )
+
+
+def test_importlinter_postgresql_contract_isolates_adapter_from_composition_roots() -> None:
+    parser = configparser.ConfigParser()
+    parser.read(REPO_ROOT / ".importlinter")
+    assert parser.has_section(POSTGRESQL_FORBIDDEN_SECTION), (
+        "an importlinter forbidden contract must isolate postgresql_source_store"
+    )
+    section = parser[POSTGRESQL_FORBIDDEN_SECTION]
+    assert section["type"] == "forbidden"
+    assert section["source_modules"].split() == ["postgresql_source_store"]
+    forbidden = set(section["forbidden_modules"].split())
+    expected_forbidden = {
+        "api_runtime",
+        "mcp_runtime",
+        "workflow_worker",
+        "r2_object_storage",
+        "temporalio",
+        "qdrant_client",
+        "neo4j",
+        "redis",
+    }
+    assert expected_forbidden <= forbidden, (
+        "postgresql adapter forbidden contract must block every composition root, "
+        "the R2 adapter and every non-SQL infrastructure SDK, missing: "
+        f"{expected_forbidden - forbidden}"
+    )
+
+
+def test_importlinter_temporal_sdk_is_only_importable_by_worker() -> None:
+    parser = configparser.ConfigParser()
+    parser.read(REPO_ROOT / ".importlinter")
+    assert parser.has_section(TEMPORAL_FORBIDDEN_SECTION), (
+        "an importlinter forbidden contract must reserve temporalio for workflow_worker"
+    )
+    section = parser[TEMPORAL_FORBIDDEN_SECTION]
+    assert section["type"] == "forbidden"
+    assert section["forbidden_modules"].split() == ["temporalio"]
+    assert section["source_modules"].split() == [
+        "api_runtime",
+        "mcp_runtime",
+        "personal_os",
+        "r2_object_storage",
+        "postgresql_source_store",
+    ], "every root except workflow_worker must forbid importing temporalio"
 
 
 def test_python_source_never_mutates_sys_path() -> None:

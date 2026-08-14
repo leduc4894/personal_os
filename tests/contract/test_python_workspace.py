@@ -31,3 +31,12 @@ def test_r2_package_imports_outside_repository(tmp_path: Path) -> None:
         check=False,
     )
     assert completed.returncode == 0
+
+
+def test_postgresql_source_store_imports_outside_repository(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        [sys.executable, "-c", "import postgresql_source_store"],
+        cwd=tmp_path,
+        check=False,
+    )
+    assert completed.returncode == 0
