@@ -78,14 +78,13 @@ exits nonzero without local test credentials.
 
 ### Activation status (2026-08-14)
 
-The live gate has not run to green yet: **live activation blocked: dedicated
-test-bucket credentials not configured.** No local `R2_TEST_*` credentials
-exist in the development environment, and the protected workflow's repository
-variables/secrets were not configured at acceptance time, so no live run was
-dispatched. All eight live cases collect and remain executable — none is
-skipped or xfailed — and Phase 1 production activation stays blocked until a
-live run passes on the exact implementation commit (see
-`docs/operations/object-storage.md`).
+The live gate is **green**: the protected `object-storage-live` workflow passed
+all nine live cases (the full design 16.2 set) against the dedicated private
+test bucket on `master` at commit `22dccca` —
+[run 31791535221](https://github.com/leduc4894/personal_os/actions/runs/31791535221),
+2026-08-14. A local developer run had passed the same nine cases first via
+`uv run poe object-storage-test-live` with the `R2_TEST_*` variables and the
+two mode-0600 credential files. No live case is skipped or xfailed.
 
 ### Exact-key cleanup contract
 

@@ -120,14 +120,21 @@ size, digest and media type before a single byte reaches a consumer.
   (format, lint, strict typing, import boundaries, Python/TypeScript tests,
   builds), the focused object-storage acceptance suites, the live-module
   collection check, `lint-imports` and `git diff --check` all passed.
-- Live gate: **live activation blocked: dedicated test-bucket credentials not
-  configured.** The protected `object-storage-live` workflow
-  (`.github/workflows/object-storage-live.yml`) triggers on push to `master`,
-  on its daily schedule and on manual dispatch, but the repository variables
-  `R2_TEST_ENDPOINT` / `R2_TEST_BUCKET_NAME` and the secrets
-  `R2_TEST_ACCESS_KEY_ID` / `R2_TEST_SECRET_ACCESS_KEY` are not configured in
-  this environment, so no live run was dispatched and none has passed yet.
-- Phase 1 production activation is therefore **not complete**. The live cases
-  are not skipped or xfailed; they remain executable via
-  `uv run poe object-storage-test-live` once the dedicated test-bucket
-  credentials exist.
+- Live gate: **green.** The protected `object-storage-live` workflow
+  (`.github/workflows/object-storage-live.yml`) passed all nine live cases
+  (the full design 16.2 set, including repeated/lost-response-equivalent
+  resolution) against the dedicated private test bucket on `master` at commit
+  `22dccca` — run
+  [31791535221](https://github.com/leduc4894/personal_os/actions/runs/31791535221),
+  2026-08-14. The workflow re-runs on every push to `master`, daily at 02:23 UTC
+  and on manual dispatch.
+- Live activation history: the first dispatch attempts surfaced configuration
+  defects outside the adapter — a workflow file bug (`runner.temp` used at job
+  level), a missing repository secret and a malformed secret value — each
+  caught fail-closed by the harness or the credential-shape guard before any
+  test claimed a pass. Local developer runs use the same contract via
+  `uv run poe object-storage-test-live` with the three `R2_TEST_*` variables
+  and the two mode-0600 credential files.
+- Phase 1 object-storage activation: **live gate satisfied** on the recorded
+  commit. Production activation remains a deliberate deployment decision
+  (secret files, spool volume and the runtime check), not a test status.
