@@ -120,6 +120,14 @@ class DatabaseRetryPolicy:
     jitter between the pinned 50-250 ms bounds. Typed application errors pass
     through untouched, and every non-retryable failure is mapped immediately by
     :func:`map_database_failure` without propagating driver text.
+
+    A write transaction may supply ``recover`` for the uncertain-commit case
+    (design section 9.4): when an ambiguous failure (unavailability or an
+    unclassified database failure) strikes, the recovery lookup runs on a fresh
+    bounded connection and decides the outcome from evidence only — a
+    committed replay is returned, a retry happens only after the lookup proves
+    absence, and an unavailable lookup raises the retryable
+    ``source_commit_outcome_unknown`` without ever claiming a rollback.
     """
 
     maximum_attempts: int = 3
@@ -131,6 +139,7 @@ class DatabaseRetryPolicy:
         source_id: UUID,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         jitter: Callable[[float, float], float] = random.uniform,
+        recover: Callable[[], Awaitable[T | None]] | None = None,
     ) -> T:
         for attempt in range(1, self.maximum_attempts + 1):
             try:
@@ -138,11 +147,51 @@ class DatabaseRetryPolicy:
             except ApplicationError:
                 raise
             except Exception as cause:
-                if classify_database_failure(cause) is not DatabaseFailureKind.CONTENTION:
+                failure_kind = classify_database_failure(cause)
+                if failure_kind is DatabaseFailureKind.NOT_DATABASE:
                     mapped = map_database_failure(cause, source_id=source_id)
                     raise mapped from cause
-                if attempt == self.maximum_attempts:
+                if failure_kind is DatabaseFailureKind.CONTENTION:
+                    if attempt == self.maximum_attempts:
+                        mapped = map_database_failure(cause, source_id=source_id)
+                        raise mapped from cause
+                elif recover is not None:
+                    # The commit acknowledgement is uncertain: resolve the
+                    # outcome from evidence before deciding anything.
+                    recovered = await self._resolve_uncertain_outcome(
+                        recover, source_id=source_id
+                    )
+                    if recovered is not None:
+                        return recovered
+                    # The lookup proved absence, so a retry cannot duplicate.
+                    if attempt == self.maximum_attempts:
+                        mapped = map_database_failure(cause, source_id=source_id)
+                        raise mapped from cause
+                else:
                     mapped = map_database_failure(cause, source_id=source_id)
                     raise mapped from cause
                 await sleep(jitter(RETRY_JITTER_MINIMUM_SECONDS, RETRY_JITTER_MAXIMUM_SECONDS))
         raise AssertionError("retry loop exhausted without a result")
+
+    @staticmethod
+    async def _resolve_uncertain_outcome[T](
+        recover: Callable[[], Awaitable[T | None]], *, source_id: UUID
+    ) -> T | None:
+        """Run the fresh-connection outcome lookup for an ambiguous commit.
+
+        A found committed result is returned as the replay evidence; ``None``
+        is a proven absence; a typed application error (for example an
+        identity misuse discovered by the lookup) propagates untouched. Any
+        other lookup failure means PostgreSQL could not prove presence or
+        absence, so the outcome stays unknown and retryable — a rollback is
+        never claimed without evidence.
+        """
+        try:
+            return await recover()
+        except ApplicationError:
+            raise
+        except Exception as lookup_cause:
+            raise SourcePublicationError(
+                ErrorCode.SOURCE_COMMIT_OUTCOME_UNKNOWN,
+                safe_details={"source_id": source_id},
+            ) from lookup_cause

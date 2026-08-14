@@ -1,4 +1,4 @@
-"""Authorization-aware idempotency preflight, replay hydration and atomic create.
+"""Authorization-aware idempotency preflight, replay hydration and atomic commits.
 
 :class:`PostgresqlSourcePublicationStore` implements the durable
 :class:`~personal_os.sources.ports.SourcePublicationStore` port over the
@@ -13,26 +13,36 @@ established — and discloses only the requested source/event IDs, never
 existing tenant data. Malformed context before the trust boundary produces
 only the typed error, never an audit row.
 
-``commit_create`` runs the canonical create transaction (design sections
-8.3-8.5 and 10.1) inside one ``READ COMMITTED`` transaction: the pinned
-``SET LOCAL`` bounds, the idempotency advisory lock, the trusted
-workspace/actor revalidation, the replay/mismatch recheck, the source
-advisory lock, the global source-existence rejection, the exact
-content-object upsert/select/compare, the pending source, version 1 with a
-null parent, the guarded active-pointer transition, the create event with a
-null base, the two upsert intents, the succeeded audit with the safe diff
-hash, and the commit. Backend UUIDv7 identities are allocated once per
-service invocation and reused through bounded transaction attempts;
-PostgreSQL owns the event identity sequence and the transaction timestamps.
+``commit_create`` (design sections 8.3-8.5 and 10.1) and ``commit_update``
+(design sections 8.6-8.8) each run one canonical ``READ COMMITTED``
+transaction behind the same locked prefix: the pinned ``SET LOCAL`` bounds,
+the idempotency advisory lock, the trusted workspace/actor revalidation, the
+replay/mismatch recheck, the source advisory lock. The create then performs
+the global source-existence rejection, the exact content-object
+upsert/select/compare, the pending source, version 1 with a null parent, the
+guarded active-pointer transition, the create event with a null base, the
+two upsert intents and the succeeded audit. The update selects the
+source/current-version/current-object rows ``FOR UPDATE``, accepts only
+``active`` and ``stored_not_indexed`` sources, compares the requested base
+BEFORE the content, and either writes the no-change event/audit pair or the
+changed graph — content object, version ``n+1`` with the current parent, the
+guarded pointer advance, the update event, the two upsert intents and the
+succeeded audit — never touching source type or title. Backend UUIDv7
+identities are allocated once per service invocation and reused through
+bounded transaction attempts; PostgreSQL owns the event identity sequence
+and the transaction timestamps. An uncertain commit acknowledgement resolves
+through the fresh-connection recovery lookup wired into the bounded retry
+runner (design section 9.4).
 
 Every statement is schema-qualified through the Task 6 Core metadata and
 parameter-bound; driver failures are routed through
 :mod:`postgresql_source_store.error_mapping` so SQLSTATE, SQL, parameters and
-driver text never leave the adapter. The update commit lands in a later task.
+driver text never leave the adapter.
 """
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
@@ -43,6 +53,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from personal_os.diagnostics.context import DiagnosticContext
+from personal_os.diagnostics.events import SafeToken
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.object_storage import VerifiedObjectReceipt
 from personal_os.object_storage.keys import ContentDigest
@@ -52,9 +63,10 @@ from personal_os.sources.commands import (
     IdempotencyKey,
     UpdateSourceVersion,
 )
-from personal_os.sources.errors import ACTOR_INVALID, SourcePublicationError
+from personal_os.sources.errors import ACTOR_INVALID, SOURCE_STATES, SourcePublicationError
 from personal_os.sources.fingerprint import (
     RequestFingerprint,
+    SafeDiffHash,
     SourceVersionCommand,
     compute_safe_diff_hash,
 )
@@ -88,8 +100,18 @@ SUCCESS_AUDIT_ACTION: Final[str] = "source.version_published"
 AUDIT_TARGET_KIND_SOURCE: Final[str] = "source"
 AUDIT_RESULT_SUCCEEDED: Final[str] = "succeeded"
 
-#: Canonical create-transition literals.
+#: Audit constants for the in-transaction success audit of a no-change update.
+NO_CHANGE_AUDIT_ACTION: Final[str] = "source.version_no_change"
+REASON_CONTENT_UNCHANGED: Final[str] = "content_unchanged"
+
+#: Rejection reason codes for the update preconditions (spec 10.3).
+REASON_SOURCE_NOT_FOUND: Final[str] = "source_not_found"
+REASON_SOURCE_STATE_INVALID: Final[str] = "source_state_invalid"
+REASON_VERSION_CONFLICT: Final[str] = "version_conflict"
+
+#: Canonical create/update transition literals.
 CREATE_EVENT_TYPE: Final[str] = "create"
+UPDATE_EVENT_TYPE: Final[str] = "update"
 CONTENT_VERSION_ONE: Final[int] = 1
 PROJECTION_KIND_QDRANT: Final[str] = "qdrant"
 PROJECTION_KIND_NEO4J: Final[str] = "neo4j"
@@ -100,6 +122,17 @@ _WORKSPACE_STATUS_ACTIVE: Final[str] = "active"
 _DEVICE_STATUS_ACTIVE: Final[str] = "active"
 _SOURCE_STATE_PENDING: Final[str] = "pending"
 _SOURCE_STATE_ACTIVE: Final[str] = "active"
+_SOURCE_STATE_STORED_NOT_INDEXED: Final[str] = "stored_not_indexed"
+
+#: The only source states an update may publish over (design 8.6).
+_UPDATEABLE_SOURCE_STATES: Final[frozenset[str]] = frozenset(
+    {_SOURCE_STATE_ACTIVE, _SOURCE_STATE_STORED_NOT_INDEXED}
+)
+
+#: Closed ``source_state`` audit tokens by their closed state value.
+_SOURCE_STATE_TOKENS_BY_VALUE: Final[dict[str, SafeToken]] = {
+    token.value: token for token in SOURCE_STATES
+}
 
 #: Rejection reason codes are the closed spec set plus ``None`` for the
 #: invariant-failure rejection, which has no registered reason token.
@@ -309,6 +342,57 @@ class SourceCreateIdentities:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceUpdateIdentities:
+    """Backend UUIDv7 identities for one update service invocation.
+
+    Like :class:`SourceCreateIdentities`, the five generated identities are
+    allocated once per service invocation and reused through the bounded
+    transaction attempts, so a retry rewrites the same canonical identity.
+    The version identity of the committed update event and every timestamp
+    stay PostgreSQL-owned.
+    """
+
+    content_object_id: UUID
+    source_version_id: UUID
+    qdrant_intent_id: UUID
+    neo4j_intent_id: UUID
+    audit_event_id: UUID
+
+    @classmethod
+    def allocate(cls) -> SourceUpdateIdentities:
+        """Allocate the five fresh time-ordered UUIDv7 identities."""
+        return cls(
+            content_object_id=uuid7(),
+            source_version_id=uuid7(),
+            qdrant_intent_id=uuid7(),
+            neo4j_intent_id=uuid7(),
+            audit_event_id=uuid7(),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LockedSourceRow:
+    """The locked ``sources`` row selected ``FOR UPDATE`` for an update."""
+
+    sync_state: str
+    current_version_id: UUID | None
+    deleted_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class LockedCurrentVersionRow:
+    """The locked current version joined with its content object ``FOR UPDATE``."""
+
+    source_version_id: UUID
+    content_version: int
+    content_object_id: UUID
+    content_hash: str
+    object_key: str
+    byte_size: int
+    media_type: str
+
+
+@dataclass(frozen=True, slots=True)
 class ContentObjectLookupRow:
     """One canonical ``content_objects`` row selected by the full content hash."""
 
@@ -370,9 +454,10 @@ class PostgresqlSourcePublicationStore:
     The store takes the composition-owned :class:`AsyncEngine`; it opens no
     connection at construction. ``resolve_committed`` runs the lock-free
     preflight inside one ``READ COMMITTED`` transaction with the pinned ``SET
-    LOCAL`` bounds and the bounded contention retry; ``commit_create`` runs
-    the same locked prefix plus the canonical create transition. The update
-    commit arrives with the later update task.
+    LOCAL`` bounds and the bounded contention retry; ``commit_create`` and
+    ``commit_update`` run the shared locked prefix plus their canonical
+    transition, and both wire the fresh-connection recovery lookup into the
+    bounded retry for the uncertain-commit case.
     """
 
     def __init__(self, engine: AsyncEngine, *, retry: DatabaseRetryPolicy | None = None) -> None:
@@ -405,6 +490,9 @@ class PostgresqlSourcePublicationStore:
                 command, request_fingerprint, receipt, diagnostic_context, identities
             ),
             source_id=command.source_id,
+            recover=lambda: self._resolve_committed_once(
+                command, request_fingerprint, diagnostic_context
+            ),
         )
 
     async def commit_update(
@@ -414,7 +502,16 @@ class PostgresqlSourcePublicationStore:
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
     ) -> SourceVersionPublicationResult:
-        raise NotImplementedError("commit_update lands with the update transaction task")
+        identities = SourceUpdateIdentities.allocate()
+        return await self._retry.run(
+            lambda _attempt: self._commit_update_once(
+                command, request_fingerprint, receipt, diagnostic_context, identities
+            ),
+            source_id=command.source_id,
+            recover=lambda: self._resolve_committed_once(
+                command, request_fingerprint, diagnostic_context
+            ),
+        )
 
     async def _commit_create_once(
         self,
@@ -424,6 +521,63 @@ class PostgresqlSourcePublicationStore:
         diagnostic_context: DiagnosticContext,
         identities: SourceCreateIdentities,
     ) -> SourceVersionPublicationResult:
+        return await self._run_locked_transition(
+            command,
+            request_fingerprint,
+            diagnostic_context,
+            lambda connection: self._create_transition(
+                connection,
+                command,
+                request_fingerprint,
+                receipt,
+                diagnostic_context,
+                identities,
+            ),
+        )
+
+    async def _commit_update_once(
+        self,
+        command: UpdateSourceVersion,
+        request_fingerprint: RequestFingerprint,
+        receipt: VerifiedObjectReceipt,
+        diagnostic_context: DiagnosticContext,
+        identities: SourceUpdateIdentities,
+    ) -> SourceVersionPublicationResult:
+        return await self._run_locked_transition(
+            command,
+            request_fingerprint,
+            diagnostic_context,
+            lambda connection: self._update_transition(
+                connection,
+                command,
+                request_fingerprint,
+                receipt,
+                diagnostic_context,
+                identities,
+            ),
+        )
+
+    async def _run_locked_transition(
+        self,
+        command: SourceVersionCommand,
+        request_fingerprint: RequestFingerprint,
+        diagnostic_context: DiagnosticContext,
+        transition: Callable[
+            [AsyncConnection],
+            Awaitable[tuple[_PendingRejection | None, SourceVersionPublicationResult | None]],
+        ],
+    ) -> SourceVersionPublicationResult:
+        """Run the common locked prefix and one command-specific transition.
+
+        The prefix follows design section 8.3: ``SET LOCAL`` bounds, the
+        idempotency advisory lock, the trusted workspace/actor revalidation,
+        the replay/mismatch recheck under lock, then the source advisory lock.
+        Every rejection raises out of the ``async with`` block via
+        :class:`_RejectionAbort` so the transaction always rolls back — a
+        rejection found after a canonical write must never commit a partial
+        graph — and the standalone rejection audit is written only after the
+        rollback, in its own transaction.
+        """
         result: SourceVersionPublicationResult | None = None
         rejection: _PendingRejection | None = None
         try:
@@ -442,9 +596,6 @@ class PostgresqlSourcePublicationStore:
                         safe_details={"reason": ACTOR_INVALID},
                     )
                 if not await self._is_actor_valid(connection, command):
-                    # Every rejection raises out of the block so the
-                    # transaction always rolls back: a rejection found after a
-                    # canonical write must never commit a partial graph.
                     raise _RejectionAbort(
                         _PendingRejection(
                             reason_code=REASON_ACTOR_INVALID,
@@ -461,14 +612,7 @@ class PostgresqlSourcePublicationStore:
                     raise _RejectionAbort(rejection)
                 if result is None:
                     await connection.execute(source_lock_statement(command.source_id))
-                    rejection, result = await self._create_transition(
-                        connection,
-                        command,
-                        request_fingerprint,
-                        receipt,
-                        diagnostic_context,
-                        identities,
-                    )
+                    rejection, result = await transition(connection)
                     if rejection is not None:
                         raise _RejectionAbort(rejection)
         except _RejectionAbort as abort:
@@ -576,6 +720,424 @@ class PostgresqlSourcePublicationStore:
             outcome=PublicationOutcome.PUBLISHED,
             committed_at=committed_at,
         )
+
+    async def _update_transition(
+        self,
+        connection: AsyncConnection,
+        command: UpdateSourceVersion,
+        request_fingerprint: RequestFingerprint,
+        receipt: VerifiedObjectReceipt,
+        diagnostic_context: DiagnosticContext,
+        identities: SourceUpdateIdentities,
+    ) -> tuple[_PendingRejection | None, SourceVersionPublicationResult | None]:
+        """Execute the update state transition under both advisory locks.
+
+        The source, current version and current object rows are selected
+        ``FOR UPDATE``; only ``active`` and ``stored_not_indexed`` sources may
+        publish. The base comparison (design 8.6) precedes the content
+        comparison: a stale base conflicts even when the proposed bytes equal
+        the current object. Equal digest/key/size/media type writes only the
+        no-change event and audit (design 8.7); anything else commits the
+        changed graph (design 8.8) without touching type, title or state.
+        """
+        source_row = await self._select_locked_source(connection, command)
+        if source_row is None:
+            return (
+                _PendingRejection(
+                    reason_code=REASON_SOURCE_NOT_FOUND,
+                    error=SourcePublicationError(
+                        ErrorCode.SOURCE_NOT_FOUND,
+                        safe_details={"source_id": command.source_id},
+                    ),
+                ),
+                None,
+            )
+        if source_row.deleted_at is not None or source_row.sync_state not in (
+            _UPDATEABLE_SOURCE_STATES
+        ):
+            return self._state_invalid_rejection(command, source_row.sync_state), None
+        if source_row.current_version_id is None:
+            # A publishable state with a null pointer cannot exist; the
+            # invariant-failure rejection audits with a null reason.
+            return self._invariant_rejection(command), None
+        current = await self._select_locked_current_version(
+            connection, command, source_row.current_version_id
+        )
+        if current is None or current.content_version < 1:
+            return self._invariant_rejection(command), None
+        # Base comparison BEFORE content comparison (design 8.6): a stale base
+        # conflicts even when the proposed bytes equal the current object.
+        if command.base_version_id != current.source_version_id:
+            return (
+                _PendingRejection(
+                    reason_code=REASON_VERSION_CONFLICT,
+                    error=SourcePublicationError(
+                        ErrorCode.SOURCE_VERSION_CONFLICT,
+                        safe_details={
+                            "source_id": command.source_id,
+                            "current_version_id": current.source_version_id,
+                            "content_version": current.content_version,
+                        },
+                    ),
+                ),
+                None,
+            )
+        if self._receipt_matches_current_object(receipt, current):
+            return await self._no_change_update_transition(
+                connection,
+                command,
+                request_fingerprint,
+                receipt,
+                diagnostic_context,
+                identities,
+                current,
+            )
+        return await self._changed_update_transition(
+            connection,
+            command,
+            request_fingerprint,
+            receipt,
+            diagnostic_context,
+            identities,
+            current,
+        )
+
+    def _state_invalid_rejection(
+        self, command: UpdateSourceVersion, sync_state: str
+    ) -> _PendingRejection:
+        """Build the non-publishable-state rejection with the closed state token."""
+        state_token = _SOURCE_STATE_TOKENS_BY_VALUE.get(sync_state)
+        if state_token is None:
+            # Impossible by the CHECK constraint; fail closed as an invariant.
+            return self._invariant_rejection(command)
+        return _PendingRejection(
+            reason_code=REASON_SOURCE_STATE_INVALID,
+            error=SourcePublicationError(
+                ErrorCode.SOURCE_STATE_INVALID,
+                safe_details={"source_id": command.source_id, "source_state": state_token},
+            ),
+        )
+
+    @staticmethod
+    def _receipt_matches_current_object(
+        receipt: VerifiedObjectReceipt, current: LockedCurrentVersionRow
+    ) -> bool:
+        """Compare the receipt against the current object exactly (design 8.7)."""
+        return (
+            current.content_hash == receipt.content_digest.hexadecimal
+            and content_object_metadata_matches(
+                receipt,
+                object_key=current.object_key,
+                byte_size=current.byte_size,
+                media_type=current.media_type,
+            )
+        )
+
+    async def _select_locked_source(
+        self, connection: AsyncConnection, command: UpdateSourceVersion
+    ) -> LockedSourceRow | None:
+        """Select the requested workspace's source row ``FOR UPDATE``.
+
+        The workspace boundary is part of the match, so a source held by
+        another workspace is indistinguishable from a missing one and nothing
+        about the owning tenant is disclosed.
+        """
+        result = await connection.execute(
+            sa.select(
+                sources.c.sync_state,
+                sources.c.current_version_id,
+                sources.c.deleted_at,
+            )
+            .where(
+                sources.c.source_id == command.source_id,
+                sources.c.workspace_id == command.workspace_id,
+            )
+            .with_for_update()
+        )
+        row = result.one_or_none()
+        if row is None:
+            return None
+        return LockedSourceRow(
+            sync_state=row.sync_state,
+            current_version_id=row.current_version_id,
+            deleted_at=row.deleted_at,
+        )
+
+    async def _select_locked_current_version(
+        self,
+        connection: AsyncConnection,
+        command: UpdateSourceVersion,
+        current_version_id: UUID,
+    ) -> LockedCurrentVersionRow | None:
+        """Select the current version joined with its content object ``FOR UPDATE``."""
+        result = await connection.execute(
+            sa.select(
+                source_versions.c.source_version_id,
+                source_versions.c.content_version,
+                source_versions.c.content_object_id,
+                content_objects.c.content_hash,
+                content_objects.c.object_key,
+                content_objects.c.byte_size,
+                content_objects.c.media_type,
+            )
+            .select_from(source_versions)
+            .join(
+                content_objects,
+                content_objects.c.content_object_id == source_versions.c.content_object_id,
+            )
+            .where(
+                source_versions.c.workspace_id == command.workspace_id,
+                source_versions.c.source_id == command.source_id,
+                source_versions.c.source_version_id == current_version_id,
+            )
+            .with_for_update()
+        )
+        row = result.one_or_none()
+        if row is None:
+            return None
+        return LockedCurrentVersionRow(
+            source_version_id=row.source_version_id,
+            content_version=int(row.content_version),
+            content_object_id=row.content_object_id,
+            content_hash=row.content_hash,
+            object_key=row.object_key,
+            byte_size=int(row.byte_size),
+            media_type=row.media_type,
+        )
+
+    async def _no_change_update_transition(
+        self,
+        connection: AsyncConnection,
+        command: UpdateSourceVersion,
+        request_fingerprint: RequestFingerprint,
+        receipt: VerifiedObjectReceipt,
+        diagnostic_context: DiagnosticContext,
+        identities: SourceUpdateIdentities,
+        current: LockedCurrentVersionRow,
+    ) -> tuple[_PendingRejection | None, SourceVersionPublicationResult | None]:
+        """Write only the no-change event and audit (design 8.7).
+
+        No content object, version, intent, pointer, state or ``updated_at``
+        change happens; ``base_version_id == committed_version_id`` is the
+        persisted no-change marker.
+        """
+        event_sequence, committed_at = await self._insert_update_event(
+            connection,
+            command,
+            request_fingerprint,
+            base_version_id=current.source_version_id,
+            committed_version_id=current.source_version_id,
+        )
+        await self._insert_publication_audit(
+            connection,
+            command,
+            diagnostic_context,
+            identities.audit_event_id,
+            action=NO_CHANGE_AUDIT_ACTION,
+            reason_code=REASON_CONTENT_UNCHANGED,
+            safe_diff_hash=self._update_safe_diff_hash(command, receipt, current),
+        )
+        return None, SourceVersionPublicationResult(
+            source_id=command.source_id,
+            source_version_id=current.source_version_id,
+            content_version=current.content_version,
+            event_id=command.event_id,
+            event_sequence=event_sequence,
+            content_digest=receipt.content_digest,
+            outcome=PublicationOutcome.NO_CHANGE,
+            committed_at=committed_at,
+        )
+
+    async def _changed_update_transition(
+        self,
+        connection: AsyncConnection,
+        command: UpdateSourceVersion,
+        request_fingerprint: RequestFingerprint,
+        receipt: VerifiedObjectReceipt,
+        diagnostic_context: DiagnosticContext,
+        identities: SourceUpdateIdentities,
+        current: LockedCurrentVersionRow,
+    ) -> tuple[_PendingRejection | None, SourceVersionPublicationResult | None]:
+        """Write the changed-update graph (design 8.8).
+
+        Content object upsert/reuse, version ``n+1`` with the current parent,
+        the guarded pointer advance, the update event, two upsert intents and
+        the succeeded audit. Source type/title stay untouched and the existing
+        sync state is preserved.
+        """
+        content_object_row = await self._insert_content_object(
+            connection, identities.content_object_id, receipt
+        )
+        if content_object_row is None:
+            return self._invariant_rejection(command), None
+        if not content_object_metadata_matches(
+            receipt,
+            object_key=content_object_row.object_key,
+            byte_size=content_object_row.byte_size,
+            media_type=content_object_row.media_type,
+        ):
+            return (
+                _PendingRejection(
+                    reason_code=REASON_CONTENT_OBJECT_CONFLICT,
+                    error=SourcePublicationError(
+                        ErrorCode.SOURCE_CONTENT_OBJECT_CONFLICT,
+                        safe_details={"source_id": command.source_id},
+                    ),
+                ),
+                None,
+            )
+        next_ordinal = current.content_version + 1
+        await self._insert_next_version(
+            connection,
+            command,
+            identities.source_version_id,
+            content_object_row.content_object_id,
+            parent_version_id=current.source_version_id,
+            content_version=next_ordinal,
+        )
+        pointer_rejection = await self._advance_current_pointer(
+            connection, command, identities.source_version_id
+        )
+        if pointer_rejection is not None:
+            return pointer_rejection, None
+        event_sequence, committed_at = await self._insert_update_event(
+            connection,
+            command,
+            request_fingerprint,
+            base_version_id=command.base_version_id,
+            committed_version_id=identities.source_version_id,
+        )
+        await self._insert_projection_intent(
+            connection,
+            command,
+            identities.source_version_id,
+            identities.qdrant_intent_id,
+            PROJECTION_KIND_QDRANT,
+        )
+        await self._insert_projection_intent(
+            connection,
+            command,
+            identities.source_version_id,
+            identities.neo4j_intent_id,
+            PROJECTION_KIND_NEO4J,
+        )
+        await self._insert_publication_audit(
+            connection,
+            command,
+            diagnostic_context,
+            identities.audit_event_id,
+            action=SUCCESS_AUDIT_ACTION,
+            reason_code=None,
+            safe_diff_hash=self._update_safe_diff_hash(command, receipt, current),
+        )
+        return None, SourceVersionPublicationResult(
+            source_id=command.source_id,
+            source_version_id=identities.source_version_id,
+            content_version=next_ordinal,
+            event_id=command.event_id,
+            event_sequence=event_sequence,
+            content_digest=receipt.content_digest,
+            outcome=PublicationOutcome.PUBLISHED,
+            committed_at=committed_at,
+        )
+
+    @staticmethod
+    def _update_safe_diff_hash(
+        command: UpdateSourceVersion,
+        receipt: VerifiedObjectReceipt,
+        current: LockedCurrentVersionRow,
+    ) -> SafeDiffHash:
+        """Compute the update safe diff hash over the locked current object."""
+        return compute_safe_diff_hash(
+            command.source_id,
+            current.source_version_id,
+            ContentDigest.parse(current.content_hash),
+            receipt.content_digest,
+        )
+
+    async def _insert_next_version(
+        self,
+        connection: AsyncConnection,
+        command: UpdateSourceVersion,
+        source_version_id: UUID,
+        content_object_id: UUID,
+        *,
+        parent_version_id: UUID,
+        content_version: int,
+    ) -> None:
+        """Insert version ``n+1`` with the current parent and actor author."""
+        await connection.execute(
+            sa.insert(source_versions).values(
+                source_version_id=source_version_id,
+                workspace_id=command.workspace_id,
+                source_id=command.source_id,
+                content_object_id=content_object_id,
+                content_version=content_version,
+                parent_version_id=parent_version_id,
+                author_kind=command.actor.actor_kind.value,
+                author_id=command.actor.actor_id,
+                client_timestamp=command.client_timestamp,
+            )
+        )
+
+    async def _advance_current_pointer(
+        self,
+        connection: AsyncConnection,
+        command: UpdateSourceVersion,
+        source_version_id: UUID,
+    ) -> _PendingRejection | None:
+        """Advance the current pointer through the guarded transition.
+
+        The guard matches the workspace/source pair whose pointer still equals
+        the requested base; any other rowcount is the invariant failure. The
+        existing sync state is preserved — only the pointer and ``updated_at``
+        change.
+        """
+        guarded = await connection.execute(
+            sa.update(sources)
+            .values(
+                current_version_id=source_version_id,
+                updated_at=sa.text("CURRENT_TIMESTAMP"),
+            )
+            .where(
+                sources.c.source_id == command.source_id,
+                sources.c.workspace_id == command.workspace_id,
+                sources.c.current_version_id == command.base_version_id,
+            )
+        )
+        if guarded.rowcount != 1:
+            return self._invariant_rejection(command)
+        return None
+
+    async def _insert_update_event(
+        self,
+        connection: AsyncConnection,
+        command: UpdateSourceVersion,
+        request_fingerprint: RequestFingerprint,
+        *,
+        base_version_id: UUID,
+        committed_version_id: UUID,
+    ) -> tuple[int, datetime]:
+        """Insert the update event; PostgreSQL owns the sequence and time."""
+        actor: SourceActor = command.actor
+        statement = (
+            sa.insert(sync_events)
+            .values(
+                event_id=command.event_id,
+                workspace_id=command.workspace_id,
+                source_id=command.source_id,
+                device_id=actor.actor_id if actor.actor_kind is ActorKind.DEVICE else None,
+                committed_version_id=committed_version_id,
+                base_version_id=base_version_id,
+                idempotency_key=command.idempotency_key.value,
+                request_fingerprint=request_fingerprint.hexadecimal,
+                event_type=UPDATE_EVENT_TYPE,
+                client_timestamp=command.client_timestamp,
+            )
+            .returning(sync_events.c.event_sequence, sync_events.c.committed_at)
+        )
+        row = (await connection.execute(statement)).one()
+        return int(row.event_sequence), row.committed_at
 
     @staticmethod
     def _invariant_rejection(command: SourceVersionCommand) -> _PendingRejection:
@@ -718,7 +1280,7 @@ class PostgresqlSourcePublicationStore:
     async def _insert_projection_intent(
         self,
         connection: AsyncConnection,
-        command: CreateSourceVersion,
+        command: SourceVersionCommand,
         source_version_id: UUID,
         projection_intent_id: UUID,
         projection_kind: str,
@@ -744,10 +1306,38 @@ class PostgresqlSourcePublicationStore:
         diagnostic_context: DiagnosticContext,
         audit_event_id: UUID,
     ) -> None:
-        """Insert the in-transaction succeeded audit with the safe diff hash."""
+        """Insert the in-transaction succeeded audit of a changed create."""
         safe_diff_hash = compute_safe_diff_hash(
             command.source_id, None, None, receipt.content_digest
         )
+        await self._insert_publication_audit(
+            connection,
+            command,
+            diagnostic_context,
+            audit_event_id,
+            action=SUCCESS_AUDIT_ACTION,
+            reason_code=None,
+            safe_diff_hash=safe_diff_hash,
+        )
+
+    async def _insert_publication_audit(
+        self,
+        connection: AsyncConnection,
+        command: SourceVersionCommand,
+        diagnostic_context: DiagnosticContext,
+        audit_event_id: UUID,
+        *,
+        action: str,
+        reason_code: str | None,
+        safe_diff_hash: SafeDiffHash,
+    ) -> None:
+        """Insert the in-transaction succeeded audit with the safe diff hash.
+
+        A changed create/update audits ``source.version_published`` with a
+        null reason; a no-change update audits ``source.version_no_change``
+        with ``content_unchanged`` (design 10.1). A replay never reaches this
+        insert.
+        """
         await connection.execute(
             sa.insert(audit_events).values(
                 audit_event_id=audit_event_id,
@@ -755,14 +1345,14 @@ class PostgresqlSourcePublicationStore:
                 actor_kind=command.actor.actor_kind.value,
                 actor_id=command.actor.actor_id,
                 actor_reference=None,
-                action=SUCCESS_AUDIT_ACTION,
+                action=action,
                 target_kind=AUDIT_TARGET_KIND_SOURCE,
                 target_id=command.source_id,
                 request_id=diagnostic_context.request_id,
                 client_request_id=diagnostic_context.client_request_id,
                 trace_id=diagnostic_context.trace.trace_id.value,
                 result=AUDIT_RESULT_SUCCEEDED,
-                reason_code=None,
+                reason_code=reason_code,
                 safe_diff_hash=safe_diff_hash.hexadecimal,
             )
         )

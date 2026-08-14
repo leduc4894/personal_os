@@ -40,7 +40,11 @@ from personal_os.sources.commands import (
     SourceType,
 )
 from personal_os.sources.errors import SourcePublicationError
-from personal_os.sources.fingerprint import RequestFingerprint, compute_request_fingerprint
+from personal_os.sources.fingerprint import (
+    RequestFingerprint,
+    SourceVersionCommand,
+    compute_request_fingerprint,
+)
 from postgresql_source_store.engine import create_source_store_engine, dispose_source_store_engine
 from postgresql_source_store.publication_store import (
     ContentObjectLookupRow,
@@ -141,7 +145,7 @@ class FaultInjectingStore(PostgresqlSourcePublicationStore):
     async def _insert_projection_intent(
         self,
         connection: AsyncConnection,
-        command: CreateSourceVersion,
+        command: SourceVersionCommand,
         source_version_id: UUID,
         projection_intent_id: UUID,
         projection_kind: str,
