@@ -43,9 +43,10 @@ Janitor degradation is a warning, never a probe skip and never an exit-code
 change: a failed cleanup run emits one `object_storage_spool_cleanup_degraded`
 event carrying only safe counts, the `HeadBucket` probe still runs, and the
 exit code reflects only the probe outcome. Stale candidates the janitor could
-not handle are picked up by a later run. The clean-success path emits exactly
-one event (`object_storage_operation_succeeded` or the degraded/failed
-counterpart for the probe).
+not handle are picked up by a later run. Every run emits exactly one
+probe-outcome event — `object_storage_operation_succeeded` on the clean-success
+path, or its failed/degraded counterpart when the probe itself fails or
+degrades; a degraded janitor adds one separate cleanup warning event.
 
 | Exit | Meaning |
 | --- | --- |
@@ -112,3 +113,21 @@ triggers provider switching (there is **no fallback** provider), Worker routing
 changes or process restart loops, and it does not prevent unrelated local
 diagnostics from running. Reads fail closed: every stored-object read verifies
 size, digest and media type before a single byte reaches a consumer.
+
+## Acceptance status (2026-08-14)
+
+- Offline gates on the implementation commit: **green.** `uv run poe verify`
+  (format, lint, strict typing, import boundaries, Python/TypeScript tests,
+  builds), the focused object-storage acceptance suites, the live-module
+  collection check, `lint-imports` and `git diff --check` all passed.
+- Live gate: **live activation blocked: dedicated test-bucket credentials not
+  configured.** The protected `object-storage-live` workflow
+  (`.github/workflows/object-storage-live.yml`) triggers on push to `master`,
+  on its daily schedule and on manual dispatch, but the repository variables
+  `R2_TEST_ENDPOINT` / `R2_TEST_BUCKET_NAME` and the secrets
+  `R2_TEST_ACCESS_KEY_ID` / `R2_TEST_SECRET_ACCESS_KEY` are not configured in
+  this environment, so no live run was dispatched and none has passed yet.
+- Phase 1 production activation is therefore **not complete**. The live cases
+  are not skipped or xfailed; they remain executable via
+  `uv run poe object-storage-test-live` once the dedicated test-bucket
+  credentials exist.

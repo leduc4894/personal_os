@@ -76,6 +76,17 @@ skip: fixture setup fails with a safe diagnostic listing the missing variable
 or secret-file NAMES only. `uv run poe object-storage-test-live` therefore
 exits nonzero without local test credentials.
 
+### Activation status (2026-08-14)
+
+The live gate has not run to green yet: **live activation blocked: dedicated
+test-bucket credentials not configured.** No local `R2_TEST_*` credentials
+exist in the development environment, and the protected workflow's repository
+variables/secrets were not configured at acceptance time, so no live run was
+dispatched. All eight live cases collect and remain executable — none is
+skipped or xfailed — and Phase 1 production activation stays blocked until a
+live run passes on the exact implementation commit (see
+`docs/operations/object-storage.md`).
+
 ### Exact-key cleanup contract
 
 CAS test objects keep the production key grammar, so cleanup can never use a
@@ -100,4 +111,3 @@ R2_TEST_BUCKET_NAME=<dedicated-test-bucket> \
 R2_TEST_SECRET_ROOT=<absolute-dir-with-0600-secret-files> \
 uv run poe object-storage-test-live
 ```
-

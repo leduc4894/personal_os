@@ -177,7 +177,9 @@ uv run --package r2-object-storage object-storage-check-runtime --service worker
 The command parses the required `--service` flag (`api`, `mcp` or `worker`)
 before reading any environment variable or secret file, runs the startup spool
 janitor, performs one bounded read-only `HeadBucket`, emits exactly one safe
-JSON diagnostic event and closes the client once. It is strictly read-only:
+JSON diagnostic event on the clean-success path (a degraded janitor adds one
+`object_storage_spool_cleanup_degraded` warning event) and closes the client
+once. It is strictly read-only:
 no put, no get, no list, no delete — the production port has no delete, list,
 overwrite, copy, public-URL or presigned operation, and there is no fallback
 provider. The bucket must be a private bucket (public URLs and custom public
