@@ -83,7 +83,7 @@ Deliverables:
 2. Settings + secret-file loading, structured errors/logging.
 3. PostgreSQL empty baseline for identity, source/version/object, events và audit.
 4. Cloudflare R2 CAS adapter with streaming SHA-256 verification, offline contract tests và live test-bucket pipeline.
-5. Source version transaction và idempotent event service.
+5. Source version transaction, pre-upload idempotency replay, optimistic concurrency/no-change, idempotent event service và fenced projection-intent dispatcher.
 6. Local Compose for PostgreSQL, Qdrant, Neo4j Community single-instance, Redis và Temporal Server/UI/admin tools.
 7. Internal CLI cho bootstrap và canonical smoke; Phase 1 không tạo public HTTP API tạm thời.
 

@@ -39,10 +39,12 @@ objects/sha256/{first_2}/{next_2}/{sha256}
 
 Object publication bắt buộc chạy theo thứ tự:
 
-1. Stream bytes tới content-addressed R2 key với bounded timeout/retry.
-2. Verify exact key, SHA-256 và byte size bằng `HEAD`/bounded read contract.
-3. Chỉ sau verification mới commit PostgreSQL version/current pointer và durable projection intent.
-4. Nếu upload hoặc verification fail, không publish pointer và giữ operation retryable/terminal theo typed error contract.
+1. Tra idempotency key/event ID; replay đã commit được trả từ PostgreSQL mà không upload hoặc đọc lại R2.
+2. Với operation mới, stream bytes tới content-addressed R2 key với bounded timeout/retry.
+3. Verify exact key, SHA-256 và byte size bằng `HEAD`/bounded read contract.
+4. Chỉ sau verification mới commit PostgreSQL version/current pointer và durable projection intent.
+5. Trong transaction, tra lại idempotency dưới lock để đóng race với preflight.
+6. Nếu upload hoặc verification fail, không publish pointer và giữ operation retryable/terminal theo typed error contract.
 
 R2 cung cấp strong consistency cho object read-after-write, delete và list. Correctness vẫn dựa trên explicit hash/size verification, không dựa riêng vào provider guarantee.
 
@@ -97,6 +99,8 @@ committed_at
 ```
 
 `content_version` tăng đơn điệu trong phạm vi source. Optimistic concurrency dùng `base_version_id`, không dùng timestamp để quyết định thắng thua.
+
+Nếu `base_version_id` vẫn current nhưng verified bytes giống exact current object, backend ghi một sync event `no_change`, không tạo source version mới, không đổi pointer và không tạo projection intent. Base stale vẫn conflict trước khi xét no-change.
 
 ## 7. Derived artifacts
 

@@ -11,7 +11,7 @@
 | R2 S3 adapter | `aiobotocore==3.9.0`; `types-aiobotocore[s3]==3.9.0` for strict development typing |
 | Search projection | Qdrant |
 | Graph projection | Neo4j |
-| Durable workflows | Temporal Python SDK |
+| Durable workflows | Temporal Python SDK `1.30.0` |
 | Cache and rate limit | Redis |
 | MCP | Official MCP Python SDK |
 | Obsidian plugin | TypeScript strict mode, Obsidian API |

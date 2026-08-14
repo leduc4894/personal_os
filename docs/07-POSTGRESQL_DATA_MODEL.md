@@ -37,12 +37,15 @@ JSONB dùng cho raw source metadata, provider-neutral structured output và boun
 
 ### Publish source version
 
-1. Lock source row.
-2. Verify expected base version.
-3. Insert immutable version referencing verified object.
-4. Update current pointer.
-5. Insert sync/change event và projection intent.
-6. Commit.
+1. Preflight idempotency key/event ID để trả operation đã commit trước khi đọc lại object bytes.
+2. Trong transaction, lock idempotency identity rồi lock source identity/row theo thứ tự cố định.
+3. Tra lại idempotency và verify expected base version.
+4. Reuse/insert content-object metadata chỉ từ verified receipt.
+5. Nếu bytes thay đổi, insert immutable version và update current pointer; nếu bytes không đổi thì giữ version/pointer.
+6. Insert sync event, audit và hai projection intent cho changed content; no-change không tạo intent.
+7. Commit một lần.
+
+Event update có `base_version_id = committed_version_id` là persisted marker cho `no_change`. Exact replay hydrate kết quả từ event/version/object hiện có; không tạo thêm audit hay canonical row.
 
 Object upload xảy ra trước transaction; orphan object được GC sau grace period nếu transaction không commit.
 

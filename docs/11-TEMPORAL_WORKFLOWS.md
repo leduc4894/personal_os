@@ -52,6 +52,8 @@ Tạo manifest, verify checksums và định kỳ restore vào disposable enviro
 - Repeated upload completion không tạo version mới.
 - Replay activity sau timeout phải trả lại committed outcome khi đã thành công.
 
+Source publication ghi một Qdrant và một Neo4j projection intent, nhưng cả hai derive cùng workflow ID `source-ingestion/{workspace_id}/{event_id}`. Dispatcher dùng lease token làm fence, `USE_EXISTING` cho workflow đang chạy và reject duplicate run cho workflow đã đóng; retry sau lost acknowledgement không tạo execution thứ hai.
+
 ## 4. Retry ownership
 
 Temporal là retry owner cho external calls. Provider SDK retries bị tắt hoặc giới hạn một attempt để tránh nhân retry. Activity policies phân loại:
@@ -100,6 +102,8 @@ Stale workflow không được ghi vào target mới hoặc activate route.
 ## 8. Recovery
 
 Worker restart không mất workflow. Temporal outage không làm mất canonical intent trong PostgreSQL. Dispatcher định kỳ quét undispatched intents bằng locked batches. Không dựa vào Temporal history làm business database dài hạn.
+
+Dispatcher claim bằng `FOR UPDATE SKIP LOCKED`, commit lease trước khi gọi Temporal và chỉ acknowledge bằng exact lease token. Start có thể được Temporal chấp nhận trước khi ingestion worker được triển khai; workflow task chờ trên task queue `source-ingestion` cho đến Phase 3.
 
 ## 9. Tests
 
