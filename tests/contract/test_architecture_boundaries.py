@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import configparser
 import os
 import re
 import subprocess
@@ -17,6 +18,7 @@ PYTHON_SOURCE_ROOTS = [
     REPO_ROOT / "apps" / "api" / "src",
     REPO_ROOT / "apps" / "mcp" / "src",
     REPO_ROOT / "apps" / "worker" / "src",
+    REPO_ROOT / "packages" / "r2-object-storage" / "src",
     REPO_ROOT / "tools",
 ]
 
@@ -145,6 +147,50 @@ def test_invalid_import_fixture_is_rejected_by_lint_imports() -> None:
     combined = completed.stdout + completed.stderr
     assert "Broken contracts" in combined, (
         "expected a broken-contract report from lint-imports:\n" + combined
+    )
+
+
+CORE_FORBIDDEN_SECTION = (
+    "importlinter:contract:domain-does-not-import-composition-or-infrastructure"
+)
+R2_FORBIDDEN_SECTION = (
+    "importlinter:contract:r2-adapter-does-not-import-composition-or-infrastructure"
+)
+
+
+def test_importlinter_core_contract_forbids_provider_packages() -> None:
+    parser = configparser.ConfigParser()
+    parser.read(REPO_ROOT / ".importlinter")
+    forbidden = parser[CORE_FORBIDDEN_SECTION]["forbidden_modules"].split()
+    for provider in ("r2_object_storage", "aiobotocore", "botocore", "aiohttp"):
+        assert provider in forbidden, f"core forbidden contract must forbid importing {provider!r}"
+
+
+def test_importlinter_r2_contract_isolates_adapter_from_composition_roots() -> None:
+    parser = configparser.ConfigParser()
+    parser.read(REPO_ROOT / ".importlinter")
+    assert parser.has_section(R2_FORBIDDEN_SECTION), (
+        "an importlinter forbidden contract must isolate r2_object_storage"
+    )
+    section = parser[R2_FORBIDDEN_SECTION]
+    assert section["type"] == "forbidden"
+    assert section["source_modules"].split() == ["r2_object_storage"]
+    forbidden = set(section["forbidden_modules"].split())
+    expected_forbidden = {
+        "api_runtime",
+        "mcp_runtime",
+        "workflow_worker",
+        "fastapi",
+        "sqlalchemy",
+        "psycopg",
+        "temporalio",
+        "qdrant_client",
+        "neo4j",
+        "redis",
+    }
+    assert expected_forbidden <= forbidden, (
+        "r2 adapter forbidden contract must block every composition root and "
+        f"infrastructure SDK, missing: {expected_forbidden - forbidden}"
     )
 
 

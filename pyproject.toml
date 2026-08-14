@@ -20,6 +20,7 @@ dev = [
   "mypy==2.3.0",
   "poethepoet==0.48.0",
   "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
   "pytest-cov==7.1.0",
   "pyyaml==6.0.3",
   "ruff==0.15.22",
@@ -29,7 +30,7 @@ dev = [
 required-version = "==0.11.32"
 
 [tool.uv.workspace]
-members = ["apps/api", "apps/mcp", "apps/worker"]
+members = ["apps/api", "apps/mcp", "apps/worker", "packages/r2-object-storage"]
 
 [tool.uv.sources]
 knowledge-core = { workspace = true }
@@ -54,7 +55,7 @@ markers = [
 [tool.ruff]
 target-version = "py314"
 line-length = 100
-src = ["src", "apps", "migrations", "tests", "tools"]
+src = ["src", "apps", "packages/r2-object-storage/src", "migrations", "tests", "tools"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
@@ -63,13 +64,13 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 python_version = "3.14"
 strict = true
 explicit_package_bases = true
-mypy_path = ["src", "apps/api/src", "apps/mcp/src", "apps/worker/src"]
+mypy_path = ["src", "apps/api/src", "apps/mcp/src", "apps/worker/src", "packages/r2-object-storage/src"]
 exclude = ["^tests[/\\\\]fixtures[/\\\\]"]
-files = ["src", "apps/api/src", "apps/mcp/src", "apps/worker/src", "migrations", "tools"]
+files = ["src", "apps/api/src", "apps/mcp/src", "apps/worker/src", "packages/r2-object-storage/src", "migrations", "tools"]
 
 [tool.coverage.run]
 branch = true
-source = ["personal_os", "api_runtime", "mcp_runtime", "workflow_worker"]
+source = ["personal_os", "api_runtime", "mcp_runtime", "workflow_worker", "r2_object_storage"]
 
 [tool.coverage.report]
 show_missing = true
@@ -84,10 +85,10 @@ skip_covered = false
 cmd = "ruff format src apps tests tools"
 
 [tool.poe.tasks.python-format-check]
-cmd = "ruff format --check src apps tests tools"
+cmd = "ruff format --check src apps packages/r2-object-storage/src tests tools"
 
 [tool.poe.tasks.python-lint]
-cmd = "ruff check src apps tests tools"
+cmd = "ruff check src apps packages/r2-object-storage/src tests tools"
 
 # TypeScript subtasks run through Poe's shell task type so the ``pnpm`` program
 # resolves on every platform. On Windows CI, pnpm/action-setup installs pnpm as
@@ -104,7 +105,7 @@ shell = "pnpm run format:check"
 shell = "pnpm run lint"
 
 [tool.poe.tasks.python-type-check]
-cmd = "mypy src apps/api/src apps/mcp/src apps/worker/src tools"
+cmd = "mypy src apps/api/src apps/mcp/src apps/worker/src packages/r2-object-storage/src tools"
 
 [tool.poe.tasks.typescript-type-check]
 shell = "pnpm run type-check"

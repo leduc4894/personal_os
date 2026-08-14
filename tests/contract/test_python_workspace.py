@@ -22,3 +22,12 @@ def test_import_succeeds_outside_repository(tmp_path: Path) -> None:
     )
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "personal_os"
+
+
+def test_r2_package_imports_outside_repository(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        [sys.executable, "-c", "import r2_object_storage"],
+        cwd=tmp_path,
+        check=False,
+    )
+    assert completed.returncode == 0

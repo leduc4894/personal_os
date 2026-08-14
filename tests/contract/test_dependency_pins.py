@@ -31,6 +31,7 @@ ALLOWED_SOURCE: dict[str, bool] = {"workspace": True}
 def _iter_python_manifests() -> list[Path]:
     manifests = [REPO_ROOT / "pyproject.toml"]
     manifests.extend(sorted((REPO_ROOT / "apps").glob("*/pyproject.toml")))
+    manifests.extend(sorted((REPO_ROOT / "packages").glob("*/pyproject.toml")))
     return [path for path in manifests if not path.is_relative_to(FIXTURES_ROOT)]
 
 
@@ -121,3 +122,19 @@ def test_pnpm_workspace_only_builds_esbuild() -> None:
     data = yaml.safe_load(workspace_path.read_text(encoding="utf-8"))
     built = data.get("onlyBuiltDependencies", [])
     assert built == ["esbuild"], f"onlyBuiltDependencies must be exactly ['esbuild'], got {built!r}"
+
+
+def test_r2_workspace_member_has_exact_sdk_pins() -> None:
+    manifest = tomllib.loads(
+        (REPO_ROOT / "packages" / "r2-object-storage" / "pyproject.toml").read_text("utf-8")
+    )
+    assert manifest["project"]["dependencies"] == [
+        "aiobotocore==3.9.0",
+        "knowledge-core==0.1.0",
+    ]
+    assert manifest["dependency-groups"]["dev"] == ["types-aiobotocore[s3]==3.9.0"]
+
+
+def test_root_dev_group_pins_pytest_asyncio() -> None:
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "pytest-asyncio==1.4.0" in data["dependency-groups"]["dev"]

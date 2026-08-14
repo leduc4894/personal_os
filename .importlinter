@@ -4,6 +4,7 @@ root_packages =
     api_runtime
     mcp_runtime
     workflow_worker
+    r2_object_storage
 include_external_packages = True
 
 [importlinter:contract:domain-does-not-import-composition-or-infrastructure]
@@ -23,6 +24,10 @@ forbidden_modules =
     neo4j
     redis
     boto3
+    aiobotocore
+    botocore
+    aiohttp
+    r2_object_storage
 
 [importlinter:contract:composition-roots-are-independent]
 name = Python composition roots do not import one another
@@ -31,3 +36,20 @@ modules =
     api_runtime
     mcp_runtime
     workflow_worker
+
+[importlinter:contract:r2-adapter-does-not-import-composition-or-infrastructure]
+name = R2 object-storage adapter imports only core contracts and its approved SDK graph
+type = forbidden
+source_modules =
+    r2_object_storage
+forbidden_modules =
+    api_runtime
+    mcp_runtime
+    workflow_worker
+    fastapi
+    sqlalchemy
+    psycopg
+    temporalio
+    qdrant_client
+    neo4j
+    redis
