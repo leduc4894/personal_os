@@ -263,12 +263,18 @@ async def run_bounded(
 
 
 async def _wait_until(condition: Callable[[], bool], *, description: str) -> None:
-    """Yield to the loop until ``condition`` holds; fail loud if it never does."""
+    """Yield to the loop until ``condition`` holds; fail loud if it never does.
 
-    for _ in range(2000):
+    Each iteration first yields without delay and then sleeps briefly, so the
+    2000-iteration budget spans real wall time: waiting on waiter tasks that
+    are still hashing their spool in executor threads cannot exhaust the loop
+    in a few milliseconds when the machine is under full-suite load.
+    """
+
+    for attempt in range(2000):
         if condition():
             return
-        await asyncio.sleep(0)
+        await asyncio.sleep(0 if attempt % 10 == 0 else 0.001)
     raise AssertionError(f"condition not reached: {description}")
 
 
