@@ -11,6 +11,12 @@ ids are never recorded or used as labels.
 depends on; :class:`InMemoryObjectStorageMetrics` is the test/standalone
 implementation sufficient for runtime checks and tests without introducing
 Prometheus. A production sink implements the same Protocol behind the boundary.
+
+The sink also publishes two bounded lifetime maxima as snapshots:
+``maximum_in_flight`` (the largest total in-flight operation count observed)
+and ``maximum_reserved_size_bytes`` (the largest process-wide spool
+reservation observed). Both are plain integer maxima over the values already
+recorded through the gauge methods; no new label, digest or key is ever added.
 """
 
 from __future__ import annotations
@@ -90,7 +96,9 @@ class ObjectStorageMetrics(Protocol):
         ...
 
     def record_reserved_bytes(self, *, operation: ObjectStorageOperation, size_bytes: int) -> None:
-        """Record the bytes currently reserved by ``operation`` spools."""
+        """Record the process-wide spool reservation, in bytes, observed at
+        ``operation``'s last admission change. ``operation`` identifies the
+        observer, not the owner of the reserved bytes."""
         ...
 
 
@@ -99,7 +107,9 @@ class InMemoryObjectStorageMetrics:
 
     Sufficient for runtime checks and tests without introducing Prometheus. It
     keeps at most :data:`_MAXIMUM_OPERATION_RECORDS` operation records in a ring
-    buffer plus counters/gauges keyed by the low-cardinality operation token.
+    buffer plus counters/gauges keyed by the low-cardinality operation token,
+    together with the two bounded lifetime maxima (total in-flight operations
+    and process-wide reserved bytes) observed through those gauges.
     """
 
     def __init__(self) -> None:
@@ -107,6 +117,8 @@ class InMemoryObjectStorageMetrics:
         self._retries: dict[ObjectStorageOperation, int] = {}
         self._in_flight: dict[ObjectStorageOperation, int] = {}
         self._reserved_bytes: dict[ObjectStorageOperation, int] = {}
+        self._maximum_in_flight: int = 0
+        self._maximum_reserved_size_bytes: int = 0
 
     def record_operation(
         self,
@@ -134,6 +146,7 @@ class InMemoryObjectStorageMetrics:
 
     def increment_in_flight(self, *, operation: ObjectStorageOperation) -> None:
         self._in_flight[operation] = self._in_flight.get(operation, 0) + 1
+        self._maximum_in_flight = max(self._maximum_in_flight, sum(self._in_flight.values()))
 
     def decrement_in_flight(self, *, operation: ObjectStorageOperation) -> None:
         current = self._in_flight.get(operation, 0)
@@ -141,6 +154,19 @@ class InMemoryObjectStorageMetrics:
 
     def record_reserved_bytes(self, *, operation: ObjectStorageOperation, size_bytes: int) -> None:
         self._reserved_bytes[operation] = size_bytes
+        self._maximum_reserved_size_bytes = max(self._maximum_reserved_size_bytes, size_bytes)
+
+    @property
+    def maximum_in_flight(self) -> int:
+        """The largest total in-flight operation count observed so far."""
+
+        return self._maximum_in_flight
+
+    @property
+    def maximum_reserved_size_bytes(self) -> int:
+        """The largest process-wide spool reservation (bytes) observed so far."""
+
+        return self._maximum_reserved_size_bytes
 
     @property
     def operations(self) -> list[OperationRecord]:

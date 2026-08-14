@@ -19,7 +19,7 @@ import shutil
 import stat
 import time
 import uuid
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -96,6 +96,24 @@ class _AdmissionWindowExpired(Exception):
     """Internal signal: local admission was not granted inside the window."""
 
 
+async def _run_shielded_cleanup(cleanup: Coroutine[object, object, None]) -> None:
+    """Drive ``cleanup`` to completion even when the caller is cancelled.
+
+    The cleanup runs as a short local task shielded from the caller's
+    cancellation; a ``CancelledError`` delivered to the caller waits for the
+    cleanup to finish and is then re-raised, so a spool file removal or an
+    admission release can never be abandoned half-done.
+    """
+
+    task = asyncio.ensure_future(cleanup)
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        with suppress(asyncio.CancelledError):
+            await task
+        raise
+
+
 class VerificationSpool:
     """One reserved verification spool for a full stored-object read.
 
@@ -148,7 +166,12 @@ class VerificationSpool:
         return self._hashed
 
     async def close(self) -> None:
-        """Remove the spool file and release the reservation exactly once."""
+        """Remove the spool file and release the reservation exactly once.
+
+        Both cleanup steps run as short shielded local tasks so a cancellation
+        delivered during cleanup still removes the file and releases the
+        reservation before the ``CancelledError`` is re-raised.
+        """
 
         if self._is_closed:
             return
@@ -156,8 +179,10 @@ class VerificationSpool:
         hashed = self._hashed
         self._hashed = None
         if hashed is not None:
-            await self._manager._remove_spool_file(hashed.path)
-        await self._manager._release_admission(self._reserved_size_bytes, consume_permit=False)
+            await _run_shielded_cleanup(self._manager._remove_spool_file(hashed.path))
+        await _run_shielded_cleanup(
+            self._manager._release_admission(self._reserved_size_bytes, consume_permit=False)
+        )
 
 
 class SpoolManager:
@@ -253,12 +278,14 @@ class SpoolManager:
                 try:
                     yield hashed
                 finally:
-                    await self._remove_spool_file(spool_path)
+                    await _run_shielded_cleanup(self._remove_spool_file(spool_path))
             finally:
                 # Covers drain failure; the unlink above is idempotent.
-                await self._remove_spool_file(spool_path)
+                await _run_shielded_cleanup(self._remove_spool_file(spool_path))
         finally:
-            await self._release_admission(expected_size_bytes, consume_permit=True)
+            await _run_shielded_cleanup(
+                self._release_admission(expected_size_bytes, consume_permit=True)
+            )
 
     async def reserve_verification(self, size_bytes: int) -> VerificationSpool:
         """Reserve capacity for one verification spool and wait for admission."""

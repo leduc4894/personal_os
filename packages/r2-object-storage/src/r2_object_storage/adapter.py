@@ -35,8 +35,9 @@ import base64
 import inspect
 import random
 import time
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Final
@@ -83,6 +84,43 @@ _PROVIDER: Final[SafeToken] = SafeToken.parse("r2")
 
 def _default_now_utc() -> datetime:
     return datetime.now(UTC)
+
+
+#: The shared single-flight outcome for one content digest: the fully verified
+#: receipt plus the verification method its owner resolved.
+_SharedStoreOutcome = tuple[VerifiedObjectReceipt, VerificationMethod]
+
+
+@dataclass(slots=True)
+class _SingleFlightEntry:
+    """One bounded per-process single-flight entry for a ``ContentDigest``.
+
+    Holds the owner's shared outcome future plus the number of waiters
+    currently attached to it. The entry exists only while the owner's shared
+    R2 work is in flight; it is removed in a lock-protected ``finally`` and is
+    never a verification cache.
+    """
+
+    future: asyncio.Future[_SharedStoreOutcome]
+    waiter_count: int
+
+
+async def _run_shielded(cleanup: Coroutine[object, object, None]) -> None:
+    """Drive ``cleanup`` to completion even when the caller is cancelled.
+
+    The cleanup runs as a short shielded local task; a ``CancelledError``
+    delivered to the caller waits for the cleanup to finish and is then
+    re-raised, so lock-protected table removal and waiter detachment can
+    never be abandoned half-done.
+    """
+
+    task = asyncio.ensure_future(cleanup)
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        with suppress(asyncio.CancelledError):
+            await task
+        raise
 
 
 class _AttemptTracker:
@@ -243,6 +281,13 @@ class R2S3ObjectStore:
     Verification is performed fresh on every call (no long-lived cache): each
     :meth:`resolve_verified_object`, :meth:`verify_existing_object` and
     :meth:`open_verified_reader` call runs its own HEAD plus conditional full GET.
+
+    Concurrent :meth:`store_stream` calls for the same digest share the R2
+    resolve/create/verify work through a bounded per-process single-flight
+    table keyed by :class:`ContentDigest` (design §6.5). Each caller still
+    hashes its own input into its own spool before joining; only the shared
+    R2 work is deduplicated, and the entry is removed the moment that work
+    completes, so the table cannot grow with lifetime object count.
     """
 
     def __init__(
@@ -273,11 +318,31 @@ class R2S3ObjectStore:
         self._jitter: Callable[[float, float], float] = (
             jitter if jitter is not None else random.uniform
         )
+        self._single_flight: dict[ContentDigest, _SingleFlightEntry] = {}
+        self._single_flight_lock = asyncio.Lock()
         self._closed = False
 
     @property
     def metrics(self) -> ObjectStorageMetrics:
         return self._metrics
+
+    @property
+    def spool_manager(self) -> SpoolManager:
+        """The bounded spool manager backing this store (test inspection)."""
+
+        return self._spools
+
+    @property
+    def single_flight_entry_count(self) -> int:
+        """Single-flight entries currently in flight (bounded test snapshot)."""
+
+        return len(self._single_flight)
+
+    @property
+    def single_flight_waiter_count(self) -> int:
+        """Waiters currently attached to in-flight single-flight entries."""
+
+        return sum(entry.waiter_count for entry in self._single_flight.values())
 
     async def resolve_verified_object(
         self, expected: ExpectedObject
@@ -292,35 +357,42 @@ class R2S3ObjectStore:
         operation = ObjectStorageOperation.RESOLVE
         started = self._monotonic()
         tracker = _AttemptTracker()
+        self._metrics.increment_in_flight(operation=operation)
         try:
-            verification = await self._verify_to_spool(expected, operation, tracker)
-        except ObjectStorageError as cause:
-            if cause.error_code is ErrorCode.OBJECT_STORAGE_OBJECT_MISSING:
-                self._record_succeeded(
-                    operation, started=started, size_bytes=0, attempt_count=tracker.count
+            try:
+                verification = await self._verify_to_spool(expected, operation, tracker)
+            except ObjectStorageError as cause:
+                if cause.error_code is ErrorCode.OBJECT_STORAGE_OBJECT_MISSING:
+                    self._record_succeeded(
+                        operation, started=started, size_bytes=0, attempt_count=tracker.count
+                    )
+                    return None
+                self._record_failed(
+                    operation,
+                    cause,
+                    started=started,
+                    size_bytes=expected.size_bytes,
+                    attempt_count=tracker.count,
                 )
-                return None
-            self._record_failed(
+                raise
+            self._record_reserved(operation)
+            try:
+                receipt = self._build_receipt(
+                    verification, expected, VerificationMethod.EXISTING_FULL_READ
+                )
+            finally:
+                await verification.close()
+            self._record_reserved(operation)
+            self._record_succeeded(
                 operation,
-                cause,
                 started=started,
-                size_bytes=expected.size_bytes,
+                size_bytes=receipt.size_bytes,
                 attempt_count=tracker.count,
             )
-            raise
-        try:
-            receipt = self._build_receipt(
-                verification, expected, VerificationMethod.EXISTING_FULL_READ
-            )
+            return receipt
         finally:
-            await verification.close()
-        self._record_succeeded(
-            operation,
-            started=started,
-            size_bytes=receipt.size_bytes,
-            attempt_count=tracker.count,
-        )
-        return receipt
+            self._metrics.decrement_in_flight(operation=operation)
+            self._record_reserved(operation)
 
     async def verify_existing_object(self, expected: ExpectedObject) -> VerifiedObjectReceipt:
         """Verify an object the caller asserts exists; raise on absence.
@@ -333,30 +405,37 @@ class R2S3ObjectStore:
         operation = ObjectStorageOperation.VERIFY
         started = self._monotonic()
         tracker = _AttemptTracker()
+        self._metrics.increment_in_flight(operation=operation)
         try:
-            verification = await self._verify_to_spool(expected, operation, tracker)
-        except ObjectStorageError as cause:
-            self._record_failed(
+            try:
+                verification = await self._verify_to_spool(expected, operation, tracker)
+            except ObjectStorageError as cause:
+                self._record_failed(
+                    operation,
+                    cause,
+                    started=started,
+                    size_bytes=expected.size_bytes,
+                    attempt_count=tracker.count,
+                )
+                raise
+            self._record_reserved(operation)
+            try:
+                receipt = self._build_receipt(
+                    verification, expected, VerificationMethod.EXISTING_FULL_READ
+                )
+            finally:
+                await verification.close()
+            self._record_reserved(operation)
+            self._record_succeeded(
                 operation,
-                cause,
                 started=started,
-                size_bytes=expected.size_bytes,
+                size_bytes=receipt.size_bytes,
                 attempt_count=tracker.count,
             )
-            raise
-        try:
-            receipt = self._build_receipt(
-                verification, expected, VerificationMethod.EXISTING_FULL_READ
-            )
+            return receipt
         finally:
-            await verification.close()
-        self._record_succeeded(
-            operation,
-            started=started,
-            size_bytes=receipt.size_bytes,
-            attempt_count=tracker.count,
-        )
-        return receipt
+            self._metrics.decrement_in_flight(operation=operation)
+            self._record_reserved(operation)
 
     async def store_stream(
         self,
@@ -388,16 +467,24 @@ class R2S3ObjectStore:
         the receive context's shielded bounded cleanup on every exit path. A
         client digest is only a claim: the receipt is issued only after the
         backend's own full read passes exact digest, size and media verification.
+
+        Same-process single flight (design §6.5): every caller hashes its own
+        input into its own spool first; callers that computed the same digest
+        then share one owner's R2 resolve/create/verify work and receive that
+        owner's verified receipt. The per-digest entry exists only while the
+        shared work is in flight and never caches a verification.
         """
 
         operation = ObjectStorageOperation.STORE
         started = self._monotonic()
         tracker = _AttemptTracker()
+        self._metrics.increment_in_flight(operation=operation)
         try:
             canonical_media = _parse_canonical_media_type(media_type)
             claimed_digest = _parse_claimed_digest(claimed_sha256)
 
             async with self._spools.receive_stream(stream, expected_size_bytes) as hashed:
+                self._record_reserved(operation)
                 if claimed_digest is not None and hashed.content_digest != claimed_digest:
                     raise ObjectStorageError(
                         ErrorCode.OBJECT_STORAGE_INPUT_INVALID,
@@ -408,12 +495,9 @@ class R2S3ObjectStore:
                     size_bytes=hashed.size_bytes,
                     media_type=canonical_media,
                 )
-                method = await self._resolve_store_method(expected, hashed, tracker)
-                verification = await self._verify_to_spool(expected, operation, tracker)
-                try:
-                    receipt = self._build_receipt(verification, expected, method)
-                finally:
-                    await verification.close()
+                receipt, method = await self._store_single_flight(
+                    expected, hashed, operation, tracker
+                )
             self._record_store_outcome(
                 operation,
                 method,
@@ -431,6 +515,9 @@ class R2S3ObjectStore:
                 attempt_count=tracker.count,
             )
             raise
+        finally:
+            self._metrics.decrement_in_flight(operation=operation)
+            self._record_reserved(operation)
 
     @asynccontextmanager
     async def open_verified_reader(
@@ -450,48 +537,54 @@ class R2S3ObjectStore:
         operation = ObjectStorageOperation.READ
         started = self._monotonic()
         tracker = _AttemptTracker()
+        self._metrics.increment_in_flight(operation=operation)
         try:
-            verification = await self._verify_to_spool(expected, operation, tracker)
-        except ObjectStorageError as cause:
-            self._record_failed(
+            try:
+                verification = await self._verify_to_spool(expected, operation, tracker)
+            except ObjectStorageError as cause:
+                self._record_failed(
+                    operation,
+                    cause,
+                    started=started,
+                    size_bytes=expected.size_bytes,
+                    attempt_count=tracker.count,
+                )
+                raise
+            self._record_reserved(operation)
+            hashed = verification.hashed
+            assert hashed is not None, "verification spool was not hashed"
+            try:
+                reader = await _VerifiedObjectReader.open(hashed, verification)
+            except asyncio.CancelledError:
+                # Cancellation re-raises unmapped (and unrecorded) after cleanup.
+                await verification.close()
+                raise
+            except Exception:
+                # The verified spool could not be reopened for reading: close the
+                # spool (removing the file and releasing the reservation), record
+                # the failed outcome, then re-raise the original cause.
+                await verification.close()
+                self._record_failed(
+                    operation,
+                    ObjectStorageError(ErrorCode.OBJECT_STORAGE_CONTRACT_INVALID),
+                    started=started,
+                    size_bytes=hashed.size_bytes,
+                    attempt_count=tracker.count,
+                )
+                raise
+            self._record_succeeded(
                 operation,
-                cause,
-                started=started,
-                size_bytes=expected.size_bytes,
-                attempt_count=tracker.count,
-            )
-            raise
-        hashed = verification.hashed
-        assert hashed is not None, "verification spool was not hashed"
-        try:
-            reader = await _VerifiedObjectReader.open(hashed, verification)
-        except asyncio.CancelledError:
-            # Cancellation re-raises unmapped (and unrecorded) after cleanup.
-            await verification.close()
-            raise
-        except Exception:
-            # The verified spool could not be reopened for reading: close the
-            # spool (removing the file and releasing the reservation), record
-            # the failed outcome, then re-raise the original cause.
-            await verification.close()
-            self._record_failed(
-                operation,
-                ObjectStorageError(ErrorCode.OBJECT_STORAGE_CONTRACT_INVALID),
                 started=started,
                 size_bytes=hashed.size_bytes,
                 attempt_count=tracker.count,
             )
-            raise
-        self._record_succeeded(
-            operation,
-            started=started,
-            size_bytes=hashed.size_bytes,
-            attempt_count=tracker.count,
-        )
-        try:
-            yield reader
+            try:
+                yield reader
+            finally:
+                await reader.aclose()
         finally:
-            await reader.aclose()
+            self._metrics.decrement_in_flight(operation=operation)
+            self._record_reserved(operation)
 
     async def close(self) -> None:
         """Close the store's underlying client exactly once."""
@@ -684,7 +777,139 @@ class R2S3ObjectStore:
             # verification; do not retry the PUT.
             return VerificationMethod.EXISTING_FULL_READ
 
+    # --- Single flight ----------------------------------------------------
+
+    async def _store_single_flight(
+        self,
+        expected: ExpectedObject,
+        hashed: HashedSpool,
+        operation: ObjectStorageOperation,
+        tracker: _AttemptTracker,
+    ) -> _SharedStoreOutcome:
+        """Own or join the per-digest single flight for the shared R2 work.
+
+        The caller has already hashed its own input spool. The first caller
+        for a digest becomes the owner and runs the HEAD -> conditional PUT ->
+        full verification sequence; later callers with the same digest attach
+        as waiters to the owner's outcome future. Waiters await through a
+        shield so their own cancellation detaches them without cancelling the
+        owner or the other waiters. The owner removes the entry in a
+        lock-protected ``finally`` on every exit path, including cancellation,
+        so the table is never a cache and never leaks an entry.
+        """
+
+        digest = expected.content_digest
+        async with self._single_flight_lock:
+            entry = self._single_flight.get(digest)
+            if entry is None:
+                entry = _SingleFlightEntry(
+                    future=asyncio.get_running_loop().create_future(), waiter_count=0
+                )
+                self._single_flight[digest] = entry
+                is_owner = True
+            else:
+                entry.waiter_count += 1
+                is_owner = False
+
+        if not is_owner:
+            try:
+                outcome = await asyncio.shield(entry.future)
+            finally:
+                await _run_shielded(self._detach_single_flight_waiter(digest))
+            receipt, method = outcome
+            tracker.count = max(tracker.count, 1)
+            if receipt.media_type != expected.media_type:
+                # The same bytes were shared, but the owner stored a different
+                # canonical media type than this caller declared; surface the
+                # conflict instead of returning a mismatched receipt.
+                raise ObjectStorageError(ErrorCode.OBJECT_STORAGE_METADATA_CONFLICT)
+            return receipt, method
+
+        try:
+            method = await self._resolve_store_method(expected, hashed, tracker)
+            verification = await self._verify_to_spool(expected, operation, tracker)
+            self._record_reserved(operation)
+            try:
+                receipt = self._build_receipt(verification, expected, method)
+            finally:
+                await verification.close()
+            self._record_reserved(operation)
+        except BaseException as cause:
+            await _run_shielded(self._finish_single_flight(digest, cause=cause))
+            raise
+        await _run_shielded(self._finish_single_flight(digest, outcome=(receipt, method)))
+        return receipt, method
+
+    async def _detach_single_flight_waiter(self, digest: ContentDigest) -> None:
+        """Detach one waiter from the digest's entry under the lock.
+
+        When the last waiter detaches after the future already failed, the
+        exception is marked retrieved so an unobserved failure can never raise
+        a stray warning once every waiter is gone.
+        """
+
+        async with self._single_flight_lock:
+            entry = self._single_flight.get(digest)
+            if entry is None:
+                return
+            if entry.waiter_count > 0:
+                entry.waiter_count -= 1
+            if (
+                entry.waiter_count == 0
+                and entry.future.done()
+                and not entry.future.cancelled()
+            ):
+                entry.future.exception()
+
+    async def _finish_single_flight(
+        self,
+        digest: ContentDigest,
+        *,
+        cause: BaseException | None = None,
+        outcome: _SharedStoreOutcome | None = None,
+    ) -> None:
+        """Complete the shared outcome and remove the digest's entry.
+
+        The owner calls this exactly once from its ``finally`` path while
+        holding the lock. A successful outcome resolves the future for every
+        waiter; a typed failure is shared with attached waiters; an owner
+        cancellation maps to a typed unavailable outcome for attached waiters
+        (never a bare ``CancelledError``, which would masquerade as the
+        waiter's own cancellation), while an entry with no waiters left is
+        simply cancelled.
+        """
+
+        async with self._single_flight_lock:
+            entry = self._single_flight.pop(digest, None)
+            if entry is None or entry.future.done():
+                return
+            if cause is None:
+                assert outcome is not None, "a completed owner must carry its outcome"
+                entry.future.set_result(outcome)
+            elif entry.waiter_count > 0:
+                if isinstance(cause, ObjectStorageError):
+                    entry.future.set_exception(cause)
+                else:
+                    entry.future.set_exception(
+                        ObjectStorageError(ErrorCode.OBJECT_STORAGE_UNAVAILABLE)
+                    )
+            else:
+                entry.future.cancel()
+
     # --- Metrics and diagnostics ------------------------------------------
+
+    def _record_reserved(self, operation: ObjectStorageOperation) -> None:
+        """Sample the process-wide spool reservation into the metrics sink.
+
+        The value is the spool manager's current aggregate reservation (input
+        and verification spools together); ``operation`` only identifies which
+        operation's admission change triggered the sample. Sampling the
+        aggregate keeps the recorded maximum an exact bound of true state.
+        """
+
+        self._metrics.record_reserved_bytes(
+            operation=operation, size_bytes=self._spools.reserved_size_bytes
+        )
 
     def _duration_ms(self, started: float) -> int:
         return max(0, int((self._monotonic() - started) * 1000))
