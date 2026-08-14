@@ -186,9 +186,7 @@ async def test_cancellation_releases_locks_and_pool_checkout(
 
     # The cancelled transaction rolled back completely.
     assert await preflight_harness.table_row_counts() == counts_before
-    assert (
-        await preflight_harness.rejection_audit_rows(workspace_id=workspace.workspace_id) == []
-    )
+    assert await preflight_harness.rejection_audit_rows(workspace_id=workspace.workspace_id) == []
     status = await _await_pool_checked_in(cancellation_engine)
     assert "Checked out connections: 0" in status, status
 

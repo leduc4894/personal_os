@@ -219,9 +219,7 @@ async def test_lost_commit_acknowledgement_resolves_committed_replay_on_new_conn
     )
     assert replay == result
     assert await _count_events(ambiguity_engine, command.event_id) == 1
-    assert (
-        await preflight_harness.rejection_audit_rows(workspace_id=workspace.workspace_id) == []
-    )
+    assert await preflight_harness.rejection_audit_rows(workspace_id=workspace.workspace_id) == []
 
 
 @pytest.mark.asyncio

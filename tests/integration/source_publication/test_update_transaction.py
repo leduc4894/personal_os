@@ -273,9 +273,7 @@ async def _seed_committed_source(harness, workspace, salt: str):
 
 
 @pytest.mark.asyncio
-async def test_changed_update_commits_next_ordinal_graph(
-    preflight_harness, update_engine
-) -> None:
+async def test_changed_update_commits_next_ordinal_graph(preflight_harness, update_engine) -> None:
     workspace = await preflight_harness.seed_workspace()
     create_salt = f"changed-base-{uuid4()}"
     _, first = await _seed_committed_source(preflight_harness, workspace, create_salt)
@@ -359,9 +357,7 @@ async def test_changed_update_commits_next_ordinal_graph(
     assert matching[0].result == _AUDIT_RESULT_SUCCEEDED
     assert matching[0].reason_code is None
     assert matching[0].target_id == first.source_id
-    assert (
-        await preflight_harness.rejection_audit_rows(workspace_id=workspace.workspace_id) == []
-    )
+    assert await preflight_harness.rejection_audit_rows(workspace_id=workspace.workspace_id) == []
 
 
 @pytest.mark.asyncio
@@ -463,15 +459,16 @@ async def test_no_change_update_writes_only_event_and_audit(
     assert audit_row.result == _AUDIT_RESULT_SUCCEEDED
     assert audit_row.reason_code == "content_unchanged"
     assert audit_row.target_id == first.source_id
-    assert audit_row.safe_diff_hash == compute_safe_diff_hash(
-        first.source_id,
-        first.source_version_id,
-        create_command.expected_object.content_digest,
-        create_command.expected_object.content_digest,
-    ).hexadecimal
     assert (
-        await preflight_harness.rejection_audit_rows(workspace_id=workspace.workspace_id) == []
+        audit_row.safe_diff_hash
+        == compute_safe_diff_hash(
+            first.source_id,
+            first.source_version_id,
+            create_command.expected_object.content_digest,
+            create_command.expected_object.content_digest,
+        ).hexadecimal
     )
+    assert await preflight_harness.rejection_audit_rows(workspace_id=workspace.workspace_id) == []
 
 
 # --- base comparison precedes content comparison ---------------------------------
@@ -763,6 +760,4 @@ async def test_commit_update_exact_replay_returns_committed_result_without_mutat
 
     assert replayed == committed
     assert await preflight_harness.table_row_counts() == counts_after_commit
-    assert (
-        await preflight_harness.rejection_audit_rows(workspace_id=workspace.workspace_id) == []
-    )
+    assert await preflight_harness.rejection_audit_rows(workspace_id=workspace.workspace_id) == []

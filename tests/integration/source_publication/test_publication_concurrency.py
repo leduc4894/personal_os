@@ -214,9 +214,7 @@ async def test_hundred_exact_concurrent_replays_commit_one_event(
         )
         == 1
     )
-    assert (
-        await preflight_harness.rejection_audit_rows(workspace_id=workspace.workspace_id) == []
-    )
+    assert await preflight_harness.rejection_audit_rows(workspace_id=workspace.workspace_id) == []
 
 
 # --- two different-key updates from one base ---------------------------------------
@@ -394,9 +392,7 @@ async def test_two_concurrent_creates_for_one_source_yield_one_source_and_one_re
     )
     assert len(rejection_audits) == 1
     assert rejection_audits[0].reason_code == "source_already_exists"
-    assert (
-        await _count_rows(concurrency_engine, sources, sources.c.source_id == source_id) == 1
-    )
+    assert await _count_rows(concurrency_engine, sources, sources.c.source_id == source_id) == 1
 
 
 # --- distinct sources with identical bytes ------------------------------------------
