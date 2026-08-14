@@ -14,7 +14,6 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
-from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -40,9 +39,14 @@ from personal_os.sources.commands import (
     SourceTitle,
     SourceType,
 )
+from personal_os.sources.errors import SourcePublicationError
 from personal_os.sources.fingerprint import RequestFingerprint, compute_request_fingerprint
 from postgresql_source_store.engine import create_source_store_engine, dispose_source_store_engine
-from postgresql_source_store.publication_store import PostgresqlSourcePublicationStore
+from postgresql_source_store.publication_store import (
+    ContentObjectLookupRow,
+    PostgresqlSourcePublicationStore,
+    _PendingRejection,
+)
 from postgresql_source_store.tables import sources
 
 pytestmark = pytest.mark.local_stack
@@ -90,7 +94,7 @@ class FaultInjectingStore(PostgresqlSourcePublicationStore):
         connection: AsyncConnection,
         content_object_id: UUID,
         receipt: VerifiedObjectReceipt,
-    ) -> Any:
+    ) -> ContentObjectLookupRow | None:
         row = await super()._insert_content_object(connection, content_object_id, receipt)
         self._maybe_fault(FAULT_AFTER_CONTENT_OBJECT)
         return row
@@ -116,7 +120,7 @@ class FaultInjectingStore(PostgresqlSourcePublicationStore):
         connection: AsyncConnection,
         command: CreateSourceVersion,
         source_version_id: UUID,
-    ) -> Any:
+    ) -> _PendingRejection | None:
         rejection = await super()._activate_source_pointer(connection, command, source_version_id)
         self._maybe_fault(FAULT_AFTER_POINTER)
         return rejection
@@ -166,6 +170,25 @@ class FaultInjectingStore(PostgresqlSourcePublicationStore):
             connection, command, receipt, diagnostic_context, audit_event_id
         )
         self._maybe_fault(FAULT_AFTER_AUDIT)
+
+
+class _PointerInvariantRejectionStore(PostgresqlSourcePublicationStore):
+    """Store whose guarded pointer transition returns the invariant rejection.
+
+    Unlike the fault-hook subclass this never raises inside the store: the
+    rejection is RETURNED after the content object, pending source and
+    version 1 rows were already written. The store must still roll the whole
+    transaction back — a returned rejection can never commit the partial
+    pending-source graph.
+    """
+
+    async def _activate_source_pointer(
+        self,
+        connection: AsyncConnection,
+        command: CreateSourceVersion,
+        source_version_id: UUID,
+    ) -> _PendingRejection | None:
+        return self._invariant_rejection(command)
 
 
 def _receipt(salt: str) -> VerifiedObjectReceipt:
@@ -259,3 +282,50 @@ async def test_fault_store_without_injected_fault_still_commits_create(
 
     assert result.content_version == 1
     assert await _source_exists(fault_engine, command.source_id)
+
+
+@pytest.mark.asyncio
+async def test_returned_invariant_rejection_after_writes_rolls_back_whole_graph(
+    preflight_harness, fault_engine
+) -> None:
+    """A rejection RETURNED after canonical writes must not commit anything."""
+    workspace = await preflight_harness.seed_workspace()
+    salt = f"create-rollback-invariant-{uuid4()}"
+    command = _create_command(workspace, salt)
+    receipt = _receipt(salt)
+    fingerprint = compute_request_fingerprint(command)
+    invariant_store = _PointerInvariantRejectionStore(fault_engine)
+    counts_before = await preflight_harness.table_row_counts()
+
+    with pytest.raises(SourcePublicationError) as captured:
+        await invariant_store.commit_create(
+            command, fingerprint, receipt, create_diagnostic_context().context
+        )
+
+    assert captured.value.error_code is ErrorCode.SOURCE_CONCURRENCY_INVARIANT_FAILED
+    assert dict(captured.value.safe_details) == {"source_id": command.source_id}
+    counts_after = await preflight_harness.table_row_counts()
+    # Only the standalone rejection audit may appear; every canonical table
+    # (including the already-inserted content object, pending source and
+    # version 1) must be unchanged.
+    assert {
+        table_name: counts_after[table_name] - counts_before[table_name]
+        for table_name in counts_after
+    } == {
+        "users": 0,
+        "workspaces": 0,
+        "devices": 0,
+        "content_objects": 0,
+        "sources": 0,
+        "source_versions": 0,
+        "sync_events": 0,
+        "projection_intents": 0,
+        "audit_events": 1,
+    }
+    assert not await _source_exists(fault_engine, command.source_id)
+    rejection_audits = await preflight_harness.rejection_audit_rows(
+        workspace_id=workspace.workspace_id
+    )
+    assert len(rejection_audits) == 1
+    assert rejection_audits[0].reason_code is None
+    assert rejection_audits[0].target_id == command.source_id

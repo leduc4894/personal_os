@@ -262,6 +262,23 @@ class _PendingRejection:
     error: SourcePublicationError
 
 
+class _RejectionAbort(Exception):
+    """Carries a pending rejection out of the open transaction to force rollback.
+
+    A business rejection detected inside the commit transaction must never let
+    the surrounding ``connection.begin()`` block exit normally, because a
+    normal exit commits — and a rejection found after a canonical write (for
+    example the guarded-pointer invariant failure) would otherwise commit the
+    partial graph. Raising this abort rolls the whole transaction back; the
+    store catches it immediately after the block, writes the standalone
+    rejection audit and raises the typed business error.
+    """
+
+    def __init__(self, rejection: _PendingRejection) -> None:
+        super().__init__("pending business rejection aborts the transaction")
+        self.rejection = rejection
+
+
 @dataclass(frozen=True, slots=True)
 class SourceCreateIdentities:
     """Backend UUIDv7 identities for one create service invocation.
@@ -409,33 +426,40 @@ class PostgresqlSourcePublicationStore:
     ) -> SourceVersionPublicationResult:
         result: SourceVersionPublicationResult | None = None
         rejection: _PendingRejection | None = None
-        async with (
-            self._engine.connect() as connection,
-            connection.begin(),
-        ):
-            await apply_transaction_bounds(connection)
-            await connection.execute(
-                idempotency_lock_statement(command.workspace_id, command.idempotency_key)
-            )
-            if not await self._select_workspace_is_active(connection, command.workspace_id):
-                # Before the trust boundary: typed diagnostics only, no audit.
-                raise SourcePublicationError(
-                    ErrorCode.SOURCE_PUBLISH_INPUT_INVALID,
-                    safe_details={"reason": ACTOR_INVALID},
+        try:
+            async with (
+                self._engine.connect() as connection,
+                connection.begin(),
+            ):
+                await apply_transaction_bounds(connection)
+                await connection.execute(
+                    idempotency_lock_statement(command.workspace_id, command.idempotency_key)
                 )
-            if not await self._is_actor_valid(connection, command):
-                rejection = _PendingRejection(
-                    reason_code=REASON_ACTOR_INVALID,
-                    error=SourcePublicationError(
+                if not await self._select_workspace_is_active(connection, command.workspace_id):
+                    # Before the trust boundary: typed diagnostics only, no audit.
+                    raise SourcePublicationError(
                         ErrorCode.SOURCE_PUBLISH_INPUT_INVALID,
                         safe_details={"reason": ACTOR_INVALID},
-                    ),
-                )
-            else:
+                    )
+                if not await self._is_actor_valid(connection, command):
+                    # Every rejection raises out of the block so the
+                    # transaction always rolls back: a rejection found after a
+                    # canonical write must never commit a partial graph.
+                    raise _RejectionAbort(
+                        _PendingRejection(
+                            reason_code=REASON_ACTOR_INVALID,
+                            error=SourcePublicationError(
+                                ErrorCode.SOURCE_PUBLISH_INPUT_INVALID,
+                                safe_details={"reason": ACTOR_INVALID},
+                            ),
+                        )
+                    )
                 rejection, result = await self._resolve_identity(
                     connection, command, request_fingerprint
                 )
-                if rejection is None and result is None:
+                if rejection is not None:
+                    raise _RejectionAbort(rejection)
+                if result is None:
                     await connection.execute(source_lock_statement(command.source_id))
                     rejection, result = await self._create_transition(
                         connection,
@@ -445,7 +469,14 @@ class PostgresqlSourcePublicationStore:
                         diagnostic_context,
                         identities,
                     )
+                    if rejection is not None:
+                        raise _RejectionAbort(rejection)
+        except _RejectionAbort as abort:
+            rejection = abort.rejection
         if rejection is not None:
+            # A failure writing this standalone audit surfaces as the database
+            # failure and replaces the business rejection error: the service
+            # must never claim an audit that does not exist.
             await self._write_rejection_audit(command, diagnostic_context, rejection.reason_code)
             raise rejection.error
         if result is None:
