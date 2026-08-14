@@ -44,12 +44,13 @@ addopts = [
   "--strict-markers",
   "--import-mode=importlib",
   "-m",
-  "not local_stack",
+  "not local_stack and not r2_live",
 ]
 testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
   "local_stack: requires a reachable Linux Docker Engine and may create disposable containers and volumes",
+  "r2_live: requires dedicated live Cloudflare R2 test credentials and a dedicated private test bucket; fails (never skips) without them",
 ]
 
 [tool.ruff]
@@ -153,6 +154,12 @@ cmd = "uv run python tools/local_service_stack.py smoke"
 # contacts R2; startup validation, liveness and normal readiness stay offline.
 [tool.poe.tasks.object-storage-check-runtime]
 cmd = "uv run --package r2-object-storage object-storage-check-runtime --service worker"
+
+# Dedicated live R2 gate (design section 16.2): explicit invocation only. The
+# explicit ``-m r2_live`` overrides the default marker expression, and the
+# harness fixtures fail (never skip) without dedicated test credentials.
+[tool.poe.tasks.object-storage-test-live]
+cmd = "pytest tests/integration/r2_object_storage/test_live_r2_adapter.py -m r2_live -q"
 
 [tool.poe.tasks.database-heads]
 cmd = "alembic heads"

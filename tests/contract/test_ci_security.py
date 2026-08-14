@@ -10,6 +10,7 @@ WORKFLOW_DIRECTORY = REPO_ROOT / ".github" / "workflows"
 WORKFLOW_PATH = WORKFLOW_DIRECTORY / "quality.yml"
 LOCAL_STACK_WORKFLOW_PATH = WORKFLOW_DIRECTORY / "local-service-stack.yml"
 CANONICAL_POSTGRESQL_WORKFLOW_PATH = WORKFLOW_DIRECTORY / "canonical-postgresql-baseline.yml"
+R2_LIVE_WORKFLOW = WORKFLOW_DIRECTORY / "object-storage-live.yml"
 WORKFLOW_TEXT = WORKFLOW_PATH.read_text(encoding="utf-8")
 
 CANONICAL_POSTGRESQL_STATIC_JOB_NAME = "windows-static"
@@ -598,3 +599,20 @@ def test_canonical_postgresql_contract_rejects_widened_artifact_mutation() -> No
         )
         assert mutated != text
         assert not _canonical_postgresql_artifact_scope_is_junit_only(mutated)
+
+
+# ---------------------------------------------------------------------------
+# Dedicated live R2 harness workflow contract (Task 11)
+# ---------------------------------------------------------------------------
+
+
+def test_r2_live_workflow_is_trusted_and_exact_cleanup_only() -> None:
+    text = R2_LIVE_WORKFLOW.read_text("utf-8")
+    assert "pull_request:" not in text
+    assert "branches: [master]" in text
+    assert "schedule:" in text and "workflow_dispatch:" in text
+    assert "R2_TEST_ACCESS_KEY_ID" in text
+    assert "R2_TEST_SECRET_ACCESS_KEY" in text
+    assert "R2_PRODUCTION" not in text
+    assert "--junitxml=.local/test-results/object-storage-live.xml" in text
+    assert "ListObjects" not in text and "prefix-delete" not in text
