@@ -30,7 +30,7 @@ from botocore.exceptions import ClientError
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.object_storage.errors import ObjectStorageError
 from personal_os.object_storage.keys import CanonicalMediaType, CanonicalObjectKey
-from r2_object_storage.error_mapping import _OBJECT_MISSING_ERROR_CODES
+from r2_object_storage.error_mapping import OBJECT_MISSING_ERROR_CODES
 from r2_object_storage.settings import LoadedR2Credentials, ObjectStorageSettings
 
 if TYPE_CHECKING:
@@ -51,7 +51,7 @@ _CONDITIONAL_IF_NONE_MATCH: Final[str] = "*"
 #: HEAD error is synthesized by botocore's ``RestXMLParser`` with
 #: ``Code == str(status_code)`` — i.e. ``"404"`` for a miss — so the status-only
 #: token is recognized alongside the named S3 absence codes for robustness.
-_HEAD_OBJECT_ABSENT_CODES: Final[frozenset[str]] = _OBJECT_MISSING_ERROR_CODES | frozenset({"404"})
+_HEAD_OBJECT_ABSENT_CODES: Final[frozenset[str]] = OBJECT_MISSING_ERROR_CODES | frozenset({"404"})
 
 #: Error codes meaning "the probed bucket is absent" on a HEAD. A bodiless
 #: ``head_bucket`` miss likewise arrives as ``"404"`` rather than the named

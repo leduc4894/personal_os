@@ -32,6 +32,7 @@ from botocore.exceptions import (
 from pydantic import SecretStr
 
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.error_contracts.exceptions import InternalApplicationError
 from personal_os.object_storage.errors import ObjectStorageError
 from personal_os.object_storage.keys import (
     CanonicalMediaType,
@@ -537,6 +538,47 @@ def test_mapped_terminal_codes_are_exact() -> None:
         map_r2_failure(_client_error("InvalidDigest", 400), exhausted=False).error_code
         is ErrorCode.OBJECT_STORAGE_CONTRACT_INVALID
     )
+
+
+def test_unknown_exception_maps_to_internal_error_without_leaking_the_cause() -> None:
+    """Spec §12: an unknown exception crosses the boundary as internal_error.
+
+    An internal bug (a plain ``RuntimeError`` from a broken client wrapper) is
+    never misreported as a provider-integrity failure, and its message never
+    enters the mapped error's rendered or safe surface.
+    """
+
+    error = map_r2_failure(RuntimeError("internal-bug-sentinel-4d81"), exhausted=False)
+
+    assert isinstance(error, InternalApplicationError)
+    assert not isinstance(error, ObjectStorageError)
+    assert error.error_code is ErrorCode.INTERNAL_ERROR
+    assert error.error_code is not ErrorCode.OBJECT_STORAGE_CONTRACT_INVALID
+    assert error.error_code is not ErrorCode.OBJECT_STORAGE_INTEGRITY_FAILED
+    assert error.is_retryable is False
+    assert error.category == "internal"
+    blob = f"{error!r}\n{error}\n{error.to_safe_dict()!r}"
+    assert "internal-bug-sentinel-4d81" not in blob
+
+
+@pytest.mark.asyncio
+async def test_retry_policy_maps_unknown_exception_to_internal_error() -> None:
+    """The bounded retry loop surfaces an unknown cause as internal_error."""
+
+    async def _operation(_attempt: int) -> str:
+        raise RuntimeError("internal-bug-sentinel-4d81")
+
+    async def _sleep(_delay: float) -> None:
+        return None
+
+    policy = RetryPolicy(maximum_attempts=3)
+    with pytest.raises(InternalApplicationError) as raised:
+        await policy.run(_operation, monotonic=lambda: 0.0, sleep=_sleep)
+
+    assert raised.value.error_code is ErrorCode.INTERNAL_ERROR
+    assert raised.value.is_retryable is False
+    assert "internal-bug-sentinel-4d81" not in repr(raised.value)
+    assert "internal-bug-sentinel-4d81" not in str(raised.value)
 
 
 # --- Step 1d: the bounded retry policy --------------------------------------

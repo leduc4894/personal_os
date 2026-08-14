@@ -37,6 +37,7 @@ from botocore.exceptions import (
 from botocore.exceptions import ConnectionError as BotoCoreConnectionError
 
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.error_contracts.exceptions import ApplicationError, InternalApplicationError
 from personal_os.object_storage.errors import ObjectStorageError
 
 
@@ -75,7 +76,7 @@ _ACCESS_DENIED_ERROR_CODES: Final[frozenset[str]] = frozenset(
         "UnauthorizedAccess",
     }
 )
-_OBJECT_MISSING_ERROR_CODES: Final[frozenset[str]] = frozenset(
+OBJECT_MISSING_ERROR_CODES: Final[frozenset[str]] = frozenset(
     {
         "NoSuchKey",
         "NoSuchObject",
@@ -133,7 +134,7 @@ def classify_r2_failure(cause: BaseException) -> RetryDecision:
             return RetryDecision.RETRY
         if code == "NoSuchBucket":
             return RetryDecision.TERMINAL
-        if code in _OBJECT_MISSING_ERROR_CODES:
+        if code in OBJECT_MISSING_ERROR_CODES:
             return RetryDecision.TERMINAL
         if code in _ACCESS_DENIED_ERROR_CODES or status in (401, 403):
             return RetryDecision.TERMINAL
@@ -145,8 +146,8 @@ def classify_r2_failure(cause: BaseException) -> RetryDecision:
     return RetryDecision.TERMINAL
 
 
-def map_r2_failure(cause: BaseException, *, exhausted: bool) -> ObjectStorageError:
-    """Map a classified R2 failure to a typed :class:`ObjectStorageError`.
+def map_r2_failure(cause: BaseException, *, exhausted: bool) -> ApplicationError:
+    """Map a classified R2 failure to a typed registry error.
 
     ``exhausted`` records whether the retry deadline elapsed (as opposed to the
     attempt budget); both give-up modes for a transient cause yield the same
@@ -156,6 +157,13 @@ def map_r2_failure(cause: BaseException, *, exhausted: bool) -> ObjectStorageErr
 
     The provider exception remains only as the chained ``__cause__``; its
     message, request id, headers and body never enter the returned error.
+
+    Unknown exceptions (spec §12) — anything that is not a
+    :class:`~botocore.exceptions.ClientError`, a recognized transient transport
+    error or :class:`ConditionalCreateConflict` — surface as
+    :class:`InternalApplicationError` with the registry's ``internal_error``
+    code: an internal bug crosses the composition boundary as an internal
+    failure and is never misreported as a provider-integrity failure.
     """
 
     decision = classify_r2_failure(cause)
@@ -169,12 +177,17 @@ def map_r2_failure(cause: BaseException, *, exhausted: bool) -> ObjectStorageErr
         code, status = _extract_client_error_info(cause)
         if code == "NoSuchBucket":
             return ObjectStorageError(ErrorCode.OBJECT_STORAGE_UNAVAILABLE)
-        if code in _OBJECT_MISSING_ERROR_CODES:
+        if code in OBJECT_MISSING_ERROR_CODES:
             return ObjectStorageError(ErrorCode.OBJECT_STORAGE_OBJECT_MISSING)
         if code in _ACCESS_DENIED_ERROR_CODES or status in (401, 403):
             return ObjectStorageError(ErrorCode.OBJECT_STORAGE_ACCESS_DENIED)
         return ObjectStorageError(ErrorCode.OBJECT_STORAGE_CONTRACT_INVALID)
-    return ObjectStorageError(ErrorCode.OBJECT_STORAGE_CONTRACT_INVALID)
+    if isinstance(cause, ConditionalCreateConflict):
+        # Known internal signal outside the retry loop's documented path; keep
+        # the historical defensive fallback rather than reclassifying it as an
+        # unknown exception.
+        return ObjectStorageError(ErrorCode.OBJECT_STORAGE_CONTRACT_INVALID)
+    return InternalApplicationError(ErrorCode.INTERNAL_ERROR)
 
 
 @dataclass(frozen=True, slots=True)

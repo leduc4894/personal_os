@@ -83,7 +83,7 @@ skip_covered = false
 # boundary-check, test, build. Coverage is diagnostic only (no fail_under).
 
 [tool.poe.tasks.python-format]
-cmd = "ruff format src apps tests tools"
+cmd = "ruff format src apps packages/r2-object-storage/src tests tools"
 
 [tool.poe.tasks.python-format-check]
 cmd = "ruff format --check src apps packages/r2-object-storage/src tests tools"

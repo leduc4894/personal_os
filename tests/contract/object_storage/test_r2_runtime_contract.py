@@ -18,6 +18,7 @@ import os
 import socket
 from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from botocore.exceptions import ClientError
@@ -27,6 +28,9 @@ from personal_os.diagnostics.logging import reset_diagnostics_for_testing
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.object_storage.errors import ObjectStorageError
 from personal_os.runtime_configuration.models import ServiceName
+
+if TYPE_CHECKING:
+    from r2_object_storage.spool import SpoolCleanupSummary
 
 COMMAND_MODULE = "r2_object_storage.runtime_check"
 COMMAND_PROGRAM = "object-storage-check-runtime"
@@ -148,9 +152,12 @@ def _valid_environ(secret_root: Path, spool_root: Path) -> dict[str, str]:
     }
 
 
-def _ordering_janitor(order: list[str]) -> Callable[[Path], Awaitable[None]]:
-    async def _janitor(_spool_root: Path) -> None:
+def _ordering_janitor(order: list[str]) -> Callable[[Path], Awaitable[SpoolCleanupSummary]]:
+    from r2_object_storage.spool import SpoolCleanupSummary as _Summary
+
+    async def _janitor(_spool_root: Path) -> SpoolCleanupSummary:
         order.append("janitor")
+        return _Summary(0, 0, 0, 0)
 
     return _janitor
 
@@ -161,7 +168,7 @@ async def _run_check(
     *,
     order: list[str] | None = None,
     sleep: Callable[[float], Awaitable[None]] | None = None,
-    spool_janitor: Callable[[Path], Awaitable[None]] | None = None,
+    spool_janitor: Callable[[Path], Awaitable[SpoolCleanupSummary]] | None = None,
 ) -> int:
     from r2_object_storage.runtime_check import run_object_storage_runtime_check
 
@@ -582,3 +589,86 @@ async def test_janitor_degradation_does_not_mask_a_probe_failure(
     ]
     assert events[1]["error_code"] == "object_storage_access_denied"
     assert "spool-scan-failed-do-not-render" not in _combined_output(capsys)
+
+
+@pytest.mark.asyncio
+async def test_janitor_deferred_candidates_emit_degraded_with_real_count(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Spec §9.3: candidates beyond the per-run bound emit the real count.
+
+    A successful janitor that deferred three candidates emits
+    ``object_storage_spool_cleanup_degraded`` with ``count == 3`` while the
+    probe still runs and the exit code still reflects only the probe outcome.
+    """
+
+    secret_root = tmp_path / "secrets"
+    secret_root.mkdir()
+    _secret_files(secret_root)
+    spool_root = tmp_path / "spool"
+    spool_root.mkdir()
+
+    client = ScriptedS3Client()
+    client.enqueue(None)
+    source = RecordingClientSource(client)
+
+    def _deferred_janitor(_spool_root: Path) -> Awaitable[SpoolCleanupSummary]:
+        from r2_object_storage.spool import SpoolCleanupSummary
+
+        async def _janitor() -> SpoolCleanupSummary:
+            return SpoolCleanupSummary(1_000, 997, 0, 3)
+
+        return _janitor()
+
+    exit_code = await _run_check(
+        _valid_environ(secret_root, spool_root), source, spool_janitor=_deferred_janitor
+    )
+
+    assert exit_code == 0
+    assert source.get_client_count == 1
+    assert source.close_count == 1
+    _assert_read_only(client, 1)
+    events = _event_records(capsys)
+    assert [event["event"] for event in events] == [
+        "object_storage_spool_cleanup_degraded",
+        "object_storage_operation_succeeded",
+    ]
+    assert events[0]["operation"] == "spool_cleanup"
+    assert events[0]["count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_janitor_without_deferred_candidates_emits_no_cleanup_event(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """A fully successful janitor keeps the clean-success one-event invariant."""
+
+    secret_root = tmp_path / "secrets"
+    secret_root.mkdir()
+    _secret_files(secret_root)
+    spool_root = tmp_path / "spool"
+    spool_root.mkdir()
+
+    client = ScriptedS3Client()
+    client.enqueue(None)
+    source = RecordingClientSource(client)
+
+    def _clean_janitor(_spool_root: Path) -> Awaitable[SpoolCleanupSummary]:
+        from r2_object_storage.spool import SpoolCleanupSummary
+
+        async def _janitor() -> SpoolCleanupSummary:
+            return SpoolCleanupSummary(5, 5, 0, 0)
+
+        return _janitor()
+
+    exit_code = await _run_check(
+        _valid_environ(secret_root, spool_root), source, spool_janitor=_clean_janitor
+    )
+
+    assert exit_code == 0
+    assert source.close_count == 1
+    _assert_read_only(client, 1)
+    events = _event_records(capsys)
+    assert [event["event"] for event in events] == ["object_storage_operation_succeeded"]

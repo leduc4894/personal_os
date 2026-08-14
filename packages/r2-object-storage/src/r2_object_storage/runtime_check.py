@@ -33,7 +33,7 @@ The bounded retry around the probe lives here, not in
 :meth:`r2_object_storage.error_mapping.RetryPolicy.run`: the client's
 ``head_bucket`` raises typed :class:`ObjectStorageError` values that
 ``classify_r2_failure`` does not recognize, so wrapping the probe in
-``RetryPolicy.run`` would re-map a typed error to ``contract_invalid``. This
+``RetryPolicy.run`` would re-map a typed error to ``internal_error``. This
 loop instead decides typed errors by their error code (``unavailable`` retries,
 ``access_denied`` is terminal) and classifies only raw provider exceptions.
 """
@@ -154,9 +154,11 @@ async def _run_bounded_head_bucket(
     code (``access_denied`` in particular) is terminal. Raw provider exceptions
     are classified with :func:`classify_r2_failure` and, when the decision is
     terminal or the bound is exhausted, mapped with :func:`map_r2_failure` —
-    access denial becomes ``object_storage_access_denied``. The probe is never
-    wrapped in ``RetryPolicy.run`` because that would re-map a typed
-    ``ObjectStorageError`` to ``contract_invalid``.
+    access denial becomes ``object_storage_access_denied``. An unknown
+    exception is mapped to ``internal_error`` (spec §12), escapes this helper
+    and is handled by the command's unexpected-failure path (exit ``70``). The
+    probe is never wrapped in ``RetryPolicy.run`` because that would re-map a
+    typed ``ObjectStorageError`` to ``internal_error``.
     """
 
     from personal_os.error_contracts.codes import ErrorCode
@@ -265,15 +267,26 @@ async def run_object_storage_runtime_check(
             # (spec §9.3: handled by a later run), so it emits one safe-counts
             # event and execution continues to the probe — a local spool
             # problem never disables the sole read-only HeadBucket diagnostic
-            # and never changes the exit code (spec §14.2).
+            # and never changes the exit code (spec §14.2). Spec §9.3 also
+            # pins the deferred count: candidates beyond the per-run bound
+            # emit the degraded event with the real remaining count and are
+            # handled by a later run, so a successful summary with deferred
+            # candidates still emits the warning while the probe continues.
+            deferred_count = 0
+            janitor_failed = False
             try:
-                await spool_janitor(object_settings.object_storage_spool_root)
+                summary = await spool_janitor(object_settings.object_storage_spool_root)
+                deferred_count = summary.deferred_count
             except asyncio.CancelledError:
                 raise
             except Exception:
+                # A failed janitor is degraded with an unknown deferred count;
+                # no summary is available on the failure path, so count is 0.
+                janitor_failed = True
+            if janitor_failed or deferred_count > 0:
                 logger.emit(
                     EventName.OBJECT_STORAGE_SPOOL_CLEANUP_DEGRADED,
-                    {"operation": janitor_operation, "count": 0},
+                    {"operation": janitor_operation, "count": deferred_count},
                 )
 
             started = monotonic()
