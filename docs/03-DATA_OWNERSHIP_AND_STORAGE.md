@@ -33,7 +33,7 @@ objects/sha256/{first_2}/{next_2}/{sha256}
 - Credentials chỉ có Object Read & Write trên đúng bucket; application không có quyền tạo/xóa bucket, đổi public access, lifecycle hoặc bucket policy.
 - R2 endpoint có dạng `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`; S3 region cố định là `auto`.
 - Credentials được nạp từ secret files/manager, không từ `.env`, CLI argument hoặc committed configuration.
-- Local/CI test ghi dưới exact run prefix trong bucket test và chỉ cleanup prefix đó.
+- Local/CI live test giữ nguyên canonical key trong bucket test; mỗi run chỉ cleanup exact allowlist các key do chính run tạo, không list/xóa wildcard hoặc prefix.
 - Không có backend fallback, dual-write, inactive credential hoặc controlled cutover.
 - R2 timeout, authentication failure, bucket drift hoặc outage đều fail closed; application không tự tạo bucket hoặc thử provider khác.
 

@@ -714,7 +714,7 @@ Marker names contain a unique CI run token. Cleanup uses exact names and runs in
 
 Redis marker persistence proves the selected local lifecycle only; it is not a correctness or durability guarantee.
 
-The local-stack smoke never contacts R2. Live R2 behavior belongs to the content-addressable object-storage pipeline and uses the dedicated test bucket with exact run-prefix cleanup.
+The local-stack smoke never contacts R2. Live R2 behavior belongs to the content-addressable object-storage pipeline and uses the dedicated test bucket with cleanup constrained to an exact per-run allowlist of canonical object keys.
 
 ### 16.4 Leakage and security tests
 

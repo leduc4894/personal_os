@@ -72,9 +72,9 @@ Mỗi schema change chạy empty upgrade, application smoke, data fixture upgrad
 - So sánh contract hash, manifest IDs, counts và golden results.
 - Không seed từ snapshot projection trong correctness drill.
 
-Object-storage unit/contract suite dùng fake/in-memory test double và không cần network. Live Cloudflare R2 pipeline chạy cùng behavior cases trên bucket test: streaming put/get, head, multipart, exact key, conditional create, SHA-256/size verification, deduplication, missing/corrupt fail-closed và presigned behavior nếu contract bật.
+Object-storage unit/contract suite dùng scripted test double và không cần network. Phase 1 live Cloudflare R2 pipeline chạy behavior cases trên bucket test: single-part streaming put/get, head, exact key, conditional create, SHA-256/size verification, deduplication và missing/corrupt fail-closed. Multipart và presigned behavior chỉ được thêm sau khi owning contract tương ứng được duyệt.
 
-Live R2 tests dùng credentials chỉ truy cập bucket test, exact prefix theo CI run và cleanup chính prefix đó. Job chỉ chạy trên trusted branch, schedule hoặc manual dispatch; pull request từ fork không nhận secrets. Acceptance bắt buộc thiếu credentials phải báo blocked/fail rõ ràng, không âm thầm skip. Production bucket và credentials không xuất hiện trong test pipeline.
+Live R2 tests dùng credentials chỉ truy cập bucket test. Mỗi CI run ghi lại exact allowlist các canonical object key do chính run tạo; cleanup chỉ được xóa các key trong allowlist đó, không list/xóa wildcard hoặc prefix. Job chỉ chạy trên trusted branch, schedule hoặc manual dispatch; pull request từ fork không nhận secrets. Acceptance bắt buộc thiếu credentials phải báo blocked/fail rõ ràng, không âm thầm skip. Production bucket và credentials không xuất hiện trong test pipeline.
 
 ## 10. CI gates
 

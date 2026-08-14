@@ -101,7 +101,7 @@ Acceptance:
 - Duplicate idempotency key returns same committed result.
 - Corrupt/missing object cannot become current.
 - Offline object-storage contract suite và live Cloudflare R2 test-bucket pipeline pass trước production activation.
-- Production/test credentials không có quyền chéo; live test cleanup chỉ xóa exact CI run prefix.
+- Production/test credentials không có quyền chéo; mỗi live test run chỉ cleanup exact allowlist các canonical object key do chính run tạo.
 - Migration upgrade/downgrade and backup smoke pass.
 
 ### Phase 2 — Obsidian sync

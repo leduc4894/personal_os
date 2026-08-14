@@ -8,6 +8,7 @@
 | Domain persistence | SQLAlchemy, Alembic |
 | Canonical state | PostgreSQL |
 | Canonical bytes | Private Cloudflare R2 buckets, tách production và test/CI |
+| R2 S3 adapter | `aiobotocore==3.9.0`; `types-aiobotocore[s3]==3.9.0` for strict development typing |
 | Search projection | Qdrant |
 | Graph projection | Neo4j |
 | Durable workflows | Temporal Python SDK |

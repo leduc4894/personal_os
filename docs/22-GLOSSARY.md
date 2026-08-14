@@ -8,9 +8,9 @@ Immutable source content stored in the private Cloudflare R2 production bucket a
 
 The private Cloudflare R2 bucket authorized for canonical reads and writes. Production and test/CI use separate buckets and credentials.
 
-## R2 test prefix
+## R2 test key allowlist
 
-A unique exact prefix inside the dedicated R2 test bucket for one trusted integration run. Cleanup may delete only objects under that run's prefix.
+The exact set of canonical object keys created by one trusted integration run in the dedicated R2 test bucket. Cleanup may delete only keys recorded in that run's allowlist; it never lists or deletes a wildcard/prefix.
 
 ## Canonical application state
 

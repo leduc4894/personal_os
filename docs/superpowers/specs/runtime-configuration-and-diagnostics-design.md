@@ -159,7 +159,7 @@ Names are uppercase and case-sensitive. Empty strings are invalid rather than eq
 
 The loader snapshots only the process environment needed for validation. It must never serialize, log or attach the whole environment to an exception.
 
-Every environment variable beginning with `KNOWLEDGE_` must be recognized by the active schema. An unknown prefixed variable is terminal `configuration_unknown_key`; this catches misspellings instead of silently applying a default.
+Every environment variable beginning with `KNOWLEDGE_` must be recognized by the repository-wide known-name registry. Each adopted settings fragment parses only the keys it owns and ignores other registered `KNOWLEDGE_*` keys, so a composition root can combine runtime, database and object-storage settings without false unknown-key failures. A prefixed name absent from the registry remains terminal `configuration_unknown_key`; this catches misspellings instead of silently applying a default. The registry contains names only and never snapshots or exposes values.
 
 Unrelated operating-system variables are ignored. Direct plaintext secret variables remain unauthorized. Later specs declare secret references only as known names ending in `_FILE`; a plaintext counterpart without `_FILE` is unknown and therefore rejected when it uses the `KNOWLEDGE_` prefix.
 
