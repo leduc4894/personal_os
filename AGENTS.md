@@ -40,6 +40,9 @@ hoặc khi cần artifact lâu dài. Không tạo tài liệu quy trình cho ch�
   thay vì sao chép nội dung của chúng.
 - Nếu handoff vượt khoảng 400 dòng, phần vượt thuộc về tài liệu canonical —
   cập nhật tài liệu đó và rút gọn handoff.
+- Mọi item trì hoãn phải có đúng MỘT dòng index trong `docs/handoff/BACKLOG.md`
+  (ngày, domain, mô tả một dòng, trỏ tới handoff nguồn chứa chi tiết và phán quyết).
+  Xóa dòng khi hoàn thành. BACKLOG là index sống; handoff vẫn giữ đầy đủ ngữ cảnh.
 
 ## Quy tắc đặt tên
 
