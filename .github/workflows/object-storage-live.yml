@@ -29,7 +29,6 @@ jobs:
       # Non-secret repository variables naming the dedicated TEST bucket only.
       R2_TEST_ENDPOINT: ${{ vars.R2_TEST_ENDPOINT }}
       R2_TEST_BUCKET_NAME: ${{ vars.R2_TEST_BUCKET_NAME }}
-      R2_TEST_SECRET_ROOT: ${{ runner.temp }}/r2-live-secrets
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,6 +44,9 @@ jobs:
       - name: Write dedicated test credentials as mode-0600 secret files
         shell: bash
         env:
+          # The runner context is step-level only, so the secret root path is
+          # defined per step rather than in the job-level env block.
+          R2_TEST_SECRET_ROOT: ${{ runner.temp }}/r2-live-secrets
           R2_TEST_ACCESS_KEY_ID: ${{ secrets.R2_TEST_ACCESS_KEY_ID }}
           R2_TEST_SECRET_ACCESS_KEY: ${{ secrets.R2_TEST_SECRET_ACCESS_KEY }}
         run: |
@@ -58,6 +60,8 @@ jobs:
           unset R2_TEST_ACCESS_KEY_ID R2_TEST_SECRET_ACCESS_KEY
       - name: Run live R2 contract cases with exact-key cleanup
         shell: bash
+        env:
+          R2_TEST_SECRET_ROOT: ${{ runner.temp }}/r2-live-secrets
         run: |
           set -euo pipefail
           mkdir -p .local/test-results
@@ -65,6 +69,8 @@ jobs:
       - name: Remove dedicated test secret files
         if: always()
         shell: bash
+        env:
+          R2_TEST_SECRET_ROOT: ${{ runner.temp }}/r2-live-secrets
         run: rm -rf -- "$R2_TEST_SECRET_ROOT"
       - name: Upload sanitized JUnit report
         if: always()
