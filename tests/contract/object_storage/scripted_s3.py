@@ -24,6 +24,12 @@ from r2_object_storage.client import (
     PutObjectRequest,
 )
 
+#: Default canonical media type and opaque ETag the Task 7 factories script. The
+#: test module imports these so the ``ExpectedObject`` it builds matches the HEAD
+#: metadata the fake serves, without the fake depending on test-local constants.
+DEFAULT_MEDIA_TYPE: str = "application/octet-stream"
+DEFAULT_ETAG: str = "etag-1"
+
 
 @dataclass(frozen=True, slots=True)
 class RecordedCall:
@@ -116,6 +122,182 @@ class ScriptedS3Client:
         else:
             self._outcomes.append(_ReturnOutcome(outcome))
         return self
+
+    # --- Task 7 verification factories --------------------------------------
+    #
+    # Each factory returns a freshly-built client with the exact ordered outcomes
+    # the adapter is expected to consume for one verification. They encode only
+    # the narrow scripted behavior; they never hash, parse keys or persist bytes.
+
+    @classmethod
+    def matching_get(
+        cls,
+        payload: bytes,
+        *,
+        media_type: str = DEFAULT_MEDIA_TYPE,
+        etag: str = DEFAULT_ETAG,
+        chunks: list[bytes] | None = None,
+    ) -> ScriptedS3Client:
+        """Script a HEAD whose metadata matches ``payload`` and a GET serving it.
+
+        A zero-byte payload yields an empty body (no chunks); a non-empty payload
+        is served as one chunk unless ``chunks`` splits it.
+        """
+
+        client = cls()
+        client.enqueue(HeadObjectResult(size_bytes=len(payload), media_type=media_type, etag=etag))
+        served = chunks if chunks is not None else ([] if len(payload) == 0 else [payload])
+        client.enqueue(GetObjectResult(body=scripted_body(served)))
+        return client
+
+    @classmethod
+    def missing_object(cls) -> ScriptedS3Client:
+        """Script an ordinary object absence: HEAD returns ``None``."""
+
+        client = cls()
+        client.enqueue(None)
+        return client
+
+    @classmethod
+    def size_conflict(
+        cls,
+        payload: bytes,
+        wrong_size_bytes: int,
+        *,
+        media_type: str = DEFAULT_MEDIA_TYPE,
+        etag: str = DEFAULT_ETAG,
+    ) -> ScriptedS3Client:
+        """Script a HEAD whose ``ContentLength`` conflicts with the expected size."""
+
+        client = cls()
+        client.enqueue(
+            HeadObjectResult(size_bytes=wrong_size_bytes, media_type=media_type, etag=etag)
+        )
+        return client
+
+    @classmethod
+    def media_conflict(
+        cls,
+        payload: bytes,
+        wrong_media_type: str,
+        *,
+        etag: str = DEFAULT_ETAG,
+    ) -> ScriptedS3Client:
+        """Script a HEAD whose ``ContentType`` conflicts with the expected media."""
+
+        client = cls()
+        client.enqueue(
+            HeadObjectResult(size_bytes=len(payload), media_type=wrong_media_type, etag=etag)
+        )
+        return client
+
+    @classmethod
+    def missing_etag(
+        cls,
+        payload: bytes,
+        *,
+        media_type: str = DEFAULT_MEDIA_TYPE,
+    ) -> ScriptedS3Client:
+        """Script a HEAD whose ETag is the empty string."""
+
+        client = cls()
+        client.enqueue(HeadObjectResult(size_bytes=len(payload), media_type=media_type, etag=""))
+        return client
+
+    @classmethod
+    def malformed_etag(
+        cls,
+        payload: bytes,
+        etag: str,
+        *,
+        media_type: str = DEFAULT_MEDIA_TYPE,
+    ) -> ScriptedS3Client:
+        """Script a HEAD whose ETag carries whitespace (a malformed opaque token)."""
+
+        client = cls()
+        client.enqueue(HeadObjectResult(size_bytes=len(payload), media_type=media_type, etag=etag))
+        return client
+
+    @classmethod
+    def short_body(
+        cls,
+        declared_size_bytes: int,
+        chunks: list[bytes],
+        *,
+        media_type: str = DEFAULT_MEDIA_TYPE,
+        etag: str = DEFAULT_ETAG,
+    ) -> ScriptedS3Client:
+        """Script a matching HEAD but a GET body shorter than declared."""
+
+        client = cls()
+        client.enqueue(
+            HeadObjectResult(size_bytes=declared_size_bytes, media_type=media_type, etag=etag)
+        )
+        client.enqueue(GetObjectResult(body=scripted_body(chunks)))
+        return client
+
+    @classmethod
+    def excess_body(
+        cls,
+        declared_size_bytes: int,
+        chunks: list[bytes],
+        *,
+        media_type: str = DEFAULT_MEDIA_TYPE,
+        etag: str = DEFAULT_ETAG,
+    ) -> ScriptedS3Client:
+        """Script a matching HEAD but a GET body longer than declared."""
+
+        client = cls()
+        client.enqueue(
+            HeadObjectResult(size_bytes=declared_size_bytes, media_type=media_type, etag=etag)
+        )
+        client.enqueue(GetObjectResult(body=scripted_body(chunks)))
+        return client
+
+    @classmethod
+    def corrupt_after_prefix(
+        cls,
+        prefix: bytes,
+        wrong_tail: bytes,
+        *,
+        media_type: str = DEFAULT_MEDIA_TYPE,
+        etag: str = DEFAULT_ETAG,
+    ) -> ScriptedS3Client:
+        """Script a matching-size HEAD but a GET body with a wrong tail.
+
+        The served body is ``prefix + wrong_tail``: its length matches the HEAD
+        ``ContentLength`` so the size check passes, but its SHA-256 cannot match
+        the expected digest, proving the fail-closed read.
+        """
+
+        client = cls()
+        client.enqueue(
+            HeadObjectResult(
+                size_bytes=len(prefix) + len(wrong_tail), media_type=media_type, etag=etag
+            )
+        )
+        client.enqueue(GetObjectResult(body=scripted_body([prefix, wrong_tail])))
+        return client
+
+    @classmethod
+    def head_then_get_failure(
+        cls,
+        payload: bytes,
+        get_cause: BaseException,
+        *,
+        media_type: str = DEFAULT_MEDIA_TYPE,
+        etag: str = DEFAULT_ETAG,
+    ) -> ScriptedS3Client:
+        """Script a matching HEAD then a GET that raises ``get_cause``.
+
+        Used for a changed-ETag conditional GET (a ``412 PreconditionFailed``) and
+        for transient GET failures consumed by the retry policy.
+        """
+
+        client = cls()
+        client.enqueue(HeadObjectResult(size_bytes=len(payload), media_type=media_type, etag=etag))
+        client.enqueue(get_cause)
+        return client
 
     @property
     def methods(self) -> list[str]:

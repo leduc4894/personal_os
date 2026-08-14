@@ -125,9 +125,7 @@ class VerificationSpool:
         if self._is_closed or self._hashed is not None:
             raise ObjectStorageError(ErrorCode.OBJECT_STORAGE_CONTRACT_INVALID)
         spool_path = self._manager._next_spool_path()
-        file_descriptor = await asyncio.to_thread(
-            self._manager._open_exclusive, spool_path
-        )
+        file_descriptor = await asyncio.to_thread(self._manager._open_exclusive, spool_path)
         try:
             self._hashed = await self._manager._drain_into_spool(
                 spool_path,
@@ -301,9 +299,7 @@ class SpoolManager:
             examined_count += 1
             try:
                 status = os.lstat(entry.path)
-                is_regular_file = not stat.S_ISLNK(status.st_mode) and stat.S_ISREG(
-                    status.st_mode
-                )
+                is_regular_file = not stat.S_ISLNK(status.st_mode) and stat.S_ISREG(status.st_mode)
                 is_stale = (now - status.st_mtime) > limits.stale_after_seconds
                 if is_regular_file and is_stale:
                     os.unlink(entry.path)
@@ -330,9 +326,7 @@ class SpoolManager:
     def _has_capacity_locked(self, size_bytes: int, consume_permit: bool) -> bool:
         if consume_permit and self._in_flight_count >= self._limits.maximum_in_flight_operations:
             return False
-        return (
-            self._reserved_size_bytes + size_bytes <= self._limits.maximum_reserved_size_bytes
-        )
+        return self._reserved_size_bytes + size_bytes <= self._limits.maximum_reserved_size_bytes
 
     def _require_free_space_reserve(self, size_bytes: int) -> None:
         if self._disk_usage(self._root).free - size_bytes < self._limits.free_space_reserve_bytes:
@@ -358,10 +352,8 @@ class SpoolManager:
                     await self._condition.wait()
 
         try:
-            await asyncio.wait_for(
-                acquire_when_available(), timeout=deadline - self._clock()
-            )
-        except (TimeoutError, _AdmissionWindowExpired):
+            await asyncio.wait_for(acquire_when_available(), timeout=deadline - self._clock())
+        except TimeoutError, _AdmissionWindowExpired:
             raise ObjectStorageError(ErrorCode.OBJECT_STORAGE_BUSY) from None
 
     async def _release_admission(self, size_bytes: int, *, consume_permit: bool) -> None:
@@ -390,9 +382,7 @@ class SpoolManager:
         try:
             file_descriptor = os.open(spool_path, flags, _OWNER_READ_WRITE_MODE)
         except FileExistsError as error:
-            raise ObjectStorageError(
-                ErrorCode.OBJECT_STORAGE_CONFIGURATION_INVALID
-            ) from error
+            raise ObjectStorageError(ErrorCode.OBJECT_STORAGE_CONFIGURATION_INVALID) from error
         except OSError as error:
             raise ObjectStorageError(ErrorCode.OBJECT_STORAGE_UNAVAILABLE) from error
         try:
