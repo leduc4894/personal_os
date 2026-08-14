@@ -17,6 +17,12 @@ from postgresql_source_store.error_mapping import (
     DatabaseRetryPolicy,
     map_database_failure,
 )
+from postgresql_source_store.projection_intents import (
+    PostgresqlProjectionIntentStore,
+    ProjectionDiagnosticSink,
+    ProjectionIntentStatus,
+    ProjectionRetryPolicy,
+)
 from postgresql_source_store.publication_store import (
     PostgresqlSourcePublicationStore,
     classify_replay,
@@ -24,7 +30,11 @@ from postgresql_source_store.publication_store import (
 
 __all__ = [
     "DatabaseRetryPolicy",
+    "PostgresqlProjectionIntentStore",
     "PostgresqlSourcePublicationStore",
+    "ProjectionDiagnosticSink",
+    "ProjectionIntentStatus",
+    "ProjectionRetryPolicy",
     "classify_replay",
     "map_database_failure",
 ]
