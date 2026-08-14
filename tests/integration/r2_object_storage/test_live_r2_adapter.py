@@ -9,9 +9,10 @@ deleting only validated canonical keys this run recorded (design 16.2/16.3).
 
 The case list is exactly the design's live set: zero-byte round trip,
 multi-chunk round trip, duplicate store, concurrent conditional create, missing
-object, size/media conflict, deliberately corrupted object, and exact cleanup
-after a forced test exception. Boundary sizes, timeout injection, the retry
-matrix and cancellation stay offline.
+object, size/media conflict, deliberately corrupted object, repeated /
+lost-response-equivalent resolution, and exact cleanup after a forced test
+exception. Boundary sizes, timeout injection, the retry matrix and
+cancellation stay offline.
 """
 
 from __future__ import annotations
@@ -197,6 +198,42 @@ async def test_corrupted_object_fails_full_verification(
     # The corrupted object was created by THIS run and stays in the allowlist
     # so teardown's exact cleanup removes it.
     assert live_r2_harness.manifest.record_for(key) is not None
+
+
+async def test_repeated_lost_response_equivalent_resolution(
+    live_r2_harness: LiveR2Harness,
+) -> None:
+    payload = _random_payload(8 * 1024)
+    digest_hexadecimal = hashlib.sha256(payload).hexdigest()
+
+    # An out-of-band writer lands the exact canonical object first — the live
+    # equivalent of a store whose PUT response was lost: the object exists at
+    # the canonical key, but this adapter never received a receipt for it.
+    key = await live_r2_harness.write_object_under_digest(
+        digest_hexadecimal=digest_hexadecimal,
+        payload=payload,
+        media_type=_MEDIA_TYPE,
+    )
+    expected = ExpectedObject(
+        content_digest=ContentDigest.parse(digest_hexadecimal),
+        size_bytes=len(payload),
+        media_type=CanonicalMediaType.parse(_MEDIA_TYPE),
+    )
+
+    # Resolution of the never-receipted object goes HEAD -> exists -> full
+    # verify, yielding an EXISTING_FULL_READ receipt and exact bytes.
+    resolved = await live_r2_harness.store.resolve_verified_object(expected)
+    assert resolved is not None
+    assert resolved.verification_method is VerificationMethod.EXISTING_FULL_READ
+    assert await _read_verified(live_r2_harness, expected) == payload
+
+    # A repeated store of the same content also resolves through the existing
+    # object — an immutable canonical key is never overwritten.
+    receipt = await live_r2_harness.store_payload(payload, media_type=_MEDIA_TYPE)
+    assert receipt.verification_method is VerificationMethod.EXISTING_FULL_READ
+    assert str(receipt.object_key) == key
+    # The out-of-band creation was recorded by this run for exact cleanup.
+    assert live_r2_harness.manifest.recorded_keys() == (key,)
 
 
 async def test_exact_cleanup_after_forced_test_exception(
