@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import pytest
+
 from personal_os.diagnostics.events import SafeToken
 from personal_os.error_contracts.codes import ErrorCategory, ErrorCode
 from personal_os.error_contracts.exceptions import (
     ConfigurationError,
     DatabaseMigrationError,
 )
+from personal_os.object_storage.errors import ObjectStorageError
 
 
 def test_error_uses_registry_metadata_and_safe_details() -> None:
@@ -61,3 +64,39 @@ def test_database_migration_error_never_renders_driver_cause() -> None:
     error.__cause__ = RuntimeError("DO_NOT_LEAK_DATABASE_DRIVER")
     rendered = f"{error!r} {error} {error.to_safe_dict()}"
     assert "DO_NOT_LEAK_DATABASE_DRIVER" not in rendered
+
+
+def test_object_storage_configuration_invalid_accepts_count_and_field_names() -> None:
+    error = ObjectStorageError(
+        ErrorCode.OBJECT_STORAGE_CONFIGURATION_INVALID,
+        safe_details={"count": 2, "field_names": (SafeToken.parse("endpoint"),)},
+    )
+    assert error.to_safe_dict()["safe_details"] == {
+        "count": 2,
+        "field_names": ["endpoint"],
+    }
+
+
+def test_object_storage_input_invalid_accepts_only_reason() -> None:
+    error = ObjectStorageError(
+        ErrorCode.OBJECT_STORAGE_INPUT_INVALID,
+        safe_details={"reason": SafeToken.parse("size_out_of_range")},
+    )
+    assert error.to_safe_dict()["safe_details"] == {"reason": "size_out_of_range"}
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        ErrorCode.OBJECT_STORAGE_BUSY,
+        ErrorCode.OBJECT_STORAGE_UNAVAILABLE,
+        ErrorCode.OBJECT_STORAGE_ACCESS_DENIED,
+        ErrorCode.OBJECT_STORAGE_CONTRACT_INVALID,
+        ErrorCode.OBJECT_STORAGE_OBJECT_MISSING,
+        ErrorCode.OBJECT_STORAGE_INTEGRITY_FAILED,
+        ErrorCode.OBJECT_STORAGE_METADATA_CONFLICT,
+    ],
+)
+def test_other_object_storage_codes_accept_no_detail_field(code: ErrorCode) -> None:
+    with pytest.raises(ValueError, match="not registered for this error code"):
+        ObjectStorageError(code, safe_details={"reason": SafeToken.parse("size_out_of_range")})

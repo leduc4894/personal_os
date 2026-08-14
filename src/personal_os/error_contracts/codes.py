@@ -37,6 +37,15 @@ class ErrorCode(StrEnum):
     DATABASE_MIGRATION_BUSY = "database_migration_busy"
     DATABASE_SCHEMA_CONTRACT_INVALID = "database_schema_contract_invalid"
     DATABASE_DESTRUCTIVE_DOWNGRADE_REFUSED = "database_destructive_downgrade_refused"
+    OBJECT_STORAGE_CONFIGURATION_INVALID = "object_storage_configuration_invalid"
+    OBJECT_STORAGE_INPUT_INVALID = "object_storage_input_invalid"
+    OBJECT_STORAGE_BUSY = "object_storage_busy"
+    OBJECT_STORAGE_UNAVAILABLE = "object_storage_unavailable"
+    OBJECT_STORAGE_ACCESS_DENIED = "object_storage_access_denied"
+    OBJECT_STORAGE_CONTRACT_INVALID = "object_storage_contract_invalid"
+    OBJECT_STORAGE_OBJECT_MISSING = "object_storage_object_missing"
+    OBJECT_STORAGE_INTEGRITY_FAILED = "object_storage_integrity_failed"
+    OBJECT_STORAGE_METADATA_CONFLICT = "object_storage_metadata_conflict"
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +160,62 @@ ERROR_DEFINITIONS: Final[Mapping[ErrorCode, ErrorDefinition]] = MappingProxyType
             category=ErrorCategory.AUTHORIZATION,
             is_retryable=False,
             safe_message="Destructive database downgrade is not authorized",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.OBJECT_STORAGE_CONFIGURATION_INVALID: ErrorDefinition(
+            category=ErrorCategory.CONFIGURATION,
+            is_retryable=False,
+            safe_message="Object-storage configuration is invalid",
+            allowed_detail_fields=frozenset({"count", "field_names"}),
+        ),
+        ErrorCode.OBJECT_STORAGE_INPUT_INVALID: ErrorDefinition(
+            category=ErrorCategory.VALIDATION,
+            is_retryable=False,
+            safe_message="Object-storage input is invalid",
+            allowed_detail_fields=frozenset({"reason"}),
+        ),
+        ErrorCode.OBJECT_STORAGE_BUSY: ErrorDefinition(
+            category=ErrorCategory.DEPENDENCY,
+            is_retryable=True,
+            safe_message="Local object-storage capacity is temporarily unavailable",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.OBJECT_STORAGE_UNAVAILABLE: ErrorDefinition(
+            category=ErrorCategory.DEPENDENCY,
+            is_retryable=True,
+            safe_message="Canonical object storage is temporarily unavailable",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.OBJECT_STORAGE_ACCESS_DENIED: ErrorDefinition(
+            category=ErrorCategory.AUTHORIZATION,
+            is_retryable=False,
+            safe_message="Canonical object storage denied access",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.OBJECT_STORAGE_CONTRACT_INVALID: ErrorDefinition(
+            category=ErrorCategory.INTEGRITY,
+            is_retryable=False,
+            safe_message="Object-store response violated the adapter contract",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.OBJECT_STORAGE_OBJECT_MISSING: ErrorDefinition(
+            category=ErrorCategory.INTEGRITY,
+            is_retryable=False,
+            safe_message="An expected canonical object is missing",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.OBJECT_STORAGE_INTEGRITY_FAILED: ErrorDefinition(
+            category=ErrorCategory.INTEGRITY,
+            is_retryable=False,
+            safe_message="Canonical object integrity verification failed",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.OBJECT_STORAGE_METADATA_CONFLICT: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message=(
+                "Existing canonical object metadata conflicts with expected metadata"
+            ),
             allowed_detail_fields=frozenset(),
         ),
     }

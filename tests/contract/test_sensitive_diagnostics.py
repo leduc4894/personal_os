@@ -25,7 +25,7 @@ from personal_os.diagnostics.context import (
     bind_diagnostic_context,
     create_diagnostic_context,
 )
-from personal_os.diagnostics.events import EventName, SafeToken
+from personal_os.diagnostics.events import EventName, ObjectDigestPrefix, SafeToken
 from personal_os.diagnostics.logging import (
     DiagnosticLogger,
     configure_diagnostics,
@@ -36,6 +36,7 @@ from personal_os.diagnostics.logging import (
 from personal_os.diagnostics.trace_context import resolve_trace_context
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import ConfigurationError, SecretFileError
+from personal_os.object_storage.errors import ObjectStorageError
 from personal_os.runtime_configuration.loading import load_runtime_settings
 from personal_os.runtime_configuration.models import (
     ConfiguredLogLevel,
@@ -58,6 +59,17 @@ _SENTINELS = (
     "do-not-emit-forbidden-field-value",
     "do-not-emit-sensitive-pattern",
     "do-not-emit-unknown-setting-name",
+    "do-not-emit-object-full-digest",
+    "do-not-emit-object-key",
+    "do-not-emit-bucket-name",
+    "do-not-emit-r2-endpoint",
+    "do-not-emit-spool-filename",
+    "do-not-emit-response-body",
+    "do-not-emit-request-header",
+    "do-not-emit-provider-request-id",
+    "do-not-emit-provider-exception",
+    "do-not-emit-source-path",
+    "do-not-emit-media-type",
 )
 
 _FORBIDDEN_FIELD_NAMES = (
@@ -313,6 +325,96 @@ def test_expected_error_cause_and_unexpected_exception_sentinels_never_leak(
         repr(captured_application),
         sentinels=(cause_sentinel, exception_sentinel, argument_sentinel),
     )
+
+
+# --- object-storage provider boundary ---------------------------------------
+
+
+_OBJECT_STORAGE_SENTINELS = (
+    "do-not-emit-object-full-digest",
+    "do-not-emit-object-key",
+    "do-not-emit-bucket-name",
+    "do-not-emit-r2-endpoint",
+    "do-not-emit-spool-filename",
+    "do-not-emit-response-body",
+    "do-not-emit-request-header",
+    "do-not-emit-provider-request-id",
+    "do-not-emit-provider-exception",
+    "do-not-emit-source-path",
+    "do-not-emit-media-type",
+)
+
+
+def test_object_storage_provider_exception_and_event_fields_never_leak(
+    runtime_settings: RuntimeSettings,
+) -> None:
+    # A real provider failure carries bucket, endpoint, full digest, key,
+    # filename, body, header, request id and exception text. None of these may
+    # survive into the typed error, its serialized form or any diagnostic sink.
+    provider_exception = RuntimeError(
+        "do-not-emit-provider-exception "
+        "bucket=do-not-emit-bucket-name "
+        "endpoint=do-not-emit-r2-endpoint "
+        "body=do-not-emit-response-body "
+        "header=do-not-emit-request-header "
+        "request_id=do-not-emit-provider-request-id "
+        "key=do-not-emit-object-key "
+        "digest=do-not-emit-object-full-digest "
+        "path=do-not-emit-source-path "
+        "media=do-not-emit-media-type "
+        "spool=do-not-emit-spool-filename"
+    )
+    try:
+        raise provider_exception
+    except RuntimeError as cause:
+        try:
+            raise ObjectStorageError(ErrorCode.OBJECT_STORAGE_UNAVAILABLE) from cause
+        except ObjectStorageError as error:
+            captured = error
+
+    # The source exception carries every sentinel; otherwise the boundary test is moot.
+    assert "do-not-emit-bucket-name" in str(captured.__cause__)
+
+    logger, stdout, stderr = _configure(runtime_settings)
+    logger.emit_application_error(captured)
+
+    # Object-storage events accept only the registered safe fields; the digest
+    # prefix is bounded to 12 lowercase hex characters and never the full digest.
+    logger.emit(
+        EventName.OBJECT_STORAGE_OPERATION_SUCCEEDED,
+        {
+            "operation": SafeToken.parse("store_stream"),
+            "duration_ms": 42,
+            "size_bytes": 1024,
+            "attempt_count": 1,
+            "provider": SafeToken.parse("r2"),
+        },
+    )
+    logger.emit(
+        EventName.OBJECT_STORAGE_OPERATION_FAILED,
+        {
+            "operation": SafeToken.parse("store_stream"),
+            "duration_ms": 99,
+            "attempt_count": 2,
+            "provider": SafeToken.parse("r2"),
+            "error_code": SafeToken.parse("object_storage_unavailable"),
+            "error_category": SafeToken.parse("dependency"),
+            "is_retryable": True,
+            "object_digest_prefix": ObjectDigestPrefix.parse("0123456789ab"),
+        },
+    )
+
+    _all_records_parsable(stdout, stderr)
+    _assert_no_sentinel(
+        _blob(stdout, stderr),
+        str(captured),
+        repr(captured),
+        sentinels=_OBJECT_STORAGE_SENTINELS,
+    )
+    # The registered digest prefix is emitted; the full digest sentinel is not.
+    blob = _blob(stdout, stderr)
+    assert "0123456789ab" in blob
+    assert "do-not-emit-object-full-digest" not in blob
 
 
 # --- hostile objects --------------------------------------------------------

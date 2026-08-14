@@ -18,7 +18,7 @@ from enum import StrEnum
 from typing import Final
 from uuid import UUID
 
-from personal_os.diagnostics.events import SafeToken, ShortDigest
+from personal_os.diagnostics.events import ObjectDigestPrefix, SafeToken, ShortDigest
 
 MAX_DIAGNOSTIC_DEPTH: Final[int] = 8
 MAX_DIAGNOSTIC_ITEMS: Final[int] = 64
@@ -85,7 +85,7 @@ def _is_safe_scalar(value: object) -> bool:
         return True
     if isinstance(value, UUID):
         return True
-    return isinstance(value, (SafeToken, ShortDigest))
+    return isinstance(value, (SafeToken, ShortDigest, ObjectDigestPrefix))
 
 
 def _is_sensitive_string(value: str) -> bool:

@@ -8,6 +8,7 @@ from types import MappingProxyType
 from uuid import UUID
 
 from personal_os.diagnostics.events import (
+    ObjectDigestPrefix,
     SafeDiagnosticScalar,
     SafeDiagnosticValue,
     SafeToken,
@@ -41,7 +42,7 @@ def _validate_safe_scalar(value: object) -> None:
         return
     if isinstance(value, UUID):
         return
-    if isinstance(value, SafeToken | ShortDigest):
+    if isinstance(value, SafeToken | ShortDigest | ObjectDigestPrefix):
         return
     raise ValueError("safe detail value is not an accepted safe scalar")
 
@@ -82,7 +83,7 @@ def _serialize_safe_scalar(value: SafeDiagnosticScalar) -> object:
         return value.value
     if isinstance(value, UUID):
         return _canonical_uuid_text(value)
-    if isinstance(value, SafeToken | ShortDigest):
+    if isinstance(value, SafeToken | ShortDigest | ObjectDigestPrefix):
         return value.value
     # Unreachable: validation rejects every other type before serialization runs.
     raise TypeError("cannot serialize an unsupported safe scalar")

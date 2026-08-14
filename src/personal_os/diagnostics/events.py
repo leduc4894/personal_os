@@ -12,6 +12,7 @@ from uuid import UUID
 
 _SAFE_TOKEN_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,63}$")
 _SHORT_DIGEST_PATTERN: Final = re.compile(r"^[0-9a-f]{16}$")
+_OBJECT_DIGEST_PREFIX_PATTERN: Final = re.compile(r"^[0-9a-f]{12}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +47,27 @@ class ShortDigest:
         return self.value
 
 
+@dataclass(frozen=True, slots=True)
+class ObjectDigestPrefix:
+    """Lowercase hexadecimal object digest prefix of the registered fixed length.
+
+    Accepts exactly 12 lowercase hexadecimal characters. It is a distinct contract
+    from :class:`ShortDigest` (16 characters) and is the only registered shape for
+    the ``object_digest_prefix`` log field; metrics never accept it.
+    """
+
+    value: str
+
+    @classmethod
+    def parse(cls, value: str) -> ObjectDigestPrefix:
+        if _OBJECT_DIGEST_PREFIX_PATTERN.fullmatch(value) is None:
+            raise ValueError("value does not satisfy the object digest prefix contract")
+        return cls(value)
+
+    def __str__(self) -> str:
+        return self.value
+
+
 class DiagnosticLevel(StrEnum):
     DEBUG = "debug"
     INFO = "info"
@@ -70,9 +92,16 @@ class EventName(StrEnum):
     LOGGING_PAYLOAD_REJECTED = "logging_payload_rejected"
     DEPENDENCY_LOG = "dependency_log"
     INTERNAL_ERROR = "internal_error"
+    OBJECT_STORAGE_OPERATION_SUCCEEDED = "object_storage_operation_succeeded"
+    OBJECT_STORAGE_OPERATION_FAILED = "object_storage_operation_failed"
+    OBJECT_STORAGE_OBJECT_DEDUPLICATED = "object_storage_object_deduplicated"
+    OBJECT_STORAGE_INTEGRITY_FAILED = "object_storage_integrity_failed"
+    OBJECT_STORAGE_SPOOL_CLEANUP_DEGRADED = "object_storage_spool_cleanup_degraded"
 
 
-type SafeDiagnosticScalar = bool | int | StrEnum | UUID | SafeToken | ShortDigest
+type SafeDiagnosticScalar = (
+    bool | int | StrEnum | UUID | SafeToken | ShortDigest | ObjectDigestPrefix
+)
 type SafeDiagnosticValue = SafeDiagnosticScalar | tuple[SafeDiagnosticScalar, ...]
 
 
@@ -145,6 +174,103 @@ EVENT_DEFINITIONS: Final[Mapping[EventName, EventDefinition]] = MappingProxyType
                     "is_retryable",
                     "exception_type",
                     "stack_fingerprint",
+                }
+            ),
+        ),
+        EventName.OBJECT_STORAGE_OPERATION_SUCCEEDED: EventDefinition(
+            level=DiagnosticLevel.INFO,
+            result_code=ResultCode.SUCCEEDED,
+            required_fields=frozenset(
+                {"operation", "duration_ms", "size_bytes", "attempt_count", "provider"}
+            ),
+            allowed_fields=frozenset(
+                {"operation", "duration_ms", "size_bytes", "attempt_count", "provider"}
+            ),
+        ),
+        EventName.OBJECT_STORAGE_OPERATION_FAILED: EventDefinition(
+            level=DiagnosticLevel.ERROR,
+            result_code=ResultCode.FAILED,
+            required_fields=frozenset(
+                {
+                    "operation",
+                    "duration_ms",
+                    "attempt_count",
+                    "provider",
+                    "error_code",
+                    "error_category",
+                    "is_retryable",
+                }
+            ),
+            allowed_fields=frozenset(
+                {
+                    "operation",
+                    "duration_ms",
+                    "attempt_count",
+                    "provider",
+                    "error_code",
+                    "error_category",
+                    "is_retryable",
+                    "size_bytes",
+                    "object_digest_prefix",
+                }
+            ),
+        ),
+        EventName.OBJECT_STORAGE_OBJECT_DEDUPLICATED: EventDefinition(
+            level=DiagnosticLevel.INFO,
+            result_code=ResultCode.SUCCEEDED,
+            required_fields=frozenset(
+                {"operation", "duration_ms", "size_bytes", "attempt_count", "provider"}
+            ),
+            allowed_fields=frozenset(
+                {
+                    "operation",
+                    "duration_ms",
+                    "size_bytes",
+                    "attempt_count",
+                    "provider",
+                    "object_digest_prefix",
+                }
+            ),
+        ),
+        EventName.OBJECT_STORAGE_INTEGRITY_FAILED: EventDefinition(
+            level=DiagnosticLevel.ERROR,
+            result_code=ResultCode.FAILED,
+            required_fields=frozenset(
+                {
+                    "operation",
+                    "duration_ms",
+                    "attempt_count",
+                    "provider",
+                    "error_code",
+                    "error_category",
+                    "is_retryable",
+                }
+            ),
+            allowed_fields=frozenset(
+                {
+                    "operation",
+                    "duration_ms",
+                    "attempt_count",
+                    "provider",
+                    "error_code",
+                    "error_category",
+                    "is_retryable",
+                    "size_bytes",
+                    "object_digest_prefix",
+                }
+            ),
+        ),
+        EventName.OBJECT_STORAGE_SPOOL_CLEANUP_DEGRADED: EventDefinition(
+            level=DiagnosticLevel.WARNING,
+            result_code=ResultCode.DEGRADED,
+            required_fields=frozenset({"operation", "count"}),
+            allowed_fields=frozenset(
+                {
+                    "operation",
+                    "count",
+                    "error_code",
+                    "error_category",
+                    "is_retryable",
                 }
             ),
         ),

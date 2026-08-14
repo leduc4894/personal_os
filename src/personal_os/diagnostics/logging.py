@@ -31,6 +31,7 @@ from personal_os.diagnostics.events import (
     EVENT_DEFINITIONS,
     DiagnosticLevel,
     EventName,
+    ObjectDigestPrefix,
     RejectedDiagnosticPayload,
     ResultCode,
     SafeToken,
@@ -126,7 +127,7 @@ def _to_json_value(value: object) -> object:
         return value.value
     if isinstance(value, UUID):
         return str(value)
-    if isinstance(value, SafeToken | ShortDigest):
+    if isinstance(value, SafeToken | ShortDigest | ObjectDigestPrefix):
         return value.value
     if isinstance(value, tuple):
         return [_to_json_value(item) for item in value]
