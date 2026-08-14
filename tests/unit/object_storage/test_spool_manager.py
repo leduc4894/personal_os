@@ -179,9 +179,7 @@ async def test_zero_byte_stream_is_a_valid_object(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("declared_size", [-1, _MAXIMUM_OBJECT_SIZE_BYTES + 1])
 @pytest.mark.asyncio
-async def test_rejects_declared_size_outside_range(
-    tmp_path: Path, declared_size: int
-) -> None:
+async def test_rejects_declared_size_outside_range(tmp_path: Path, declared_size: int) -> None:
     manager = build_spool_manager(tmp_path)
     with pytest.raises(ObjectStorageError) as raised:
         async with manager.receive_stream(chunks(b"abc"), declared_size):
@@ -352,18 +350,14 @@ async def test_admission_timeout_maps_to_retryable_busy(tmp_path: Path) -> None:
     def held_stream() -> AsyncIterator[bytes]:
         return _held_stream(started_count, all_permits_held)
 
-    async def _held_stream(
-        counter: list[int], gate: asyncio.Event
-    ) -> AsyncIterator[bytes]:
+    async def _held_stream(counter: list[int], gate: asyncio.Event) -> AsyncIterator[bytes]:
         counter[0] += 1
         if counter[0] >= 4:
             gate.set()
         await asyncio.Event().wait()
         yield b""
 
-    holders = [
-        asyncio.create_task(_hold_receive(manager, held_stream(), 10)) for _ in range(4)
-    ]
+    holders = [asyncio.create_task(_hold_receive(manager, held_stream(), 10)) for _ in range(4)]
     await all_permits_held.wait()
     assert manager.in_flight_count == 4
     assert manager.reserved_size_bytes == 40
@@ -397,18 +391,14 @@ async def test_fifth_operation_waits_for_a_permit_then_proceeds(
     def held_stream() -> AsyncIterator[bytes]:
         return _held_stream(started_count, all_permits_held)
 
-    async def _held_stream(
-        counter: list[int], gate: asyncio.Event
-    ) -> AsyncIterator[bytes]:
+    async def _held_stream(counter: list[int], gate: asyncio.Event) -> AsyncIterator[bytes]:
         counter[0] += 1
         if counter[0] >= 4:
             gate.set()
         await asyncio.Event().wait()
         yield b""
 
-    holders = [
-        asyncio.create_task(_hold_receive(manager, held_stream(), 10)) for _ in range(4)
-    ]
+    holders = [asyncio.create_task(_hold_receive(manager, held_stream(), 10)) for _ in range(4)]
     await all_permits_held.wait()
 
     waiting = asyncio.create_task(_hold_receive(manager, chunks(b"0123456789"), 10))
@@ -431,9 +421,7 @@ async def test_fifth_operation_waits_for_a_permit_then_proceeds(
 async def test_insufficient_free_space_rejects_admission_as_busy(
     tmp_path: Path,
 ) -> None:
-    manager = build_spool_manager(
-        tmp_path, free_space_bytes=_FREE_SPACE_RESERVE_BYTES + 10
-    )
+    manager = build_spool_manager(tmp_path, free_space_bytes=_FREE_SPACE_RESERVE_BYTES + 10)
     with pytest.raises(ObjectStorageError) as raised:
         async with manager.receive_stream(chunks(b"0123456789"), 11):
             pass
@@ -445,9 +433,7 @@ async def test_insufficient_free_space_rejects_admission_as_busy(
 
 @pytest.mark.asyncio
 async def test_admission_at_exactly_the_free_space_reserve(tmp_path: Path) -> None:
-    manager = build_spool_manager(
-        tmp_path, free_space_bytes=_FREE_SPACE_RESERVE_BYTES + 11
-    )
+    manager = build_spool_manager(tmp_path, free_space_bytes=_FREE_SPACE_RESERVE_BYTES + 11)
     async with manager.receive_stream(chunks(b"0123456789!"), 11) as spool:
         assert spool.size_bytes == 11
     assert list(tmp_path.iterdir()) == []
@@ -631,9 +617,7 @@ async def test_verification_close_is_idempotent_and_rejects_reuse(
     await verification.close()
     assert not hashed.path.exists()
     with pytest.raises(ObjectStorageError) as raised:
-        await verification.copy_and_hash(
-            chunks(b"01234567891"), _expected_object(b"01234567891")
-        )
+        await verification.copy_and_hash(chunks(b"01234567891"), _expected_object(b"01234567891"))
     assert raised.value.error_code is ErrorCode.OBJECT_STORAGE_CONTRACT_INVALID
     assert manager.reserved_size_bytes == 0
 
@@ -649,9 +633,7 @@ async def test_verification_reservation_enforces_the_process_budget(
     def held_stream() -> AsyncIterator[bytes]:
         return _held_stream(started_count, all_permits_held)
 
-    async def _held_stream(
-        counter: list[int], gate: asyncio.Event
-    ) -> AsyncIterator[bytes]:
+    async def _held_stream(counter: list[int], gate: asyncio.Event) -> AsyncIterator[bytes]:
         counter[0] += 1
         if counter[0] >= 4:
             gate.set()
@@ -659,9 +641,7 @@ async def test_verification_reservation_enforces_the_process_budget(
         yield b""
 
     holders = [
-        asyncio.create_task(
-            _hold_receive(manager, held_stream(), _MAXIMUM_OBJECT_SIZE_BYTES)
-        )
+        asyncio.create_task(_hold_receive(manager, held_stream(), _MAXIMUM_OBJECT_SIZE_BYTES))
         for _ in range(4)
     ]
     await all_permits_held.wait()
@@ -672,9 +652,7 @@ async def test_verification_reservation_enforces_the_process_budget(
         manager.reserved_size_bytes == 5 * _MAXIMUM_OBJECT_SIZE_BYTES
     )  # 500 MiB of the 512 MiB budget
 
-    waiting = asyncio.create_task(
-        manager.reserve_verification(_MAXIMUM_OBJECT_SIZE_BYTES)
-    )
+    waiting = asyncio.create_task(manager.reserve_verification(_MAXIMUM_OBJECT_SIZE_BYTES))
     await asyncio.sleep(0.05)
     assert not waiting.done()
 
@@ -759,9 +737,7 @@ async def test_janitor_never_touches_symlinks(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_janitor_defers_candidates_beyond_the_cap(tmp_path: Path) -> None:
-    manager = build_spool_manager(
-        tmp_path, limits=SpoolLimits(maximum_cleanup_candidates=2)
-    )
+    manager = build_spool_manager(tmp_path, limits=SpoolLimits(maximum_cleanup_candidates=2))
     stale_files = []
     for _ in range(3):
         stale = tmp_path / _spool_file_name()

@@ -213,9 +213,7 @@ ERROR_DEFINITIONS: Final[Mapping[ErrorCode, ErrorDefinition]] = MappingProxyType
         ErrorCode.OBJECT_STORAGE_METADATA_CONFLICT: ErrorDefinition(
             category=ErrorCategory.CONFLICT,
             is_retryable=False,
-            safe_message=(
-                "Existing canonical object metadata conflicts with expected metadata"
-            ),
+            safe_message=("Existing canonical object metadata conflicts with expected metadata"),
             allowed_detail_fields=frozenset(),
         ),
     }

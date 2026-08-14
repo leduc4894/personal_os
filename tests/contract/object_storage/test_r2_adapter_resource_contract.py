@@ -182,9 +182,7 @@ class RepeatingStoreClient:
         self._objects[key] = request.spool_path.read_bytes()
         self._etags[key] = f"etag-{key[:12]}"
 
-    async def get_object(
-        self, object_key: CanonicalObjectKey, *, if_match: str
-    ) -> GetObjectResult:
+    async def get_object(self, object_key: CanonicalObjectKey, *, if_match: str) -> GetObjectResult:
         self.calls.append("get_object")
         self._observe_reserved()
         key = str(object_key)
@@ -291,16 +289,13 @@ async def test_four_active_permits_and_fifth_waits(tmp_path: Path) -> None:
     store, client, metrics = build_repeating_store(tmp_path, head_gate=head_gate)
     tasks = [
         asyncio.create_task(
-            store.store_stream(
-                chunks(f"permit-{index}".encode()), 8, "application/octet-stream"
-            )
+            store.store_stream(chunks(f"permit-{index}".encode()), 8, "application/octet-stream")
         )
         for index in range(5)
     ]
 
     await _wait_until(
-        lambda: store.spool_manager.in_flight_count == 4
-        and store.single_flight_entry_count == 4,
+        lambda: store.spool_manager.in_flight_count == 4 and store.single_flight_entry_count == 4,
         description="four receive permits admitted and four entries joined",
     )
     assert not tasks[4].done()
@@ -325,9 +320,7 @@ async def test_aggregate_reservation_capped_with_one_verification_spool(
         maximum_object_size_bytes=_ONE_MEBIBYTE,
         maximum_reserved_size_bytes=budget_bytes,
     )
-    store, client, metrics = build_repeating_store(
-        tmp_path, limits=limits, head_gate=head_gate
-    )
+    store, client, metrics = build_repeating_store(tmp_path, limits=limits, head_gate=head_gate)
     payloads = [bytes([index]) * _ONE_MEBIBYTE for index in range(4)]
     tasks = [
         asyncio.create_task(
@@ -386,9 +379,7 @@ async def test_same_digest_stores_share_one_r2_sequence(tmp_path: Path) -> None:
     assert client.calls == ["head_object", "put_object", "head_object", "get_object"]
     assert client.object_count == 1
     store_records = [
-        record
-        for record in metrics.operations
-        if record.operation is ObjectStorageOperation.STORE
+        record for record in metrics.operations if record.operation is ObjectStorageOperation.STORE
     ]
     assert len(store_records) == 2
     assert metrics.maximum_in_flight == 2

@@ -854,11 +854,7 @@ class R2S3ObjectStore:
                 return
             if entry.waiter_count > 0:
                 entry.waiter_count -= 1
-            if (
-                entry.waiter_count == 0
-                and entry.future.done()
-                and not entry.future.cancelled()
-            ):
+            if entry.waiter_count == 0 and entry.future.done() and not entry.future.cancelled():
                 entry.future.exception()
 
     async def _finish_single_flight(
