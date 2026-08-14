@@ -89,6 +89,12 @@ class PutObjectRequest:
     content_md5_base64: str
     if_none_match: str = _CONDITIONAL_IF_NONE_MATCH
 
+    @property
+    def content_md5(self) -> str:
+        """Base64-encoded binary MD5 digest (the S3 ``Content-MD5`` transport guard)."""
+
+        return self.content_md5_base64
+
 
 @dataclass(frozen=True, slots=True)
 class HeadObjectResult:

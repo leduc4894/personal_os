@@ -16,9 +16,11 @@ buckets, endpoints, media types and paths never enter a recorded metric.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
-from collections.abc import Awaitable
+from collections.abc import AsyncIterator, Awaitable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,6 +36,7 @@ from tests.contract.object_storage.scripted_s3 import (
 )
 
 from personal_os.diagnostics import DiagnosticLogger
+from personal_os.diagnostics.events import EventName
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.object_storage import (
     CanonicalMediaType,
@@ -43,9 +46,15 @@ from personal_os.object_storage import (
     VerifiedObjectReceipt,
     derive_canonical_object_key,
 )
-from personal_os.object_storage.errors import SIZE_OUT_OF_RANGE, ObjectStorageError
+from personal_os.object_storage.errors import (
+    DIGEST_MISMATCH,
+    MEDIA_TYPE_INVALID,
+    SIZE_OUT_OF_RANGE,
+    ObjectStorageError,
+)
 from r2_object_storage import adapter as adapter_module
 from r2_object_storage.adapter import R2S3ObjectStore
+from r2_object_storage.client import GetObjectResult, HeadObjectResult
 from r2_object_storage.error_mapping import RetryPolicy
 from r2_object_storage.metrics import (
     InMemoryObjectStorageMetrics,
@@ -139,6 +148,46 @@ def build_store(client: ScriptedS3Client, tmp_path: Path) -> R2S3ObjectStore:
         sleep=_no_sleep,
         jitter=_zero_jitter,
     )
+
+
+async def _chunk_stream(payloads: tuple[bytes, ...]) -> AsyncIterator[bytes]:
+    for payload in payloads:
+        yield payload
+
+
+def chunks(*payloads: bytes) -> AsyncIterator[bytes]:
+    """Wrap fixed payloads as an asynchronous byte stream for ``store_stream``."""
+
+    return _chunk_stream(payloads)
+
+
+class _DiagnosticRecordCapture(logging.Handler):
+    """Capture diagnostic record dicts emitted through the :class:`DiagnosticLogger`."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.events: list[dict[str, object]] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        diagnostic = getattr(record, "_diagnostic_schema_record", None)
+        if isinstance(diagnostic, dict):
+            self.events.append(diagnostic)
+
+
+@contextmanager
+def capture_diagnostic_events() -> Iterator[_DiagnosticRecordCapture]:
+    """Attach a capture handler to the root logger at DEBUG level for the scope."""
+
+    capture = _DiagnosticRecordCapture()
+    root_logger = logging.getLogger()
+    original_level = root_logger.level
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.addHandler(capture)
+    try:
+        yield capture
+    finally:
+        root_logger.removeHandler(capture)
+        root_logger.setLevel(original_level)
 
 
 # --- Matching HEAD + If-Match GET -------------------------------------------
@@ -241,7 +290,7 @@ async def test_resolve_raises_for_corrupt_body_instead_of_returning_none(
 
 
 @pytest.mark.asyncio
-async def test_size_conflict_at_head_raises_metadata_conflict(tmp_path: Path) -> None:
+async def test_size_conflict_at_head_raises_integrity_failed(tmp_path: Path) -> None:
     payload = _CANONICAL_PAYLOAD
     expected = _expected(payload)
     client = ScriptedS3Client.size_conflict(payload, wrong_size_bytes=len(payload) + 1)
@@ -250,8 +299,10 @@ async def test_size_conflict_at_head_raises_metadata_conflict(tmp_path: Path) ->
     with pytest.raises(ObjectStorageError) as raised:
         await store.verify_existing_object(expected)
 
-    assert raised.value.error_code is ErrorCode.OBJECT_STORAGE_METADATA_CONFLICT
-    # The conflict is detected at HEAD before any GET body is fetched.
+    # Per design §6.3 a size mismatch on an immutable content-addressed key is
+    # corruption, not a conflicting write: it fails as an integrity failure.
+    assert raised.value.error_code is ErrorCode.OBJECT_STORAGE_INTEGRITY_FAILED
+    # The mismatch is detected at HEAD before any GET body is fetched.
     assert client.methods == ["head_object"]
     assert client.get_calls == []
     assert list(tmp_path.iterdir()) == []
@@ -662,3 +713,409 @@ def test_store_constructor_does_not_read_process_environment(
         jitter=_zero_jitter,
     )
     assert store.metrics is metrics
+
+
+# --- Store: conditional create, deduplication and lost-response recovery ----
+
+
+@pytest.mark.asyncio
+async def test_store_uses_conditional_single_put_then_full_read(tmp_path: Path) -> None:
+    client = ScriptedS3Client.missing_then_put_then_exact_get(b"payload", "text/plain")
+    store = build_store(client, tmp_path)
+    receipt = await store.store_stream(chunks(b"pay", b"load"), 7, "text/plain")
+    put = client.only_put
+    assert put.object_key == receipt.object_key
+    assert put.size_bytes == 7
+    assert put.media_type.value == "text/plain"
+    md5 = hashlib.md5(b"payload", usedforsecurity=False).digest()
+    assert put.content_md5 == base64.b64encode(md5).decode()
+    assert put.if_none_match == "*"
+    assert client.calls_after_put == ["head_object", "get_object"]
+    assert receipt.verification_method is VerificationMethod.UPLOADED_FULL_READ
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_store_deduplicates_existing_object_without_put(tmp_path: Path) -> None:
+    payload = b"dedup-existing"
+    client = ScriptedS3Client.existing_then_verify_get(payload, DEFAULT_MEDIA_TYPE)
+    store = build_store(client, tmp_path)
+
+    receipt = await store.store_stream(chunks(payload), len(payload), DEFAULT_MEDIA_TYPE)
+
+    assert receipt.verification_method is VerificationMethod.EXISTING_FULL_READ
+    assert receipt.content_digest == ContentDigest.parse(hashlib.sha256(payload).hexdigest())
+    # No PUT: the store HEAD showed the object exists, so the path is dedup-only.
+    assert client.methods == ["head_object", "head_object", "get_object"]
+    assert client.put_calls == []
+    store_records = [
+        record
+        for record in store.metrics.operations
+        if record.operation is ObjectStorageOperation.STORE
+    ]
+    assert store_records[-1].result is ObjectStorageResult.DEDUPLICATED
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_store_412_race_transitions_to_winner_verification(tmp_path: Path) -> None:
+    payload = b"race-lost-winner"
+    client = ScriptedS3Client.missing_then_put_conflict_then_get(
+        payload, _precondition_failed(), DEFAULT_MEDIA_TYPE
+    )
+    store = build_store(client, tmp_path)
+
+    receipt = await store.store_stream(chunks(payload), len(payload), DEFAULT_MEDIA_TYPE)
+
+    # The 412 is NOT a retry and NOT an integrity failure: it transitions directly
+    # to winner verification. The stored object is verified as existing.
+    assert receipt.verification_method is VerificationMethod.EXISTING_FULL_READ
+    assert client.methods == ["head_object", "put_object", "head_object", "get_object"]
+    store_records = [
+        record
+        for record in store.metrics.operations
+        if record.operation is ObjectStorageOperation.STORE
+    ]
+    assert store_records[-1].result is ObjectStorageResult.DEDUPLICATED
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_store_ambiguous_put_retries_beginning_at_head(tmp_path: Path) -> None:
+    payload = b"ambiguous-put"
+    client = ScriptedS3Client.missing_then_put_ambiguous_then_existing(
+        payload, _service_unavailable(), DEFAULT_MEDIA_TYPE
+    )
+    store = build_store(client, tmp_path)
+
+    receipt = await store.store_stream(chunks(payload), len(payload), DEFAULT_MEDIA_TYPE)
+
+    # After an ambiguous PUT (transient failure, unknown outcome), the retry
+    # begins at HEAD, not a blind second PUT. The HEAD now shows the object
+    # exists, so it is deduplicated instead of re-uploaded.
+    assert client.methods == [
+        "head_object",
+        "put_object",
+        "head_object",
+        "head_object",
+        "get_object",
+    ]
+    assert len(client.put_calls) == 1
+    assert receipt.verification_method is VerificationMethod.EXISTING_FULL_READ
+    store_records = [
+        record
+        for record in store.metrics.operations
+        if record.operation is ObjectStorageOperation.STORE
+    ]
+    assert store_records[-1].attempt_count == 2
+    assert store_records[-1].result is ObjectStorageResult.DEDUPLICATED
+    assert store.metrics.retry_count(ObjectStorageOperation.STORE) == 1
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_store_terminal_put_failure_propagates_mapped_error(tmp_path: Path) -> None:
+    payload = b"bad-digest-payload"
+    client = ScriptedS3Client()
+    client.enqueue(None)  # store HEAD: missing
+    client.enqueue(_client_error("BadDigest", 400, "PutObject"))  # conditional PUT: terminal
+    store = build_store(client, tmp_path)
+
+    with pytest.raises(ObjectStorageError) as raised:
+        await store.store_stream(chunks(payload), len(payload), DEFAULT_MEDIA_TYPE)
+
+    # BadDigest is terminal and non-retryable; it propagates as the mapped error.
+    assert raised.value.error_code is ErrorCode.OBJECT_STORAGE_CONTRACT_INVALID
+    assert client.methods == ["head_object", "put_object"]
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_store_auth_failure_propagates_access_denied(tmp_path: Path) -> None:
+    payload = b"auth-failure"
+    client = ScriptedS3Client()
+    client.enqueue(None)  # store HEAD: missing
+    client.enqueue(_client_error("AccessDenied", 403, "PutObject"))  # conditional PUT: terminal
+    store = build_store(client, tmp_path)
+
+    with pytest.raises(ObjectStorageError) as raised:
+        await store.store_stream(chunks(payload), len(payload), DEFAULT_MEDIA_TYPE)
+
+    assert raised.value.error_code is ErrorCode.OBJECT_STORAGE_ACCESS_DENIED
+    assert client.methods == ["head_object", "put_object"]
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_store_rejects_invalid_media_type_without_r2_call(tmp_path: Path) -> None:
+    payload = b"bad-media"
+    client = ScriptedS3Client()
+    store = build_store(client, tmp_path)
+
+    with pytest.raises(ObjectStorageError) as raised:
+        await store.store_stream(chunks(payload), len(payload), "text")
+
+    assert raised.value.error_code is ErrorCode.OBJECT_STORAGE_INPUT_INVALID
+    assert raised.value.safe_details["reason"] is MEDIA_TYPE_INVALID
+    # Admission is validated before any R2 call or spool receive.
+    assert client.calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_store_rejects_invalid_size_without_r2_call(tmp_path: Path) -> None:
+    payload = b"x"
+    client = ScriptedS3Client()
+    store = build_store(client, tmp_path)
+
+    with pytest.raises(ObjectStorageError) as raised:
+        await store.store_stream(chunks(payload), -1, DEFAULT_MEDIA_TYPE)
+
+    assert raised.value.error_code is ErrorCode.OBJECT_STORAGE_INPUT_INVALID
+    assert raised.value.safe_details["reason"] is SIZE_OUT_OF_RANGE
+    assert client.calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_store_rejects_malformed_claimed_digest_without_r2_call(tmp_path: Path) -> None:
+    payload = b"bad-claim"
+    client = ScriptedS3Client()
+    store = build_store(client, tmp_path)
+
+    with pytest.raises(ObjectStorageError) as raised:
+        await store.store_stream(
+            chunks(payload), len(payload), DEFAULT_MEDIA_TYPE, claimed_sha256="not-hex"
+        )
+
+    assert raised.value.error_code is ErrorCode.OBJECT_STORAGE_INPUT_INVALID
+    assert raised.value.safe_details["reason"] is DIGEST_MISMATCH
+    # The claim shape is validated at admission before any R2 call or spool receive.
+    assert client.calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_store_rejects_claimed_digest_mismatch_after_hashing(tmp_path: Path) -> None:
+    payload = b"claim-mismatch"
+    well_formed_but_wrong = "0" * 64
+    client = ScriptedS3Client()
+    store = build_store(client, tmp_path)
+
+    with pytest.raises(ObjectStorageError) as raised:
+        await store.store_stream(
+            chunks(payload),
+            len(payload),
+            DEFAULT_MEDIA_TYPE,
+            claimed_sha256=well_formed_but_wrong,
+        )
+
+    assert raised.value.error_code is ErrorCode.OBJECT_STORAGE_INPUT_INVALID
+    assert raised.value.safe_details["reason"] is DIGEST_MISMATCH
+    # The mismatch is detected after hashing but before any R2 call (HEAD).
+    assert client.calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_store_accepts_matching_claimed_digest(tmp_path: Path) -> None:
+    payload = b"claim-matches"
+    claim = hashlib.sha256(payload).hexdigest()
+    client = ScriptedS3Client.missing_then_put_then_exact_get(payload, DEFAULT_MEDIA_TYPE)
+    store = build_store(client, tmp_path)
+
+    receipt = await store.store_stream(
+        chunks(payload), len(payload), DEFAULT_MEDIA_TYPE, claimed_sha256=claim
+    )
+
+    assert receipt.verification_method is VerificationMethod.UPLOADED_FULL_READ
+    assert receipt.content_digest == ContentDigest.parse(claim)
+
+
+@pytest.mark.asyncio
+async def test_store_does_not_overwrite_existing_size_mismatch(tmp_path: Path) -> None:
+    payload = b"no-overwrite"
+    client = ScriptedS3Client()
+    wrong_head = HeadObjectResult(
+        size_bytes=len(payload) + 1, media_type=DEFAULT_MEDIA_TYPE, etag=DEFAULT_ETAG
+    )
+    client.enqueue(wrong_head)  # store HEAD: exists with wrong size
+    client.enqueue(wrong_head)  # verify HEAD: same wrong size -> integrity failure
+    store = build_store(client, tmp_path)
+
+    with pytest.raises(ObjectStorageError) as raised:
+        await store.store_stream(chunks(payload), len(payload), DEFAULT_MEDIA_TYPE)
+
+    # The store HEAD showed an existing object; the store path does NOT PUT over
+    # it. Verification catches the size mismatch (corruption under an immutable
+    # key, design §6.3) and fails closed as an integrity failure.
+    assert raised.value.error_code is ErrorCode.OBJECT_STORAGE_INTEGRITY_FAILED
+    assert client.methods == ["head_object", "head_object"]
+    assert client.put_calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_store_does_not_overwrite_existing_media_type_mismatch(tmp_path: Path) -> None:
+    payload = b"no-overwrite-media"
+    client = ScriptedS3Client()
+    wrong_head = HeadObjectResult(
+        size_bytes=len(payload), media_type="application/json", etag=DEFAULT_ETAG
+    )
+    client.enqueue(wrong_head)  # store HEAD: exists with wrong media type
+    client.enqueue(wrong_head)  # verify HEAD: same wrong media type -> metadata conflict
+    store = build_store(client, tmp_path)
+
+    with pytest.raises(ObjectStorageError) as raised:
+        await store.store_stream(chunks(payload), len(payload), DEFAULT_MEDIA_TYPE)
+
+    # A media-type mismatch on the stored canonical object is a metadata
+    # conflict (design §6.3); the store path never PUTs over the existing key.
+    assert raised.value.error_code is ErrorCode.OBJECT_STORAGE_METADATA_CONFLICT
+    assert client.methods == ["head_object", "head_object"]
+    assert client.put_calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_store_preserves_input_spool_until_verify_then_removes_it(
+    tmp_path: Path,
+) -> None:
+    payload = b"spool-lifetime"
+    client = ScriptedS3Client.missing_then_put_then_exact_get(payload, DEFAULT_MEDIA_TYPE)
+    store = build_store(client, tmp_path)
+
+    await store.store_stream(chunks(payload), len(payload), DEFAULT_MEDIA_TYPE)
+
+    # The input spool survives through PUT and verify, then is removed in the
+    # shielded bounded cleanup when the receive context exits.
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_store_removes_input_spool_on_failure(tmp_path: Path) -> None:
+    payload = b"spool-on-failure"
+    client = ScriptedS3Client()
+    client.enqueue(None)  # store HEAD: missing
+    client.enqueue(_client_error("BadDigest", 400, "PutObject"))  # terminal PUT failure
+    store = build_store(client, tmp_path)
+
+    with pytest.raises(ObjectStorageError):
+        await store.store_stream(chunks(payload), len(payload), DEFAULT_MEDIA_TYPE)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_store_independently_hashes_each_same_hash_input(tmp_path: Path) -> None:
+    payload = b"independent-hashing"
+    head = HeadObjectResult(
+        size_bytes=len(payload), media_type=DEFAULT_MEDIA_TYPE, etag=DEFAULT_ETAG
+    )
+    client = ScriptedS3Client()
+    # First call: missing -> conditional PUT -> verify.
+    client.enqueue(None)  # store HEAD: missing
+    client.enqueue(None)  # PUT: success
+    client.enqueue(head)  # verify HEAD
+    client.enqueue(GetObjectResult(body=scripted_body([payload])))  # verify GET
+    # Second call: same content, now exists -> dedup verify.
+    client.enqueue(head)  # store HEAD: exists
+    client.enqueue(head)  # verify HEAD
+    client.enqueue(GetObjectResult(body=scripted_body([payload])))  # verify GET
+    store = build_store(client, tmp_path)
+
+    first = await store.store_stream(chunks(payload), len(payload), DEFAULT_MEDIA_TYPE)
+    second = await store.store_stream(chunks(payload), len(payload), DEFAULT_MEDIA_TYPE)
+
+    # Each call independently hashed its own input to the same identity.
+    assert first.content_digest == second.content_digest
+    assert first.object_key == second.object_key
+    assert first.verification_method is VerificationMethod.UPLOADED_FULL_READ
+    assert second.verification_method is VerificationMethod.EXISTING_FULL_READ
+    assert len(client.put_calls) == 1
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_store_emits_deduplicated_event_on_existing_path(tmp_path: Path) -> None:
+    payload = b"dedup-event-existing"
+    client = ScriptedS3Client.existing_then_verify_get(payload, DEFAULT_MEDIA_TYPE)
+    store = build_store(client, tmp_path)
+    with capture_diagnostic_events() as capture:
+        receipt = await store.store_stream(chunks(payload), len(payload), DEFAULT_MEDIA_TYPE)
+
+    assert receipt.verification_method is VerificationMethod.EXISTING_FULL_READ
+    dedup_events = [
+        event
+        for event in capture.events
+        if event.get("event") == EventName.OBJECT_STORAGE_OBJECT_DEDUPLICATED.value
+    ]
+    assert len(dedup_events) == 1
+    event = dedup_events[0]
+    assert event["operation"] == ObjectStorageOperation.STORE.value
+    assert event["size_bytes"] == len(payload)
+    assert event["provider"] == "r2"
+    assert isinstance(event["duration_ms"], int)
+    assert isinstance(event["attempt_count"], int)
+
+
+@pytest.mark.asyncio
+async def test_store_emits_deduplicated_event_on_412_winner(tmp_path: Path) -> None:
+    payload = b"dedup-event-412"
+    client = ScriptedS3Client.missing_then_put_conflict_then_get(
+        payload, _precondition_failed(), DEFAULT_MEDIA_TYPE
+    )
+    store = build_store(client, tmp_path)
+    with capture_diagnostic_events() as capture:
+        receipt = await store.store_stream(chunks(payload), len(payload), DEFAULT_MEDIA_TYPE)
+
+    assert receipt.verification_method is VerificationMethod.EXISTING_FULL_READ
+    dedup_events = [
+        event
+        for event in capture.events
+        if event.get("event") == EventName.OBJECT_STORAGE_OBJECT_DEDUPLICATED.value
+    ]
+    assert len(dedup_events) == 1
+    assert dedup_events[0]["operation"] == ObjectStorageOperation.STORE.value
+
+
+@pytest.mark.asyncio
+async def test_store_emits_succeeded_event_on_upload(tmp_path: Path) -> None:
+    payload = b"upload-event"
+    client = ScriptedS3Client.missing_then_put_then_exact_get(payload, DEFAULT_MEDIA_TYPE)
+    store = build_store(client, tmp_path)
+    with capture_diagnostic_events() as capture:
+        receipt = await store.store_stream(chunks(payload), len(payload), DEFAULT_MEDIA_TYPE)
+
+    assert receipt.verification_method is VerificationMethod.UPLOADED_FULL_READ
+    dedup_events = [
+        event
+        for event in capture.events
+        if event.get("event") == EventName.OBJECT_STORAGE_OBJECT_DEDUPLICATED.value
+    ]
+    assert dedup_events == []
+    succeeded_events = [
+        event
+        for event in capture.events
+        if event.get("event") == EventName.OBJECT_STORAGE_OPERATION_SUCCEEDED.value
+        and event.get("operation") == ObjectStorageOperation.STORE.value
+    ]
+    assert len(succeeded_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_store_records_failed_outcome_for_input_invalid(tmp_path: Path) -> None:
+    payload = b"record-failed"
+    client = ScriptedS3Client()
+    store = build_store(client, tmp_path)
+
+    with pytest.raises(ObjectStorageError):
+        await store.store_stream(chunks(payload), len(payload), "text")
+
+    store_records = [
+        record
+        for record in store.metrics.operations
+        if record.operation is ObjectStorageOperation.STORE
+    ]
+    assert store_records[-1].result is ObjectStorageResult.FAILED
+    assert store_records[-1].error_code is ErrorCode.OBJECT_STORAGE_INPUT_INVALID

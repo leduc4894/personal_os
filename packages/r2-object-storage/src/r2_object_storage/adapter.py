@@ -16,19 +16,26 @@ typed :class:`ObjectStorageError` and yields no bytes; the verification spool is
 removed and its reservation released on every path, including a failure to open
 the just-verified spool for reading.
 
+:meth:`R2S3ObjectStore.store_stream` receives and hashes the input into a bounded
+spool, derives the canonical key, ``HEAD``s it, and either deduplicates (exists)
+or conditionally creates (missing) with ``IfNoneMatch="*"`` before running the
+same full verification. An ambiguous PUT retries beginning at ``HEAD``; a PUT
+``412`` transitions directly to winner verification. Single-flight concurrency
+(Task 9) is layered on top.
+
 Provider exception classes, response bodies, ETags, request ids, endpoints and
 object keys remain chained only as internal causes and never enter a typed error,
-a metric label or a diagnostic field. ``store_stream`` (Task 8) and single-flight
-deduplication (Task 9) are intentionally absent here.
+a metric label or a diagnostic field.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import inspect
 import random
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,17 +45,25 @@ from personal_os.diagnostics import DiagnosticLogger
 from personal_os.diagnostics.events import EventName, SafeToken
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.object_storage import (
+    CanonicalMediaType,
+    ContentDigest,
     ExpectedObject,
     VerificationMethod,
     VerifiedObjectReader,
     VerifiedObjectReceipt,
     derive_canonical_object_key,
 )
-from personal_os.object_storage.errors import SIZE_OUT_OF_RANGE, ObjectStorageError
+from personal_os.object_storage.errors import (
+    DIGEST_MISMATCH,
+    MEDIA_TYPE_INVALID,
+    SIZE_OUT_OF_RANGE,
+    ObjectStorageError,
+)
 from personal_os.object_storage.keys import CanonicalObjectKey
 from r2_object_storage.client import (
     GetObjectResult,
     HeadObjectResult,
+    PutObjectRequest,
     S3ClientProtocol,
     StreamingBodyProtocol,
 )
@@ -87,19 +102,58 @@ class _AttemptTracker:
 def require_exact_metadata(head: HeadObjectResult, expected: ExpectedObject) -> None:
     """Require the HEAD size and media to match ``expected`` and a usable ETag.
 
-    A size or media-type mismatch at HEAD is a metadata conflict: the stored
-    canonical object does not match what the caller expects. A missing or
-    whitespace-bearing ETag violates the opaque-token contract the conditional
-    GET depends on, so it fails closed as a contract error before any GET.
+    A size mismatch at HEAD is integrity failure (design §6.3): under an
+    immutable content-addressed key, a stored object whose ``ContentLength``
+    differs from the expected size is corruption, not a conflicting write. A
+    media-type mismatch is a metadata conflict: the stored canonical object
+    carries a different canonical media type than the caller expects. A missing
+    or whitespace-bearing ETag violates the opaque-token contract the
+    conditional GET depends on, so it fails closed as a contract error before
+    any GET.
     """
 
     if head.size_bytes != expected.size_bytes:
-        raise ObjectStorageError(ErrorCode.OBJECT_STORAGE_METADATA_CONFLICT)
+        raise ObjectStorageError(ErrorCode.OBJECT_STORAGE_INTEGRITY_FAILED)
     if head.media_type != str(expected.media_type):
         raise ObjectStorageError(ErrorCode.OBJECT_STORAGE_METADATA_CONFLICT)
     etag = head.etag
     if not etag or any(character.isspace() for character in etag):
         raise ObjectStorageError(ErrorCode.OBJECT_STORAGE_CONTRACT_INVALID)
+
+
+def _parse_canonical_media_type(media_type: str) -> CanonicalMediaType:
+    """Parse ``media_type`` as the canonical MIME grammar or fail at admission.
+
+    A value that does not satisfy the canonical ``type/subtype`` grammar is an
+    input failure detected before any byte is received or any R2 call is made.
+    """
+
+    try:
+        return CanonicalMediaType.parse(media_type)
+    except ValueError as cause:
+        raise ObjectStorageError(
+            ErrorCode.OBJECT_STORAGE_INPUT_INVALID,
+            safe_details={"reason": MEDIA_TYPE_INVALID},
+        ) from cause
+
+
+def _parse_claimed_digest(claimed_sha256: str | None) -> ContentDigest | None:
+    """Parse the optional claimed digest at admission, or return ``None``.
+
+    A non-``None`` claim that is not exactly 64 lowercase hexadecimal characters
+    is a malformed shape: it is rejected at admission before any byte is received
+    or any R2 call is made. ``None`` means the caller made no claim.
+    """
+
+    if claimed_sha256 is None:
+        return None
+    try:
+        return ContentDigest.parse(claimed_sha256)
+    except ValueError as cause:
+        raise ObjectStorageError(
+            ErrorCode.OBJECT_STORAGE_INPUT_INVALID,
+            safe_details={"reason": DIGEST_MISMATCH},
+        ) from cause
 
 
 async def _close_streaming_body(body: StreamingBodyProtocol) -> None:
@@ -304,6 +358,80 @@ class R2S3ObjectStore:
         )
         return receipt
 
+    async def store_stream(
+        self,
+        stream: AsyncIterable[bytes],
+        expected_size_bytes: int,
+        media_type: str,
+        claimed_sha256: str | None = None,
+    ) -> VerifiedObjectReceipt:
+        """Store a stream as an immutable content-addressable R2 object.
+
+        The state machine is exact (design §5/§6):
+
+        1. Validate admission: canonical media type, claimed digest shape and the
+           declared size (enforced by the spool manager). No R2 call is made
+           before admission completes.
+        2. Receive and hash the complete input spool under bounded resource
+           limits (the spool manager owns the receive deadline and cleanup).
+        3. Compare the claimed digest against the backend-computed SHA-256; a
+           well-formed claim that disagrees is rejected before any R2 call.
+        4. Derive the expected object and canonical key from the computed digest.
+        5. ``HEAD`` the canonical key:
+           - exists -> full verify -> receipt ``EXISTING_FULL_READ`` (dedup).
+           - missing -> one conditional ``PutObject`` with ``IfNoneMatch="*"``:
+             success -> full verify -> ``UPLOADED_FULL_READ``;
+             ``412`` -> full verify the winner -> ``EXISTING_FULL_READ``;
+             ambiguous (transient transport failure) -> retry begins at HEAD.
+
+        The input spool survives through PUT and verification and is removed in
+        the receive context's shielded bounded cleanup on every exit path. A
+        client digest is only a claim: the receipt is issued only after the
+        backend's own full read passes exact digest, size and media verification.
+        """
+
+        operation = ObjectStorageOperation.STORE
+        started = self._monotonic()
+        tracker = _AttemptTracker()
+        try:
+            canonical_media = _parse_canonical_media_type(media_type)
+            claimed_digest = _parse_claimed_digest(claimed_sha256)
+
+            async with self._spools.receive_stream(stream, expected_size_bytes) as hashed:
+                if claimed_digest is not None and hashed.content_digest != claimed_digest:
+                    raise ObjectStorageError(
+                        ErrorCode.OBJECT_STORAGE_INPUT_INVALID,
+                        safe_details={"reason": DIGEST_MISMATCH},
+                    )
+                expected = ExpectedObject(
+                    content_digest=hashed.content_digest,
+                    size_bytes=hashed.size_bytes,
+                    media_type=canonical_media,
+                )
+                method = await self._resolve_store_method(expected, hashed, tracker)
+                verification = await self._verify_to_spool(expected, operation, tracker)
+                try:
+                    receipt = self._build_receipt(verification, expected, method)
+                finally:
+                    await verification.close()
+            self._record_store_outcome(
+                operation,
+                method,
+                started=started,
+                size_bytes=receipt.size_bytes,
+                attempt_count=tracker.count,
+            )
+            return receipt
+        except ObjectStorageError as cause:
+            self._record_failed(
+                operation,
+                cause,
+                started=started,
+                size_bytes=expected_size_bytes,
+                attempt_count=tracker.count,
+            )
+            raise
+
     @asynccontextmanager
     async def open_verified_reader(
         self, expected: ExpectedObject
@@ -500,6 +628,62 @@ class R2S3ObjectStore:
             verification_method=method,
         )
 
+    # --- Store core -------------------------------------------------------
+
+    async def _resolve_store_method(
+        self,
+        expected: ExpectedObject,
+        hashed: HashedSpool,
+        tracker: _AttemptTracker,
+    ) -> VerificationMethod:
+        """Resolve the store receipt method: dedup or upload.
+
+        Wraps the ``HEAD`` -> optional conditional ``PUT`` sequence in one retry
+        loop so an ambiguous PUT (a transient transport failure whose outcome is
+        unknown) re-enters at ``HEAD`` rather than blindly re-uploading. If the
+        retry HEAD now shows the object exists, the operation is resolved as a
+        dedup; only if it is still missing does a second PUT execute.
+
+        A ``412 PreconditionFailed`` from the conditional PUT is NOT a retry and
+        NOT an integrity failure (design §11 line 469): the retry loop raises
+        :class:`ConditionalCreateConflict`, caught here to transition directly to
+        winner verification as ``EXISTING_FULL_READ``. A terminal PUT failure
+        (``BadDigest``/auth) propagates as the mapped typed error. A GET-time
+        ``412`` is a different signal mapped in :meth:`_get_with_retry`.
+
+        The client opens the spool file fresh for every ``put_object`` call,
+        positioning the body at byte 0 (the rewind before each PUT attempt).
+        """
+
+        object_key = derive_canonical_object_key(expected.content_digest)
+        content_md5_base64 = base64.b64encode(hashed.md5_digest).decode()
+
+        async def attempt(_attempt: int) -> VerificationMethod:
+            head = await self._client.head_object(object_key)
+            if head is not None:
+                # Exists: dedup path. The subsequent full verify checks exact
+                # metadata and fails closed on any mismatch instead of PUTting
+                # over the immutable key (no overwrite, no self-repair).
+                return VerificationMethod.EXISTING_FULL_READ
+            await self._client.put_object(
+                PutObjectRequest(
+                    object_key=object_key,
+                    spool_path=hashed.path,
+                    size_bytes=hashed.size_bytes,
+                    media_type=expected.media_type,
+                    content_md5_base64=content_md5_base64,
+                )
+            )
+            return VerificationMethod.UPLOADED_FULL_READ
+
+        try:
+            return await self._run_with_retry(ObjectStorageOperation.STORE, tracker, attempt)
+        except ConditionalCreateConflict:
+            # The conditional PUT lost the immutable-key race: another writer
+            # won and the object now exists. Transition directly to winner
+            # verification; do not retry the PUT.
+            return VerificationMethod.EXISTING_FULL_READ
+
     # --- Metrics and diagnostics ------------------------------------------
 
     def _duration_ms(self, started: float) -> int:
@@ -523,6 +707,45 @@ class R2S3ObjectStore:
         )
         self._logger.emit(
             EventName.OBJECT_STORAGE_OPERATION_SUCCEEDED,
+            {
+                "operation": operation,
+                "duration_ms": duration_ms,
+                "size_bytes": size_bytes,
+                "attempt_count": attempt_count,
+                "provider": _PROVIDER,
+            },
+        )
+
+    def _record_store_outcome(
+        self,
+        operation: ObjectStorageOperation,
+        method: VerificationMethod,
+        *,
+        started: float,
+        size_bytes: int,
+        attempt_count: int,
+    ) -> None:
+        """Record a completed store: ``DEDUPLICATED`` for a dedup/412-winner path,
+        ``SUCCEEDED`` for a conditional-upload path. Emits the matching registered
+        event (:data:`OBJECT_STORAGE_OBJECT_DEDUPLICATED` or
+        :data:`OBJECT_STORAGE_OPERATION_SUCCEEDED`)."""
+
+        duration_ms = self._duration_ms(started)
+        if method is VerificationMethod.EXISTING_FULL_READ:
+            result = ObjectStorageResult.DEDUPLICATED
+            event = EventName.OBJECT_STORAGE_OBJECT_DEDUPLICATED
+        else:
+            result = ObjectStorageResult.SUCCEEDED
+            event = EventName.OBJECT_STORAGE_OPERATION_SUCCEEDED
+        self._metrics.record_operation(
+            operation=operation,
+            result=result,
+            duration_ms=duration_ms,
+            size_bytes=size_bytes,
+            attempt_count=attempt_count,
+        )
+        self._logger.emit(
+            event,
             {
                 "operation": operation,
                 "duration_ms": duration_ms,

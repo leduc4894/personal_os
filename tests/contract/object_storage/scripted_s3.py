@@ -98,6 +98,12 @@ def scripted_body(chunks: list[bytes]) -> ScriptedStreamingBody:
     return ScriptedStreamingBody(chunks=tuple(chunks))
 
 
+def _payload_chunks(payload: bytes) -> list[bytes]:
+    """Return the single-chunk body for ``payload`` (empty list for zero bytes)."""
+
+    return [] if len(payload) == 0 else [payload]
+
+
 class ScriptedS3Client:
     """Deterministic fake implementing :class:`S3ClientProtocol`.
 
@@ -111,6 +117,7 @@ class ScriptedS3Client:
     def __init__(self) -> None:
         self._outcomes: deque[_Outcome] = deque()
         self.calls: list[RecordedCall] = []
+        self.put_requests: list[PutObjectRequest] = []
 
     def enqueue(
         self, outcome: HeadObjectResult | GetObjectResult | BaseException | None
@@ -299,6 +306,92 @@ class ScriptedS3Client:
         client.enqueue(get_cause)
         return client
 
+    # --- Task 8 store factories ---------------------------------------------
+    #
+    # Each factory scripts the ordered outcomes the store path consumes: a
+    # store-level HEAD, optionally a conditional PUT, then the full verification
+    # HEAD+GET. They never hash, parse keys or persist bytes.
+
+    @classmethod
+    def missing_then_put_then_exact_get(
+        cls,
+        payload: bytes,
+        media_type: str = DEFAULT_MEDIA_TYPE,
+        *,
+        etag: str = DEFAULT_ETAG,
+    ) -> ScriptedS3Client:
+        """Script a missing store HEAD, a successful conditional PUT, then the
+        exact verification HEAD+GET that proves the stored object."""
+
+        client = cls()
+        client.enqueue(None)  # store HEAD: missing
+        client.enqueue(None)  # conditional PUT: success
+        client.enqueue(HeadObjectResult(size_bytes=len(payload), media_type=media_type, etag=etag))
+        client.enqueue(GetObjectResult(body=scripted_body(_payload_chunks(payload))))
+        return client
+
+    @classmethod
+    def existing_then_verify_get(
+        cls,
+        payload: bytes,
+        media_type: str = DEFAULT_MEDIA_TYPE,
+        *,
+        etag: str = DEFAULT_ETAG,
+    ) -> ScriptedS3Client:
+        """Script a store-level HEAD showing an exact existing object, then the
+        verification HEAD+GET that proves it. No PUT: the object is deduplicated."""
+
+        client = cls()
+        head = HeadObjectResult(size_bytes=len(payload), media_type=media_type, etag=etag)
+        client.enqueue(head)  # store HEAD: exists
+        client.enqueue(head)  # verification HEAD
+        client.enqueue(GetObjectResult(body=scripted_body(_payload_chunks(payload))))
+        return client
+
+    @classmethod
+    def missing_then_put_conflict_then_get(
+        cls,
+        payload: bytes,
+        put_cause: BaseException,
+        media_type: str = DEFAULT_MEDIA_TYPE,
+        *,
+        etag: str = DEFAULT_ETAG,
+    ) -> ScriptedS3Client:
+        """Script a missing store HEAD, a conditional PUT that raises ``put_cause``
+        (a ``412 PreconditionFailed`` race loss), then the winner verification
+        HEAD+GET. The 412 transitions directly to winner verification (no re-HEAD
+        between the failed PUT and the winner verify)."""
+
+        client = cls()
+        client.enqueue(None)  # store HEAD: missing
+        client.enqueue(put_cause)  # conditional PUT: 412 race loss
+        client.enqueue(HeadObjectResult(size_bytes=len(payload), media_type=media_type, etag=etag))
+        client.enqueue(GetObjectResult(body=scripted_body(_payload_chunks(payload))))
+        return client
+
+    @classmethod
+    def missing_then_put_ambiguous_then_existing(
+        cls,
+        payload: bytes,
+        put_cause: BaseException,
+        media_type: str = DEFAULT_MEDIA_TYPE,
+        *,
+        etag: str = DEFAULT_ETAG,
+    ) -> ScriptedS3Client:
+        """Script a missing store HEAD, a conditional PUT that raises an ambiguous
+        (transient) ``put_cause``, then a store HEAD showing the object now exists
+        (the retry begins at HEAD, not a blind re-PUT), then the verification
+        HEAD+GET."""
+
+        client = cls()
+        head = HeadObjectResult(size_bytes=len(payload), media_type=media_type, etag=etag)
+        client.enqueue(None)  # attempt 1 store HEAD: missing
+        client.enqueue(put_cause)  # attempt 1 PUT: ambiguous transient failure
+        client.enqueue(head)  # attempt 2 store HEAD: exists (retry begins HEAD)
+        client.enqueue(head)  # verification HEAD
+        client.enqueue(GetObjectResult(body=scripted_body(_payload_chunks(payload))))
+        return client
+
     @property
     def methods(self) -> list[str]:
         """The recorded method names in call order (close excluded)."""
@@ -312,6 +405,25 @@ class ScriptedS3Client:
     @property
     def put_calls(self) -> list[RecordedCall]:
         return [call for call in self.calls if call.method == "put_object"]
+
+    @property
+    def only_put(self) -> PutObjectRequest:
+        """Return the single recorded PUT request; fail closed unless exactly one."""
+
+        if len(self.put_requests) != 1:
+            raise AssertionError(
+                f"expected exactly one put_object call, found {len(self.put_requests)}"
+            )
+        return self.put_requests[0]
+
+    @property
+    def calls_after_put(self) -> list[str]:
+        """Method names of every call after the first ``put_object``."""
+
+        for index, call in enumerate(self.calls):
+            if call.method == "put_object":
+                return [entry.method for entry in self.calls[index + 1 :]]
+        raise AssertionError("no put_object call recorded")
 
     @property
     def get_calls(self) -> list[RecordedCall]:
@@ -344,6 +456,7 @@ class ScriptedS3Client:
                 put_media_type=str(request.media_type),
             )
         )
+        self.put_requests.append(request)
         result = self._consume()
         if result is not None:
             raise AssertionError("scripted put_object must return None")
