@@ -31,9 +31,17 @@ def _skip_without_symlink_support(target_dir: Path) -> None:
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
-    [(b"value", "value"), (b"value\n", "value"), (b"value\r\n", "value")],
+    [
+        (b"value", "value"),
+        (b"value\n", "value"),
+        (b"value\r\n", "value"),
+        (b"value\r", "value"),
+        (b"value\n\n", "value"),
+        (b"value\r\n\r\n", "value"),
+        (b"value  \n", "value  "),
+    ],
 )
-def test_reads_utf8_and_removes_exactly_one_line_ending(
+def test_reads_utf8_and_strips_every_trailing_line_ending(
     tmp_path: Path, raw: bytes, expected: str
 ) -> None:
     secret_file = tmp_path / "credential"
@@ -42,10 +50,10 @@ def test_reads_utf8_and_removes_exactly_one_line_ending(
     assert secret.get_secret_value() == expected
 
 
-def test_preserves_other_whitespace(tmp_path: Path) -> None:
+def test_preserves_interior_whitespace(tmp_path: Path) -> None:
     secret_file = tmp_path / "credential"
-    secret_file.write_bytes(b"  value  \n\n")
-    assert read_secret_file(secret_file, tmp_path).get_secret_value() == "  value  \n"
+    secret_file.write_bytes(b"  value  ")
+    assert read_secret_file(secret_file, tmp_path).get_secret_value() == "  value  "
 
 
 @pytest.mark.parametrize(

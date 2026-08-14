@@ -108,10 +108,10 @@ def read_secret_file(
             ErrorCode.SECRET_FILE_INVALID_ENCODING,
             "invalid_encoding",
         ) from cause
-    if value.endswith("\r\n"):
-        value = value[:-2]
-    elif value.endswith("\n"):
-        value = value[:-1]
+    # Strip every trailing CR/LF residue: a lone "\r" (Windows clipboard) or
+    # repeated newlines would otherwise corrupt consumers that interpolate the
+    # value into a single-line header or connection string.
+    value = value.rstrip("\r\n")
     if value == "":
         raise _secret_error(ErrorCode.SECRET_FILE_EMPTY, "empty")
     return SecretStr(value)

@@ -58,6 +58,19 @@ jobs:
           chmod 0600 "$R2_TEST_SECRET_ROOT/r2_test_access_key_id" \
             "$R2_TEST_SECRET_ROOT/r2_test_secret_access_key"
           unset R2_TEST_ACCESS_KEY_ID R2_TEST_SECRET_ACCESS_KEY
+          # Credential-shape guard: R2 access key ids are exactly 32 and secret
+          # access keys exactly 64 characters. A wrapped or truncated paste in
+          # the GitHub secret would otherwise surface later as a cryptic SigV4
+          # header failure. Lengths only are ever rendered.
+          for credential_shape in r2_test_access_key_id:32 r2_test_secret_access_key:64; do
+            credential_file="${credential_shape%%:*}"
+            expected_length="${credential_shape##*:}"
+            actual_length=$(tr -d '\r\n' < "$R2_TEST_SECRET_ROOT/$credential_file" | wc -c)
+            if [ "$actual_length" -ne "$expected_length" ]; then
+              echo "::error::secret file $credential_file holds $actual_length credential characters, expected $expected_length; re-enter the GitHub secret as one clean line"
+              exit 1
+            fi
+          done
       - name: Run live R2 contract cases with exact-key cleanup
         shell: bash
         env:
