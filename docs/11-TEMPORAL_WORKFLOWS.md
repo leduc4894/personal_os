@@ -103,7 +103,21 @@ Stale workflow không được ghi vào target mới hoặc activate route.
 
 Worker restart không mất workflow. Temporal outage không làm mất canonical intent trong PostgreSQL. Dispatcher định kỳ quét undispatched intents bằng locked batches. Không dựa vào Temporal history làm business database dài hạn.
 
-Dispatcher claim bằng `FOR UPDATE SKIP LOCKED`, commit lease trước khi gọi Temporal và chỉ acknowledge bằng exact lease token. Start có thể được Temporal chấp nhận trước khi ingestion worker được triển khai; workflow task chờ trên task queue `source-ingestion` cho đến Phase 3.
+Dispatcher claim bằng `FOR UPDATE SKIP LOCKED`, commit lease trước khi gọi Temporal và chỉ acknowledge bằng exact lease token. Các boundary cố định của một dispatch cycle:
+
+```text
+claim batch                          50 intents
+concurrent Temporal starts            8
+lease                                 60 seconds
+Temporal start/describe timeout       10 seconds
+retry backoff                         min(300, 2 ** prior_attempt_count) seconds
+```
+
+Claim chọn pending rows theo `(available_at, created_at, projection_intent_id)`, gán status `leased`, lease token UUIDv7 và database-time expiry. Attempt count chỉ tăng khi outcome đã biết hoặc lease hết hạn. Lease hết hạn trả intent về pending, tăng attempt, ghi `projection_dispatch_lease_expired` và áp dụng backoff; stale token không bao giờ ghi đè transition của dispatcher khác. Temporal outage giữ intent ở pending với backoff có cap, không phụ thuộc attempt count. Workflow input là closed contract `source_ingestion_reference/v1` chỉ chứa contract tag và bốn UUID (workspace, event, source, source version); raw content, title, object key, hash và vector không bao giờ vào Temporal history.
+
+Start có thể được Temporal chấp nhận trước khi ingestion worker được triển khai; workflow task chờ trên task queue `source-ingestion` cho đến Phase 3. Phase 1 chỉ queue các workflow start này — worker Phase 1 chưa register implementation của `SourceIngestionWorkflow`; registration đến với deliverable Phase 3.
+
+Readiness của API/MCP kiểm tra PostgreSQL connectivity và schema head; readiness của worker thêm kiểm tra Temporal namespace. Backlog age chỉ degrade readiness, không degrade liveness, và liveness không thực hiện network call.
 
 ## 9. Tests
 

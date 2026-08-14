@@ -45,7 +45,11 @@ JSONB dùng cho raw source metadata, provider-neutral structured output và boun
 6. Insert sync event, audit và hai projection intent cho changed content; no-change không tạo intent.
 7. Commit một lần.
 
+Hai lớp khóa là transaction-level advisory lock theo thứ tự cố định: `(workspace_id, idempotency_key)` trước (namespace `0x53564349`), rồi source identity (namespace `0x53564353`) và `SELECT ... FOR UPDATE` source row hiện có. Session advisory lock bị cấm; lock luôn được giải phóng bởi commit, rollback, cancellation hoặc mất kết nối. Transaction không thực hiện bất kỳ call R2 hay Temporal nào.
+
 Event update có `base_version_id = committed_version_id` là persisted marker cho `no_change`. Exact replay hydrate kết quả từ event/version/object hiện có; không tạo thêm audit hay canonical row.
+
+Transaction retry bị chặn ở tối đa 3 attempts, chỉ áp dụng cho deadlock, serialization failure và bounded lock contention, với cancellable jitter 50–250 ms; business conflict, identity misuse, receipt failure, metadata conflict và invariant failure không retry. Nếu acknowledgment của commit không chắc chắn, adapter bỏ connection hiện tại, mở connection bounded mới và tra cứu key/event/fingerprint; chỉ retry sau khi tra cứu chứng minh vắng mặt. Khi PostgreSQL không khả dụng, lỗi là retryable `source_commit_outcome_unknown`, không bao giờ là rollback giả định.
 
 Object upload xảy ra trước transaction; orphan object được GC sau grace period nếu transaction không commit.
 

@@ -48,6 +48,13 @@ Object publication bắt buộc chạy theo thứ tự:
 
 R2 cung cấp strong consistency cho object read-after-write, delete và list. Correctness vẫn dựa trên explicit hash/size verification, không dựa riêng vào provider guarantee.
 
+### Verified receipt và replay
+
+- Publication mới bắt buộc một `VerifiedObjectReceipt` nội bộ: digest, derived key, byte size và media type phải khớp exact `ExpectedObject`; `verified_at` không ở tương lai và tối đa 5 phút tuổi. Receipt stale được tạo lại bằng `verify_existing_object()`, không bao giờ bằng cách sửa timestamp.
+- Receipt chỉ tồn tại trong tiến trình nội bộ; nó không đi qua HTTP, MCP, Worker, Web App hay Obsidian serialization. Bounded database retry trong cùng service call được tái dùng receipt; một lời gọi mới phải lấy receipt mới trừ khi preflight chứng minh operation đã commit.
+- Exact replay (cùng workspace idempotency key, cùng event ID và fingerprint) trả về đúng version, event sequence, outcome và `committed_at` gốc từ PostgreSQL mà không đọc lại R2 và không tạo thêm bất kỳ row nào.
+- Nếu PostgreSQL không xác nhận được commit, hệ thống mở connection mới để tra cứu bằng chứng (key/event/fingerprint); chỉ khi tra cứu chứng minh vắng mặt mới retry. Khi PostgreSQL không khả dụng, lỗi là retryable `source_commit_outcome_unknown` — hệ thống không bao giờ đoán rằng transaction đã rollback. Database failure không bao giờ kích hoạt compensating R2 deletion.
+
 ## 4. Stable identities
 
 ```text
@@ -101,6 +108,8 @@ committed_at
 `content_version` tăng đơn điệu trong phạm vi source. Optimistic concurrency dùng `base_version_id`, không dùng timestamp để quyết định thắng thua.
 
 Nếu `base_version_id` vẫn current nhưng verified bytes giống exact current object, backend ghi một sync event `no_change`, không tạo source version mới, không đổi pointer và không tạo projection intent. Base stale vẫn conflict trước khi xét no-change.
+
+Transaction publication tuần tự hóa bằng hai transaction advisory lock theo thứ tự cố định: lock idempotency identity `(workspace_id, idempotency_key)` trước, rồi lock source identity, sau đó `SELECT ... FOR UPDATE` source row hiện có. Session advisory lock bị cấm; mọi lock giải phóng khi commit, rollback, cancellation hoặc mất kết nối. Bên trong transaction không có bất kỳ call R2 hay Temporal nào.
 
 ## 7. Derived artifacts
 

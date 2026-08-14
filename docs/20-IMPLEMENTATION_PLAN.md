@@ -93,6 +93,8 @@ Deployment constraints:
 - Cloudflare R2 là canonical object store duy nhất; production và test/CI dùng private bucket cùng bucket-scoped credentials tách biệt.
 - R2 dependency failure dùng bounded retry rồi fail closed; không có backend fallback, dual-write hoặc controlled cutover.
 - PostgreSQL không publish version/current pointer tới object chưa được ghi và verify exact key, SHA-256 cùng byte size.
+- Source publication dùng transaction advisory lock theo thứ tự idempotency-then-source, receipt nội bộ tối đa 5 phút tuổi, outbox intent với lease 60 giây và Temporal workflow identity deterministic `source-ingestion/{workspace_id}/{event_id}`; operator runbook tại `docs/operations/source-publication.md`.
+- Phase 1 queue các `SourceIngestionWorkflow` start trên task queue `source-ingestion` nhưng không register workflow implementation; worker ingestion đến với deliverable Phase 3, và các start đã queue chờ trên task queue cho đến lúc đó.
 
 Acceptance:
 
