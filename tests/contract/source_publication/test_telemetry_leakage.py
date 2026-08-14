@@ -196,6 +196,53 @@ def test_unsafe_event_field_with_sentinel_is_rejected_without_leaking(
     assert "logging_payload_rejected" in events
 
 
+def test_idempotency_key_sentinel_never_leaks_through_logging_scenario(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The idempotency-key sentinel must survive a full logging round trip
+    undisclosed: an application error chained onto a cause that carries the raw
+    key, plus the registered rejection event, produce no record, rendered
+    message or schema payload containing it."""
+
+    underscored_sentinel = KEY_SENTINEL.replace("-", "_")
+    key = IdempotencyKey(underscored_sentinel)
+    assert underscored_sentinel in key.value
+    underlying = RuntimeError(f"commit rejected for key {key.value}")
+    try:
+        raise underlying
+    except RuntimeError as cause:
+        try:
+            raise SourcePublicationError(
+                ErrorCode.SOURCE_IDEMPOTENCY_MISMATCH,
+                safe_details={"source_id": uuid4()},
+            ) from cause
+        except SourcePublicationError as captured:
+            error = captured
+
+    logger = _build_logger()
+    with caplog.at_level(logging.DEBUG):
+        logger.emit_application_error(error)
+        logger.emit(
+            EventName.SOURCE_VERSION_PUBLISH_REJECTED,
+            {
+                "operation": SafeToken.parse("update"),
+                "outcome": SafeToken.parse("rejected"),
+                "duration_ms": 2,
+                "error_code": SafeToken.parse("source_idempotency_mismatch"),
+                "error_category": SafeToken.parse("conflict"),
+                "is_retryable": False,
+                "source_id": uuid4(),
+                "event_id": uuid4(),
+                "reason_code": SafeToken.parse("idempotency_mismatch"),
+            },
+        )
+
+    blob = _captured_log_blob(caplog)
+    assert len(caplog.records) >= 2
+    for sentinel in (KEY_SENTINEL, underscored_sentinel):
+        assert sentinel not in blob, sentinel
+
+
 def test_dependency_sql_and_password_sentinels_never_leak_into_logs(
     tmp_path: Path,
 ) -> None:
