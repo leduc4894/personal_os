@@ -11,10 +11,12 @@ import math
 
 import pytest
 
+from personal_os.database_schema import CANONICAL_POSTGRESQL_SCHEMA_REVISION
 from personal_os.diagnostics.events import EVENT_DEFINITIONS, DiagnosticLevel, EventName, ResultCode
 from personal_os.error_contracts.codes import ERROR_DEFINITIONS, ErrorCategory, ErrorCode
 from personal_os.recovery.contracts import (
     CANONICAL_BACKUP_METRIC_CONTRACTS,
+    POSTGRESQL_SCHEMA_REVISION,
     RECOVERY_BUNDLE_INVALID_REASONS,
     RECOVERY_COMPONENTS,
     RECOVERY_CONFIGURATION_REASONS,
@@ -88,6 +90,14 @@ def test_recovery_error_rejects_codes_outside_the_closed_set() -> None:
 
 def test_recovery_environment_is_closed() -> None:
     assert {member.value for member in RecoveryEnvironment} == {"local", "test"}
+
+
+def test_postgresql_schema_revision_alias_keeps_database_schema_authority() -> None:
+    # Authority moved to ``personal_os.database_schema``; the recovery-side
+    # name must keep resolving to the identical constant object.
+    assert CANONICAL_POSTGRESQL_SCHEMA_REVISION == "20260813_01"
+    assert POSTGRESQL_SCHEMA_REVISION == "20260813_01"
+    assert POSTGRESQL_SCHEMA_REVISION is CANONICAL_POSTGRESQL_SCHEMA_REVISION
 
 
 def test_recovery_reason_tokens_are_closed() -> None:

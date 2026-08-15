@@ -20,6 +20,7 @@ from types import MappingProxyType
 from typing import Final, Protocol, runtime_checkable
 from uuid import UUID
 
+from personal_os.database_schema import CANONICAL_POSTGRESQL_SCHEMA_REVISION
 from personal_os.diagnostics.events import SafeToken
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import ApplicationError
@@ -27,8 +28,10 @@ from personal_os.error_contracts.exceptions import ApplicationError
 #: The only supported manifest contract identifier (spec 8.1); never guessed.
 MANIFEST_CONTRACT: Final[str] = "canonical_core_backup/v1"
 
-#: Canonical PostgreSQL baseline pinned by the acceptance/recovery contract.
-POSTGRESQL_SCHEMA_REVISION: Final[str] = "20260813_01"
+#: Compatibility alias: revision authority lives in
+#: :mod:`personal_os.database_schema`; existing recovery imports keep
+#: resolving to the identical constant.
+POSTGRESQL_SCHEMA_REVISION: Final[str] = CANONICAL_POSTGRESQL_SCHEMA_REVISION
 POSTGRESQL_SERVER_VERSION: Final[str] = "18.4"
 
 #: Upper bound for one canonical object admitted into a bundle (100 MiB).

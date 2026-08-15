@@ -4,7 +4,9 @@ Typed recovery error with its closed reason/component/dependency tokens, the
 canonical manifest value types and strict encode/parse codec, the dump
 process, snapshot-store and bundle-store ports, and the closed backup metric
 contract with its bounded in-memory sink. The modules import no infrastructure
-SDK, driver or subprocess primitive.
+SDK, driver or subprocess primitive. Schema-revision authority lives in
+:mod:`personal_os.database_schema`; ``POSTGRESQL_SCHEMA_REVISION`` remains
+importable from this package as a compatibility alias.
 """
 
 from personal_os.recovery.bundle import (

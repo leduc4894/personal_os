@@ -3,8 +3,9 @@
 This package implements the core source publication contracts (idempotent
 preflight and replay hydration now; version commits and citation lookups in
 later tasks) and the atomic identity bootstrap transaction over the canonical
-PostgreSQL baseline. The composition root builds the engine through
-:mod:`postgresql_source_store.engine` and constructs
+PostgreSQL baseline, plus the canonical database readiness probe
+(:class:`PostgresqlReadinessProbe`). The composition root builds the engine
+through :mod:`postgresql_source_store.engine` and constructs
 :class:`PostgresqlSourcePublicationStore` and
 :class:`PostgresqlIdentityBootstrapStore` directly.
 """
@@ -39,6 +40,7 @@ from postgresql_source_store.publication_store import (
     PostgresqlSourcePublicationStore,
     classify_replay,
 )
+from postgresql_source_store.readiness import PostgresqlReadinessProbe
 
 __all__ = [
     "ACCEPTED_READ_SOURCE_STATES",
@@ -47,6 +49,7 @@ __all__ = [
     "PostgresqlCanonicalSourceReadStore",
     "PostgresqlIdentityBootstrapStore",
     "PostgresqlProjectionIntentStore",
+    "PostgresqlReadinessProbe",
     "PostgresqlRestoreTarget",
     "PostgresqlSourcePublicationStore",
     "ProjectionDiagnosticSink",
