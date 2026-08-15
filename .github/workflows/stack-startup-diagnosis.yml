@@ -16,6 +16,8 @@ jobs:
       CI: "true"
       LOCAL_STACK_TEST_PROJECT: knowledge-ci-diagnosis-1
       UV_PYTHON: 3.14.6
+      TEMPORAL_GRPC_PORT: "17243"
+      TEMPORAL_UI_PORT: "18083"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup uv
@@ -27,7 +29,17 @@ jobs:
           set -euo pipefail
           install -d -m 700 .local
           uv run python tools/local_service_stack.py bootstrap --project-name "$LOCAL_STACK_TEST_PROJECT"
+      - name: Run the production stack up step with acceptance ports
+        run: |
+          set -uo pipefail
+          uv run python tools/local_service_stack.py config --project-name "$LOCAL_STACK_TEST_PROJECT"
+          echo "config exit: $?"
+          uv run python tools/local_service_stack.py up --project-name "$LOCAL_STACK_TEST_PROJECT"
+          up_exit=$?
+          echo "tool up exit: $up_exit"
+          exit "$up_exit"
       - name: Run docker compose up with raw output
+        if: always()
         run: |
           set -uo pipefail
           docker compose --file infra/compose/compose.yaml \
