@@ -439,7 +439,7 @@ async def test_pre_publication_claim_mismatch_creates_no_canonical_pointer(
 ) -> None:
     harness = live_acceptance_context.harness
     workspace = await harness.seed_workspace()
-    claimed_payload = _unique_payload("Claim mismatch claimed")
+    claimed_payload = _unique_payload("Claim mismatch declared")
     supplied_payload = _unique_payload("Claim mismatch supplied")
     assert len(supplied_payload) == len(claimed_payload)
     command = harness.build_markdown_create_command(workspace, claimed_payload)

@@ -648,6 +648,11 @@ def validate_port_availability(
             candidate_socket = create_socket(socket.AF_INET, socket.SOCK_STREAM)
             if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
                 candidate_socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                # Docker publishes the stack ports with SO_REUSEADDR; probe the
+                # same way so TIME_WAIT sockets left by a torn-down stack cycle
+                # do not read as occupied while an active listener still does.
+                candidate_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             candidate_socket.bind(("127.0.0.1", port))
         except OSError:
             is_unavailable = True

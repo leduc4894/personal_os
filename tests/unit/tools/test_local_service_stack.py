@@ -547,6 +547,25 @@ def test_closes_every_opened_socket_when_port_binding_fails() -> None:
     assert all(opened_socket.closed for opened_socket in created)
 
 
+def test_port_availability_probe_sets_reuseaddr_before_binding_on_posix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Probe like Docker binds: with SO_REUSEADDR.
+
+    Docker publishes the stack ports with SO_REUSEADDR, so a probe without it
+    reports port_unavailable against TIME_WAIT sockets left on the very same
+    loopback ports by a torn-down stack cycle.
+    """
+
+    monkeypatch.setattr(stack_module.sys, "platform", "linux")
+    tracked = _TrackedSocket(bind_fails=False)
+
+    validate_port_availability({"POSTGRES_PORT": 5432}, socket_factory=lambda family, kind: tracked)
+
+    assert tracked.options == [(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)]
+    assert tracked.closed
+
+
 def test_subprocess_environment_omits_credentials_and_r2() -> None:
     clean = sanitize_subprocess_environment(
         {"PATH": "safe", "R2_SECRET_ACCESS_KEY": "secret", "POSTGRES_PASSWORD": "secret"}
