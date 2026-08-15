@@ -26,7 +26,7 @@ IMAGE_LOCK_PATH = REPO_ROOT / "infra" / "compose" / "images.lock.yaml"
 COMPOSE_PATH = REPO_ROOT / "infra" / "compose" / "compose.yaml"
 SCRIPT_DIRECTORY = REPO_ROOT / "infra" / "compose" / "scripts"
 LOCAL_STACK_DESIGN_PATH = (
-    REPO_ROOT / "docs" / "superpowers" / "specs" / "local-service-stack-design.md"
+    REPO_ROOT / "docs" / "superpowers" / "specs" / "phase 1" / "local-service-stack-design.md"
 )
 LOCAL_STACK_PLAN_PATH = (
     REPO_ROOT / "docs" / "superpowers" / "plans" / "2026-08-13-local-service-stack.md"
