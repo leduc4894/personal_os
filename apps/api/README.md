@@ -20,7 +20,10 @@ in the root README.
   local/test; `KNOWLEDGE_API_HOST`/`KNOWLEDGE_API_PORT` required explicitly in
   staging/production) and serves `GET /api/health/live` (I/O-free liveness)
   and `GET /api/health/ready` (one bounded PostgreSQL connectivity and
-  exact-schema-head probe, two-second deadline, no retry).
+  exact-schema-head probe, two-second deadline, no retry). Uvicorn's access
+  log is disabled entirely — request-level observations come only from the
+  structured diagnostics events — and low-level Uvicorn-internal startup
+  failures (for example bind errors) surface as the safe exit code `70`.
 - Every application/health response uses the strict envelope
   `{request_id, data, warnings, error}` with a server-owned UUIDv7 request ID
   returned in body and `X-Request-ID`; framework errors map through a closed

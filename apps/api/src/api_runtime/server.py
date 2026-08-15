@@ -6,13 +6,17 @@ settings plus the secret-file password, configures structured diagnostics,
 builds the database lifecycle and the FastAPI application (wiring the lifecycle
 into the application lifespan so the engine starts on startup and is disposed
 on shutdown), then runs Uvicorn in single-process mode with the approved
-flags: no server header, no proxy headers, no reload and exactly one worker.
+flags: no server header, no proxy headers, no access log, no reload and
+exactly one worker.
 
 Exit codes follow the process contract: configuration and secret failures
 exit ``78`` with one safe emergency record, unexpected startup failures exit
-``70``, and a clean server shutdown exits ``0``. Raw exception text is never
-printed. This module is imported only inside the lazy serve callback, so
-shell-only invocations never load FastAPI or Uvicorn.
+``70``, and a clean server shutdown exits ``0``. A ``SystemExit`` raised by
+the server run is translated, not propagated: ``0``/``None`` map to the clean
+shutdown exit and any other code (Uvicorn signals bind failures through
+``sys.exit(3)``) maps to ``70``. Raw exception text is never printed. This
+module is imported only inside the lazy serve callback, so shell-only
+invocations never load FastAPI or Uvicorn.
 """
 
 from __future__ import annotations
@@ -108,11 +112,19 @@ def run_server(
                 port=api_settings.port,
                 server_header=False,
                 proxy_headers=False,
+                access_log=False,
                 reload=False,
                 workers=1,
             )
             server = server_factory(server_config)
             server.run()
+        except SystemExit as exit_request:
+            # Uvicorn aborts low-level startup (for example a bind failure)
+            # through ``sys.exit``; translate it into the documented exits
+            # instead of letting the interpreter surface the raw code.
+            if exit_request.code is not None and exit_request.code != 0:
+                emit_emergency_internal_error(ServiceName.API, context, exit_request)
+                return _EXIT_INTERNAL_FAILURE
         except Exception as error:
             emit_emergency_internal_error(ServiceName.API, context, error)
             return _EXIT_INTERNAL_FAILURE

@@ -156,8 +156,14 @@ def test_render_failure_leaves_no_output_file(
     assert not output.exists()
 
 
-def test_export_never_creates_parent_directories(tmp_path: Path) -> None:
+def test_export_write_failure_exits_seventy_and_never_creates_parent_directories(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     output = tmp_path / "missing" / "openapi.json"
-    with pytest.raises(FileNotFoundError):
-        export_openapi(str(output))
+    assert export_openapi(str(output)) == 70
+    captured = capsys.readouterr()
+    assert "openapi_export_failed" in captured.err
+    assert str(output) not in captured.err
+    assert "Traceback" not in captured.err
+    assert captured.out == ""
     assert not output.parent.exists()

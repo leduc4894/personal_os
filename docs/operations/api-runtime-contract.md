@@ -165,7 +165,10 @@ already-aborted request is rejected before dispatch.
 
 On termination or cancellation Uvicorn stops accepting work, the application
 lifespan closes the database engine exactly once (idempotent disposal), and
-the process exits `0`. `KeyboardInterrupt`/`SystemExit` are never swallowed.
+the process exits `0`. `KeyboardInterrupt` is never swallowed; a `SystemExit`
+raised by the server run maps to the documented exits (`0` clean, `70`
+unexpected startup failure), so low-level Uvicorn-internal startup failures
+such as bind errors surface as the safe exit `70`.
 Uvicorn runs single-process (`workers=1`, `reload` off), does not trust proxy
 headers and sends no framework version header.
 
@@ -175,7 +178,9 @@ headers and sends no framework version header.
   response bodies, tokens, secrets, database statements or exception text.
   Access diagnostics carry only the closed set `http_method`, `route`
   (template, or the constant `unmatched` label), `status_code`, `duration_ms`
-  plus the safe correlation fields.
+  plus the safe correlation fields. Uvicorn's access log is disabled entirely
+  (`access_log=False`); those structured events are the only request-level
+  logging.
 - Do not add auth, sync, upload or business routes, CORS, proxy trust or new
   readiness dependencies to this surface — they belong to later child specs.
 - Do not hand-edit `packages/api-client/openapi.json` or

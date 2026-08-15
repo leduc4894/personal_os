@@ -20,6 +20,7 @@ import json
 from pathlib import Path
 from typing import Final
 
+import pytest
 import yaml  # type: ignore[import-untyped]  # Pinned PyYAML does not ship type stubs.
 from alembic.config import Config
 from alembic.script import ScriptDirectory
@@ -184,18 +185,50 @@ def test_generated_typescript_clients_declare_no_source_publication_endpoint() -
 
 
 def _rendered_endpoint_surface(parsed: object) -> str:
-    """Render only the endpoint-declaring subtree of one OpenAPI document.
+    """Render every endpoint-declaring subtree of one OpenAPI document.
 
-    The ``paths`` subtree (path templates, operation ids, summaries, tags) is
-    where a document declares endpoints. The ``components`` subtree is data
+    Endpoint declarations live in ``paths``, ``webhooks`` and
+    ``components.pathItems``; each present subtree is rendered and the
+    renderings joined so a document declaring endpoints under only one of
+    them is still scanned. The remaining ``components`` subtree is data
     schema, not endpoint declaration: it legitimately embeds registry enums
     such as the error-code table, whose values (for example
-    ``source_version_conflict``) name error conditions, not endpoints, and the
-    generated API-client snapshot carries that schema verbatim.
+    ``source_version_conflict``) name error conditions, not endpoints, and
+    the generated API-client snapshot carries that schema verbatim. A
+    document with none of the three structures is a scanning gap and fails
+    loudly instead of silently passing.
     """
-    if isinstance(parsed, dict) and isinstance(parsed.get("paths"), dict):
-        return json.dumps(parsed["paths"], default=repr)
-    return ""
+    if not isinstance(parsed, dict):
+        raise AssertionError("openapi surface document must be a mapping")
+    rendered_sections: list[str] = []
+    for section_key in ("paths", "webhooks"):
+        section = parsed.get(section_key)
+        if isinstance(section, dict):
+            rendered_sections.append(json.dumps(section, default=repr))
+    components = parsed.get("components")
+    if isinstance(components, dict) and isinstance(components.get("pathItems"), dict):
+        rendered_sections.append(json.dumps(components["pathItems"], default=repr))
+    if not rendered_sections:
+        raise AssertionError(
+            "openapi surface document declares none of paths, webhooks or components.pathItems"
+        )
+    return "\n".join(rendered_sections)
+
+
+def test_endpoint_surface_scan_catches_publication_tokens_declared_only_under_webhooks() -> None:
+    document = {
+        "openapi": "3.1.0",
+        "webhooks": {"new-source-version": {"post": {"operationId": "publishSourceVersion"}}},
+    }
+    rendered = _rendered_endpoint_surface(document)
+    caught = [token for token in PUBLICATION_ENDPOINT_TOKENS if token in rendered]
+    assert caught, "a publication endpoint declared only under webhooks must be scanned"
+
+
+def test_endpoint_surface_scan_fails_loudly_when_no_endpoint_structure_is_present() -> None:
+    document = {"openapi": "3.1.0", "info": {"title": "no endpoint declarations"}}
+    with pytest.raises(AssertionError, match="paths"):
+        _rendered_endpoint_surface(document)
 
 
 def test_openapi_documents_declare_no_source_publication_path() -> None:

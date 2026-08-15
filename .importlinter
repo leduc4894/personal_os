@@ -18,7 +18,9 @@ forbidden_modules =
     mcp_runtime
     workflow_worker
     fastapi
+    uvicorn
     sqlalchemy
+    psycopg
     temporalio
     mcp
     qdrant_client

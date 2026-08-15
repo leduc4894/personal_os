@@ -8,13 +8,15 @@ sorts mapping keys recursively so one commit always renders byte-identical
 bytes, while arrays keep their order because OpenAPI arrays (``required``,
 ``anyOf``, ``enum``) carry meaning. Unsupported non-JSON values are rejected
 instead of silently coerced, the payload reaches disk through a single write
-only after the full bytes are rendered, and parent directories are never
-created implicitly.
+only after the full bytes are rendered, parent directories are never
+created implicitly, and a failed write surfaces as exit code ``70`` with one
+fixed safe stderr line instead of a traceback.
 """
 
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, cast
@@ -23,6 +25,8 @@ from fastapi import FastAPI
 
 from api_runtime.application import create_api_application
 from personal_os.runtime_configuration.models import RuntimeEnvironment
+
+_EXIT_INTERNAL_FAILURE: Final[int] = 70
 
 #: Document-level bindings that embed deployment machine values. Only the root
 #: ``servers`` entry is dropped: nested keys named ``servers`` can be ordinary
@@ -72,9 +76,19 @@ def render_openapi_json() -> bytes:
 
 
 def export_openapi(output_path: str) -> int:
-    """Write the rendered document bytes to one file and report success."""
+    """Write the rendered document bytes to one file and report the exit code.
+
+    A write failure (for example an output location inside a missing
+    directory) is an unexpected internal failure: it returns exit code
+    ``70`` with one fixed safe stderr line and never prints the raw
+    exception or the failing path.
+    """
     payload = render_openapi_json()
-    Path(output_path).write_bytes(payload)
+    try:
+        Path(output_path).write_bytes(payload)
+    except OSError:
+        print("openapi_export_failed", file=sys.stderr)
+        return _EXIT_INTERNAL_FAILURE
     return 0
 
 

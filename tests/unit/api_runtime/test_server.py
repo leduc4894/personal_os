@@ -85,6 +85,27 @@ class ExplodingServerFactory:
         raise RuntimeError(_SENTINEL_HOSTILE_DETAIL)
 
 
+class ExitingServer(RecordingServer):
+    """Server whose run raises ``SystemExit`` like Uvicorn on bind failure."""
+
+    def __init__(self, exit_code: int | None, config: uvicorn.Config) -> None:
+        super().__init__(config)
+        self.exit_code = exit_code
+
+    def run(self) -> None:
+        raise SystemExit(self.exit_code)
+
+
+class ExitingServerFactory:
+    """Factory returning a server whose run exits with the prepared code."""
+
+    def __init__(self, exit_code: int | None) -> None:
+        self.exit_code = exit_code
+
+    def __call__(self, config: uvicorn.Config) -> ExitingServer:
+        return ExitingServer(self.exit_code, config)
+
+
 def test_server_disables_version_and_proxy_headers() -> None:
     captured = RecordingServerFactory()
     result = run_server(environ=LOCAL_ENVIRONMENT, server_factory=captured)
@@ -95,6 +116,7 @@ def test_server_disables_version_and_proxy_headers() -> None:
     assert captured.config.proxy_headers is False
     assert captured.config.reload is False
     assert captured.config.workers == 1
+    assert captured.config.access_log is False
 
 
 def test_server_builds_local_application_with_openapi_route() -> None:
@@ -164,4 +186,24 @@ def test_server_unexpected_startup_failure_exits_seventy_safely(
     assert "internal_error" in captured.err
     assert _SENTINEL_HOSTILE_DETAIL not in captured.err
     assert _SENTINEL_HOSTILE_DETAIL not in captured.out
+    assert "Traceback" not in captured.err
+
+
+def test_server_nonzero_system_exit_exits_seventy_safely(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = run_server(environ=LOCAL_ENVIRONMENT, server_factory=ExitingServerFactory(3))
+    assert result == 70
+    captured = capsys.readouterr()
+    assert "internal_error" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_server_zero_system_exit_is_clean_shutdown(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = run_server(environ=LOCAL_ENVIRONMENT, server_factory=ExitingServerFactory(0))
+    assert result == 0
+    captured = capsys.readouterr()
+    assert "internal_error" not in captured.err
     assert "Traceback" not in captured.err
