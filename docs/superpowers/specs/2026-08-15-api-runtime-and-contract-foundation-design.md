@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-15
 
-**Status:** Approved design; written-spec review pending
+**Status:** Approved for implementation planning
 
 **Parent:** `2026-08-15-phase-two-obsidian-sync-design.md` child 1
 
@@ -218,7 +218,11 @@ environment. Production also uses `openapi_url=None`; local/test use
 
 ## 7. Response contract
 
-All public responses use one strict outer shape.
+All application and health responses use one strict outer shape. The
+local/test-only `/api/openapi.json` tooling route is the sole exception: it
+returns the raw OpenAPI 3.1 document required by standard generators. Its
+correlation headers and safe access diagnostics still pass through the common
+middleware; in production the absent route returns the normal enveloped 404.
 
 ### 7.1 Success
 
@@ -530,7 +534,8 @@ Mutation testing remains explicitly deferred by the parent Phase 2 decision.
 4. Liveness performs no external I/O.
 5. Readiness checks only PostgreSQL connectivity and exact schema head within
    two seconds and cleans up on cancellation.
-6. Every public success and failure has the approved envelope.
+6. Every application/health success and failure has the approved envelope; the
+   local/test OpenAPI document is the one raw tooling response.
 7. Every framework-generated error is normalized to a stable safe code.
 8. Request correlation follows the existing UUIDv7 and W3C contracts.
 9. Production exposes neither OpenAPI nor interactive API documentation.

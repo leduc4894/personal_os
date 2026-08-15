@@ -50,7 +50,7 @@
         <li><code>personal-api serve</code> starts through an app factory.</li>
         <li>Liveness performs no dependency call.</li>
         <li>Readiness checks only PostgreSQL + schema head.</li>
-        <li>Every HTTP response follows the common envelope.</li>
+        <li>Mọi application/health response dùng envelope; raw local/test OpenAPI là ngoại lệ duy nhất.</li>
         <li>OpenAPI snapshot and generated types are reproducible.</li>
         <li>Web and plugin compile against the same package.</li>
         <li>Production exposes no OpenAPI, Swagger or ReDoc.</li>

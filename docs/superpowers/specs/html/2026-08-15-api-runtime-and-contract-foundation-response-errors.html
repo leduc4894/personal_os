@@ -30,7 +30,7 @@
 <body>
   <main>
     <h1>Response contract &amp; error handling</h1>
-    <p class="subtitle">Một envelope ổn định cho mọi public API response, kể cả lỗi do framework tạo ra.</p>
+    <p class="subtitle">Một envelope ổn định cho mọi application/health response và lỗi framework. Raw OpenAPI local/test là ngoại lệ tooling duy nhất.</p>
     <div class="approved">Contract approved · 2026-08-15</div>
 
     <div class="grid">
@@ -78,6 +78,7 @@
     </section>
 
     <div class="warning"><strong>Deferred deliberately:</strong> auth error codes và mapping cụ thể thuộc child spec Web auth/device authorization.</div>
+    <div class="warning"><strong>Tooling exception:</strong> <code>/api/openapi.json</code> ở local/test trả raw OpenAPI 3.1 để generator đọc được; middleware vẫn thêm correlation headers. Production route này không tồn tại và trả enveloped 404.</div>
   </main>
 </body>
 </html>
