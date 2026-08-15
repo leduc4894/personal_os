@@ -32,6 +32,8 @@ PURGED_MODULES = (
     "api_runtime",
     "api_runtime.command",
     "api_runtime.runtime_check",
+    "api_runtime.server",
+    "api_runtime.application",
     "mcp_runtime",
     "mcp_runtime.command",
     "mcp_runtime.runtime_check",
@@ -41,10 +43,25 @@ PURGED_MODULES = (
     "personal_os",
     "personal_os.command_shell",
     "personal_os.package_metadata",
+    "fastapi",
+    "uvicorn",
 )
 
+# Server machinery that must stay unimported until a lazy serve callback runs.
+# Shell-only parsing (including check-runtime, whose only imports live inside
+# the checked callback) can never reach any of these modules.
+HEAVY_SERVER_MODULES = (
+    "api_runtime.server",
+    "api_runtime.application",
+    "fastapi",
+    "uvicorn",
+)
+
+# stdlib argparse joins the allowlist because the typed BootstrapSubcommand
+# callbacks (ArgumentParser/Namespace) are part of the lazy shell contract;
+# no new external module is allowed.
 ALLOWED_IMPORTS = frozenset(
-    {"__future__", "collections.abc", "typing", "personal_os.command_shell"}
+    {"__future__", "argparse", "collections.abc", "typing", "personal_os.command_shell"}
 )
 
 # Shell-only invocations that never select ``check-runtime``. ``--version`` reads
@@ -178,4 +195,38 @@ def test_runtime_check_import_is_lazy_inside_a_function(module_name: str) -> Non
     assert expected_lazy in function_level, (
         f"{module_name} must import {expected_lazy} inside a function body so "
         "shell-only parsing paths never evaluate it"
+    )
+
+
+@pytest.mark.parametrize("module_name", WRAPPERS, ids=WRAPPERS)
+def test_shell_paths_never_import_server_or_web_framework(module_name: str) -> None:
+    for name in PURGED_MODULES:
+        sys.modules.pop(name, None)
+
+    module = importlib.import_module(module_name)
+    for heavy_name in HEAVY_SERVER_MODULES:
+        assert heavy_name not in sys.modules, (
+            f"importing {module_name} eagerly imported the server module {heavy_name}"
+        )
+
+    for argv in ALL_SHELL_INVOCATIONS:
+        with contextlib.suppress(SystemExit):
+            module.run(list(argv))
+        for heavy_name in HEAVY_SERVER_MODULES:
+            assert heavy_name not in sys.modules, (
+                f"a shell-only invocation imported the server module {heavy_name}"
+            )
+
+
+@pytest.mark.parametrize("module_name", WRAPPERS, ids=WRAPPERS)
+def test_wrapper_never_imports_server_or_web_framework_at_module_level(
+    module_name: str,
+) -> None:
+    module = importlib.import_module(module_name)
+    assert module.__file__ is not None
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    imported = _collect_imported_modules(source)
+    forbidden = imported.intersection(HEAVY_SERVER_MODULES)
+    assert not forbidden, (
+        f"{module_name} imports server machinery at module top level: {sorted(forbidden)}"
     )

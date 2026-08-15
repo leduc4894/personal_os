@@ -169,3 +169,17 @@ def test_parsing_paths_never_read_secret_file_or_load_settings(
     assert "Traceback" not in invalid.stderr
     assert sentinel_value not in invalid.stdout + invalid.stderr
     assert sentinel_name not in invalid.stdout + invalid.stderr
+
+
+def test_api_help_lists_lazy_server_subcommands(tmp_path: Path) -> None:
+    completed = _run_module("api_runtime.command", ["--help"], tmp_path)
+    assert completed.returncode == 0, completed.stderr
+    assert "serve" in completed.stdout
+    assert "export-openapi" in completed.stdout
+
+
+def test_api_export_openapi_missing_output_is_syntax_failure(tmp_path: Path) -> None:
+    completed = _run_module("api_runtime.command", ["export-openapi"], tmp_path)
+    assert completed.returncode == 2, completed.stdout
+    assert "--output" in completed.stderr
+    assert "Traceback" not in completed.stderr

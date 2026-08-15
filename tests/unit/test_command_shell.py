@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from argparse import ArgumentParser, Namespace
 from collections.abc import Sequence
 
 import pytest
 
-from personal_os.command_shell import CommandIdentity, run_bootstrap_command
+from personal_os.command_shell import (
+    BootstrapSubcommand,
+    CommandIdentity,
+    run_bootstrap_command,
+)
 
 IDENTITY = CommandIdentity(program_name="personal-api", process_description="API process shell")
 
@@ -141,3 +146,65 @@ def test_shell_only_argv_sequence_types_accept_sequence() -> None:
     """A plain list argv must remain accepted alongside the keyword callback."""
     argv: Sequence[str] = ["check-runtime"]
     assert run_bootstrap_command(IDENTITY, argv, runtime_check=lambda: 7) == 7
+
+
+def test_bootstrap_subcommand_parses_owned_arguments_and_calls_handler() -> None:
+    calls: list[Namespace] = []
+    command = BootstrapSubcommand(
+        name="export-openapi",
+        help="export contract",
+        configure=lambda parser: parser.add_argument("--output", required=True),
+        handler=lambda arguments: calls.append(arguments) or 0,
+    )
+    assert (
+        run_bootstrap_command(
+            IDENTITY,
+            ["export-openapi", "--output", "schema.json"],
+            subcommands=(command,),
+        )
+        == 0
+    )
+    assert calls[0].output == "schema.json"
+
+
+def test_bootstrap_subcommand_handler_waits_for_successful_parsing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[Namespace] = []
+    command = BootstrapSubcommand(
+        name="export-openapi",
+        help="export contract",
+        configure=lambda parser: parser.add_argument("--output", required=True),
+        handler=lambda arguments: calls.append(arguments) or 0,
+    )
+    with pytest.raises(SystemExit) as raised:
+        run_bootstrap_command(IDENTITY, ["export-openapi"], subcommands=(command,))
+    captured = capsys.readouterr()
+    assert raised.value.code == 2
+    assert "--output" in captured.err
+    assert "Traceback" not in captured.err
+    assert calls == []
+
+
+def test_bootstrap_subcommand_handler_receives_declared_configure_arguments() -> None:
+    """``configure`` owns the subparser surface, including flags with dest renaming."""
+    seen: list[Namespace] = []
+
+    def configure(parser: ArgumentParser) -> None:
+        parser.add_argument("--output", dest="output_path", required=True)
+
+    command = BootstrapSubcommand(
+        name="export-openapi",
+        help="export contract",
+        configure=configure,
+        handler=lambda arguments: seen.append(arguments) or 3,
+    )
+    assert (
+        run_bootstrap_command(
+            IDENTITY,
+            ["export-openapi", "--output", "schema.json"],
+            subcommands=(command,),
+        )
+        == 3
+    )
+    assert seen[0].output_path == "schema.json"
