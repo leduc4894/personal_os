@@ -7,6 +7,12 @@ contract with its bounded in-memory sink. The modules import no infrastructure
 SDK, driver or subprocess primitive.
 """
 
+from personal_os.recovery.bundle import (
+    BACKUP_FREE_SPACE_RESERVE_BYTES,
+    STAGING_NAME_PREFIX,
+    FilesystemRecoveryBundleStore,
+    validate_backup_root,
+)
 from personal_os.recovery.contracts import (
     CANONICAL_BACKUP_METRIC_CONTRACTS,
     CANONICAL_COUNT_TABLES,
@@ -52,6 +58,7 @@ from personal_os.recovery.ports import (
 )
 
 __all__ = [
+    "BACKUP_FREE_SPACE_RESERVE_BYTES",
     "CANONICAL_BACKUP_METRIC_CONTRACTS",
     "CANONICAL_COUNT_TABLES",
     "MANIFEST_CONTRACT",
@@ -62,11 +69,13 @@ __all__ = [
     "RECOVERY_COMPONENTS",
     "RECOVERY_CONFIGURATION_REASONS",
     "RECOVERY_DEPENDENCIES",
+    "STAGING_NAME_PREFIX",
     "CanonicalBackupMetrics",
     "CanonicalBackupRecord",
     "CanonicalBackupSnapshot",
     "CanonicalBackupSnapshotStore",
     "DumpReceipt",
+    "FilesystemRecoveryBundleStore",
     "InMemoryCanonicalBackupMetrics",
     "ManifestDumpEntry",
     "ManifestObjectEntry",
@@ -89,4 +98,5 @@ __all__ = [
     "format_manifest_timestamp",
     "manifest_digest",
     "parse_manifest",
+    "validate_backup_root",
 ]
