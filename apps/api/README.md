@@ -5,11 +5,31 @@ This package is the composition root for the `personal-api` process. It is a
 and exposes the `personal-api` console-script entry point
 (`api_runtime.command:main`).
 
-**Composition role:** API process shell. The shell-only paths (`--help`,
-`--version`, no argument and any invalid syntax) parse arguments and exit
-without reading any environment variable, secret file or network resource, and
-without importing any framework SDK. The `check-runtime` subcommand loads the
-approved runtime configuration described in the root README.
+**Composition role:** API process shell and the runnable HTTP contract spine.
+The shell-only paths (`--help`, `--version`, no argument and any invalid
+syntax) parse arguments and exit without reading any environment variable,
+secret file or network resource, and without importing any framework SDK.
+`serve` lazy-imports FastAPI/Uvicorn and runs the application;
+`export-openapi` renders the deterministic OpenAPI 3.1 document offline. The
+`check-runtime` subcommand loads the approved runtime configuration described
+in the root README.
+
+## API runtime contract
+
+- `personal-api serve` binds Uvicorn single-process (loopback defaults in
+  local/test; `KNOWLEDGE_API_HOST`/`KNOWLEDGE_API_PORT` required explicitly in
+  staging/production) and serves `GET /api/health/live` (I/O-free liveness)
+  and `GET /api/health/ready` (one bounded PostgreSQL connectivity and
+  exact-schema-head probe, two-second deadline, no retry).
+- Every application/health response uses the strict envelope
+  `{request_id, data, warnings, error}` with a server-owned UUIDv7 request ID
+  returned in body and `X-Request-ID`; framework errors map through a closed
+  code-to-status table. Local/test additionally serve the raw
+  `/api/openapi.json`; production OpenAPI is disabled along with Swagger UI
+  and ReDoc.
+- The full operator contract (startup/shutdown, readiness and schema-drift
+  diagnosis, OpenAPI governance) lives in
+  [`docs/operations/api-runtime-contract.md`](../../docs/operations/api-runtime-contract.md).
 
 ## Build and test
 
@@ -45,14 +65,14 @@ exit codes:
 
 ## Intentionally absent behavior
 
-The following are deliberately absent and belong to later specs:
+The following are deliberately absent and belong to later child specs:
 
-- **FastAPI** application, routes, dependency injection and middleware;
-- request/trace ID generation and structured logging;
-- database clients (PostgreSQL/SQLAlchemy), object storage clients and provider
-  SDKs;
-- authentication, authorization and dependency health checks;
-- generated API clients and OpenAPI schemas.
+- authentication, sessions, device authorization and workspace resolution
+  middleware;
+- source, sync, upload, download, event, reconciliation or conflict routes;
+- business tables, Alembic migrations and non-PostgreSQL readiness
+  dependencies (R2, Temporal, Redis, Qdrant, Neo4j);
+- object storage clients and provider SDKs in the API process.
 
 No placeholder implementation of the above is provided. Each concern is added
 by a separate, reviewed spec.

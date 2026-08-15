@@ -10,6 +10,16 @@ that identifies the workspace shell. It type-checks under TypeScript strict
 mode and produces a production build with no secret, network service or API
 endpoint required.
 
+## API transport
+
+Web compiles against the shared generated client `@workspace/api-client`
+(alone among workspace members — ESLint rejects every other `@workspace/*`
+import). `src/api/native-fetch-transport.ts` supplies the native `fetch` as
+the injected transport: a strict pass-through with no interception, no
+defaults and no logging of tokens, queries, bodies or response content. The
+shared client performs no automatic retry. The full API operator contract
+lives in `docs/operations/api-runtime-contract.md`.
+
 ## Build and test
 
 This member is built and tested through the root pnpm scripts, which the
@@ -28,9 +38,11 @@ The production build lands in `apps/web/.next/` (gitignored).
 The following are deliberately absent and belong to later specs:
 
 - any **API route**, server action, proxy endpoint or route handler;
-- authentication, session management and authorization;
+- authentication, session management and authorization (the next Phase 2
+  child, `web-auth-and-device-authorization-design.md`, owns them);
 - product navigation, layouts beyond the bootstrap shell and product UI;
-- data fetching from backend services and dependency health checks;
+- data fetching from backend services beyond the transport adapter and
+  dependency health checks;
 - Testing Library (no UI behavior exists to test beyond the bootstrap copy).
 
 No placeholder implementation of the above is provided. Each concern is added

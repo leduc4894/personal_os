@@ -51,3 +51,4 @@ here — link them at most.
 | 2026-08-15 | canonical-core | Integration-harness hygiene: bundle_root POSIX temp leak; Any-typed runner/shim signatures; fake object store passes same-digest-different-media re-store | [handoff §12](2026-08-15-canonical-core-acceptance-and-recovery.md) |
 | 2026-08-15 | canonical-core | Live-harness type precision: cast(LocalFilesystemObjectStore) type-lie; unused discarded harness in live_acceptance_context | [handoff §13](2026-08-15-canonical-core-acceptance-and-recovery.md) |
 | 2026-08-15 | canonical-core | Acceptance polish: boundary test name overstates DATABASE_URL/PGPASSWORD scope; duration_ms bypasses clock seam | [handoff §14](2026-08-15-canonical-core-acceptance-and-recovery.md) |
+| 2026-08-15 | api-contract | `openapi-typescript@7.13.0` peer-declares `typescript@^5.x` while the workspace pins `6.0.3` (standing install warning; resurface on any pin bump) | [handoff §1](2026-08-15-api-runtime-contract-foundation.md) |

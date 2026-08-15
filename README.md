@@ -82,7 +82,7 @@ uv run poe format-check    # verify formatting without writing changes
 uv run poe lint            # ruff + eslint, warnings are fatal
 uv run poe type-check      # mypy strict + tsc strict
 uv run poe test            # pytest with diagnostic coverage + member vitest runs
-uv run poe boundary-check  # import-linter + architecture contract tests
+uv run poe boundary-check  # import-linter + architecture contract tests + API contract check
 uv run poe build           # uv build --all-packages + pnpm recursive build
 uv run poe verify          # the full pipeline, in canonical order (see below)
 ```
@@ -108,6 +108,31 @@ uv run --package api-runtime personal-api --help
 uv run --package mcp-runtime personal-mcp --version
 uv run --package workflow-worker personal-worker
 ```
+
+## API runtime
+
+The API process serves the Phase 2 contract spine: `personal-api serve` runs
+the FastAPI composition root (single process, loopback by default), exposing
+`/api/health/live` (I/O-free liveness) and `/api/health/ready` (one bounded
+PostgreSQL connectivity and exact-schema-head probe). `personal-api
+export-openapi` renders the deterministic OpenAPI 3.1 document offline. The
+committed snapshot and generated TypeScript client are gated by
+`uv run poe api-contract-check`.
+
+### API server environment variables
+
+The API fragment adds exactly two approved names; staging and production
+require both explicitly (there is no implicit public bind).
+
+| Variable | Default (local/test) | Allowed values |
+| --- | --- | --- |
+| `KNOWLEDGE_API_HOST` | `127.0.0.1` | host name or address, no whitespace |
+| `KNOWLEDGE_API_PORT` | `8000` | `1..65535` |
+
+The full operator contract — startup and shutdown, readiness and schema-drift
+diagnosis, the response/error/request-ID envelope, OpenAPI governance and the
+Web/plugin transport boundaries — lives in
+[`docs/operations/api-runtime-contract.md`](docs/operations/api-runtime-contract.md).
 
 ## Runtime configuration & diagnostics
 
@@ -232,16 +257,20 @@ source on every install. The Obsidian plugin ships exactly two artifacts:
 
 ## Intentionally out of scope
 
-Runtime configuration loading, secret-file loading and structured diagnostics
-are provided by this workspace (see *Runtime configuration & diagnostics*
-above). The following remain deliberately absent and belong to later specs:
+Runtime configuration loading, secret-file loading, structured diagnostics,
+the canonical PostgreSQL/R2 core and the API contract spine (health routes,
+deterministic OpenAPI, shared generated client) are provided by this
+workspace (see the sections above). The following remain deliberately absent
+and belong to later specs:
 
-- application database schemas/adapters and Cloudflare R2 object storage behavior;
-- provider SDKs, concrete provider credentials and remote secret managers;
-- framework adapters and HTTP/MCP/Temporal request/trace propagation, plus
-  OpenTelemetry exporters and log-shipping deployment;
-- API, MCP or workflow behavior (no FastAPI routes, MCP tools, or Temporal
-  workflows/activities);
+- concrete provider credentials, remote secret managers and additional
+  provider SDKs;
+- business database schema beyond the canonical Phase 1 core — ingestion,
+  retrieval, sync and business migrations belong to later specs;
+- MCP tool behavior and Temporal workflows/activities;
+- API routes beyond the health and local OpenAPI contract spine — no
+  authentication, sync, upload, search or business schema is exposed yet;
+- OpenTelemetry exporters and log-shipping deployment;
 - product UI beyond the static bootstrap page, including the Obsidian plugin's
   product commands.
 
@@ -254,9 +283,10 @@ the relevant `apps/*/README.md`.
 pyproject.toml            # root knowledge-core distribution + Poe task graph
 uv.lock                   # frozen Python workspace
 package.json              # pnpm workspace root
-pnpm-workspace.yaml       # web + obsidian-plugin members
+pnpm-workspace.yaml       # web, obsidian-plugin and api-client members
 pnpm-lock.yaml            # frozen TypeScript workspace
 src/personal_os/          # shared Python distribution (no product behavior)
+packages/                 # Python adapters + generated TypeScript API client
 apps/api/                 # personal-api composition shell
 apps/mcp/                 # personal-mcp composition shell
 apps/worker/              # personal-worker composition shell

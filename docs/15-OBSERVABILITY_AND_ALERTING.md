@@ -36,6 +36,15 @@ duration_ms
 
 Không log raw body/query/excerpt. Error stack được gửi Sentry sau scrubber.
 
+HTTP access observation dùng closed event set
+`api_request_completed` / `api_request_rejected` / `api_request_failed`
+(INFO/WARNING/ERROR theo status <400/<500/else) với đúng các field
+`http_method`, `route` (route template hoặc hằng `unmatched`), `status_code`,
+`duration_ms` cùng correlation fields. Raw path, query, headers, cookies,
+body, response data và exception text không bao giờ vào access observation;
+correlation value không hợp lệ chỉ được ghi bằng rejection event với reason
+token, không echo giá trị bị từ chối.
+
 ## 3. Metrics
 
 ### Sync

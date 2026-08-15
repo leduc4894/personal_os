@@ -21,6 +21,15 @@ FastAPI và MCP là adapters gọi cùng domain services. Không adapter nào qu
 
 HTTP API được version qua OpenAPI contract/release, không encode architecture generation vào domain names.
 
+Trạng thái hiện tại (2026-08-15): Phase 2 child 1
+(`api-runtime-and-contract-foundation-design.md`) đã triển khai contract spine
+— runnable FastAPI composition root tại `apps/api`, envelope/error/correlation
+contract, `/api/health/live` và `/api/health/ready`, local-only
+`/api/openapi.json`, deterministic OpenAPI snapshot và shared generated
+client. Các group ở trên thuộc các child spec sau theo sequence trong
+`2026-08-15-phase-two-obsidian-sync-design.md` (section 17). Operator
+runbook: `docs/operations/api-runtime-contract.md`.
+
 ## 3. Response envelope
 
 ```json
@@ -32,7 +41,19 @@ HTTP API được version qua OpenAPI contract/release, không encode architectu
 }
 ```
 
-Errors có stable code, retryable flag và safe detail. Không trả provider exception nguyên văn.
+Envelope là strict model (`extra="forbid"`): đúng một trong `data`/`error`
+khác null. `request_id` do server sinh (UUIDv7), trả về trong cả body và header
+`X-Request-ID`; client không thể chọn request id. Response luôn kèm
+`traceparent` (W3C version `00`). Warning dùng `{code, message, details}` với
+cùng safe-detail grammar; mọi public warning vocabulary phải được đăng ký
+trước khi dùng.
+
+Errors có stable code, retryable flag và safe detail. Không trả provider
+exception nguyên văn. HTTP mapping là closed per-code table (400/422/404/405
+cho bốn API transport codes; 503 cho database dependency codes; 500 cho
+`internal_error`); mọi code mà route expose phải có đúng một mapping được test.
+Local/test `/api/openapi.json` là ngoại lệ tài liệu hóa duy nhất không dùng
+envelope.
 
 ## 4. MCP tool catalog
 
@@ -113,3 +134,11 @@ Context pack có thể được dùng để tạo session bootstrap nhưng khôn
 - Breaking change cần explicit API release note và bounded contract transition window.
 - MCP schemas có contract tests với Codex/Claude-compatible clients.
 - Raw SQL/Cypher/Qdrant filters không thuộc public contract.
+- Pipeline hiện tại: `personal-api export-openapi` render deterministic
+  document (key-sorted, không `servers`/machine values) vào committed snapshot
+  `packages/api-client/openapi.json`; `poe api-contract-check` so sánh
+  byte-for-byte với fresh render và verify generated TypeScript
+  (`packages/api-client/src/generated/schema.ts`) không stale — gate này nằm
+  trong `poe boundary-check` và `poe verify`. Một contract change phải cập nhật
+  routes/models, snapshot, generated client và contract tests trong cùng một
+  change. Generator input luôn là local snapshot, không bao giờ remote URL.

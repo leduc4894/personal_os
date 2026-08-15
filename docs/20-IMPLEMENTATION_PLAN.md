@@ -108,6 +108,21 @@ Acceptance:
 
 ### Phase 2 — Obsidian sync
 
+Phase 2 được triển khai qua child-spec program (sequence trong
+`docs/superpowers/specs/2026-08-15-phase-two-obsidian-sync-design.md`,
+section 17). Trạng thái từng child:
+
+- Child 1 `api-runtime-and-contract-foundation-design.md` — **hoàn thành
+  (2026-08-15)**: runnable API composition root, envelope/error/correlation
+  contract, liveness/readiness, deterministic OpenAPI snapshot và shared
+  generated client. Plan:
+  `docs/superpowers/plans/2026-08-15-api-runtime-and-contract-foundation.md`;
+  handoff: `docs/handoff/2026-08-15-api-runtime-contract-foundation.md`;
+  runbook: `docs/operations/api-runtime-contract.md`.
+- Child tiếp theo: `web-auth-and-device-authorization-design.md` (auth, web
+  sessions, device approval, token rotation, device Admin). Các child còn lại
+  của phase chưa bắt đầu.
+
 Deliverables:
 
 1. Plugin auth/onboarding and secure token store.
