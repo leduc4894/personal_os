@@ -50,6 +50,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+# Registers the live R2 harness fixture (fail-closed credential gating plus
+# per-run exact-key cleanup) for the Task 14 live acceptance drills in this
+# directory; every offline test here leaves the fixture uninstantiated.
+from tests.integration.r2_object_storage.conftest import live_r2_harness  # noqa: F401
 from tools.local_service_stack import main as stack_main
 from tools.local_service_stack import validate_project_name
 from tools.postgresql_dump_process import (
