@@ -162,6 +162,23 @@ cmd = "lint-imports"
 [tool.poe.tasks.boundary-contract-tests]
 cmd = "pytest tests/contract/test_architecture_boundaries.py -q"
 
+# API contract artifact gates: export rewrites the snapshot, the snapshot check
+# compares the committed bytes without rewriting, the client check proves the
+# generated TypeScript still matches the committed schema document, and the
+# composite runs both checks as one boundary gate.
+[tool.poe.tasks.api-contract-export]
+cmd = "uv run --package api-runtime personal-api export-openapi --output packages/api-client/openapi.json"
+
+[tool.poe.tasks.api-contract-snapshot-check]
+cmd = "uv run python tools/api_contract_artifacts.py check"
+
+[tool.poe.tasks.api-client-generate-check]
+shell = "pnpm --filter @workspace/api-client run generate:check"
+
+[tool.poe.tasks.api-contract-check]
+sequence = ["api-contract-snapshot-check", "api-client-generate-check"]
+default_item_type = "ref"
+
 # Canonical-core acceptance and recovery feature gate: the unit directories of
 # the composed domain services, adapters, runtime configuration and the
 # repository-internal operations CLI.
@@ -243,7 +260,7 @@ sequence = ["python-test", "typescript-test"]
 default_item_type = "ref"
 
 [tool.poe.tasks.boundary-check]
-sequence = ["import-boundaries", "boundary-contract-tests"]
+sequence = ["import-boundaries", "boundary-contract-tests", "api-contract-check"]
 default_item_type = "ref"
 
 [tool.poe.tasks.build]
