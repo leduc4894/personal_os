@@ -25,4 +25,11 @@ TEMPORAL_BROADCAST_ADDRESS=$bind_on_ip
 export POSTGRES_PWD BIND_ON_IP TEMPORAL_BROADCAST_ADDRESS
 unset temporal_password bind_on_ip password_file
 
+# The Compose file secret keeps host ownership (0600, root-readable only on a
+# real Linux host), so the container starts as root to read it and must drop
+# back to the image user before handing control to the server. Busybox su
+# preserves the exported environment for the child process.
+if [ "$(id -u)" = "0" ]; then
+    exec su temporal -c 'exec temporal-server --allow-no-auth start'
+fi
 exec temporal-server --allow-no-auth start

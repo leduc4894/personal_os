@@ -614,6 +614,22 @@ def test_initialization_scripts_use_strict_bounded_secret_safe_shell() -> None:
         assert not re.search(r"(?:echo|printf).*\$\{?\w*(?:PASSWORD|SECRET)", script, re.I)
 
 
+def test_temporal_entrypoint_reads_root_owned_secret_and_drops_back_to_temporal_user() -> None:
+    """On Linux the 0600 host-owned secret is readable only by root.
+
+    Compose bind-mounts the secret file with host ownership, so the image's
+    non-root ``temporal`` user cannot read it on a real Linux host (Docker
+    Desktop on Windows masks this by presenting mounts as world-readable).
+    The service therefore starts as root, and the entrypoint must hand
+    control back to the ``temporal`` user before starting the server.
+    """
+    temporal = _read_yaml(COMPOSE_PATH)["services"]["temporal"]
+    assert temporal["user"] == "root"
+    script = (SCRIPT_DIRECTORY / "temporal-secret-entrypoint.sh").read_text(encoding="utf-8")
+    assert "su temporal -c" in script
+    assert "exec temporal-server --allow-no-auth start" in script
+
+
 def test_postgres_18_provisioning_reconciles_exact_roles_databases_and_grants() -> None:
     compose = _read_yaml(COMPOSE_PATH)
     postgresql = compose["services"]["postgresql"]

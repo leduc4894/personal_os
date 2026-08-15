@@ -163,6 +163,7 @@ services:
     restart: unless-stopped
     mem_limit: 1g
     cpus: 1.5
+    user: root
     secrets:
       - postgres_temporal_password
     entrypoint:
