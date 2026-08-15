@@ -63,6 +63,15 @@ class ErrorCode(StrEnum):
     IDENTITY_BOOTSTRAP_INPUT_INVALID = "identity_bootstrap_input_invalid"
     IDENTITY_BOOTSTRAP_STATE_CONFLICT = "identity_bootstrap_state_conflict"
     CANONICAL_READ_STATE_INVALID = "canonical_read_state_invalid"
+    CANONICAL_RECOVERY_ENVIRONMENT_REFUSED = "canonical_recovery_environment_refused"
+    CANONICAL_RECOVERY_CONFIGURATION_INVALID = "canonical_recovery_configuration_invalid"
+    CANONICAL_RECOVERY_SNAPSHOT_BUSY = "canonical_recovery_snapshot_busy"
+    CANONICAL_RECOVERY_BUNDLE_EXISTS = "canonical_recovery_bundle_exists"
+    CANONICAL_RECOVERY_BUNDLE_INVALID = "canonical_recovery_bundle_invalid"
+    CANONICAL_RECOVERY_TARGET_NOT_EMPTY = "canonical_recovery_target_not_empty"
+    CANONICAL_RECOVERY_DEPENDENCY_UNAVAILABLE = "canonical_recovery_dependency_unavailable"
+    CANONICAL_RECOVERY_INTEGRITY_FAILED = "canonical_recovery_integrity_failed"
+    CANONICAL_RECOVERY_RESTORE_FAILED = "canonical_recovery_restore_failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,6 +345,60 @@ ERROR_DEFINITIONS: Final[Mapping[ErrorCode, ErrorDefinition]] = MappingProxyType
             is_retryable=False,
             safe_message="The canonical current-source reference is missing or inconsistent",
             allowed_detail_fields=frozenset({"source_id"}),
+        ),
+        ErrorCode.CANONICAL_RECOVERY_ENVIRONMENT_REFUSED: ErrorDefinition(
+            category=ErrorCategory.AUTHORIZATION,
+            is_retryable=False,
+            safe_message="The recovery environment is not authorized for this operation",
+            allowed_detail_fields=frozenset({"operation"}),
+        ),
+        ErrorCode.CANONICAL_RECOVERY_CONFIGURATION_INVALID: ErrorDefinition(
+            category=ErrorCategory.CONFIGURATION,
+            is_retryable=False,
+            safe_message="Recovery configuration is invalid",
+            allowed_detail_fields=frozenset({"reason"}),
+        ),
+        ErrorCode.CANONICAL_RECOVERY_SNAPSHOT_BUSY: ErrorDefinition(
+            category=ErrorCategory.DEPENDENCY,
+            is_retryable=True,
+            safe_message="A canonical backup snapshot is temporarily unavailable",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.CANONICAL_RECOVERY_BUNDLE_EXISTS: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="A recovery bundle with this identity already exists",
+            allowed_detail_fields=frozenset({"bundle_id"}),
+        ),
+        ErrorCode.CANONICAL_RECOVERY_BUNDLE_INVALID: ErrorDefinition(
+            category=ErrorCategory.INTEGRITY,
+            is_retryable=False,
+            safe_message="The recovery bundle failed canonical manifest validation",
+            allowed_detail_fields=frozenset({"reason"}),
+        ),
+        ErrorCode.CANONICAL_RECOVERY_TARGET_NOT_EMPTY: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The restore target is not empty",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.CANONICAL_RECOVERY_DEPENDENCY_UNAVAILABLE: ErrorDefinition(
+            category=ErrorCategory.DEPENDENCY,
+            is_retryable=True,
+            safe_message="A recovery dependency is temporarily unavailable",
+            allowed_detail_fields=frozenset({"dependency"}),
+        ),
+        ErrorCode.CANONICAL_RECOVERY_INTEGRITY_FAILED: ErrorDefinition(
+            category=ErrorCategory.INTEGRITY,
+            is_retryable=False,
+            safe_message="Recovery integrity verification failed",
+            allowed_detail_fields=frozenset({"component"}),
+        ),
+        ErrorCode.CANONICAL_RECOVERY_RESTORE_FAILED: ErrorDefinition(
+            category=ErrorCategory.INTEGRITY,
+            is_retryable=False,
+            safe_message="The canonical restore failed",
+            allowed_detail_fields=frozenset({"component"}),
         ),
     }
 )

@@ -108,6 +108,11 @@ class EventName(StrEnum):
     IDENTITY_BOOTSTRAP_REJECTED = "identity_bootstrap_rejected"
     CANONICAL_SOURCE_READ_SUCCEEDED = "canonical_source_read_succeeded"
     CANONICAL_SOURCE_READ_FAILED = "canonical_source_read_failed"
+    CANONICAL_BACKUP_CREATED = "canonical_backup_created"
+    CANONICAL_BACKUP_VERIFIED = "canonical_backup_verified"
+    CANONICAL_BACKUP_FAILED = "canonical_backup_failed"
+    CANONICAL_RESTORE_SUCCEEDED = "canonical_restore_succeeded"
+    CANONICAL_RESTORE_FAILED = "canonical_restore_failed"
 
 
 type SafeDiagnosticScalar = (
@@ -453,6 +458,46 @@ EVENT_DEFINITIONS: Final[Mapping[EventName, EventDefinition]] = MappingProxyType
             result_code=ResultCode.FAILED,
             required_fields=frozenset({"error_code"}),
             allowed_fields=frozenset({"source_id", "workspace_id", "error_code"}),
+        ),
+        EventName.CANONICAL_BACKUP_CREATED: EventDefinition(
+            level=DiagnosticLevel.INFO,
+            result_code=ResultCode.SUCCEEDED,
+            required_fields=frozenset({"operation", "outcome", "duration_ms", "bundle_id"}),
+            allowed_fields=frozenset(
+                {"operation", "outcome", "duration_ms", "bundle_id", "object_count", "byte_total"}
+            ),
+        ),
+        EventName.CANONICAL_BACKUP_VERIFIED: EventDefinition(
+            level=DiagnosticLevel.INFO,
+            result_code=ResultCode.SUCCEEDED,
+            required_fields=frozenset({"operation", "outcome", "duration_ms", "bundle_id"}),
+            allowed_fields=frozenset(
+                {"operation", "outcome", "duration_ms", "bundle_id", "object_count", "byte_total"}
+            ),
+        ),
+        EventName.CANONICAL_BACKUP_FAILED: EventDefinition(
+            level=DiagnosticLevel.ERROR,
+            result_code=ResultCode.FAILED,
+            required_fields=frozenset({"error_code"}),
+            allowed_fields=frozenset(
+                {"operation", "outcome", "duration_ms", "bundle_id", "error_code"}
+            ),
+        ),
+        EventName.CANONICAL_RESTORE_SUCCEEDED: EventDefinition(
+            level=DiagnosticLevel.INFO,
+            result_code=ResultCode.SUCCEEDED,
+            required_fields=frozenset({"operation", "outcome", "duration_ms", "bundle_id"}),
+            allowed_fields=frozenset(
+                {"operation", "outcome", "duration_ms", "bundle_id", "object_count", "byte_total"}
+            ),
+        ),
+        EventName.CANONICAL_RESTORE_FAILED: EventDefinition(
+            level=DiagnosticLevel.ERROR,
+            result_code=ResultCode.FAILED,
+            required_fields=frozenset({"error_code"}),
+            allowed_fields=frozenset(
+                {"operation", "outcome", "duration_ms", "bundle_id", "error_code"}
+            ),
         ),
     }
 )

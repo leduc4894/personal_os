@@ -62,4 +62,9 @@ def test_event_names_are_closed() -> None:
         "identity_bootstrap_rejected",
         "canonical_source_read_succeeded",
         "canonical_source_read_failed",
+        "canonical_backup_created",
+        "canonical_backup_verified",
+        "canonical_backup_failed",
+        "canonical_restore_succeeded",
+        "canonical_restore_failed",
     }
