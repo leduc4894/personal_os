@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-15
 
-**Status:** Approved design target; implementation planning requires a separate user review
+**Status:** Approved architecture umbrella; not directly implementation-plannable
 
 **Owning phase:** Phase 2 — Obsidian sync
 
@@ -17,6 +17,12 @@ Phase 2 is complete when Markdown, text and binary bytes, source identity,
 locator history, tombstones, device cursors, policy outcomes and conflicts remain
 correct through offline use, retry, restart and concurrent edits. Searchability
 is not a Phase 2 requirement.
+
+This document fixes cross-cutting architecture, boundaries, invariants and the
+dependency order for Phase 2. Its scope is intentionally too broad for one
+implementation plan, worktree or pull request. Implementation proceeds only
+through the child specs in section 17; no phase-wide implementation plan may be
+derived directly from this umbrella.
 
 ## 2. Canonical context
 
@@ -497,22 +503,44 @@ All cases run against one final commit:
 11. No sensitive value appears in logs, traces, errors, JUnit or manifests.
 12. Upgrade/downgrade, backup and restore include the Phase 2 schema/state.
 
-## 17. Delivery sequence
+## 17. Child-spec program and delivery sequence
+
+| Order | Child spec | Owns | Depends on |
+|---|---|---|---|
+| 1 | `sync-contract-and-schema-design.md` | shared API envelope, error vocabulary, migration sequencing and generated-client boundary | Phase 1 canonical core |
+| 2 | `web-auth-and-device-authorization-design.md` | password/TOTP, web sessions, browser device approval, token rotation/revoke and device Admin | child 1 |
+| 3 | `exclusion-policy-publication-design.md` | rule model, preview/publish, signed snapshot and backend enforcement | children 1–2 |
+| 4 | `plugin-journal-and-small-file-sync-design.md` | SQLite journal, offline queue and create/update through 16 MiB | children 1–3 |
+| 5 | `source-locator-and-tombstone-lifecycle-design.md` | rename, move, delete, restore, stable identity and lifecycle intents | child 4 |
+| 6 | `device-cursor-and-manifest-reconciliation-design.md` | pull cursor, atomic apply, echo prevention, offline registration and repair | children 4–5 |
+| 7 | `resumable-multipart-mobile-upload-design.md` | staging multipart, resume, verify/promote and exact staging cleanup | children 1, 3–4 |
+| 8 | `source-conflict-capture-and-resolution-design.md` | verified candidates, text merge, binary choice and conflict races | children 4–7 |
+| 9 | `obsidian-sync-acceptance-and-operations-design.md` | cross-slice E2E, real devices, recovery, runbooks and final Phase 2 handoff | children 1–8 |
+
+The filenames above describe stable domain boundaries; their written artifacts
+use the required `YYYY-MM-DD-<name>` prefix when created.
+
+Each child goes through its own brainstorming approval, written design, user
+review, implementation plan, test-first implementation, review and exactly one
+plan handoff. `writing-plans` may be invoked only for the currently approved
+child spec. No child may silently widen another child's public contract; a
+cross-boundary change first updates this umbrella and every affected child spec.
+
+The implementation order inside the program remains:
 
 1. Contract and migration foundation.
 2. Login, device authorization and minimal Admin.
 3. Server-owned exclusions.
 4. Small-file create/update.
 5. Locator lifecycle: rename/move/delete/restore.
-6. Cursor, pull and atomic apply.
-7. Manifest reconciliation and offline registration.
-8. Multipart and mobile resilience.
-9. Conflict Inbox and resolution.
-10. Cross-platform acceptance, operations docs and handoff.
+6. Cursor, pull, atomic apply, manifest reconciliation and offline registration.
+7. Multipart and mobile resilience.
+8. Conflict Inbox and resolution.
+9. Cross-platform acceptance, operations docs and final handoff.
 
-Every slice follows failing test, minimal implementation, focused gates,
-integration/contract evidence, docs, review and commit. A slice is not complete
-with only backend or plugin work.
+Every deliverable follows failing test, minimal implementation, focused gates,
+integration/contract evidence, docs, review and commit. A deliverable is not
+complete with only backend or plugin work.
 
 ## 18. Phase 1 deferred-work adjudication
 
