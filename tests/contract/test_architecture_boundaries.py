@@ -5,6 +5,7 @@ import configparser
 import os
 import re
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -256,6 +257,68 @@ def test_python_source_never_mutates_sys_path() -> None:
         tree = ast.parse(path.read_text(encoding="utf-8"))
         offenders.extend(_scan_sys_path_mutations(tree, path))
     assert not offenders, "Python source must not mutate sys.path:\n" + "\n".join(offenders)
+
+
+# The framework-neutral API contract package: exactly these modules, and never a
+# web framework, database driver, provider SDK, composition root or sibling
+# adapter import (spec 4.1: Pydantic and core contracts only).
+API_CONTRACTS_ROOT = REPO_ROOT / "src" / "personal_os" / "api_contracts"
+API_CONTRACTS_MODULE_FILES = (
+    "__init__.py",
+    "envelopes.py",
+    "errors.py",
+    "health.py",
+    "request_values.py",
+)
+API_CONTRACTS_FORBIDDEN_IMPORT_ROOTS = frozenset(
+    {
+        "aiohttp",
+        "aiobotocore",
+        "api_runtime",
+        "boto3",
+        "botocore",
+        "fastapi",
+        "mcp",
+        "mcp_runtime",
+        "neo4j",
+        "psycopg",
+        "qdrant_client",
+        "r2_object_storage",
+        "redis",
+        "sqlalchemy",
+        "temporalio",
+        "uvicorn",
+        "workflow_worker",
+    }
+)
+
+
+def _iter_imported_module_names(tree: ast.AST) -> Iterator[str]:
+    """Yield every absolute module name imported by one parsed module."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                yield alias.name
+        elif isinstance(node, ast.ImportFrom) and node.module is not None and node.level == 0:
+            yield node.module
+
+
+def test_api_contracts_modules_reject_web_framework_and_provider_imports() -> None:
+    module_paths = sorted(API_CONTRACTS_ROOT.rglob("*.py"))
+    assert [path.name for path in module_paths] == sorted(API_CONTRACTS_MODULE_FILES), (
+        "personal_os.api_contracts must stay the closed five-module contract package"
+    )
+    offenders: list[str] = []
+    for path in module_paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for module_name in _iter_imported_module_names(tree):
+            root = module_name.partition(".")[0]
+            if root in API_CONTRACTS_FORBIDDEN_IMPORT_ROOTS:
+                offenders.append(f"{path}: forbidden import {module_name!r}")
+    assert not offenders, (
+        "personal_os.api_contracts must not import web frameworks, database drivers, "
+        "provider SDKs, composition roots or sibling adapters:\n" + "\n".join(offenders)
+    )
 
 
 def test_typescript_imports_stay_within_member_boundaries() -> None:

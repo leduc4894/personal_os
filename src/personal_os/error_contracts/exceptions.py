@@ -188,3 +188,21 @@ class DatabaseMigrationError(ApplicationError):
             ErrorCode.DATABASE_DESTRUCTIVE_DOWNGRADE_REFUSED,
         }
     )
+
+
+class ApiTransportError(ApplicationError):
+    """API transport failures: malformed, invalid, unrouted or unmatched requests.
+
+    The closed code set covers request-shape validation at the HTTP boundary.
+    Rejected client input stays out of the typed error; only registered safe
+    detail fields (``field_names`` for failed request validation) survive.
+    """
+
+    allowed_codes = frozenset(
+        {
+            ErrorCode.API_REQUEST_MALFORMED,
+            ErrorCode.API_REQUEST_VALIDATION_FAILED,
+            ErrorCode.API_ROUTE_NOT_FOUND,
+            ErrorCode.API_METHOD_NOT_ALLOWED,
+        }
+    )

@@ -72,6 +72,10 @@ class ErrorCode(StrEnum):
     CANONICAL_RECOVERY_DEPENDENCY_UNAVAILABLE = "canonical_recovery_dependency_unavailable"
     CANONICAL_RECOVERY_INTEGRITY_FAILED = "canonical_recovery_integrity_failed"
     CANONICAL_RECOVERY_RESTORE_FAILED = "canonical_recovery_restore_failed"
+    API_REQUEST_MALFORMED = "api_request_malformed"
+    API_REQUEST_VALIDATION_FAILED = "api_request_validation_failed"
+    API_ROUTE_NOT_FOUND = "api_route_not_found"
+    API_METHOD_NOT_ALLOWED = "api_method_not_allowed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -399,6 +403,30 @@ ERROR_DEFINITIONS: Final[Mapping[ErrorCode, ErrorDefinition]] = MappingProxyType
             is_retryable=False,
             safe_message="The canonical restore failed",
             allowed_detail_fields=frozenset({"component"}),
+        ),
+        ErrorCode.API_REQUEST_MALFORMED: ErrorDefinition(
+            category=ErrorCategory.VALIDATION,
+            is_retryable=False,
+            safe_message="The API request is malformed",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.API_REQUEST_VALIDATION_FAILED: ErrorDefinition(
+            category=ErrorCategory.VALIDATION,
+            is_retryable=False,
+            safe_message="The API request failed validation",
+            allowed_detail_fields=frozenset({"field_names"}),
+        ),
+        ErrorCode.API_ROUTE_NOT_FOUND: ErrorDefinition(
+            category=ErrorCategory.VALIDATION,
+            is_retryable=False,
+            safe_message="The requested API route does not exist",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.API_METHOD_NOT_ALLOWED: ErrorDefinition(
+            category=ErrorCategory.VALIDATION,
+            is_retryable=False,
+            safe_message="The API route does not allow this method",
+            allowed_detail_fields=frozenset(),
         ),
     }
 )
