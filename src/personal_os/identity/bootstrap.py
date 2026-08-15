@@ -16,7 +16,6 @@ diagnostic sink by the composition root that owns the configured logger.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from dataclasses import replace as replace
 from datetime import datetime
 from typing import Final, NoReturn
 from uuid import UUID
@@ -28,6 +27,7 @@ from personal_os.diagnostics.events import (
     build_registered_event,
 )
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.error_contracts.exceptions import InternalApplicationError
 from personal_os.identity.contracts import (
     BootstrapIdentityCommand,
     BootstrapIdentityOutcome,
@@ -45,7 +45,6 @@ __all__ = [
     "IdentityBootstrapService",
     "bootstrap_completion_event",
     "classify_existing_identity",
-    "replace",
     "resolve_trusted_workspace_id",
 ]
 
@@ -205,6 +204,9 @@ class IdentityBootstrapService:
         self.metrics.record_bootstrap(result.outcome)
         event_name, fields = bootstrap_completion_event(result)
         built = build_registered_event(event_name, fields)
-        # A rejected payload here is a programming error; surface it loudly.
-        assert not isinstance(built, RejectedDiagnosticPayload)
+        if isinstance(built, RejectedDiagnosticPayload):
+            # A rejected payload here means registry drift, a programming
+            # error rather than untrusted input; raise so it also surfaces
+            # in optimized (python -O) runs instead of vanishing with assert.
+            raise InternalApplicationError(ErrorCode.INTERNAL_ERROR)
         return result

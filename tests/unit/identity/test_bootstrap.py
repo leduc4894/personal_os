@@ -10,6 +10,7 @@ completion-event payload built only from ids and the outcome enum.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Final
@@ -22,9 +23,12 @@ from personal_os.diagnostics.events import (
     DiagnosticEvent,
     EventName,
     RejectedDiagnosticPayload,
+    SafeToken,
     build_registered_event,
 )
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.error_contracts.exceptions import InternalApplicationError
+from personal_os.identity import bootstrap as bootstrap_module
 from personal_os.identity.bootstrap import (
     ExistingIdentityDevice,
     ExistingIdentityState,
@@ -321,17 +325,42 @@ def test_resolve_trusted_workspace_id_requires_single_active_matching_workspace(
 
 
 @pytest.mark.asyncio
-async def test_service_emits_succeeded_event_and_metric_for_created_outcome() -> None:
+async def test_service_emits_succeeded_event_and_metric_for_created_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     result = build_result(BootstrapIdentityOutcome.CREATED)
     store = FakeIdentityBootstrapStore(result=result)
     metrics = InMemoryIdentityBootstrapMetrics()
     service = IdentityBootstrapService(store=store, metrics=metrics)
+    builder_calls: list[BootstrapIdentityResult] = []
+    registry_calls: list[tuple[EventName, dict[str, object]]] = []
+    original_builder = bootstrap_module.bootstrap_completion_event
+    original_registry = bootstrap_module.build_registered_event
+
+    def recording_builder(argument: BootstrapIdentityResult) -> tuple[EventName, dict[str, object]]:
+        builder_calls.append(argument)
+        return original_builder(argument)
+
+    def recording_registry(
+        event_name: EventName, fields: Mapping[str, object]
+    ) -> DiagnosticEvent | RejectedDiagnosticPayload:
+        registry_calls.append((event_name, dict(fields)))
+        return original_registry(event_name, fields)
+
+    # Spy inside the service's module so the test observes the service path,
+    # not just the pure builder: removing the service's event-building call
+    # would leave builder_calls empty and fail this test.
+    monkeypatch.setattr(bootstrap_module, "bootstrap_completion_event", recording_builder)
+    monkeypatch.setattr(bootstrap_module, "build_registered_event", recording_registry)
 
     await service.bootstrap(build_command(), build_diagnostic_context())
 
-    event_name, event_fields = bootstrap_completion_event(result)
-    assert event_name is EventName.IDENTITY_BOOTSTRAP_SUCCEEDED
-    built = build_registered_event(event_name, event_fields)
+    assert builder_calls == [result]
+    assert registry_calls == [
+        (EventName.IDENTITY_BOOTSTRAP_SUCCEEDED, dict(original_builder(result)[1]))
+    ]
+    event_name, event_fields = registry_calls[0]
+    built = original_registry(event_name, event_fields)
     assert isinstance(built, DiagnosticEvent)
     assert set(built.fields) == {"outcome", "user_id", "workspace_id", "device_id"}
     assert built.fields["outcome"] is BootstrapIdentityOutcome.CREATED
@@ -339,20 +368,51 @@ async def test_service_emits_succeeded_event_and_metric_for_created_outcome() ->
 
 
 @pytest.mark.asyncio
-async def test_service_emits_replayed_event_for_existing_outcome() -> None:
+async def test_service_emits_replayed_event_for_existing_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     result = build_result(BootstrapIdentityOutcome.EXISTING)
     store = FakeIdentityBootstrapStore(result=result)
     metrics = InMemoryIdentityBootstrapMetrics()
     service = IdentityBootstrapService(store=store, metrics=metrics)
+    builder_calls: list[BootstrapIdentityResult] = []
+    original_builder = bootstrap_module.bootstrap_completion_event
+
+    def recording_builder(argument: BootstrapIdentityResult) -> tuple[EventName, dict[str, object]]:
+        builder_calls.append(argument)
+        return original_builder(argument)
+
+    monkeypatch.setattr(bootstrap_module, "bootstrap_completion_event", recording_builder)
 
     await service.bootstrap(build_command(), build_diagnostic_context())
 
-    event_name, event_fields = bootstrap_completion_event(result)
+    assert builder_calls == [result]
+    event_name, event_fields = original_builder(result)
     assert event_name is EventName.IDENTITY_BOOTSTRAP_REPLAYED
     built = build_registered_event(event_name, event_fields)
     assert isinstance(built, DiagnosticEvent)
     assert set(built.fields) == {"user_id", "workspace_id", "device_id"}
     assert metrics.bootstrap_count(BootstrapIdentityOutcome.EXISTING) == 1
+
+
+@pytest.mark.asyncio
+async def test_service_raises_internal_error_when_registry_rejects_the_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FakeIdentityBootstrapStore(result=build_result(BootstrapIdentityOutcome.CREATED))
+    service = IdentityBootstrapService(store=store, metrics=InMemoryIdentityBootstrapMetrics())
+
+    def rejecting_registry(
+        event_name: EventName, fields: Mapping[str, object]
+    ) -> DiagnosticEvent | RejectedDiagnosticPayload:
+        return RejectedDiagnosticPayload(reason=SafeToken.parse("unsafe_value"), count=1)
+
+    monkeypatch.setattr(bootstrap_module, "build_registered_event", rejecting_registry)
+
+    # Registry drift is a programming error: it must raise (also under -O),
+    # never silently drop the completion event.
+    with pytest.raises(InternalApplicationError):
+        await service.bootstrap(build_command(), build_diagnostic_context())
 
 
 def test_completion_event_fields_carry_only_ids_and_the_outcome() -> None:
