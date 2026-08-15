@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import sys
@@ -398,8 +399,15 @@ def test_read_current_source_writes_bytes_only_to_exclusive_output_file(
     assert exit_code == int(CanonicalCoreExitCode.OK)
     assert output_file.read_bytes() == content
     assert len(stdout_documents) == 1
-    assert stdout_documents[0]["size_bytes"] == len(content)
+    assert stdout_documents[0] == {
+        "result_code": "canonical_source_read_complete",
+        "size_bytes": len(content),
+    }
+    # The content digest is as private as the bytes themselves: it must never
+    # reach either stream (plan privacy constraint; runbook stream contract).
     rendered_stdout = json.dumps(stdout_documents[0])
+    assert "content_sha256" not in rendered_stdout
+    assert hashlib.sha256(content).hexdigest() not in rendered_stdout
     assert "canonical bytes never printed" not in rendered_stdout
     assert stderr_documents == []
 

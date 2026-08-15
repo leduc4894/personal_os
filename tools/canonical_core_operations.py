@@ -432,7 +432,6 @@ async def _read_current_source_with_exclusive_output(
         return {
             "result_code": "canonical_source_read_complete",
             "size_bytes": len(content),
-            "content_sha256": hashlib.sha256(content).hexdigest(),
         }
 
     return await asyncio.wait_for(read_and_write_exclusively(), timeout=timeout_seconds)
