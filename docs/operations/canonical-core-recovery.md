@@ -254,8 +254,18 @@ never skip.
   leftover containers.
 - Phase-one acceptance composition: the 256-test contract/unit set over the
   composition, CI-security and tool suites passed at Task 15.
-- Protected live-R2 CI run: **pending first execution.** The
-  `canonical-core-acceptance` workflow has not yet run — it triggers on the
-  first protected push to `master` after this branch merges. No CI live-R2
-  evidence exists yet; this line must be updated with the workflow run link
-  once that first execution completes.
+- Protected live-R2 CI run: **green since 2026-08-15.** The first protected
+  executions after the merge surfaced and fixed five Linux-CI-only defects
+  (`.local` directory mode in workflow steps; non-root services unable to
+  read the 0600 host-owned bind-mounted secrets — temporal, neo4j, redis; the
+  missing explicit `command` under the neo4j entrypoint override; a port
+  availability probe without `SO_REUSEADDR`; and the missing pinned
+  PostgreSQL 18.4 client tools on the runner). With those fixed, the
+  `canonical-core-acceptance` live gate passes 6/6 live-R2 drills — first
+  green run:
+  https://github.com/leduc4894/personal_os/actions/runs/31886915923
+  (confirmed by runs 31886972234 and 31887267161). The same fixes turned
+  `canonical-postgresql-baseline`, `local-service-stack` and `quality`
+  green; see `docs/handoff/2026-08-15-linux-ci-stack-activation.md` for the
+  diagnosis trail and the one remaining transient (Docker Hub pull rate
+  limiting) observed twice before the green runs.
