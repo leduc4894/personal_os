@@ -38,6 +38,24 @@ jobs:
           up_exit=$?
           echo "tool up exit: $up_exit"
           exit "$up_exit"
+      - name: Cycle the stack repeatedly to reproduce intermittent startup failure
+        run: |
+          set -uo pipefail
+          for attempt in 1 2 3 4 5 6; do
+            echo "=== cycle $attempt: raw compose up ==="
+            docker compose --file infra/compose/compose.yaml \
+              --project-name "$LOCAL_STACK_TEST_PROJECT" \
+              up --detach --remove-orphans --wait --wait-timeout 180
+            up_status=$?
+            echo "cycle $attempt compose exit: $up_status"
+            docker compose --file infra/compose/compose.yaml \
+              --project-name "$LOCAL_STACK_TEST_PROJECT" down --volumes --remove-orphans >/dev/null 2>&1
+            if [ "$up_status" -ne 0 ]; then
+              echo "reproduced on cycle $attempt"
+              exit "$up_status"
+            fi
+          done
+          echo "all cycles green"
       - name: Run docker compose up with raw output
         if: always()
         run: |
