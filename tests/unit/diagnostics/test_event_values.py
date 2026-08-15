@@ -69,4 +69,7 @@ def test_event_names_are_closed() -> None:
         "canonical_restore_failed",
         "canonical_acceptance_completed",
         "canonical_acceptance_failed",
+        "api_request_completed",
+        "api_request_rejected",
+        "api_request_failed",
     }

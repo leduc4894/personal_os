@@ -16,9 +16,11 @@ import sys
 from collections.abc import Iterator
 from io import StringIO
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import pytest
+from api_runtime.request_context import RequestContextMiddleware
 
 from personal_os.diagnostics.context import (
     DiagnosticContext,
@@ -70,6 +72,8 @@ _SENTINELS = (
     "do-not-emit-provider-exception",
     "do-not-emit-source-path",
     "do-not-emit-media-type",
+    "do-not-emit-raw-path",
+    "do-not-emit-query-value",
 )
 
 _FORBIDDEN_FIELD_NAMES = (
@@ -218,6 +222,99 @@ def test_rejected_client_request_id_and_traceparent_sentinels_never_leak(
         repr(resolved.context),
         sentinels=(client_sentinel, trace_sentinel),
     )
+
+
+# --- api request observation surface -----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_api_request_observation_sentinels_never_leak(
+    runtime_settings: RuntimeSettings,
+) -> None:
+    """Raw ASGI requests with hostile paths, queries, headers and correlation ids.
+
+    The middleware owns the request id and trace context; the access events and
+    the rejection reasons it feeds the diagnostic logger may only ever carry
+    closed enum values, status and duration. The raw path, query string, custom
+    header values and the malformed correlation inputs must never survive into
+    any diagnostic sink.
+    """
+    logger, stdout, stderr = _configure(runtime_settings)
+
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/do-not-emit-raw-path",
+        "raw_path": b"/do-not-emit-raw-path",
+        "query_string": b"q=do-not-emit-query-value",
+        "root_path": "",
+        "headers": [
+            (b"x-client-request-id", b"do-not-emit-client-request-id"),
+            (b"traceparent", b"do-not-emit-traceparent"),
+            (b"x-custom-header", b"do-not-emit-request-header"),
+        ],
+        "client": ("127.0.0.1", 42000),
+        "server": ("127.0.0.1", 80),
+    }
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    started: dict[str, Any] | None = None
+
+    async def send(message: dict[str, Any]) -> None:
+        nonlocal started
+        if message["type"] == "http.response.start":
+            started = message
+
+    await RequestContextMiddleware(app, event_sink=logger)(scope, receive, send)
+
+    assert started is not None
+    response_headers = {name: value for name, value in started["headers"]}
+    assert b"traceparent" in response_headers
+    assert b"x-request-id" in response_headers
+
+    _all_records_parsable(stdout, stderr)
+    _assert_no_sentinel(_blob(stdout, stderr))
+
+    records = [json.loads(line) for line in _blob(stdout, stderr).splitlines()]
+    base_keys = {
+        "diagnostic_schema_version",
+        "timestamp",
+        "service",
+        "environment",
+        "request_id",
+        "trace_id",
+        "level",
+        "event",
+        "result_code",
+    }
+    events = [record["event"] for record in records]
+    assert "api_request_completed" in events
+    assert "client_request_id_rejected" in events
+    assert "trace_context_replaced" in events
+    closed_access_fields = {"http_method", "route", "status_code", "duration_ms"}
+    for record in records:
+        extra_fields = set(record) - base_keys
+        if record["event"] == "api_request_completed":
+            assert extra_fields == closed_access_fields
+            assert record["route"] in {
+                "/api/health/live",
+                "/api/health/ready",
+                "/api/openapi.json",
+                "unmatched",
+            }
+            assert record["http_method"] in {"GET", "OTHER"}
+        else:
+            assert extra_fields == {"reason"}
+            assert record["reason"] == "invalid_format"
 
 
 # --- forbidden field families and sensitive patterns ------------------------

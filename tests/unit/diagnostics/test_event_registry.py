@@ -26,6 +26,21 @@ def test_event_registry_is_complete_and_well_formed() -> None:
         assert definition.allowed_fields, event_name
 
 
+EXPECTED_FIELDS = frozenset({"http_method", "route", "status_code", "duration_ms"})
+
+
+def test_api_request_events_have_closed_low_cardinality_fields() -> None:
+    for name, result in (
+        (EventName.API_REQUEST_COMPLETED, ResultCode.SUCCEEDED),
+        (EventName.API_REQUEST_REJECTED, ResultCode.REJECTED),
+        (EventName.API_REQUEST_FAILED, ResultCode.FAILED),
+    ):
+        definition = EVENT_DEFINITIONS[name]
+        assert definition.result_code is result
+        assert definition.required_fields == EXPECTED_FIELDS
+        assert definition.allowed_fields == EXPECTED_FIELDS
+
+
 def test_source_publication_events_are_registered_with_exact_contracts() -> None:
     expected = {
         EventName.SOURCE_VERSION_PUBLISH_SUCCEEDED: (

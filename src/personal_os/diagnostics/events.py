@@ -115,6 +115,9 @@ class EventName(StrEnum):
     CANONICAL_RESTORE_FAILED = "canonical_restore_failed"
     CANONICAL_ACCEPTANCE_COMPLETED = "canonical_acceptance_completed"
     CANONICAL_ACCEPTANCE_FAILED = "canonical_acceptance_failed"
+    API_REQUEST_COMPLETED = "api_request_completed"
+    API_REQUEST_REJECTED = "api_request_rejected"
+    API_REQUEST_FAILED = "api_request_failed"
 
 
 type SafeDiagnosticScalar = (
@@ -530,6 +533,24 @@ EVENT_DEFINITIONS: Final[Mapping[EventName, EventDefinition]] = MappingProxyType
                     "duration_ms",
                 }
             ),
+        ),
+        EventName.API_REQUEST_COMPLETED: EventDefinition(
+            level=DiagnosticLevel.INFO,
+            result_code=ResultCode.SUCCEEDED,
+            required_fields=frozenset({"http_method", "route", "status_code", "duration_ms"}),
+            allowed_fields=frozenset({"http_method", "route", "status_code", "duration_ms"}),
+        ),
+        EventName.API_REQUEST_REJECTED: EventDefinition(
+            level=DiagnosticLevel.WARNING,
+            result_code=ResultCode.REJECTED,
+            required_fields=frozenset({"http_method", "route", "status_code", "duration_ms"}),
+            allowed_fields=frozenset({"http_method", "route", "status_code", "duration_ms"}),
+        ),
+        EventName.API_REQUEST_FAILED: EventDefinition(
+            level=DiagnosticLevel.ERROR,
+            result_code=ResultCode.FAILED,
+            required_fields=frozenset({"http_method", "route", "status_code", "duration_ms"}),
+            allowed_fields=frozenset({"http_method", "route", "status_code", "duration_ms"}),
         ),
     }
 )
