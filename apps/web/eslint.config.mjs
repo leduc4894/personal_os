@@ -16,7 +16,13 @@ const eslintConfig = [
         {
           patterns: [
             {
-              group: ["@workspace/obsidian-plugin", "**/obsidian-plugin/**"],
+              // The shared API contract package is the only workspace member
+              // Web may import; Obsidian and every other app stay unreachable.
+              group: [
+                "@workspace/*",
+                "!@workspace/api-client",
+                "**/obsidian-plugin/**",
+              ],
             },
           ],
         },
