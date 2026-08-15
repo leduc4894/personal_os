@@ -5,6 +5,10 @@ export type RequestUrlFunction = (
   request: RequestUrlParam,
 ) => Promise<RequestUrlResponse>;
 
+// Obsidian always populates arrayBuffer (even as zero bytes), but the
+// Response constructor rejects any non-null body for these statuses.
+const NULL_BODY_STATUS_CODES = new Set([204, 205, 304]);
+
 /**
  * Pure adapter from the fetch-shaped `ApiTransport` to Obsidian's
  * `requestUrl`. It imports Obsidian types only, so Vitest can exercise it
@@ -40,7 +44,10 @@ export function createRequestUrlTransport(
       param.body = await request.arrayBuffer();
     }
     const result = await requestUrlFunction(param);
-    return new Response(result.arrayBuffer, {
+    const body = NULL_BODY_STATUS_CODES.has(result.status)
+      ? null
+      : result.arrayBuffer;
+    return new Response(body, {
       status: result.status,
       headers: result.headers,
     });

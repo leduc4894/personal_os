@@ -115,6 +115,26 @@ describe("createRequestUrlTransport", () => {
     expect([...new Uint8Array(await response.arrayBuffer())]).toEqual([7, 8]);
   });
 
+  it.each([204, 205, 304])(
+    "returns an empty-bodied response for null-body status %i",
+    async (status) => {
+      const requestUrlFunction: RequestUrlFunction = async () => ({
+        status,
+        headers: {},
+        arrayBuffer: new Uint8Array([]).buffer,
+        json: undefined,
+        text: "",
+      });
+      const transport = createRequestUrlTransport(requestUrlFunction);
+      const response = await transport("https://api.invalid/api/object", {
+        method: "DELETE",
+      });
+      expect(response.status).toBe(status);
+      expect(response.body).toBeNull();
+      expect((await response.arrayBuffer()).byteLength).toBe(0);
+    },
+  );
+
   it("never logs request or response content", async () => {
     const consoleSpies = [
       vi.spyOn(console, "log"),
