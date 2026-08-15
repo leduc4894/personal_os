@@ -96,7 +96,11 @@ _ALEMBIC_SCHEMA: Final[str] = "public"
 _ALEMBIC_TABLE: Final[str] = "alembic_version"
 
 _EXPORT_SNAPSHOT_STATEMENT: Final[sa.TextClause] = sa.text("SELECT pg_export_snapshot()")
-_SERVER_VERSION_STATEMENT: Final[sa.TextClause] = sa.text("SELECT server_version()")
+_SERVER_VERSION_STATEMENT: Final[sa.TextClause] = sa.text(
+    # Distribution builds append a packaging suffix to the ``server_version``
+    # setting; the pinned contract compares the bare upstream version token.
+    "SELECT split_part(current_setting('server_version'), ' ', 1)"
+)
 _SCHEMA_HEAD_STATEMENT: Final[sa.TextClause] = sa.text(
     f"SELECT version_num FROM {_ALEMBIC_SCHEMA}.{_ALEMBIC_TABLE}"
 )
@@ -421,9 +425,23 @@ class PostgresqlRestoreTarget:
             raise _map_snapshot_failure(cause) from cause
 
     async def read_schema_head(self) -> str | None:
-        """Read the Alembic head revision, or ``None`` when no row exists."""
+        """Read the Alembic head revision, or ``None`` when it cannot exist.
+
+        ``None`` covers both an absent ``alembic_version`` table — an admitted
+        empty restore target carries no baseline at all — and a present table
+        with no row. The presence check is a parameter-bound catalog read so a
+        missing table never surfaces as a driver failure.
+        """
         try:
             async with self._bounded_probe() as connection:
+                alembic_count = (
+                    await connection.execute(
+                        _ALEMBIC_PRESENCE_COUNT_STATEMENT,
+                        {"schema": _ALEMBIC_SCHEMA, "table_name": _ALEMBIC_TABLE},
+                    )
+                ).scalar_one()
+                if int(alembic_count) == 0:
+                    return None
                 head = (await connection.execute(_SCHEMA_HEAD_STATEMENT)).scalar_one_or_none()
         except ApplicationError:
             raise

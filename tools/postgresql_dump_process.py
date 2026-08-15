@@ -121,9 +121,9 @@ async def run_bounded_child(
         await _drain(process)
         exit_code = process.returncode if process.returncode is not None else -1
         return ProcessRunResult(returncode=exit_code, timed_out=True)
-    await _drain(process)
+    capped_stdout = await _drain(process)
     exit_code = process.returncode if process.returncode is not None else -1
-    return ProcessRunResult(returncode=exit_code)
+    return ProcessRunResult(returncode=exit_code, stdout=capped_stdout)
 
 
 async def _drain(process: asyncio.subprocess.Process) -> str:

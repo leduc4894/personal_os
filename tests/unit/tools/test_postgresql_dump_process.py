@@ -460,6 +460,20 @@ async def test_run_bounded_child_returns_success_without_shell() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_bounded_child_returns_drained_capped_stdout() -> None:
+    result = await run_bounded_child(
+        [sys.executable, "-c", "print('probe-output')"],
+        env=dict(os.environ),
+        timeout_seconds=30.0,
+    )
+
+    # The capped stdout is the client-version gate's only input, so the
+    # bounded runner must return what it drained from the child.
+    assert result.returncode == 0
+    assert result.stdout.strip() == "probe-output"
+
+
+@pytest.mark.asyncio
 async def test_run_bounded_child_terminates_then_kills_within_grace() -> None:
     started_monotonic = time.monotonic()
 
