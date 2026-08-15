@@ -42,3 +42,12 @@ def test_api_port_outside_bind_range_is_rejected(port: str) -> None:
             environ={"KNOWLEDGE_ENVIRONMENT": "test", "KNOWLEDGE_API_PORT": port}
         )
     assert raised.value.error_code is ErrorCode.CONFIGURATION_INVALID
+
+
+@pytest.mark.parametrize("host", ["", " ", "\t", " \t "])
+def test_blank_api_host_is_rejected(host: str) -> None:
+    with pytest.raises(ConfigurationError) as raised:
+        load_api_server_settings(
+            environ={"KNOWLEDGE_ENVIRONMENT": "test", "KNOWLEDGE_API_HOST": host}
+        )
+    assert raised.value.error_code is ErrorCode.CONFIGURATION_INVALID

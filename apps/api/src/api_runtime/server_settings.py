@@ -41,6 +41,10 @@ _LOOPBACK_DEFAULT_ENVIRONMENTS: Final[tuple[RuntimeEnvironment, ...]] = (
     RuntimeEnvironment.TEST,
 )
 
+#: Sensible upper bound for the safe host field, tracking the FQDN boundary
+#: the database settings screen uses (253 characters).
+_MAXIMUM_HOST_LENGTH: Final[int] = 253
+
 #: Closed map of API server environment names to model field names. The key
 #: set mirrors the core API server fragment exactly, so the repository-wide
 #: registry stays the single source of truth for the approved names.
@@ -61,6 +65,24 @@ class ApiServerSettings(BaseModel):
     environment: RuntimeEnvironment
     host: str
     port: int
+
+    @field_validator("host")
+    @classmethod
+    def _require_safe_host(cls, value: str) -> str:
+        """Trim, bound and screen the bind host.
+
+        Leading/trailing whitespace is trimmed; the trimmed value must be
+        non-empty, within ``_MAXIMUM_HOST_LENGTH`` and free of whitespace and
+        control characters, mirroring the database settings host screen.
+        """
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("host must not be empty")
+        if len(trimmed) > _MAXIMUM_HOST_LENGTH:
+            raise ValueError("host exceeds the accepted length")
+        if any(character.isspace() or not character.isprintable() for character in trimmed):
+            raise ValueError("host contains an unsupported character")
+        return trimmed
 
     @field_validator("port")
     @classmethod
