@@ -714,6 +714,11 @@ def test_acceptance_workflow_runs_disposable_stack_and_live_suite() -> None:
     # a default-umask mkdir -p .local/test-results would create it 0755 and
     # fail the run closed with unsafe_secret_set.
     assert "install -d -m 700 .local" in run_step
+    # The recovery drills require the pinned 18.4 pg_dump/pg_restore clients;
+    # the runner image only ships an older major, so the workflow installs
+    # them from the PGDG repository.
+    assert "apt.postgresql.org/pub/repos/apt noble-pgdg main" in text
+    assert "postgresql-client-18=18.4*" in text
     assert (
         'uv run pytest tests/integration/canonical_core -m "local_stack and r2_live" -q'
         " --junitxml=.local/test-results/canonical-core-acceptance.xml" in run_step

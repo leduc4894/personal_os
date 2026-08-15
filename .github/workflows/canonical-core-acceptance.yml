@@ -71,6 +71,20 @@ jobs:
           sudo install -D --mode 0755 \
             "$download_path" /usr/local/lib/docker/cli-plugins/docker-compose
           docker compose version --short | grep -Ex 'v?2\.30\.0'
+      - name: Install pinned PostgreSQL 18.4 client tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo install -d -m 755 /usr/share/postgresql-common/pgdg
+          sudo curl --fail --location --silent --show-error \
+            --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq 'postgresql-client-18=18.4*'
+          pg_dump --version | grep -Ex 'pg_dump \(PostgreSQL\) 18\.4.*'
+          pg_restore --version | grep -Ex 'pg_restore \(PostgreSQL\) 18\.4.*'
       - name: Validate bounded project identity
         shell: bash
         run: |
