@@ -83,6 +83,9 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
           sudo apt-get update -qq
           sudo apt-get install -y -qq 'postgresql-client-18=18.4*'
+          # Debian keeps the binaries outside PATH for non-default majors.
+          sudo ln -s /usr/lib/postgresql/18/bin/pg_dump /usr/local/bin/pg_dump
+          sudo ln -s /usr/lib/postgresql/18/bin/pg_restore /usr/local/bin/pg_restore
           pg_dump --version | grep -Ex 'pg_dump \(PostgreSQL\) 18\.4.*'
           pg_restore --version | grep -Ex 'pg_restore \(PostgreSQL\) 18\.4.*'
       - name: Validate bounded project identity
