@@ -119,7 +119,7 @@ class VerifiedRecoveryBundle(Protocol):
 
 
 class RecoveryBundleStore(Protocol):
-    """Immutable bundle storage seam: staging, verified open and existence."""
+    """Immutable bundle storage seam: staging, offline verification and open."""
 
     def create_staging(
         self, bundle_id: UUID
@@ -128,5 +128,7 @@ class RecoveryBundleStore(Protocol):
     def open_verified(
         self, bundle_id: UUID
     ) -> AbstractAsyncContextManager[VerifiedRecoveryBundle]: ...
+
+    def verify_offline(self, bundle_id: UUID) -> RecoveryManifest: ...
 
     def bundle_exists(self, bundle_id: UUID) -> bool: ...

@@ -1,4 +1,4 @@
-"""Recovery service: consistent backup creation orchestrating the ports.
+"""Recovery service: backup creation, verification and empty-target restore.
 
 :class:`RecoveryService.create_backup` composes the quiesced snapshot store,
 the bundle store, the ``pg_dump`` process boundary and the verified object
@@ -8,9 +8,16 @@ identity are re-checked inside the snapshot; object copies run at most four
 concurrently; finalization happens while the snapshot transaction is still
 open; and every failure or cancellation path abandons staging, closes readers
 and re-raises. The snapshot token flows only into ``create_dump`` — never into
-a manifest, event, metric or error detail. Events carry only safe scalars and
-metrics only the closed operation/outcome enums; no path, key, hash, digest or
-raw content is ever disclosed.
+a manifest, event, metric or error detail.
+
+:class:`RecoveryService.verify_bundle` performs one offline bundle
+verification (spec 10) touching no PostgreSQL, R2 or Temporal port, and
+:class:`RecoveryService.restore_empty` restores an empty target (spec 11):
+gates fire before any I/O, R2 objects are restored before the single-
+transaction ``pg_restore``, and the restored graph plus a canonical read are
+re-verified before the safe receipt. Events carry only safe scalars and
+metrics only the closed operation/outcome enums; no path, key, hash, digest
+or raw content is ever disclosed.
 """
 
 from __future__ import annotations
@@ -19,12 +26,13 @@ import asyncio
 import hashlib
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Final, Protocol, runtime_checkable
 from uuid import UUID
 
+from personal_os.diagnostics.context import DiagnosticContext, create_diagnostic_context
 from personal_os.diagnostics.events import (
     EventName,
     RejectedDiagnosticPayload,
@@ -33,17 +41,23 @@ from personal_os.diagnostics.events import (
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import ApplicationError, InternalApplicationError
 from personal_os.object_storage import (
+    CanonicalMediaType,
     CanonicalObjectStore,
+    ContentDigest,
     ExpectedObject,
+    VerifiedObjectReceipt,
     derive_canonical_object_key,
 )
 from personal_os.recovery.contracts import (
+    MANIFEST_CONTRACT,
     POSTGRESQL_SCHEMA_REVISION,
+    POSTGRESQL_SERVER_VERSION,
     CanonicalBackupMetrics,
     ManifestDumpEntry,
     ManifestObjectEntry,
     RecoveryComponent,
     RecoveryConfigurationReason,
+    RecoveryDependency,
     RecoveryEnvironment,
     RecoveryError,
     RecoveryManifest,
@@ -56,28 +70,48 @@ from personal_os.recovery.ports import (
     PostgresqlDumpProcess,
     RecoveryBundleStore,
     RecoveryBundleWriter,
+    VerifiedRecoveryBundle,
 )
+from personal_os.sources.reading import ReadCurrentSourceCommand
 
 __all__ = [
     "BACKUP_OBJECT_READ_CONCURRENCY",
     "POSTGRESQL_DUMP_TIMEOUT_SECONDS",
+    "POSTGRESQL_RESTORE_TIMEOUT_SECONDS",
     "RECOVERY_COMMAND_TIMEOUT_SECONDS",
+    "RESTORE_OBJECT_WRITE_CONCURRENCY",
+    "AcceptanceSmokeProbe",
     "BackupCreateCommand",
     "BackupCreationResult",
     "BufferedObjectWriter",
+    "BundleVerificationResult",
+    "CanonicalSourceBytesReader",
+    "PostgresqlRestoreTarget",
     "RecoveryService",
+    "RestoreEmptyCommand",
+    "RestoreEmptyResult",
+    "VerifyBundleCommand",
     "canonical_backup_created_event_fields",
     "canonical_backup_failed_event_fields",
+    "canonical_backup_verified_event_fields",
+    "canonical_restore_failed_event_fields",
+    "canonical_restore_succeeded_event_fields",
 ]
 
 #: Peak number of concurrent verified object reads during one backup (spec 9.2).
 BACKUP_OBJECT_READ_CONCURRENCY: Final[int] = 4
+
+#: Peak number of concurrent conditional object writes during one restore (spec 11.2).
+RESTORE_OBJECT_WRITE_CONCURRENCY: Final[int] = 4
 
 #: Whole-command bound applied by the composition layer (spec 9.2, Task 12).
 RECOVERY_COMMAND_TIMEOUT_SECONDS: Final[float] = 30 * 60.0
 
 #: The ``pg_dump`` subprocess bound (spec 9.2: ten minutes).
 POSTGRESQL_DUMP_TIMEOUT_SECONDS: Final[float] = 600.0
+
+#: The ``pg_restore`` subprocess bound (spec 11.2: ten minutes).
+POSTGRESQL_RESTORE_TIMEOUT_SECONDS: Final[float] = 600.0
 
 #: Verified object copies stream in bounded chunks of this size.
 OBJECT_COPY_CHUNK_SIZE_BYTES: Final[int] = 1024 * 1024
@@ -110,6 +144,100 @@ class BackupCreationResult:
     object_count: int
     byte_total: int
     duration_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class VerifyBundleCommand:
+    """One offline bundle verification request."""
+
+    environment: RecoveryEnvironment
+    bundle_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class BundleVerificationResult:
+    """Observed outcome of one complete offline bundle verification.
+
+    Carries only safe scalars: the verified bundle id, the supported manifest
+    contract token and bounded counts. No path, object key, hash or digest is
+    ever disclosed (spec 10.8).
+    """
+
+    bundle_id: UUID
+    contract: str
+    object_count: int
+    byte_total: int
+    table_counts: Mapping[str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptanceSmokeProbe:
+    """The acceptance source whose bytes the restored graph must serve exactly."""
+
+    workspace_id: UUID
+    source_id: UUID
+    expected_sha256: str
+    expected_size_bytes: int
+    expected_media_type: CanonicalMediaType
+
+
+@dataclass(frozen=True, slots=True)
+class RestoreEmptyCommand:
+    """One empty-target restore request for a verified bundle (spec 11.1).
+
+    ``target_confirmation`` must equal ``target.database`` exactly before any
+    I/O beyond offline verification happens.
+    """
+
+    environment: RecoveryEnvironment
+    bundle_id: UUID
+    target: PostgresqlConnectionTarget
+    target_confirmation: str
+    acceptance_probe: AcceptanceSmokeProbe | None
+
+
+@dataclass(frozen=True, slots=True)
+class RestoreEmptyResult:
+    """Observed outcome of one completed empty-target restore.
+
+    Carries only safe scalars: the restored bundle id, the completion moment
+    and bounded counts. No path, object key, hash or digest is ever disclosed
+    (spec 11.3).
+    """
+
+    bundle_id: UUID
+    completed_at: datetime
+    table_counts: Mapping[str, int]
+    object_count: int
+
+
+@runtime_checkable
+class PostgresqlRestoreTarget(Protocol):
+    """Narrow restore-target probe surface consumed by the restore flow.
+
+    Mirrors the async probe protocol of the PostgreSQL restore-target adapter
+    without importing the provider package, so the core service stays
+    provider-neutral (spec 11.1, 11.3).
+    """
+
+    async def is_application_empty(self) -> bool: ...
+
+    async def server_version(self) -> str: ...
+
+    async def read_schema_head(self) -> str | None: ...
+
+    async def read_canonical_counts(self) -> Mapping[str, int]: ...
+
+    async def read_current_pointer_resolution(self) -> int: ...
+
+
+@runtime_checkable
+class CanonicalSourceBytesReader(Protocol):
+    """Narrow canonical-read surface consumed by the acceptance smoke probe."""
+
+    async def read_current_source_bytes(
+        self, command: ReadCurrentSourceCommand, diagnostic_context: DiagnosticContext
+    ) -> bytes: ...
 
 
 @runtime_checkable
@@ -327,6 +455,280 @@ class RecoveryService:
             relative_path=object_key,
         )
 
+    async def verify_bundle(self, command: VerifyBundleCommand) -> BundleVerificationResult:
+        """Verify one bundle offline, touching no other port (spec 10).
+
+        The environment gate fires before the bundle store is read; a failed
+        verification records the closed verify metric and the registered
+        backup-failed event, then re-raises the typed bundle-invalid error.
+        """
+
+        if command.environment not in _ALLOWED_ENVIRONMENTS:
+            # Before any path is opened: no metric or event is recorded for a
+            # refused gate (spec 9.1).
+            raise RecoveryError(
+                ErrorCode.CANONICAL_RECOVERY_ENVIRONMENT_REFUSED,
+                safe_details={"operation": RecoveryOperation.VERIFY},
+            )
+        started = time.monotonic()
+        try:
+            manifest = self.bundle_store.verify_offline(command.bundle_id)
+        except ApplicationError as error:
+            duration_seconds = max(time.monotonic() - started, 0.0)
+            self.metrics.record_backup(
+                operation=RecoveryOperation.VERIFY,
+                outcome=RecoveryMetricOutcome.FAILED,
+                duration_seconds=duration_seconds,
+                object_count=0,
+                byte_total=0,
+            )
+            _emit_registered_event(
+                *_recovery_failed_event_fields(
+                    EventName.CANONICAL_BACKUP_FAILED,
+                    RecoveryOperation.VERIFY,
+                    command.bundle_id,
+                    error,
+                    _duration_ms(duration_seconds),
+                )
+            )
+            raise
+        object_count = len(manifest.objects)
+        byte_total = sum(entry.size_bytes for entry in manifest.objects)
+        duration_seconds = max(time.monotonic() - started, 0.0)
+        self.metrics.record_backup(
+            operation=RecoveryOperation.VERIFY,
+            outcome=RecoveryMetricOutcome.SUCCEEDED,
+            duration_seconds=duration_seconds,
+            object_count=object_count,
+            byte_total=byte_total,
+        )
+        _emit_registered_event(
+            *canonical_backup_verified_event_fields(
+                command.bundle_id, object_count, byte_total, _duration_ms(duration_seconds)
+            )
+        )
+        return BundleVerificationResult(
+            bundle_id=command.bundle_id,
+            contract=MANIFEST_CONTRACT,
+            object_count=object_count,
+            byte_total=byte_total,
+            table_counts=dict(manifest.canonical_counts),
+        )
+
+    async def restore_empty(
+        self,
+        command: RestoreEmptyCommand,
+        *,
+        read_service: CanonicalSourceBytesReader,
+        restore_target: PostgresqlRestoreTarget,
+        diagnostic_context: DiagnosticContext | None = None,
+    ) -> RestoreEmptyResult:
+        """Restore one verified bundle into an admitted empty target (spec 11).
+
+        Gates fire before any I/O beyond offline verification; R2 objects are
+        restored and verified before the single-transaction ``pg_restore``;
+        the restored graph and the acceptance smoke read are re-verified
+        before the safe receipt is returned. A later failure never deletes
+        already restored objects: they stay as safe unreferenced CAS bytes.
+        """
+
+        if command.environment not in _ALLOWED_ENVIRONMENTS:
+            raise RecoveryError(
+                ErrorCode.CANONICAL_RECOVERY_ENVIRONMENT_REFUSED,
+                safe_details={"operation": RecoveryOperation.RESTORE},
+            )
+        if command.target_confirmation != command.target.database:
+            raise RecoveryError(
+                ErrorCode.CANONICAL_RECOVERY_ENVIRONMENT_REFUSED,
+                safe_details={"operation": RecoveryOperation.RESTORE},
+            )
+        started = time.monotonic()
+        try:
+            return await self._restore_within_gates(
+                command, read_service, restore_target, diagnostic_context, started
+            )
+        except ApplicationError as error:
+            duration_seconds = max(time.monotonic() - started, 0.0)
+            self.metrics.record_backup(
+                operation=RecoveryOperation.RESTORE,
+                outcome=RecoveryMetricOutcome.FAILED,
+                duration_seconds=duration_seconds,
+                object_count=0,
+                byte_total=0,
+            )
+            _emit_registered_event(
+                *canonical_restore_failed_event_fields(
+                    command.bundle_id, error, _duration_ms(duration_seconds)
+                )
+            )
+            raise
+
+    async def _restore_within_gates(
+        self,
+        command: RestoreEmptyCommand,
+        read_service: CanonicalSourceBytesReader,
+        restore_target: PostgresqlRestoreTarget,
+        diagnostic_context: DiagnosticContext | None,
+        started: float,
+    ) -> RestoreEmptyResult:
+        async with self.bundle_store.open_verified(command.bundle_id) as bundle:
+            manifest = bundle.manifest
+            await self._admit_restore_target(restore_target)
+            await self._restore_object_set(bundle, manifest)
+            receipt = await self.dump_process.restore_dump(
+                bundle.dump_path,
+                command.target,
+                timeout_seconds=POSTGRESQL_RESTORE_TIMEOUT_SECONDS,
+            )
+            await self._verify_restored_graph(manifest, restore_target)
+            if command.acceptance_probe is not None:
+                await self._run_acceptance_smoke(
+                    command.acceptance_probe, read_service, diagnostic_context
+                )
+        duration_seconds = max(time.monotonic() - started, 0.0)
+        object_count = len(manifest.objects)
+        byte_total = sum(entry.size_bytes for entry in manifest.objects)
+        self.metrics.record_backup(
+            operation=RecoveryOperation.RESTORE,
+            outcome=RecoveryMetricOutcome.SUCCEEDED,
+            duration_seconds=duration_seconds,
+            object_count=object_count,
+            byte_total=byte_total,
+        )
+        _emit_registered_event(
+            *canonical_restore_succeeded_event_fields(
+                command.bundle_id, object_count, byte_total, _duration_ms(duration_seconds)
+            )
+        )
+        return RestoreEmptyResult(
+            bundle_id=command.bundle_id,
+            completed_at=receipt.completed_at,
+            table_counts=dict(manifest.canonical_counts),
+            object_count=object_count,
+        )
+
+    async def _admit_restore_target(self, restore_target: PostgresqlRestoreTarget) -> None:
+        """Admit only an empty, correctly versioned target (spec 11.1)."""
+
+        if not await restore_target.is_application_empty():
+            raise RecoveryError(ErrorCode.CANONICAL_RECOVERY_TARGET_NOT_EMPTY)
+        if await restore_target.server_version() != POSTGRESQL_SERVER_VERSION:
+            raise RecoveryError(
+                ErrorCode.CANONICAL_RECOVERY_DEPENDENCY_UNAVAILABLE,
+                safe_details={"dependency": RecoveryDependency.POSTGRESQL},
+            )
+        if await restore_target.read_schema_head() is not None:
+            # The dump brings the baseline itself; any pre-existing head means
+            # the target is not empty.
+            raise RecoveryError(ErrorCode.CANONICAL_RECOVERY_TARGET_NOT_EMPTY)
+
+    async def _restore_object_set(
+        self, bundle: VerifiedRecoveryBundle, manifest: RecoveryManifest
+    ) -> None:
+        """Restore and verify every manifest object into canonical storage."""
+
+        write_limiter = asyncio.Semaphore(RESTORE_OBJECT_WRITE_CONCURRENCY)
+
+        async def restore_one(entry: ManifestObjectEntry) -> None:
+            async with write_limiter:
+                await self._restore_single_object(bundle, entry)
+
+        # The task group cancels sibling restores on the first failure; the
+        # first typed application error is surfaced so the failure path keeps
+        # recording the registered event and metric. Restored objects are
+        # never overwritten, deleted or compensated (spec 11.2).
+        try:
+            async with asyncio.TaskGroup() as task_group:
+                for entry in manifest.objects:
+                    task_group.create_task(restore_one(entry))
+        except BaseExceptionGroup as task_failures:
+            typed_failures = [
+                failure
+                for failure in task_failures.exceptions
+                if isinstance(failure, ApplicationError)
+            ]
+            if typed_failures:
+                raise typed_failures[0] from None
+            raise
+
+    async def _restore_single_object(
+        self, bundle: VerifiedRecoveryBundle, entry: ManifestObjectEntry
+    ) -> None:
+        expected = _expected_object_from_entry(entry)
+        existing_receipt = await self.object_store.resolve_verified_object(expected)
+        if existing_receipt is None:
+            receipt = await self.object_store.store_stream(
+                self._stream_bundle_object(bundle, entry),
+                entry.size_bytes,
+                entry.media_type,
+                claimed_sha256=entry.content_sha256,
+            )
+        else:
+            receipt = await self.object_store.verify_existing_object(expected)
+        _require_matching_receipt(receipt, expected)
+
+    async def _stream_bundle_object(
+        self, bundle: VerifiedRecoveryBundle, entry: ManifestObjectEntry
+    ) -> AsyncIterator[bytes]:
+        """Yield the verified bundle sidecar in bounded 1 MiB chunks."""
+
+        with bundle.object_path(entry.content_sha256).open(mode="rb") as object_file:
+            while chunk := object_file.read(OBJECT_COPY_CHUNK_SIZE_BYTES):
+                yield chunk
+
+    async def _verify_restored_graph(
+        self, manifest: RecoveryManifest, restore_target: PostgresqlRestoreTarget
+    ) -> None:
+        """Re-verify the restored schema, counts, pointers and objects (spec 11.3)."""
+
+        if await restore_target.read_schema_head() != POSTGRESQL_SCHEMA_REVISION:
+            raise RecoveryError(
+                ErrorCode.CANONICAL_RECOVERY_RESTORE_FAILED,
+                safe_details={"component": RecoveryComponent.CANONICAL_GRAPH},
+            )
+        if dict(await restore_target.read_canonical_counts()) != dict(manifest.canonical_counts):
+            raise RecoveryError(
+                ErrorCode.CANONICAL_RECOVERY_RESTORE_FAILED,
+                safe_details={"component": RecoveryComponent.CANONICAL_GRAPH},
+            )
+        if await restore_target.read_current_pointer_resolution() != 0:
+            raise RecoveryError(
+                ErrorCode.CANONICAL_RECOVERY_RESTORE_FAILED,
+                safe_details={"component": RecoveryComponent.CANONICAL_GRAPH},
+            )
+        for entry in manifest.objects:
+            # Full verification is requested from R2 again after pg_restore;
+            # receipts from the restore phase are never reused.
+            expected = _expected_object_from_entry(entry)
+            receipt = await self.object_store.verify_existing_object(expected)
+            _require_matching_receipt(receipt, expected)
+
+    async def _run_acceptance_smoke(
+        self,
+        probe: AcceptanceSmokeProbe,
+        read_service: CanonicalSourceBytesReader,
+        diagnostic_context: DiagnosticContext | None,
+    ) -> None:
+        """Require the acceptance source to serve the exact restored bytes."""
+
+        context = (
+            diagnostic_context
+            if diagnostic_context is not None
+            else create_diagnostic_context().context
+        )
+        payload = await read_service.read_current_source_bytes(
+            ReadCurrentSourceCommand(workspace_id=probe.workspace_id, source_id=probe.source_id),
+            context,
+        )
+        if (
+            hashlib.sha256(payload).hexdigest() != probe.expected_sha256
+            or len(payload) != probe.expected_size_bytes
+        ):
+            raise RecoveryError(
+                ErrorCode.CANONICAL_RECOVERY_RESTORE_FAILED,
+                safe_details={"component": RecoveryComponent.CANONICAL_READ},
+            )
+
 
 def _require_verified_copy(
     digest_hexadecimal: str,
@@ -337,6 +739,30 @@ def _require_verified_copy(
     """Fail closed when the streamed bytes disagree with the verified claim."""
 
     if digest_hexadecimal != digest_text or copied_bytes != expected_size_bytes:
+        raise RecoveryError(
+            ErrorCode.CANONICAL_RECOVERY_INTEGRITY_FAILED,
+            safe_details={"component": RecoveryComponent.OBJECT_SET},
+        )
+
+
+def _expected_object_from_entry(entry: ManifestObjectEntry) -> ExpectedObject:
+    """The verification claim a manifest object entry describes."""
+
+    return ExpectedObject(
+        content_digest=ContentDigest.parse(entry.content_sha256),
+        size_bytes=entry.size_bytes,
+        media_type=CanonicalMediaType.parse(entry.media_type),
+    )
+
+
+def _require_matching_receipt(receipt: VerifiedObjectReceipt, expected: ExpectedObject) -> None:
+    """Fail closed when an object-storage receipt disagrees with the claim."""
+
+    if (
+        receipt.content_digest != expected.content_digest
+        or receipt.size_bytes != expected.size_bytes
+        or receipt.media_type != expected.media_type
+    ):
         raise RecoveryError(
             ErrorCode.CANONICAL_RECOVERY_INTEGRITY_FAILED,
             safe_details={"component": RecoveryComponent.OBJECT_SET},
@@ -363,6 +789,55 @@ def canonical_backup_created_event_fields(
     }
 
 
+def canonical_backup_verified_event_fields(
+    bundle_id: UUID, object_count: int, byte_total: int, duration_ms: int
+) -> tuple[EventName, dict[str, object]]:
+    """The registered backup-verified event and its safe field payload.
+
+    Carries only registry-safe scalars — the closed enums, the bundle id and
+    bounded counts — so no path, key, hash or token can ever reach a
+    diagnostic line.
+    """
+
+    return EventName.CANONICAL_BACKUP_VERIFIED, {
+        "operation": RecoveryOperation.VERIFY,
+        "outcome": RecoveryMetricOutcome.SUCCEEDED,
+        "duration_ms": duration_ms,
+        "bundle_id": bundle_id,
+        "object_count": object_count,
+        "byte_total": byte_total,
+    }
+
+
+def canonical_restore_succeeded_event_fields(
+    bundle_id: UUID, object_count: int, byte_total: int, duration_ms: int
+) -> tuple[EventName, dict[str, object]]:
+    """The registered restore-succeeded event and its safe field payload."""
+
+    return EventName.CANONICAL_RESTORE_SUCCEEDED, {
+        "operation": RecoveryOperation.RESTORE,
+        "outcome": RecoveryMetricOutcome.SUCCEEDED,
+        "duration_ms": duration_ms,
+        "bundle_id": bundle_id,
+        "object_count": object_count,
+        "byte_total": byte_total,
+    }
+
+
+def canonical_restore_failed_event_fields(
+    bundle_id: UUID, error: ApplicationError, duration_ms: int
+) -> tuple[EventName, dict[str, object]]:
+    """The registered restore-failed event and its safe field payload."""
+
+    return _recovery_failed_event_fields(
+        EventName.CANONICAL_RESTORE_FAILED,
+        RecoveryOperation.RESTORE,
+        bundle_id,
+        error,
+        duration_ms,
+    )
+
+
 def canonical_backup_failed_event_fields(
     error: ApplicationError, duration_ms: int
 ) -> tuple[EventName, dict[str, object]]:
@@ -373,12 +848,33 @@ def canonical_backup_failed_event_fields(
     chained provider cause never enter the field set.
     """
 
-    return EventName.CANONICAL_BACKUP_FAILED, {
-        "operation": RecoveryOperation.CREATE,
+    return _recovery_failed_event_fields(
+        EventName.CANONICAL_BACKUP_FAILED,
+        RecoveryOperation.CREATE,
+        None,
+        error,
+        duration_ms,
+    )
+
+
+def _recovery_failed_event_fields(
+    event_name: EventName,
+    operation: RecoveryOperation,
+    bundle_id: UUID | None,
+    error: ApplicationError,
+    duration_ms: int,
+) -> tuple[EventName, dict[str, object]]:
+    """A registered recovery-failure event and its safe field payload."""
+
+    fields: dict[str, object] = {
+        "operation": operation,
         "outcome": RecoveryMetricOutcome.FAILED,
         "duration_ms": duration_ms,
-        "error_code": error.error_code,
     }
+    if bundle_id is not None:
+        fields["bundle_id"] = bundle_id
+    fields["error_code"] = error.error_code
+    return event_name, fields
 
 
 def _duration_ms(duration_seconds: float) -> int:
