@@ -278,13 +278,20 @@ class PostgresqlIdentityBootstrapStore:
             return await self._bootstrap_once(command, diagnostic_context)
         except _StateConflictAbort as abort:
             # The transaction has already rolled back; record the rejection
-            # out of band before the typed error leaves the adapter. A failure
-            # writing the standalone audit surfaces as the mapped database
-            # failure and replaces the conflict error: the service must never
-            # claim an audit that does not exist.
-            await self._record_conflict_rejection(
-                abort.state, command, diagnostic_context
-            )
+            # out of band before the typed error leaves the adapter. A
+            # sibling ``except`` clause never catches an exception raised
+            # inside this handler, so the rejection recording maps its own
+            # database failures here. The mapped database failure replaces
+            # the conflict error: the service must never claim an audit that
+            # does not exist, and driver text must never leak.
+            try:
+                await self._record_conflict_rejection(
+                    abort.state, command, diagnostic_context
+                )
+            except SQLAlchemyError as audit_cause:
+                raise map_database_failure(
+                    audit_cause, source_id=_NIL_SOURCE_ID
+                ) from audit_cause
             raise abort.error from abort
         except SQLAlchemyError as cause:
             raise map_database_failure(cause, source_id=_NIL_SOURCE_ID) from cause

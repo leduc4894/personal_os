@@ -11,20 +11,31 @@ bootstrap actions — all compiled or computed without touching a database.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import SQLAlchemyError
 
+from personal_os.diagnostics.context import DiagnosticContext
+from personal_os.diagnostics.trace_context import SpanId, TraceContext, TraceId
+from personal_os.error_contracts.exceptions import ApplicationError
 from personal_os.identity.bootstrap import ExistingIdentityDevice
-from personal_os.identity.contracts import BootstrapDeviceKind, BootstrapIdentityCommand
+from personal_os.identity.contracts import (
+    BootstrapDeviceKind,
+    BootstrapIdentityCommand,
+    IdentityBootstrapError,
+)
 from postgresql_source_store.identity_bootstrap import (
     IDENTITY_BOOTSTRAP_AUDIT_ACTION,
     IDENTITY_BOOTSTRAP_LOCK_NAMESPACE,
     IDENTITY_REJECTION_AUDIT_ACTION,
     IDENTITY_REJECTION_REASON,
+    PostgresqlIdentityBootstrapStore,
     bootstrap_lock_key,
     bootstrap_lock_statement,
     build_identity_audit_values,
@@ -268,3 +279,108 @@ def test_build_identity_rejection_audit_values_uses_rejected_action_and_reason()
     assert values["reason_code"] == "identity_state_conflict"
     assert values["safe_diff_hash"] is None
     assert values["request_id"] == REQUEST_ID
+
+
+# --- conflict rejection recording maps its own database failures ---------------
+
+
+class _ScriptedResult:
+    """Minimal result facade covering the statement shapes the store executes."""
+
+    def __init__(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        self._rows = rows
+
+    def mappings(self) -> _ScriptedResult:
+        return self
+
+    def all(self) -> list[Mapping[str, Any]]:
+        return list(self._rows)
+
+    def scalar_one(self) -> Any:
+        return self._rows[0]
+
+
+class _ScriptedConnection:
+    """Async connection double scripting the bootstrap statement sequence."""
+
+    def __init__(
+        self,
+        *,
+        user_rows: Sequence[Mapping[str, Any]],
+        workspace_rows: Sequence[Mapping[str, Any]],
+        device_rows: Sequence[Mapping[str, Any]],
+        audit_insert_failure: BaseException | None = None,
+    ) -> None:
+        self._user_rows = user_rows
+        self._workspace_rows = workspace_rows
+        self._device_rows = device_rows
+        self._audit_insert_failure = audit_insert_failure
+
+    async def __aenter__(self) -> _ScriptedConnection:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        return False
+
+    def begin(self) -> _ScriptedConnection:
+        return self
+
+    async def execute(self, statement: object) -> _ScriptedResult:
+        sql = str(statement)
+        if sql.startswith("INSERT") and "audit_events" in sql:
+            if self._audit_insert_failure is not None:
+                raise self._audit_insert_failure
+            return _ScriptedResult([])
+        if "FROM knowledge.users" in sql:
+            return _ScriptedResult(self._user_rows)
+        if "FROM knowledge.workspaces" in sql:
+            return _ScriptedResult(self._workspace_rows)
+        if "FROM knowledge.devices" in sql:
+            return _ScriptedResult(self._device_rows)
+        if sql.startswith("SELECT now()"):
+            return _ScriptedResult([COMMITTED_AT])
+        return _ScriptedResult([])
+
+
+class _ScriptedEngine:
+    """Engine double handing out the one scripted connection."""
+
+    def __init__(self, connection: _ScriptedConnection) -> None:
+        self._connection = connection
+
+    def connect(self) -> _ScriptedConnection:
+        return self._connection
+
+
+def _diagnostic_context() -> DiagnosticContext:
+    return DiagnosticContext(
+        request_id=REQUEST_ID,
+        client_request_id=None,
+        trace=TraceContext(
+            trace_id=TraceId("0123456789abcdef0123456789abcdef"),
+            remote_parent_span_id=None,
+            local_span_id=SpanId("0123456789abcdef"),
+            trace_flags=0,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_rejection_audit_database_failure_maps_to_application_error() -> None:
+    # A drift conflict (username changed) with a trusted workspace routes to
+    # the standalone rejection audit; when that audit insert fails with a
+    # driver error, the mapped ApplicationError — never the raw
+    # SQLAlchemyError carrying statement text — must escape ``bootstrap``.
+    connection = _ScriptedConnection(
+        user_rows=[_user_row(username="migrated-owner")],
+        workspace_rows=[_workspace_row()],
+        device_rows=[_device_row()],
+        audit_insert_failure=SQLAlchemyError("driver detail that must not leak"),
+    )
+    store = PostgresqlIdentityBootstrapStore(_ScriptedEngine(connection))
+    with pytest.raises(ApplicationError) as captured:
+        await store.bootstrap(_build_command(), _diagnostic_context())
+    assert not isinstance(captured.value, SQLAlchemyError)
+    # The database failure replaces the conflict error: the service must
+    # never claim an audit row that does not exist.
+    assert not isinstance(captured.value, IdentityBootstrapError)
