@@ -24,6 +24,21 @@ jobs:
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
       - name: Sync frozen Python workspace
         run: uv sync --all-packages --frozen
+      - name: Install pinned PostgreSQL 18.4 client tools (hypothesis test)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo install -d -m 755 /usr/share/postgresql-common/pgdg
+          sudo curl --fail --location --silent --show-error \
+            --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq 'postgresql-client-18=18.4*'
+          sudo ln -s /usr/lib/postgresql/18/bin/pg_dump /usr/local/bin/pg_dump
+          sudo ln -s /usr/lib/postgresql/18/bin/pg_restore /usr/local/bin/pg_restore
+          pg_dump --version
       - name: Bootstrap stack secrets through the production tool
         run: |
           set -euo pipefail
