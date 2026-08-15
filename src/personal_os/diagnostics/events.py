@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Final, cast
+from typing import Final, Protocol, cast
 from uuid import UUID
 
 _SAFE_TOKEN_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,63}$")
@@ -561,6 +561,19 @@ class RejectedDiagnosticPayload:
 
     reason: SafeToken
     count: int
+
+
+class DiagnosticEventSink(Protocol):
+    """Structural sink a composition root satisfies with its diagnostic logger.
+
+    One narrow core protocol shared by the domain services that build and
+    validate registered events: when the composition provides a sink, the
+    service delivers the validated event; when it does not, the built payload
+    is validated and discarded (build-only behavior). The validating
+    ``DiagnosticLogger`` satisfies this protocol structurally.
+    """
+
+    def emit(self, event_name: EventName, fields: Mapping[str, object] | None = None) -> None: ...
 
 
 def build_registered_event(

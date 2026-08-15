@@ -9,8 +9,8 @@ delegates the atomic create-or-replay decision to the store port, records the
 closed outcome metric, and builds the registered completion event from ids and
 the outcome enum only, mirroring the pure diagnostic-field builder pattern of
 :mod:`personal_os.sources.projection_dispatch`; no name, key or free-text
-value ever enters an event field, and the validated payload is handed to the
-diagnostic sink by the composition root that owns the configured logger.
+value ever enters an event field, and the validated event is delivered to the
+optional composition-provided diagnostics sink when one is bound.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from uuid import UUID
 
 from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.diagnostics.events import (
+    DiagnosticEventSink,
     EventName,
     RejectedDiagnosticPayload,
     build_registered_event,
@@ -190,15 +191,17 @@ class IdentityBootstrapService:
 
     store: IdentityBootstrapStore
     metrics: IdentityBootstrapMetrics
+    diagnostics: DiagnosticEventSink | None = None
 
     async def bootstrap(
         self, command: BootstrapIdentityCommand, diagnostic_context: DiagnosticContext
     ) -> BootstrapIdentityResult:
         """Delegate the atomic create-or-replay, then record the closed outcome.
 
-        Emits the registered completion event validated through
-        :func:`build_registered_event`; the composition root that owns the
-        configured diagnostic sink consumes the validated payload.
+        The registered completion event is always built and validated through
+        :func:`build_registered_event`; when the composition root bound a
+        diagnostics sink, the validated event is delivered to it, and without
+        one the built payload is validated and discarded.
         """
         result = await self.store.bootstrap(command, diagnostic_context)
         self.metrics.record_bootstrap(result.outcome)
@@ -209,4 +212,6 @@ class IdentityBootstrapService:
             # error rather than untrusted input; raise so it also surfaces
             # in optimized (python -O) runs instead of vanishing with assert.
             raise InternalApplicationError(ErrorCode.INTERNAL_ERROR)
+        if self.diagnostics is not None:
+            self.diagnostics.emit(event_name, dict(fields))
         return result

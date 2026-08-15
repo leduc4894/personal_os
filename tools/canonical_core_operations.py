@@ -72,6 +72,7 @@ from personal_os.diagnostics.context import (
 )
 from personal_os.diagnostics.events import EventName, SafeToken
 from personal_os.diagnostics.logging import (
+    DiagnosticLogger,
     emit_emergency_application_error,
     emit_emergency_internal_error,
 )
@@ -441,6 +442,16 @@ def _recovery_clock() -> datetime:
     return datetime.now(UTC)
 
 
+def _operations_diagnostic_logger() -> DiagnosticLogger:
+    """The CLI's validating diagnostic sink bound into every composed service.
+
+    Delivery uses the same validating facade the acceptance composition binds:
+    events are registry-validated here and routed through the configured
+    stdlib logging (guarded silent by default in this CLI process).
+    """
+    return DiagnosticLogger({"service": _OPERATIONS_SERVICE.value})
+
+
 def _uuid_text(value: UUID) -> str:
     return str(value)
 
@@ -672,7 +683,11 @@ def _compose_bootstrap_identity(
     database_settings, password = _load_database_parts(environ)
     engine = _create_database_engine(database_settings, password)
     store = PostgresqlIdentityBootstrapStore(engine)
-    service = IdentityBootstrapService(store=store, metrics=InMemoryIdentityBootstrapMetrics())
+    service = IdentityBootstrapService(
+        store=store,
+        metrics=InMemoryIdentityBootstrapMetrics(),
+        diagnostics=_operations_diagnostic_logger(),
+    )
 
     async def run() -> Mapping[str, object]:
         resolution = create_diagnostic_context()
@@ -721,6 +736,7 @@ def _compose_read_current_source(
                     store=read_store,
                     object_store=object_store,
                     metrics=InMemoryCanonicalReadMetrics(),
+                    diagnostics=_operations_diagnostic_logger(),
                 )
                 content = await service.read_current_source_bytes(command, resolution.context)
             return {"content_bytes": content}
@@ -767,6 +783,7 @@ def _compose_backup_create(
                     object_store=object_store,
                     metrics=InMemoryCanonicalBackupMetrics(),
                     clock=_recovery_clock,
+                    diagnostics=_operations_diagnostic_logger(),
                 )
                 result = await service.create_backup(command)
             return {
@@ -807,6 +824,7 @@ def _compose_backup_verify(
                 object_store=_UnusedObjectStore(),
                 metrics=InMemoryCanonicalBackupMetrics(),
                 clock=_recovery_clock,
+                diagnostics=_operations_diagnostic_logger(),
             )
             result = await service.verify_bundle(command)
         return {
@@ -860,6 +878,7 @@ def _compose_restore_empty(
                     store=read_store,
                     object_store=object_store,
                     metrics=InMemoryCanonicalReadMetrics(),
+                    diagnostics=_operations_diagnostic_logger(),
                 )
                 service = RecoveryService(
                     snapshot_store=_UnusedSnapshotStore(),
@@ -868,6 +887,7 @@ def _compose_restore_empty(
                     object_store=object_store,
                     metrics=InMemoryCanonicalBackupMetrics(),
                     clock=_recovery_clock,
+                    diagnostics=_operations_diagnostic_logger(),
                 )
                 result = await service.restore_empty(
                     command,
@@ -1299,6 +1319,7 @@ def _compose_phase_one_acceptance(
                             engine, diagnostics=diagnostic_logger
                         ),
                         metrics=InMemoryIdentityBootstrapMetrics(),
+                        diagnostics=diagnostic_logger,
                     ),
                     publication_service=SourceVersionPublicationService(
                         store=PostgresqlSourcePublicationStore(engine),
@@ -1310,6 +1331,7 @@ def _compose_phase_one_acceptance(
                         store=PostgresqlCanonicalSourceReadStore(engine),
                         object_store=object_store,
                         metrics=InMemoryCanonicalReadMetrics(),
+                        diagnostics=diagnostic_logger,
                     ),
                     intent_store=PostgresqlProjectionIntentStore(engine),
                     workflow_starter=TemporalProjectionWorkflowStarter(temporal_client),

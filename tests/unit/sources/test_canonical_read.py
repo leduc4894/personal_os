@@ -332,3 +332,65 @@ def test_reference_exposes_resolved_identity_and_expected_object() -> None:
     assert reference.content_version == 3
     assert reference.expected_object.size_bytes == len(LeakCheckingObjectStore().canonical_bytes)
     assert reference.committed_at.tzinfo is not None
+
+
+class RecordingDiagnosticSink:
+    """Composition-owned sink fake recording every delivered event."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[EventName, dict[str, object]]] = []
+
+    def emit(self, event_name: EventName, fields: Mapping[str, object] | None = None) -> None:
+        self.events.append((event_name, dict(fields or {})))
+
+
+@pytest.mark.asyncio
+async def test_success_event_is_delivered_to_the_bound_diagnostics_sink() -> None:
+    command = build_read_command()
+    reference = build_read_reference(command)
+    store = FakeCanonicalSourceReadStore(reference)
+    object_store = LeakCheckingObjectStore()
+    sink = RecordingDiagnosticSink()
+    service = CanonicalSourceReadService(
+        store=store,
+        object_store=object_store,
+        metrics=InMemoryCanonicalReadMetrics(),
+        diagnostics=sink,
+    )
+
+    await service.read_current_source_bytes(command, build_diagnostic_context())
+
+    assert sink.events == [
+        (
+            EventName.CANONICAL_SOURCE_READ_SUCCEEDED,
+            {
+                "source_id": command.source_id,
+                "workspace_id": command.workspace_id,
+                "source_version_id": reference.source_version_id,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_failure_event_is_delivered_to_the_bound_diagnostics_sink() -> None:
+    command = build_read_command()
+    store = FakeCanonicalSourceReadStore(None)
+    object_store = LeakCheckingObjectStore()
+    sink = RecordingDiagnosticSink()
+    service = CanonicalSourceReadService(
+        store=store,
+        object_store=object_store,
+        metrics=InMemoryCanonicalReadMetrics(),
+        diagnostics=sink,
+    )
+
+    with pytest.raises(CanonicalReadStateError):
+        await service.read_current_source_bytes(command, build_diagnostic_context())
+
+    assert len(sink.events) == 1
+    event_name, event_fields = sink.events[0]
+    assert event_name is EventName.CANONICAL_SOURCE_READ_FAILED
+    assert event_fields["source_id"] == command.source_id
+    assert event_fields["workspace_id"] == command.workspace_id
+    assert event_fields["error_code"] is ErrorCode.CANONICAL_READ_STATE_INVALID

@@ -10,10 +10,11 @@ mutations on any port. Missing or corrupt bytes surface the existing typed
 object-storage errors unchanged; a missing or identity-mismatched current
 reference fails closed as the typed read-state integrity error.
 
-Outcome metrics and registered diagnostic events are recorded for both
-terminal paths, with durations measured by :func:`time.monotonic`; event
-fields carry ids and the closed error-code enum only — never bytes, titles or
-digests.
+Outcome metrics are recorded for both terminal paths and registered diagnostic
+events are built and registry-validated always, with durations measured by
+:func:`time.monotonic`; the validated events are delivered to the optional
+composition-provided diagnostics sink, and event fields carry ids and the
+closed error-code enum only — never bytes, titles or digests.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from uuid import UUID
 
 from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.diagnostics.events import (
+    DiagnosticEventSink,
     EventName,
     RejectedDiagnosticPayload,
     build_registered_event,
@@ -117,15 +119,17 @@ class CanonicalSourceReadService:
 
     Depends only on provider-neutral ports: the read-only
     :class:`CanonicalSourceReadStore`, the
-    :class:`~personal_os.object_storage.CanonicalObjectStore` and the closed
-    low-cardinality read metrics sink. The service never updates source state,
-    the current pointer, versions, events, audit or intents, and never trusts
-    client-supplied object metadata.
+    :class:`~personal_os.object_storage.CanonicalObjectStore`, the closed
+    low-cardinality read metrics sink and the optional diagnostics sink the
+    composition root satisfies with its configured logger. The service never
+    updates source state, the current pointer, versions, events, audit or
+    intents, and never trusts client-supplied object metadata.
     """
 
     store: CanonicalSourceReadStore
     object_store: CanonicalObjectStore
     metrics: CanonicalReadMetrics
+    diagnostics: DiagnosticEventSink | None = None
 
     @asynccontextmanager
     async def open_current_source(
@@ -153,14 +157,30 @@ class CanonicalSourceReadService:
                 outcome=ReadOutcome.FAILED,
                 duration_seconds=max(time.monotonic() - started, 0.0),
             )
-            _emit_registered_event(*canonical_read_failed_event_fields(command, error))
+            self._emit_registered_event(*canonical_read_failed_event_fields(command, error))
             raise
         assert reference is not None
         self.metrics.record_read(
             outcome=ReadOutcome.SUCCEEDED,
             duration_seconds=max(time.monotonic() - started, 0.0),
         )
-        _emit_registered_event(*canonical_read_succeeded_event_fields(reference))
+        self._emit_registered_event(*canonical_read_succeeded_event_fields(reference))
+
+    def _emit_registered_event(self, event_name: EventName, fields: Mapping[str, object]) -> None:
+        """Validate the registered event; deliver it when a sink is bound.
+
+        Without a composition-provided sink the validated payload is discarded
+        (build-and-validate only); a rejected payload is registry drift and
+        raises regardless of sink presence.
+        """
+        built = build_registered_event(event_name, fields)
+        if isinstance(built, RejectedDiagnosticPayload):
+            # A rejected payload here means registry drift, a programming error
+            # rather than untrusted input; raise so it also surfaces in optimized
+            # (python -O) runs instead of vanishing with assert.
+            raise InternalApplicationError(ErrorCode.INTERNAL_ERROR)
+        if self.diagnostics is not None:
+            self.diagnostics.emit(event_name, dict(fields))
 
     async def read_current_source_bytes(
         self, command: ReadCurrentSourceCommand, diagnostic_context: DiagnosticContext
@@ -220,12 +240,3 @@ def canonical_read_failed_event_fields(
         "workspace_id": command.workspace_id,
         "error_code": error.error_code,
     }
-
-
-def _emit_registered_event(event_name: EventName, fields: Mapping[str, object]) -> None:
-    built = build_registered_event(event_name, fields)
-    if isinstance(built, RejectedDiagnosticPayload):
-        # A rejected payload here means registry drift, a programming error
-        # rather than untrusted input; raise so it also surfaces in optimized
-        # (python -O) runs instead of vanishing with assert.
-        raise InternalApplicationError(ErrorCode.INTERNAL_ERROR)

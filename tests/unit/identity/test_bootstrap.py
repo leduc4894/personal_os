@@ -437,3 +437,57 @@ async def test_service_returns_store_result_unchanged() -> None:
     assert returned is result
     assert store.commands == [command]
     assert store.contexts == [diagnostic_context]
+
+
+class RecordingDiagnosticSink:
+    """Composition-owned sink fake recording every delivered event."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[EventName, dict[str, object]]] = []
+
+    def emit(self, event_name: EventName, fields: Mapping[str, object] | None = None) -> None:
+        self.events.append((event_name, dict(fields or {})))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outcome", "expected_event"),
+    [
+        (BootstrapIdentityOutcome.CREATED, EventName.IDENTITY_BOOTSTRAP_SUCCEEDED),
+        (BootstrapIdentityOutcome.EXISTING, EventName.IDENTITY_BOOTSTRAP_REPLAYED),
+    ],
+)
+async def test_service_delivers_completion_event_to_bound_diagnostics_sink(
+    outcome: BootstrapIdentityOutcome, expected_event: EventName
+) -> None:
+    result = build_result(outcome)
+    store = FakeIdentityBootstrapStore(result=result)
+    sink = RecordingDiagnosticSink()
+    service = IdentityBootstrapService(
+        store=store, metrics=InMemoryIdentityBootstrapMetrics(), diagnostics=sink
+    )
+
+    await service.bootstrap(build_command(), build_diagnostic_context())
+
+    assert len(sink.events) == 1
+    event_name, event_fields = sink.events[0]
+    assert event_name is expected_event
+    assert event_fields["user_id"] == result.user_id
+    assert event_fields["workspace_id"] == result.workspace_id
+    assert event_fields["device_id"] == result.device_id
+    # The delivered payload satisfies the registry contract exactly.
+    assert not isinstance(
+        build_registered_event(event_name, event_fields), RejectedDiagnosticPayload
+    )
+
+
+@pytest.mark.asyncio
+async def test_service_without_sink_still_validates_event_and_returns_result() -> None:
+    result = build_result(BootstrapIdentityOutcome.CREATED)
+    store = FakeIdentityBootstrapStore(result=result)
+
+    returned = await IdentityBootstrapService(
+        store=store, metrics=InMemoryIdentityBootstrapMetrics()
+    ).bootstrap(build_command(), build_diagnostic_context())
+
+    assert returned is result

@@ -9,6 +9,7 @@ from personal_os.diagnostics.context import (
 from personal_os.diagnostics.events import (
     EVENT_DEFINITIONS,
     DiagnosticEvent,
+    DiagnosticEventSink,
     DiagnosticLevel,
     EventDefinition,
     EventName,
@@ -37,6 +38,7 @@ __all__ = [
     "EVENT_DEFINITIONS",
     "DiagnosticContext",
     "DiagnosticEvent",
+    "DiagnosticEventSink",
     "DiagnosticLevel",
     "DiagnosticLogger",
     "EventDefinition",

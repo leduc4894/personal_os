@@ -244,3 +244,31 @@ def test_acceptance_composition_lives_only_in_tools() -> None:
         assert "canonical_core_operations" not in source, f"{path} imports the tools composition"
         for token in ACCEPTANCE_NAME_TOKENS:
             assert token not in source, f"{path} references the acceptance composition"
+
+
+def test_cli_composition_binds_a_diagnostics_sink_into_every_core_service() -> None:
+    # Every construction of the three diagnostic-emitting canonical core
+    # services inside the CLI composition must pass a `diagnostics=` sink so
+    # the built and validated events are delivered, never silently discarded
+    # by the composition.
+    composed_services = {
+        "IdentityBootstrapService",
+        "CanonicalSourceReadService",
+        "RecoveryService",
+    }
+    source_path = REPO_ROOT / "tools" / "canonical_core_operations.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    constructions = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in composed_services
+    ]
+    assert constructions, "the CLI composition must construct the canonical core services"
+    for call in constructions:
+        assert isinstance(call.func, ast.Name)
+        keyword_names = [keyword.arg for keyword in call.keywords]
+        assert "diagnostics" in keyword_names, (
+            f"{call.func.id} construction at line {call.lineno} binds no diagnostics sink"
+        )

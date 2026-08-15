@@ -292,3 +292,65 @@ async def test_environment_refused_for_verification_before_any_port_call() -> No
     assert error.is_retryable is False
     assert bundle_store.verify_calls == []
     assert metrics.backup_records() == []
+
+
+class RecordingDiagnosticSink:
+    """Composition-owned sink fake recording every delivered event."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[EventName, dict[str, object]]] = []
+
+    def emit(self, event_name: EventName, fields: dict[str, object] | None = None) -> None:
+        self.events.append((event_name, dict(fields or {})))
+
+
+def build_service_with_sink(
+    manifest: RecoveryManifest, error: RecoveryError | None, sink: RecordingDiagnosticSink
+) -> RecoveryService:
+    return RecoveryService(
+        snapshot_store=RefusingSnapshotStore(),
+        bundle_store=OfflineVerifyingBundleStore(manifest, error),
+        dump_process=RefusingDumpProcess(),
+        object_store=RefusingObjectStore(),
+        metrics=InMemoryCanonicalBackupMetrics(),
+        clock=lambda: _MANIFEST_CREATED_AT,
+        diagnostics=sink,
+    )
+
+
+@pytest.mark.asyncio
+async def test_verified_event_is_delivered_to_the_bound_diagnostics_sink() -> None:
+    manifest, payloads = build_manifest(object_count=2)
+    sink = RecordingDiagnosticSink()
+    service = build_service_with_sink(manifest, None, sink)
+
+    await service.verify_bundle(build_command())
+
+    assert len(sink.events) == 1
+    event_name, event_fields = sink.events[0]
+    assert event_name is EventName.CANONICAL_BACKUP_VERIFIED
+    assert event_fields["operation"] is RecoveryOperation.VERIFY
+    assert event_fields["outcome"] is RecoveryMetricOutcome.SUCCEEDED
+    assert event_fields["bundle_id"] == _BUNDLE_ID
+    assert event_fields["object_count"] == 2
+    assert event_fields["byte_total"] == sum(len(payload) for payload in payloads)
+
+
+@pytest.mark.asyncio
+async def test_failed_event_is_delivered_to_the_bound_diagnostics_sink(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest, _ = build_manifest(object_count=1)
+    error = RecoveryError(ErrorCode.CANONICAL_RECOVERY_BUNDLE_INVALID)
+    sink = RecordingDiagnosticSink()
+    service = build_service_with_sink(manifest, error, sink)
+
+    with pytest.raises(RecoveryError):
+        await service.verify_bundle(build_command())
+
+    assert len(sink.events) == 1
+    event_name, event_fields = sink.events[0]
+    assert event_name is EventName.CANONICAL_BACKUP_FAILED
+    assert event_fields["operation"] is RecoveryOperation.VERIFY
+    assert event_fields["outcome"] is RecoveryMetricOutcome.FAILED
+    assert event_fields["error_code"] is ErrorCode.CANONICAL_RECOVERY_BUNDLE_INVALID

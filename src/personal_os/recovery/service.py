@@ -15,9 +15,11 @@ verification (spec 10) touching no PostgreSQL, R2 or Temporal port, and
 :class:`RecoveryService.restore_empty` restores an empty target (spec 11):
 gates fire before any I/O, R2 objects are restored before the single-
 transaction ``pg_restore``, and the restored graph plus a canonical read are
-re-verified before the safe receipt. Events carry only safe scalars and
-metrics only the closed operation/outcome enums; no path, key, hash, digest
-or raw content is ever disclosed.
+re-verified before the safe receipt. Events carry only safe scalars, are
+always built and registry-validated, and are delivered to the optional
+composition-provided diagnostics sink; metrics carry only the closed
+operation/outcome enums; no path, key, hash, digest or raw content is ever
+disclosed.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from uuid import UUID
 
 from personal_os.diagnostics.context import DiagnosticContext, create_diagnostic_context
 from personal_os.diagnostics.events import (
+    DiagnosticEventSink,
     EventName,
     RejectedDiagnosticPayload,
     build_registered_event,
@@ -257,7 +260,9 @@ class RecoveryService:
     """Backup creation, offline verification and empty-target restore (spec 9-11).
 
     Composes existing production ports; never reimplements publication,
-    object verification or transaction behavior.
+    object verification or transaction behavior. Registered outcome events are
+    always built and registry-validated and are delivered to the optional
+    composition-provided diagnostics sink when one is bound.
     """
 
     snapshot_store: CanonicalBackupSnapshotStore
@@ -266,6 +271,7 @@ class RecoveryService:
     object_store: CanonicalObjectStore
     metrics: CanonicalBackupMetrics
     clock: Callable[[], datetime]
+    diagnostics: DiagnosticEventSink | None = None
 
     async def create_backup(self, command: BackupCreateCommand) -> BackupCreationResult:
         """Create one consistent backup bundle under a quiesced snapshot."""
@@ -290,7 +296,7 @@ class RecoveryService:
                 object_count=0,
                 byte_total=0,
             )
-            _emit_registered_event(
+            self._emit_registered_event(
                 *canonical_backup_failed_event_fields(error, _duration_ms(duration_seconds))
             )
             raise
@@ -357,7 +363,7 @@ class RecoveryService:
             object_count=object_count,
             byte_total=byte_total,
         )
-        _emit_registered_event(
+        self._emit_registered_event(
             *canonical_backup_created_event_fields(
                 bundle_id, object_count, byte_total, _duration_ms(duration_seconds)
             )
@@ -459,8 +465,9 @@ class RecoveryService:
         """Verify one bundle offline, touching no other port (spec 10).
 
         The environment gate fires before the bundle store is read; a failed
-        verification records the closed verify metric and the registered
-        backup-failed event, then re-raises the typed bundle-invalid error.
+        verification records the closed verify metric, builds and validates
+        the registered backup-failed event (delivering it when a diagnostics
+        sink is bound), then re-raises the typed bundle-invalid error.
         """
 
         if command.environment not in _ALLOWED_ENVIRONMENTS:
@@ -482,7 +489,7 @@ class RecoveryService:
                 object_count=0,
                 byte_total=0,
             )
-            _emit_registered_event(
+            self._emit_registered_event(
                 *_recovery_failed_event_fields(
                     EventName.CANONICAL_BACKUP_FAILED,
                     RecoveryOperation.VERIFY,
@@ -502,7 +509,7 @@ class RecoveryService:
             object_count=object_count,
             byte_total=byte_total,
         )
-        _emit_registered_event(
+        self._emit_registered_event(
             *canonical_backup_verified_event_fields(
                 command.bundle_id, object_count, byte_total, _duration_ms(duration_seconds)
             )
@@ -556,7 +563,7 @@ class RecoveryService:
                 object_count=0,
                 byte_total=0,
             )
-            _emit_registered_event(
+            self._emit_registered_event(
                 *canonical_restore_failed_event_fields(
                     command.bundle_id, error, _duration_ms(duration_seconds)
                 )
@@ -595,7 +602,7 @@ class RecoveryService:
             object_count=object_count,
             byte_total=byte_total,
         )
-        _emit_registered_event(
+        self._emit_registered_event(
             *canonical_restore_succeeded_event_fields(
                 command.bundle_id, object_count, byte_total, _duration_ms(duration_seconds)
             )
@@ -728,6 +735,22 @@ class RecoveryService:
                 ErrorCode.CANONICAL_RECOVERY_RESTORE_FAILED,
                 safe_details={"component": RecoveryComponent.CANONICAL_READ},
             )
+
+    def _emit_registered_event(self, event_name: EventName, fields: dict[str, object]) -> None:
+        """Validate the registered event; deliver it when a sink is bound.
+
+        Without a composition-provided sink the validated payload is discarded
+        (build-and-validate only); a rejected payload is registry drift and
+        raises regardless of sink presence.
+        """
+        built = build_registered_event(event_name, fields)
+        if isinstance(built, RejectedDiagnosticPayload):
+            # A rejected payload here means registry drift, a programming error
+            # rather than untrusted input; raise so it also surfaces in optimized
+            # (python -O) runs instead of vanishing with assert.
+            raise InternalApplicationError(ErrorCode.INTERNAL_ERROR)
+        if self.diagnostics is not None:
+            self.diagnostics.emit(event_name, dict(fields))
 
 
 def _require_verified_copy(
@@ -879,12 +902,3 @@ def _recovery_failed_event_fields(
 
 def _duration_ms(duration_seconds: float) -> int:
     return max(0, int(duration_seconds * 1000))
-
-
-def _emit_registered_event(event_name: EventName, fields: dict[str, object]) -> None:
-    built = build_registered_event(event_name, fields)
-    if isinstance(built, RejectedDiagnosticPayload):
-        # A rejected payload here means registry drift, a programming error
-        # rather than untrusted input; raise so it also surfaces in optimized
-        # (python -O) runs instead of vanishing with assert.
-        raise InternalApplicationError(ErrorCode.INTERNAL_ERROR)
