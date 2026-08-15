@@ -113,6 +113,8 @@ class EventName(StrEnum):
     CANONICAL_BACKUP_FAILED = "canonical_backup_failed"
     CANONICAL_RESTORE_SUCCEEDED = "canonical_restore_succeeded"
     CANONICAL_RESTORE_FAILED = "canonical_restore_failed"
+    CANONICAL_ACCEPTANCE_COMPLETED = "canonical_acceptance_completed"
+    CANONICAL_ACCEPTANCE_FAILED = "canonical_acceptance_failed"
 
 
 type SafeDiagnosticScalar = (
@@ -497,6 +499,36 @@ EVENT_DEFINITIONS: Final[Mapping[EventName, EventDefinition]] = MappingProxyType
             required_fields=frozenset({"error_code"}),
             allowed_fields=frozenset(
                 {"operation", "outcome", "duration_ms", "bundle_id", "error_code"}
+            ),
+        ),
+        EventName.CANONICAL_ACCEPTANCE_COMPLETED: EventDefinition(
+            level=DiagnosticLevel.INFO,
+            result_code=ResultCode.SUCCEEDED,
+            required_fields=frozenset({"outcome", "duration_ms"}),
+            allowed_fields=frozenset(
+                {
+                    "outcome",
+                    "duration_ms",
+                    "workspace_id",
+                    "source_version_id",
+                    "event_id",
+                    "intent_count",
+                }
+            ),
+        ),
+        EventName.CANONICAL_ACCEPTANCE_FAILED: EventDefinition(
+            level=DiagnosticLevel.ERROR,
+            result_code=ResultCode.FAILED,
+            required_fields=frozenset({"error_code"}),
+            allowed_fields=frozenset(
+                {
+                    "error_code",
+                    "error_category",
+                    "is_retryable",
+                    "operation",
+                    "outcome",
+                    "duration_ms",
+                }
             ),
         ),
     }

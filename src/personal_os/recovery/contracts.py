@@ -317,3 +317,48 @@ class InMemoryCanonicalBackupMetrics:
 
     def __repr__(self) -> str:
         return "InMemoryCanonicalBackupMetrics(redacted)"
+
+
+class AcceptanceMetricOutcome(StrEnum):
+    """The closed phase-one acceptance outcomes used as metric labels."""
+
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+#: The exact required acceptance metric name and its label dimensions (spec 18):
+#: only the closed outcome label, never an ID, key, digest or error message.
+CANONICAL_ACCEPTANCE_METRIC_CONTRACTS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+    {"canonical_acceptance_total": frozenset({"outcome"})}
+)
+
+
+@runtime_checkable
+class CanonicalAcceptanceMetrics(Protocol):
+    """Low-cardinality phase-one acceptance metrics sink (spec 18)."""
+
+    def record_acceptance(self, *, outcome: AcceptanceMetricOutcome) -> None:
+        """Record one acceptance-run outcome under ``canonical_acceptance_total``."""
+        ...
+
+
+class InMemoryCanonicalAcceptanceMetrics:
+    """Bounded in-memory sink implementing :class:`CanonicalAcceptanceMetrics`.
+
+    Sufficient for the repository-internal acceptance CLI without introducing
+    Prometheus. It counts only the closed outcome enum, so no UUID, key,
+    digest, title or error message can ever become a label.
+    """
+
+    def __init__(self) -> None:
+        self._counts: dict[AcceptanceMetricOutcome, int] = {}
+
+    def record_acceptance(self, *, outcome: AcceptanceMetricOutcome) -> None:
+        _validate_label("outcome", AcceptanceMetricOutcome, outcome)
+        self._counts[outcome] = self._counts.get(outcome, 0) + 1
+
+    def acceptance_count(self, outcome: AcceptanceMetricOutcome) -> int:
+        return self._counts.get(outcome, 0)
+
+    def __repr__(self) -> str:
+        return "InMemoryCanonicalAcceptanceMetrics(redacted)"

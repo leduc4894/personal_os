@@ -67,4 +67,6 @@ def test_event_names_are_closed() -> None:
         "canonical_backup_failed",
         "canonical_restore_succeeded",
         "canonical_restore_failed",
+        "canonical_acceptance_completed",
+        "canonical_acceptance_failed",
     }

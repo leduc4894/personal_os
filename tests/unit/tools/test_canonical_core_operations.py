@@ -102,6 +102,7 @@ def _fake_composers(composition: _FakeComposition) -> dict[str, _CountingCompose
         "backup_create": _CountingComposer(composition),
         "backup_verify": _CountingComposer(composition),
         "restore_empty": _CountingComposer(composition),
+        "phase_one_acceptance": _CountingComposer(composition),
     }
 
 
@@ -130,6 +131,7 @@ def _run_main(
         compose_backup_create=composers["backup_create"],
         compose_backup_verify=composers["backup_verify"],
         compose_restore_empty=composers["restore_empty"],
+        compose_phase_one_acceptance=composers["phase_one_acceptance"],
         **optional_timeout,
     )
     stdout_documents = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
@@ -463,21 +465,22 @@ def test_unexpected_failure_maps_to_internal_with_one_document() -> None:
     assert "secret raw failure detail" not in json.dumps(stderr_documents)
 
 
-def test_phase_one_acceptance_placeholder_defers_to_task_fifteen() -> None:
+def test_phase_one_acceptance_composes_once_and_returns_payload() -> None:
+    composition = _FakeComposition(payload={"result_code": "canonical_acceptance_completed"})
+    composer = _CountingComposer(composition)
     composers = _fake_composers(_FakeComposition())
+    composers["phase_one_acceptance"] = composer
 
-    exit_code, stdout_documents, stderr_documents = _run_main(
+    exit_code, stdout_documents, _ = _run_main(
         ["phase-one-acceptance"], environ=_LOCAL_ENVIRONMENT, composers=composers
     )
 
-    assert exit_code == int(CanonicalCoreExitCode.UNAVAILABLE)
-    assert all(composer.call_count == 0 for composer in composers.values())
-    assert stdout_documents == [
-        {"result_code": "phase_one_acceptance_deferred_to_task_15", "state": "error"}
-    ]
-    assert len(stderr_documents) == 1
-    rendered = json.dumps(stderr_documents[0]).lower()
-    assert "deferredtotask15" in rendered
+    assert exit_code == int(CanonicalCoreExitCode.OK)
+    assert composer.call_count == 1
+    assert all(
+        other.call_count == 0 for name, other in composers.items() if name != "phase_one_acceptance"
+    )
+    assert stdout_documents == [{"result_code": "canonical_acceptance_completed"}]
 
 
 # --- Timeout and interactive safety ------------------------------------------

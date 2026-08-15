@@ -11,6 +11,7 @@ WORKFLOW_PATH = WORKFLOW_DIRECTORY / "quality.yml"
 LOCAL_STACK_WORKFLOW_PATH = WORKFLOW_DIRECTORY / "local-service-stack.yml"
 CANONICAL_POSTGRESQL_WORKFLOW_PATH = WORKFLOW_DIRECTORY / "canonical-postgresql-baseline.yml"
 R2_LIVE_WORKFLOW = WORKFLOW_DIRECTORY / "object-storage-live.yml"
+CANONICAL_CORE_ACCEPTANCE_WORKFLOW = WORKFLOW_DIRECTORY / "canonical-core-acceptance.yml"
 WORKFLOW_TEXT = WORKFLOW_PATH.read_text(encoding="utf-8")
 
 CANONICAL_POSTGRESQL_STATIC_JOB_NAME = "windows-static"
@@ -616,3 +617,170 @@ def test_r2_live_workflow_is_trusted_and_exact_cleanup_only() -> None:
     assert "R2_PRODUCTION" not in text
     assert "--junitxml=.local/test-results/object-storage-live.xml" in text
     assert "ListObjects" not in text and "prefix-delete" not in text
+
+
+# ---------------------------------------------------------------------------
+# Protected phase-one acceptance workflow contract (Task 15, spec 18.4)
+# ---------------------------------------------------------------------------
+
+CANONICAL_CORE_ACCEPTANCE_JUNIT_ARTIFACT_PATH = ".local/test-results/canonical-core-acceptance.xml"
+
+
+def _acceptance_workflow_text() -> str:
+    return CANONICAL_CORE_ACCEPTANCE_WORKFLOW.read_text(encoding="utf-8")
+
+
+def _acceptance_step_block(text: str, step_name: str) -> str:
+    jobs = _job_blocks(text)
+    pattern = re.compile(
+        rf"(?ms)^      - name: {re.escape(step_name)}\n(?P<body>.*?)(?=^      - |\Z)"
+    )
+    matches = [
+        match.group("body") for job_body in jobs.values() for match in pattern.finditer(job_body)
+    ]
+    return "".join(matches)
+
+
+def _acceptance_artifact_scope_is_junit_only(text: str) -> bool:
+    if text.count("actions/upload-artifact@") != 1:
+        return False
+    if any(token in text for token in (".local/stack-secrets", ".env\n")):
+        return False
+    uploaded_paths = re.findall(r"(?m)^ +path: (.+)$", text)
+    return uploaded_paths == [CANONICAL_CORE_ACCEPTANCE_JUNIT_ARTIFACT_PATH]
+
+
+def test_acceptance_workflow_never_runs_fork_prs_and_never_cancels() -> None:
+    text = _acceptance_workflow_text()
+    assert "pull_request:" not in text
+    assert "pull_request_target" not in text
+    assert "branches: [master]" in text
+    assert "schedule:" in text and "workflow_dispatch:" in text
+    # Per-bucket safety: a superseded run keeps its cleanup, so live-bucket
+    # objects are never orphaned mid-flight (spec 18.4).
+    assert "cancel-in-progress: false" in text
+    assert "canonical-core-acceptance-${{ github.workflow }}-${{ github.ref }}" in text
+
+
+def test_acceptance_workflow_is_least_privilege_with_bounded_job() -> None:
+    text = _acceptance_workflow_text()
+    assert _workflow_is_least_privilege_and_sha_pinned(text)
+    assert _top_level_permissions(text) == ["  contents: read"]
+    assert not _has_job_level_permissions_override(text)
+    assert "timeout-minutes: 45" in text
+    assert "runs-on: ubuntu-latest" in text
+
+
+def test_acceptance_workflow_writes_secrets_as_mode_0600_files_only() -> None:
+    text = _acceptance_workflow_text()
+    secret_step = _acceptance_step_block(
+        text, "Compose live R2 environment as mode-0600 secret files"
+    )
+    assert "R2_TEST_ACCESS_KEY_ID: ${{ secrets.R2_TEST_ACCESS_KEY_ID }}" in secret_step
+    assert "R2_TEST_SECRET_ACCESS_KEY: ${{ secrets.R2_TEST_SECRET_ACCESS_KEY }}" in secret_step
+    assert "${{ runner.temp }}" in secret_step
+    assert "umask 0177" in secret_step
+    assert "chmod 0600" in secret_step
+    # The credential-shape guard fails the run explicitly on mismatch.
+    assert "r2_test_access_key_id:32" in secret_step
+    assert "r2_test_secret_access_key:64" in secret_step
+    removal_step = _acceptance_step_block(text, "Remove dedicated test secret files")
+    assert "if: always()" in removal_step
+    assert 'rm -rf -- "$R2_TEST_SECRET_ROOT"' in removal_step
+    # Secrets exist only inside the two step-local env blocks.
+    assert text.count("secrets.R2_TEST_ACCESS_KEY_ID") == 1
+    assert text.count("secrets.R2_TEST_SECRET_ACCESS_KEY") == 1
+
+
+def test_acceptance_workflow_runs_disposable_stack_and_live_suite() -> None:
+    text = _acceptance_workflow_text()
+    run_step = _acceptance_step_block(
+        text, "Run canonical-core acceptance live suite with exact-key cleanup"
+    )
+    assert 'CI: "true"' in text
+    assert (
+        "LOCAL_STACK_TEST_PROJECT: knowledge-ci-${{ github.run_id }}-${{ github.run_attempt }}"
+        in text
+    )
+    assert "knowledge-local" not in text
+    assert "R2_TEST_ENDPOINT: ${{ vars.R2_TEST_ENDPOINT }}" in text
+    assert "R2_TEST_BUCKET_NAME: ${{ vars.R2_TEST_BUCKET_NAME }}" in text
+    assert "uv sync --all-packages --frozen" in text
+    assert (
+        'uv run pytest tests/integration/canonical_core -m "local_stack and r2_live" -q'
+        " --junitxml=.local/test-results/canonical-core-acceptance.xml" in run_step
+    )
+
+
+def test_acceptance_workflow_cleanup_is_always_gated_and_label_exhaustive() -> None:
+    text = _acceptance_workflow_text()
+    cleanup = _acceptance_step_block(text, "Reset exact project and assert cleanup")
+    required_tokens = (
+        "if: always()",
+        '--confirm-project "$LOCAL_STACK_TEST_PROJECT"',
+        "--non-interactive",
+        "docker container ls -a --filter",
+        "docker network ls --filter",
+        "docker volume ls --filter",
+        '[[ -n "$remaining_containers" || -n "$remaining_networks" || -n "$remaining_volumes" ]]',
+    )
+    assert all(token in cleanup for token in required_tokens)
+
+
+def test_acceptance_workflow_uploads_scrubbed_junit_only() -> None:
+    text = _acceptance_workflow_text()
+    assert _acceptance_artifact_scope_is_junit_only(text)
+    upload_step = _acceptance_step_block(text, "Upload sanitized JUnit report")
+    assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" in upload_step
+    for required_flag in (
+        "if: always()",
+        "include-hidden-files: true",
+        "if-no-files-found: ignore",
+        "retention-days: 7",
+    ):
+        assert required_flag in upload_step
+    # No bundle, dump, service log, environment dump or Temporal history may
+    # ever leave the runner (spec 18.4).
+    for forbidden in (
+        "docker logs",
+        "docker inspect",
+        ".local/stack-secrets",
+        "postgres.dump",
+        "temporal history",
+        "env -0",
+        "/proc/self/environ",
+    ):
+        assert forbidden not in text
+
+
+def test_acceptance_contract_rejects_cancel_in_progress_mutation() -> None:
+    text = _acceptance_workflow_text()
+    mutated = text.replace("cancel-in-progress: false", "cancel-in-progress: true", 1)
+    assert mutated != text
+    assert "cancel-in-progress: false" not in mutated
+
+
+def test_acceptance_contract_rejects_widened_artifact_mutation() -> None:
+    text = _acceptance_workflow_text()
+    for widened in (
+        f"          path: {CANONICAL_CORE_ACCEPTANCE_JUNIT_ARTIFACT_PATH}\n"
+        "            - .local/stack-secrets",
+        "          path: .local",
+        "          path: $RUNNER_TEMP",
+    ):
+        mutated = text.replace(
+            f"          path: {CANONICAL_CORE_ACCEPTANCE_JUNIT_ARTIFACT_PATH}", widened, 1
+        )
+        assert mutated != text
+        assert not _acceptance_artifact_scope_is_junit_only(mutated)
+
+
+def test_acceptance_contract_rejects_fork_pr_trigger_mutation() -> None:
+    text = _acceptance_workflow_text()
+    mutated = text.replace(
+        "on:\n  push:\n    branches: [master]",
+        "on:\n  pull_request:\n  push:\n    branches: [master]",
+        1,
+    )
+    assert mutated != text
+    assert "pull_request:" in mutated
