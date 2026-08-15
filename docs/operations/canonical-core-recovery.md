@@ -238,13 +238,15 @@ never skip.
 
 ## Acceptance status (2026-08-15)
 
-- Offline gates on the final code commit `76202b1` (branch
-  `canonical-core-acceptance-recovery`): **green** — `uv run poe python-lint`
+- Offline gates on branch `canonical-core-acceptance-recovery` (final code
+  commit `76202b1` plus the 2026-08-15 final-review fix commits — CLI digest
+  removal, diagnostic-sink wiring, restore-side error mapping): **green** —
+  `uv run poe python-lint`
   ("All checks passed!"), `uv run poe python-type-check` ("Success: no issues
-  found in 78 source files"), `uv run poe format-check` ("183 files already
-  formatted"; TypeScript eslint clean), `uv run poe boundary-check` (5
+  found in 78 source files"), `uv run poe format-check` (formatted; TypeScript
+  eslint clean), `uv run poe boundary-check` (5
   contracts kept, 8 architecture tests passed), `uv run pytest -q` full
-  default suite (1411 passed, 19 skipped, 112 deselected).
+  default suite (1421 passed, 19 skipped, 112 deselected).
 - Disposable-stack integration gate: **green.** The Task 13 live run of
   `tests/integration/canonical_core -m local_stack` passed 15/15 (identity,
   canonical read, recovery) on a unique disposable project, including the

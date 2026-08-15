@@ -5,7 +5,7 @@
 **Spec:** `docs/superpowers/specs/canonical-core-acceptance-and-recovery-design.md`
 **Branch:** `canonical-core-acceptance-recovery`
 **Final code commit:** `76202b1` — Tasks 1-15 implemented on branch
-`canonical-core-acceptance-recovery` in the range `dc3f3de..HEAD` (17 commits:
+`canonical-core-acceptance-recovery` in the range `dc3f3de..HEAD` (19 commits:
 `efe9dc6` identity contracts → `76202b1` phase-one acceptance composition and
 protected workflow). This documentation commit (runbook + handoff + BACKLOG)
 follows it.
@@ -181,8 +181,10 @@ minors share one BACKLOG line per group; each group's details live here.
 - §14 Acceptance polish (Task 15): the boundary test name
   `test_no_database_url_or_pgpassword_anywhere_in_tools` overstates scope
   (scans the two canonical-core tools only); `duration_ms` bypasses the clock
-  seam; the workflow's `TEMPORAL_GRPC_PORT`/`TEMPORAL_UI_PORT` env vars are
-  dead. Verdict: deferred — rename/tighten with the next workflow touch.
+  seam. (An earlier draft of this item also called the workflow's
+  `TEMPORAL_GRPC_PORT`/`TEMPORAL_UI_PORT` env vars dead — corrected at the
+  final-branch review: `tools/local_service_stack.py` consumes both.)
+  Verdict: deferred — rename/tighten with the next workflow touch.
 
 Resolved during the plan (no BACKLOG line): the Task 3 rejection-sink wiring
 (decision 12); the Task 10 formatting drift (style commit `1c4ec05`); the
