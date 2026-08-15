@@ -16,3 +16,7 @@ def test_temporal_environment_names_are_a_closed_registry() -> None:
 
 def test_temporal_environment_names_join_the_repository_wide_registry() -> None:
     assert TEMPORAL_ENVIRONMENT_NAMES <= KNOWN_KNOWLEDGE_ENVIRONMENT_NAMES
+
+
+def test_api_environment_names_are_registered() -> None:
+    assert {"KNOWLEDGE_API_HOST", "KNOWLEDGE_API_PORT"} <= (KNOWN_KNOWLEDGE_ENVIRONMENT_NAMES)

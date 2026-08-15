@@ -75,6 +75,17 @@ CANONICAL_RECOVERY_ENVIRONMENT_NAMES: Final[frozenset[str]] = frozenset(
     }
 )
 
+#: API server fragment: the bind address the API process listens on. Staging
+#: and production have no loopback default, so both names must be supplied
+#: explicitly there.
+API_SERVER_ENVIRONMENT_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "KNOWLEDGE_ENVIRONMENT",
+        "KNOWLEDGE_API_HOST",
+        "KNOWLEDGE_API_PORT",
+    }
+)
+
 #: Repository-wide union of every approved ``KNOWLEDGE_*`` name. A loader treats
 #: any prefixed name outside this set as terminal ``configuration_unknown_key``.
 KNOWN_KNOWLEDGE_ENVIRONMENT_NAMES: Final[frozenset[str]] = frozenset(
@@ -83,4 +94,5 @@ KNOWN_KNOWLEDGE_ENVIRONMENT_NAMES: Final[frozenset[str]] = frozenset(
     | OBJECT_STORAGE_ENVIRONMENT_NAMES
     | TEMPORAL_ENVIRONMENT_NAMES
     | CANONICAL_RECOVERY_ENVIRONMENT_NAMES
+    | API_SERVER_ENVIRONMENT_NAMES
 )
