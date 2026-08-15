@@ -15,6 +15,11 @@ PostgreSQL baseline. The composition root builds the engine through
 # exceptions back), which only resolves when the diagnostics package loads
 # first. The R2 adapter's import graph relies on the same ordering.
 from personal_os.diagnostics.events import SafeToken  # noqa: F401
+from postgresql_source_store.canonical_read import (
+    ACCEPTED_READ_SOURCE_STATES,
+    PostgresqlCanonicalSourceReadStore,
+    hydrate_canonical_source_reference,
+)
 from postgresql_source_store.error_mapping import (
     DatabaseRetryPolicy,
     map_database_failure,
@@ -32,7 +37,9 @@ from postgresql_source_store.publication_store import (
 )
 
 __all__ = [
+    "ACCEPTED_READ_SOURCE_STATES",
     "DatabaseRetryPolicy",
+    "PostgresqlCanonicalSourceReadStore",
     "PostgresqlIdentityBootstrapStore",
     "PostgresqlProjectionIntentStore",
     "PostgresqlSourcePublicationStore",
@@ -40,5 +47,6 @@ __all__ = [
     "ProjectionIntentStatus",
     "ProjectionRetryPolicy",
     "classify_replay",
+    "hydrate_canonical_source_reference",
     "map_database_failure",
 ]
