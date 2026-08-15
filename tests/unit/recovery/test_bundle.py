@@ -109,7 +109,7 @@ async def test_create_then_verify_round_trip(bundle_root: Path) -> None:
         assert bundle.dump_path.read_bytes() == _DUMP_BYTES
         digest = hashlib.sha256(_OBJECT_PAYLOADS[0]).hexdigest()
         expected = (
-            bundle_root
+            bundle_root.resolve()
             / str(_BUNDLE_ID)
             / "objects"
             / "sha256"
