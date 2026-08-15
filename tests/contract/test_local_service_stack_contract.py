@@ -483,7 +483,11 @@ def test_services_have_exact_storage_and_resource_contracts() -> None:
     expected_mounts = {
         "postgresql": ["postgres-data:/var/lib/postgresql"],
         "qdrant": ["qdrant-data:/qdrant/storage"],
-        "neo4j": ["neo4j-data:/data"],
+        "neo4j": [
+            "neo4j-data:/data",
+            "./scripts/neo4j-secret-entrypoint.sh:"
+            "/opt/knowledge/bin/neo4j-secret-entrypoint.sh:ro",
+        ],
         "redis": [
             "redis-data:/data",
             "./scripts/redis-secret-entrypoint.sh:"
@@ -606,6 +610,7 @@ def test_initialization_scripts_use_strict_bounded_secret_safe_shell() -> None:
         "temporal-namespace-bootstrap.sh",
         "temporal-secret-entrypoint.sh",
         "redis-secret-entrypoint.sh",
+        "neo4j-secret-entrypoint.sh",
     }
 
     for script_name in script_names:
@@ -638,13 +643,27 @@ def test_temporal_entrypoint_reads_root_owned_secret_and_drops_back_to_temporal_
 def test_neo4j_and_redis_read_root_owned_secrets_and_drop_back_to_service_users() -> None:
     """On a real Linux host only root can read the 0600 host-owned secrets.
 
-    Neo4j's own entrypoint reads ``NEO4J_AUTH_FILE`` before it drops from
-    root to the neo4j user, so starting the service as root is sufficient.
+    Neo4j's entrypoint hand-rolls its readability check from mode bits and
+    the target user id, so even root cannot pass it for a file owned by the
+    host runner; a wrapper must materialize a neo4j-owned copy first.
     Redis's entrypoint drops to the redis user before the server reads the
     ACL file, so a wrapper must first materialize a redis-owned copy.
     """
     services = _read_yaml(COMPOSE_PATH)["services"]
     assert services["neo4j"]["user"] == "root"
+    assert services["neo4j"]["entrypoint"] == [
+        "/bin/sh",
+        "/opt/knowledge/bin/neo4j-secret-entrypoint.sh",
+    ]
+    neo4j_wrapper = (SCRIPT_DIRECTORY / "neo4j-secret-entrypoint.sh").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        "install -o neo4j -g neo4j -m 400 /run/secrets/neo4j_auth"
+        " /run/neo4j-secrets/neo4j_auth" in neo4j_wrapper
+    )
+    assert "export NEO4J_AUTH_FILE=/run/neo4j-secrets/neo4j_auth" in neo4j_wrapper
+    assert "exec /startup/docker-entrypoint.sh" in neo4j_wrapper
 
     redis_wrapper = (SCRIPT_DIRECTORY / "redis-secret-entrypoint.sh").read_text(
         encoding="utf-8"

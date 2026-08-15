@@ -90,6 +90,9 @@ services:
     mem_limit: 2560m
     cpus: 2.0
     user: root
+    entrypoint:
+      - /bin/sh
+      - /opt/knowledge/bin/neo4j-secret-entrypoint.sh
     environment:
       NEO4J_AUTH_FILE: /run/secrets/neo4j_auth
       NEO4J_server_memory_heap_initial__size: 512m
@@ -104,6 +107,7 @@ services:
       - "127.0.0.1:${NEO4J_BOLT_PORT:-7687}:7687"
     volumes:
       - neo4j-data:/data
+      - ./scripts/neo4j-secret-entrypoint.sh:/opt/knowledge/bin/neo4j-secret-entrypoint.sh:ro
     networks:
       - service-backplane
     healthcheck:
