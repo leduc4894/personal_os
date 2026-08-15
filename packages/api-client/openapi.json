@@ -1,0 +1,351 @@
+{
+  "components": {
+    "schemas": {
+      "ApiDetailValue": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "type": "array"
+          }
+        ]
+      },
+      "ApiEnvelope_LivenessData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LivenessData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[LivenessData]",
+        "type": "object"
+      },
+      "ApiEnvelope_ReadinessData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReadinessData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[ReadinessData]",
+        "type": "object"
+      },
+      "ApiErrorBody": {
+        "additionalProperties": false,
+        "description": "The failure body: registry code, safe message, retryability and details.",
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "details": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ApiDetailValue"
+            },
+            "title": "Details",
+            "type": "object"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable",
+          "details"
+        ],
+        "title": "ApiErrorBody",
+        "type": "object"
+      },
+      "ApiWarning": {
+        "additionalProperties": false,
+        "description": "One non-fatal advisory attached to a response.\n\nThe schema is fixed now for contract stability; this child registers no\nwarning vocabulary and every route returns an empty warning list. Later\nchildren must register public warning codes before using them.",
+        "properties": {
+          "code": {
+            "pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$",
+            "title": "Code",
+            "type": "string"
+          },
+          "details": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ApiDetailValue"
+            },
+            "title": "Details",
+            "type": "object"
+          },
+          "message": {
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "details"
+        ],
+        "title": "ApiWarning",
+        "type": "object"
+      },
+      "ErrorCode": {
+        "enum": [
+          "configuration_invalid",
+          "configuration_unknown_key",
+          "secret_file_missing",
+          "secret_file_outside_root",
+          "secret_file_invalid_type",
+          "secret_file_insecure_permissions",
+          "secret_file_too_large",
+          "secret_file_invalid_encoding",
+          "secret_file_empty",
+          "diagnostic_context_invalid",
+          "diagnostic_payload_rejected",
+          "internal_error",
+          "database_migration_configuration_invalid",
+          "database_connection_unavailable",
+          "database_migration_busy",
+          "database_schema_contract_invalid",
+          "database_destructive_downgrade_refused",
+          "object_storage_configuration_invalid",
+          "object_storage_input_invalid",
+          "object_storage_busy",
+          "object_storage_unavailable",
+          "object_storage_access_denied",
+          "object_storage_contract_invalid",
+          "object_storage_object_missing",
+          "object_storage_integrity_failed",
+          "object_storage_metadata_conflict",
+          "source_publish_input_invalid",
+          "source_not_found",
+          "source_already_exists",
+          "source_state_invalid",
+          "source_version_conflict",
+          "source_idempotency_mismatch",
+          "source_event_identity_mismatch",
+          "source_verified_receipt_stale",
+          "source_content_object_conflict",
+          "source_concurrency_busy",
+          "source_concurrency_invariant_failed",
+          "source_commit_outcome_unknown",
+          "projection_dispatch_unavailable",
+          "projection_intent_contract_invalid",
+          "identity_bootstrap_input_invalid",
+          "identity_bootstrap_state_conflict",
+          "canonical_read_state_invalid",
+          "canonical_recovery_environment_refused",
+          "canonical_recovery_configuration_invalid",
+          "canonical_recovery_snapshot_busy",
+          "canonical_recovery_bundle_exists",
+          "canonical_recovery_bundle_invalid",
+          "canonical_recovery_target_not_empty",
+          "canonical_recovery_dependency_unavailable",
+          "canonical_recovery_integrity_failed",
+          "canonical_recovery_restore_failed",
+          "api_request_malformed",
+          "api_request_validation_failed",
+          "api_route_not_found",
+          "api_method_not_allowed"
+        ],
+        "title": "ErrorCode",
+        "type": "string"
+      },
+      "LivenessData": {
+        "additionalProperties": false,
+        "description": "Process-liveness success data; it implies no I/O by construction.",
+        "properties": {
+          "service": {
+            "const": "api",
+            "default": "api",
+            "title": "Service",
+            "type": "string"
+          },
+          "status": {
+            "const": "live",
+            "default": "live",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "title": "LivenessData",
+        "type": "object"
+      },
+      "ReadinessChecks": {
+        "additionalProperties": false,
+        "description": "Canonical dependency check outcomes; this child tracks PostgreSQL only.",
+        "properties": {
+          "postgresql": {
+            "const": "ready",
+            "default": "ready",
+            "title": "Postgresql",
+            "type": "string"
+          },
+          "schema": {
+            "const": "ready",
+            "default": "ready",
+            "title": "Schema",
+            "type": "string"
+          }
+        },
+        "title": "ReadinessChecks",
+        "type": "object"
+      },
+      "ReadinessData": {
+        "additionalProperties": false,
+        "description": "Readiness success data; failed readiness uses an error envelope instead.",
+        "properties": {
+          "checks": {
+            "$ref": "#/components/schemas/ReadinessChecks"
+          },
+          "status": {
+            "const": "ready",
+            "default": "ready",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "title": "ReadinessData",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Personal Knowledge API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/health/live": {
+      "get": {
+        "description": "Report process liveness: a constant payload, no dependency consulted.",
+        "operationId": "getApiLiveness",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_LivenessData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Liveness"
+      }
+    },
+    "/api/health/ready": {
+      "get": {
+        "operationId": "getApiReadiness",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_ReadinessData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Readiness Endpoint"
+      }
+    }
+  }
+}

@@ -35,13 +35,9 @@ def _serve(_arguments: Namespace) -> int:
 
 
 def _export_openapi(arguments: Namespace) -> int:
-    # api_runtime.openapi_export lands with the contract-export task; the
-    # import stays inside this handler so the shell never needs it, and the
-    # ignore exists only until that module ships.
-    from api_runtime.openapi_export import export_openapi  # type: ignore[import-untyped]
+    from api_runtime.openapi_export import export_openapi
 
-    exit_code: int = export_openapi(arguments.output)
-    return exit_code
+    return export_openapi(arguments.output)
 
 
 def _configure_serve(parser: ArgumentParser) -> None:

@@ -183,6 +183,21 @@ def test_generated_typescript_clients_declare_no_source_publication_endpoint() -
     )
 
 
+def _rendered_endpoint_surface(parsed: object) -> str:
+    """Render only the endpoint-declaring subtree of one OpenAPI document.
+
+    The ``paths`` subtree (path templates, operation ids, summaries, tags) is
+    where a document declares endpoints. The ``components`` subtree is data
+    schema, not endpoint declaration: it legitimately embeds registry enums
+    such as the error-code table, whose values (for example
+    ``source_version_conflict``) name error conditions, not endpoints, and the
+    generated API-client snapshot carries that schema verbatim.
+    """
+    if isinstance(parsed, dict) and isinstance(parsed.get("paths"), dict):
+        return json.dumps(parsed["paths"], default=repr)
+    return ""
+
+
 def test_openapi_documents_declare_no_source_publication_path() -> None:
     offenders: list[str] = []
     for path in _iter_surface_documents():
@@ -191,7 +206,7 @@ def test_openapi_documents_declare_no_source_publication_path() -> None:
             parsed = json.loads(path.read_text(encoding="utf-8"))
         else:
             parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
-        rendered = json.dumps(parsed, default=repr)
+        rendered = _rendered_endpoint_surface(parsed)
         for token in PUBLICATION_ENDPOINT_TOKENS:
             if token in rendered:
                 offenders.append(f"{path}: endpoint token {token!r}")
