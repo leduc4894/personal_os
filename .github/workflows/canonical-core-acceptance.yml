@@ -58,6 +58,12 @@ jobs:
           cache-dependency-glob: uv.lock
       - name: Sync frozen Python workspace
         run: uv sync --all-packages --frozen
+      - name: Prefetch pinned stack images
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose --file infra/compose/compose.yaml \
+            --project-name "$LOCAL_STACK_TEST_PROJECT" pull --quiet
       - name: Install verified Docker Compose v2.30.0
         shell: bash
         run: |

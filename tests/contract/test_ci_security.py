@@ -191,6 +191,29 @@ def test_frozen_installs_and_frozen_verify() -> None:
     )
 
 
+def test_stack_workflows_prefetch_images_before_live_gates() -> None:
+    """`compose up` must not spend its startup deadline pulling images.
+
+    The stack startup deadline bounds health waiting; a fresh runner pulling
+    gigabytes of pinned images inside `compose up` can exceed it and fail
+    closed with stack_startup_failed. Every workflow that brings the stack
+    up must prefetch the pinned images first.
+    """
+    workflow_paths = (
+        LOCAL_STACK_WORKFLOW_PATH,
+        CANONICAL_POSTGRESQL_WORKFLOW_PATH,
+        WORKFLOW_DIRECTORY / "canonical-core-acceptance.yml",
+    )
+    for workflow_path in workflow_paths:
+        text = workflow_path.read_text(encoding="utf-8")
+        assert "Prefetch pinned stack images" in text, (
+            f"{workflow_path.name} must prefetch pinned images before live gates"
+        )
+        assert "pull --quiet" in text, (
+            f"{workflow_path.name} prefetch must pull pinned images quietly"
+        )
+
+
 def test_no_secrets_docker_services_deploy_or_publish() -> None:
     for forbidden in ("secrets.", "docker", "services:", "deploy", "publish"):
         assert forbidden not in WORKFLOW_TEXT, (

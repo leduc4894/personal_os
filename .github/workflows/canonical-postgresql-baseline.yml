@@ -131,6 +131,12 @@ jobs:
           fi
       - name: Sync frozen Python workspace
         run: uv sync --all-packages --frozen
+      - name: Prefetch pinned stack images
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose --file infra/compose/compose.yaml \
+            --project-name "$LOCAL_STACK_TEST_PROJECT" pull --quiet
       - name: Exercise PostgreSQL 18.4 baseline lifecycle
         shell: bash
         run: |
