@@ -6,8 +6,9 @@ import importlib
 import os
 import socket
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -88,6 +89,35 @@ def _forbid_side_effect(*_args: object, **_kwargs: object) -> None:
     )
 
 
+@contextlib.contextmanager
+def _purge_module_registry() -> Iterator[None]:
+    """Drop the harness module set from ``sys.modules`` for the wrapped block.
+
+    Every entry is restored to its exact pre-block object afterwards. Restoring
+    is not cosmetic: the import system binds a submodule on its parent package
+    only when that submodule is freshly executed, so a bare purge followed by a
+    re-import leaves a partial package in the registry (attributes such as
+    ``uvicorn.logging`` stay missing because the old submodules are still
+    cached). Later in-process consumers — ``logging.config`` resolving
+    ``uvicorn.logging.DefaultFormatter`` inside ``uvicorn.Config`` — then fail
+    with ``ValueError`` in otherwise-unrelated tests. Snapshotting keeps the
+    laziness proofs hermetic instead of poisoning the shared session.
+    """
+    snapshot: dict[str, ModuleType] = {
+        name: sys.modules[name] for name in PURGED_MODULES if name in sys.modules
+    }
+    for name in PURGED_MODULES:
+        sys.modules.pop(name, None)
+    try:
+        yield
+    finally:
+        for name in PURGED_MODULES:
+            if name in snapshot:
+                sys.modules[name] = snapshot[name]
+            else:
+                sys.modules.pop(name, None)
+
+
 def _module_body_imports(node: ast.AST) -> set[str]:
     """Collect imports reachable at module top level (and inside class bodies).
 
@@ -132,18 +162,16 @@ def test_import_and_shell_invocations_touch_no_env_secret_file_or_network(
     monkeypatch: pytest.MonkeyPatch,
     module_name: str,
 ) -> None:
-    for name in PURGED_MODULES:
-        sys.modules.pop(name, None)
+    with _purge_module_registry():
+        monkeypatch.setattr(os, "getenv", _forbid_side_effect)
+        monkeypatch.setattr(Path, "read_text", _forbid_side_effect)
+        monkeypatch.setattr(socket, "create_connection", _forbid_side_effect)
 
-    monkeypatch.setattr(os, "getenv", _forbid_side_effect)
-    monkeypatch.setattr(Path, "read_text", _forbid_side_effect)
-    monkeypatch.setattr(socket, "create_connection", _forbid_side_effect)
+        module = importlib.import_module(module_name)
 
-    module = importlib.import_module(module_name)
-
-    for argv in SECRET_SAFE_INVOCATIONS:
-        with contextlib.suppress(SystemExit):
-            module.run(list(argv))
+        for argv in SECRET_SAFE_INVOCATIONS:
+            with contextlib.suppress(SystemExit):
+                module.run(list(argv))
 
 
 @pytest.mark.parametrize("module_name", WRAPPERS, ids=WRAPPERS)
@@ -151,21 +179,19 @@ def test_shell_paths_never_execute_lazy_runtime_check_import(
     module_name: str,
 ) -> None:
     lazy_module = LAZY_COMPOSITION_ROOTS[module_name]
-    for name in PURGED_MODULES:
-        sys.modules.pop(name, None)
+    with _purge_module_registry():
+        module = importlib.import_module(module_name)
+        assert lazy_module not in sys.modules, (
+            f"importing {module_name} eagerly imported the lazy {lazy_module}"
+        )
 
-    module = importlib.import_module(module_name)
-    assert lazy_module not in sys.modules, (
-        f"importing {module_name} eagerly imported the lazy {lazy_module}"
-    )
+        for argv in ALL_SHELL_INVOCATIONS:
+            with contextlib.suppress(SystemExit):
+                module.run(list(argv))
 
-    for argv in ALL_SHELL_INVOCATIONS:
-        with contextlib.suppress(SystemExit):
-            module.run(list(argv))
-
-    assert lazy_module not in sys.modules, (
-        f"a shell-only invocation executed the lazy {lazy_module} import"
-    )
+        assert lazy_module not in sys.modules, (
+            f"a shell-only invocation executed the lazy {lazy_module} import"
+        )
 
 
 @pytest.mark.parametrize("module_name", WRAPPERS, ids=WRAPPERS)
@@ -200,22 +226,35 @@ def test_runtime_check_import_is_lazy_inside_a_function(module_name: str) -> Non
 
 @pytest.mark.parametrize("module_name", WRAPPERS, ids=WRAPPERS)
 def test_shell_paths_never_import_server_or_web_framework(module_name: str) -> None:
-    for name in PURGED_MODULES:
-        sys.modules.pop(name, None)
-
-    module = importlib.import_module(module_name)
-    for heavy_name in HEAVY_SERVER_MODULES:
-        assert heavy_name not in sys.modules, (
-            f"importing {module_name} eagerly imported the server module {heavy_name}"
-        )
-
-    for argv in ALL_SHELL_INVOCATIONS:
-        with contextlib.suppress(SystemExit):
-            module.run(list(argv))
+    with _purge_module_registry():
+        module = importlib.import_module(module_name)
         for heavy_name in HEAVY_SERVER_MODULES:
             assert heavy_name not in sys.modules, (
-                f"a shell-only invocation imported the server module {heavy_name}"
+                f"importing {module_name} eagerly imported the server module {heavy_name}"
             )
+
+        for argv in ALL_SHELL_INVOCATIONS:
+            with contextlib.suppress(SystemExit):
+                module.run(list(argv))
+            for heavy_name in HEAVY_SERVER_MODULES:
+                assert heavy_name not in sys.modules, (
+                    f"a shell-only invocation imported the server module {heavy_name}"
+                )
+
+
+def test_purge_cycle_restores_original_module_registry_entries() -> None:
+    """A completed purge must leave the exact original module objects in place.
+
+    Regression guard for the session-poisoning bug where a bare purge left a
+    re-imported partial package behind: identity of the pre-purge object is the
+    property later in-process consumers depend on.
+    """
+    original = importlib.import_module("personal_os.command_shell")
+    with _purge_module_registry():
+        assert "personal_os.command_shell" not in sys.modules
+        fresh = importlib.import_module("personal_os.command_shell")
+        assert fresh is not original
+    assert sys.modules["personal_os.command_shell"] is original
 
 
 @pytest.mark.parametrize("module_name", WRAPPERS, ids=WRAPPERS)
