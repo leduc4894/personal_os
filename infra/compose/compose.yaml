@@ -93,6 +93,8 @@ services:
     entrypoint:
       - /bin/sh
       - /opt/knowledge/bin/neo4j-secret-entrypoint.sh
+    command:
+      - neo4j
     environment:
       NEO4J_AUTH_FILE: /run/secrets/neo4j_auth
       NEO4J_server_memory_heap_initial__size: 512m

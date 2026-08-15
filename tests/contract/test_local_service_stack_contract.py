@@ -653,6 +653,9 @@ def test_neo4j_and_redis_read_root_owned_secrets_and_drop_back_to_service_users(
         "/bin/sh",
         "/opt/knowledge/bin/neo4j-secret-entrypoint.sh",
     ]
+    # Compose does not append the image CMD when the entrypoint is overridden,
+    # so the server command must stay explicit.
+    assert services["neo4j"]["command"] == ["neo4j"]
     neo4j_wrapper = (SCRIPT_DIRECTORY / "neo4j-secret-entrypoint.sh").read_text(encoding="utf-8")
     assert (
         "install -o neo4j -g neo4j -m 400 /run/secrets/neo4j_auth"
