@@ -2,9 +2,11 @@
 
 This package implements the core source publication contracts (idempotent
 preflight and replay hydration now; version commits and citation lookups in
-later tasks) over the canonical PostgreSQL baseline. The composition root
-builds the engine through :mod:`postgresql_source_store.engine` and constructs
-:class:`PostgresqlSourcePublicationStore` directly.
+later tasks) and the atomic identity bootstrap transaction over the canonical
+PostgreSQL baseline. The composition root builds the engine through
+:mod:`postgresql_source_store.engine` and constructs
+:class:`PostgresqlSourcePublicationStore` and
+:class:`PostgresqlIdentityBootstrapStore` directly.
 """
 
 # The diagnostics import below precedes every error-contracts import: the core
@@ -17,6 +19,7 @@ from postgresql_source_store.error_mapping import (
     DatabaseRetryPolicy,
     map_database_failure,
 )
+from postgresql_source_store.identity_bootstrap import PostgresqlIdentityBootstrapStore
 from postgresql_source_store.projection_intents import (
     PostgresqlProjectionIntentStore,
     ProjectionDiagnosticSink,
@@ -30,6 +33,7 @@ from postgresql_source_store.publication_store import (
 
 __all__ = [
     "DatabaseRetryPolicy",
+    "PostgresqlIdentityBootstrapStore",
     "PostgresqlProjectionIntentStore",
     "PostgresqlSourcePublicationStore",
     "ProjectionDiagnosticSink",
