@@ -1,20 +1,25 @@
-"""Narrow in-memory fakes proving the publication service orchestration order.
+"""Narrow in-memory fakes proving the publication and read service orchestrations.
 
 Every fake records the exact port call sequence into one shared ledger so a
 test can assert the full cross-port order (store preflight, object-store
-resolve/store, receipt validation, commit) with string entries only. The fakes
-never retain, echo or log command payloads: titles, idempotency keys and
-fingerprints are compared by identity/equality in the assertions, not recorded.
+resolve/store, receipt validation, commit) with string entries only. The read
+fakes extend the same discipline: the scripted current-reference resolver
+records every resolve call, and the leak-checking object store proves no byte
+reaches the consumer before verification passes and that the reader closes on
+every exit path. The fakes never retain, echo or log command payloads: titles,
+idempotency keys and fingerprints are compared by identity/equality in the
+assertions, not recorded.
 """
 
 from __future__ import annotations
 
 import hashlib
 from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Final
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from personal_os.diagnostics.context import DiagnosticContext, create_diagnostic_context
 from personal_os.error_contracts.codes import ErrorCode
@@ -24,9 +29,11 @@ from personal_os.object_storage import (
     ContentDigest,
     ExpectedObject,
     VerificationMethod,
+    VerifiedObjectReader,
     VerifiedObjectReceipt,
     derive_canonical_object_key,
 )
+from personal_os.object_storage.errors import ObjectStorageError
 from personal_os.sources.actors import ActorKind, SourceActor
 from personal_os.sources.commands import (
     CreateSourceVersion,
@@ -37,6 +44,11 @@ from personal_os.sources.commands import (
 )
 from personal_os.sources.errors import SourcePublicationError
 from personal_os.sources.fingerprint import RequestFingerprint, SourceVersionCommand
+from personal_os.sources.reading import (
+    CanonicalReadStateError,
+    CanonicalSourceReference,
+    ReadCurrentSourceCommand,
+)
 from personal_os.sources.results import PublicationOutcome, SourceVersionPublicationResult
 
 #: Shared ledger entry constants: one string per observed port call.
@@ -303,3 +315,146 @@ def build_idempotency_mismatch_error() -> SourcePublicationError:
     """The typed error a preflight mismatch raises before any object-store call."""
 
     return SourcePublicationError(ErrorCode.SOURCE_IDEMPOTENCY_MISMATCH)
+
+
+class FakeCanonicalSourceReadStore:
+    """Scripted current-reference resolver recording every call.
+
+    ``reference`` is the resolved current version, or ``None`` to model a
+    source whose canonical current pointer is missing (the adapter raises the
+    typed read-state error). The read store port has no mutating method, so
+    ``resolve_calls`` is the complete observable behavior.
+    """
+
+    def __init__(self, reference: CanonicalSourceReference | None) -> None:
+        self.reference = reference
+        self.resolve_calls: list[tuple[UUID, UUID]] = []
+
+    async def resolve_current(
+        self, command: ReadCurrentSourceCommand, diagnostic_context: DiagnosticContext
+    ) -> CanonicalSourceReference:
+        self.resolve_calls.append((command.workspace_id, command.source_id))
+        if self.reference is None:
+            raise CanonicalReadStateError(source_id=command.source_id)
+        return self.reference
+
+
+class CloseRecordingVerifiedReader:
+    """Verified-reader fake whose close() is observable for cancellation tests.
+
+    Serves fixed chunks asynchronously and counts close() calls; it never
+    retains or echoes anything beyond the canonical bytes it was given.
+    """
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._remaining = list(chunks)
+        self.close_calls = 0
+
+    async def read(self, size_bytes: int = 1_048_576) -> bytes:
+        if not self._remaining:
+            return b""
+        return self._remaining.pop(0)[: max(size_bytes, 0)]
+
+    def __aiter__(self) -> CloseRecordingVerifiedReader:
+        return self
+
+    async def __anext__(self) -> bytes:
+        if not self._remaining:
+            raise StopAsyncIteration
+        return self._remaining.pop(0)
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class LeakCheckingObjectStore:
+    """Open/verify-only object store that proves no byte reaches the consumer early.
+
+    ``open_verified_reader`` fails before yielding when ``missing`` or
+    ``fail_verification`` is set, so the consumer body can never observe a
+    single unverified byte. Every mutation-port method records itself and
+    raises: the read path must never resolve, store or verify for write. Reader
+    teardown removes the spooled entry exactly like the R2 adapter contract.
+    """
+
+    def __init__(
+        self,
+        *,
+        canonical_bytes: bytes = _CANONICAL_BYTES,
+        fail_verification: bool = False,
+        missing: bool = False,
+    ) -> None:
+        self.canonical_bytes = canonical_bytes
+        self.fail_verification = fail_verification
+        self.missing = missing
+        self.opened: list[ContentDigest] = []
+        self.closed = 0
+        self.spool_removed: list[ContentDigest] = []
+        self.mutation_calls: list[str] = []
+
+    def open_verified_reader(
+        self, expected: ExpectedObject
+    ) -> AbstractAsyncContextManager[VerifiedObjectReader]:
+        return self._open_verified_reader(expected)
+
+    @asynccontextmanager
+    async def _open_verified_reader(
+        self, expected: ExpectedObject
+    ) -> AsyncIterator[VerifiedObjectReader]:
+        self.opened.append(expected.content_digest)
+        if self.missing:
+            raise ObjectStorageError(ErrorCode.OBJECT_STORAGE_OBJECT_MISSING)
+        if self.fail_verification:
+            raise ObjectStorageError(ErrorCode.OBJECT_STORAGE_INTEGRITY_FAILED)
+        reader = CloseRecordingVerifiedReader([self.canonical_bytes])
+        try:
+            yield reader
+        finally:
+            reader.close()
+            self.closed += 1
+            self.spool_removed.append(expected.content_digest)
+
+    def _reject_mutation(self, entry: str) -> None:
+        self.mutation_calls.append(entry)
+        raise AssertionError(f"canonical read must never mutate state: {entry}")
+
+    async def resolve_verified_object(
+        self, expected: ExpectedObject
+    ) -> VerifiedObjectReceipt | None:
+        self._reject_mutation(OBJECT_STORE_RESOLVE)
+        raise AssertionError(OBJECT_STORE_RESOLVE)
+
+    async def store_stream(
+        self,
+        stream: AsyncIterator[bytes],
+        expected_size_bytes: int,
+        media_type: str,
+        claimed_sha256: str | None = None,
+    ) -> VerifiedObjectReceipt:
+        self._reject_mutation(OBJECT_STORE_STORE_STREAM)
+        raise AssertionError(OBJECT_STORE_STORE_STREAM)
+
+    async def verify_existing_object(self, expected: ExpectedObject) -> VerifiedObjectReceipt:
+        self._reject_mutation("object_store.verify_existing_object")
+        raise AssertionError("object_store.verify_existing_object")
+
+
+def build_read_command() -> ReadCurrentSourceCommand:
+    """A valid read command for a fresh workspace and source."""
+
+    return ReadCurrentSourceCommand(workspace_id=uuid4(), source_id=uuid4())
+
+
+def build_read_reference(
+    command: ReadCurrentSourceCommand, *, content_version: int = 1
+) -> CanonicalSourceReference:
+    """The canonical current-source reference a read store resolves for ``command``."""
+
+    return CanonicalSourceReference(
+        workspace_id=command.workspace_id,
+        source_id=command.source_id,
+        source_version_id=uuid4(),
+        content_version=content_version,
+        expected_object=build_expected_object(),
+        committed_at=datetime.now(UTC),
+    )

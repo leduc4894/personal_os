@@ -106,6 +106,8 @@ class EventName(StrEnum):
     IDENTITY_BOOTSTRAP_SUCCEEDED = "identity_bootstrap_succeeded"
     IDENTITY_BOOTSTRAP_REPLAYED = "identity_bootstrap_replayed"
     IDENTITY_BOOTSTRAP_REJECTED = "identity_bootstrap_rejected"
+    CANONICAL_SOURCE_READ_SUCCEEDED = "canonical_source_read_succeeded"
+    CANONICAL_SOURCE_READ_FAILED = "canonical_source_read_failed"
 
 
 type SafeDiagnosticScalar = (
@@ -439,6 +441,18 @@ EVENT_DEFINITIONS: Final[Mapping[EventName, EventDefinition]] = MappingProxyType
             result_code=ResultCode.REJECTED,
             required_fields=frozenset({"error_code"}),
             allowed_fields=frozenset({"workspace_id", "error_code"}),
+        ),
+        EventName.CANONICAL_SOURCE_READ_SUCCEEDED: EventDefinition(
+            level=DiagnosticLevel.INFO,
+            result_code=ResultCode.SUCCEEDED,
+            required_fields=frozenset({"source_id", "workspace_id", "source_version_id"}),
+            allowed_fields=frozenset({"source_id", "workspace_id", "source_version_id"}),
+        ),
+        EventName.CANONICAL_SOURCE_READ_FAILED: EventDefinition(
+            level=DiagnosticLevel.ERROR,
+            result_code=ResultCode.FAILED,
+            required_fields=frozenset({"error_code"}),
+            allowed_fields=frozenset({"source_id", "workspace_id", "error_code"}),
         ),
     }
 )

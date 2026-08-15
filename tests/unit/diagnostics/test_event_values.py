@@ -60,4 +60,6 @@ def test_event_names_are_closed() -> None:
         "identity_bootstrap_succeeded",
         "identity_bootstrap_replayed",
         "identity_bootstrap_rejected",
+        "canonical_source_read_succeeded",
+        "canonical_source_read_failed",
     }

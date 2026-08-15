@@ -1,18 +1,20 @@
-"""Low-cardinality source-publication metrics contract and in-memory recorder.
+"""Low-cardinality source metrics contracts and in-memory recorders.
 
 Every metric label is a closed :class:`enum.StrEnum` member: publication
 operation/outcome/rejection reason, transaction retry reason, projection
-kind/outcome/backlog status and dispatch error code. UUIDs, idempotency keys,
-digests, titles, SQL text and provider messages are never accepted as labels
-and never recorded. :data:`SOURCE_METRIC_CONTRACTS` pins the exact metric names
-and their label dimensions from the source version publication spec.
+kind/outcome/backlog status, dispatch error code and canonical read outcome.
+UUIDs, idempotency keys, digests, titles, SQL text and provider messages are
+never accepted as labels and never recorded. :data:`SOURCE_METRIC_CONTRACTS`
+pins the exact metric names and their label dimensions from the source version
+publication and canonical read specs.
 
-:class:`SourcePublicationMetrics` is the injectable Protocol every publication
-path depends on; :class:`InMemorySourcePublicationMetrics` is the
-test/standalone implementation sufficient for runtime checks and tests without
-introducing Prometheus. A production sink implements the same Protocol behind
-the boundary and, like the in-memory recorder, must reject negative or
-non-finite duration/age values.
+:class:`SourcePublicationMetrics` and :class:`CanonicalReadMetrics` are the
+injectable Protocols their paths depend on;
+:class:`InMemorySourcePublicationMetrics` and
+:class:`InMemoryCanonicalReadMetrics` are the test/standalone implementations
+sufficient for runtime checks and tests without introducing Prometheus. A
+production sink implements the same Protocol behind the boundary and, like the
+in-memory recorders, must reject negative or non-finite duration/age values.
 """
 
 from __future__ import annotations
@@ -28,6 +30,9 @@ from typing import Final, Protocol, runtime_checkable
 #: Maximum number of retained per-publication records. The recorder is a bounded
 #: ring buffer for tests and standalone runs, never an unbounded audit log.
 _MAXIMUM_PUBLICATION_RECORDS: Final[int] = 4096
+
+#: Maximum number of retained per-read records, bounded like the publication ring.
+_MAXIMUM_READ_RECORDS: Final[int] = 4096
 
 
 class PublicationOperation(StrEnum):
@@ -96,6 +101,13 @@ class ProjectionDispatchErrorCode(StrEnum):
     PROJECTION_INTENT_CONTRACT_INVALID = "projection_intent_contract_invalid"
 
 
+class ReadOutcome(StrEnum):
+    """The closed set of canonical current-source read outcomes used as labels."""
+
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
 #: The exact required metric names and their label dimensions. IDs, keys and
 #: digests are never metric labels, so no dimension names one.
 SOURCE_METRIC_CONTRACTS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
@@ -110,6 +122,8 @@ SOURCE_METRIC_CONTRACTS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
         "projection_dispatch_total": frozenset({"projection_kind", "outcome", "error_code"}),
         "projection_dispatch_duration_seconds": frozenset({"projection_kind", "outcome"}),
         "projection_lease_reclaimed_total": frozenset({"projection_kind"}),
+        "canonical_source_read_total": frozenset({"outcome"}),
+        "canonical_source_read_duration_seconds": frozenset({"outcome"}),
     }
 )
 
@@ -127,6 +141,18 @@ class PublicationRecord:
     duration_seconds: float
 
 
+@dataclass(frozen=True, slots=True)
+class CanonicalReadRecord:
+    """One recorded canonical current-source read outcome.
+
+    Carries only the closed outcome enum and a finite non-negative duration;
+    never a UUID, digest, title or byte count of the read content.
+    """
+
+    outcome: ReadOutcome
+    duration_seconds: float
+
+
 def _validate_finite_non_negative(field_name: str, value: float) -> None:
     if not math.isfinite(value) or value < 0:
         raise ValueError(f"{field_name} must be finite and non-negative")
@@ -135,6 +161,15 @@ def _validate_finite_non_negative(field_name: str, value: float) -> None:
 def _validate_label(field_name: str, expected_type: type, value: object) -> None:
     if not isinstance(value, expected_type):
         raise ValueError(f"{field_name} label must be a closed enum member")
+
+
+@runtime_checkable
+class CanonicalReadMetrics(Protocol):
+    """The low-cardinality canonical current-source read metrics sink."""
+
+    def record_read(self, *, outcome: ReadOutcome, duration_seconds: float) -> None:
+        """Record one completed read outcome and its duration in seconds."""
+        ...
 
 
 @runtime_checkable
@@ -344,3 +379,33 @@ class InMemorySourcePublicationMetrics:
 
     def __repr__(self) -> str:
         return "InMemorySourcePublicationMetrics(redacted)"
+
+
+class InMemoryCanonicalReadMetrics:
+    """Bounded in-memory recorder implementing :class:`CanonicalReadMetrics`.
+
+    Sufficient for runtime checks and tests without introducing Prometheus. It
+    keeps at most :data:`_MAXIMUM_READ_RECORDS` read records in a ring buffer,
+    keyed only by the closed outcome enum, and rejects negative or non-finite
+    durations and any non-enum outcome so a UUID, digest or byte count of the
+    read content can never become a label.
+    """
+
+    def __init__(self) -> None:
+        self._reads: deque[CanonicalReadRecord] = deque(maxlen=_MAXIMUM_READ_RECORDS)
+
+    def record_read(self, *, outcome: ReadOutcome, duration_seconds: float) -> None:
+        _validate_label("outcome", ReadOutcome, outcome)
+        _validate_finite_non_negative("duration_seconds", duration_seconds)
+        self._reads.append(CanonicalReadRecord(outcome=outcome, duration_seconds=duration_seconds))
+
+    def read_records(self) -> list[CanonicalReadRecord]:
+        """A snapshot list of recorded read outcomes (oldest first)."""
+
+        return list(self._reads)
+
+    def read_count(self, outcome: ReadOutcome) -> int:
+        return sum(1 for record in self._reads if record.outcome is outcome)
+
+    def __repr__(self) -> str:
+        return "InMemoryCanonicalReadMetrics(redacted)"

@@ -62,6 +62,7 @@ class ErrorCode(StrEnum):
     PROJECTION_INTENT_CONTRACT_INVALID = "projection_intent_contract_invalid"
     IDENTITY_BOOTSTRAP_INPUT_INVALID = "identity_bootstrap_input_invalid"
     IDENTITY_BOOTSTRAP_STATE_CONFLICT = "identity_bootstrap_state_conflict"
+    CANONICAL_READ_STATE_INVALID = "canonical_read_state_invalid"
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,6 +330,12 @@ ERROR_DEFINITIONS: Final[Mapping[ErrorCode, ErrorDefinition]] = MappingProxyType
             is_retryable=False,
             safe_message="identity bootstrap state conflicts with canonical state",
             allowed_detail_fields=frozenset({}),
+        ),
+        ErrorCode.CANONICAL_READ_STATE_INVALID: ErrorDefinition(
+            category=ErrorCategory.INTEGRITY,
+            is_retryable=False,
+            safe_message="The canonical current-source reference is missing or inconsistent",
+            allowed_detail_fields=frozenset({"source_id"}),
         ),
     }
 )

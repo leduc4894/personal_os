@@ -16,6 +16,8 @@ from personal_os.diagnostics.events import ShortDigest
 from personal_os.sources.commands import IdempotencyKey
 from personal_os.sources.metrics import (
     SOURCE_METRIC_CONTRACTS,
+    CanonicalReadMetrics,
+    InMemoryCanonicalReadMetrics,
     InMemorySourcePublicationMetrics,
     ProjectionBacklogStatus,
     ProjectionDispatchErrorCode,
@@ -24,11 +26,12 @@ from personal_os.sources.metrics import (
     PublicationMetricOutcome,
     PublicationOperation,
     PublicationRejectionReason,
+    ReadOutcome,
     SourcePublicationMetrics,
     TransactionRetryReason,
 )
 
-#: The exact required metric contracts from spec section 14.
+#: The exact required metric contracts from spec section 14 and the read spec.
 EXPECTED_METRIC_CONTRACTS = {
     "source_version_publish_total": frozenset({"operation", "outcome"}),
     "source_version_publish_duration_seconds": frozenset({"operation", "outcome"}),
@@ -40,6 +43,8 @@ EXPECTED_METRIC_CONTRACTS = {
     "projection_dispatch_total": frozenset({"projection_kind", "outcome", "error_code"}),
     "projection_dispatch_duration_seconds": frozenset({"projection_kind", "outcome"}),
     "projection_lease_reclaimed_total": frozenset({"projection_kind"}),
+    "canonical_source_read_total": frozenset({"outcome"}),
+    "canonical_source_read_duration_seconds": frozenset({"outcome"}),
 }
 
 
@@ -83,11 +88,14 @@ def test_label_vocabularies_are_closed_enums() -> None:
         "projection_dispatch_unavailable",
         "projection_intent_contract_invalid",
     }
+    assert {member.value for member in ReadOutcome} == {"succeeded", "failed"}
 
 
 def test_in_memory_recorder_satisfies_the_protocol() -> None:
     recorder = InMemorySourcePublicationMetrics()
     assert isinstance(recorder, SourcePublicationMetrics)
+    read_recorder = InMemoryCanonicalReadMetrics()
+    assert isinstance(read_recorder, CanonicalReadMetrics)
 
 
 def test_in_memory_recorder_records_low_cardinality_values() -> None:
