@@ -161,6 +161,12 @@ cmd = "lint-imports"
 [tool.poe.tasks.boundary-contract-tests]
 cmd = "pytest tests/contract/test_architecture_boundaries.py -q"
 
+# Canonical-core acceptance and recovery feature gate: the unit directories of
+# the composed domain services, adapters, runtime configuration and the
+# repository-internal operations CLI.
+[tool.poe.tasks.canonical-core-test]
+cmd = "pytest tests/unit/runtime_configuration tests/unit/identity tests/unit/sources tests/unit/recovery tests/unit/postgresql_source_store tests/unit/tools -q"
+
 [tool.poe.tasks.python-build]
 cmd = "uv build --all-packages --clear"
 

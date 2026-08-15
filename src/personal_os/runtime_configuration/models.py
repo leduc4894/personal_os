@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 
@@ -68,3 +68,31 @@ class RuntimeSettings(BaseSettings):
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         del settings_cls, env_settings, dotenv_settings, file_secret_settings
         return (init_settings,)
+
+
+class CanonicalRecoverySettings(BaseModel):
+    """Frozen, validated snapshot of the canonical recovery configuration.
+
+    The snapshot carries the operation environment and the operator-owned
+    private backup root, and nothing else. The backup root may reveal host
+    layout, so it stays out of every rendered diagnostic: both ``__repr__``
+    and ``__str__`` return a constant redacted token (spec 14).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", validate_default=True)
+
+    environment: RuntimeEnvironment = RuntimeEnvironment.LOCAL
+    backup_root: Path
+
+    @field_validator("backup_root")
+    @classmethod
+    def require_absolute_backup_root(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("backup root must be absolute")
+        return value
+
+    def __repr__(self) -> str:
+        return "CanonicalRecoverySettings(redacted)"
+
+    def __str__(self) -> str:
+        return "CanonicalRecoverySettings(redacted)"

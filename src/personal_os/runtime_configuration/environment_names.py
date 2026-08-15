@@ -67,6 +67,14 @@ TEMPORAL_ENVIRONMENT_NAMES: Final[frozenset[str]] = frozenset(
     }
 )
 
+#: Canonical recovery fragment: the operator-owned private backup root.
+CANONICAL_RECOVERY_ENVIRONMENT_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "KNOWLEDGE_ENVIRONMENT",
+        "KNOWLEDGE_CANONICAL_BACKUP_ROOT",
+    }
+)
+
 #: Repository-wide union of every approved ``KNOWLEDGE_*`` name. A loader treats
 #: any prefixed name outside this set as terminal ``configuration_unknown_key``.
 KNOWN_KNOWLEDGE_ENVIRONMENT_NAMES: Final[frozenset[str]] = frozenset(
@@ -74,4 +82,5 @@ KNOWN_KNOWLEDGE_ENVIRONMENT_NAMES: Final[frozenset[str]] = frozenset(
     | DATABASE_ENVIRONMENT_NAMES
     | OBJECT_STORAGE_ENVIRONMENT_NAMES
     | TEMPORAL_ENVIRONMENT_NAMES
+    | CANONICAL_RECOVERY_ENVIRONMENT_NAMES
 )
