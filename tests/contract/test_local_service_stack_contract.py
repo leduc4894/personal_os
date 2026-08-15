@@ -484,7 +484,11 @@ def test_services_have_exact_storage_and_resource_contracts() -> None:
         "postgresql": ["postgres-data:/var/lib/postgresql"],
         "qdrant": ["qdrant-data:/qdrant/storage"],
         "neo4j": ["neo4j-data:/data"],
-        "redis": ["redis-data:/data"],
+        "redis": [
+            "redis-data:/data",
+            "./scripts/redis-secret-entrypoint.sh:"
+            "/opt/knowledge/bin/redis-secret-entrypoint.sh:ro",
+        ],
         "temporal": [
             "./config/temporal/dynamicconfig.yaml:/etc/temporal/dynamicconfig.yaml:ro",
             "./scripts/temporal-secret-entrypoint.sh:"
@@ -601,6 +605,7 @@ def test_initialization_scripts_use_strict_bounded_secret_safe_shell() -> None:
         "temporal-schema-setup.sh",
         "temporal-namespace-bootstrap.sh",
         "temporal-secret-entrypoint.sh",
+        "redis-secret-entrypoint.sh",
     }
 
     for script_name in script_names:
@@ -628,6 +633,26 @@ def test_temporal_entrypoint_reads_root_owned_secret_and_drops_back_to_temporal_
     script = (SCRIPT_DIRECTORY / "temporal-secret-entrypoint.sh").read_text(encoding="utf-8")
     assert "su temporal -c" in script
     assert "exec temporal-server --allow-no-auth start" in script
+
+
+def test_neo4j_and_redis_read_root_owned_secrets_and_drop_back_to_service_users() -> None:
+    """On a real Linux host only root can read the 0600 host-owned secrets.
+
+    Neo4j's own entrypoint reads ``NEO4J_AUTH_FILE`` before it drops from
+    root to the neo4j user, so starting the service as root is sufficient.
+    Redis's entrypoint drops to the redis user before the server reads the
+    ACL file, so a wrapper must first materialize a redis-owned copy.
+    """
+    services = _read_yaml(COMPOSE_PATH)["services"]
+    assert services["neo4j"]["user"] == "root"
+
+    redis_wrapper = (SCRIPT_DIRECTORY / "redis-secret-entrypoint.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "install -o redis -g redis -m 400 /run/secrets/redis_acl /run/redis/redis_acl" in (
+        redis_wrapper
+    )
+    assert "exec docker-entrypoint.sh" in redis_wrapper
 
 
 def test_postgres_18_provisioning_reconciles_exact_roles_databases_and_grants() -> None:
@@ -747,10 +772,14 @@ def test_services_use_only_required_secrets_commands_and_static_config() -> None
         "--disable-telemetry",
     ]
     assert services["qdrant"]["entrypoint"] == ["/qdrant/entrypoint.sh"]
+    assert services["redis"]["entrypoint"] == [
+        "/bin/sh",
+        "/opt/knowledge/bin/redis-secret-entrypoint.sh",
+    ]
     assert services["redis"]["command"] == [
         "redis-server",
         "--aclfile",
-        "/run/secrets/redis_acl",
+        "/run/redis/redis_acl",
         "--appendonly",
         "yes",
         "--maxmemory",

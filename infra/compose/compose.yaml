@@ -89,6 +89,7 @@ services:
     restart: unless-stopped
     mem_limit: 2560m
     cpus: 2.0
+    user: root
     environment:
       NEO4J_AUTH_FILE: /run/secrets/neo4j_auth
       NEO4J_server_memory_heap_initial__size: 512m
@@ -126,10 +127,16 @@ services:
     cpus: 0.5
     secrets:
       - redis_acl
+    entrypoint:
+      - /bin/sh
+      - /opt/knowledge/bin/redis-secret-entrypoint.sh
+    volumes:
+      - redis-data:/data
+      - ./scripts/redis-secret-entrypoint.sh:/opt/knowledge/bin/redis-secret-entrypoint.sh:ro
     command:
       - redis-server
       - --aclfile
-      - /run/secrets/redis_acl
+      - /run/redis/redis_acl
       - --appendonly
       - "yes"
       - --maxmemory
@@ -140,8 +147,6 @@ services:
       - "yes"
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
-    volumes:
-      - redis-data:/data
     networks:
       - service-backplane
     healthcheck:
