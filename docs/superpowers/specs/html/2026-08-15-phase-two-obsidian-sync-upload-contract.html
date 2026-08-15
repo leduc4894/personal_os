@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Phase 2 — Obsidian Sync Upload Contract</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --background: #f8fafc;
+      --surface: #fff;
+      --text: #0f172a;
+      --muted: #475569;
+      --line: #cbd5e1;
+      --blue: #2563eb;
+      --green: #059669;
+      --amber: #d97706;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--background); color: var(--text); font: 16px/1.5 system-ui, sans-serif; }
+    main { max-width: 1280px; margin: auto; padding: 40px 28px 56px; }
+    h1 { margin: 0 0 8px; font-size: clamp(28px, 4vw, 44px); }
+    h2 { margin: 0 0 13px; font-size: 21px; }
+    h3 { margin: 0 0 7px; font-size: 17px; }
+    p { margin: 5px 0; }
+    code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .subtitle { max-width: 900px; margin-bottom: 28px; color: var(--muted); }
+    .panel, .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 8px 24px rgb(15 23 42 / 0.07); }
+    .panel { padding: 22px; margin-bottom: 22px; }
+    .flow { display: grid; grid-template-columns: 1fr 60px 1.15fr 60px 1.15fr; gap: 10px; align-items: center; text-align: center; }
+    .step { padding: 18px 14px; border: 2px solid var(--line); border-radius: 12px; }
+    .plugin { border-color: var(--blue); }
+    .decision { border-color: var(--amber); }
+    .commit { border-color: var(--green); }
+    .arrow { color: var(--muted); font-size: 28px; }
+    .plans, .split { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .card { padding: 20px; }
+    .lifecycle { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; align-items: center; }
+    .lifecycle span { padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; }
+    .approved { padding: 14px 16px; border-left: 4px solid var(--green); background: color-mix(in srgb, var(--green) 10%, var(--surface)); }
+    a { color: var(--blue); }
+    @media (max-width: 850px) {
+      .flow, .plans, .split { grid-template-columns: 1fr; }
+      .arrow { transform: rotate(90deg); }
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --background:#0f172a; --surface:#111827; --text:#e5e7eb; --muted:#a8b3c7; --line:#334155; --blue:#60a5fa; --green:#34d399; --amber:#fbbf24; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Phase 2 — Upload contract without a Worker</h1>
+    <p class="subtitle">The server chooses an explicit plan. The plugin never infers routing and never receives a trusted verification receipt.</p>
+
+    <section class="panel">
+      <h2>One event, two upload plans</h2>
+      <div class="flow">
+        <div class="step plugin"><h3>Plugin preflight</h3><p>Event ID and idempotency key</p><p>Base version, digest and size</p><p>Locator and policy revision</p></div>
+        <div class="arrow">→</div>
+        <div class="step decision"><h3>Server decision</h3><p>Replay, conflict or excluded</p><p>Already stored or upload required</p><p>Single-part or multipart plan</p></div>
+        <div class="arrow">→</div>
+        <div class="step commit"><h3>Canonical publish</h3><p>Server verifies SHA-256 and size</p><p>Creates internal receipt</p><p>Phase 1 transaction commits once</p></div>
+      </div>
+    </section>
+
+    <section class="plans">
+      <article class="card">
+        <h2>Plan A — API-mediated single part</h2>
+        <h3>0–16 MiB</h3>
+        <p>Plugin streams bytes to the authenticated API. The API reuses the Phase 1 bounded spool and conditional CAS write. A failed attempt restarts this small upload.</p>
+        <p><strong>No presigned URL reaches the client.</strong></p>
+      </article>
+      <article class="card">
+        <h2>Plan B — resumable multipart staging</h2>
+        <h3>&gt;16 MiB, maximum 100 MiB</h3>
+        <p>Use 8 MiB equal parts except the last with bounded parallelism. Short-lived presigned part URLs target an exact session staging key.</p>
+        <p>The server verifies staging bytes, streams them through the Phase 1 CAS writer and exact-deletes staging. A bearer URL never targets an existing canonical object.</p>
+      </article>
+    </section>
+
+    <section class="panel" style="margin-top:22px">
+      <h2>Multipart lifecycle</h2>
+      <div class="lifecycle">
+        <span>created</span> → <span>uploading</span> → <span>uploaded</span> →
+        <span>verifying</span> → <span>promoting</span> → <strong>committed</strong>
+      </div>
+      <p style="margin-top:16px;text-align:center">Any stage may become <strong>expired</strong>, <strong>aborted</strong> or <strong>failed_terminal</strong>. Cleanup addresses only the exact staging key registered to that session.</p>
+    </section>
+
+    <section class="split">
+      <article class="card">
+        <h2>Why this is the safe first release</h2>
+        <ul>
+          <li>Preserves the Phase 1 immutable CAS guarantees.</li>
+          <li>Mobile retries only failed parts for larger files.</li>
+          <li>Changing the threshold later does not change the client contract.</li>
+          <li>No Worker deployment or routing revision is introduced.</li>
+        </ul>
+      </article>
+      <article class="card">
+        <h2>Accepted trade-offs</h2>
+        <ul>
+          <li>Multipart promotion reads and writes bytes once more.</li>
+          <li>Small failed uploads restart from zero.</li>
+          <li>Staging cleanup needs a narrow exact-delete capability.</li>
+          <li>16 MiB is an initial operational threshold, not a product invariant.</li>
+        </ul>
+      </article>
+    </section>
+
+    <p class="approved"><strong>Brainstorming decision:</strong> approved on 2026-08-15 as the Phase 2 upload boundary.</p>
+    <p>References: <a href="https://developers.cloudflare.com/r2/objects/upload-objects/">Cloudflare R2 upload objects</a> and <a href="https://developers.cloudflare.com/r2/api/s3/presigned-urls/">presigned URL security</a>.</p>
+  </main>
+</body>
+</html>

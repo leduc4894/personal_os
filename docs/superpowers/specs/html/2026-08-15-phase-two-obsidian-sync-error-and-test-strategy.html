@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Phase 2 — Obsidian Sync Error and Test Strategy</title>
+  <style>
+    :root { color-scheme:light dark; --bg:#f8fafc; --surface:#fff; --text:#0f172a; --muted:#475569; --line:#cbd5e1; --blue:#2563eb; --green:#059669; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 system-ui,sans-serif; }
+    main { max-width:1240px; margin:auto; padding:40px 28px 56px; }
+    h1 { margin:0 0 8px; font-size:clamp(28px,4vw,44px); } h2 { margin:0 0 13px; font-size:21px; }
+    .subtitle { max-width:920px; margin-bottom:28px; color:var(--muted); }
+    .panel { background:var(--surface); border:1px solid var(--line); border-radius:14px; box-shadow:0 8px 24px rgb(15 23 42 / .07); padding:22px; margin-bottom:22px; }
+    table { width:100%; border-collapse:collapse; }
+    th,td { padding:12px 14px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-size:14px; text-transform:uppercase; letter-spacing:.04em; }
+    tr:last-child td { border-bottom:0; }
+    .gates { display:grid; grid-template-columns:repeat(2,1fr); gap:12px 24px; }
+    .gate { padding:13px 15px; border-left:3px solid var(--blue); background:color-mix(in srgb,var(--blue) 7%,var(--surface)); }
+    .approved { padding:14px 16px; border-left:4px solid var(--green); background:color-mix(in srgb,var(--green) 10%,var(--surface)); }
+    @media (max-width:760px) { .gates { grid-template-columns:1fr; } table,thead,tbody,tr,th,td { display:block; } thead { display:none; } td:first-child { font-weight:700; padding-bottom:2px; } }
+    @media (prefers-color-scheme:dark) { :root { --bg:#0f172a; --surface:#111827; --text:#e5e7eb; --muted:#a8b3c7; --line:#334155; --blue:#60a5fa; --green:#34d399; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Phase 2 — Error handling and verification</h1>
+    <p class="subtitle">Failures preserve local content, canonical integrity and retry evidence. Telemetry never contains content, paths, credentials or signed URLs.</p>
+
+    <section class="panel">
+      <h2>Error model</h2>
+      <table>
+        <thead><tr><th>Failure</th><th>Required behavior</th></tr></thead>
+        <tbody>
+          <tr><td>Offline, timeout, 429 or dependency outage</td><td>Keep queue and uploaded parts, apply bounded exponential backoff and do not advance the cursor.</td></tr>
+          <tr><td>Expired access token</td><td>Refresh exactly once; if refresh fails, require login without deleting queued work.</td></tr>
+          <tr><td>Revoked device or refresh-token reuse</td><td>Revoke the token family while preserving local files and pending queue state.</td></tr>
+          <tr><td>Stale base</td><td>Capture a conflict; never retry it as a network failure.</td></tr>
+          <tr><td>Policy denied</td><td>Stop upload and mark excluded; preserve the local file.</td></tr>
+          <tr><td>Cursor gap or local invariant mismatch</td><td>Stop incremental pull and require manifest reconciliation.</td></tr>
+          <tr><td>Hash, size or multipart mismatch</td><td>Abort the session and return a terminal integrity error; never commit or apply bytes.</td></tr>
+          <tr><td>Ambiguous commit acknowledgement</td><td>Use Phase 1 evidence lookup and exact replay; never guess that rollback occurred.</td></tr>
+          <tr><td>Unknown failure</td><td>Fail closed with a safe error code and no raw provider message.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>Verification gates</h2>
+      <div class="gates">
+        <div class="gate"><strong>Migration</strong><br>Empty upgrade, fixture upgrade and downgrade for every Phase 2 migration.</div>
+        <div class="gate"><strong>Domain</strong><br>Lifecycle, locator uniqueness, tombstone, token rotation, policy revision and conflict races.</div>
+        <div class="gate"><strong>Plugin</strong><br>SQLite crash/restart, queue bounds, missed watcher, cursor gap, atomic apply and echo suppression.</div>
+        <div class="gate"><strong>Mobile</strong><br>No Node/Electron imports; small batches, suspend/resume and uninterrupted local editing.</div>
+        <div class="gate"><strong>Contracts</strong><br>OpenAPI snapshot, generated TypeScript compile, stable error mapping and policy fixtures.</div>
+        <div class="gate"><strong>Integration</strong><br>PostgreSQL, R2 and Temporal for create/update/rename/move/delete/restore.</div>
+        <div class="gate"><strong>End-to-end</strong><br>Two devices, duplicate/out-of-order events, conflict, policy transition and remote apply.</div>
+        <div class="gate"><strong>Web Admin</strong><br>Playwright login, TOTP, device approval/revoke and exclusion publication.</div>
+        <div class="gate"><strong>Security</strong><br>Leak scanning, cross-device denial, revoked credential and malicious locator/path cases.</div>
+        <div class="gate"><strong>Real device</strong><br>Test Vault on Obsidian Desktop and Mobile with a sanitized result manifest.</div>
+      </div>
+    </section>
+
+    <p class="approved"><strong>Brainstorming decision:</strong> approved on 2026-08-15. Mutation testing remains deferred and is not a Phase 2 acceptance gate.</p>
+  </main>
+</body>
+</html>

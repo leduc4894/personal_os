@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Phase 2 — Obsidian Sync Auth and Device Flow</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --background:#f8fafc; --surface:#fff; --text:#0f172a; --muted:#475569;
+      --line:#cbd5e1; --blue:#2563eb; --green:#059669; --amber:#d97706; --purple:#7c3aed;
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--background); color:var(--text); font:16px/1.5 system-ui,sans-serif; }
+    main { max-width:1280px; margin:auto; padding:40px 28px 56px; }
+    h1 { margin:0 0 8px; font-size:clamp(28px,4vw,44px); }
+    h2 { margin:0 0 13px; font-size:21px; }
+    h3 { margin:0 0 7px; font-size:17px; }
+    p { margin:5px 0; }
+    .subtitle { max-width:900px; margin-bottom:28px; color:var(--muted); }
+    .panel,.card { background:var(--surface); border:1px solid var(--line); border-radius:14px; box-shadow:0 8px 24px rgb(15 23 42 / .07); }
+    .panel { padding:22px; margin-bottom:22px; }
+    .sequence { display:grid; grid-template-columns:repeat(7,minmax(90px,1fr)); gap:8px; align-items:stretch; text-align:center; }
+    .step { padding:15px 12px; border:2px solid var(--line); border-radius:11px; }
+    .plugin { border-color:var(--blue); } .api { border-color:var(--amber); } .browser { border-color:var(--purple); } .registered { border-color:var(--green); }
+    .arrow { display:grid; place-items:center; color:var(--muted); font-size:24px; }
+    .split { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+    .card { padding:20px; }
+    .admin { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; text-align:center; }
+    .admin div { padding:14px; border:1px solid var(--line); border-radius:10px; }
+    .approved { padding:14px 16px; border-left:4px solid var(--green); background:color-mix(in srgb,var(--green) 10%,var(--surface)); }
+    a { color:var(--blue); }
+    @media (max-width:900px) { .sequence,.split,.admin { grid-template-columns:1fr; } .arrow { transform:rotate(90deg); min-height:30px; } }
+    @media (prefers-color-scheme:dark) {
+      :root { --background:#0f172a; --surface:#111827; --text:#e5e7eb; --muted:#a8b3c7; --line:#334155; --blue:#60a5fa; --green:#34d399; --amber:#fbbf24; --purple:#c4b5fd; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Phase 2 — Web login and device authorization</h1>
+    <p class="subtitle">The browser approves the device. Credentials return only through the plugin polling channel.</p>
+
+    <section class="panel">
+      <h2>Onboarding sequence</h2>
+      <div class="sequence">
+        <div class="step plugin"><h3>1. Plugin</h3><p>Request device authorization</p></div>
+        <div class="arrow">→</div>
+        <div class="step api"><h3>2. API</h3><p>Issue a 10-minute device code</p></div>
+        <div class="arrow">→</div>
+        <div class="step browser"><h3>3. Browser</h3><p>Login and approve the named device</p></div>
+        <div class="arrow">→</div>
+        <div class="step registered"><h3>4. Plugin</h3><p>Poll the approved code and register</p></div>
+      </div>
+    </section>
+
+    <section class="split">
+      <article class="card">
+        <h2>Web Admin session</h2>
+        <p><strong>Password:</strong> Argon2id hash in a dedicated credential row, never on the identity row.</p>
+        <p><strong>Session:</strong> opaque random ID; only its hash is stored server-side.</p>
+        <p><strong>Cookie:</strong> Secure, HttpOnly, SameSite=Lax, bounded idle and absolute expiry.</p>
+        <p><strong>CSRF:</strong> origin check plus per-session token for state-changing forms.</p>
+        <p><strong>TOTP:</strong> optional enrollment and recovery codes; secret encrypted at rest.</p>
+      </article>
+      <article class="card">
+        <h2>Obsidian device credential</h2>
+        <p><strong>Access token:</strong> opaque, workspace/device scoped, 15-minute lifetime.</p>
+        <p><strong>Refresh credential:</strong> rotating family with 30-day inactivity and 90-day absolute expiry.</p>
+        <p><strong>Storage:</strong> Obsidian SecretStorage; plugin data stores only the secret name.</p>
+        <p><strong>Reuse detection:</strong> reuse of a rotated token revokes the device family.</p>
+        <p><strong>Admin revoke:</strong> immediately disables access and pending grants.</p>
+      </article>
+    </section>
+
+    <section class="panel" style="margin-top:22px">
+      <h2>Minimal Web Admin surface</h2>
+      <div class="admin">
+        <div><h3>Login</h3><p>Password, optional TOTP and rate-limit feedback</p></div>
+        <div><h3>Device approval</h3><p>Name, platform, requested sync scope and expiry</p></div>
+        <div><h3>Devices</h3><p>Status, registered/last-seen time and revoke</p></div>
+        <div><h3>Exclusions</h3><p>Draft, preview impact, publish revision and audit</p></div>
+      </div>
+    </section>
+
+    <section class="split">
+      <article class="card">
+        <h2>Security invariants</h2>
+        <ul>
+          <li>No token in a browser URL, redirect history or plugin settings JSON.</li>
+          <li>Every credential derives user, workspace and device scope server-side.</li>
+          <li>Login, approval, refresh, revoke and policy publication are safely audited.</li>
+          <li>Disabled user, revoked device or expired grant fails closed.</li>
+        </ul>
+      </article>
+      <article class="card">
+        <h2>Deliberately deferred</h2>
+        <ul>
+          <li>Passkeys/WebAuthn.</li>
+          <li>External OIDC providers.</li>
+          <li>Multi-user roles and collaboration.</li>
+          <li>Token delivery through custom URI callbacks.</li>
+        </ul>
+      </article>
+    </section>
+
+    <p class="approved"><strong>Brainstorming decision:</strong> approved on 2026-08-15 as the Phase 2 authentication and device-registration boundary.</p>
+    <p>Reference: <a href="https://docs.obsidian.md/plugins/guides/secret-storage">Obsidian SecretStorage</a>.</p>
+  </main>
+</body>
+</html>

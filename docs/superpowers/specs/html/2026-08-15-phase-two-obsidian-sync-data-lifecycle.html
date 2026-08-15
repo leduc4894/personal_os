@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Phase 2 — Obsidian Sync Data Lifecycle</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --background: #f8fafc;
+      --surface: #ffffff;
+      --text: #0f172a;
+      --muted: #475569;
+      --line: #cbd5e1;
+      --blue: #2563eb;
+      --green: #059669;
+      --amber: #d97706;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--background);
+      color: var(--text);
+      font: 16px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { max-width: 1320px; margin: 0 auto; padding: 40px 28px 56px; }
+    h1 { margin: 0 0 8px; font-size: clamp(28px, 4vw, 44px); }
+    h2 { margin: 0 0 14px; font-size: 21px; }
+    h3 { margin: 0 0 7px; font-size: 17px; }
+    p { margin: 5px 0; }
+    code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.92em; }
+    .subtitle { max-width: 900px; margin-bottom: 28px; color: var(--muted); }
+    .panel, .card {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      box-shadow: 0 8px 24px rgb(15 23 42 / 0.07);
+    }
+    .panel { padding: 22px; margin-bottom: 22px; }
+    .states {
+      display: grid;
+      grid-template-columns: 1fr 92px 1.2fr 92px 1fr;
+      gap: 12px;
+      align-items: center;
+      text-align: center;
+    }
+    .state { padding: 22px 16px; border: 2px solid var(--line); border-radius: 12px; }
+    .stored { border-color: var(--green); }
+    .deleted { border-color: var(--amber); }
+    .arrow { color: var(--muted); font-weight: 700; }
+    .note {
+      margin-top: 18px;
+      padding: 14px 16px;
+      border-left: 4px solid var(--blue);
+      background: color-mix(in srgb, var(--blue) 9%, var(--surface));
+    }
+    .cards { display: grid; grid-template-columns: repeat(3, minmax(220px, 1fr)); gap: 14px; }
+    .card { padding: 17px; }
+    .sqlite { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; text-align: center; }
+    .sqlite div { padding: 14px; border: 1px solid var(--line); border-radius: 10px; }
+    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .approved {
+      margin-top: 22px;
+      padding: 14px 16px;
+      border-left: 4px solid var(--green);
+      background: color-mix(in srgb, var(--green) 10%, var(--surface));
+    }
+    @media (max-width: 900px) {
+      .states, .cards, .sqlite, .split { grid-template-columns: 1fr; }
+      .states .arrow { min-height: 32px; }
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --background: #0f172a;
+        --surface: #111827;
+        --text: #e5e7eb;
+        --muted: #a8b3c7;
+        --line: #334155;
+        --blue: #60a5fa;
+        --green: #34d399;
+        --amber: #fbbf24;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Phase 2 — Canonical data lifecycle</h1>
+    <p class="subtitle">
+      PostgreSQL remains the authority. SQLite is only a per-device journal and
+      can always be rebuilt through manifest reconciliation.
+    </p>
+
+    <section class="panel">
+      <h2>Source state machine</h2>
+      <div class="states">
+        <div class="state"><h3>Absent</h3><p>No canonical source</p></div>
+        <div class="arrow">create →</div>
+        <div class="state stored"><h3>Active</h3><p><code>active</code></p><p>Current version and locator</p></div>
+        <div class="arrow"><div>delete →</div><div>← restore</div></div>
+        <div class="state deleted"><h3>Deleted</h3><p><code>deleted</code></p><p>Tombstone and retained lineage</p></div>
+      </div>
+      <p class="note">
+        While stored, update creates an immutable version; rename/move changes
+        locator history without changing <code>source_id</code>; no-change records
+        the event without creating a new version. Searchability is a separate
+        projection concern; Phase 3 may use <code>stored_not_indexed</code> when
+        an active source has no supported parser or reaches a terminal indexing reason.
+      </p>
+    </section>
+
+    <section class="panel">
+      <h2>Phase 2 PostgreSQL migrations</h2>
+      <div class="cards">
+        <article class="card"><h3>Identity and browser auth</h3><p><code>web_sessions</code>, device authorization grants, hashed rotating credentials and token-family revocation.</p></article>
+        <article class="card"><h3>Locator and deletion</h3><p><code>source_locators</code> preserves path history; <code>source_tombstones</code> records logical deletion and restore provenance.</p></article>
+        <article class="card"><h3>Sync correctness</h3><p><code>device_cursors</code> and <code>manifest_runs</code> support monotonic pull and reconciliation after watcher gaps.</p></article>
+        <article class="card"><h3>Upload sessions</h3><p><code>multipart_uploads</code> and <code>multipart_parts</code> retain bounded resumable state; completion requires full-object verification.</p></article>
+        <article class="card"><h3>Conflicts</h3><p><code>source_conflicts</code> binds base, remote current and verified local candidate; resolution records the resulting version.</p></article>
+        <article class="card"><h3>Policy authority</h3><p>Revisioned policies, rules and evaluations produce a signed plugin snapshot without granting client authority.</p></article>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Device-local SQLite boundary</h2>
+      <div class="sqlite">
+        <div><h3>File map</h3><p>Local path ↔ server-issued source ID</p></div>
+        <div><h3>Event journal</h3><p>Stable event and idempotency identity across retries</p></div>
+        <div><h3>Cursor</h3><p>Last applied server sequence</p></div>
+        <div><h3>Upload state</h3><p>Parts, retry schedule and bounded queue status</p></div>
+      </div>
+      <p class="note">
+        Deleting or corrupting SQLite triggers a manifest reconcile. It must never
+        mint a second canonical source merely from path matching.
+      </p>
+    </section>
+
+    <section class="split">
+      <article class="panel">
+        <h2>Concurrency rule</h2>
+        <ul>
+          <li>Exact replay returns the original event outcome.</li>
+          <li>A stale base never overwrites current state.</li>
+          <li>Text and binary candidates remain referenced through resolution; future GC owns expiry and deletion.</li>
+        </ul>
+      </article>
+      <article class="panel">
+        <h2>Deliberately absent</h2>
+        <ul>
+          <li>No last-write-wins.</li>
+          <li>No physical object deletion in a request path.</li>
+          <li>No parser or projection execution in Phase 2.</li>
+        </ul>
+      </article>
+    </section>
+
+    <p class="approved"><strong>Brainstorming decision:</strong> approved on 2026-08-15 as the basis for the detailed Phase 2 contract.</p>
+  </main>
+</body>
+</html>

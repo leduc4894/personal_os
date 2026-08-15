@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Phase 2 — Obsidian Sync Reconcile Protocol</title>
+  <style>
+    :root { color-scheme:light dark; --bg:#f8fafc; --surface:#fff; --text:#0f172a; --muted:#475569; --line:#cbd5e1; --blue:#2563eb; --green:#059669; --amber:#d97706; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 system-ui,sans-serif; }
+    main { max-width:1280px; margin:auto; padding:40px 28px 56px; }
+    h1 { margin:0 0 8px; font-size:clamp(28px,4vw,44px); } h2 { margin:0 0 13px; font-size:21px; } h3 { margin:0 0 7px; font-size:17px; } p { margin:5px 0; }
+    .subtitle { max-width:900px; margin-bottom:28px; color:var(--muted); }
+    .panel,.card { background:var(--surface); border:1px solid var(--line); border-radius:14px; box-shadow:0 8px 24px rgb(15 23 42 / .07); }
+    .panel { padding:22px; margin-bottom:22px; } .card { padding:20px; }
+    .split { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+    .identity { display:grid; grid-template-columns:1fr 58px 1fr 58px 1fr; gap:12px; align-items:center; text-align:center; }
+    .step { padding:17px; border:2px solid var(--line); border-radius:12px; }
+    .local { border-color:var(--blue); } .resolve { border-color:var(--amber); } .canonical { border-color:var(--green); }
+    .arrow { font-size:28px; color:var(--muted); }
+    .run { display:flex; flex-wrap:wrap; gap:9px; justify-content:center; align-items:center; }
+    .run span { padding:7px 10px; border:1px solid var(--line); border-radius:8px; }
+    .note { margin-top:15px; padding:13px 15px; border-left:4px solid var(--blue); background:color-mix(in srgb,var(--blue) 9%,var(--surface)); }
+    .approved { padding:14px 16px; border-left:4px solid var(--green); background:color-mix(in srgb,var(--green) 10%,var(--surface)); }
+    @media (max-width:850px) { .split,.identity { grid-template-columns:1fr; } .arrow { transform:rotate(90deg); text-align:center; } }
+    @media (prefers-color-scheme:dark) { :root { --bg:#0f172a; --surface:#111827; --text:#e5e7eb; --muted:#a8b3c7; --line:#334155; --blue:#60a5fa; --green:#34d399; --amber:#fbbf24; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Phase 2 — Event queue, cursor and reconciliation</h1>
+    <p class="subtitle">Watchers reduce latency. Only cursor continuity and manifest reconciliation establish correctness.</p>
+
+    <section class="split">
+      <article class="card">
+        <h2>Local → server</h2>
+        <p><strong>1.</strong> A Vault event marks a local file dirty.</p>
+        <p><strong>2.</strong> SQLite records path, hash, base, stable event ID and retry state before network I/O.</p>
+        <p><strong>3.</strong> Events serialize per source; separate sources may sync concurrently.</p>
+        <p><strong>4.</strong> Preflight returns replay, conflict, excluded, no-change or an upload plan.</p>
+        <p><strong>5.</strong> The entry completes only after the exact canonical outcome is durable.</p>
+      </article>
+      <article class="card">
+        <h2>Server → local</h2>
+        <p><strong>1.</strong> Poll events after the last contiguous sequence.</p>
+        <p><strong>2.</strong> Self-origin is a no-op only when local hash and committed outcome match.</p>
+        <p><strong>3.</strong> A remote event applies only when local hash still equals the recorded base.</p>
+        <p><strong>4.</strong> Download to a sibling temporary file, verify, then atomically rename.</p>
+        <p><strong>5.</strong> Advance cursor only after safe apply, no-op, conflict or tombstone handling.</p>
+      </article>
+    </section>
+
+    <section class="panel" style="margin-top:22px">
+      <h2>Offline create and stable identity</h2>
+      <div class="identity">
+        <div class="step local"><h3>Offline file</h3><p>SQLite-only local key</p><p>No client-generated source ID</p></div>
+        <div class="arrow">→</div>
+        <div class="step resolve"><h3>Registration/reconcile</h3><p>Normalize locator and check policy</p><p>Resolve concurrent first registration</p></div>
+        <div class="arrow">→</div>
+        <div class="step canonical"><h3>Canonical mapping</h3><p>Backend issues source ID</p><p>SQLite persists the returned mapping</p></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Manifest reconcile run</h2>
+      <div class="run">
+        <span>start run</span> → <span>bind checkpoint and policy revision</span> →
+        <span>upload ordered pages</span> → <span>verify page/final digests</span> →
+        <span>return deterministic actions</span> → <strong>apply and resume cursor</strong>
+      </div>
+      <p class="note"><strong>Actions:</strong> upload, download, apply_tombstone, conflict, no_change or excluded. Vault events observed during a run remain journaled and replay afterward, so reconciliation never freezes the editor.</p>
+    </section>
+
+    <section class="split">
+      <article class="card">
+        <h2>Reconcile triggers</h2>
+        <ul>
+          <li>After onboarding or SQLite recovery.</li>
+          <li>Cursor gap, compacted history or invariant mismatch.</li>
+          <li>Scheduled while the app is active, using small mobile batches.</li>
+          <li>Explicit user “Repair sync” command.</li>
+        </ul>
+      </article>
+      <article class="card">
+        <h2>Bounded behavior</h2>
+        <ul>
+          <li>Queue metadata is bounded; content stays in the Vault.</li>
+          <li>Backpressure pauses network work, never editing.</li>
+          <li>No background-task assumption on mobile.</li>
+          <li>Policy deny preserves local content but blocks upload and projection.</li>
+        </ul>
+      </article>
+    </section>
+
+    <p class="approved"><strong>Brainstorming decision:</strong> approved on 2026-08-15 as the Phase 2 event/cursor/reconciliation boundary.</p>
+  </main>
+</body>
+</html>

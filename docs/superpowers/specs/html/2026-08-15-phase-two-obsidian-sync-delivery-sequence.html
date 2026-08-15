@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Phase 2 — Obsidian Sync Delivery Sequence</title>
+  <style>
+    :root { color-scheme:light dark; --bg:#f8fafc; --surface:#fff; --text:#0f172a; --muted:#475569; --line:#cbd5e1; --blue:#2563eb; --green:#059669; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 system-ui,sans-serif; }
+    main { max-width:1280px; margin:auto; padding:40px 28px 56px; }
+    h1 { margin:0 0 8px; font-size:clamp(28px,4vw,44px); } h2 { margin:0 0 13px; font-size:21px; } h3 { margin:0 0 7px; font-size:17px; } p { margin:5px 0; }
+    .subtitle { max-width:940px; margin-bottom:28px; color:var(--muted); }
+    .panel,.card { background:var(--surface); border:1px solid var(--line); border-radius:14px; box-shadow:0 8px 24px rgb(15 23 42 / .07); }
+    .panel { padding:22px; margin-bottom:22px; } .card { padding:19px; }
+    .foundation,.excluded { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; text-align:center; }
+    .foundation div,.excluded div { padding:14px; border:1px solid var(--line); border-radius:10px; }
+    .slices { display:grid; grid-template-columns:repeat(2,minmax(300px,1fr)); gap:14px; margin-bottom:22px; }
+    .number { display:inline-grid; place-items:center; width:30px; height:30px; margin-right:7px; border-radius:50%; background:var(--blue); color:#fff; }
+    .gate { margin-top:11px; padding-top:10px; border-top:1px solid var(--line); }
+    .excluded { grid-template-columns:repeat(3,1fr); }
+    .approved { padding:14px 16px; border-left:4px solid var(--green); background:color-mix(in srgb,var(--green) 10%,var(--surface)); }
+    @media (max-width:850px) { .foundation,.excluded,.slices { grid-template-columns:1fr; } }
+    @media (prefers-color-scheme:dark) { :root { --bg:#0f172a; --surface:#111827; --text:#e5e7eb; --muted:#a8b3c7; --line:#334155; --blue:#60a5fa; --green:#34d399; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Phase 2 — Dependency-ordered vertical slices</h1>
+    <p class="subtitle">Each slice ends with an executable client-to-canonical proof. Database, API and plugin work are not separated into long backend-only or client-only waves.</p>
+
+    <section class="panel">
+      <h2>Phase 1 foundation already complete</h2>
+      <div class="foundation">
+        <div><h3>Canonical storage</h3><p>R2 CAS, verification and deduplication</p></div>
+        <div><h3>Canonical state</h3><p>Identity, sources, versions, events and audit</p></div>
+        <div><h3>Write/read core</h3><p>Create/update/no-change, replay and verified reads</p></div>
+        <div><h3>Durability</h3><p>Outbox dispatcher, backup/restore and live gates</p></div>
+      </div>
+      <p><strong>Still shells only:</strong> Obsidian plugin, FastAPI composition and Web App. Phase 1 exposes no public sync HTTP contract.</p>
+    </section>
+
+    <section class="slices">
+      <article class="card"><h3><span class="number">1</span>Contract and migration foundation</h3><p>Closed API schemas/errors, forward migrations, generated client pipeline and required Phase 1 exposure hardening.</p><p class="gate"><strong>Gate:</strong> upgrade/downgrade and OpenAPI client compile.</p></article>
+      <article class="card"><h3><span class="number">2</span>Login, device and minimal Admin</h3><p>Password/TOTP session, browser device approval, SecretStorage token rotation and device management.</p><p class="gate"><strong>Gate:</strong> login → approve → refresh → revoke.</p></article>
+      <article class="card"><h3><span class="number">3</span>Server-owned exclusions</h3><p>Rules/evaluations, preview and publish UI, signed snapshot and backend recheck.</p><p class="gate"><strong>Gate:</strong> denied file reaches neither upload nor projection intent.</p></article>
+      <article class="card"><h3><span class="number">4</span>Small-file create and update</h3><p>SQLite journal, ≤16 MiB API upload, Phase 1 publication/read composition and exact replay.</p><p class="gate"><strong>Gate:</strong> offline save reconnects and commits once.</p></article>
+      <article class="card"><h3><span class="number">5</span>Locator lifecycle</h3><p>Stable rename/move history, tombstone/restore and lifecycle projection intents.</p><p class="gate"><strong>Gate:</strong> all six event types preserve source identity.</p></article>
+      <article class="card"><h3><span class="number">6</span>Cursor, pull and atomic apply</h3><p>Paginated events, contiguous cursor, verified download, temporary write/rename and echo suppression.</p><p class="gate"><strong>Gate:</strong> remote edit applies once without loss.</p></article>
+      <article class="card"><h3><span class="number">7</span>Manifest reconciliation</h3><p>Offline registration, checkpoint-bound pages, deterministic actions, gap and repair flows.</p><p class="gate"><strong>Gate:</strong> missed watcher and lost SQLite recover without duplicates.</p></article>
+      <article class="card"><h3><span class="number">8</span>Multipart and mobile resilience</h3><p>Staging sessions, presigned parts, suspend/resume, verification/promotion and exact cleanup.</p><p class="gate"><strong>Gate:</strong> interrupted binary upload resumes on real mobile.</p></article>
+      <article class="card"><h3><span class="number">9</span>Conflict Inbox and resolution</h3><p>Verified candidate capture, three-way text merge, binary choice and stale-resolution recheck.</p><p class="gate"><strong>Gate:</strong> two-device races never silently overwrite.</p></article>
+      <article class="card"><h3><span class="number">10</span>Acceptance and operations</h3><p>Cross-platform E2E, real devices, security scans, runbooks, schema recovery and final handoff.</p><p class="gate"><strong>Gate:</strong> every Phase 2 acceptance passes on one commit.</p></article>
+    </section>
+
+    <section class="panel">
+      <h2>Explicitly not integrated into Phase 2</h2>
+      <div class="excluded">
+        <div><h3>Later phases</h3><p>Parsing/indexing, MCP, Web editor/conflict UI and AI-approved writes</p></div>
+        <div><h3>Rejected architecture</h3><p>MinIO, multi-provider, fallback and dual-write</p></div>
+        <div><h3>Future optional work</h3><p>Cloudflare Worker, hybrid routing, full object GC, client encryption and mutation testing</p></div>
+      </div>
+    </section>
+
+    <p class="approved"><strong>Brainstorming decision:</strong> approved on 2026-08-15 as the Phase 2 delivery order.</p>
+  </main>
+</body>
+</html>

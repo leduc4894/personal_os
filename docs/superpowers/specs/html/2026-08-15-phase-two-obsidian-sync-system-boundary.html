@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Phase 2 — Obsidian Sync System Boundary</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --background: #f8fafc;
+      --surface: #ffffff;
+      --text: #0f172a;
+      --muted: #475569;
+      --line: #cbd5e1;
+      --phase-two: #2563eb;
+      --phase-one: #059669;
+      --future: #64748b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--background);
+      color: var(--text);
+      font: 16px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { max-width: 1440px; margin: 0 auto; padding: 40px 28px 56px; }
+    h1 { margin: 0 0 8px; font-size: clamp(28px, 4vw, 44px); }
+    h2 { margin: 0 0 16px; font-size: 21px; }
+    h3 { margin: 0 0 8px; font-size: 17px; }
+    p { margin: 6px 0; }
+    .subtitle { max-width: 900px; margin-bottom: 28px; color: var(--muted); }
+    .legend { display: flex; flex-wrap: wrap; gap: 18px; margin-bottom: 24px; }
+    .legend span { display: inline-flex; align-items: center; gap: 8px; }
+    .dot { width: 12px; height: 12px; border-radius: 50%; }
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(240px, 1fr) 52px minmax(280px, 1.2fr) 52px minmax(260px, 1.1fr);
+      gap: 10px;
+      align-items: stretch;
+    }
+    .card {
+      background: var(--surface);
+      border: 2px solid var(--line);
+      border-radius: 14px;
+      overflow: hidden;
+      box-shadow: 0 8px 24px rgb(15 23 42 / 0.07);
+    }
+    .card.phase-two { border-color: var(--phase-two); }
+    .card.phase-one { border-color: var(--phase-one); }
+    .card.future { border-color: var(--future); border-style: dashed; }
+    .card header {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
+      font-weight: 700;
+    }
+    .card .body { padding: 16px; }
+    .card .item { margin-bottom: 17px; }
+    .card .item:last-child { margin-bottom: 0; }
+    .arrow { display: grid; place-items: center; color: var(--muted); font-size: 34px; }
+    .future-flow { margin-top: 20px; }
+    .future-flow .body {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      align-items: center;
+      justify-content: center;
+    }
+    .loops { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 22px; }
+    .loop { padding: 18px; }
+    .status {
+      margin-top: 24px;
+      padding: 14px 16px;
+      border-left: 4px solid #f59e0b;
+      background: color-mix(in srgb, #f59e0b 12%, var(--surface));
+    }
+    code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.92em; }
+    @media (max-width: 980px) {
+      .grid { grid-template-columns: 1fr; }
+      .arrow { transform: rotate(90deg); min-height: 38px; }
+      .loops { grid-template-columns: 1fr; }
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --background: #0f172a;
+        --surface: #111827;
+        --text: #e5e7eb;
+        --muted: #a8b3c7;
+        --line: #334155;
+        --phase-two: #60a5fa;
+        --phase-one: #34d399;
+        --future: #94a3b8;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Phase 2 — Obsidian Sync</h1>
+    <p class="subtitle">
+      System boundary and end-to-end data flow. This is a brainstorming visual,
+      not yet an approved implementation contract.
+    </p>
+
+    <div class="legend" aria-label="Chú giải">
+      <span><i class="dot" style="background:var(--phase-two)"></i>New in Phase 2</span>
+      <span><i class="dot" style="background:var(--phase-one)"></i>Reused from Phase 1</span>
+      <span><i class="dot" style="background:var(--future)"></i>Deferred to Phase 3</span>
+    </div>
+
+    <section class="grid" aria-label="System boundary">
+      <article class="card phase-two">
+        <header>Phase 2 clients</header>
+        <div class="body">
+          <div class="item">
+            <h3>Obsidian plugin</h3>
+            <p>Vault watcher plus scheduled reconciliation.</p>
+            <p>SQLite journal, cursor and bounded offline queue.</p>
+            <p>Atomic remote apply and echo suppression.</p>
+            <p>Conflict Inbox for text and binary decisions.</p>
+          </div>
+          <div class="item">
+            <h3>Minimal Web Admin</h3>
+            <p>Browser login and device authorization.</p>
+            <p>Device list, last-sync state and revoke.</p>
+            <p>Exclusion rules and policy revisions.</p>
+          </div>
+        </div>
+      </article>
+
+      <div class="arrow" aria-hidden="true">⇄</div>
+
+      <article class="card phase-two">
+        <header>Phase 2 authenticated API and domain</header>
+        <div class="body">
+          <div class="item"><h3>Auth/device service</h3><p>Device-code login, short-lived access token and rotating refresh credential.</p></div>
+          <div class="item"><h3>Sync service</h3><p>Events, cursor pages, manifest plans and lifecycle commands.</p></div>
+          <div class="item"><h3>Upload coordinator</h3><p>Single-part and resumable multipart upload with completion verification.</p></div>
+          <div class="item"><h3>Policy service</h3><p>Server authority and signed plugin snapshot.</p></div>
+          <div class="item"><h3>Conflict service</h3><p>Base checks, candidate retention and resolution commits.</p></div>
+        </div>
+      </article>
+
+      <div class="arrow" aria-hidden="true">⇄</div>
+
+      <article class="card phase-one">
+        <header>Phase 1 canonical core — reused</header>
+        <div class="body">
+          <div class="item"><h3>PostgreSQL</h3><p>Identity, sources, immutable versions, events, audit and durable outbox.</p></div>
+          <div class="item"><h3>Cloudflare R2 CAS</h3><p>Immutable bytes and verified internal receipts.</p></div>
+          <div class="item"><h3>Publication service</h3><p>Idempotency, optimistic concurrency and atomic current pointer.</p></div>
+          <div class="item"><h3>Canonical reader</h3><p>Fail-closed verified download.</p></div>
+          <div class="item"><h3>Temporal dispatcher</h3><p>Durable workflow identity and start dispatch.</p></div>
+        </div>
+      </article>
+    </section>
+
+    <section class="card future future-flow">
+      <header>Phase 3 boundary — deliberately inactive during Phase 2</header>
+      <div class="body">
+        <span>Queued projection intent</span><span>→</span>
+        <span>Markdown parser</span><span>→</span>
+        <span>Chunking/indexing workflow</span><span>→</span>
+        <span>Qdrant and Neo4j</span>
+      </div>
+    </section>
+
+    <section class="loops" aria-label="Correctness loops">
+      <article class="card loop">
+        <h2>Push local change</h2>
+        <p>Journal event → policy preflight → upload and verify → lifecycle transaction → cursor event → acknowledge exact event.</p>
+      </article>
+      <article class="card loop">
+        <h2>Pull remote change</h2>
+        <p>Poll cursor → compare local/base hash → verified download → temporary file → atomic rename → record apply marker.</p>
+      </article>
+    </section>
+
+    <p class="status">
+      <strong>Current design decision:</strong> Phase 2 completes when canonical bytes and sync state are consistent.
+      A successfully synchronized source is <code>active</code>, but searchability is tracked separately and is not
+      required until Phase 3 registers and executes <code>SourceIngestionWorkflow</code>. Phase 3 may later use
+      <code>stored_not_indexed</code> for an unsupported parser or terminal indexing reason.
+    </p>
+  </main>
+</body>
+</html>

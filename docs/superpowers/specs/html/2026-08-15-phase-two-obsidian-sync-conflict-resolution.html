@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Phase 2 — Obsidian Sync Conflict Resolution</title>
+  <style>
+    :root { color-scheme:light dark; --bg:#f8fafc; --surface:#fff; --text:#0f172a; --muted:#475569; --line:#cbd5e1; --blue:#2563eb; --green:#059669; --amber:#d97706; --purple:#7c3aed; --red:#dc2626; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 system-ui,sans-serif; }
+    main { max-width:1280px; margin:auto; padding:40px 28px 56px; }
+    h1 { margin:0 0 8px; font-size:clamp(28px,4vw,44px); } h2 { margin:0 0 13px; font-size:21px; } h3 { margin:0 0 7px; font-size:17px; } p { margin:5px 0; }
+    .subtitle { max-width:930px; margin-bottom:28px; color:var(--muted); }
+    .panel,.card { background:var(--surface); border:1px solid var(--line); border-radius:14px; box-shadow:0 8px 24px rgb(15 23 42 / .07); }
+    .panel { padding:22px; margin-bottom:22px; } .card { padding:20px; }
+    .flow { display:grid; grid-template-columns:1fr 50px 1fr 50px 1fr 50px 1fr; gap:8px; align-items:center; text-align:center; }
+    .step { padding:15px; border:2px solid var(--line); border-radius:11px; }
+    .local { border-color:var(--blue); } .preflight { border-color:var(--amber); } .capture { border-color:var(--purple); } .blocked { border-color:var(--red); }
+    .arrow { font-size:24px; color:var(--muted); }
+    .evidence { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; text-align:center; }
+    .evidence div { padding:14px; border:1px solid var(--line); border-radius:10px; }
+    .split { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+    .resolution { display:flex; flex-wrap:wrap; gap:9px; justify-content:center; align-items:center; }
+    .resolution span { padding:7px 10px; border:1px solid var(--line); border-radius:8px; }
+    .note { margin-top:15px; padding:13px 15px; border-left:4px solid var(--amber); background:color-mix(in srgb,var(--amber) 9%,var(--surface)); }
+    .approved { padding:14px 16px; border-left:4px solid var(--green); background:color-mix(in srgb,var(--green) 10%,var(--surface)); }
+    @media (max-width:900px) { .flow,.evidence,.split { grid-template-columns:1fr; } .arrow { transform:rotate(90deg); text-align:center; } }
+    @media (prefers-color-scheme:dark) { :root { --bg:#0f172a; --surface:#111827; --text:#e5e7eb; --muted:#a8b3c7; --line:#334155; --blue:#60a5fa; --green:#34d399; --amber:#fbbf24; --purple:#c4b5fd; --red:#f87171; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Phase 2 — Conflict capture and resolution</h1>
+    <p class="subtitle">A stale base never publishes current state, but the user's verified candidate is retained so mobile and offline work cannot disappear.</p>
+
+    <section class="panel">
+      <h2>Stale-base path</h2>
+      <div class="flow">
+        <div class="step local"><h3>Local candidate</h3><p>Base V3</p><p>Local digest L</p></div>
+        <div class="arrow">→</div>
+        <div class="step preflight"><h3>Preflight</h3><p>Current is V4</p><p>Return conflict upload plan</p></div>
+        <div class="arrow">→</div>
+        <div class="step capture"><h3>Capture</h3><p>Verify candidate object</p><p>Insert open conflict</p></div>
+        <div class="arrow">→</div>
+        <div class="step blocked"><h3>No publish</h3><p>Current remains V4</p><p>No silent overwrite</p></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Conflict record binds exact evidence</h2>
+      <div class="evidence">
+        <div><h3>Base</h3><p>Version V3 that the edit started from</p></div>
+        <div><h3>Remote</h3><p>Current version V4 observed at capture</p></div>
+        <div><h3>Local</h3><p>Verified candidate content object L</p></div>
+        <div><h3>Origin</h3><p>Device, event, locator and timestamps</p></div>
+      </div>
+    </section>
+
+    <section class="split">
+      <article class="card">
+        <h2>Text and Markdown Conflict Inbox</h2>
+        <p>Download exact base, remote and local bytes.</p>
+        <p>Show a three-way diff and editable merge result.</p>
+        <p>Choose <strong>keep remote</strong>, <strong>keep local</strong> or <strong>save merged</strong>.</p>
+        <p>No parser/indexer dependency: this is bounded text diff only.</p>
+      </article>
+      <article class="card">
+        <h2>Binary Conflict Inbox</h2>
+        <p>Show filenames, media types, sizes, hashes and safe previews where supported.</p>
+        <p>Choose <strong>keep remote</strong> or <strong>keep local</strong>.</p>
+        <p>No automatic merge and no last-write-wins.</p>
+        <p>The unselected candidate remains referenced; future canonical GC owns retention expiry.</p>
+      </article>
+    </section>
+
+    <section class="panel" style="margin-top:22px">
+      <h2>Resolution transaction</h2>
+      <div class="resolution">
+        <span>bind conflict and observed remote V4</span> → <span>recheck current and policy</span> →
+        <span>publish local/merged against V4, or accept remote</span> →
+        <span>mark resolved and audit</span> → <strong>atomically apply winner</strong>
+      </div>
+      <p class="note">If current advanced beyond V4, resolution is stale and must be reviewed again. “Keep remote” creates no redundant content version; local or merged creates one immutable version linked to the conflict.</p>
+    </section>
+
+    <section class="split">
+      <article class="card">
+        <h2>Lifecycle conflicts covered</h2>
+        <ul>
+          <li>Local edit versus remote edit.</li>
+          <li>Local edit versus remote delete.</li>
+          <li>Local delete versus remote edit.</li>
+          <li>Concurrent rename/move or locator collision.</li>
+        </ul>
+      </article>
+      <article class="card">
+        <h2>Safety boundaries</h2>
+        <ul>
+          <li>Candidate objects are not active source versions.</li>
+          <li>Phase 2 does not delete candidate objects; future GC requires retention and reference recheck.</li>
+          <li>Paths, diff text and bytes never enter logs or Temporal history.</li>
+          <li>Conflict resolution uses a new event identity.</li>
+        </ul>
+      </article>
+    </section>
+
+    <p class="approved"><strong>Brainstorming decision:</strong> approved on 2026-08-15 as the Phase 2 conflict boundary.</p>
+  </main>
+</body>
+</html>
