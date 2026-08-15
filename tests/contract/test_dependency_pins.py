@@ -24,6 +24,9 @@ PYTHON_PIN_RE = re.compile(rf"^{_PYTHON_NAME}{_PYTHON_EXTRAS}=={_VERSION}$")
 # A canonical exact npm pin: a bare ``x.y[.z...]`` version literal with no
 # caret, tilde, wildcard, range, prerelease, tag or package alias.
 NPM_PIN_RE = re.compile(rf"^{_VERSION}$")
+# pnpm workspace protocol: links a package inside the workspace and never
+# resolves against the npm registry, so it is not a registry specifier.
+NPM_WORKSPACE_PROTOCOL = "workspace:"
 
 ALLOWED_SOURCE: dict[str, bool] = {"workspace": True}
 
@@ -98,23 +101,66 @@ def test_uv_sources_only_allow_workspace_true() -> None:
     )
 
 
+def _npm_registry_violations(manifest: Path, data: dict[str, Any]) -> list[str]:
+    violations: list[str] = []
+    for section in ("dependencies", "devDependencies", "optionalDependencies"):
+        entries = data.get(section, {})
+        if not isinstance(entries, dict):
+            continue
+        for name, version in entries.items():
+            specifier = str(version)
+            if specifier.startswith(NPM_WORKSPACE_PROTOCOL):
+                continue
+            if not NPM_PIN_RE.match(specifier):
+                violations.append(
+                    f"{manifest.relative_to(REPO_ROOT)}:{section} {name}={specifier!r}"
+                )
+    return violations
+
+
 def test_npm_registry_dependencies_are_bare_versions() -> None:
     violations: list[str] = []
     for manifest in _iter_npm_manifests():
         data = json.loads(manifest.read_text(encoding="utf-8"))
-        for section in ("dependencies", "devDependencies", "optionalDependencies"):
-            entries = data.get(section, {})
-            if not isinstance(entries, dict):
-                continue
-            for name, version in entries.items():
-                if not NPM_PIN_RE.match(str(version)):
-                    violations.append(
-                        f"{manifest.relative_to(REPO_ROOT)}:{section} {name}={version!r}"
-                    )
+        violations.extend(_npm_registry_violations(manifest, data))
     assert not violations, (
-        "npm dependencies must be bare x.y.z versions "
-        "(no ranges, wildcards, prereleases, tags, aliases or git URLs):\n" + "\n".join(violations)
+        "npm registry dependencies must be bare x.y.z versions "
+        "(no ranges, wildcards, prereleases, tags, aliases or git URLs; "
+        "workspace: protocol specifiers are exempt because pnpm links them "
+        "inside the workspace):\n" + "\n".join(violations)
     )
+
+
+def test_npm_registry_guard_exempts_workspace_protocol_only() -> None:
+    manifest = REPO_ROOT / "apps" / "pin-guard-sample" / "package.json"
+    workspace_linked = {
+        "dependencies": {"@workspace/api-client": "workspace:*"},
+        "devDependencies": {"@workspace/api-client": "workspace:^1.2.3"},
+        "optionalDependencies": {"@workspace/api-client": "workspace:~2.0.0"},
+    }
+    assert _npm_registry_violations(manifest, workspace_linked) == []
+
+    rejected_registry_specifiers = [
+        "^1.2.3",
+        "~1.2.3",
+        ">=1.0.0 <2.0.0",
+        "1.2.x",
+        "*",
+        "latest",
+        "next",
+        "npm:aliased-package@1.2.3",
+        "git+https://example.com/repo.git",
+        "https://example.com/pkg.tgz",
+        "1.2.3-beta.1",
+    ]
+    for specifier in rejected_registry_specifiers:
+        violations = _npm_registry_violations(
+            manifest, {"dependencies": {"registry-package": specifier}}
+        )
+        assert len(violations) == 1, (
+            f"expected exactly one violation for {specifier!r}, got {violations}"
+        )
+        assert f"registry-package={specifier!r}" in violations[0]
 
 
 def test_pnpm_workspace_only_builds_esbuild() -> None:
