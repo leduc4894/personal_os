@@ -485,13 +485,11 @@ def test_services_have_exact_storage_and_resource_contracts() -> None:
         "qdrant": ["qdrant-data:/qdrant/storage"],
         "neo4j": [
             "neo4j-data:/data",
-            "./scripts/neo4j-secret-entrypoint.sh:"
-            "/opt/knowledge/bin/neo4j-secret-entrypoint.sh:ro",
+            "./scripts/neo4j-secret-entrypoint.sh:/opt/knowledge/bin/neo4j-secret-entrypoint.sh:ro",
         ],
         "redis": [
             "redis-data:/data",
-            "./scripts/redis-secret-entrypoint.sh:"
-            "/opt/knowledge/bin/redis-secret-entrypoint.sh:ro",
+            "./scripts/redis-secret-entrypoint.sh:/opt/knowledge/bin/redis-secret-entrypoint.sh:ro",
         ],
         "temporal": [
             "./config/temporal/dynamicconfig.yaml:/etc/temporal/dynamicconfig.yaml:ro",
@@ -655,9 +653,7 @@ def test_neo4j_and_redis_read_root_owned_secrets_and_drop_back_to_service_users(
         "/bin/sh",
         "/opt/knowledge/bin/neo4j-secret-entrypoint.sh",
     ]
-    neo4j_wrapper = (SCRIPT_DIRECTORY / "neo4j-secret-entrypoint.sh").read_text(
-        encoding="utf-8"
-    )
+    neo4j_wrapper = (SCRIPT_DIRECTORY / "neo4j-secret-entrypoint.sh").read_text(encoding="utf-8")
     assert (
         "install -o neo4j -g neo4j -m 400 /run/secrets/neo4j_auth"
         " /run/neo4j-secrets/neo4j_auth" in neo4j_wrapper
@@ -665,9 +661,7 @@ def test_neo4j_and_redis_read_root_owned_secrets_and_drop_back_to_service_users(
     assert "export NEO4J_AUTH_FILE=/run/neo4j-secrets/neo4j_auth" in neo4j_wrapper
     assert "exec /startup/docker-entrypoint.sh" in neo4j_wrapper
 
-    redis_wrapper = (SCRIPT_DIRECTORY / "redis-secret-entrypoint.sh").read_text(
-        encoding="utf-8"
-    )
+    redis_wrapper = (SCRIPT_DIRECTORY / "redis-secret-entrypoint.sh").read_text(encoding="utf-8")
     assert "install -o redis -g redis -m 400 /run/secrets/redis_acl /run/redis/redis_acl" in (
         redis_wrapper
     )
