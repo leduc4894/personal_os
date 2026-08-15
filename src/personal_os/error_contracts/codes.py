@@ -60,6 +60,8 @@ class ErrorCode(StrEnum):
     SOURCE_COMMIT_OUTCOME_UNKNOWN = "source_commit_outcome_unknown"
     PROJECTION_DISPATCH_UNAVAILABLE = "projection_dispatch_unavailable"
     PROJECTION_INTENT_CONTRACT_INVALID = "projection_intent_contract_invalid"
+    IDENTITY_BOOTSTRAP_INPUT_INVALID = "identity_bootstrap_input_invalid"
+    IDENTITY_BOOTSTRAP_STATE_CONFLICT = "identity_bootstrap_state_conflict"
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,6 +317,18 @@ ERROR_DEFINITIONS: Final[Mapping[ErrorCode, ErrorDefinition]] = MappingProxyType
             is_retryable=False,
             safe_message="A projection intent violated its dispatch contract",
             allowed_detail_fields=frozenset({"projection_kind"}),
+        ),
+        ErrorCode.IDENTITY_BOOTSTRAP_INPUT_INVALID: ErrorDefinition(
+            category=ErrorCategory.VALIDATION,
+            is_retryable=False,
+            safe_message="identity bootstrap input is invalid",
+            allowed_detail_fields=frozenset({"reason"}),
+        ),
+        ErrorCode.IDENTITY_BOOTSTRAP_STATE_CONFLICT: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="identity bootstrap state conflicts with canonical state",
+            allowed_detail_fields=frozenset({}),
         ),
     }
 )

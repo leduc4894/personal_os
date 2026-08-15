@@ -57,4 +57,7 @@ def test_event_names_are_closed() -> None:
         "projection_intent_dispatched",
         "projection_intent_dispatch_failed",
         "projection_intent_lease_reclaimed",
+        "identity_bootstrap_succeeded",
+        "identity_bootstrap_replayed",
+        "identity_bootstrap_rejected",
     }

@@ -103,6 +103,9 @@ class EventName(StrEnum):
     PROJECTION_INTENT_DISPATCHED = "projection_intent_dispatched"
     PROJECTION_INTENT_DISPATCH_FAILED = "projection_intent_dispatch_failed"
     PROJECTION_INTENT_LEASE_RECLAIMED = "projection_intent_lease_reclaimed"
+    IDENTITY_BOOTSTRAP_SUCCEEDED = "identity_bootstrap_succeeded"
+    IDENTITY_BOOTSTRAP_REPLAYED = "identity_bootstrap_replayed"
+    IDENTITY_BOOTSTRAP_REJECTED = "identity_bootstrap_rejected"
 
 
 type SafeDiagnosticScalar = (
@@ -418,6 +421,24 @@ EVENT_DEFINITIONS: Final[Mapping[EventName, EventDefinition]] = MappingProxyType
             result_code=ResultCode.DEGRADED,
             required_fields=frozenset({"projection_kind", "count"}),
             allowed_fields=frozenset({"projection_kind", "count", "attempt_count"}),
+        ),
+        EventName.IDENTITY_BOOTSTRAP_SUCCEEDED: EventDefinition(
+            level=DiagnosticLevel.INFO,
+            result_code=ResultCode.SUCCEEDED,
+            required_fields=frozenset({"outcome", "workspace_id"}),
+            allowed_fields=frozenset({"outcome", "user_id", "workspace_id", "device_id"}),
+        ),
+        EventName.IDENTITY_BOOTSTRAP_REPLAYED: EventDefinition(
+            level=DiagnosticLevel.INFO,
+            result_code=ResultCode.SUCCEEDED,
+            required_fields=frozenset({"workspace_id"}),
+            allowed_fields=frozenset({"user_id", "workspace_id", "device_id"}),
+        ),
+        EventName.IDENTITY_BOOTSTRAP_REJECTED: EventDefinition(
+            level=DiagnosticLevel.WARNING,
+            result_code=ResultCode.REJECTED,
+            required_fields=frozenset({"error_code"}),
+            allowed_fields=frozenset({"workspace_id", "error_code"}),
         ),
     }
 )

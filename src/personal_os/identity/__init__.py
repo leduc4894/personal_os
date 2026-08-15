@@ -1,0 +1,37 @@
+"""Public identity-bootstrap domain contracts.
+
+Immutable bootstrap command/result types, the provider-neutral validation
+grammar, the typed identity error with its closed reason tokens, the metrics
+sink seam and the provider-neutral bootstrap store port. The modules import
+no infrastructure SDK, composition root or provider package.
+"""
+
+from personal_os.identity.contracts import (
+    BOOTSTRAP_INPUT_REASONS,
+    IDENTITY_METRIC_CONTRACTS,
+    BootstrapDeviceKind,
+    BootstrapIdentityCommand,
+    BootstrapIdentityOutcome,
+    BootstrapIdentityResult,
+    BootstrapInputReason,
+    IdentityBootstrapError,
+    IdentityBootstrapMetrics,
+    InMemoryIdentityBootstrapMetrics,
+    validate_bootstrap_identity_command,
+)
+from personal_os.identity.ports import IdentityBootstrapStore
+
+__all__ = [
+    "BOOTSTRAP_INPUT_REASONS",
+    "IDENTITY_METRIC_CONTRACTS",
+    "BootstrapDeviceKind",
+    "BootstrapIdentityCommand",
+    "BootstrapIdentityOutcome",
+    "BootstrapIdentityResult",
+    "BootstrapInputReason",
+    "IdentityBootstrapError",
+    "IdentityBootstrapMetrics",
+    "IdentityBootstrapStore",
+    "InMemoryIdentityBootstrapMetrics",
+    "validate_bootstrap_identity_command",
+]
