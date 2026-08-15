@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>API Runtime and Contract Foundation — Response and Errors</title>
+  <style>
+    :root { color-scheme: light dark; --bg:#f8fafc; --surface:#fff; --text:#0f172a; --muted:#475569; --line:#cbd5e1; --accent:#2563eb; --ok:#047857; --warn:#b45309; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { max-width:1280px; margin:auto; padding:40px 28px 56px; }
+    h1 { margin:0 0 8px; font-size:clamp(28px,4vw,44px); }
+    h2 { margin:0 0 12px; font-size:21px; }
+    .subtitle { max-width:900px; margin:0 0 22px; color:var(--muted); }
+    .approved { display:inline-block; margin-bottom:24px; padding:7px 11px; border-radius:999px; color:var(--ok); background:color-mix(in srgb,var(--ok) 14%,var(--surface)); font-weight:700; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+    .card { padding:20px; border:1px solid var(--line); border-radius:14px; background:var(--surface); box-shadow:0 8px 24px rgb(15 23 42 / .06); }
+    pre { overflow:auto; margin:0; padding:16px; border-radius:10px; background:#0f172a; color:#e2e8f0; font:14px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace; }
+    code { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; }
+    .flow { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-top:18px; }
+    .step { padding:16px; border-top:4px solid var(--accent); border-radius:10px; background:var(--surface); }
+    .step strong { display:block; margin-bottom:6px; }
+    .rules { margin-top:18px; }
+    li { margin:8px 0; }
+    .warning { margin-top:18px; padding:14px 16px; border-left:4px solid var(--warn); background:color-mix(in srgb,var(--warn) 10%,var(--surface)); }
+    @media (max-width:850px) { .grid,.flow { grid-template-columns:1fr; } }
+    @media (prefers-color-scheme:dark) { :root { --bg:#0f172a; --surface:#111827; --text:#e5e7eb; --muted:#94a3b8; --line:#334155; --accent:#60a5fa; --ok:#34d399; --warn:#fbbf24; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Response contract &amp; error handling</h1>
+    <p class="subtitle">Một envelope ổn định cho mọi public API response, kể cả lỗi do framework tạo ra.</p>
+    <div class="approved">Contract approved · 2026-08-15</div>
+
+    <div class="grid">
+      <section class="card">
+        <h2>Success envelope</h2>
+        <pre>{
+  "request_id": "uuid-v7",
+  "data": {},
+  "warnings": [],
+  "error": null
+}</pre>
+      </section>
+      <section class="card">
+        <h2>Error envelope</h2>
+        <pre>{
+  "request_id": "uuid-v7",
+  "data": null,
+  "warnings": [],
+  "error": {
+    "code": "stable_error_code",
+    "message": "Safe fixed message",
+    "retryable": false,
+    "details": {}
+  }
+}</pre>
+      </section>
+    </div>
+
+    <div class="flow">
+      <section class="step"><strong>1 · Correlate</strong>Server tạo UUIDv7; body và <code>X-Request-ID</code> phải giống nhau.</section>
+      <section class="step"><strong>2 · Validate</strong><code>traceparent</code> và <code>X-Client-Request-ID</code> được xử lý bằng diagnostics contract hiện có.</section>
+      <section class="step"><strong>3 · Map</strong>Mỗi stable error code có một HTTP status rõ ràng trong bảng ánh xạ đóng.</section>
+      <section class="step"><strong>4 · Redact</strong>Chỉ field allowlist được vào <code>details</code>; provider exception không bao giờ ra response.</section>
+    </div>
+
+    <section class="card rules">
+      <h2>Quy tắc bắt buộc</h2>
+      <ul>
+        <li>FastAPI validation, unknown route và method-not-allowed đều đi qua cùng envelope.</li>
+        <li>Không suy HTTP status chỉ từ error category; mapping theo từng code để tránh gộp sai semantics.</li>
+        <li>Retryable dependency failure trả <code>503</code>; business conflict thường là <code>409</code>; invalid request là <code>400</code>/<code>422</code>; lỗi không xác định là <code>500 internal_error</code>.</li>
+        <li>Không phản chiếu secret, raw content, query string, path, provider response hoặc raw exception.</li>
+        <li>Client request ID không bao giờ thay thế request ID do server sở hữu.</li>
+      </ul>
+    </section>
+
+    <div class="warning"><strong>Deferred deliberately:</strong> auth error codes và mapping cụ thể thuộc child spec Web auth/device authorization.</div>
+  </main>
+</body>
+</html>

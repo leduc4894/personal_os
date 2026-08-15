@@ -41,7 +41,7 @@
     </section>
 
     <section class="slices">
-      <article class="card"><h3><span class="number">1</span>Contract and migration foundation</h3><p>Closed API schemas/errors, forward migrations, generated client pipeline and required Phase 1 exposure hardening.</p><p class="gate"><strong>Gate:</strong> upgrade/downgrade and OpenAPI client compile.</p></article>
+      <article class="card"><h3><span class="number">1</span>API runtime and contract foundation</h3><p>Runnable FastAPI composition root, closed response/error contract, health semantics and deterministic generated-client pipeline. No business schema.</p><p class="gate"><strong>Gate:</strong> HTTP contract, reproducible OpenAPI and Web/plugin client compile.</p></article>
       <article class="card"><h3><span class="number">2</span>Login, device and minimal Admin</h3><p>Password/TOTP session, browser device approval, SecretStorage token rotation and device management.</p><p class="gate"><strong>Gate:</strong> login → approve → refresh → revoke.</p></article>
       <article class="card"><h3><span class="number">3</span>Server-owned exclusions</h3><p>Rules/evaluations, preview and publish UI, signed snapshot and backend recheck.</p><p class="gate"><strong>Gate:</strong> denied file reaches neither upload nor projection intent.</p></article>
       <article class="card"><h3><span class="number">4</span>Small-file create and update</h3><p>SQLite journal, ≤16 MiB API upload, Phase 1 publication/read composition and exact replay.</p><p class="gate"><strong>Gate:</strong> offline save reconnects and commits once.</p></article>

@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>API Runtime and Contract Foundation — Architecture</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --background: #f8fafc;
+      --surface: #ffffff;
+      --text: #0f172a;
+      --muted: #475569;
+      --line: #cbd5e1;
+      --accent: #2563eb;
+      --success: #047857;
+      --excluded: #9a3412;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--background);
+      color: var(--text);
+      font: 16px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { max-width: 1440px; margin: 0 auto; padding: 40px 28px 56px; }
+    h1 { margin: 0 0 8px; font-size: clamp(28px, 4vw, 44px); }
+    h2 { margin: 0 0 10px; font-size: 21px; }
+    h3 { margin: 0 0 8px; font-size: 17px; }
+    p { margin: 6px 0; }
+    code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .92em; }
+    .subtitle { max-width: 980px; margin-bottom: 28px; color: var(--muted); }
+    .approved {
+      display: inline-block;
+      margin: 0 0 22px;
+      padding: 7px 11px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--success) 14%, var(--surface));
+      color: var(--success);
+      font-weight: 700;
+    }
+    .architecture {
+      display: grid;
+      grid-template-columns: 1fr 52px 1.25fr 52px 1fr;
+      gap: 10px;
+      align-items: stretch;
+    }
+    .card {
+      padding: 18px;
+      border: 2px solid var(--line);
+      border-radius: 14px;
+      background: var(--surface);
+      box-shadow: 0 8px 24px rgb(15 23 42 / .07);
+    }
+    .card.primary { border-color: var(--accent); }
+    .label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .arrow { display: grid; place-items: center; color: var(--accent); font-size: 34px; }
+    .pipeline {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      margin-top: 24px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--surface);
+    }
+    .pipeline span:not(.flow) {
+      padding: 9px 12px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--background);
+    }
+    .flow { color: var(--accent); font-size: 22px; }
+    .scope { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 20px; }
+    .scope section { padding: 18px; border-radius: 14px; background: var(--surface); }
+    .included { border-left: 4px solid var(--success); }
+    .excluded { border-left: 4px solid var(--excluded); }
+    li { margin: 7px 0; }
+    @media (max-width: 960px) {
+      .architecture { grid-template-columns: 1fr; }
+      .arrow { transform: rotate(90deg); min-height: 36px; }
+      .scope { grid-template-columns: 1fr; }
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --background: #0f172a;
+        --surface: #111827;
+        --text: #e5e7eb;
+        --muted: #94a3b8;
+        --line: #334155;
+        --accent: #60a5fa;
+        --success: #34d399;
+        --excluded: #fb923c;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>API runtime &amp; contract foundation</h1>
+    <p class="subtitle">Child spec 1 của Phase 2: một “contract spine” chạy được để Web, Obsidian plugin và các child spec sau dùng chung, chưa đưa nghiệp vụ sync vào.</p>
+    <div class="approved">Architecture approved · 2026-08-15</div>
+
+    <div class="architecture">
+      <section class="card">
+        <div class="label">Consumers</div>
+        <h2>Web + Obsidian</h2>
+        <p><strong><code>packages/api-client</code></strong></p>
+        <p>Generated request/response types và <code>ApiClient</code> dùng một <code>ApiTransport</code> được inject.</p>
+        <p>Web dùng fetch adapter; plugin dùng Obsidian <code>requestUrl</code> adapter.</p>
+      </section>
+
+      <div class="arrow">⇄</div>
+
+      <section class="card primary">
+        <div class="label">Runnable API spine</div>
+        <h2><code>apps/api</code></h2>
+        <p><code>serve</code> lazy-load FastAPI; các CLI hiện tại vẫn không cần import framework.</p>
+        <p>Middleware tạo request ID, xử lý trace context, safe access log/metrics và exception mapping.</p>
+        <p>Public routes ban đầu chỉ gồm <code>/api/health/live</code>, <code>/api/health/ready</code> và local/test <code>/api/openapi.json</code>.</p>
+      </section>
+
+      <div class="arrow">⇄</div>
+
+      <section class="card">
+        <div class="label">Framework-neutral</div>
+        <h2>API contracts</h2>
+        <p>Pydantic response envelopes và HTTP error mapping nằm ngoài FastAPI.</p>
+        <p>Readiness kiểm tra PostgreSQL connectivity và schema head. Liveness tuyệt đối không gọi network.</p>
+      </section>
+    </div>
+
+    <section class="pipeline">
+      <strong>Deterministic contract pipeline</strong>
+      <span>Pydantic + routes</span><span class="flow">→</span>
+      <span>Normalized OpenAPI snapshot</span><span class="flow">→</span>
+      <span>Diff gate</span><span class="flow">→</span>
+      <span>Generated TypeScript contract</span>
+    </section>
+
+    <div class="scope">
+      <section class="included">
+        <h2>Trong scope</h2>
+        <ul>
+          <li>API app factory và explicit <code>serve</code>.</li>
+          <li>Success/error envelope nhất quán.</li>
+          <li>Health/readiness và production docs policy.</li>
+          <li>OpenAPI snapshot và shared client package.</li>
+          <li>Contract, middleware và CLI-boundary tests.</li>
+        </ul>
+      </section>
+      <section class="excluded">
+        <h2>Ngoài scope</h2>
+        <ul>
+          <li>Auth và device authorization.</li>
+          <li>Upload/download và sync routes.</li>
+          <li>Business tables hoặc migrations.</li>
+          <li>R2, Temporal, Qdrant hoặc Neo4j readiness.</li>
+          <li>Wildcard CORS và Swagger/ReDoc trong production.</li>
+        </ul>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

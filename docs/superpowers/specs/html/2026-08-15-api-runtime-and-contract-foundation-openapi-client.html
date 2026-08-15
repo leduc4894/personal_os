@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>API Runtime and Contract Foundation — OpenAPI Client Pipeline</title>
+  <style>
+    :root { color-scheme:light dark; --bg:#f8fafc; --surface:#fff; --text:#0f172a; --muted:#475569; --line:#cbd5e1; --accent:#2563eb; --ok:#047857; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { max-width:1380px; margin:auto; padding:40px 28px 56px; }
+    h1 { margin:0 0 8px; font-size:clamp(28px,4vw,44px); }
+    h2 { margin:0 0 10px; font-size:21px; }
+    h3 { margin:0 0 7px; font-size:17px; }
+    p { margin:6px 0; }
+    code { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:.92em; }
+    a { color:var(--accent); }
+    .subtitle { max-width:980px; margin:0 0 22px; color:var(--muted); }
+    .approved { display:inline-block; margin-bottom:24px; padding:7px 11px; border-radius:999px; color:var(--ok); background:color-mix(in srgb,var(--ok) 14%,var(--surface)); font-weight:700; }
+    .pipeline { display:grid; grid-template-columns:repeat(7,auto); gap:9px; align-items:center; }
+    .node { min-height:120px; padding:17px; border:1px solid var(--line); border-radius:13px; background:var(--surface); box-shadow:0 7px 20px rgb(15 23 42 / .06); }
+    .node.primary { border:2px solid var(--accent); }
+    .arrow { color:var(--accent); font-size:28px; }
+    .consumers { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:20px; }
+    .consumer { padding:18px; border-top:4px solid var(--accent); border-radius:12px; background:var(--surface); }
+    .gates { margin-top:20px; padding:18px; border:1px solid var(--line); border-radius:14px; background:var(--surface); }
+    .gates ol { display:grid; grid-template-columns:repeat(5,1fr); gap:12px; padding:0; list-style-position:inside; }
+    .gates li { padding:12px; border-radius:9px; background:var(--bg); }
+    .notes { margin-top:18px; color:var(--muted); }
+    @media (max-width:1000px) { .pipeline { grid-template-columns:1fr; } .arrow { transform:rotate(90deg); text-align:center; } .gates ol { grid-template-columns:1fr; } }
+    @media (max-width:720px) { .consumers { grid-template-columns:1fr; } }
+    @media (prefers-color-scheme:dark) { :root { --bg:#0f172a; --surface:#111827; --text:#e5e7eb; --muted:#94a3b8; --line:#334155; --accent:#60a5fa; --ok:#34d399; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Deterministic OpenAPI → TypeScript pipeline</h1>
+    <p class="subtitle">Một snapshot canonical và một client transport-neutral ngăn Web, plugin và backend tự diễn giải contract theo ba cách khác nhau.</p>
+    <div class="approved">Pipeline approved · 2026-08-15</div>
+
+    <div class="pipeline">
+      <section class="node"><h3>Pydantic + routes</h3><p>Explicit stable <code>operationId</code>.</p></section>
+      <div class="arrow">→</div>
+      <section class="node"><h3>Export</h3><p><code>personal-api export-openapi</code>, không mở server/DB.</p></section>
+      <div class="arrow">→</div>
+      <section class="node primary"><h3>Canonical snapshot</h3><p><code>packages/api-client/openapi.json</code></p><p>Normalized, sorted, committed.</p></section>
+      <div class="arrow">→</div>
+      <section class="node"><h3>Generated client</h3><p><code>openapi-typescript</code> + <code>openapi-fetch</code>.</p></section>
+    </div>
+
+    <div class="consumers">
+      <section class="consumer"><h2>Web</h2><p><code>createApiClient({ baseUrl, transport })</code></p><p>Native-fetch transport; same-origin deployment.</p></section>
+      <section class="consumer"><h2>Obsidian plugin</h2><p>Cùng generated types và API client.</p><p>Adapter chuyển Obsidian <code>requestUrl</code> sang fetch-compatible transport; shared package không import Obsidian.</p></section>
+    </div>
+
+    <section class="gates">
+      <h2>Contract gate</h2>
+      <ol>
+        <li>Export snapshot</li>
+        <li>Compare committed diff</li>
+        <li><code>openapi-typescript --check</code></li>
+        <li>TypeScript strict check</li>
+        <li>Consumer contract tests</li>
+      </ol>
+    </section>
+
+    <div class="notes">
+      <p>Snapshot và generated types đều được commit; consumer build không cần Python hoặc một API server đang chạy.</p>
+      <p>API version nằm trong OpenAPI <code>info.version</code> và package version. Route vẫn dùng <code>/api/...</code>, không thêm <code>/v1</code>.</p>
+      <p>References: <a href="https://openapi-ts.dev/cli">openapi-typescript CLI</a>, <a href="https://openapi-ts.dev/openapi-fetch/api">openapi-fetch API</a>, <a href="https://fastapi.tiangolo.com/tutorial/metadata/">FastAPI metadata/docs URLs</a>.</p>
+    </div>
+  </main>
+</body>
+</html>

@@ -507,7 +507,7 @@ All cases run against one final commit:
 
 | Order | Child spec | Owns | Depends on |
 |---|---|---|---|
-| 1 | `sync-contract-and-schema-design.md` | shared API envelope, error vocabulary, migration sequencing and generated-client boundary | Phase 1 canonical core |
+| 1 | `api-runtime-and-contract-foundation-design.md` | runnable API composition root, shared envelope/error vocabulary, health semantics, deterministic OpenAPI and generated-client boundary; no business schema | Phase 1 canonical core |
 | 2 | `web-auth-and-device-authorization-design.md` | password/TOTP, web sessions, browser device approval, token rotation/revoke and device Admin | child 1 |
 | 3 | `exclusion-policy-publication-design.md` | rule model, preview/publish, signed snapshot and backend enforcement | children 1–2 |
 | 4 | `plugin-journal-and-small-file-sync-design.md` | SQLite journal, offline queue and create/update through 16 MiB | children 1–3 |
@@ -528,7 +528,7 @@ cross-boundary change first updates this umbrella and every affected child spec.
 
 The implementation order inside the program remains:
 
-1. Contract and migration foundation.
+1. API runtime and contract foundation.
 2. Login, device authorization and minimal Admin.
 3. Server-owned exclusions.
 4. Small-file create/update.

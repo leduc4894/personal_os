@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>API Runtime and Contract Foundation — Testing and Acceptance</title>
+  <style>
+    :root { color-scheme:light dark; --bg:#f8fafc; --surface:#fff; --text:#0f172a; --muted:#475569; --line:#cbd5e1; --accent:#2563eb; --ok:#047857; --warn:#b45309; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { max-width:1380px; margin:auto; padding:40px 28px 56px; }
+    h1 { margin:0 0 8px; font-size:clamp(28px,4vw,44px); }
+    h2 { margin:0 0 10px; font-size:21px; }
+    h3 { margin:0 0 8px; font-size:17px; }
+    p { margin:6px 0; }
+    code { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:.92em; }
+    .subtitle { max-width:980px; margin:0 0 22px; color:var(--muted); }
+    .approved { display:inline-block; margin-bottom:24px; padding:7px 11px; border-radius:999px; color:var(--ok); background:color-mix(in srgb,var(--ok) 14%,var(--surface)); font-weight:700; }
+    .layers { display:grid; grid-template-columns:repeat(5,1fr); gap:12px; }
+    .layer { min-height:230px; padding:17px; border:1px solid var(--line); border-top:5px solid var(--accent); border-radius:13px; background:var(--surface); box-shadow:0 7px 20px rgb(15 23 42 / .05); }
+    .layer ul { padding-left:20px; }
+    li { margin:7px 0; }
+    .acceptance { margin-top:20px; padding:20px; border:1px solid var(--line); border-radius:14px; background:var(--surface); }
+    .acceptance ol { columns:2; column-gap:44px; }
+    .acceptance li { break-inside:avoid; margin:0 0 10px; }
+    .dependencies { margin-top:18px; padding:16px; border-left:4px solid var(--warn); background:color-mix(in srgb,var(--warn) 10%,var(--surface)); }
+    @media (max-width:1100px) { .layers { grid-template-columns:repeat(2,1fr); } }
+    @media (max-width:700px) { .layers { grid-template-columns:1fr; } .acceptance ol { columns:1; } }
+    @media (prefers-color-scheme:dark) { :root { --bg:#0f172a; --surface:#111827; --text:#e5e7eb; --muted:#94a3b8; --line:#334155; --accent:#60a5fa; --ok:#34d399; --warn:#fbbf24; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Testing &amp; acceptance gates</h1>
+    <p class="subtitle">Child spec chỉ hoàn thành khi contract chạy xuyên Python API, committed OpenAPI snapshot và cả hai TypeScript consumers.</p>
+    <div class="approved">Test strategy approved · 2026-08-15</div>
+
+    <div class="layers">
+      <section class="layer"><h3>Unit</h3><ul><li>Settings/bind policy</li><li>Envelope serialization</li><li>Error-status map</li><li>Request/trace context</li><li>OpenAPI normalization</li></ul></section>
+      <section class="layer"><h3>ASGI contract</h3><ul><li>Success + all framework errors</li><li>UUIDv7 body/header match</li><li>Production docs absent</li><li>No wildcard CORS</li></ul></section>
+      <section class="layer"><h3>Integration</h3><ul><li>Current-head readiness</li><li>DB unavailable/schema drift</li><li>Liveness during outage</li><li>Loopback start/stop</li><li>Pool cleanup</li></ul></section>
+      <section class="layer"><h3>Generated client</h3><ul><li>Byte-identical export</li><li>Stale diff failure</li><li>TS strict compile</li><li>Web transport contract</li><li>Plugin transport contract</li></ul></section>
+      <section class="layer"><h3>Security regression</h3><ul><li>Header/query/body sentinels</li><li>No raw exception</li><li>Server-owned request ID</li><li>No token/secret/provider text</li></ul></section>
+    </div>
+
+    <section class="acceptance">
+      <h2>Definition of done</h2>
+      <ol>
+        <li>Shell-only CLI paths still avoid framework imports.</li>
+        <li><code>personal-api serve</code> starts through an app factory.</li>
+        <li>Liveness performs no dependency call.</li>
+        <li>Readiness checks only PostgreSQL + schema head.</li>
+        <li>Every HTTP response follows the common envelope.</li>
+        <li>OpenAPI snapshot and generated types are reproducible.</li>
+        <li>Web and plugin compile against the same package.</li>
+        <li>Production exposes no OpenAPI, Swagger or ReDoc.</li>
+        <li>Sensitive sentinels never reach response or diagnostics.</li>
+        <li>No auth/sync route or business migration is introduced.</li>
+      </ol>
+    </section>
+
+    <div class="dependencies"><strong>Bounded dependency change:</strong> FastAPI/Uvicorn for Python runtime, <code>openapi-fetch</code> for the shared TypeScript client, and <code>openapi-typescript</code> as a development generator. All versions are lockfile-pinned. No new infrastructure service or mutation-testing scope.</div>
+  </main>
+</body>
+</html>
