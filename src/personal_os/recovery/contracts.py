@@ -120,9 +120,7 @@ RECOVERY_BUNDLE_INVALID_REASONS: Final[frozenset[str]] = frozenset(
 )
 
 #: Closed component tokens accepted by the recovery integrity codes.
-RECOVERY_COMPONENTS: Final[frozenset[str]] = frozenset(
-    member.value for member in RecoveryComponent
-)
+RECOVERY_COMPONENTS: Final[frozenset[str]] = frozenset(member.value for member in RecoveryComponent)
 
 #: Closed dependency tokens accepted by ``canonical_recovery_dependency_unavailable``.
 RECOVERY_DEPENDENCIES: Final[frozenset[str]] = frozenset(
@@ -310,9 +308,7 @@ class InMemoryCanonicalBackupMetrics:
 
         return list(self._records)
 
-    def backup_count(
-        self, operation: RecoveryOperation, outcome: RecoveryMetricOutcome
-    ) -> int:
+    def backup_count(self, operation: RecoveryOperation, outcome: RecoveryMetricOutcome) -> int:
         return sum(
             1
             for record in self._records

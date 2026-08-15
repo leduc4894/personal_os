@@ -204,18 +204,14 @@ def test_rejects_duplicate_content_sha256() -> None:
 def test_rejects_relative_path_object_key_disagreement() -> None:
     entry = _object_entry(_FIRST_DIGEST, 128)
     entry["relative_path"] = "objects/sha256/00/00/elsewhere"
-    assert_bundle_invalid(
-        canonical_json(manifest_payload(objects=[entry])), "path_key_mismatch"
-    )
+    assert_bundle_invalid(canonical_json(manifest_payload(objects=[entry])), "path_key_mismatch")
 
 
 def test_rejects_key_not_derived_from_digest() -> None:
     entry = _object_entry(_FIRST_DIGEST, 128)
     entry["object_key"] = f"objects/sha256/ff/ff/{_FIRST_DIGEST}"
     entry["relative_path"] = entry["object_key"]
-    assert_bundle_invalid(
-        canonical_json(manifest_payload(objects=[entry])), "path_key_mismatch"
-    )
+    assert_bundle_invalid(canonical_json(manifest_payload(objects=[entry])), "path_key_mismatch")
 
 
 def test_rejects_non_uuidv7_bundle_id() -> None:
@@ -223,9 +219,7 @@ def test_rejects_non_uuidv7_bundle_id() -> None:
         canonical_json(manifest_payload(bundle_id=str(UUID(int=0)))), "bundle_id_invalid"
     )
     v4_text = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d"
-    assert_bundle_invalid(
-        canonical_json(manifest_payload(bundle_id=v4_text)), "bundle_id_invalid"
-    )
+    assert_bundle_invalid(canonical_json(manifest_payload(bundle_id=v4_text)), "bundle_id_invalid")
     assert_bundle_invalid(
         canonical_json(manifest_payload(bundle_id="not-a-uuid")), "bundle_id_invalid"
     )
@@ -261,9 +255,7 @@ def test_rejects_wrong_closed_counts_map() -> None:
     extra = dict(counts)
     extra["audit_events"] = 0
     extra["unexpected_table"] = 1
-    assert_bundle_invalid(
-        canonical_json(manifest_payload(canonical_counts=extra)), "field_invalid"
-    )
+    assert_bundle_invalid(canonical_json(manifest_payload(canonical_counts=extra)), "field_invalid")
 
 
 def test_rejects_invalid_grammar_fields() -> None:
@@ -277,9 +269,7 @@ def test_rejects_invalid_grammar_fields() -> None:
     entry = _object_entry(uppercase_digest, 128)
     entry["object_key"] = f"objects/sha256/00/00/{uppercase_digest}"
     entry["relative_path"] = entry["object_key"]
-    assert_bundle_invalid(
-        canonical_json(manifest_payload(objects=[entry])), "field_invalid"
-    )
+    assert_bundle_invalid(canonical_json(manifest_payload(objects=[entry])), "field_invalid")
     assert_bundle_invalid(
         canonical_json(manifest_payload(objects=[{"content_sha256": _FIRST_DIGEST}])),
         "field_invalid",

@@ -91,38 +91,53 @@ def test_recovery_environment_is_closed() -> None:
 
 
 def test_recovery_reason_tokens_are_closed() -> None:
-    assert frozenset(
-        {
-            "environment_not_allowed",
-            "backup_root_not_absolute",
-            "schema_head_mismatch",
-            "free_space_reserve",
-            "client_tools_unavailable",
-            "target_not_empty",
-        }
-    ) == RECOVERY_CONFIGURATION_REASONS
-    assert frozenset(
-        {
-            "contract_unsupported",
-            "json_noncanonical",
-            "duplicate_json_key",
-            "bundle_id_invalid",
-            "timestamp_invalid",
-            "field_unknown",
-            "field_invalid",
-            "entries_unsorted",
-            "digest_duplicate",
-            "path_key_mismatch",
-            "sidecar_missing",
-            "file_tree_mismatch",
-            "file_changed",
-            "checksum_mismatch",
-        }
-    ) == RECOVERY_BUNDLE_INVALID_REASONS
-    assert frozenset(
-        {"postgres_dump", "postgres_restore", "object_set", "bundle", "canonical_graph",
-         "canonical_read"}
-    ) == RECOVERY_COMPONENTS
+    assert (
+        frozenset(
+            {
+                "environment_not_allowed",
+                "backup_root_not_absolute",
+                "schema_head_mismatch",
+                "free_space_reserve",
+                "client_tools_unavailable",
+                "target_not_empty",
+            }
+        )
+        == RECOVERY_CONFIGURATION_REASONS
+    )
+    assert (
+        frozenset(
+            {
+                "contract_unsupported",
+                "json_noncanonical",
+                "duplicate_json_key",
+                "bundle_id_invalid",
+                "timestamp_invalid",
+                "field_unknown",
+                "field_invalid",
+                "entries_unsorted",
+                "digest_duplicate",
+                "path_key_mismatch",
+                "sidecar_missing",
+                "file_tree_mismatch",
+                "file_changed",
+                "checksum_mismatch",
+            }
+        )
+        == RECOVERY_BUNDLE_INVALID_REASONS
+    )
+    assert (
+        frozenset(
+            {
+                "postgres_dump",
+                "postgres_restore",
+                "object_set",
+                "bundle",
+                "canonical_graph",
+                "canonical_read",
+            }
+        )
+        == RECOVERY_COMPONENTS
+    )
     assert frozenset({"postgresql", "r2", "temporal", "pg_client"}) == RECOVERY_DEPENDENCIES
 
 

@@ -137,9 +137,7 @@ def hydrate_identity_state(
     devices_for_state = device_rows
     if len(workspace_rows) == 1:
         sole_workspace_id = workspace_rows[0]["workspace_id"]
-        devices_for_state = [
-            row for row in device_rows if row["workspace_id"] == sole_workspace_id
-        ]
+        devices_for_state = [row for row in device_rows if row["workspace_id"] == sole_workspace_id]
     return ExistingIdentityState(
         users=tuple(
             ExistingIdentityUser(
@@ -285,13 +283,9 @@ class PostgresqlIdentityBootstrapStore:
             # the conflict error: the service must never claim an audit that
             # does not exist, and driver text must never leak.
             try:
-                await self._record_conflict_rejection(
-                    abort.state, command, diagnostic_context
-                )
+                await self._record_conflict_rejection(abort.state, command, diagnostic_context)
             except SQLAlchemyError as audit_cause:
-                raise map_database_failure(
-                    audit_cause, source_id=_NIL_SOURCE_ID
-                ) from audit_cause
+                raise map_database_failure(audit_cause, source_id=_NIL_SOURCE_ID) from audit_cause
             raise abort.error from abort
         except SQLAlchemyError as cause:
             raise map_database_failure(cause, source_id=_NIL_SOURCE_ID) from cause
@@ -306,9 +300,7 @@ class PostgresqlIdentityBootstrapStore:
                     await connection.execute(bootstrap_lock_statement(command))
                     state = await self._read_identity_state(connection)
                     if self._is_empty_state(state):
-                        return await self._create_identity(
-                            connection, command, diagnostic_context
-                        )
+                        return await self._create_identity(connection, command, diagnostic_context)
                     # Replaying performs no mutation and no extra audit row;
                     # the read-only transaction simply commits. A drift
                     # conflict aborts so the transaction rolls back.
