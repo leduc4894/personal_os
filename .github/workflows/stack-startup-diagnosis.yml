@@ -53,6 +53,13 @@ jobs:
           up_exit=$?
           echo "tool up exit: $up_exit"
           exit "$up_exit"
+      - name: Reproduce the exact acceptance pytest stack fixture
+        run: |
+          set -uo pipefail
+          install -d -m 700 .local
+          uv run pytest tests/integration/canonical_core -m "local_stack and r2_live" -q || pytest_status=$?
+          echo "pytest exit: ${pytest_status:-0}"
+          exit 0
       - name: Cycle the stack repeatedly to reproduce intermittent startup failure
         run: |
           set -uo pipefail
