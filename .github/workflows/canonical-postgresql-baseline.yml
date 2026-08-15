@@ -135,6 +135,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          install -d -m 700 .local
           mkdir -p .local/test-results
           uv run pytest tests/integration/test_canonical_postgresql_baseline.py -m local_stack -q \
             tests/integration/projection_dispatch \

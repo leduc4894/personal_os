@@ -480,6 +480,10 @@ def test_canonical_postgresql_ubuntu_lifecycle_job_uses_pinned_stack() -> None:
     assert 'CI: "true"' in lifecycle_job
     assert CANONICAL_POSTGRESQL_PROJECT_TEMPLATE in lifecycle_job
     assert "uv sync --all-packages --frozen" in lifecycle_job
+    # The stack bootstrap requires the .local parent directory at mode 0700;
+    # a default-umask mkdir -p .local/test-results would create it 0755 and
+    # fail the run closed with unsafe_secret_set.
+    assert "install -d -m 700 .local" in lifecycle_job
     assert "mkdir -p .local/test-results" in lifecycle_job
     assert (
         "pytest tests/integration/test_canonical_postgresql_baseline.py -m local_stack -q"
@@ -706,6 +710,10 @@ def test_acceptance_workflow_runs_disposable_stack_and_live_suite() -> None:
     assert "R2_TEST_ENDPOINT: ${{ vars.R2_TEST_ENDPOINT }}" in text
     assert "R2_TEST_BUCKET_NAME: ${{ vars.R2_TEST_BUCKET_NAME }}" in text
     assert "uv sync --all-packages --frozen" in text
+    # The stack bootstrap requires the .local parent directory at mode 0700;
+    # a default-umask mkdir -p .local/test-results would create it 0755 and
+    # fail the run closed with unsafe_secret_set.
+    assert "install -d -m 700 .local" in run_step
     assert (
         'uv run pytest tests/integration/canonical_core -m "local_stack and r2_live" -q'
         " --junitxml=.local/test-results/canonical-core-acceptance.xml" in run_step

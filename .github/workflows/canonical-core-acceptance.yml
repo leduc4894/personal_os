@@ -118,6 +118,7 @@ jobs:
           R2_TEST_SECRET_ROOT: ${{ runner.temp }}/r2-live-secrets
         run: |
           set -euo pipefail
+          install -d -m 700 .local
           mkdir -p .local/test-results
           uv run pytest tests/integration/canonical_core -m "local_stack and r2_live" -q --junitxml=.local/test-results/canonical-core-acceptance.xml
       - name: Remove dedicated test secret files
