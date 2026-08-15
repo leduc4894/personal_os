@@ -1,6 +1,7 @@
 packages:
   - apps/web
   - apps/obsidian-plugin
+  - packages/api-client
 
 onlyBuiltDependencies:
   - esbuild

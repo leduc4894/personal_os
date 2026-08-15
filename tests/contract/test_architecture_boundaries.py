@@ -28,11 +28,14 @@ PYTHON_SOURCE_ROOTS = [
 TS_SOURCE_ROOTS = [
     REPO_ROOT / "apps" / "web" / "src",
     REPO_ROOT / "apps" / "obsidian-plugin" / "src",
+    REPO_ROOT / "packages" / "api-client" / "src",
 ]
 
 # Module specifiers that would bridge the Web and Obsidian members.
 WEB_FORBIDDEN_SUBSTRINGS = ("obsidian-plugin",)
 OBSIDIAN_FORBIDDEN_SUBSTRINGS = ("web-runtime", "apps/web")
+# The shared api client serves both consumers; it must never import either.
+API_CLIENT_FORBIDDEN_SUBSTRINGS = ("web-runtime", "obsidian-plugin", "apps/web")
 # Alias prefixes that neither member tsconfig defines; their use would let a
 # import escape the member without a relative path.
 ALIAS_PREFIXES = ("@/", "~/")
@@ -91,6 +94,8 @@ def _classify_member(path: Path) -> str:
         return "web"
     if path.is_relative_to(REPO_ROOT / "apps" / "obsidian-plugin"):
         return "obsidian-plugin"
+    if path.is_relative_to(REPO_ROOT / "packages" / "api-client"):
+        return "api-client"
     return "other"
 
 
@@ -336,7 +341,11 @@ def test_typescript_imports_stay_within_member_boundaries() -> None:
                 token in specifier for token in OBSIDIAN_FORBIDDEN_SUBSTRINGS
             ):
                 offenders.append(f"{path}: obsidian-plugin imports web via {specifier!r}")
+            elif member == "api-client" and any(
+                token in specifier for token in API_CLIENT_FORBIDDEN_SUBSTRINGS
+            ):
+                offenders.append(f"{path}: api-client imports a consumer via {specifier!r}")
     assert not offenders, (
-        "TypeScript imports must not cross Web/Obsidian member boundaries "
-        "or use undefined path aliases:\n" + "\n".join(offenders)
+        "TypeScript imports must not cross member boundaries (web, obsidian-plugin, "
+        "shared api-client) or use undefined path aliases:\n" + "\n".join(offenders)
     )

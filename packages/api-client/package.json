@@ -1,0 +1,29 @@
+{
+  "name": "@workspace/api-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "format": "eslint . --fix",
+    "format:check": "eslint . --max-warnings=0",
+    "generate": "openapi-typescript openapi.json -o src/generated/schema.ts --immutable --export-type",
+    "generate:check": "openapi-typescript openapi.json -o src/generated/schema.ts --immutable --export-type --check",
+    "lint": "eslint . --max-warnings=0",
+    "test": "vitest run --coverage",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "openapi-fetch": "0.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "@vitest/coverage-v8": "4.1.10",
+    "eslint": "9.39.5",
+    "openapi-typescript": "7.13.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.67.0",
+    "vitest": "4.1.10"
+  }
+}
