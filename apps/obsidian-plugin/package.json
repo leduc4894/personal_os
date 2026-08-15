@@ -10,6 +10,9 @@
     "test": "vitest run --coverage",
     "type-check": "tsc --noEmit"
   },
+  "dependencies": {
+    "@workspace/api-client": "workspace:*"
+  },
   "devDependencies": {
     "@types/node": "24.13.3",
     "@vitest/coverage-v8": "4.1.10",

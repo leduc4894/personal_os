@@ -20,7 +20,14 @@ const eslintConfig = [
         {
           patterns: [
             {
-              group: ["@workspace/web-runtime", "**/apps/web/**"],
+              // The shared API contract package is the only workspace member
+              // the plugin may import; Web and every other app stay
+              // unreachable.
+              group: [
+                "@workspace/*",
+                "!@workspace/api-client",
+                "**/apps/web/**",
+              ],
             },
           ],
         },
