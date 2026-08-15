@@ -8,6 +8,8 @@
 **Final code commit before this handoff commit:** `9cb5b0e`
 **Commit range:** `3b09967..9cb5b0e` (16 commits; `3b09967` is the pre-plan
 baseline repair described in decision 1, parent `1646847` = `master`).
+**Branch head after the final-review fix wave:** `69b13c2` (see the
+final-review addendum below).
 
 Living operational status: `docs/operations/api-runtime-contract.md` (the
 operator runbook — commands, bind rules, health semantics, OpenAPI pipeline,
@@ -147,6 +149,36 @@ are polish notes owned by this handoff.
   reads `PYDANTIC_DISABLE_PLUGINS`; pytest renders six terminal env keys) are
   documented in `tests/unit/api_runtime/test_openapi_export.py`. Verdict:
   accept, documented.
+
+## Final-review addendum (2026-08-15)
+
+The whole-branch review (range `1646847..0d76ac1`, after Task 12) returned
+one Critical finding: `run_server` built `uvicorn.Config` without
+`access_log=False`, so Uvicorn's default access log would write every
+request's raw path and query string to stdout — violating the privacy
+contract this child exists to enforce (spec 8/14). The single fix wave
+commit `69b13c2` (`fix: disable uvicorn access log and close review edges`)
+addressed it plus five minor review findings:
+
+- `access_log=False` on the server config, pinned by the recording-factory
+  test; structured diagnostics events remain the only request-level logging.
+- `export-openapi` maps write `OSError` to the safe exit `70`
+  (`openapi_export_failed` stderr token, no traceback, no path).
+- Uvicorn-internal startup failures (`SystemExit(3)` on bind errors) map to
+  the safe exit `70`; clean shutdown stays `0`.
+- The publication-token scan now covers `paths`, `webhooks` and
+  `components.pathItems` and fails loudly on documents declaring none.
+- `.importlinter` core contract now also forbids `uvicorn` and `psycopg`.
+
+Verification after the fix wave: `uv run poe verify` exit `0`
+(1564 passed / 19 skipped Python, TS suites green), `poe boundary-check`
+kept, `git diff --check` clean; scoped re-review confirmed all findings
+addressed with no new Critical/Important breakage. Two residual notes were
+parked with rulings: Uvicorn's own logger still prints bind-failure
+`OSError` text (coordinates only — close by routing `uvicorn.error` through
+the structured formatter when that configuration is adopted), and
+`export-openapi` with a null byte in the output path raises `ValueError`
+(exotic operator input; no privacy surface).
 
 ## Next actions
 
