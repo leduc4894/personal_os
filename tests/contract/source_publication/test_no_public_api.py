@@ -5,6 +5,12 @@ MCP tool, no OpenAPI document and no generated TypeScript client may declare a
 source-publication endpoint, and the Alembic graph must still be exactly the
 single ``20260813_01`` baseline head with exactly one migration file — the
 acceptance work added tests only, never a migration.
+
+The API runtime package under ``apps/api/src/api_runtime`` is the sanctioned
+FastAPI composition root of the API plan, so its framework imports and route
+registrations are permitted there; the structural web-framework prohibitions
+below guard the MCP surface, while the publication endpoint vocabulary is
+forbidden on every public surface root.
 """
 
 from __future__ import annotations
@@ -23,6 +29,9 @@ PYTHON_API_ROOTS: Final[tuple[Path, ...]] = (
     REPO_ROOT / "apps" / "api" / "src",
     REPO_ROOT / "apps" / "mcp" / "src",
 )
+#: Root whose modules may never import a web framework or register a route:
+#: the MCP composition has no sanctioned web surface, unlike the API runtime.
+PYTHON_FRAMEWORK_FREE_ROOTS: Final[tuple[Path, ...]] = (REPO_ROOT / "apps" / "mcp" / "src",)
 TYPESCRIPT_ROOTS: Final[tuple[Path, ...]] = (
     REPO_ROOT / "apps" / "web" / "src",
     REPO_ROOT / "apps" / "obsidian-plugin" / "src",
@@ -134,20 +143,22 @@ def test_alembic_heads_and_migration_file_count_are_unchanged() -> None:
 def test_api_and_mcp_sources_declare_no_source_publication_route() -> None:
     offenders: list[str] = []
     for root in PYTHON_API_ROOTS:
+        is_framework_free = root in PYTHON_FRAMEWORK_FREE_ROOTS
         for path in _iter_python_files(root):
             source = path.read_text(encoding="utf-8")
             tree = ast.parse(source, filename=str(path))
-            violating_imports = FORBIDDEN_WEB_IMPORT_ROOTS & _import_roots(tree)
-            if violating_imports:
-                offenders.append(f"{path}: imports {sorted(violating_imports)}")
-            violating_registrations = FORBIDDEN_REGISTRATION_CALLS & _call_names(tree)
-            if violating_registrations:
-                offenders.append(f"{path}: registers {sorted(violating_registrations)}")
-            violating_decorators = (
-                FORBIDDEN_REGISTRATION_CALLS | FORBIDDEN_DECORATOR_ATTRS
-            ) & _decorator_names(tree)
-            if violating_decorators:
-                offenders.append(f"{path}: decorator {sorted(violating_decorators)}")
+            if is_framework_free:
+                violating_imports = FORBIDDEN_WEB_IMPORT_ROOTS & _import_roots(tree)
+                if violating_imports:
+                    offenders.append(f"{path}: imports {sorted(violating_imports)}")
+                violating_registrations = FORBIDDEN_REGISTRATION_CALLS & _call_names(tree)
+                if violating_registrations:
+                    offenders.append(f"{path}: registers {sorted(violating_registrations)}")
+                violating_decorators = (
+                    FORBIDDEN_REGISTRATION_CALLS | FORBIDDEN_DECORATOR_ATTRS
+                ) & _decorator_names(tree)
+                if violating_decorators:
+                    offenders.append(f"{path}: decorator {sorted(violating_decorators)}")
             for token in PUBLICATION_ENDPOINT_TOKENS:
                 if token in source:
                     offenders.append(f"{path}: endpoint token {token!r}")
