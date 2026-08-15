@@ -267,5 +267,6 @@ never skip.
   (confirmed by runs 31886972234 and 31887267161). The same fixes turned
   `canonical-postgresql-baseline`, `local-service-stack` and `quality`
   green; see `docs/handoff/2026-08-15-linux-ci-stack-activation.md` for the
-  diagnosis trail and the one remaining transient (Docker Hub pull rate
-  limiting) observed twice before the green runs.
+  diagnosis trail and the image-pull transient (pinned-image prefetch was
+  added to the stack workflows so `compose up` never spends its startup
+  deadline pulling).

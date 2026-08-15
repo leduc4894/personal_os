@@ -86,13 +86,18 @@ Living operational status: `docs/operations/canonical-core-recovery.md`
 
 ## Deferred items (verdicts)
 
-- **Docker Hub pull rate limiting (transient).** Two acceptance runs
-  (`31886101513` original + rerun) failed `up` within seconds with
-   `stack_startup_failed` at a commit whose only change was the pg-client
-   install step; every reproduction since (8+ stack ups across three
-   diagnosis shapes and three acceptance runs) is green. Verdict: deferred
-   — if it recurs, add a single bounded retry of the live-suite step or a
-   Docker Hub token secret before considering code changes.
+- **Image pulls inside the startup deadline (was: suspected Docker Hub rate
+  limiting).** Two acceptance runs failed `up` within seconds; after the
+  green runs, manual dispatches of the two scheduled workflows on HEAD
+  failed again — one stuck for the full 180s with zero containers created,
+  which localised the cause: `docker compose up` was pulling gigabytes of
+  pinned images inside the 180s startup deadline meant for health waiting.
+  Verdict: **mitigated in `685696e`** — the three stack workflows now
+  prefetch the pinned images (`docker compose pull --quiet`) before their
+  live steps, keeping pull latency out of the startup deadline; pinned by
+  `test_stack_workflows_prefetch_images_before_live_gates`. No retry loop
+  was added; if the transient recurs despite prefetch, add a single
+  bounded retry of the live-suite step or a Docker Hub token secret.
 - **STACK failures hide compose stderr by design** (privacy contract);
    diagnosis required a temporary workflow. Verdict: deferred — a bounded
    sanitized compose-output tail in the startup failure payload would be a
