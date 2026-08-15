@@ -28,7 +28,7 @@ import os
 import re
 import shutil
 import tempfile
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -273,7 +273,10 @@ class PostgresqlDumpProcessAdapter:
         ]
         async with self._ephemeral_passfile(target) as passfile_path:
             result = await self._run_bounded(
-                argv, env=self._child_env(passfile_path), timeout_seconds=timeout_seconds
+                argv,
+                env=self._child_env(passfile_path),
+                timeout_seconds=timeout_seconds,
+                spawn_failure=_integrity_failed,
             )
         if result.timed_out or result.returncode != 0:
             raise _integrity_failed()
@@ -309,7 +312,10 @@ class PostgresqlDumpProcessAdapter:
         ]
         async with self._ephemeral_passfile(target) as passfile_path:
             result = await self._run_bounded(
-                argv, env=self._child_env(passfile_path), timeout_seconds=timeout_seconds
+                argv,
+                env=self._child_env(passfile_path),
+                timeout_seconds=timeout_seconds,
+                spawn_failure=_restore_failed,
             )
         if result.timed_out or result.returncode != 0:
             raise _restore_failed()
@@ -321,6 +327,7 @@ class PostgresqlDumpProcessAdapter:
         *,
         env: Mapping[str, str],
         timeout_seconds: float,
+        spawn_failure: Callable[[], RecoveryError],
     ) -> ProcessRunResult:
         try:
             return await self._runner(argv, env=env, timeout_seconds=timeout_seconds)
@@ -328,8 +335,10 @@ class PostgresqlDumpProcessAdapter:
             raise
         except Exception:
             # The runner's failure detail (which may quote its inputs) never
-            # survives this boundary; only the closed token does.
-            raise _integrity_failed() from None
+            # survives this boundary; only the closed token does. The token
+            # names the component of the calling side, so a restore-side spawn
+            # failure is never mislabeled as a dump integrity failure.
+            raise spawn_failure() from None
 
     def _child_env(self, passfile_path: Path) -> dict[str, str]:
         """Sanitized environment plus exactly ``PGPASSFILE``."""

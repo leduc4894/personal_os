@@ -390,6 +390,42 @@ async def test_restore_failure_maps_to_restore_failed(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_dump_runner_exception_maps_to_integrity_failed(
+    tmp_path: Path,
+) -> None:
+    output_file = tmp_path / "postgres.dump"
+    output_file.write_bytes(b"dump-bytes")
+    runner = ScriptedRunner(error=RuntimeError(_STDERR_SENTINEL))
+
+    with pytest.raises(RecoveryError) as raised:
+        await _adapter(runner).create_dump(_SNAPSHOT_TOKEN, output_file, _TARGET)
+
+    error = raised.value
+    assert error.error_code is ErrorCode.CANONICAL_RECOVERY_INTEGRITY_FAILED
+    assert error.safe_details["component"] == "postgres_dump"
+    _assert_error_is_closed_and_sentinel_free(error)
+
+
+@pytest.mark.asyncio
+async def test_restore_runner_exception_maps_to_restore_failed(
+    tmp_path: Path,
+) -> None:
+    input_file = tmp_path / "restore.dump"
+    input_file.write_bytes(b"dump-bytes")
+    runner = ScriptedRunner(error=RuntimeError(_STDERR_SENTINEL))
+
+    with pytest.raises(RecoveryError) as raised:
+        await _adapter(runner).restore_dump(input_file, _TARGET)
+
+    error = raised.value
+    # A restore-side spawn failure must carry the restore component, never the
+    # dump-side integrity token.
+    assert error.error_code is ErrorCode.CANONICAL_RECOVERY_RESTORE_FAILED
+    assert error.safe_details["component"] == "postgres_restore"
+    _assert_error_is_closed_and_sentinel_free(error)
+
+
+@pytest.mark.asyncio
 async def test_dump_timeout_maps_to_integrity_failed(tmp_path: Path) -> None:
     output_file = tmp_path / "postgres.dump"
     output_file.write_bytes(b"partial-bytes")
