@@ -20,11 +20,14 @@ from dataclasses import replace
 from datetime import timedelta
 from typing import Final
 
+import httpx
 import pytest
 from api_runtime.application import create_api_application
 from api_runtime.authentication_composition import (
+    _OFFLINE_MASTER_KEY,
     OFFLINE_WEB_ALLOWED_ORIGIN,
     OfflineAuthenticationClock,
+    OfflineAuthenticationCrypto,
     OfflineAuthenticationState,
     compose_offline_web_authentication,
 )
@@ -36,7 +39,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from personal_os.authentication.contracts import WebSessionState
-from personal_os.authentication.sessions import session_secret_hash_of
+from personal_os.authentication.sessions import (
+    ThrottleBucketKind,
+    derive_throttle_hmac_key,
+    session_secret_hash_of,
+    throttle_bucket_hash,
+)
 from personal_os.runtime_configuration.models import RuntimeEnvironment
 
 #: The offline composition accepts exactly this origin (spec 9.3).
@@ -75,15 +83,42 @@ def create_session_test_app(
     totp_active: bool = False,
     clock: OfflineAuthenticationClock | None = None,
     state: OfflineAuthenticationState | None = None,
+    trusted_proxy_cidrs: tuple[str, ...] = (),
 ) -> FastAPI:
     """Compose the real application over the offline deterministic ports."""
     return create_api_application(
         environment=RuntimeEnvironment.TEST,
         readiness_probe=_ReadyProbe(),
         web_authentication=compose_offline_web_authentication(
-            totp_active=totp_active, clock=clock, state=state
+            totp_active=totp_active,
+            clock=clock,
+            state=state,
+            trusted_proxy_cidrs=trusted_proxy_cidrs,
         ),
     )
+
+
+def login_source_bucket_hash(source: str) -> str:
+    """Hash one login source bucket exactly like the offline LoginService."""
+    hmac_key = derive_throttle_hmac_key(OfflineAuthenticationCrypto(), _OFFLINE_MASTER_KEY)
+    return throttle_bucket_hash(
+        hmac_key=hmac_key, bucket_kind=ThrottleBucketKind.LOGIN_SOURCE, bucket_material=source
+    )
+
+
+async def post_failed_login_behind_transport(
+    app: FastAPI, *, client_address: tuple[str, int], forwarded_for: str
+) -> None:
+    """Send one wrong-password login from the given socket peer."""
+    transport = httpx.ASGITransport(app=app, client=client_address, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url=_SECURE_BASE_URL) as client:
+        response = await client.post(
+            "/api/auth/login",
+            headers={"Origin": ORIGIN, "x-forwarded-for": forwarded_for},
+            json=_WRONG_LOGIN,
+        )
+    assert response.status_code == 401, response.text
+    assert response.json()["error"]["code"] == "authentication_failed"
 
 
 @pytest.fixture
@@ -520,3 +555,28 @@ def test_disallowed_method_uses_the_closed_error_envelope(client: TestClient) ->
     response = client.put("/api/auth/session", headers={"Origin": ORIGIN})
     assert response.status_code == 405
     assert response.json()["error"]["code"] == "api_method_not_allowed"
+
+
+# --- trusted-proxy source buckets -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_login_source_bucket_uses_the_forwarded_client_behind_configured_trust() -> None:
+    state = OfflineAuthenticationState(totp_active=False)
+    app = create_session_test_app(state=state, trusted_proxy_cidrs=("192.0.2.0/24",))
+    await post_failed_login_behind_transport(
+        app, client_address=("192.0.2.10", 443), forwarded_for="198.51.100.7"
+    )
+    assert login_source_bucket_hash("198.51.100.7") in state.buckets
+    assert login_source_bucket_hash("192.0.2.10") not in state.buckets
+
+
+@pytest.mark.asyncio
+async def test_login_source_bucket_ignores_forwarded_headers_without_configured_trust() -> None:
+    state = OfflineAuthenticationState(totp_active=False)
+    app = create_session_test_app(state=state)
+    await post_failed_login_behind_transport(
+        app, client_address=("192.0.2.10", 443), forwarded_for="198.51.100.7"
+    )
+    assert login_source_bucket_hash("192.0.2.10") in state.buckets
+    assert login_source_bucket_hash("198.51.100.7") not in state.buckets

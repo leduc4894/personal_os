@@ -35,6 +35,8 @@ from api_runtime.authentication_dependencies import (
     apply_session_cookies,
     build_session_cookie_contract,
     clear_session_cookies,
+    client_source_address,
+    create_client_address_resolver,
     create_session_route_dependencies,
 )
 from fastapi import Request
@@ -52,7 +54,12 @@ _LOOPBACK_ORIGIN: Final[str] = "http://127.0.0.1:3000"
 _SECURE_LOOPBACK_ORIGIN: Final[str] = "https://127.0.0.1"
 
 
-def build_request(*, headers: Mapping[str, str], path: str = "/api/auth/password") -> Request:
+def build_request(
+    *,
+    headers: Mapping[str, str],
+    path: str = "/api/auth/password",
+    client: tuple[str, int] | None = ("192.0.2.10", 41000),
+) -> Request:
     """Build one HTTP request scope carrying exactly the given headers."""
     scope: dict[str, Any] = {
         "type": "http",
@@ -67,7 +74,7 @@ def build_request(*, headers: Mapping[str, str], path: str = "/api/auth/password
             (name.lower().encode("latin-1"), value.encode("latin-1"))
             for name, value in headers.items()
         ],
-        "client": ("192.0.2.10", 41000),
+        "client": client,
         "server": ("web-admin.example", 443),
     }
     return Request(scope)
@@ -451,3 +458,24 @@ def test_missing_referenced_key_id_refuses_startup_safely() -> None:
     assert rejection.value.error_code is ErrorCode.CONFIGURATION_SECRET_INVALID
     rendered = str(rejection.value)
     assert "auth-key-v0" not in rendered
+
+
+# --- trusted-proxy client-address resolution -------------------------------------------
+
+
+def test_client_source_address_reads_the_forwarded_chain_through_configured_trust() -> None:
+    request = build_request(headers={"x-forwarded-for": "198.51.100.7"})
+    resolver = create_client_address_resolver(("192.0.2.0/24",))
+    assert resolver(request) == "198.51.100.7"
+    assert client_source_address(request, trusted_proxy_cidrs=("192.0.2.0/24",)) == "198.51.100.7"
+
+
+def test_client_source_address_without_configured_trust_keeps_the_socket_peer() -> None:
+    request = build_request(headers={"x-forwarded-for": "198.51.100.7"})
+    assert create_client_address_resolver()(request) == "192.0.2.10"
+    assert client_source_address(request) == "192.0.2.10"
+
+
+def test_client_source_address_without_a_socket_peer_uses_the_closed_fallback() -> None:
+    request = build_request(headers={"x-forwarded-for": "198.51.100.7"}, client=None)
+    assert client_source_address(request) == "unknown-source"

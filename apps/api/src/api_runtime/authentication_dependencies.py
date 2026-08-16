@@ -197,6 +197,29 @@ def client_source_address(
     )
 
 
+#: Request-level client-address resolution bound to one composed runtime's
+#: exact trusted-proxy CIDRs; the routes consume the bound resolver so the
+#: configured trust governs every HMACed throttle bucket.
+ClientAddressResolver = Callable[[Request], str]
+
+
+def create_client_address_resolver(
+    trusted_proxy_cidrs: Sequence[str] = (),
+) -> ClientAddressResolver:
+    """Bind one runtime's exact trusted-proxy CIDRs into a request resolver.
+
+    The CIDR sequence is snapshotted at composition time, so a later mutation
+    of the passed sequence cannot change the trust of a composed runtime. The
+    empty default resolves every request to its socket peer.
+    """
+    bound_trusted_proxy_cidrs = tuple(trusted_proxy_cidrs)
+
+    def resolve_client_address(request: Request) -> str:
+        return client_source_address(request, trusted_proxy_cidrs=bound_trusted_proxy_cidrs)
+
+    return resolve_client_address
+
+
 def extract_bearer_credential(request: Request) -> str:
     """Return the one Bearer credential of a device-credential request.
 

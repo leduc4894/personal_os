@@ -32,7 +32,6 @@ from api_runtime.authentication_composition import WebAuthenticationRuntime
 from api_runtime.authentication_dependencies import (
     REFRESH_BEARER_SCHEME,
     AuthenticatedWebRequest,
-    client_source_address,
     create_session_route_dependencies,
     require_polling_credential,
     require_refresh_credential,
@@ -139,7 +138,7 @@ def create_device_authorization_route_endpoints(
             plugin_version=grant_request.plugin_version,
             requested_scope=grant_request.requested_scope,
             claimed_device_id=grant_request.claimed_device_id,
-            source_bucket=client_source_address(request),
+            source_bucket=runtime.resolve_client_address(request),
             diagnostic_context=_bound_diagnostic_context(),
         )
         return _success_json(

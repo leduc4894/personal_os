@@ -25,7 +25,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Final, cast
@@ -40,8 +40,10 @@ from api_runtime.authentication_crypto import (
     CryptographyAuthenticationCrypto,
 )
 from api_runtime.authentication_dependencies import (
+    ClientAddressResolver,
     SessionCookieContract,
     build_session_cookie_contract,
+    create_client_address_resolver,
 )
 from api_runtime.authentication_settings import AuthenticationSettings
 from personal_os.authentication.contracts import (
@@ -207,6 +209,7 @@ class WebAuthenticationRuntime:
 
     allowed_origin: str
     cookie_contract: SessionCookieContract
+    resolve_client_address: ClientAddressResolver
     login_service: LoginService
     session_service: SessionService
     password_change_service: PasswordChangeService
@@ -351,6 +354,7 @@ def compose_web_authentication(
         cookie_contract=build_session_cookie_contract(
             settings.allowed_origin, settings.environment
         ),
+        resolve_client_address=create_client_address_resolver(settings.trusted_proxy_cidrs),
         login_service=LoginService(
             credentials=credentials,
             hasher=hasher,
@@ -2048,13 +2052,17 @@ def compose_offline_web_authentication(
     totp_active: bool = False,
     clock: OfflineAuthenticationClock | None = None,
     state: OfflineAuthenticationState | None = None,
+    trusted_proxy_cidrs: Sequence[str] = (),
 ) -> WebAuthenticationRuntime:
     """Build the deterministic offline runtime for export and tests.
 
     An injected ``state`` replaces the default construction — ``totp_active``
     then only seeds the default — so tests can pre-seed or restamp session
     rows (for example a ``recovery_limited`` binding) while every secret and
-    the fixed clock stay deterministic.
+    the fixed clock stay deterministic. The trusted-proxy CIDRs default to
+    the fail-closed empty set (socket peer always wins) and are only ever the
+    exact explicit values a test passes, so the offline graph stays
+    deterministic for the export.
     """
     offline_state = (
         state if state is not None else OfflineAuthenticationState(totp_active=totp_active)
@@ -2093,6 +2101,7 @@ def compose_offline_web_authentication(
         cookie_contract=build_session_cookie_contract(
             OFFLINE_WEB_ALLOWED_ORIGIN, RuntimeEnvironment.TEST
         ),
+        resolve_client_address=create_client_address_resolver(trusted_proxy_cidrs),
         login_service=LoginService(
             credentials=credentials,
             hasher=hasher,

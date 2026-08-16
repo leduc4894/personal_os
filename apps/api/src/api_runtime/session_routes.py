@@ -29,7 +29,6 @@ from api_runtime.authentication_dependencies import (
     AuthenticatedWebRequest,
     apply_session_cookies,
     clear_session_cookies,
-    client_source_address,
     create_session_route_dependencies,
 )
 from api_runtime.authentication_models import (
@@ -177,7 +176,7 @@ def create_session_route_endpoints(
         outcome = await runtime.login_service.login(
             username=credentials.username,
             password=credentials.password,
-            source_bucket=client_source_address(request),
+            source_bucket=runtime.resolve_client_address(request),
             diagnostic_context=_bound_diagnostic_context(),
         )
         if outcome.public_error is not None:

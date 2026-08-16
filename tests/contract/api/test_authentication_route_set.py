@@ -126,3 +126,28 @@ async def test_unknown_method_answers_the_safe_method_not_allowed_envelope(
         response = await client.request(method, path)
     assert response.status_code == 405
     assert response.json()["error"]["code"] == "api_method_not_allowed"
+
+
+@pytest.mark.asyncio
+async def test_composed_application_emits_the_security_headers(application: FastAPI) -> None:
+    # Pins the application-factory wiring: the web security headers middleware
+    # wraps the built stack, so success and error envelopes alike carry the
+    # nonce CSP, the referrer policy and nosniff, with a fresh nonce per
+    # response (spec 20.2).
+    transport = httpx.ASGITransport(app=application, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        success = await client.get("/api/health/live")
+        rejection = await client.get("/not-a-route")
+    for response in (success, rejection):
+        assert response.headers["referrer-policy"] == "no-referrer"
+        assert response.headers["x-content-type-options"] == "nosniff"
+        policy = response.headers["content-security-policy"]
+        assert policy.startswith("default-src 'self'; script-src 'self' 'nonce-")
+        assert policy.endswith(
+            "connect-src 'self'; img-src 'self' data:; object-src 'none'; "
+            "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+        )
+    success_nonce = success.headers["content-security-policy"].split("'nonce-")[1].split("'")[0]
+    rejection_nonce = rejection.headers["content-security-policy"].split("'nonce-")[1].split("'")[0]
+    assert success_nonce and rejection_nonce
+    assert success_nonce != rejection_nonce
