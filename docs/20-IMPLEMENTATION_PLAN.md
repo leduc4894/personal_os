@@ -119,9 +119,21 @@ section 17). Trạng thái từng child:
   `docs/superpowers/plans/2026-08-15-api-runtime-and-contract-foundation.md`;
   handoff: `docs/handoff/2026-08-15-api-runtime-contract-foundation.md`;
   runbook: `docs/operations/api-runtime-contract.md`.
-- Child tiếp theo: `web-auth-and-device-authorization-design.md` (auth, web
-  sessions, device approval, token rotation, device Admin). Các child còn lại
-  của phase chưa bắt đầu.
+- Child 2 `web-auth-and-device-authorization-design.md` — **hoàn thành
+  (2026-08-16)**: protected enrollment CLI, password login với throttling,
+  web session/CSRF/re-auth contract, TOTP và recovery codes, browser device
+  authorization với exact-replay exchange/refresh, device revoke
+  (admin/self), Web Admin (login/security/devices/approval), Obsidian plugin
+  SecretStorage onboarding, leak/integration/E2E acceptance gates và
+  operations runbook. Plan:
+  `docs/superpowers/plans/2026-08-16-web-auth-and-device-authorization.md`;
+  handoff:
+  `docs/handoff/2026-08-16-web-authentication-and-device-authorization.md`;
+  runbook:
+  `docs/operations/web-authentication-and-device-authorization.md`.
+  Deliverable 1 của phase (plugin auth/onboarding và secure token store) đã
+  đóng; deliverables 2-7 (Vault synchronization) thuộc các child sau và chưa
+  bắt đầu.
 
 Deliverables:
 

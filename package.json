@@ -13,6 +13,7 @@
     "format:check": "pnpm --recursive --if-present run format:check",
     "lint": "pnpm --recursive --if-present run lint",
     "test": "pnpm --recursive --if-present run test",
+    "test:e2e:authentication": "playwright test tests/end_to_end/authentication",
     "type-check": "pnpm --recursive --if-present run type-check"
   },
   "devDependencies": {

@@ -185,6 +185,24 @@ default_item_type = "ref"
 [tool.poe.tasks.canonical-core-test]
 cmd = "pytest tests/unit/runtime_configuration tests/unit/identity tests/unit/sources tests/unit/recovery tests/unit/postgresql_source_store tests/unit/tools -q"
 
+# Authentication acceptance feature gate (web-auth plan, Task 15): the
+# authentication unit, api-runtime unit, adapter unit and HTTP contract
+# suites plus the disposable-stack integration suite. The marker override
+# enables ``local_stack`` — fail, never skip: the integration conftest
+# refuses to run without ``CI=true`` and a unique ``knowledge-ci-*``
+# project name, and the contract leak gate requires pnpm for the real
+# Web/plugin production builds.
+[tool.poe.tasks.authentication-test]
+cmd = "pytest tests/unit/authentication tests/unit/api_runtime tests/unit/postgresql_source_store tests/contract/api tests/integration/authentication -m \"not r2_live\" -q"
+
+# Authentication browser acceptance gate (web-auth plan, Task 15): the
+# Playwright journeys of tests/end_to_end/authentication against the built
+# Web application (the Playwright webServer performs the build itself).
+# Browser binaries must be installed beforehand; Playwright fails rather
+# than skipping when they are absent.
+[tool.poe.tasks.authentication-e2e]
+shell = "pnpm run test:e2e:authentication"
+
 [tool.poe.tasks.python-build]
 cmd = "uv build --all-packages --clear"
 

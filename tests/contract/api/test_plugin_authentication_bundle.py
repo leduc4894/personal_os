@@ -60,9 +60,7 @@ _OBSIDIAN_IMPORT_PATTERN = re.compile(r'import\s+(?:type\s+)?\{([^}]*)\}\s+from\
 def _resolve_pnpm() -> str:
     pnpm = shutil.which("pnpm")
     if pnpm is None:
-        pytest.fail(
-            "pnpm is required to build the Obsidian plugin bundle for this contract"
-        )
+        pytest.fail("pnpm is required to build the Obsidian plugin bundle for this contract")
     return pnpm
 
 
@@ -85,9 +83,7 @@ def built_bundle() -> str:
         timeout=600,
     )
     assert completed.returncode == 0, (
-        "the Obsidian plugin bundle build failed:\n"
-        + completed.stdout
-        + completed.stderr
+        "the Obsidian plugin bundle build failed:\n" + completed.stdout + completed.stderr
     )
     assert BUNDLE_PATH.is_file(), (
         "the Obsidian plugin build produced no dist/main.js bundle to scan"
@@ -137,8 +133,7 @@ def test_plugin_sources_import_only_the_closed_obsidian_surface() -> None:
                 if name and name not in ALLOWED_OBSIDIAN_IMPORT_NAMES:
                     offenders.append(f"{path}: imports obsidian symbol {name!r}")
     assert offenders == [], (
-        "the plugin may import only the closed spec-19 Obsidian surface:\n"
-        + "\n".join(offenders)
+        "the plugin may import only the closed spec-19 Obsidian surface:\n" + "\n".join(offenders)
     )
 
 
