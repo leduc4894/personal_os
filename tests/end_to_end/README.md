@@ -1,27 +1,25 @@
-# Reserved: end-to-end tests
+# End-to-end tests
 
-**Status:** Reserved directory — no executable tests in this bootstrap.
+## Status
 
-## Owner
+This layer owns the repository's Playwright end-to-end suites. It left the
+bootstrap-reserved state when the web-authentication child landed its first
+real spec (`authentication/web-security.spec.ts`); that child's plan
+(`docs/superpowers/plans/2026-08-16-web-auth-and-device-authorization.md`)
+schedules the remaining authentication flows here as well.
 
-This directory is owned by the Phase One workspace **bootstrap** spec
-(`docs/superpowers/specs/phase-one-workspace-bootstrap-design.md`). It exists
-to preserve the canonical Python test hierarchy
-(`unit`, `contract`, `integration`, `end_to_end`, `golden`, `performance`)
-without populating layers that have no behavior to verify yet.
+## Layout
 
-## Future acceptance source
+- `playwright.config.ts` at the repository root configures the web server and
+  the browser project.
+- `authentication/` holds the browser-flow specs. Each spec proves one
+  user-facing journey with real assertions; none may silently pass with zero
+  assertions.
 
-End-to-end tests are added by a **later spec** that defines a complete
-user-facing flow worth exercising against assembled composition roots (for
-example: ingest source → canonical bytes → retrieval → citation). Until that
-spec lands, this directory intentionally contains only this README.
+## Conventions
 
-## What is forbidden here during bootstrap
-
-- No `test_*.py`, `*.test.ts`, `*.spec.ts` or any other executable test file.
-- No `conftest.py` that autocollects placeholder tests.
-- No fixture that silently passes with zero assertions.
-
-A later spec is responsible for adding real tests with real assertions; until
-then, pytest collects nothing from this directory.
+- Specs run via `pnpm exec playwright test` from the repository root.
+- A spec proves its UI flow (storage hygiene, redirects, one-time value
+  handling) with `page.route` interception unless a task states otherwise.
+- Later children add their own domain folders with real behavior; placeholder
+  or empty specs stay forbidden.

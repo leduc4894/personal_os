@@ -94,9 +94,10 @@ APP_README_EXPECTATIONS = {
 }
 
 # Reserved test layers. Each one is part of the canonical test hierarchy but
-# owns no executable test in this bootstrap spec.
+# owns no executable test in this bootstrap spec. The end-to-end layer left the
+# reserved set when the web-authentication child landed its first real
+# Playwright spec (tests/end_to_end/authentication/web-security.spec.ts).
 RESERVED_TEST_LAYERS = (
-    "tests/end_to_end/README.md",
     "tests/golden/README.md",
     "tests/performance/README.md",
 )

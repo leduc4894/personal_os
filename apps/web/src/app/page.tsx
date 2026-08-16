@@ -1,10 +1,12 @@
-import { WORKSPACE_SHELL_HEADING } from "./bootstrap-copy";
+import { connection } from "next/server";
 
-export default function WorkspaceBootstrapPage() {
+import { SessionRedirect } from "./session-redirect";
+
+export default async function WorkspaceRootPage() {
+  await connection();
   return (
     <main>
-      <h1>{WORKSPACE_SHELL_HEADING}</h1>
-      <p>Application services are not configured in this bootstrap.</p>
+      <SessionRedirect />
     </main>
   );
 }
