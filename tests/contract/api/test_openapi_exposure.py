@@ -32,6 +32,12 @@ _API_ROUTE_PATHS = frozenset(
         "/api/auth/logout",
         "/api/auth/reauthenticate",
         "/api/auth/password",
+        "/api/auth/totp/verify",
+        "/api/auth/totp/enrollments",
+        "/api/auth/totp/enrollments/{enrollment_id}/verify",
+        "/api/auth/totp/recovery",
+        "/api/auth/totp/recovery-codes/regenerate",
+        "/api/auth/totp",
     }
 )
 
@@ -85,6 +91,12 @@ async def test_local_environments_serve_raw_openapi_document_with_correlation(
         "logout",
         "reauthenticate",
         "changePassword",
+        "verifyTotpChallenge",
+        "createTotpEnrollment",
+        "verifyTotpEnrollment",
+        "startTotpRecovery",
+        "regenerateTotpRecoveryCodes",
+        "disableTotp",
     }
     assert "data" not in document
     assert "request_id" not in document
@@ -117,7 +129,17 @@ async def test_route_set_is_closed_to_the_api_and_local_document_routes() -> Non
     assert set(routes) == _API_ROUTE_PATHS | {"/api/openapi.json"}
     for path in ("/api/health/live", "/api/health/ready", "/api/auth/session"):
         assert "GET" in routes[path].methods, path
-    for path in ("/api/auth/login", "/api/auth/logout", "/api/auth/reauthenticate"):
+    for path in (
+        "/api/auth/login",
+        "/api/auth/logout",
+        "/api/auth/reauthenticate",
+        "/api/auth/totp/verify",
+        "/api/auth/totp/enrollments",
+        "/api/auth/totp/enrollments/{enrollment_id}/verify",
+        "/api/auth/totp/recovery",
+        "/api/auth/totp/recovery-codes/regenerate",
+    ):
         assert "POST" in routes[path].methods, path
     assert "PUT" in routes["/api/auth/password"].methods
+    assert "DELETE" in routes["/api/auth/totp"].methods
     assert isinstance(routes["/api/openapi.json"], StarletteRoute)

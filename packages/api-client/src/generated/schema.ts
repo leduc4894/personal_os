@@ -79,7 +79,7 @@ export type paths = {
         readonly put?: never;
         /**
          * Reauthenticate
-         * @description Verify the password again and rotate the session binding (spec 9.4).
+         * @description Verify the password — and TOTP when active — then rotate (spec 9.4).
          */
         readonly post: operations["reauthenticate"];
         readonly delete?: never;
@@ -102,6 +102,126 @@ export type paths = {
         readonly get: operations["getSession"];
         readonly put?: never;
         readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/auth/totp": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        readonly post?: never;
+        /**
+         * Disable
+         * @description Close every TOTP surface and rotate to password-only (spec 10.3).
+         */
+        readonly delete: operations["disableTotp"];
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/auth/totp/enrollments": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Submit Enrollment Action
+         * @description Run one strict enrollment action (spec 10.1).
+         */
+        readonly post: operations["createTotpEnrollment"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/auth/totp/enrollments/{enrollment_id}/verify": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Verify Enrollment
+         * @description Verify one enrollment code, activate and return the codes once.
+         */
+        readonly post: operations["verifyTotpEnrollment"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/auth/totp/recovery": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Recover
+         * @description Consume one recovery code and enter the recovery-limited state.
+         */
+        readonly post: operations["startTotpRecovery"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/auth/totp/recovery-codes/regenerate": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Regenerate Recovery Codes
+         * @description Re-verify password plus current TOTP and issue a fresh code set.
+         */
+        readonly post: operations["regenerateTotpRecoveryCodes"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/auth/totp/verify": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Verify Challenge
+         * @description Verify one login TOTP challenge and activate the pending binding.
+         */
+        readonly post: operations["verifyTotpChallenge"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -180,9 +300,54 @@ export type components = {
              */
             readonly warnings: readonly components["schemas"]["ApiWarning"][];
         };
+        /** ApiEnvelope[RecoveryCodesData] */
+        readonly ApiEnvelope_RecoveryCodesData_: {
+            readonly data: components["schemas"]["RecoveryCodesData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[RecoveryLimitedContext] */
+        readonly ApiEnvelope_RecoveryLimitedContext_: {
+            readonly data: components["schemas"]["RecoveryLimitedContext"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
         /** ApiEnvelope[SessionData] */
         readonly ApiEnvelope_SessionData_: {
             readonly data: components["schemas"]["SessionData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[TotpEnrollmentData] */
+        readonly ApiEnvelope_TotpEnrollmentData_: {
+            readonly data: components["schemas"]["TotpEnrollmentData"] | null;
             readonly error: components["schemas"]["ApiErrorBody"] | null;
             /**
              * Request Id
@@ -303,10 +468,48 @@ export type components = {
         /**
          * ReauthenticateRequest
          * @description The password body of one recent re-authentication attempt (spec 9.4).
+         *
+         *     ``totp_code`` carries the second factor when the account holds an active
+         *     TOTP credential: recent re-auth always verifies the password and also
+         *     verifies TOTP when active, so a missing code fails like a wrong one.
          */
         readonly ReauthenticateRequest: {
             /** Password */
             readonly password: string;
+            /** Totp Code */
+            readonly totp_code?: string | null;
+        };
+        /**
+         * RecoveryCodesData
+         * @description One recovery-code revision displayed exactly once (spec 10.3).
+         */
+        readonly RecoveryCodesData: {
+            /** Codes */
+            readonly codes: readonly string[];
+            /** Revision */
+            readonly revision: number;
+        };
+        /**
+         * RecoveryLimitedContext
+         * @description The recovery-limited binding context one accepted recovery produces.
+         *
+         *     The closed permitted-action set tells the client only TOTP replacement or
+         *     logout remains before normal Admin access returns (spec 10.3).
+         */
+        readonly RecoveryLimitedContext: {
+            /**
+             * Absolute Expires At
+             * Format: date-time
+             */
+            readonly absolute_expires_at: string;
+            /**
+             * Idle Expires At
+             * Format: date-time
+             */
+            readonly idle_expires_at: string;
+            /** Permitted Actions */
+            readonly permitted_actions: readonly ("totp_replacement" | "logout")[];
+            readonly state: components["schemas"]["WebSessionState"];
         };
         /**
          * SessionData
@@ -334,6 +537,83 @@ export type components = {
             /** Scopes */
             readonly scopes: readonly components["schemas"]["WebScope"][];
             readonly state: components["schemas"]["WebSessionState"];
+        };
+        /**
+         * TotpCodeRequest
+         * @description The six-digit code body of one TOTP challenge verification.
+         */
+        readonly TotpCodeRequest: {
+            /** Code */
+            readonly code: string;
+        };
+        /**
+         * TotpEnrollmentAction
+         * @description The strict discriminated enrollment action vocabulary (spec 10.1).
+         * @enum {string}
+         */
+        readonly TotpEnrollmentAction: "start" | "dismiss_initial_offer";
+        /**
+         * TotpEnrollmentData
+         * @description The response payload of one enrollment action (spec 10.1).
+         *
+         *     ``start`` carries the one-time offer; ``dismiss_initial_offer`` carries
+         *     only the recorded dismissal moment — never a secret or pending row.
+         */
+        readonly TotpEnrollmentData: {
+            readonly action: components["schemas"]["TotpEnrollmentAction"];
+            /** Dismissed At */
+            readonly dismissed_at?: string | null;
+            readonly enrollment?: components["schemas"]["TotpEnrollmentOfferData"] | null;
+        };
+        /**
+         * TotpEnrollmentOfferData
+         * @description The one-time provisioning material of a started enrollment (10.1).
+         *
+         *     The provisioning URI and Base32 secret render exactly once, under the
+         *     provisioning cache-suppression headers, and never again.
+         */
+        readonly TotpEnrollmentOfferData: {
+            /**
+             * Enrollment Id
+             * Format: uuid
+             */
+            readonly enrollment_id: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            readonly expires_at: string;
+            /** Provisioning Uri */
+            readonly provisioning_uri: string;
+            /** Secret */
+            readonly secret: string;
+        };
+        /**
+         * TotpEnrollmentRequest
+         * @description The strict discriminated enrollment action body (spec 10.1).
+         */
+        readonly TotpEnrollmentRequest: {
+            readonly action: components["schemas"]["TotpEnrollmentAction"];
+        };
+        /**
+         * TotpProofRequest
+         * @description The shared password plus current TOTP proof body (spec 10.3).
+         */
+        readonly TotpProofRequest: {
+            /** Password */
+            readonly password: string;
+            /** Totp Code */
+            readonly totp_code: string;
+        };
+        /**
+         * TotpRecoveryRequest
+         * @description The password plus one recovery code body (spec 10.3).
+         */
+        readonly TotpRecoveryRequest: {
+            /** Password */
+            readonly password: string;
+            /** Recovery Code */
+            readonly recovery_code: string;
         };
         /**
          * WebScope
@@ -459,6 +739,152 @@ export interface operations {
             readonly cookie?: never;
         };
         readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_SessionData_"];
+                };
+            };
+        };
+    };
+    readonly disableTotp: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["TotpProofRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_SessionData_"];
+                };
+            };
+        };
+    };
+    readonly createTotpEnrollment: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["TotpEnrollmentRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_TotpEnrollmentData_"];
+                };
+            };
+        };
+    };
+    readonly verifyTotpEnrollment: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly enrollment_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["TotpCodeRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_RecoveryCodesData_"];
+                };
+            };
+        };
+    };
+    readonly startTotpRecovery: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["TotpRecoveryRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_RecoveryLimitedContext_"];
+                };
+            };
+        };
+    };
+    readonly regenerateTotpRecoveryCodes: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["TotpProofRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_RecoveryCodesData_"];
+                };
+            };
+        };
+    };
+    readonly verifyTotpChallenge: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["TotpCodeRequest"];
+            };
+        };
         readonly responses: {
             /** @description Successful Response */
             readonly 200: {

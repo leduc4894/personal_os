@@ -340,6 +340,7 @@ AUTHENTICATION_DOMAIN_MODULE_FILES = (
     "passwords.py",
     "ports.py",
     "sessions.py",
+    "totp.py",
 )
 AUTHENTICATION_DOMAIN_FORBIDDEN_IMPORT_ROOTS = API_CONTRACTS_FORBIDDEN_IMPORT_ROOTS | {
     "argon2",

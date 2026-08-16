@@ -47,7 +47,7 @@ from personal_os.authentication.ports import (
     AuthenticationCryptoPort,
     PasswordHasherPort,
 )
-from personal_os.diagnostics.context import DiagnosticContext
+from personal_os.diagnostics.context import DiagnosticContext, create_diagnostic_context
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.identity.contracts import IDENTITY_KEY_PATTERN
 
@@ -342,6 +342,27 @@ class AuthenticationClockPort(Protocol):
     """The single transaction-timestamp source of one service invocation."""
 
     async def database_now(self) -> datetime: ...
+
+
+@runtime_checkable
+class ReauthenticationTotpLegPort(Protocol):
+    """The TOTP leg of recent re-authentication (spec 9.4).
+
+    Recent re-auth always verifies the password and also verifies TOTP when
+    the account carries an active credential; the leg resolves that state and
+    runs the same replay-locked verification the login challenge uses.
+    """
+
+    async def has_active_totp(self, *, user_id: UUID) -> bool: ...
+
+    async def verify_reauthentication_totp(
+        self,
+        *,
+        user_id: UUID,
+        code: str | None,
+        database_now: datetime,
+        diagnostic_context: DiagnosticContext,
+    ) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -869,6 +890,7 @@ class SessionService:
         master_key: bytes,
         clock: AuthenticationClockPort,
         session_policy: SessionWindowPolicy | None = None,
+        totp_leg: ReauthenticationTotpLegPort | None = None,
     ) -> None:
         self._sessions = sessions
         self._hasher = hasher
@@ -877,6 +899,7 @@ class SessionService:
             session_policy if session_policy is not None else SessionWindowPolicy()
         )
         self._csrf_hmac_key = derive_csrf_hmac_key(crypto, master_key)
+        self._totp_leg = totp_leg
 
     async def database_now(self) -> datetime:
         """One transaction timestamp shared with co-orchestrating services."""
@@ -911,7 +934,7 @@ class SessionService:
         return await self.resolve(session_secret=session_secret)
 
     async def resolve_challenge_eligible(
-        self, *, session_secret: str
+        self, *, session_secret: str, database_now: datetime | None = None
     ) -> AuthenticatedSession:
         """Resolve one session secret tolerating the pending/recovery states.
 
@@ -919,9 +942,15 @@ class SessionService:
         unexpired state still resolves for its own challenge routes — TOTP and
         recovery verification, logout — even though only ``active``
         authenticates; the idle window never slides because presenting a
-        challenge or logging out is not session activity.
+        challenge or logging out is not session activity. ``database_now``
+        lets a co-orchestrating service share its single clock read, exactly
+        like the strict resolution.
         """
-        transaction_now = await self._clock.database_now()
+        transaction_now = (
+            database_now
+            if database_now is not None
+            else await self._clock.database_now()
+        )
         resolved = await self._sessions.resolve_challenge_eligible_session(
             session_secret_hash=session_secret_hash_of(session_secret),
             database_now=transaction_now,
@@ -956,9 +985,21 @@ class SessionService:
         )
 
     async def reauthenticate(
-        self, *, session_secret: str, password: str
+        self,
+        *,
+        session_secret: str,
+        password: str,
+        totp_code: str | None = None,
+        diagnostic_context: DiagnosticContext | None = None,
     ) -> ReauthenticationOutcome:
-        """Verify the password again and rotate the session (spec 9.4)."""
+        """Verify the password — and TOTP when active — then rotate (spec 9.4).
+
+        Recent re-auth always verifies the password and also verifies TOTP
+        when the account carries an active credential; a missing, wrong or
+        replayed code fails with the same public ``authentication_failed`` as
+        the password proof. Success rotates the session and records
+        ``reauthenticated_at``.
+        """
         database_now = await self._clock.database_now()
         resolved = await self._sessions.resolve_session(
             session_secret_hash=session_secret_hash_of(session_secret),
@@ -970,6 +1011,23 @@ class SessionService:
             return ReauthenticationOutcome(
                 public_error=ErrorCode.AUTHENTICATION_FAILED, rotated_session=None
             )
+        if self._totp_leg is not None and await self._totp_leg.has_active_totp(
+            user_id=resolved.session.user_id
+        ):
+            bound_context = (
+                diagnostic_context
+                if diagnostic_context is not None
+                else create_diagnostic_context().context
+            )
+            if not await self._totp_leg.verify_reauthentication_totp(
+                user_id=resolved.session.user_id,
+                code=totp_code,
+                database_now=database_now,
+                diagnostic_context=bound_context,
+            ):
+                return ReauthenticationOutcome(
+                    public_error=ErrorCode.AUTHENTICATION_FAILED, rotated_session=None
+                )
         prepared = self.prepare_rotation_material(
             web_session_id=resolved.session.web_session_id,
             database_now=database_now,

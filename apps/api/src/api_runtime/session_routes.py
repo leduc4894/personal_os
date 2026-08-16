@@ -242,11 +242,13 @@ def create_session_route_endpoints(
             dependencies.require_csrf_protected_request
         ),
     ) -> JSONResponse:
-        """Verify the password again and rotate the session binding (spec 9.4)."""
+        """Verify the password — and TOTP when active — then rotate (spec 9.4)."""
         request.scope["route_template"] = ApiRouteTemplate.AUTH_REAUTHENTICATE
         outcome = await runtime.session_service.reauthenticate(
             session_secret=authentication.session_secret,
             password=credentials.password,
+            totp_code=credentials.totp_code,
+            diagnostic_context=_bound_diagnostic_context(),
         )
         if outcome.public_error is not None:
             return _error_json(AuthenticationError(outcome.public_error))

@@ -1,8 +1,9 @@
 """FastAPI application factory: closed route set, envelopes and error handlers.
 
 The factory composes exactly two health routes plus the five session/password
-routes of the injected web-authentication runtime and the local/test-only
-OpenAPI document route, registers the four envelope exception handlers,
+routes and six TOTP/recovery routes of the injected web-authentication runtime
+and the local/test-only OpenAPI document route, registers the four envelope
+exception handlers,
 strips FastAPI's default validation-error response from the generated
 document (the shared handler emits the canonical error envelope instead), and
 wraps the finished middleware stack with :class:`RequestContextMiddleware`
@@ -32,10 +33,16 @@ from starlette.types import ASGIApp, ExceptionHandler, Lifespan
 
 from api_runtime import health_routes
 from api_runtime.authentication_composition import WebAuthenticationRuntime
-from api_runtime.authentication_models import SessionData
+from api_runtime.authentication_models import (
+    RecoveryCodesData,
+    RecoveryLimitedContext,
+    SessionData,
+    TotpEnrollmentData,
+)
 from api_runtime.request_context import ASGIApp as CorrelationApp
 from api_runtime.request_context import RequestContextMiddleware
 from api_runtime.session_routes import create_session_route_endpoints
+from api_runtime.totp_routes import create_totp_route_endpoints
 from personal_os.api_contracts import (
     AUTHENTICATION_ROUTE_TEMPLATE_VALUES,
     HTTP_ERROR_STATUSES,
@@ -132,6 +139,7 @@ def create_api_application(
         response_model=ApiEnvelope[ReadinessData],
     )
     _register_session_routes(app, web_authentication)
+    _register_totp_routes(app, web_authentication)
     _classify_openapi_route(app)
     _suppress_framework_validation_error_document(app)
     # The pure-ASGI correlation middleware declares read-only ``Mapping``
@@ -203,6 +211,61 @@ def _register_session_routes(
         methods=["PUT"],
         operation_id="changePassword",
         response_model=session_envelope_model,
+    )
+
+
+def _register_totp_routes(
+    app: FastAPI, web_authentication: WebAuthenticationRuntime
+) -> None:
+    """Register the closed TOTP/recovery route set (spec 16.2).
+
+    Each route carries its manually assigned semantic operation id and the
+    envelope response model of its strict payload; the challenge-tolerant and
+    strict CSRF dependencies, the one-time provisioning/recovery payloads and
+    the rotation cookies live in the endpoint factory.
+    """
+    endpoints = create_totp_route_endpoints(web_authentication)
+    app.add_api_route(
+        "/api/auth/totp/verify",
+        endpoints.verify_challenge,
+        methods=["POST"],
+        operation_id="verifyTotpChallenge",
+        response_model=ApiEnvelope[SessionData],
+    )
+    app.add_api_route(
+        "/api/auth/totp/enrollments",
+        endpoints.submit_enrollment_action,
+        methods=["POST"],
+        operation_id="createTotpEnrollment",
+        response_model=ApiEnvelope[TotpEnrollmentData],
+    )
+    app.add_api_route(
+        "/api/auth/totp/enrollments/{enrollment_id}/verify",
+        endpoints.verify_enrollment,
+        methods=["POST"],
+        operation_id="verifyTotpEnrollment",
+        response_model=ApiEnvelope[RecoveryCodesData],
+    )
+    app.add_api_route(
+        "/api/auth/totp/recovery",
+        endpoints.recover,
+        methods=["POST"],
+        operation_id="startTotpRecovery",
+        response_model=ApiEnvelope[RecoveryLimitedContext],
+    )
+    app.add_api_route(
+        "/api/auth/totp/recovery-codes/regenerate",
+        endpoints.regenerate_recovery_codes,
+        methods=["POST"],
+        operation_id="regenerateTotpRecoveryCodes",
+        response_model=ApiEnvelope[RecoveryCodesData],
+    )
+    app.add_api_route(
+        "/api/auth/totp",
+        endpoints.disable,
+        methods=["DELETE"],
+        operation_id="disableTotp",
+        response_model=ApiEnvelope[SessionData],
     )
 
 

@@ -120,6 +120,96 @@
         "title": "ApiEnvelope[ReadinessData]",
         "type": "object"
       },
+      "ApiEnvelope_RecoveryCodesData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecoveryCodesData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[RecoveryCodesData]",
+        "type": "object"
+      },
+      "ApiEnvelope_RecoveryLimitedContext_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecoveryLimitedContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[RecoveryLimitedContext]",
+        "type": "object"
+      },
       "ApiEnvelope_SessionData_": {
         "additionalProperties": false,
         "properties": {
@@ -163,6 +253,51 @@
           "error"
         ],
         "title": "ApiEnvelope[SessionData]",
+        "type": "object"
+      },
+      "ApiEnvelope_TotpEnrollmentData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TotpEnrollmentData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[TotpEnrollmentData]",
         "type": "object"
       },
       "ApiErrorBody": {
@@ -406,19 +541,92 @@
       },
       "ReauthenticateRequest": {
         "additionalProperties": false,
-        "description": "The password body of one recent re-authentication attempt (spec 9.4).",
+        "description": "The password body of one recent re-authentication attempt (spec 9.4).\n\n``totp_code`` carries the second factor when the account holds an active\nTOTP credential: recent re-auth always verifies the password and also\nverifies TOTP when active, so a missing code fails like a wrong one.",
         "properties": {
           "password": {
             "maxLength": 128,
             "minLength": 15,
             "title": "Password",
             "type": "string"
+          },
+          "totp_code": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9]{6}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Totp Code"
           }
         },
         "required": [
           "password"
         ],
         "title": "ReauthenticateRequest",
+        "type": "object"
+      },
+      "RecoveryCodesData": {
+        "additionalProperties": false,
+        "description": "One recovery-code revision displayed exactly once (spec 10.3).",
+        "properties": {
+          "codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Codes",
+            "type": "array"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "codes",
+          "revision"
+        ],
+        "title": "RecoveryCodesData",
+        "type": "object"
+      },
+      "RecoveryLimitedContext": {
+        "additionalProperties": false,
+        "description": "The recovery-limited binding context one accepted recovery produces.\n\nThe closed permitted-action set tells the client only TOTP replacement or\nlogout remains before normal Admin access returns (spec 10.3).",
+        "properties": {
+          "absolute_expires_at": {
+            "format": "date-time",
+            "title": "Absolute Expires At",
+            "type": "string"
+          },
+          "idle_expires_at": {
+            "format": "date-time",
+            "title": "Idle Expires At",
+            "type": "string"
+          },
+          "permitted_actions": {
+            "items": {
+              "enum": [
+                "totp_replacement",
+                "logout"
+              ],
+              "type": "string"
+            },
+            "title": "Permitted Actions",
+            "type": "array"
+          },
+          "state": {
+            "$ref": "#/components/schemas/WebSessionState"
+          }
+        },
+        "required": [
+          "state",
+          "permitted_actions",
+          "idle_expires_at",
+          "absolute_expires_at"
+        ],
+        "title": "RecoveryLimitedContext",
         "type": "object"
       },
       "SessionData": {
@@ -458,6 +666,159 @@
           "absolute_expires_at"
         ],
         "title": "SessionData",
+        "type": "object"
+      },
+      "TotpCodeRequest": {
+        "additionalProperties": false,
+        "description": "The six-digit code body of one TOTP challenge verification.",
+        "properties": {
+          "code": {
+            "pattern": "^[0-9]{6}$",
+            "title": "Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "title": "TotpCodeRequest",
+        "type": "object"
+      },
+      "TotpEnrollmentAction": {
+        "description": "The strict discriminated enrollment action vocabulary (spec 10.1).",
+        "enum": [
+          "start",
+          "dismiss_initial_offer"
+        ],
+        "title": "TotpEnrollmentAction",
+        "type": "string"
+      },
+      "TotpEnrollmentData": {
+        "additionalProperties": false,
+        "description": "The response payload of one enrollment action (spec 10.1).\n\n``start`` carries the one-time offer; ``dismiss_initial_offer`` carries\nonly the recorded dismissal moment — never a secret or pending row.",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/TotpEnrollmentAction"
+          },
+          "dismissed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dismissed At"
+          },
+          "enrollment": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TotpEnrollmentOfferData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "TotpEnrollmentData",
+        "type": "object"
+      },
+      "TotpEnrollmentOfferData": {
+        "additionalProperties": false,
+        "description": "The one-time provisioning material of a started enrollment (10.1).\n\nThe provisioning URI and Base32 secret render exactly once, under the\nprovisioning cache-suppression headers, and never again.",
+        "properties": {
+          "enrollment_id": {
+            "format": "uuid",
+            "title": "Enrollment Id",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "provisioning_uri": {
+            "title": "Provisioning Uri",
+            "type": "string"
+          },
+          "secret": {
+            "title": "Secret",
+            "type": "string"
+          }
+        },
+        "required": [
+          "enrollment_id",
+          "provisioning_uri",
+          "secret",
+          "expires_at"
+        ],
+        "title": "TotpEnrollmentOfferData",
+        "type": "object"
+      },
+      "TotpEnrollmentRequest": {
+        "additionalProperties": false,
+        "description": "The strict discriminated enrollment action body (spec 10.1).",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/TotpEnrollmentAction"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "TotpEnrollmentRequest",
+        "type": "object"
+      },
+      "TotpProofRequest": {
+        "additionalProperties": false,
+        "description": "The shared password plus current TOTP proof body (spec 10.3).",
+        "properties": {
+          "password": {
+            "maxLength": 128,
+            "minLength": 15,
+            "title": "Password",
+            "type": "string"
+          },
+          "totp_code": {
+            "pattern": "^[0-9]{6}$",
+            "title": "Totp Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "password",
+          "totp_code"
+        ],
+        "title": "TotpProofRequest",
+        "type": "object"
+      },
+      "TotpRecoveryRequest": {
+        "additionalProperties": false,
+        "description": "The password plus one recovery code body (spec 10.3).",
+        "properties": {
+          "password": {
+            "maxLength": 128,
+            "minLength": 15,
+            "title": "Password",
+            "type": "string"
+          },
+          "recovery_code": {
+            "pattern": "^[A-Za-z2-7]{4}([- ]?[A-Za-z2-7]{4}){2}$",
+            "title": "Recovery Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "password",
+          "recovery_code"
+        ],
+        "title": "TotpRecoveryRequest",
         "type": "object"
       },
       "WebScope": {
@@ -568,7 +929,7 @@
     },
     "/api/auth/reauthenticate": {
       "post": {
-        "description": "Verify the password again and rotate the session binding (spec 9.4).",
+        "description": "Verify the password — and TOTP when active — then rotate (spec 9.4).",
         "operationId": "reauthenticate",
         "requestBody": {
           "content": {
@@ -612,6 +973,192 @@
           }
         },
         "summary": "Get Session"
+      }
+    },
+    "/api/auth/totp": {
+      "delete": {
+        "description": "Close every TOTP surface and rotate to password-only (spec 10.3).",
+        "operationId": "disableTotp",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TotpProofRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_SessionData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Disable"
+      }
+    },
+    "/api/auth/totp/enrollments": {
+      "post": {
+        "description": "Run one strict enrollment action (spec 10.1).",
+        "operationId": "createTotpEnrollment",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TotpEnrollmentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_TotpEnrollmentData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Submit Enrollment Action"
+      }
+    },
+    "/api/auth/totp/enrollments/{enrollment_id}/verify": {
+      "post": {
+        "description": "Verify one enrollment code, activate and return the codes once.",
+        "operationId": "verifyTotpEnrollment",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "enrollment_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Enrollment Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TotpCodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_RecoveryCodesData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Verify Enrollment"
+      }
+    },
+    "/api/auth/totp/recovery": {
+      "post": {
+        "description": "Consume one recovery code and enter the recovery-limited state.",
+        "operationId": "startTotpRecovery",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TotpRecoveryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_RecoveryLimitedContext_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Recover"
+      }
+    },
+    "/api/auth/totp/recovery-codes/regenerate": {
+      "post": {
+        "description": "Re-verify password plus current TOTP and issue a fresh code set.",
+        "operationId": "regenerateTotpRecoveryCodes",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TotpProofRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_RecoveryCodesData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Regenerate Recovery Codes"
+      }
+    },
+    "/api/auth/totp/verify": {
+      "post": {
+        "description": "Verify one login TOTP challenge and activate the pending binding.",
+        "operationId": "verifyTotpChallenge",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TotpCodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_SessionData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Verify Challenge"
       }
     },
     "/api/health/live": {

@@ -21,13 +21,15 @@ socket is exposed.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import hashlib
 import hmac
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Final, cast
-from uuid import UUID
+from uuid import UUID, uuid7
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -42,7 +44,8 @@ from api_runtime.authentication_dependencies import (
     build_session_cookie_contract,
 )
 from api_runtime.authentication_settings import AuthenticationSettings
-from personal_os.authentication.contracts import WebSessionState
+from personal_os.authentication.contracts import TotpCredentialState, WebSessionState
+from personal_os.authentication.crypto import TOTP_SECRET_AEAD_LABEL
 from personal_os.authentication.errors import AuthenticationError
 from personal_os.authentication.passwords import (
     PasswordBlocklist,
@@ -50,6 +53,7 @@ from personal_os.authentication.passwords import (
 )
 from personal_os.authentication.ports import AuthenticationCryptoPort
 from personal_os.authentication.sessions import (
+    PASSWORD_AUTHENTICATION_METHOD,
     ChangedPassword,
     ChangePasswordCommand,
     CommitLoginSuccessCommand,
@@ -65,25 +69,54 @@ from personal_os.authentication.sessions import (
     RevokeWebSessionCommand,
     RotatedWebSessionSecrets,
     RotateWebSessionSecretsCommand,
+    SessionRotationCause,
     SessionService,
     SessionWindowPolicy,
     StoredWebSession,
+    ThrottleBucketKind,
     ThrottleBucketState,
+    ThrottleFailureTransition,
     ThrottleWindowPolicy,
     WebSessionTransactionPort,
+    clamp_idle_expiry,
     derive_csrf_hmac_key,
     evaluate_session_authentication,
     is_challenge_eligible_session,
     next_login_failure_transition,
 )
+from personal_os.authentication.totp import (
+    RECOVERY_AUTHENTICATION_METHOD,
+    TOTP_AUTHENTICATION_METHOD,
+    TOTP_DISABLED_REVOCATION_REASON,
+    ActivatedTotpEnrollment,
+    ActivateEnrollmentCommand,
+    DisabledTotp,
+    DisableTotpCommand,
+    InsertedPendingEnrollment,
+    InsertPendingEnrollmentCommand,
+    RecoveredSession,
+    RecoverSessionCommand,
+    RegeneratedRecoveryCodes,
+    RegenerateRecoveryCodesCommand,
+    SealedTotpSecret,
+    TotpService,
+    TotpTransactionPort,
+    TotpVerified,
+    VerifyTotpCommand,
+    resolve_totp_step,
+)
 from personal_os.diagnostics.events import SafeToken
 from personal_os.error_contracts.codes import ErrorCode
-from personal_os.error_contracts.exceptions import ConfigurationError
+from personal_os.error_contracts.exceptions import (
+    ConfigurationError,
+    InternalApplicationError,
+)
 from personal_os.runtime_configuration.models import RuntimeEnvironment
 from postgresql_source_store.authentication_credentials import (
     CredentialStore,
     run_authentication_transaction,
 )
+from postgresql_source_store.totp_store import TotpStore
 from postgresql_source_store.web_session_store import WebSessionStore
 
 #: The exact origin the offline composition accepts. It never enters the
@@ -99,6 +132,10 @@ OFFLINE_USERNAME: Final[str] = "admin"
 OFFLINE_PASSWORD: Final[str] = "correct-horse-battery-staple"
 _OFFLINE_USER_ID: Final[UUID] = UUID("00000000-0000-7000-8000-000000000001")
 _OFFLINE_WORKSPACE_ID: Final[UUID] = UUID("00000000-0000-7000-8000-000000000002")
+
+#: The fixed secret of the offline seeded active TOTP credential; tests
+#: compute challenge codes from it. It never renders in the contract document.
+OFFLINE_TOTP_SECRET: Final[bytes] = b"offline-totp-secret-"
 
 #: The offline graph pins the domain default window policies.
 _OFFLINE_THROTTLE_POLICY: Final[ThrottleWindowPolicy] = ThrottleWindowPolicy()
@@ -119,7 +156,51 @@ class WebAuthenticationRuntime:
     login_service: LoginService
     session_service: SessionService
     password_change_service: PasswordChangeService
+    totp_service: TotpService
     verify_csrf_token: Callable[[str, str], bool]
+
+
+class KeyringTotpSecretCodec:
+    """Versioned-keyring AEAD adapter for TOTP-secret ciphertext (spec 20.1).
+
+    Sealing always derives the ``auth/totp-secret/v1`` subkey of the current
+    master key; opening resolves the subkey of the key ID the row references,
+    so a previous-key secret stays decryptable until its re-encryption. Every
+    decrypt or parameter failure fails closed as the safe ``internal_error``
+    without crypto text.
+    """
+
+    def __init__(
+        self, crypto: CryptographyAuthenticationCrypto, keyring: AuthenticationKeyring
+    ) -> None:
+        self._crypto = crypto
+        self._keyring = keyring
+
+    def current_key_id(self) -> str:
+        return self._keyring.current_key_id
+
+    def seal_secret(self, *, plaintext: bytes) -> SealedTotpSecret:
+        key_id = self.current_key_id()
+        subkey = self._crypto.derive_subkey(
+            master_key=self._keyring.keys_by_id[key_id], label=TOTP_SECRET_AEAD_LABEL
+        )
+        nonce, ciphertext = self._crypto.seal_secret(key=subkey, plaintext=plaintext)
+        return SealedTotpSecret(
+            key_id=key_id,
+            nonce=base64.b64encode(nonce).decode("ascii"),
+            ciphertext=base64.b64encode(ciphertext).decode("ascii"),
+        )
+
+    def open_secret(self, *, sealed: SealedTotpSecret) -> bytes:
+        master_key = self._keyring.keys_by_id.get(sealed.key_id)
+        if master_key is None:
+            raise InternalApplicationError(ErrorCode.INTERNAL_ERROR)
+        subkey = self._crypto.derive_subkey(master_key=master_key, label=TOTP_SECRET_AEAD_LABEL)
+        return self._crypto.open_secret(
+            key=subkey,
+            nonce=base64.b64decode(sealed.nonce.encode("ascii")),
+            ciphertext=base64.b64decode(sealed.ciphertext.encode("ascii")),
+        )
 
 
 def _build_csrf_verifier(
@@ -167,9 +248,26 @@ def compose_web_authentication(
     clock = DatabaseAuthenticationClock(engine)
     credentials: CredentialTransactionPort = CredentialStore(engine)
     sessions: WebSessionTransactionPort = WebSessionStore(engine)
+    totp_transactions: TotpTransactionPort = TotpStore(
+        engine, secret_codec=KeyringTotpSecretCodec(crypto, keyring)
+    )
     master_key = keyring.current_key()
+    totp_service = TotpService(
+        transactions=totp_transactions,
+        sessions=sessions,
+        hasher=hasher,
+        crypto=crypto,
+        master_key=master_key,
+        clock=clock,
+        secret_codec=KeyringTotpSecretCodec(crypto, keyring),
+    )
     session_service = SessionService(
-        sessions=sessions, hasher=hasher, crypto=crypto, master_key=master_key, clock=clock
+        sessions=sessions,
+        hasher=hasher,
+        crypto=crypto,
+        master_key=master_key,
+        clock=clock,
+        totp_leg=totp_service,
     )
     return WebAuthenticationRuntime(
         allowed_origin=settings.allowed_origin,
@@ -190,6 +288,7 @@ def compose_web_authentication(
             hasher=hasher,
             blocklist=load_common_password_blocklist(),
         ),
+        totp_service=totp_service,
         verify_csrf_token=_build_csrf_verifier(crypto, master_key),
     )
 
@@ -274,8 +373,76 @@ class OfflineAuthenticationClock:
         return self.database_now_value
 
 
+class OfflineTotpCredentialRow:
+    """In-memory ``totp_credentials`` row of the offline graph."""
+
+    def __init__(
+        self,
+        *,
+        totp_credential_id: UUID,
+        user_id: UUID,
+        workspace_id: UUID,
+        state: TotpCredentialState,
+        sealed: SealedTotpSecret,
+        last_accepted_time_step: int | None,
+        enrollment_expires_at: datetime | None,
+        revision: int,
+        created_at: datetime,
+        activated_at: datetime | None,
+    ) -> None:
+        self.totp_credential_id = totp_credential_id
+        self.user_id = user_id
+        self.workspace_id = workspace_id
+        self.state = state
+        self.sealed = sealed
+        self.last_accepted_time_step = last_accepted_time_step
+        self.enrollment_expires_at = enrollment_expires_at
+        self.revision = revision
+        self.created_at = created_at
+        self.activated_at = activated_at
+
+
+class OfflineRecoveryCodeRow:
+    """In-memory ``totp_recovery_codes`` row of the offline graph."""
+
+    def __init__(
+        self,
+        *,
+        recovery_code_id: UUID,
+        totp_credential_id: UUID,
+        revision: int,
+        code_hash: str,
+        created_at: datetime,
+    ) -> None:
+        self.recovery_code_id = recovery_code_id
+        self.totp_credential_id = totp_credential_id
+        self.revision = revision
+        self.code_hash = code_hash
+        self.created_at = created_at
+        self.used_at: datetime | None = None
+
+
+class OfflineTotpSecretCodec:
+    """Deterministic AEAD double: reversible transform, fixed key id."""
+
+    _CURRENT_KEY_ID: Final[str] = "offline-totp-key-current"
+
+    def current_key_id(self) -> str:
+        return self._CURRENT_KEY_ID
+
+    def seal_secret(self, *, plaintext: bytes) -> SealedTotpSecret:
+        return SealedTotpSecret(
+            key_id=self._CURRENT_KEY_ID,
+            nonce=hashlib.sha256(plaintext).hexdigest()[:16],
+            ciphertext=base64.b64encode(bytes(reversed(plaintext))).decode("ascii"),
+        )
+
+    def open_secret(self, *, sealed: SealedTotpSecret) -> bytes:
+        return bytes(reversed(base64.b64decode(sealed.ciphertext.encode("ascii"))))
+
+
 class OfflineAuthenticationState:
-    """In-memory credential, throttle and session state of the offline graph."""
+    """In-memory credential, throttle, TOTP and session state of the offline graph."""
 
     def __init__(self, *, totp_active: bool) -> None:
         self.totp_active = totp_active
@@ -283,6 +450,31 @@ class OfflineAuthenticationState:
         self.password_hash = OfflinePasswordHasher().hash_password(OFFLINE_PASSWORD)
         self.sessions_by_secret_hash: dict[str, StoredWebSession] = {}
         self.buckets: dict[str, ThrottleBucketState] = {}
+        self.totp_prompt_dismissed_at: datetime | None = None
+        self.totp_credential_rows: list[OfflineTotpCredentialRow] = []
+        self.recovery_code_rows: list[OfflineRecoveryCodeRow] = []
+        if totp_active:
+            self.totp_credential_rows.append(
+                OfflineTotpCredentialRow(
+                    totp_credential_id=UUID("00000000-0000-7000-8000-0000000000aa"),
+                    user_id=_OFFLINE_USER_ID,
+                    workspace_id=_OFFLINE_WORKSPACE_ID,
+                    state=TotpCredentialState.ACTIVE,
+                    sealed=OfflineTotpSecretCodec().seal_secret(plaintext=OFFLINE_TOTP_SECRET),
+                    last_accepted_time_step=None,
+                    enrollment_expires_at=None,
+                    revision=1,
+                    created_at=_OFFLINE_DATABASE_NOW,
+                    activated_at=_OFFLINE_DATABASE_NOW,
+                )
+            )
+
+    def has_active_totp_credential(self) -> bool:
+        return any(
+            row.state is TotpCredentialState.ACTIVE
+            for row in self.totp_credential_rows
+            if row.user_id == _OFFLINE_USER_ID
+        )
 
 
 class OfflineCredentialStore:
@@ -338,7 +530,7 @@ class OfflineCredentialStore:
     ) -> CommittedLoginSuccess:
         state = (
             WebSessionState.PENDING_TOTP
-            if self._state.totp_active
+            if self._state.has_active_totp_credential()
             else WebSessionState.ACTIVE
         )
         session = StoredWebSession(
@@ -351,12 +543,14 @@ class OfflineCredentialStore:
             credential_revision=command.expected_credential_revision,
             authentication_method="password",
             created_at=command.database_now,
-            authenticated_at=None if self._state.totp_active else command.database_now,
+            authenticated_at=(
+                None if state is WebSessionState.PENDING_TOTP else command.database_now
+            ),
             reauthenticated_at=None,
             last_seen_at=None,
             idle_expires_at=(
                 command.pending_totp_idle_expires_at
-                if self._state.totp_active
+                if state is WebSessionState.PENDING_TOTP
                 else command.active_idle_expires_at
             ),
             absolute_expires_at=command.absolute_expires_at,
@@ -478,17 +672,43 @@ class OfflineSessionStore:
             or session.session_secret_hash != command.prior_session_secret_hash
         ):
             raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
-        rotated = replace(
-            session,
-            session_secret_hash=command.new_session_secret_hash,
-            csrf_secret_hash=command.new_csrf_secret_hash,
-            reauthenticated_at=command.database_now,
-        )
+        if command.cause is SessionRotationCause.RECENT_REAUTHENTICATION:
+            if session.state is not WebSessionState.ACTIVE:
+                raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
+            rotated = replace(
+                session,
+                session_secret_hash=command.new_session_secret_hash,
+                csrf_secret_hash=command.new_csrf_secret_hash,
+                reauthenticated_at=command.database_now,
+            )
+            next_state = rotated.state
+        else:
+            source_state = (
+                WebSessionState.PENDING_TOTP
+                if command.cause is SessionRotationCause.SESSION_ACTIVATION
+                else WebSessionState.RECOVERY_LIMITED
+            )
+            if session.state is not source_state:
+                raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
+            rotated = replace(
+                session,
+                session_secret_hash=command.new_session_secret_hash,
+                csrf_secret_hash=command.new_csrf_secret_hash,
+                state=WebSessionState.ACTIVE,
+                authentication_method=command.target_authentication_method,
+                authenticated_at=command.database_now,
+                reauthenticated_at=None,
+                idle_expires_at=clamp_idle_expiry(
+                    command.database_now + _OFFLINE_SESSION_POLICY.idle_ttl,
+                    session.absolute_expires_at,
+                ),
+            )
+            next_state = WebSessionState.ACTIVE
         del self._state.sessions_by_secret_hash[command.prior_session_secret_hash]
         self._state.sessions_by_secret_hash[command.new_session_secret_hash] = rotated
         return RotatedWebSessionSecrets(
             web_session_id=command.web_session_id,
-            state=rotated.state,
+            state=next_state,
             database_now=command.database_now,
         )
 
@@ -507,6 +727,358 @@ class OfflineSessionStore:
         return RevokedWebSession(
             web_session_id=session.web_session_id, revoked_at=command.database_now
         )
+
+
+class OfflineTotpStore:
+    """In-memory TOTP transaction double mirroring the store contracts.
+
+    One ``asyncio.Lock`` serializes every operation, so the offline graph
+    reproduces the row-lock serialization points of the real store — the same
+    TOTP step accepted once, one recovery code consumed once — with the real
+    pure domain logic and the same closed rejections.
+    """
+
+    def __init__(self, state: OfflineAuthenticationState) -> None:
+        self._state = state
+        self._codec = OfflineTotpSecretCodec()
+        self._lock = asyncio.Lock()
+
+    def _active_credential(self) -> OfflineTotpCredentialRow | None:
+        return next(
+            (
+                row
+                for row in self._state.totp_credential_rows
+                if row.user_id == _OFFLINE_USER_ID
+                and row.state is TotpCredentialState.ACTIVE
+            ),
+            None,
+        )
+
+    def _pending_credential(self, enrollment_id: UUID) -> OfflineTotpCredentialRow | None:
+        return next(
+            (
+                row
+                for row in self._state.totp_credential_rows
+                if row.totp_credential_id == enrollment_id
+                and row.user_id == _OFFLINE_USER_ID
+                and row.state is TotpCredentialState.PENDING
+            ),
+            None,
+        )
+
+    def _bucket(self, bucket_kind: ThrottleBucketKind, bucket_hash: str) -> str:
+        return f"{bucket_kind.value}:{bucket_hash}"
+
+    async def resolve_verification_bucket(
+        self, *, bucket_kind: ThrottleBucketKind, bucket_hash: str
+    ) -> ThrottleBucketState | None:
+        async with self._lock:
+            return self._state.buckets.get(self._bucket(bucket_kind, bucket_hash))
+
+    async def record_verification_failure(
+        self, *, bucket_kind: ThrottleBucketKind, bucket_hash: str, database_now: datetime
+    ) -> ThrottleFailureTransition:
+        async with self._lock:
+            key = self._bucket(bucket_kind, bucket_hash)
+            transition = next_login_failure_transition(
+                self._state.buckets.get(key),
+                database_now=database_now,
+                policy=_OFFLINE_THROTTLE_POLICY,
+            )
+            self._state.buckets[key] = ThrottleBucketState(
+                window_started_at=transition.window_started_at,
+                failed_attempt_count=transition.failed_attempt_count,
+                locked_until=transition.locked_until,
+            )
+            return transition
+
+    async def has_active_totp(self, *, user_id: UUID) -> bool:
+        async with self._lock:
+            return any(
+                row.user_id == user_id and row.state is TotpCredentialState.ACTIVE
+                for row in self._state.totp_credential_rows
+            )
+
+    async def record_prompt_dismissal(
+        self, *, user_id: UUID, workspace_id: UUID, database_now: datetime
+    ) -> datetime:
+        del user_id, workspace_id
+        async with self._lock:
+            self._state.totp_prompt_dismissed_at = database_now
+            return database_now
+
+    async def insert_pending_enrollment(
+        self, command: InsertPendingEnrollmentCommand
+    ) -> InsertedPendingEnrollment:
+        async with self._lock:
+            active = self._active_credential()
+            if active is not None and not command.allow_active_credential:
+                raise AuthenticationError(ErrorCode.TOTP_ENROLLMENT_STATE_INVALID)
+            for row in self._state.totp_credential_rows:
+                if row.state is TotpCredentialState.PENDING:
+                    row.state = TotpCredentialState.REPLACED
+                    row.enrollment_expires_at = None
+            totp_credential_id = uuid7()
+            self._state.totp_credential_rows.append(
+                OfflineTotpCredentialRow(
+                    totp_credential_id=totp_credential_id,
+                    user_id=command.user_id,
+                    workspace_id=_OFFLINE_WORKSPACE_ID,
+                    state=TotpCredentialState.PENDING,
+                    sealed=command.sealed_secret,
+                    last_accepted_time_step=None,
+                    enrollment_expires_at=command.enrollment_expires_at,
+                    revision=1,
+                    created_at=command.database_now,
+                    activated_at=None,
+                )
+            )
+            return InsertedPendingEnrollment(
+                totp_credential_id=totp_credential_id,
+                enrollment_expires_at=command.enrollment_expires_at,
+                username=OFFLINE_USERNAME,
+                database_now=command.database_now,
+            )
+
+    async def verify_totp(self, command: VerifyTotpCommand) -> TotpVerified:
+        async with self._lock:
+            credential = self._active_credential()
+            if credential is None:
+                raise AuthenticationError(ErrorCode.AUTHENTICATION_FAILED)
+            secret = self._codec.open_secret(sealed=credential.sealed)
+            accepted_step = resolve_totp_step(
+                submitted_code=command.submitted_code,
+                secret=secret,
+                last_accepted_time_step=credential.last_accepted_time_step,
+                unix_time_seconds=command.unix_time_seconds,
+            )
+            if accepted_step is None:
+                raise AuthenticationError(ErrorCode.AUTHENTICATION_FAILED)
+            credential.last_accepted_time_step = accepted_step
+            was_reencrypted = False
+            if credential.sealed.key_id != self._codec.current_key_id():
+                credential.sealed = self._codec.seal_secret(plaintext=secret)
+                was_reencrypted = True
+            if command.reset_bucket_hash is not None:
+                self._state.buckets[
+                    self._bucket(
+                        ThrottleBucketKind.TOTP_VERIFICATION, command.reset_bucket_hash
+                    )
+                ] = ThrottleBucketState(
+                    window_started_at=command.database_now,
+                    failed_attempt_count=0,
+                    locked_until=None,
+                )
+            return TotpVerified(
+                totp_credential_id=credential.totp_credential_id,
+                accepted_time_step=accepted_step,
+                was_reencrypted=was_reencrypted,
+                database_now=command.database_now,
+            )
+
+    async def activate_enrollment(
+        self, command: ActivateEnrollmentCommand
+    ) -> ActivatedTotpEnrollment:
+        async with self._lock:
+            pending = self._pending_credential(command.enrollment_id)
+            if (
+                pending is None
+                or pending.enrollment_expires_at is None
+                or pending.enrollment_expires_at <= command.database_now
+            ):
+                raise AuthenticationError(ErrorCode.TOTP_ENROLLMENT_STATE_INVALID)
+            secret = self._codec.open_secret(sealed=pending.sealed)
+            accepted_step = resolve_totp_step(
+                submitted_code=command.submitted_code,
+                secret=secret,
+                last_accepted_time_step=pending.last_accepted_time_step,
+                unix_time_seconds=command.unix_time_seconds,
+            )
+            if accepted_step is None:
+                raise AuthenticationError(ErrorCode.AUTHENTICATION_FAILED)
+            replaced_previous = False
+            for row in self._state.totp_credential_rows:
+                if row.state is TotpCredentialState.ACTIVE:
+                    row.state = TotpCredentialState.REPLACED
+                    row.enrollment_expires_at = None
+                    replaced_previous = True
+            pending.state = TotpCredentialState.ACTIVE
+            pending.activated_at = command.database_now
+            pending.enrollment_expires_at = None
+            pending.last_accepted_time_step = accepted_step
+            for code_hash in command.recovery_code_hashes:
+                self._state.recovery_code_rows.append(
+                    OfflineRecoveryCodeRow(
+                        recovery_code_id=uuid7(),
+                        totp_credential_id=pending.totp_credential_id,
+                        revision=pending.revision,
+                        code_hash=code_hash,
+                        created_at=command.database_now,
+                    )
+                )
+            if command.complete_recovery_session:
+                session = next(
+                    (
+                        candidate
+                        for candidate in self._state.sessions_by_secret_hash.values()
+                        if candidate.web_session_id == command.current_web_session_id
+                    ),
+                    None,
+                )
+                if (
+                    session is None
+                    or session.session_secret_hash != command.prior_session_secret_hash
+                    or session.state is not WebSessionState.RECOVERY_LIMITED
+                ):
+                    raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
+                rotated = replace(
+                    session,
+                    session_secret_hash=command.new_session_secret_hash,
+                    csrf_secret_hash=command.new_csrf_secret_hash,
+                    state=WebSessionState.ACTIVE,
+                    authentication_method=TOTP_AUTHENTICATION_METHOD,
+                    authenticated_at=command.database_now,
+                    reauthenticated_at=None,
+                    idle_expires_at=clamp_idle_expiry(
+                        command.database_now + _OFFLINE_SESSION_POLICY.idle_ttl,
+                        session.absolute_expires_at,
+                    ),
+                )
+                del self._state.sessions_by_secret_hash[command.prior_session_secret_hash]
+                self._state.sessions_by_secret_hash[command.new_session_secret_hash] = rotated
+            return ActivatedTotpEnrollment(
+                totp_credential_id=pending.totp_credential_id,
+                recovery_code_revision=pending.revision,
+                replaced_previous_credential=replaced_previous,
+                database_now=command.database_now,
+            )
+
+    async def recover_session(self, command: RecoverSessionCommand) -> RecoveredSession:
+        async with self._lock:
+            credential = self._active_credential()
+            if credential is None:
+                raise AuthenticationError(ErrorCode.AUTHENTICATION_FAILED)
+            matching = next(
+                (
+                    row
+                    for row in self._state.recovery_code_rows
+                    if row.totp_credential_id == credential.totp_credential_id
+                    and row.code_hash == command.recovery_code_hash
+                    and row.used_at is None
+                ),
+                None,
+            )
+            if matching is None:
+                raise AuthenticationError(ErrorCode.AUTHENTICATION_FAILED)
+            matching.used_at = command.database_now
+            session = next(
+                (
+                    candidate
+                    for candidate in self._state.sessions_by_secret_hash.values()
+                    if candidate.web_session_id == command.current_web_session_id
+                ),
+                None,
+            )
+            if (
+                session is None
+                or session.session_secret_hash != command.prior_session_secret_hash
+                or session.state
+                not in (WebSessionState.PENDING_TOTP, WebSessionState.ACTIVE)
+            ):
+                raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
+            rotated = replace(
+                session,
+                session_secret_hash=command.new_session_secret_hash,
+                csrf_secret_hash=command.new_csrf_secret_hash,
+                state=WebSessionState.RECOVERY_LIMITED,
+                authentication_method=RECOVERY_AUTHENTICATION_METHOD,
+                authenticated_at=command.database_now,
+                reauthenticated_at=None,
+            )
+            del self._state.sessions_by_secret_hash[command.prior_session_secret_hash]
+            self._state.sessions_by_secret_hash[command.new_session_secret_hash] = rotated
+            return RecoveredSession(
+                web_session_id=command.current_web_session_id,
+                state=WebSessionState.RECOVERY_LIMITED,
+                database_now=command.database_now,
+            )
+
+    async def regenerate_recovery_codes(
+        self, command: RegenerateRecoveryCodesCommand
+    ) -> RegeneratedRecoveryCodes:
+        async with self._lock:
+            credential = self._active_credential()
+            if credential is None:
+                raise AuthenticationError(ErrorCode.AUTHENTICATION_FAILED)
+            credential.revision += 1
+            invalidated = 0
+            for row in self._state.recovery_code_rows:
+                if row.totp_credential_id == credential.totp_credential_id and row.used_at is None:
+                    row.used_at = command.database_now
+                    invalidated += 1
+            for code_hash in command.recovery_code_hashes:
+                self._state.recovery_code_rows.append(
+                    OfflineRecoveryCodeRow(
+                        recovery_code_id=uuid7(),
+                        totp_credential_id=credential.totp_credential_id,
+                        revision=credential.revision,
+                        code_hash=code_hash,
+                        created_at=command.database_now,
+                    )
+                )
+            return RegeneratedRecoveryCodes(
+                revision=credential.revision,
+                invalidated_code_count=invalidated,
+                database_now=command.database_now,
+            )
+
+    async def disable_totp(self, command: DisableTotpCommand) -> DisabledTotp:
+        async with self._lock:
+            if self._active_credential() is None:
+                raise AuthenticationError(ErrorCode.AUTHENTICATION_FAILED)
+            for row in self._state.totp_credential_rows:
+                if row.state is not TotpCredentialState.REPLACED:
+                    row.state = TotpCredentialState.REPLACED
+                    row.enrollment_expires_at = None
+            for code_row in self._state.recovery_code_rows:
+                if code_row.used_at is None:
+                    code_row.used_at = command.database_now
+            self._state.credential_revision += 1
+            next_credential_revision = self._state.credential_revision
+            revoked_session_count = 0
+            rotated_session: StoredWebSession | None = None
+            for secret_hash, session in list(self._state.sessions_by_secret_hash.items()):
+                if session.web_session_id == command.current_web_session_id:
+                    if session.session_secret_hash != command.prior_session_secret_hash:
+                        raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
+                    rotated_session = replace(
+                        session,
+                        session_secret_hash=command.new_session_secret_hash,
+                        csrf_secret_hash=command.new_csrf_secret_hash,
+                        credential_revision=next_credential_revision,
+                        authentication_method=PASSWORD_AUTHENTICATION_METHOD,
+                    )
+                    del self._state.sessions_by_secret_hash[secret_hash]
+                    self._state.sessions_by_secret_hash[
+                        command.new_session_secret_hash
+                    ] = rotated_session
+                elif session.state is not WebSessionState.REVOKED:
+                    self._state.sessions_by_secret_hash[secret_hash] = replace(
+                        session,
+                        state=WebSessionState.REVOKED,
+                        revoked_at=command.database_now,
+                        revocation_reason=TOTP_DISABLED_REVOCATION_REASON,
+                        authenticated_at=None,
+                        reauthenticated_at=None,
+                    )
+                    revoked_session_count += 1
+            if rotated_session is None:
+                raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
+            return DisabledTotp(
+                credential_revision=next_credential_revision,
+                revoked_session_count=revoked_session_count,
+                database_now=command.database_now,
+            )
 
 
 def compose_offline_web_authentication(
@@ -530,6 +1102,18 @@ def compose_offline_web_authentication(
     offline_clock = clock if clock is not None else OfflineAuthenticationClock()
     credentials: CredentialTransactionPort = OfflineCredentialStore(offline_state)
     sessions: WebSessionTransactionPort = OfflineSessionStore(offline_state)
+    totp_transactions: TotpTransactionPort = OfflineTotpStore(offline_state)
+    totp_service = TotpService(
+        transactions=totp_transactions,
+        sessions=sessions,
+        hasher=hasher,
+        crypto=crypto,
+        master_key=_OFFLINE_MASTER_KEY,
+        clock=offline_clock,
+        secret_codec=OfflineTotpSecretCodec(),
+        throttle_policy=_OFFLINE_THROTTLE_POLICY,
+        session_policy=_OFFLINE_SESSION_POLICY,
+    )
     session_service = SessionService(
         sessions=sessions,
         hasher=hasher,
@@ -537,6 +1121,7 @@ def compose_offline_web_authentication(
         master_key=_OFFLINE_MASTER_KEY,
         clock=offline_clock,
         session_policy=_OFFLINE_SESSION_POLICY,
+        totp_leg=totp_service,
     )
     return WebAuthenticationRuntime(
         allowed_origin=OFFLINE_WEB_ALLOWED_ORIGIN,
@@ -559,5 +1144,6 @@ def compose_offline_web_authentication(
             hasher=hasher,
             blocklist=PasswordBlocklist(digests=()),
         ),
+        totp_service=totp_service,
         verify_csrf_token=_build_csrf_verifier(crypto, _OFFLINE_MASTER_KEY),
     )

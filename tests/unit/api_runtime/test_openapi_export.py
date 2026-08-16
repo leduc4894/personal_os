@@ -113,6 +113,12 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
         "/api/auth/logout",
         "/api/auth/reauthenticate",
         "/api/auth/password",
+        "/api/auth/totp/verify",
+        "/api/auth/totp/enrollments",
+        "/api/auth/totp/enrollments/{enrollment_id}/verify",
+        "/api/auth/totp/recovery",
+        "/api/auth/totp/recovery-codes/regenerate",
+        "/api/auth/totp",
     }
     assert document["paths"]["/api/health/live"]["get"]["operationId"] == "getApiLiveness"
     assert document["paths"]["/api/health/ready"]["get"]["operationId"] == "getApiReadiness"
@@ -124,6 +130,29 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
         == "reauthenticate"
     )
     assert document["paths"]["/api/auth/password"]["put"]["operationId"] == "changePassword"
+    assert (
+        document["paths"]["/api/auth/totp/verify"]["post"]["operationId"]
+        == "verifyTotpChallenge"
+    )
+    assert (
+        document["paths"]["/api/auth/totp/enrollments"]["post"]["operationId"]
+        == "createTotpEnrollment"
+    )
+    assert (
+        document["paths"]["/api/auth/totp/enrollments/{enrollment_id}/verify"]["post"][
+            "operationId"
+        ]
+        == "verifyTotpEnrollment"
+    )
+    assert (
+        document["paths"]["/api/auth/totp/recovery"]["post"]["operationId"]
+        == "startTotpRecovery"
+    )
+    assert (
+        document["paths"]["/api/auth/totp/recovery-codes/regenerate"]["post"]["operationId"]
+        == "regenerateTotpRecoveryCodes"
+    )
+    assert document["paths"]["/api/auth/totp"]["delete"]["operationId"] == "disableTotp"
 
 
 def test_openapi_render_omits_the_framework_validation_error_documentation() -> None:

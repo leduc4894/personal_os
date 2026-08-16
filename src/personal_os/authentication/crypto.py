@@ -9,9 +9,11 @@ wrong segment counts, invalid lookup identifiers and size violations are all
 rejected through one failure path that never retains or echoes the rejected
 value — not in the exception, its ``str``/``repr`` or its safe details.
 
-The five HKDF domain labels (spec 20.1) are pinned to exact bytes here as the
-closed vocabulary every subkey derivation must name; deriving with a label
-outside this set is a contract violation, not a configuration choice.
+The HKDF domain labels of spec 20.1 — TOTP-secret authenticated encryption,
+CSRF hashing, throttle-bucket HMAC, recovery-code hashing and the two
+exact-replay derivations — are pinned to exact bytes here as the closed
+vocabulary every subkey derivation must name; deriving with a label outside
+this set is a contract violation, not a configuration choice.
 """
 
 from __future__ import annotations
@@ -30,6 +32,9 @@ CSRF_HASH_LABEL: Final[str] = "auth/csrf/v1"
 #: Throttle-bucket HMAC domain (spec 8.3, 20.1).
 THROTTLE_HMAC_LABEL: Final[str] = "auth/throttle/v1"
 
+#: TOTP-secret authenticated-encryption domain (spec 10.1, 20.1).
+TOTP_SECRET_AEAD_LABEL: Final[str] = "auth/totp-secret/v1"
+
 #: Recovery-code hashing domain (spec 10.3, 20.1).
 RECOVERY_CODE_HASH_LABEL: Final[str] = "auth/recovery/v1"
 
@@ -42,6 +47,7 @@ REFRESH_REPLAY_DERIVATION_LABEL: Final[str] = "auth/refresh-replay/v1"
 #: The closed domain-separation label vocabulary (exact bytes).
 CRYPTO_DOMAIN_LABELS: Final[frozenset[str]] = frozenset(
     {
+        TOTP_SECRET_AEAD_LABEL,
         CSRF_HASH_LABEL,
         THROTTLE_HMAC_LABEL,
         RECOVERY_CODE_HASH_LABEL,

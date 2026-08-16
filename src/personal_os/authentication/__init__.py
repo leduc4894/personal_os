@@ -37,6 +37,7 @@ from personal_os.authentication.crypto import (
     REFRESH_CREDENTIAL_PREFIX,
     REFRESH_REPLAY_DERIVATION_LABEL,
     THROTTLE_HMAC_LABEL,
+    TOTP_SECRET_AEAD_LABEL,
     parse_access_credential,
     parse_refresh_credential,
 )
@@ -88,6 +89,7 @@ __all__ = [
     "REFRESH_CREDENTIAL_PREFIX",
     "REFRESH_REPLAY_DERIVATION_LABEL",
     "THROTTLE_HMAC_LABEL",
+    "TOTP_SECRET_AEAD_LABEL",
     "AuthenticatedDeviceContext",
     "AuthenticatedWebContext",
     "AuthenticationCryptoPort",
