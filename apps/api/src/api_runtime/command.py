@@ -2,9 +2,10 @@
 
 The module stays import-light so every shell-only invocation (``--help``,
 ``--version``, no arguments, invalid syntax, ``check-runtime``) parses without
-touching FastAPI, Uvicorn or any settings loader. The server and OpenAPI export
-implementations are imported inside their handlers only, so the heavy runtime
-loads exactly when the matching subcommand is selected and parsed.
+touching FastAPI, Uvicorn or any settings loader. The server, OpenAPI export
+and protected web-credential implementations are imported inside their
+handlers only, so the heavy runtime loads exactly when the matching
+subcommand is selected and parsed.
 """
 
 from __future__ import annotations
@@ -40,12 +41,53 @@ def _export_openapi(arguments: Namespace) -> int:
     return export_openapi(arguments.output)
 
 
+def _enroll_web_credential(arguments: Namespace) -> int:
+    from api_runtime.authentication_commands import run_enroll_web_credential
+
+    return run_enroll_web_credential(arguments)
+
+
+def _web_credential_status(arguments: Namespace) -> int:
+    from api_runtime.authentication_commands import run_web_credential_status
+
+    return run_web_credential_status(arguments)
+
+
+def _reset_web_authentication(arguments: Namespace) -> int:
+    from api_runtime.authentication_commands import run_reset_web_authentication
+
+    return run_reset_web_authentication(arguments)
+
+
 def _configure_serve(parser: ArgumentParser) -> None:
     """Declare the serve surface: bind settings come from the environment."""
 
 
 def _configure_export_openapi(parser: ArgumentParser) -> None:
     parser.add_argument("--output", required=True)
+
+
+def _configure_enroll_web_credential(parser: ArgumentParser) -> None:
+    """Declare the enrollment surface: the password never travels in argv.
+
+    Abbreviation stays off so ``--password`` cannot alias
+    ``--password-file-name``: password text in argv remains a syntax failure.
+    """
+    parser.allow_abbrev = False
+    parser.add_argument("--username", required=True)
+    parser.add_argument("--password-file-name")
+
+
+def _configure_web_credential_status(parser: ArgumentParser) -> None:
+    parser.allow_abbrev = False
+    parser.add_argument("--username", required=True)
+
+
+def _configure_reset_web_authentication(parser: ArgumentParser) -> None:
+    """Declare the reset surface: password file or prompt, typed confirmation."""
+    parser.allow_abbrev = False
+    parser.add_argument("--username", required=True)
+    parser.add_argument("--password-file-name")
 
 
 API_SUBCOMMANDS: Final[tuple[BootstrapSubcommand, ...]] = (
@@ -60,6 +102,24 @@ API_SUBCOMMANDS: Final[tuple[BootstrapSubcommand, ...]] = (
         help="export the OpenAPI contract document to one file",
         configure=_configure_export_openapi,
         handler=_export_openapi,
+    ),
+    BootstrapSubcommand(
+        name="enroll-web-credential",
+        help="enroll the initial web credential of one canonical username",
+        configure=_configure_enroll_web_credential,
+        handler=_enroll_web_credential,
+    ),
+    BootstrapSubcommand(
+        name="web-credential-status",
+        help="report the web credential enrollment and credential revision",
+        configure=_configure_web_credential_status,
+        handler=_web_credential_status,
+    ),
+    BootstrapSubcommand(
+        name="reset-web-authentication",
+        help="emergency-reset every web authentication surface of one username",
+        configure=_configure_reset_web_authentication,
+        handler=_reset_web_authentication,
     ),
 )
 

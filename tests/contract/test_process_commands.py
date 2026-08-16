@@ -183,3 +183,56 @@ def test_api_export_openapi_missing_output_is_syntax_failure(tmp_path: Path) -> 
     assert completed.returncode == 2, completed.stdout
     assert "--output" in completed.stderr
     assert "Traceback" not in completed.stderr
+
+
+PROTECTED_CREDENTIAL_SUBCOMMANDS = (
+    "enroll-web-credential",
+    "web-credential-status",
+    "reset-web-authentication",
+)
+
+
+def test_api_help_lists_protected_credential_subcommands(tmp_path: Path) -> None:
+    completed = _run_module("api_runtime.command", ["--help"], tmp_path)
+    assert completed.returncode == 0, completed.stderr
+    for subcommand in PROTECTED_CREDENTIAL_SUBCOMMANDS:
+        assert subcommand in completed.stdout
+
+
+def test_credential_subcommand_help_never_reads_secret_or_loads_settings(
+    tmp_path: Path,
+) -> None:
+    sentinel_value = "do-not-emit-secret-value"
+    sentinel_name = "database-password"
+    (tmp_path / sentinel_name).write_text(sentinel_value, encoding="utf-8")
+    env = _hostile_secret_environment(tmp_path)
+    for subcommand in PROTECTED_CREDENTIAL_SUBCOMMANDS:
+        completed = _run_module("api_runtime.command", [subcommand, "--help"], tmp_path, env=env)
+        assert completed.returncode == 0, completed.stderr
+        assert sentinel_value not in completed.stdout + completed.stderr
+        assert sentinel_name not in completed.stdout + completed.stderr
+
+
+def test_credential_subcommands_validate_arguments_before_any_input(
+    tmp_path: Path,
+) -> None:
+    env = _hostile_secret_environment(tmp_path)
+    for subcommand in PROTECTED_CREDENTIAL_SUBCOMMANDS:
+        completed = _run_module("api_runtime.command", [subcommand], tmp_path, env=env)
+        assert completed.returncode == 2, completed.stdout
+        assert "--username" in completed.stderr
+        assert "Traceback" not in completed.stderr
+
+
+def test_credential_subcommands_reject_password_arguments(tmp_path: Path) -> None:
+    env = _hostile_secret_environment(tmp_path)
+    for subcommand in ("enroll-web-credential", "reset-web-authentication"):
+        completed = _run_module(
+            "api_runtime.command",
+            [subcommand, "--username", "owner", "--password", "argv-secret"],
+            tmp_path,
+            env=env,
+        )
+        assert completed.returncode == 2, completed.stdout
+        assert "unrecognized arguments" in completed.stderr
+        assert "Traceback" not in completed.stderr

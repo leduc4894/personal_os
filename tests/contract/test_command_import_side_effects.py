@@ -35,6 +35,9 @@ PURGED_MODULES = (
     "api_runtime.runtime_check",
     "api_runtime.server",
     "api_runtime.application",
+    "api_runtime.authentication_commands",
+    "api_runtime.authentication_settings",
+    "api_runtime.authentication_crypto",
     "mcp_runtime",
     "mcp_runtime.command",
     "mcp_runtime.runtime_check",
@@ -44,6 +47,13 @@ PURGED_MODULES = (
     "personal_os",
     "personal_os.command_shell",
     "personal_os.package_metadata",
+    "postgresql_source_store",
+    "postgresql_source_store.authentication_credentials",
+    "postgresql_source_store.engine",
+    "postgresql_source_store.settings",
+    "postgresql_source_store.tables",
+    "argon2",
+    "psycopg",
     "fastapi",
     "uvicorn",
 )
@@ -79,6 +89,29 @@ ALL_SHELL_INVOCATIONS: Sequence[Sequence[str]] = (
     ["--version"],
     [],
     ["--not-a-real-flag"],
+)
+
+# Protected credential invocations that must parse inside the shell only: each
+# subcommand's help screen and every argument-validation failure (missing
+# --username, password text in argv) exit before any handler body runs.
+CREDENTIAL_SHELL_INVOCATIONS: Sequence[Sequence[str]] = (
+    ["enroll-web-credential", "--help"],
+    ["web-credential-status", "--help"],
+    ["reset-web-authentication", "--help"],
+    ["enroll-web-credential"],
+    ["web-credential-status"],
+    ["reset-web-authentication"],
+    ["enroll-web-credential", "--username", "owner", "--password", "argv-secret"],
+)
+
+# The protected credential implementation, its database adapter and its crypto
+# adapters must stay unimported on every shell-only parsing path.
+PROTECTED_IMPLEMENTATION_MODULES = (
+    "api_runtime.authentication_commands",
+    "api_runtime.authentication_crypto",
+    "postgresql_source_store",
+    "argon2",
+    "psycopg",
 )
 
 
@@ -268,4 +301,44 @@ def test_wrapper_never_imports_server_or_web_framework_at_module_level(
     forbidden = imported.intersection(HEAVY_SERVER_MODULES)
     assert not forbidden, (
         f"{module_name} imports server machinery at module top level: {sorted(forbidden)}"
+    )
+
+
+def test_credential_shell_paths_never_import_implementation_or_database_modules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _purge_module_registry():
+        monkeypatch.setattr(os, "getenv", _forbid_side_effect)
+        monkeypatch.setattr(Path, "read_text", _forbid_side_effect)
+        monkeypatch.setattr(socket, "create_connection", _forbid_side_effect)
+
+        module = importlib.import_module("api_runtime.command")
+        for protected_name in PROTECTED_IMPLEMENTATION_MODULES:
+            assert protected_name not in sys.modules
+
+        for argv in CREDENTIAL_SHELL_INVOCATIONS:
+            with contextlib.suppress(SystemExit):
+                module.run(list(argv))
+
+        for protected_name in PROTECTED_IMPLEMENTATION_MODULES:
+            assert protected_name not in sys.modules, (
+                f"a protected credential shell-only invocation imported {protected_name}"
+            )
+
+
+def test_protected_credential_module_import_is_lazy_inside_handlers() -> None:
+    module = importlib.import_module("api_runtime.command")
+    assert module.__file__ is not None
+    source = Path(module.__file__).read_text(encoding="utf-8")
+
+    module_level = _collect_imported_modules(source)
+    assert "api_runtime.authentication_commands" not in module_level, (
+        "api_runtime.command imports the protected credential implementation at "
+        "module top level; it must stay lazy inside the subcommand handlers"
+    )
+
+    function_level = _collect_function_body_imports(source)
+    assert "api_runtime.authentication_commands" in function_level, (
+        "api_runtime.command must import api_runtime.authentication_commands "
+        "inside a handler body so shell-only parsing paths never evaluate it"
     )

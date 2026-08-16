@@ -17,6 +17,20 @@ and rotates the current binding without touching devices; and
 with the replay-eligible grant/token state so startup can fail before bind
 when the configured keyring omits one (spec 20.1).
 
+The protected operator operations of design sections 7.1 and 7.2 live here
+too: ``resolve_web_credential_status`` reads one canonical username's
+enrollment state lock-free; ``enroll_web_credential`` locks the canonical
+identity row, refuses any existing credential, inserts ``user_credentials``
+revision 1 and appends the enrollment audit in one transaction with the
+Argon2id hash computed by the caller outside it; and
+``reset_web_authentication`` closes every authentication surface of one
+canonical identity in exactly one transaction — password and revision
+replaced, TOTP credentials replaced with their recovery codes disabled, every
+web session revoked with cleared authenticated timestamps, every device,
+token family and still-active token revoked, every pending grant plus the
+identity's approved-but-unexchanged grants denied, and one append-only reset
+audit row — returning the closed counts of each closed surface.
+
 Every statement is schema-qualified through the Task 6 Core metadata and
 parameter-bound; driver failures are classified through
 :mod:`postgresql_source_store.error_mapping`, retried only for bounded
@@ -28,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import random
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Final
 from uuid import UUID, uuid7
@@ -65,8 +80,11 @@ from postgresql_source_store.tables import (
     audit_events,
     authentication_throttle_buckets,
     device_authorization_grants,
+    device_token_families,
     device_tokens,
+    devices,
     totp_credentials,
+    totp_recovery_codes,
     user_credentials,
     users,
     web_sessions,
@@ -77,6 +95,8 @@ from postgresql_source_store.tables import (
 LOGIN_SUCCEEDED_AUDIT_ACTION: Final[str] = "authentication.login_succeeded"
 LOGIN_REJECTED_AUDIT_ACTION: Final[str] = "authentication.login_rejected"
 PASSWORD_CHANGED_AUDIT_ACTION: Final[str] = "authentication.password_changed"
+WEB_CREDENTIAL_ENROLLED_AUDIT_ACTION: Final[str] = "authentication.web_credential_enrolled"
+WEB_AUTHENTICATION_RESET_AUDIT_ACTION: Final[str] = "authentication.web_authentication_reset"
 
 #: Audit target and actor vocabulary of the authentication transitions.
 AUDIT_TARGET_KIND_USER_CREDENTIAL: Final[str] = "user_credential"
@@ -90,10 +110,22 @@ _USER_STATUS_ACTIVE: Final[str] = "active"
 _WORKSPACE_STATUS_ACTIVE: Final[str] = "active"
 _TOTP_STATE_ACTIVE: Final[str] = "active"
 _TOTP_STATE_PENDING: Final[str] = "pending"
+_TOTP_STATE_REPLACED: Final[str] = "replaced"
 _SESSION_STATE_REVOKED: Final[str] = "revoked"
+_DEVICE_STATUS_ACTIVE: Final[str] = "active"
+_DEVICE_STATUS_REVOKED: Final[str] = "revoked"
+_TOKEN_FAMILY_STATE_ACTIVE: Final[str] = "active"
+_TOKEN_FAMILY_STATE_REVOKED: Final[str] = "revoked"
 _REFRESH_TOKEN_KIND: Final[str] = "refresh"
 _TOKEN_STATE_ACTIVE: Final[str] = "active"
+_TOKEN_STATE_REVOKED: Final[str] = "revoked"
+_GRANT_STATE_PENDING: Final[str] = "pending"
+_GRANT_STATE_APPROVED: Final[str] = "approved"
+_GRANT_STATE_DENIED: Final[str] = "denied"
 _GRANT_STATES_WITH_REPLAY_STATE: Final[tuple[str, ...]] = ("approved", "exchanged")
+
+#: Revocation reason of every surface the emergency reset closes (spec 7.2).
+EMERGENCY_RESET_REVOCATION_REASON: Final[str] = "emergency_reset"
 
 #: Bounded contention retry bounds, mirroring the canonical policy.
 _MAXIMUM_TRANSACTION_ATTEMPTS: Final[int] = 3
@@ -133,6 +165,78 @@ async def run_authentication_transaction[TransactionResultT](
                 continue
             raise InternalApplicationError(ErrorCode.INTERNAL_ERROR) from cause
     raise AssertionError("authentication transaction attempts exhausted without a result")
+
+
+# --- protected operator commands (spec 7.1, 7.2) ------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedWebCredentialStatus:
+    """One canonical username's enrollment state; the revision is the whole truth.
+
+    ``credential_revision`` is ``None`` exactly when no Web credential exists;
+    the non-secret status command prints nothing beyond that flag and number.
+    """
+
+    user_id: UUID
+    workspace_id: UUID | None
+    credential_revision: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class EnrollWebCredentialCommand:
+    """One initial enrollment's transactional write (spec 7.1).
+
+    The Argon2id hash is computed by the caller outside the transaction; the
+    command resolves, refuses and inserts behind the canonical identity lock.
+    """
+
+    username: str
+    password_hash: str = field(repr=False)
+    database_now: datetime
+    diagnostic_context: DiagnosticContext
+
+
+@dataclass(frozen=True, slots=True)
+class EnrolledWebCredential:
+    """The committed identity of one accepted enrollment."""
+
+    user_id: UUID
+    workspace_id: UUID
+    credential_revision: int
+    database_now: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ResetWebAuthenticationCommand:
+    """One emergency reset's transactional writes (spec 7.2).
+
+    The new Argon2id hash is computed by the caller outside the transaction;
+    the typed confirmation is validated at the input boundary before this
+    command is ever built.
+    """
+
+    username: str
+    new_password_hash: str = field(repr=False)
+    database_now: datetime
+    diagnostic_context: DiagnosticContext
+
+
+@dataclass(frozen=True, slots=True)
+class ResetWebAuthentication:
+    """The committed outcome of one emergency reset with closed counts."""
+
+    user_id: UUID
+    workspace_id: UUID
+    credential_revision: int
+    replaced_totp_credential_count: int
+    disabled_recovery_code_count: int
+    revoked_web_session_count: int
+    revoked_device_count: int
+    revoked_token_family_count: int
+    revoked_device_token_count: int
+    denied_grant_count: int
+    database_now: datetime
 
 
 class CredentialStore:
@@ -467,6 +571,244 @@ class CredentialStore:
 
         return await run_authentication_transaction(self._engine, operation)
 
+    async def resolve_web_credential_status(
+        self, *, username: str
+    ) -> ResolvedWebCredentialStatus:
+        """Read one canonical username's enrollment state lock-free (spec 7.1).
+
+        An unresolvable username fails closed as the generic
+        ``authentication_failed`` rejection, mirroring the login contract; a
+        resolved username without a credential row reports ``None`` so the
+        status surface never distinguishes more than enrolled versus not.
+        """
+
+        async def operation(connection: AsyncConnection) -> ResolvedWebCredentialStatus:
+            result = await connection.execute(
+                sa.select(
+                    users.c.user_id,
+                    user_credentials.c.workspace_id,
+                    user_credentials.c.credential_revision,
+                )
+                .select_from(users)
+                .outerjoin(user_credentials, user_credentials.c.user_id == users.c.user_id)
+                .where(users.c.username == username)
+            )
+            row = result.one_or_none()
+            if row is None:
+                raise AuthenticationError(ErrorCode.AUTHENTICATION_FAILED)
+            return ResolvedWebCredentialStatus(
+                user_id=row.user_id,
+                workspace_id=row.workspace_id,
+                credential_revision=(
+                    int(row.credential_revision)
+                    if row.credential_revision is not None
+                    else None
+                ),
+            )
+
+        return await run_authentication_transaction(self._engine, operation)
+
+    async def enroll_web_credential(
+        self, command: EnrollWebCredentialCommand
+    ) -> EnrolledWebCredential:
+        """Insert the initial Web credential revision 1 (spec 7.1).
+
+        One transaction locks the canonical identity row, resolves exactly one
+        active user/workspace, refuses when any credential already exists,
+        inserts revision 1 with the caller's pre-computed Argon2id hash and
+        appends the enrollment audit. Enrollment is intentionally not
+        create-or-return: a concurrent or repeated attempt serialises on the
+        identity lock and leaves the existing credential untouched.
+        """
+
+        async def operation(connection: AsyncConnection) -> EnrolledWebCredential:
+            identity = await _select_locked_canonical_identity(connection, command.username)
+            if identity is None:
+                raise AuthenticationError(ErrorCode.AUTHENTICATION_FAILED)
+            existing = await connection.execute(
+                sa.select(user_credentials.c.user_id).where(
+                    user_credentials.c.user_id == identity.user_id
+                )
+            )
+            if existing.one_or_none() is not None:
+                raise AuthenticationError(ErrorCode.AUTHENTICATION_FAILED)
+            await connection.execute(
+                sa.insert(user_credentials).values(
+                    user_id=identity.user_id,
+                    workspace_id=identity.workspace_id,
+                    password_hash=command.password_hash,
+                    credential_revision=1,
+                    password_changed_at=command.database_now,
+                    created_at=command.database_now,
+                    updated_at=command.database_now,
+                )
+            )
+            await _append_audit_event(
+                connection,
+                diagnostic_context=command.diagnostic_context,
+                workspace_id=identity.workspace_id,
+                user_id=identity.user_id,
+                action=WEB_CREDENTIAL_ENROLLED_AUDIT_ACTION,
+                result=AUDIT_RESULT_SUCCEEDED,
+                reason_code=None,
+                occurred_at=command.database_now,
+            )
+            return EnrolledWebCredential(
+                user_id=identity.user_id,
+                workspace_id=identity.workspace_id,
+                credential_revision=1,
+                database_now=command.database_now,
+            )
+
+        return await run_authentication_transaction(self._engine, operation)
+
+    async def reset_web_authentication(
+        self, command: ResetWebAuthenticationCommand
+    ) -> ResetWebAuthentication:
+        """Close every authentication surface of one identity (spec 7.2).
+
+        Exactly one transaction: the canonical identity row locks first, the
+        credential row locks second, then the password hash and revision are
+        replaced, every active or pending TOTP credential becomes ``replaced``
+        with its unused recovery codes disabled, every web session is revoked
+        with both authenticated timestamps cleared (the schema state matrix
+        demands it), every device, token family and still-active token is
+        revoked, every pending grant plus this identity's
+        approved-but-unexchanged grants is denied, and one append-only reset
+        audit row lands with the commit. Pending grants carry no user linkage
+        until approval, so they are denied deployment-wide — the
+        single-operator reading of the personal OS. Vault data, device audit
+        rows and sync queue data are never deleted or touched.
+        """
+
+        async def operation(connection: AsyncConnection) -> ResetWebAuthentication:
+            identity = await _select_locked_canonical_identity(connection, command.username)
+            if identity is None:
+                raise AuthenticationError(ErrorCode.AUTHENTICATION_FAILED)
+            locked_credential = await connection.execute(
+                sa.select(
+                    user_credentials.c.workspace_id, user_credentials.c.credential_revision
+                )
+                .where(user_credentials.c.user_id == identity.user_id)
+                .with_for_update(of=user_credentials)
+            )
+            credential = locked_credential.one_or_none()
+            if credential is None:
+                raise AuthenticationError(ErrorCode.AUTHENTICATION_FAILED)
+            next_credential_revision = int(credential.credential_revision) + 1
+            await connection.execute(
+                sa.update(user_credentials)
+                .values(
+                    password_hash=command.new_password_hash,
+                    credential_revision=next_credential_revision,
+                    totp_prompt_dismissed_at=None,
+                    password_changed_at=command.database_now,
+                    updated_at=command.database_now,
+                )
+                .where(user_credentials.c.user_id == identity.user_id)
+            )
+            replaced_totp = await connection.execute(
+                sa.update(totp_credentials)
+                .values(
+                    state=_TOTP_STATE_REPLACED,
+                    replaced_at=command.database_now,
+                    enrollment_expires_at=None,
+                )
+                .where(
+                    totp_credentials.c.user_id == identity.user_id,
+                    totp_credentials.c.state.in_((_TOTP_STATE_ACTIVE, _TOTP_STATE_PENDING)),
+                )
+            )
+            disabled_recovery = await connection.execute(
+                sa.update(totp_recovery_codes)
+                .values(used_at=command.database_now)
+                .where(
+                    totp_recovery_codes.c.user_id == identity.user_id,
+                    totp_recovery_codes.c.used_at.is_(None),
+                )
+            )
+            revoked_sessions = await connection.execute(
+                sa.update(web_sessions)
+                .values(
+                    state=_SESSION_STATE_REVOKED,
+                    revoked_at=command.database_now,
+                    revocation_reason=EMERGENCY_RESET_REVOCATION_REASON,
+                    authenticated_at=None,
+                    reauthenticated_at=None,
+                )
+                .where(
+                    web_sessions.c.user_id == identity.user_id,
+                    web_sessions.c.state != _SESSION_STATE_REVOKED,
+                )
+            )
+            revoked_devices = await connection.execute(
+                sa.update(devices)
+                .values(status=_DEVICE_STATUS_REVOKED, revoked_at=command.database_now)
+                .where(
+                    devices.c.user_id == identity.user_id,
+                    devices.c.status == _DEVICE_STATUS_ACTIVE,
+                )
+            )
+            revoked_families = await connection.execute(
+                sa.update(device_token_families)
+                .values(
+                    state=_TOKEN_FAMILY_STATE_REVOKED,
+                    revoked_at=command.database_now,
+                    revocation_reason=EMERGENCY_RESET_REVOCATION_REASON,
+                )
+                .where(
+                    device_token_families.c.user_id == identity.user_id,
+                    device_token_families.c.state == _TOKEN_FAMILY_STATE_ACTIVE,
+                )
+            )
+            revoked_tokens = await connection.execute(
+                sa.update(device_tokens)
+                .values(state=_TOKEN_STATE_REVOKED, revoked_at=command.database_now)
+                .where(
+                    device_tokens.c.user_id == identity.user_id,
+                    device_tokens.c.state == _TOKEN_STATE_ACTIVE,
+                )
+            )
+            denied_grants = await connection.execute(
+                sa.update(device_authorization_grants)
+                .values(state=_GRANT_STATE_DENIED, denied_at=command.database_now)
+                .where(
+                    sa.or_(
+                        device_authorization_grants.c.state == _GRANT_STATE_PENDING,
+                        sa.and_(
+                            device_authorization_grants.c.state == _GRANT_STATE_APPROVED,
+                            device_authorization_grants.c.approved_by_user_id
+                            == identity.user_id,
+                        ),
+                    )
+                )
+            )
+            await _append_audit_event(
+                connection,
+                diagnostic_context=command.diagnostic_context,
+                workspace_id=credential.workspace_id,
+                user_id=identity.user_id,
+                action=WEB_AUTHENTICATION_RESET_AUDIT_ACTION,
+                result=AUDIT_RESULT_SUCCEEDED,
+                reason_code=None,
+                occurred_at=command.database_now,
+            )
+            return ResetWebAuthentication(
+                user_id=identity.user_id,
+                workspace_id=credential.workspace_id,
+                credential_revision=next_credential_revision,
+                replaced_totp_credential_count=int(replaced_totp.rowcount),
+                disabled_recovery_code_count=int(disabled_recovery.rowcount),
+                revoked_web_session_count=int(revoked_sessions.rowcount),
+                revoked_device_count=int(revoked_devices.rowcount),
+                revoked_token_family_count=int(revoked_families.rowcount),
+                revoked_device_token_count=int(revoked_tokens.rowcount),
+                denied_grant_count=int(denied_grants.rowcount),
+                database_now=command.database_now,
+            )
+
+        return await run_authentication_transaction(self._engine, operation)
+
     async def _select_bucket(
         self,
         connection: AsyncConnection,
@@ -621,6 +963,45 @@ class CredentialStore:
         """Recheck the trusted account boundary under the credential lock."""
         row = await self._select_locked_credential(connection, user_id, workspace_id)
         return row is not None
+
+
+async def _select_locked_canonical_identity(
+    connection: AsyncConnection, username: str
+) -> Any:
+    """Lock the canonical user row and resolve exactly one active workspace.
+
+    ``FOR UPDATE OF users`` serialises concurrent enrollments and emergency
+    resets of the same canonical username, so every decision those protected
+    transactions take afterwards — the existing-credential refusal, the
+    revision bump, the surface revocations — happens under the identity lock.
+    The active-workspace outer join keeps one row per identity: a missing or
+    archived workspace leaves ``workspace_id`` null and refuses the operation.
+    """
+    result = await connection.execute(
+        sa.select(
+            users.c.user_id,
+            users.c.status.label("user_status"),
+            workspaces.c.workspace_id,
+        )
+        .select_from(users)
+        .outerjoin(
+            workspaces,
+            sa.and_(
+                workspaces.c.owner_user_id == users.c.user_id,
+                workspaces.c.status == _WORKSPACE_STATUS_ACTIVE,
+            ),
+        )
+        .where(users.c.username == username)
+        .with_for_update(of=users)
+    )
+    rows = result.all()
+    if (
+        len(rows) != 1
+        or rows[0].user_status != _USER_STATUS_ACTIVE
+        or rows[0].workspace_id is None
+    ):
+        return None
+    return rows[0]
 
 
 async def _append_audit_event(
