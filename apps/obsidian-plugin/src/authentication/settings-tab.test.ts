@@ -1,0 +1,79 @@
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+
+const tabPath = new URL("./settings-tab.ts", import.meta.url);
+const tabSource = readFileSync(tabPath, "utf8");
+
+// The settings tab imports the Obsidian runtime module, so this suite pins its
+// source contract statically (the same convention as plugin.test.ts): the
+// closed control set of spec 19, the allowed Obsidian surface, and no
+// forbidden load-time capability.
+const ALLOWED_OBSIDIAN_IMPORT_NAMES = new Set([
+  "PluginSettingTab",
+  "Setting",
+  "App",
+  "Plugin",
+  "Platform",
+  "requestUrl",
+  "RequestUrlParam",
+  "RequestUrlResponse",
+]);
+
+function extractObsidianImportNames(source: string): string[] {
+  const names: string[] = [];
+  const importPattern = /import\s+(type\s+)?\{([^}]*)\}\s+from\s+"obsidian"/g;
+  for (const match of source.matchAll(importPattern)) {
+    for (const specifier of match[2]?.split(",") ?? []) {
+      const name = specifier.trim().split(/\s+as\s+/)[0]?.trim();
+      if (name) {
+        names.push(name);
+      }
+    }
+  }
+  return names;
+}
+
+describe("DeviceAuthenticationSettingTab source contract", () => {
+  it("imports only the closed Obsidian settings surface", () => {
+    const names = extractObsidianImportNames(tabSource);
+    expect(names.length).toBeGreaterThan(0);
+    for (const name of names) {
+      expect(ALLOWED_OBSIDIAN_IMPORT_NAMES.has(name)).toBe(true);
+    }
+  });
+
+  it("exposes the exact spec-19 control set", () => {
+    expect(extractObsidianImportNames(tabSource)).toContain("PluginSettingTab");
+    for (const requiredControl of [
+      "Server origin",
+      "Device name",
+      "Connection status",
+      "Login",
+      "Open browser again",
+      "Cancel pending login",
+      "Disconnect",
+    ]) {
+      expect(tabSource).toContain(requiredControl);
+    }
+  });
+
+  it("derives the status text and controls from the closed contracts", () => {
+    expect(tabSource).toContain("CONNECTION_STATUS_TEXT");
+    expect(tabSource).toContain("resolveAuthenticationControls");
+    expect(tabSource).toContain("ConnectionState");
+  });
+
+  it("touches no forbidden runtime capability", () => {
+    for (const forbiddenText of [
+      "node:",
+      "electron",
+      "FileSystemAdapter",
+      ".vault",
+      "fetch(",
+      "process.env",
+      "qrcode",
+    ]) {
+      expect(tabSource).not.toContain(forbiddenText);
+    }
+  });
+});
