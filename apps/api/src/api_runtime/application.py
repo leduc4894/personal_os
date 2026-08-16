@@ -2,7 +2,9 @@
 
 The factory composes exactly two health routes plus the five session/password
 routes of the injected web-authentication runtime and the local/test-only
-OpenAPI document route, registers the four envelope exception handlers, and
+OpenAPI document route, registers the four envelope exception handlers,
+strips FastAPI's default validation-error response from the generated
+document (the shared handler emits the canonical error envelope instead), and
 wraps the finished middleware stack with :class:`RequestContextMiddleware`
 from the outside so request correlation owns every exchange, including the
 catch-all internal error response. No CORS, GZip, session or authentication
@@ -59,6 +61,15 @@ LOCAL_ENVIRONMENTS: Final[frozenset[RuntimeEnvironment]] = frozenset(
 
 _MALFORMED_JSON_ERROR_TYPE: Final = "json_invalid"
 _MAX_VALIDATION_FIELD_NAMES: Final = 8
+
+#: The response status FastAPI documents on every body-bearing route with its
+#: own ``HTTPValidationError`` schema, and the framework schema definitions
+#: that exist only for that default entry.
+_HTTP_VALIDATION_STATUS: Final = "422"
+_FRAMEWORK_VALIDATION_SCHEMA_NAMES: Final[tuple[str, ...]] = (
+    "HTTPValidationError",
+    "ValidationError",
+)
 
 #: Header every authentication-route response carries, success or failure
 #: alike (spec 16.1); the error handlers apply it through the same closed
@@ -122,6 +133,7 @@ def create_api_application(
     )
     _register_session_routes(app, web_authentication)
     _classify_openapi_route(app)
+    _suppress_framework_validation_error_document(app)
     # The pure-ASGI correlation middleware declares read-only ``Mapping``
     # message aliases; every ASGI message mapping is mutable in practice, so
     # the static mismatch with Starlette's ``ASGIApp`` is bridged here once at
@@ -234,6 +246,41 @@ def _bind_openapi_route_template(route: StarletteRoute) -> None:
 
     route.endpoint = classified_openapi
     route.app = request_response(classified_openapi)
+
+
+def _suppress_framework_validation_error_document(app: FastAPI) -> None:
+    """Drop FastAPI's default validation-error responses from the document.
+
+    Body-bearing routes would otherwise document a ``422`` response with the
+    framework's ``HTTPValidationError`` schema, but the shared request
+    validation handler answers with the canonical error envelope —
+    ``api_request_malformed`` or ``api_request_validation_failed`` with bounded
+    field names — exactly like every other failure, and no route documents
+    error envelopes. Suppressing the default keeps the advertised response set
+    closed over the shapes actually emitted, for the served document and the
+    exported snapshot alike.
+    """
+    framework_openapi = app.openapi
+
+    def openapi() -> dict[str, Any]:
+        cached = app.openapi_schema
+        if cached is not None:
+            return cached
+        document = framework_openapi()
+        schemas = document.get("components", {}).get("schemas")
+        for path_item in document.get("paths", {}).values():
+            if not isinstance(path_item, dict):
+                continue
+            for operation in path_item.values():
+                if isinstance(operation, dict):
+                    operation.get("responses", {}).pop(_HTTP_VALIDATION_STATUS, None)
+        if isinstance(schemas, dict):
+            for schema_name in _FRAMEWORK_VALIDATION_SCHEMA_NAMES:
+                schemas.pop(schema_name, None)
+        app.openapi_schema = document
+        return document
+
+    app.openapi = openapi  # type: ignore[method-assign]
 
 
 async def _handle_request_validation_error(

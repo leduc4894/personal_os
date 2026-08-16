@@ -211,10 +211,15 @@ def create_session_route_endpoints(
     async def logout(
         request: Request,
         authentication: AuthenticatedWebRequest = Depends(  # noqa: B008
-            dependencies.require_csrf_protected_request
+            dependencies.require_csrf_protected_challenge_request
         ),
     ) -> JSONResponse:
-        """Revoke the session row, then clear both browser cookies."""
+        """Revoke the session row, then clear both browser cookies.
+
+        Spec 9.2 reaches logout from every unrevoked state — a pending or
+        recovery-limited session logs out too — so the dependency tolerates
+        those states while the CSRF triple check stays identical.
+        """
         request.scope["route_template"] = ApiRouteTemplate.AUTH_LOGOUT
         revoked_session = authentication.session
         await runtime.session_service.revoke(

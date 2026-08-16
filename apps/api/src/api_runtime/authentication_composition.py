@@ -73,6 +73,7 @@ from personal_os.authentication.sessions import (
     WebSessionTransactionPort,
     derive_csrf_hmac_key,
     evaluate_session_authentication,
+    is_challenge_eligible_session,
     next_login_failure_transition,
 )
 from personal_os.diagnostics.events import SafeToken
@@ -453,6 +454,21 @@ class OfflineSessionStore:
             database_now=database_now,
         )
 
+    async def resolve_challenge_eligible_session(
+        self, *, session_secret_hash: str, database_now: datetime
+    ) -> ResolvedWebSession:
+        session = self._state.sessions_by_secret_hash.get(session_secret_hash)
+        if session is None or not is_challenge_eligible_session(
+            session, database_now=database_now
+        ):
+            raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
+        return ResolvedWebSession(
+            session=session,
+            current_credential_revision=self._state.credential_revision,
+            password_hash=self._state.password_hash,
+            database_now=database_now,
+        )
+
     async def rotate_session_secrets(
         self, command: RotateWebSessionSecretsCommand
     ) -> RotatedWebSessionSecrets:
@@ -494,15 +510,26 @@ class OfflineSessionStore:
 
 
 def compose_offline_web_authentication(
-    *, totp_active: bool = False, clock: OfflineAuthenticationClock | None = None
+    *,
+    totp_active: bool = False,
+    clock: OfflineAuthenticationClock | None = None,
+    state: OfflineAuthenticationState | None = None,
 ) -> WebAuthenticationRuntime:
-    """Build the deterministic offline runtime for export and tests."""
-    state = OfflineAuthenticationState(totp_active=totp_active)
+    """Build the deterministic offline runtime for export and tests.
+
+    An injected ``state`` replaces the default construction — ``totp_active``
+    then only seeds the default — so tests can pre-seed or restamp session
+    rows (for example a ``recovery_limited`` binding) while every secret and
+    the fixed clock stay deterministic.
+    """
+    offline_state = (
+        state if state is not None else OfflineAuthenticationState(totp_active=totp_active)
+    )
     hasher = OfflinePasswordHasher()
     crypto = OfflineAuthenticationCrypto()
     offline_clock = clock if clock is not None else OfflineAuthenticationClock()
-    credentials: CredentialTransactionPort = OfflineCredentialStore(state)
-    sessions: WebSessionTransactionPort = OfflineSessionStore(state)
+    credentials: CredentialTransactionPort = OfflineCredentialStore(offline_state)
+    sessions: WebSessionTransactionPort = OfflineSessionStore(offline_state)
     session_service = SessionService(
         sessions=sessions,
         hasher=hasher,

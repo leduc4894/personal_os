@@ -132,6 +132,20 @@ def test_every_response_references_a_named_component_schema(
                 )
 
 
+def test_document_never_advertises_the_framework_validation_error_shape(
+    snapshot_document: dict[str, Any],
+) -> None:
+    # The shared request-validation handler emits the canonical error envelope
+    # (api_request_validation_failed / api_request_malformed), never FastAPI's
+    # HTTPValidationError, so no route may document that default 422 shape.
+    schemas = snapshot_document["components"]["schemas"]
+    assert "HTTPValidationError" not in schemas
+    assert "ValidationError" not in schemas
+    for path, operations in snapshot_document["paths"].items():
+        for method, operation in operations.items():
+            assert "422" not in operation["responses"], (path, method)
+
+
 def test_document_carries_no_machine_values(snapshot_document: dict[str, Any]) -> None:
     rendered_strings = list(iter_document_strings(snapshot_document))
     assert rendered_strings

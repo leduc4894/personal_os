@@ -16,6 +16,7 @@ rate-limited exit with its safe retry detail.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import timedelta
 from typing import Final
 
@@ -24,6 +25,7 @@ from api_runtime.application import create_api_application
 from api_runtime.authentication_composition import (
     OFFLINE_WEB_ALLOWED_ORIGIN,
     OfflineAuthenticationClock,
+    OfflineAuthenticationState,
     compose_offline_web_authentication,
 )
 from api_runtime.authentication_dependencies import (
@@ -33,6 +35,8 @@ from api_runtime.authentication_dependencies import (
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from personal_os.authentication.contracts import WebSessionState
+from personal_os.authentication.sessions import session_secret_hash_of
 from personal_os.runtime_configuration.models import RuntimeEnvironment
 
 #: The offline composition accepts exactly this origin (spec 9.3).
@@ -69,14 +73,17 @@ class _ReadyProbe:
 
 
 def create_session_test_app(
-    *, totp_active: bool = False, clock: OfflineAuthenticationClock | None = None
+    *,
+    totp_active: bool = False,
+    clock: OfflineAuthenticationClock | None = None,
+    state: OfflineAuthenticationState | None = None,
 ) -> FastAPI:
     """Compose the real application over the offline deterministic ports."""
     return create_api_application(
         environment=RuntimeEnvironment.TEST,
         readiness_probe=_ReadyProbe(),
         web_authentication=compose_offline_web_authentication(
-            totp_active=totp_active, clock=clock
+            totp_active=totp_active, clock=clock, state=state
         ),
     )
 
@@ -200,6 +207,19 @@ def test_login_without_origin_header_is_rejected(client: TestClient) -> None:
     assert response.json()["error"]["code"] == "csrf_validation_failed"
 
 
+def test_login_with_non_ascii_origin_bytes_is_rejected_closed(client: TestClient) -> None:
+    # Starlette decodes headers latin-1: a non-ASCII byte must close with the
+    # documented 403, never escalate to an internal error.
+    response = client.post(
+        "/api/auth/login",
+        headers={"Origin": "https://attacker.example/\xfc".encode("latin-1")},
+        json=_VALID_LOGIN,
+    )
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "csrf_validation_failed"
+    assert response.headers["cache-control"] == "no-store"
+
+
 def test_login_locks_after_five_failures_with_safe_retry_detail(client: TestClient) -> None:
     for _ in range(5):
         rejected = client.post(
@@ -296,6 +316,66 @@ def test_logout_rejects_a_missing_csrf_pair(client: TestClient) -> None:
     assert response.json()["error"]["code"] == "csrf_validation_failed"
 
 
+def test_logout_succeeds_from_a_pending_totp_session() -> None:
+    # Spec 9.2: a pending_totp session may call logout even though it never
+    # authenticates any other route.
+    with TestClient(
+        create_session_test_app(totp_active=True), base_url=_SECURE_BASE_URL
+    ) as totp_client:
+        cookies = login(totp_client)
+        response = totp_client.post(
+            "/api/auth/logout", headers=authenticated_headers(ORIGIN, cookies)
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["state"] == "revoked"
+        assert response.json()["data"]["authenticated"] is False
+        assert any(
+            cookie.startswith(f"{SESSION_COOKIE_NAME}=") and "Max-Age=0" in cookie
+            for cookie in response.headers.get_list("set-cookie")
+        )
+        assert any(
+            cookie.startswith(f"{CSRF_COOKIE_NAME}=") and "Max-Age=0" in cookie
+            for cookie in response.headers.get_list("set-cookie")
+        )
+        afterwards = totp_client.get("/api/auth/session", headers={"Origin": ORIGIN})
+        assert afterwards.status_code == 401
+
+
+def test_logout_succeeds_from_a_recovery_limited_session() -> None:
+    offline_state = OfflineAuthenticationState(totp_active=False)
+    with TestClient(
+        create_session_test_app(state=offline_state), base_url=_SECURE_BASE_URL
+    ) as recovery_client:
+        cookies = login(recovery_client)
+        stored = offline_state.sessions_by_secret_hash[
+            session_secret_hash_of(cookies["session"])
+        ]
+        offline_state.sessions_by_secret_hash[stored.session_secret_hash] = replace(
+            stored, state=WebSessionState.RECOVERY_LIMITED
+        )
+        response = recovery_client.post(
+            "/api/auth/logout", headers=authenticated_headers(ORIGIN, cookies)
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["state"] == "revoked"
+        assert response.json()["data"]["authenticated"] is False
+        assert response.headers.get_list("set-cookie") != []
+
+
+def test_logout_from_an_expired_pending_totp_session_is_rejected() -> None:
+    clock = OfflineAuthenticationClock()
+    with TestClient(
+        create_session_test_app(totp_active=True, clock=clock), base_url=_SECURE_BASE_URL
+    ) as totp_client:
+        cookies = login(totp_client)
+        clock.database_now_value += timedelta(minutes=6)
+        response = totp_client.post(
+            "/api/auth/logout", headers=authenticated_headers(ORIGIN, cookies)
+        )
+        assert response.status_code == 401
+        assert response.json()["error"]["code"] == "authentication_required"
+
+
 # --- reauthentication ----------------------------------------------------------------
 
 
@@ -326,6 +406,22 @@ def test_reauthenticate_with_wrong_password_fails_closed(client: TestClient) -> 
     assert response.headers.get_list("set-cookie") == []
 
 
+def test_reauthenticate_from_a_pending_totp_session_still_requires_active() -> None:
+    # Only logout tolerates the pending state; re-authentication keeps the
+    # strict active-only resolution (spec 9.2, 9.4).
+    with TestClient(
+        create_session_test_app(totp_active=True), base_url=_SECURE_BASE_URL
+    ) as totp_client:
+        cookies = login(totp_client)
+        response = totp_client.post(
+            "/api/auth/reauthenticate",
+            headers=authenticated_headers(ORIGIN, cookies),
+            json={"password": _VALID_LOGIN["password"]},
+        )
+        assert response.status_code == 401
+        assert response.json()["error"]["code"] == "authentication_required"
+
+
 # --- password change -----------------------------------------------------------------
 
 
@@ -350,6 +446,29 @@ def test_password_change_rejects_an_unequal_csrf_header(client: TestClient) -> N
         },
         json=_VALID_CHANGE,
     )
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "csrf_validation_failed"
+
+
+def test_password_change_with_a_non_ascii_csrf_pair_is_rejected_closed(
+    client: TestClient,
+) -> None:
+    cookies = login(client)
+    non_ascii_pair = "f\xf6rged-equal-pair".encode("latin-1")
+    response = client.put(
+        "/api/auth/password",
+        headers={
+            "Origin": ORIGIN,
+            "Cookie": (
+                f"{SESSION_COOKIE_NAME}={cookies['session']}; "
+                f"{CSRF_COOKIE_NAME}=".encode("ascii") + non_ascii_pair
+            ),
+            "X-CSRF-Token": non_ascii_pair,
+        },
+        json=_VALID_CHANGE,
+    )
+    # The equal-but-non-ASCII pair must close with the documented 403 instead
+    # of escalating to an internal error inside the comparison.
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "csrf_validation_failed"
 

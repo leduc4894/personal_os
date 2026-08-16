@@ -36,6 +36,10 @@ export type paths = {
         /**
          * Logout
          * @description Revoke the session row, then clear both browser cookies.
+         *
+         *     Spec 9.2 reaches logout from every unrevoked state — a pending or
+         *     recovery-limited session logs out too — so the dependency tolerates
+         *     those states while the CSRF triple check stays identical.
          */
         readonly post: operations["logout"];
         readonly delete?: never;
@@ -229,11 +233,6 @@ export type components = {
          * @enum {string}
          */
         readonly ErrorCode: "configuration_invalid" | "configuration_unknown_key" | "configuration_secret_invalid" | "secret_file_missing" | "secret_file_outside_root" | "secret_file_invalid_type" | "secret_file_insecure_permissions" | "secret_file_too_large" | "secret_file_invalid_encoding" | "secret_file_empty" | "diagnostic_context_invalid" | "diagnostic_payload_rejected" | "internal_error" | "database_migration_configuration_invalid" | "database_connection_unavailable" | "database_migration_busy" | "database_schema_contract_invalid" | "database_destructive_downgrade_refused" | "object_storage_configuration_invalid" | "object_storage_input_invalid" | "object_storage_busy" | "object_storage_unavailable" | "object_storage_access_denied" | "object_storage_contract_invalid" | "object_storage_object_missing" | "object_storage_integrity_failed" | "object_storage_metadata_conflict" | "source_publish_input_invalid" | "source_not_found" | "source_already_exists" | "source_state_invalid" | "source_version_conflict" | "source_idempotency_mismatch" | "source_event_identity_mismatch" | "source_verified_receipt_stale" | "source_content_object_conflict" | "source_concurrency_busy" | "source_concurrency_invariant_failed" | "source_commit_outcome_unknown" | "projection_dispatch_unavailable" | "projection_intent_contract_invalid" | "identity_bootstrap_input_invalid" | "identity_bootstrap_state_conflict" | "canonical_read_state_invalid" | "canonical_recovery_environment_refused" | "canonical_recovery_configuration_invalid" | "canonical_recovery_snapshot_busy" | "canonical_recovery_bundle_exists" | "canonical_recovery_bundle_invalid" | "canonical_recovery_target_not_empty" | "canonical_recovery_dependency_unavailable" | "canonical_recovery_integrity_failed" | "canonical_recovery_restore_failed" | "api_request_malformed" | "api_request_validation_failed" | "api_route_not_found" | "api_method_not_allowed" | "authentication_required" | "authentication_failed" | "authentication_rate_limited" | "recent_authentication_required" | "csrf_validation_failed" | "authorization_scope_denied" | "totp_enrollment_state_invalid" | "device_authorization_pending" | "device_authorization_slow_down" | "device_authorization_denied" | "device_authorization_expired" | "device_authorization_state_invalid" | "device_credential_invalid" | "device_revoked" | "device_token_reuse_detected" | "plugin_version_unsupported";
-        /** HTTPValidationError */
-        readonly HTTPValidationError: {
-            /** Detail */
-            readonly detail?: readonly components["schemas"]["ValidationError"][];
-        };
         /**
          * LivenessData
          * @description Process-liveness success data; it implies no I/O by construction.
@@ -336,19 +335,6 @@ export type components = {
             readonly scopes: readonly components["schemas"]["WebScope"][];
             readonly state: components["schemas"]["WebSessionState"];
         };
-        /** ValidationError */
-        readonly ValidationError: {
-            /** Context */
-            readonly ctx?: Record<string, never>;
-            /** Input */
-            readonly input?: unknown;
-            /** Location */
-            readonly loc: readonly (string | number)[];
-            /** Message */
-            readonly msg: string;
-            /** Error Type */
-            readonly type: string;
-        };
         /**
          * WebScope
          * @description The fixed Phase 2 Web administration scopes (spec 6.1).
@@ -395,15 +381,6 @@ export interface operations {
                     readonly "application/json": components["schemas"]["ApiEnvelope_SessionData_"];
                 };
             };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
         };
     };
     readonly logout: {
@@ -448,15 +425,6 @@ export interface operations {
                     readonly "application/json": components["schemas"]["ApiEnvelope_SessionData_"];
                 };
             };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
         };
     };
     readonly reauthenticate: {
@@ -479,15 +447,6 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["ApiEnvelope_SessionData_"];
-                };
-            };
-            /** @description Validation Error */
-            readonly 422: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content: {
-                    readonly "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

@@ -138,6 +138,43 @@ def test_validation_failures_on_authentication_routes_are_never_stored(
     assert response.headers["cache-control"] == "no-store"
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "json_body"),
+    [
+        ("POST", "/api/auth/login", _VALID_LOGIN),
+        ("PUT", "/api/auth/password", {"new_password": "fresh-trebuchet-unlock-phrase"}),
+    ],
+)
+def test_non_ascii_attacker_headers_close_with_documented_codes(
+    client: TestClient, method: str, path: str, json_body: dict[str, str]
+) -> None:
+    # Starlette decodes headers latin-1, so raw non-ASCII bytes reach the
+    # origin and CSRF comparisons as non-ASCII strings: both must close with
+    # the documented 403 envelope, never an internal-error 500.
+    non_ascii_pair = "f\xf6rged-equal-pair".encode("latin-1")
+    login_response = client.post("/api/auth/login", headers={"Origin": _ORIGIN}, json=_VALID_LOGIN)
+    assert login_response.status_code == 200
+    session_cookie = login_response.cookies[SESSION_COOKIE_NAME]
+    response = client.request(
+        method,
+        path,
+        headers={
+            "Origin": "https://attacker.example/\xfc".encode("latin-1")
+            if method == "POST"
+            else _ORIGIN,
+            "Cookie": (
+                f"{SESSION_COOKIE_NAME}={session_cookie}; "
+                f"{CSRF_COOKIE_NAME}=".encode("ascii") + non_ascii_pair
+            ),
+            "X-CSRF-Token": non_ascii_pair,
+        },
+        json=json_body,
+    )
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "csrf_validation_failed"
+    assert response.headers["cache-control"] == "no-store"
+
+
 def test_rejected_credentials_never_reach_any_response_surface(client: TestClient) -> None:
     response = client.post(
         "/api/auth/login",

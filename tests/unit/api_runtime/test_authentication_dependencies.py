@@ -13,11 +13,14 @@ match; and the response helpers render exactly the approved cookie attributes.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
+from datetime import timedelta
 from typing import Any, Final
 
 import pytest
 from api_runtime.authentication_composition import (
     OFFLINE_WEB_ALLOWED_ORIGIN,
+    OfflineAuthenticationState,
     WebAuthenticationRuntime,
     assert_keyring_covers_required_key_ids,
     compose_offline_web_authentication,
@@ -37,6 +40,7 @@ from api_runtime.authentication_dependencies import (
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from personal_os.authentication.contracts import WebSessionState
 from personal_os.authentication.errors import AuthenticationError
 from personal_os.authentication.sessions import StartedWebSession
 from personal_os.diagnostics.context import create_diagnostic_context
@@ -170,7 +174,16 @@ async def test_origin_guard_accepts_the_exact_allowed_origin() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "origin_value",
-    [None, "https://attacker.example", OFFLINE_WEB_ALLOWED_ORIGIN + "/", "null"],
+    [
+        None,
+        "https://attacker.example",
+        OFFLINE_WEB_ALLOWED_ORIGIN + "/",
+        "null",
+        # Starlette decodes headers latin-1, so a non-ASCII byte arrives as a
+        # non-ASCII str: the guard must close with the CSRF code, not crash.
+        "https://attacker.example/\xfc",
+        "https://attacker.example/\xfc\ber",
+    ],
 )
 async def test_origin_guard_rejects_every_non_exact_origin(origin_value: str | None) -> None:
     headers: dict[str, str] = {}
@@ -294,6 +307,127 @@ async def test_csrf_dependency_requires_the_stored_hash_match() -> None:
             )
         )
     assert rejection.value.error_code is ErrorCode.CSRF_VALIDATION_FAILED
+
+
+@pytest.mark.asyncio
+async def test_csrf_dependency_rejects_a_non_ascii_but_equal_pair_closed() -> None:
+    started_session, runtime = await start_offline_session()
+    dependencies = create_session_route_dependencies(runtime)
+    non_ascii_pair = "f\xf6rged-but-equal-pair"
+    with pytest.raises(AuthenticationError) as rejection:
+        await dependencies.require_csrf_protected_request(
+            build_request(
+                headers=csrf_request_headers(started_session, csrf_value=non_ascii_pair)
+            )
+        )
+    assert rejection.value.error_code is ErrorCode.CSRF_VALIDATION_FAILED
+
+
+# --- state-tolerant challenge resolution (spec 9.2) ------------------------------------
+
+
+async def start_offline_session_in_state(
+    state: WebSessionState,
+) -> tuple[StartedWebSession, WebAuthenticationRuntime, OfflineAuthenticationState]:
+    """Start one offline session, then restamp its stored row's state.
+
+    The offline composition exposes its in-memory state so tests can produce
+    the ``pending_totp``/``recovery_limited``/``revoked`` rows the recovery
+    flows of later tasks will create, while every secret stays genuine.
+    """
+    offline_state = OfflineAuthenticationState(totp_active=False)
+    runtime = compose_offline_web_authentication(state=offline_state)
+    outcome = await runtime.login_service.login(
+        username="admin",
+        password="correct-horse-battery-staple",
+        source_bucket="192.0.2.10",
+        diagnostic_context=create_diagnostic_context().context,
+    )
+    started = outcome.started_session
+    assert started is not None
+    stored = offline_state.sessions_by_secret_hash[started.session_secret_hash]
+    offline_state.sessions_by_secret_hash[started.session_secret_hash] = replace(
+        stored, state=state
+    )
+    return started, runtime, offline_state
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "state",
+    [WebSessionState.PENDING_TOTP, WebSessionState.RECOVERY_LIMITED],
+)
+async def test_challenge_csrf_dependency_accepts_unrevoked_non_active_states(
+    state: WebSessionState,
+) -> None:
+    started_session, runtime, _offline_state = await start_offline_session_in_state(state)
+    dependencies = create_session_route_dependencies(runtime)
+    request = build_request(
+        headers=csrf_request_headers(started_session, csrf_value=started_session.csrf_secret)
+    )
+    resolved = await dependencies.require_csrf_protected_challenge_request(request)
+    assert isinstance(resolved, AuthenticatedWebRequest)
+    assert resolved.session.state is state
+    assert request.state.authentication is resolved
+
+
+@pytest.mark.asyncio
+async def test_challenge_csrf_dependency_rejects_revoked_and_expired_bindings() -> None:
+    started_session, runtime, _offline_state = await start_offline_session_in_state(
+        WebSessionState.REVOKED
+    )
+    dependencies = create_session_route_dependencies(runtime)
+    with pytest.raises(AuthenticationError) as revoked_rejection:
+        await dependencies.require_csrf_protected_challenge_request(
+            build_request(
+                headers=csrf_request_headers(
+                    started_session, csrf_value=started_session.csrf_secret
+                )
+            )
+        )
+    assert revoked_rejection.value.error_code is ErrorCode.AUTHENTICATION_REQUIRED
+
+    pending_session, pending_runtime, pending_state = await start_offline_session_in_state(
+        WebSessionState.PENDING_TOTP
+    )
+    stored = pending_state.sessions_by_secret_hash[pending_session.session_secret_hash]
+    # The restamped row keeps its twelve-hour active idle window; moving it
+    # past the fixed offline clock makes the binding expired.
+    pending_state.sessions_by_secret_hash[stored.session_secret_hash] = replace(
+        stored, idle_expires_at=stored.idle_expires_at - timedelta(hours=13)
+    )
+    with pytest.raises(AuthenticationError) as expired_rejection:
+        await create_session_route_dependencies(
+            pending_runtime
+        ).require_csrf_protected_challenge_request(
+            build_request(
+                headers=csrf_request_headers(
+                    pending_session, csrf_value=pending_session.csrf_secret
+                )
+            )
+        )
+    assert expired_rejection.value.error_code is ErrorCode.AUTHENTICATION_REQUIRED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "state",
+    [WebSessionState.PENDING_TOTP, WebSessionState.RECOVERY_LIMITED],
+)
+async def test_strict_csrf_dependency_still_rejects_non_active_states(
+    state: WebSessionState,
+) -> None:
+    started_session, runtime, _offline_state = await start_offline_session_in_state(state)
+    dependencies = create_session_route_dependencies(runtime)
+    with pytest.raises(AuthenticationError) as rejection:
+        await dependencies.require_csrf_protected_request(
+            build_request(
+                headers=csrf_request_headers(
+                    started_session, csrf_value=started_session.csrf_secret
+                )
+            )
+        )
+    assert rejection.value.error_code is ErrorCode.AUTHENTICATION_REQUIRED
 
 
 # --- keyring coverage refusal (spec 20.1) ---------------------------------------------

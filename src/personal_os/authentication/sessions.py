@@ -85,6 +85,18 @@ REVOCATION_REASON_PASSWORD_CHANGED: Final[str] = "password_changed"
 #: The one authentication method a password login can start (binding decision 2).
 PASSWORD_AUTHENTICATION_METHOD: Final[str] = "password"
 
+#: Session states whose binding may still drive their own challenge routes
+#: and logout (spec 9.2): every unrevoked state, because ``pending_totp`` and
+#: ``recovery_limited`` never authenticate yet may verify their challenge or
+#: log out.
+CHALLENGE_ELIGIBLE_SESSION_STATES: Final[frozenset[WebSessionState]] = frozenset(
+    {
+        WebSessionState.PENDING_TOTP,
+        WebSessionState.ACTIVE,
+        WebSessionState.RECOVERY_LIMITED,
+    }
+)
+
 
 class ThrottleBucketKind(StrEnum):
     """Closed throttle-bucket kinds (spec 8.3, binding decision 2)."""
@@ -278,6 +290,25 @@ def clamp_idle_expiry(
 ) -> datetime:
     """Return the idle expiry that never passes the absolute boundary."""
     return min(candidate_idle_expiry, absolute_expires_at)
+
+
+def is_challenge_eligible_session(
+    session: StoredWebSession, *, database_now: datetime
+) -> bool:
+    """Whether one session binding may drive its own challenge routes (spec 9.2).
+
+    Every unrevoked state qualifies while both expiry boundaries hold, so the
+    TOTP/recovery verification and logout routes can resolve ``pending_totp``
+    and ``recovery_limited`` bindings that never authenticate. Unlike
+    :func:`evaluate_session_authentication` this does not require ``active``
+    and never slides the idle window: presenting a challenge or logging out is
+    not session activity.
+    """
+    return (
+        session.state in CHALLENGE_ELIGIBLE_SESSION_STATES
+        and database_now < session.idle_expires_at
+        and database_now < session.absolute_expires_at
+    )
 
 
 def recent_authentication_moment(session: StoredWebSession) -> datetime | None:
@@ -487,6 +518,10 @@ class WebSessionTransactionPort(Protocol):
     """The session-lifecycle transaction surface the services orchestrate."""
 
     async def resolve_session(
+        self, *, session_secret_hash: str, database_now: datetime
+    ) -> ResolvedWebSession: ...
+
+    async def resolve_challenge_eligible_session(
         self, *, session_secret_hash: str, database_now: datetime
     ) -> ResolvedWebSession: ...
 
@@ -869,23 +904,56 @@ class SessionService:
             session_secret_hash=session_secret_hash_of(session_secret),
             database_now=transaction_now,
         )
-        session = resolved.session
+        return self._authenticated_session_of(resolved.session, database_now=transaction_now)
+
+    async def authenticate(self, *, session_secret: str) -> AuthenticatedSession:
+        """Resolve one session secret to its authenticated web context."""
+        return await self.resolve(session_secret=session_secret)
+
+    async def resolve_challenge_eligible(
+        self, *, session_secret: str
+    ) -> AuthenticatedSession:
+        """Resolve one session secret tolerating the pending/recovery states.
+
+        The state-tolerant resolution of spec 9.2: a binding in any unrevoked,
+        unexpired state still resolves for its own challenge routes — TOTP and
+        recovery verification, logout — even though only ``active``
+        authenticates; the idle window never slides because presenting a
+        challenge or logging out is not session activity.
+        """
+        transaction_now = await self._clock.database_now()
+        resolved = await self._sessions.resolve_challenge_eligible_session(
+            session_secret_hash=session_secret_hash_of(session_secret),
+            database_now=transaction_now,
+        )
+        return self._authenticated_session_of(resolved.session, database_now=transaction_now)
+
+    @staticmethod
+    def _authenticated_session_of(
+        session: StoredWebSession, *, database_now: datetime
+    ) -> AuthenticatedSession:
+        """Build the resolved view of one session row for its state.
+
+        Only an ``active`` row carries the granted web scopes; the strict
+        resolution never resolves anything else, so the empty-scope branch is
+        reached only by the challenge resolution of non-authenticating states.
+        """
         return AuthenticatedSession(
             context=AuthenticatedWebContext(
                 user_id=session.user_id,
                 workspace_id=session.workspace_id,
                 web_session_id=session.web_session_id,
                 credential_revision=session.credential_revision,
-                scopes=AUTHENTICATED_WEB_SCOPES,
+                scopes=(
+                    AUTHENTICATED_WEB_SCOPES
+                    if session.state is WebSessionState.ACTIVE
+                    else frozenset()
+                ),
             ),
             csrf_secret_hash=session.csrf_secret_hash,
             session=session,
-            database_now=transaction_now,
+            database_now=database_now,
         )
-
-    async def authenticate(self, *, session_secret: str) -> AuthenticatedSession:
-        """Resolve one session secret to its authenticated web context."""
-        return await self.resolve(session_secret=session_secret)
 
     async def reauthenticate(
         self, *, session_secret: str, password: str

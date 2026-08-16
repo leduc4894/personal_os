@@ -6,7 +6,11 @@
 ``FOR UPDATE``, applies the pure domain authentication decision (state,
 credential revision, idle and absolute expiry) and conditionally slides
 ``last_seen_at`` with the idle expiry clamped to the absolute boundary — one
-transaction; ``rotate_session_secrets`` rewrites exactly the closed rotation
+transaction; ``resolve_challenge_eligible_session`` applies the tolerant
+unrevoked-and-unexpired decision the challenge/logout routes of spec 9.2
+resolve ``pending_totp`` and ``recovery_limited`` bindings through, without
+the active-only gate and without touching activity;
+``rotate_session_secrets`` rewrites exactly the closed rotation
 cause's timestamps plus both secret hashes behind the prior-hash guard;
 ``revoke_session`` resolves and revokes behind the presented secret hash in
 one transaction, clearing ``authenticated_at`` and ``reauthenticated_at``
@@ -41,6 +45,7 @@ from personal_os.authentication.sessions import (
     StoredWebSession,
     clamp_idle_expiry,
     evaluate_session_authentication,
+    is_challenge_eligible_session,
 )
 from personal_os.error_contracts.codes import ErrorCode
 from postgresql_source_store.authentication_credentials import (
@@ -158,6 +163,40 @@ class WebSessionStore:
                     last_seen_at=database_now,
                     idle_expires_at=decision.next_idle_expires_at,
                 )
+            return ResolvedWebSession(
+                session=session,
+                current_credential_revision=current_credential_revision,
+                password_hash=row.password_hash,
+                database_now=database_now,
+            )
+
+        return await run_authentication_transaction(self._engine, operation)
+
+    async def resolve_challenge_eligible_session(
+        self, *, session_secret_hash: str, database_now: datetime
+    ) -> ResolvedWebSession:
+        """Resolve one session binding tolerating the pending/recovery states.
+
+        Spec 9.2 lets ``pending_totp`` and ``recovery_limited`` call their own
+        challenge routes and logout, so this applies the tolerant decision —
+        unrevoked state, both expiry boundaries in the future — without the
+        active-only gate and without sliding the idle window.
+        """
+
+        async def operation(connection: AsyncConnection) -> ResolvedWebSession:
+            row = await self._select_session_by_secret_hash(
+                connection, session_secret_hash
+            )
+            if row is None:
+                raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
+            session = stored_web_session_from_row(row)
+            if not is_challenge_eligible_session(session, database_now=database_now):
+                raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
+            current_credential_revision = (
+                int(row.current_credential_revision)
+                if row.current_credential_revision is not None
+                else 0
+            )
             return ResolvedWebSession(
                 session=session,
                 current_credential_revision=current_credential_revision,

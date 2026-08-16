@@ -12,7 +12,11 @@ dependency resolves the opaque cookie secret through the session service and
 attaches the typed authenticated request context to ``request.state``; the
 CSRF dependency adds the three further checks spec 9.3 names: the CSRF cookie,
 an exactly equal ``X-CSRF-Token`` header, and a hash match against the stored
-session binding. Response helpers render the approved cookie attributes for
+session binding. A state-tolerant challenge variant of that CSRF dependency
+resolves every unrevoked, unexpired binding, because spec 9.2 lets
+``pending_totp`` and ``recovery_limited`` sessions call logout — and the TOTP
+challenge verification of the next slice resolves the same states. Response
+helpers render the approved cookie attributes for
 issue, rotation and logout clearing — routes never build cookie headers.
 
 The runtime is consumed structurally through :class:`WebAuthenticationRuntimePort`
@@ -33,7 +37,11 @@ from fastapi.responses import Response
 
 from personal_os.authentication.contracts import AuthenticatedWebContext
 from personal_os.authentication.errors import AuthenticationError
-from personal_os.authentication.sessions import SessionService, StoredWebSession
+from personal_os.authentication.sessions import (
+    AuthenticatedSession,
+    SessionService,
+    StoredWebSession,
+)
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.runtime_configuration.models import RuntimeEnvironment
 
@@ -144,11 +152,14 @@ class AuthenticatedWebRequest:
 
 @dataclass(frozen=True, slots=True)
 class SessionRouteDependencies:
-    """The three FastAPI dependency callables of the session/password routes."""
+    """The four FastAPI dependency callables of the session/password routes."""
 
     require_allowed_origin: Callable[[Request], Awaitable[None]]
     require_session_request: Callable[[Request], Awaitable[AuthenticatedWebRequest]]
     require_csrf_protected_request: Callable[[Request], Awaitable[AuthenticatedWebRequest]]
+    require_csrf_protected_challenge_request: Callable[
+        [Request], Awaitable[AuthenticatedWebRequest]
+    ]
 
 
 def client_source_address(request: Request) -> str:
@@ -169,23 +180,64 @@ def create_session_route_dependencies(
     """Build the origin, session and CSRF dependencies over one runtime."""
 
     async def require_allowed_origin(request: Request) -> None:
-        """Reject any request whose origin is not exactly the allowed one."""
+        """Reject any request whose origin is not exactly the allowed one.
+
+        The comparison is plain string equality: the allowed origin is public
+        routing material rather than a secret, so constant time buys nothing —
+        and header values are latin-1-decoded strings that may carry
+        non-ASCII bytes, which a digest comparison would reject with a
+        ``TypeError`` instead of the closed CSRF failure.
+        """
         origin = request.headers.get("origin")
-        if origin is None or not hmac.compare_digest(origin, runtime.allowed_origin):
+        if origin is None or origin != runtime.allowed_origin:
             raise AuthenticationError(ErrorCode.CSRF_VALIDATION_FAILED)
 
-    async def _resolve_authenticated_session(request: Request) -> AuthenticatedWebRequest:
-        """Resolve the session cookie to the typed authenticated request."""
+    async def _resolve_session(
+        request: Request,
+        *,
+        resolve: Callable[..., Awaitable[AuthenticatedSession]],
+    ) -> AuthenticatedWebRequest:
+        """Resolve the session cookie through the given service resolution."""
         session_secret = request.cookies.get(runtime.cookie_contract.session_cookie_name)
         if session_secret is None:
             raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
-        resolved = await runtime.session_service.authenticate(session_secret=session_secret)
+        resolved = await resolve(session_secret=session_secret)
         authenticated_request = AuthenticatedWebRequest(
             context=resolved.context,
             session=resolved.session,
             session_secret=session_secret,
         )
         request.state.authentication = authenticated_request
+        return authenticated_request
+
+    async def _resolve_authenticated_session(request: Request) -> AuthenticatedWebRequest:
+        """Resolve the session cookie to the typed authenticated request."""
+        return await _resolve_session(request, resolve=runtime.session_service.authenticate)
+
+    async def _resolve_challenge_session(request: Request) -> AuthenticatedWebRequest:
+        """Resolve the session cookie tolerating the pending/recovery states."""
+        return await _resolve_session(
+            request, resolve=runtime.session_service.resolve_challenge_eligible
+        )
+
+    def _require_csrf_pair(
+        request: Request, authenticated_request: AuthenticatedWebRequest
+    ) -> AuthenticatedWebRequest:
+        """Apply the CSRF cookie/header pair and stored-hash match (spec 9.3)."""
+        csrf_cookie = request.cookies.get(runtime.cookie_contract.csrf_cookie_name)
+        csrf_header = request.headers.get(CSRF_HEADER_NAME)
+        if csrf_cookie is None or csrf_header is None:
+            raise AuthenticationError(ErrorCode.CSRF_VALIDATION_FAILED)
+        # Cookie and header values are latin-1-decoded strings that may carry
+        # non-ASCII bytes, so the pair compares as encoded bytes: a digest
+        # comparison of the raw strings would raise on non-ASCII input instead
+        # of closing with the CSRF failure, and equal genuine tokens encode to
+        # equal bytes under one consistent encoding.
+        if not hmac.compare_digest(csrf_cookie.encode("utf-8"), csrf_header.encode("utf-8")):
+            raise AuthenticationError(ErrorCode.CSRF_VALIDATION_FAILED)
+        stored_hash = authenticated_request.session.csrf_secret_hash
+        if not runtime.verify_csrf_token(csrf_cookie, stored_hash):
+            raise AuthenticationError(ErrorCode.CSRF_VALIDATION_FAILED)
         return authenticated_request
 
     async def require_session_request(request: Request) -> AuthenticatedWebRequest:
@@ -199,21 +251,30 @@ def create_session_route_dependencies(
         """Origin, session cookie, CSRF pair and stored-hash match (spec 9.3)."""
         await require_allowed_origin(request)
         authenticated_request = await _resolve_authenticated_session(request)
-        csrf_cookie = request.cookies.get(runtime.cookie_contract.csrf_cookie_name)
-        csrf_header = request.headers.get(CSRF_HEADER_NAME)
-        if csrf_cookie is None or csrf_header is None:
-            raise AuthenticationError(ErrorCode.CSRF_VALIDATION_FAILED)
-        if not hmac.compare_digest(csrf_cookie, csrf_header):
-            raise AuthenticationError(ErrorCode.CSRF_VALIDATION_FAILED)
-        stored_hash = authenticated_request.session.csrf_secret_hash
-        if not runtime.verify_csrf_token(csrf_cookie, stored_hash):
-            raise AuthenticationError(ErrorCode.CSRF_VALIDATION_FAILED)
-        return authenticated_request
+        return _require_csrf_pair(request, authenticated_request)
+
+    async def require_csrf_protected_challenge_request(
+        request: Request,
+    ) -> AuthenticatedWebRequest:
+        """Origin, tolerant session resolution and the same CSRF triple check.
+
+        Spec 9.2 lets ``pending_totp`` and ``recovery_limited`` call logout —
+        and, for the challenge-verification routes of the TOTP slice, their
+        own challenge — so this resolves every unrevoked, unexpired binding
+        while revoked, expired and unknown secrets still fail closed. The CSRF
+        checks are identical to the strict variant; only the accepted session
+        states widen, which is why the strict dependency keeps guarding
+        re-authentication and password change.
+        """
+        await require_allowed_origin(request)
+        authenticated_request = await _resolve_challenge_session(request)
+        return _require_csrf_pair(request, authenticated_request)
 
     return SessionRouteDependencies(
         require_allowed_origin=require_allowed_origin,
         require_session_request=require_session_request,
         require_csrf_protected_request=require_csrf_protected_request,
+        require_csrf_protected_challenge_request=require_csrf_protected_challenge_request,
     )
 
 

@@ -307,19 +307,6 @@
         "title": "ErrorCode",
         "type": "string"
       },
-      "HTTPValidationError": {
-        "properties": {
-          "detail": {
-            "items": {
-              "$ref": "#/components/schemas/ValidationError"
-            },
-            "title": "Detail",
-            "type": "array"
-          }
-        },
-        "title": "HTTPValidationError",
-        "type": "object"
-      },
       "LivenessData": {
         "additionalProperties": false,
         "description": "Process-liveness success data; it implies no I/O by construction.",
@@ -473,46 +460,6 @@
         "title": "SessionData",
         "type": "object"
       },
-      "ValidationError": {
-        "properties": {
-          "ctx": {
-            "title": "Context",
-            "type": "object"
-          },
-          "input": {
-            "title": "Input"
-          },
-          "loc": {
-            "items": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                }
-              ]
-            },
-            "title": "Location",
-            "type": "array"
-          },
-          "msg": {
-            "title": "Message",
-            "type": "string"
-          },
-          "type": {
-            "title": "Error Type",
-            "type": "string"
-          }
-        },
-        "required": [
-          "loc",
-          "msg",
-          "type"
-        ],
-        "title": "ValidationError",
-        "type": "object"
-      },
       "WebScope": {
         "description": "The fixed Phase 2 Web administration scopes (spec 6.1).\n\nA Web session always carries the full surface; the client never chooses,\nwidens or customizes these values.",
         "enum": [
@@ -566,16 +513,6 @@
               }
             },
             "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Login"
@@ -583,7 +520,7 @@
     },
     "/api/auth/logout": {
       "post": {
-        "description": "Revoke the session row, then clear both browser cookies.",
+        "description": "Revoke the session row, then clear both browser cookies.\n\nSpec 9.2 reaches logout from every unrevoked state — a pending or\nrecovery-limited session logs out too — so the dependency tolerates\nthose states while the CSRF triple check stays identical.",
         "operationId": "logout",
         "responses": {
           "200": {
@@ -624,16 +561,6 @@
               }
             },
             "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Change Password"
@@ -663,16 +590,6 @@
               }
             },
             "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Reauthenticate"

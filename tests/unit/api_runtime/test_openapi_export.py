@@ -126,6 +126,18 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
     assert document["paths"]["/api/auth/password"]["put"]["operationId"] == "changePassword"
 
 
+def test_openapi_render_omits_the_framework_validation_error_documentation() -> None:
+    # The runtime answers request-validation failures with the canonical error
+    # envelope, so the document must not advertise FastAPI's default 422
+    # HTTPValidationError shape on any body-bearing route.
+    document = json.loads(render_openapi_json())
+    assert "HTTPValidationError" not in document["components"]["schemas"]
+    assert "ValidationError" not in document["components"]["schemas"]
+    for operations in document["paths"].values():
+        for operation in operations.values():
+            assert "422" not in operation["responses"]
+
+
 def test_export_never_reads_environment_secret_or_network(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

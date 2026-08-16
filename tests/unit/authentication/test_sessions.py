@@ -56,6 +56,7 @@ from personal_os.authentication.sessions import (
     ThrottleBucketState,
     ThrottleWindowPolicy,
     evaluate_session_authentication,
+    is_challenge_eligible_session,
     is_recently_authenticated,
     is_throttle_bucket_locked,
     next_login_failure_transition,
@@ -384,6 +385,21 @@ class FakeWebSessionTransactions:
                 idle_expires_at=decision.next_idle_expires_at,
             )
             self.rows_by_secret_hash[session_secret_hash] = session
+        return ResolvedWebSession(
+            session=session,
+            current_credential_revision=self.current_credential_revisions[session.user_id],
+            password_hash=self.password_hashes[session.user_id],
+            database_now=database_now,
+        )
+
+    async def resolve_challenge_eligible_session(
+        self, *, session_secret_hash: str, database_now: datetime
+    ) -> ResolvedWebSession:
+        session = self.rows_by_secret_hash.get(session_secret_hash)
+        if session is None or not is_challenge_eligible_session(
+            session, database_now=database_now
+        ):
+            raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
         return ResolvedWebSession(
             session=session,
             current_credential_revision=self.current_credential_revisions[session.user_id],
@@ -726,6 +742,62 @@ async def test_authenticate_rejects_unknown_revoked_stale_and_expired_sessions()
 
 
 @pytest.mark.asyncio
+async def test_challenge_resolution_accepts_unrevoked_states_without_scopes_or_idle_slide() -> None:
+    harness = LoginHarness()
+    for secret_suffix, state in (
+        ("pending", WebSessionState.PENDING_TOTP),
+        ("recovery", WebSessionState.RECOVERY_LIMITED),
+        ("active", WebSessionState.ACTIVE),
+    ):
+        harness.sessions.register(
+            _active_session(
+                state=state, session_secret=f"{secret_suffix}-secret".encode()
+            ),
+            current_credential_revision=1,
+        )
+    pending = await harness.session_service.resolve_challenge_eligible(
+        session_secret="pending-secret"
+    )
+    assert pending.session.state is WebSessionState.PENDING_TOTP
+    # A session that never authenticated holds no web scopes and its idle
+    # window never slides: challenge usage is not session activity.
+    assert pending.context.scopes == frozenset()
+    assert pending.session.last_seen_at is None
+    assert pending.session.idle_expires_at == _DATABASE_NOW + timedelta(hours=12)
+    recovery = await harness.session_service.resolve_challenge_eligible(
+        session_secret="recovery-secret"
+    )
+    assert recovery.session.state is WebSessionState.RECOVERY_LIMITED
+    assert recovery.context.scopes == frozenset()
+    active = await harness.session_service.resolve_challenge_eligible(
+        session_secret="active-secret"
+    )
+    assert active.context.scopes == AUTHENTICATED_WEB_SCOPES
+
+
+@pytest.mark.asyncio
+async def test_challenge_resolution_rejects_unknown_revoked_and_expired_bindings() -> None:
+    harness = LoginHarness()
+    for session in (
+        _active_session(state=WebSessionState.REVOKED, session_secret=b"revoked-secret"),
+        _active_session(
+            idle_expires_at=_DATABASE_NOW, session_secret=b"idle-expired-secret"
+        ),
+        _active_session(
+            absolute_expires_at=_DATABASE_NOW - timedelta(seconds=1),
+            session_secret=b"absolute-expired-secret",
+        ),
+    ):
+        harness.sessions.register(session, current_credential_revision=1)
+    for secret_suffix in ("unknown", "revoked", "idle-expired", "absolute-expired"):
+        with pytest.raises(AuthenticationError) as rejected:
+            await harness.session_service.resolve_challenge_eligible(
+                session_secret=f"{secret_suffix}-secret"
+            )
+        assert rejected.value.error_code is ErrorCode.AUTHENTICATION_REQUIRED
+
+
+@pytest.mark.asyncio
 async def test_reauthenticate_verifies_password_and_rotates_session_binding() -> None:
     harness = LoginHarness()
     outcome = await harness.login()
@@ -947,6 +1019,29 @@ def test_session_decision_rejects_every_non_active_state() -> None:
         assert not decision.is_authenticated
         assert decision.rejection_code is ErrorCode.AUTHENTICATION_REQUIRED
         assert not decision.should_advance_activity
+
+
+def test_challenge_eligibility_accepts_every_unrevoked_state_while_unexpired() -> None:
+    for state in (
+        WebSessionState.PENDING_TOTP,
+        WebSessionState.ACTIVE,
+        WebSessionState.RECOVERY_LIMITED,
+    ):
+        assert is_challenge_eligible_session(
+            _active_session(state=state), database_now=_DATABASE_NOW
+        )
+
+
+def test_challenge_eligibility_rejects_revoked_and_expired_bindings() -> None:
+    assert not is_challenge_eligible_session(
+        _active_session(state=WebSessionState.REVOKED), database_now=_DATABASE_NOW
+    )
+    assert not is_challenge_eligible_session(
+        _active_session(idle_expires_at=_DATABASE_NOW), database_now=_DATABASE_NOW
+    )
+    assert not is_challenge_eligible_session(
+        _active_session(absolute_expires_at=_DATABASE_NOW), database_now=_DATABASE_NOW
+    )
 
 
 def test_session_decision_rejects_stale_revision_and_expiry() -> None:
