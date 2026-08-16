@@ -49,10 +49,14 @@ generated client, and this final acceptance layer:
   → re-auth gate → approve/deny → Admin list) with contract-fidelity request
   capture.
 - CI gates `authentication-test` and `authentication-e2e` (Poe tasks in
-  `pyproject.toml`, `test:e2e:authentication` script in `package.json`, jobs
-  in `.github/workflows/quality.yml` — Docker-stack job on Ubuntu following
-  the canonical-postgresql-baseline wiring, and a Playwright job installing
-  chromium; both fail, never skip).
+  `pyproject.toml`, `test:e2e:authentication` script in `package.json`; the
+  browser-e2e job lives in `.github/workflows/quality.yml` and the
+  Docker-stack job in `.github/workflows/authentication-acceptance.yml` —
+  the committed CI-security contract forbids stack references in
+  quality.yml, so the stack gate follows the canonical-baseline workflow
+  pattern, and the prefetch contract in
+  `tests/contract/test_ci_security.py` now also covers it; both gates fail,
+  never skip).
 - `docs/operations/web-authentication-and-device-authorization.md` and the
   Phase 2 status update in `docs/20-IMPLEMENTATION_PLAN.md`.
 - Pre-existing format drift fixed in
@@ -166,6 +170,7 @@ per-route forwarded-bucket duplication (login route pins the pattern).
 2. Amendment follow-ups from decisions 1–3 (SecLists release note in plan
    text; poll-bucket schema+spec amendment when scaling beyond one worker).
 3. Deferred batch §6–§12 when the respective modules are next touched.
-4. CI: the two new quality.yml jobs (`authentication-test`,
-   `authentication-e2e`) run on the next push; first CI run is their live
-   validation (locally both gates passed with the same invocations).
+4. CI: the new jobs (`authentication-test` in authentication-acceptance.yml,
+   `authentication-e2e` in quality.yml) run on the next push; first CI run is
+   their live validation (locally both gates passed with the same
+   invocations).

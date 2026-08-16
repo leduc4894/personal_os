@@ -19,6 +19,7 @@ from datetime import timedelta
 from typing import Final
 from uuid import uuid4
 
+import httpx
 import pytest
 from api_runtime.application import create_api_application
 from api_runtime.authentication_composition import (
@@ -83,7 +84,7 @@ class HeaderJourney:
             "X-CSRF-Token": self.cookies["csrf"],
         }
 
-    def login(self) -> None:
+    def login(self) -> httpx.Response:
         response = self.client.post(
             "/api/auth/login",
             headers={"Origin": _ORIGIN},
@@ -94,6 +95,7 @@ class HeaderJourney:
             "session": response.cookies[SESSION_COOKIE_NAME],
             "csrf": response.cookies[CSRF_COOKIE_NAME],
         }
+        return response
 
     def code_for(self, secret_base32: str) -> str:
         secret = base64.b32decode(secret_base32)
@@ -105,7 +107,8 @@ class HeaderJourney:
         assert self.active_secret_base32, "the enrollment must run first"
         return self.code_for(self.active_secret_base32)
 
-    def create_grant(self) -> dict[str, str]:
+    def create_grant(self) -> tuple[dict[str, str], httpx.Response]:
+        """Create one grant; return its payload and the response itself."""
         response = self.client.post(
             "/api/auth/device-authorizations",
             headers={"Origin": _ORIGIN},
@@ -120,11 +123,29 @@ class HeaderJourney:
         )
         assert response.status_code == 200, response.text
         data = dict(response.json()["data"])
-        return {
-            "grant_id": str(data["grant_id"]),
-            "polling_secret": str(data["polling_secret"]),
-            "user_code": str(data["user_code"]),
-        }
+        return (
+            {
+                "grant_id": str(data["grant_id"]),
+                "polling_secret": str(data["polling_secret"]),
+                "user_code": str(data["user_code"]),
+            },
+            response,
+        )
+
+    def create_unsupported_grant(self) -> httpx.Response:
+        """Create one grant outside the approved plugin window (426)."""
+        return self.client.post(
+            "/api/auth/device-authorizations",
+            headers={"Origin": _ORIGIN},
+            json={
+                "client_instance_id": str(uuid4()),
+                "device_name": "Header Matrix Desktop",
+                "platform_class": "obsidian_desktop",
+                "platform_name": "windows",
+                "plugin_version": "9.9.9",
+                "requested_scope": "obsidian_sync",
+            },
+        )
 
     def poll(self, grant_id: str, polling_secret: str):
         return self.client.post(
@@ -158,7 +179,7 @@ class HeaderJourney:
             json={"username": OFFLINE_USERNAME, "password": "short"},
         )
         step("login-validation-failed", invalid_login)
-        self.login()
+        step("login", self.login())
         session = self.client.get("/api/auth/session", headers={"Origin": _ORIGIN})
         step("session-get", session)
         csrf_rejected = self.client.post(
@@ -216,7 +237,15 @@ class HeaderJourney:
         issued_codes = [str(code) for code in regenerated.json()["data"]["codes"]]
 
         # Device surface: creation, lookup, decisions, exchange and refresh.
-        created = self.create_grant()
+        # The creation response renders the one-time user code and polling
+        # secret: the provisioning pragma belongs on its 200, and the
+        # unsupported-plugin rejection keeps the plain no-store contract.
+        created, created_response = self.create_grant()
+        step("grant-create", created_response, pragma=True)
+        unsupported = self.create_unsupported_grant()
+        assert unsupported.status_code == 426, unsupported.text
+        assert unsupported.json()["error"]["code"] == "plugin_version_unsupported"
+        step("grant-create-plugin-unsupported", unsupported)
         grant = self.client.post(
             "/api/auth/device-authorizations/lookup",
             headers=self.authenticated_headers(),
@@ -249,7 +278,7 @@ class HeaderJourney:
         )
         step("revoke-current", revoked_current)
 
-        denied_grant = self.create_grant()
+        denied_grant, _denied_created_response = self.create_grant()
         denied = self.client.post(
             f"/api/auth/device-authorizations/{denied_grant['grant_id']}/deny",
             headers=self.authenticated_headers(),
@@ -367,7 +396,10 @@ def test_every_authentication_route_pins_its_cache_suppression_headers(
 
 
 def test_provisioning_failures_keep_the_no_store_contract(journey: HeaderJourney) -> None:
-    journey.login()
+    login_response = journey.login()
+    assert login_response.status_code == 200
+    assert login_response.headers["cache-control"] == "no-store"
+
     unknown_decision = journey.client.post(
         f"/api/auth/device-authorizations/{uuid4()}/approve",
         headers=journey.authenticated_headers(),
@@ -375,7 +407,15 @@ def test_provisioning_failures_keep_the_no_store_contract(journey: HeaderJourney
     assert unknown_decision.status_code in (401, 404)
     assert unknown_decision.headers["cache-control"] == "no-store"
 
-    slow_poll_grant = journey.create_grant()
+    # The provisioning surface itself: its 200 carries both suppression
+    # headers, and its unsupported-plugin rejection keeps plain no-store.
+    slow_poll_grant, created_response = journey.create_grant()
+    assert created_response.headers["cache-control"] == "no-store"
+    assert created_response.headers["pragma"] == "no-cache"
+    unsupported = journey.create_unsupported_grant()
+    assert unsupported.status_code == 426
+    assert unsupported.headers["cache-control"] == "no-store"
+
     first_poll = journey.poll(slow_poll_grant["grant_id"], slow_poll_grant["polling_secret"])
     second_poll = journey.poll(slow_poll_grant["grant_id"], slow_poll_grant["polling_secret"])
     assert second_poll.status_code in (400, 429)

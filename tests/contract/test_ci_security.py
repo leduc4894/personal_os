@@ -203,6 +203,7 @@ def test_stack_workflows_prefetch_images_before_live_gates() -> None:
         LOCAL_STACK_WORKFLOW_PATH,
         CANONICAL_POSTGRESQL_WORKFLOW_PATH,
         WORKFLOW_DIRECTORY / "canonical-core-acceptance.yml",
+        WORKFLOW_DIRECTORY / "authentication-acceptance.yml",
     )
     for workflow_path in workflow_paths:
         text = workflow_path.read_text(encoding="utf-8")
