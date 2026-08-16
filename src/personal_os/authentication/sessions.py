@@ -847,12 +847,27 @@ class SessionService:
         """One transaction timestamp shared with co-orchestrating services."""
         return await self._clock.database_now()
 
-    async def resolve(self, *, session_secret: str) -> AuthenticatedSession:
-        """Resolve one session secret or reject with ``authentication_required``."""
-        database_now = await self._clock.database_now()
+    async def resolve(
+        self,
+        *,
+        session_secret: str,
+        database_now: datetime | None = None,
+    ) -> AuthenticatedSession:
+        """Resolve one session secret or reject with ``authentication_required``.
+
+        ``database_now`` lets a co-orchestrating service (the password change)
+        share its single clock read with this resolution so the whole
+        invocation decides and persists against one transaction timestamp;
+        omitted, the resolution takes its own read.
+        """
+        transaction_now = (
+            database_now
+            if database_now is not None
+            else await self._clock.database_now()
+        )
         resolved = await self._sessions.resolve_session(
             session_secret_hash=session_secret_hash_of(session_secret),
-            database_now=database_now,
+            database_now=transaction_now,
         )
         session = resolved.session
         return AuthenticatedSession(
@@ -865,7 +880,7 @@ class SessionService:
             ),
             csrf_secret_hash=session.csrf_secret_hash,
             session=session,
-            database_now=database_now,
+            database_now=transaction_now,
         )
 
     async def authenticate(self, *, session_secret: str) -> AuthenticatedSession:
@@ -944,7 +959,9 @@ class PasswordChangeService:
     Requires a recently re-authenticated session, validates and hashes the new
     password outside the transaction, then commits one credential-anchored
     transaction that bumps the revision, revokes every other session and
-    rotates the current binding. Obsidian devices are never touched.
+    rotates the current binding. One clock read drives the re-auth gate, the
+    session resolution and every persisted write of the invocation. Obsidian
+    devices are never touched.
     """
 
     def __init__(
@@ -969,7 +986,9 @@ class PasswordChangeService:
     ) -> PasswordChangeOutcome:
         """Run one password change; device state is never touched."""
         database_now = await self._session_service.database_now()
-        resolved = await self._session_service.resolve(session_secret=session_secret)
+        resolved = await self._session_service.resolve(
+            session_secret=session_secret, database_now=database_now
+        )
         session = resolved.session
         if not is_recently_authenticated(
             session,

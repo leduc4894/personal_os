@@ -128,6 +128,26 @@ class FixedClock:
         return self.database_now_value
 
 
+class AdvancingClock(FixedClock):
+    """Clock double consuming scripted reads in order and counting them.
+
+    The first read returns the first scripted moment, each further read
+    advances to the next; reads beyond the script keep returning the last
+    value. ``read_count`` proves how many clock reads one invocation took.
+    """
+
+    def __init__(self, reads: tuple[datetime, ...]) -> None:
+        super().__init__(reads[0])
+        self._pending_reads = list(reads[1:])
+        self.read_count = 0
+
+    async def database_now(self) -> datetime:
+        self.read_count += 1
+        if self.read_count > 1 and self._pending_reads:
+            self.database_now_value = self._pending_reads.pop(0)
+        return self.database_now_value
+
+
 class FakeCredentialTransactions:
     """In-memory credential/throttle port double applying the domain rules."""
 
@@ -426,8 +446,13 @@ class FakeWebSessionTransactions:
 class LoginHarness:
     """Composition of the real services over the in-memory port doubles."""
 
-    def __init__(self, *, needs_rehash: bool = False) -> None:
-        self.clock = FixedClock()
+    def __init__(
+        self,
+        *,
+        needs_rehash: bool = False,
+        clock: FixedClock | None = None,
+    ) -> None:
+        self.clock = clock if clock is not None else FixedClock()
         self.hasher = CountingPasswordHasher(
             valid_password=_CORRECT_PASSWORD, needs_rehash=needs_rehash
         )
@@ -787,6 +812,35 @@ async def test_password_change_rotates_current_and_revokes_other_sessions() -> N
     assert command.expected_credential_revision == 1
     with pytest.raises(AuthenticationError):
         await harness.session_service.authenticate(session_secret=started.session_secret)
+
+
+@pytest.mark.asyncio
+async def test_password_change_shares_one_clock_read_between_gate_and_writes() -> None:
+    gate_moment = _DATABASE_NOW + timedelta(minutes=5) - timedelta(seconds=1)
+    later_moment = _DATABASE_NOW + timedelta(minutes=5) + timedelta(seconds=1)
+    clock = AdvancingClock((_DATABASE_NOW, gate_moment, later_moment))
+    harness = LoginHarness(clock=clock)
+    started = (await harness.login()).started_session
+    assert started is not None
+    # The two scripted reads straddle the exclusive re-auth boundary: a second
+    # read inside the same invocation could slide persisted state past the
+    # moment the gate checked. One invocation must take exactly one read and
+    # drive the gate, the session resolution and every write with it.
+    reads_before_change = clock.read_count
+    result = await harness.password_service.change_password(
+        session_secret=started.session_secret,
+        new_password="fresh-rotation-passphrase-value",
+        diagnostic_context=_diagnostic_context(),
+    )
+    assert result.public_error is None
+    assert clock.read_count - reads_before_change == 1
+    command = harness.credentials.change_commands[0]
+    assert command.database_now == gate_moment
+    rotated = result.rotated_session
+    assert rotated is not None
+    stored = harness.sessions.rows_by_secret_hash[rotated.session_secret_hash]
+    assert stored.last_seen_at == gate_moment
+    assert stored.idle_expires_at == gate_moment + timedelta(hours=12)
 
 
 @pytest.mark.asyncio
