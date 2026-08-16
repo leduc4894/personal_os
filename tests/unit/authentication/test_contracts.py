@@ -145,8 +145,8 @@ def test_opaque_credential_is_frozen_and_hides_secret_in_repr() -> None:
         credential.secret = b"replacement"  # type: ignore[misc]
 
 
-def test_authentication_error_codes_are_exactly_the_sixteen_auth_codes() -> None:
-    assert len(AUTHENTICATION_ERROR_CODES) == 16
+def test_authentication_error_codes_are_exactly_the_seventeen_auth_codes() -> None:
+    assert len(AUTHENTICATION_ERROR_CODES) == 17
     assert {code.value for code in AUTHENTICATION_ERROR_CODES} == {
         "authentication_required",
         "authentication_failed",
@@ -160,6 +160,7 @@ def test_authentication_error_codes_are_exactly_the_sixteen_auth_codes() -> None
         "device_authorization_denied",
         "device_authorization_expired",
         "device_authorization_state_invalid",
+        "device_revocation_confirmation_invalid",
         "device_credential_invalid",
         "device_revoked",
         "device_token_reuse_detected",

@@ -1,4 +1,4 @@
-"""Authentication-domain error bound to the closed sixteen-code registry.
+"""Authentication-domain error bound to the closed seventeen-code registry.
 
 The closed code set is exactly the authentication block of the error registry
 (spec 17). The rejected input of a validation or parsing failure — a password,
@@ -29,6 +29,7 @@ AUTHENTICATION_ERROR_CODES: Final[frozenset[ErrorCode]] = frozenset(
         ErrorCode.DEVICE_AUTHORIZATION_DENIED,
         ErrorCode.DEVICE_AUTHORIZATION_EXPIRED,
         ErrorCode.DEVICE_AUTHORIZATION_STATE_INVALID,
+        ErrorCode.DEVICE_REVOCATION_CONFIRMATION_INVALID,
         ErrorCode.DEVICE_CREDENTIAL_INVALID,
         ErrorCode.DEVICE_REVOKED,
         ErrorCode.DEVICE_TOKEN_REUSE_DETECTED,

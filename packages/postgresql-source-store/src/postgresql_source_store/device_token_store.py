@@ -37,18 +37,28 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from personal_os.authentication.contracts import (
     FIXED_DEVICE_SCOPE,
     AuthenticatedDeviceContext,
+    DeviceAuthorizationGrantState,
     DeviceTokenFamilyState,
     DeviceTokenKind,
     DeviceTokenState,
 )
 from personal_os.authentication.device_tokens import (
+    ADMIN_REVOCATION_REASON,
     DEVICE_LAST_SEEN_MAXIMUM_UPDATE_INTERVAL,
+    DEVICE_REVOKED_AUDIT_ACTION,
+    DEVICE_TOKEN_FAMILY_REVOKED_AUDIT_ACTION,
     REFRESH_INACTIVITY_LIFETIME,
+    SELF_REVOCATION_REASON,
     AccessTokenAuthenticationCommand,
+    AdminRevokedDevice,
+    AdminRevokeDeviceCommand,
     AuthenticatedAccessToken,
     CommittedRefreshRotation,
+    ListedAdminDevice,
     RefreshPresentationKind,
     RefreshRotationCommand,
+    RevokeCurrentRefreshCommand,
+    RevokedCurrentTokenFamily,
     StoredDeviceToken,
     StoredTokenFamily,
     classify_refresh_presentation,
@@ -57,11 +67,13 @@ from personal_os.authentication.errors import AuthenticationError
 from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.error_contracts.codes import ErrorCode
 from postgresql_source_store.authentication_credentials import (
+    AUDIT_ACTOR_KIND_USER,
     AUDIT_RESULT_SUCCEEDED,
     run_authentication_transaction,
 )
 from postgresql_source_store.tables import (
     audit_events,
+    device_authorization_grants,
     device_token_families,
     device_tokens,
     devices,
@@ -85,8 +97,19 @@ _DEVICE_STATUS_REVOKED: Final[str] = "revoked"
 #: Audit actor/target vocabulary and revocation reason of confirmed reuse.
 AUDIT_ACTOR_KIND_DEVICE: Final[str] = "device"
 AUDIT_TARGET_KIND_DEVICE_TOKEN_FAMILY: Final[str] = "device_token_family"
+AUDIT_TARGET_KIND_DEVICE: Final[str] = "device"
 DEVICE_TOKEN_REUSE_DETECTED_AUDIT_ACTION: Final[str] = "authentication.device_token_reuse_detected"
 TOKEN_REUSE_REVOCATION_REASON: Final[str] = "token_reuse"
+
+#: The device kind of the system bootstrap row the Admin surface excludes
+#: from every device route (spec 14.1); plugin exchanges write ``obsidian``.
+_SYSTEM_DEVICE_KIND: Final[str] = "system"
+
+#: The grant state an Admin revoke denies a claiming grant in (14.1): only
+#: pending and approved grants may legally transition to denied.
+_GRANT_STATE_PENDING: Final[str] = "pending"
+_GRANT_STATE_APPROVED: Final[str] = "approved"
+_GRANT_STATE_DENIED: Final[str] = "denied"
 
 
 def stored_device_token_from_row(row: Any) -> StoredDeviceToken:
@@ -483,6 +506,298 @@ class DeviceTokenStore:
                 occurred_at=decided_at,
             )
         )
+
+    # -- plugin self-revoke (spec 14.2) ---------------------------------------------------
+
+    async def revoke_current_refresh(
+        self, command: RevokeCurrentRefreshCommand
+    ) -> RevokedCurrentTokenFamily:
+        """Lock, verify and terminally revoke the presented family (14.2).
+
+        Only an active, current-generation refresh credential of an active
+        family self-revokes: its family and every usable token turn revoked
+        with the terminal family-revoke audit row in the same commit. An
+        already-revoked surface answers with the terminal revoked code, and a
+        stale predecessor follows the confirmed-reuse revocation of 13.5 —
+        committed first, exactly like the rotation path, so the typed
+        rejection never rolls back the revocation it reports.
+        """
+
+        async def operation(
+            connection: AsyncConnection,
+        ) -> RevokedCurrentTokenFamily | None:
+            locked = await connection.execute(
+                sa.select(device_tokens)
+                .where(
+                    device_tokens.c.device_token_id == command.refresh_token_id,
+                    device_tokens.c.token_kind == _TOKEN_KIND_REFRESH,
+                )
+                .with_for_update(of=device_tokens)
+            )
+            predecessor_row = locked.one_or_none()
+            if predecessor_row is None:
+                raise AuthenticationError(ErrorCode.DEVICE_CREDENTIAL_INVALID)
+            presented_hash = command.secret_hashes_by_key_id.get(predecessor_row.derivation_key_id)
+            if presented_hash is None or not hmac_module.compare_digest(
+                presented_hash, predecessor_row.secret_hash
+            ):
+                raise AuthenticationError(ErrorCode.DEVICE_CREDENTIAL_INVALID)
+            predecessor = stored_device_token_from_row(predecessor_row)
+
+            locked_family = await connection.execute(
+                sa.select(device_token_families)
+                .where(device_token_families.c.token_family_id == predecessor.token_family_id)
+                .with_for_update(of=device_token_families)
+            )
+            family_row = locked_family.one_or_none()
+            if family_row is None:
+                raise AuthenticationError(ErrorCode.DEVICE_CREDENTIAL_INVALID)
+            family = stored_token_family_from_row(family_row)
+
+            if (
+                family.state is DeviceTokenFamilyState.REVOKED
+                or predecessor.state is DeviceTokenState.REVOKED
+            ):
+                raise AuthenticationError(ErrorCode.DEVICE_REVOKED)
+            if (
+                predecessor.state is DeviceTokenState.ROTATED
+                or family.current_refresh_generation != predecessor.generation
+            ):
+                await self._revoke_family_for_reuse(
+                    connection,
+                    family=family,
+                    workspace_id=predecessor.workspace_id,
+                    decided_at=command.database_now,
+                    diagnostic_context=command.diagnostic_context,
+                )
+                return None
+
+            await connection.execute(
+                sa.update(device_token_families)
+                .values(
+                    state=_FAMILY_STATE_REVOKED,
+                    revoked_at=command.database_now,
+                    revocation_reason=SELF_REVOCATION_REASON,
+                )
+                .where(
+                    device_token_families.c.token_family_id == family.token_family_id,
+                    device_token_families.c.state == _FAMILY_STATE_ACTIVE,
+                )
+            )
+            await connection.execute(
+                sa.update(device_tokens)
+                .values(state=_TOKEN_STATE_REVOKED, revoked_at=command.database_now)
+                .where(
+                    device_tokens.c.token_family_id == family.token_family_id,
+                    device_tokens.c.state == _TOKEN_STATE_ACTIVE,
+                )
+            )
+            await connection.execute(
+                sa.insert(audit_events).values(
+                    audit_event_id=uuid7(),
+                    workspace_id=predecessor.workspace_id,
+                    actor_kind=AUDIT_ACTOR_KIND_DEVICE,
+                    actor_id=predecessor.device_id,
+                    actor_reference=None,
+                    action=DEVICE_TOKEN_FAMILY_REVOKED_AUDIT_ACTION,
+                    target_kind=AUDIT_TARGET_KIND_DEVICE_TOKEN_FAMILY,
+                    target_id=family.token_family_id,
+                    request_id=command.diagnostic_context.request_id,
+                    client_request_id=command.diagnostic_context.client_request_id,
+                    trace_id=command.diagnostic_context.trace.trace_id.value,
+                    result=AUDIT_RESULT_SUCCEEDED,
+                    reason_code=None,
+                    safe_diff_hash=None,
+                    occurred_at=command.database_now,
+                )
+            )
+            return RevokedCurrentTokenFamily(
+                token_family_id=family.token_family_id,
+                device_id=predecessor.device_id,
+                revoked_at=command.database_now,
+                database_now=command.database_now,
+            )
+
+        committed = await run_authentication_transaction(self._engine, operation)
+        if committed is None:
+            raise AuthenticationError(ErrorCode.DEVICE_TOKEN_REUSE_DETECTED)
+        return committed
+
+    # -- admin revocation and list (spec 14.1, 18.3) --------------------------------------
+
+    async def admin_revoke_device(self, command: AdminRevokeDeviceCommand) -> AdminRevokedDevice:
+        """Revoke one device, its families, tokens and claiming grants (14.1).
+
+        One locked transaction: the device row lock serializes every racing
+        refresh against this decision, the exact stored display name gates the
+        revocation, and the already-revoked read-only row answers idempotently
+        with its stored revocation moment — no second audit row, no rewrite.
+        The system bootstrap device and any device of another workspace close
+        with the invalid-credential code, keeping the route free of an
+        existence oracle.
+        """
+
+        async def operation(connection: AsyncConnection) -> AdminRevokedDevice:
+            locked_device = await connection.execute(
+                sa.select(devices)
+                .where(devices.c.device_id == command.device_id)
+                .with_for_update(of=devices)
+            )
+            device_row = locked_device.one_or_none()
+            if (
+                device_row is None
+                or device_row.device_kind == _SYSTEM_DEVICE_KIND
+                or device_row.workspace_id != command.workspace_id
+            ):
+                raise AuthenticationError(ErrorCode.DEVICE_CREDENTIAL_INVALID)
+            if device_row.device_name != command.device_name_confirmation:
+                raise AuthenticationError(ErrorCode.DEVICE_REVOCATION_CONFIRMATION_INVALID)
+            if device_row.status == _DEVICE_STATUS_REVOKED:
+                assert device_row.revoked_at is not None
+                return AdminRevokedDevice(
+                    device_id=command.device_id,
+                    revoked_at=device_row.revoked_at,
+                    database_now=command.database_now,
+                )
+
+            revoked_device = await connection.execute(
+                sa.update(devices)
+                .values(status=_DEVICE_STATUS_REVOKED, revoked_at=command.database_now)
+                .where(
+                    devices.c.device_id == command.device_id,
+                    devices.c.status == _DEVICE_STATUS_ACTIVE,
+                )
+            )
+            if revoked_device.rowcount != 1:
+                raise AuthenticationError(ErrorCode.DEVICE_REVOKED)
+            family_ids = sa.select(device_token_families.c.token_family_id).where(
+                device_token_families.c.device_id == command.device_id
+            )
+            await connection.execute(
+                sa.update(device_token_families)
+                .values(
+                    state=_FAMILY_STATE_REVOKED,
+                    revoked_at=command.database_now,
+                    revocation_reason=ADMIN_REVOCATION_REASON,
+                )
+                .where(
+                    device_token_families.c.device_id == command.device_id,
+                    device_token_families.c.state == _FAMILY_STATE_ACTIVE,
+                )
+            )
+            await connection.execute(
+                sa.update(device_tokens)
+                .values(state=_TOKEN_STATE_REVOKED, revoked_at=command.database_now)
+                .where(
+                    device_tokens.c.token_family_id.in_(family_ids),
+                    device_tokens.c.state == _TOKEN_STATE_ACTIVE,
+                )
+            )
+            await connection.execute(
+                sa.update(device_authorization_grants)
+                .values(
+                    state=_GRANT_STATE_DENIED,
+                    denied_at=command.database_now,
+                )
+                .where(
+                    device_authorization_grants.c.claimed_device_id == command.device_id,
+                    device_authorization_grants.c.state.in_(
+                        (_GRANT_STATE_PENDING, _GRANT_STATE_APPROVED)
+                    ),
+                )
+            )
+            await connection.execute(
+                sa.insert(audit_events).values(
+                    audit_event_id=uuid7(),
+                    workspace_id=command.workspace_id,
+                    actor_kind=AUDIT_ACTOR_KIND_USER,
+                    actor_id=command.actor_user_id,
+                    actor_reference=None,
+                    action=DEVICE_REVOKED_AUDIT_ACTION,
+                    target_kind=AUDIT_TARGET_KIND_DEVICE,
+                    target_id=command.device_id,
+                    request_id=command.diagnostic_context.request_id,
+                    client_request_id=command.diagnostic_context.client_request_id,
+                    trace_id=command.diagnostic_context.trace.trace_id.value,
+                    result=AUDIT_RESULT_SUCCEEDED,
+                    reason_code=None,
+                    safe_diff_hash=None,
+                    occurred_at=command.database_now,
+                )
+            )
+            return AdminRevokedDevice(
+                device_id=command.device_id,
+                revoked_at=command.database_now,
+                database_now=command.database_now,
+            )
+
+        return await run_authentication_transaction(self._engine, operation)
+
+    async def list_admin_devices(self, *, workspace_id: UUID) -> tuple[ListedAdminDevice, ...]:
+        """List the workspace's plugin devices with grant-joined metadata.
+
+        The system bootstrap device never appears; every listed row joins its
+        exchanged grant so the platform class, platform token, validated
+        plugin version, approval moment and the family's absolute expiry come
+        from validated creation material, never from client claims stored
+        outside a grant.
+        """
+        family_absolute_expires_at = (
+            sa.select(sa.func.max(device_token_families.c.absolute_expires_at))
+            .where(device_token_families.c.device_id == devices.c.device_id)
+            .scalar_subquery()
+            .label("family_absolute_expires_at")
+        )
+        statement = (
+            sa.select(
+                devices.c.device_id,
+                devices.c.device_name,
+                devices.c.status,
+                devices.c.registered_at,
+                devices.c.last_seen_at,
+                devices.c.revoked_at,
+                device_authorization_grants.c.platform_class,
+                device_authorization_grants.c.platform_name,
+                device_authorization_grants.c.plugin_version,
+                device_authorization_grants.c.approved_at,
+                family_absolute_expires_at,
+            )
+            .select_from(devices)
+            .join(
+                device_authorization_grants,
+                sa.and_(
+                    device_authorization_grants.c.device_id == devices.c.device_id,
+                    device_authorization_grants.c.state
+                    == DeviceAuthorizationGrantState.EXCHANGED.value,
+                ),
+            )
+            .where(
+                devices.c.workspace_id == workspace_id,
+                devices.c.device_kind != _SYSTEM_DEVICE_KIND,
+            )
+            .order_by(devices.c.registered_at.desc(), devices.c.device_id)
+        )
+
+        async def operation(connection: AsyncConnection) -> tuple[ListedAdminDevice, ...]:
+            rows = (await connection.execute(statement)).all()
+            return tuple(
+                ListedAdminDevice(
+                    device_id=row.device_id,
+                    device_name=row.device_name,
+                    platform_class=row.platform_class,
+                    platform_name=row.platform_name,
+                    plugin_version=row.plugin_version,
+                    status=row.status,
+                    registered_at=row.registered_at,
+                    last_seen_at=row.last_seen_at,
+                    revoked_at=row.revoked_at,
+                    approved_at=row.approved_at,
+                    family_absolute_expires_at=row.family_absolute_expires_at,
+                )
+                for row in rows
+            )
+
+        return await run_authentication_transaction(self._engine, operation)
 
     # -- access authentication (spec 13.1) -----------------------------------------------
 

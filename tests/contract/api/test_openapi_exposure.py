@@ -43,6 +43,10 @@ _API_ROUTE_PATHS = frozenset(
         "/api/auth/device-authorizations/{grant_id}/approve",
         "/api/auth/device-authorizations/{grant_id}/deny",
         "/api/auth/device-authorizations/{grant_id}/poll",
+        "/api/auth/device-tokens/refresh",
+        "/api/auth/device-tokens/revoke-current",
+        "/api/admin/devices",
+        "/api/admin/devices/{device_id}/revoke",
     }
 )
 
@@ -107,6 +111,10 @@ async def test_local_environments_serve_raw_openapi_document_with_correlation(
         "approveDeviceAuthorization",
         "denyDeviceAuthorization",
         "pollDeviceAuthorization",
+        "refreshDeviceTokens",
+        "revokeCurrentDeviceToken",
+        "listAdminDevices",
+        "revokeAdminDevice",
     }
     assert "data" not in document
     assert "request_id" not in document

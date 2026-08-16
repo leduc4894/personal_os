@@ -1,18 +1,20 @@
-"""Browser device-authorization endpoints: envelopes and closed errors (spec 11).
+"""Browser device-authorization and device-token endpoints (spec 11-14).
 
-The four endpoints of the spec 16.3 device-authorization route set this task
-owns are created per composed runtime: each closure binds the runtime's
-device-authorization service, session dependencies and cookie contract, so
-the application factory only registers semantic operation ids and response
-models. The unauthenticated plugin creation endpoint keeps the exact-origin
-gate and throttles per source address; the browser lookup and decision
-endpoints reuse the strict CSRF dependency of spec 9.3 verbatim. Every
-response carries the canonical envelope and ``Cache-Control: no-store``; the
-creation response also carries ``Pragma: no-cache`` because it is the one
-provisioning surface that renders the user code and polling secret (spec 16).
-Service rejections raise the typed authentication error and reach the shared
-application handler, which maps them onto the closed registry codes (spec 17)
-with the same cache-suppression posture.
+The seven endpoints of the spec 16.3 device route set this task owns are
+created per composed runtime: each closure binds the runtime's
+device-authorization and device-token services, session dependencies and
+cookie contract, so the application factory only registers semantic
+operation ids and response models. The unauthenticated plugin creation
+endpoint keeps the exact-origin gate and throttles per source address; the
+browser lookup and decision endpoints reuse the strict CSRF dependency of
+spec 9.3 verbatim; the poll, refresh and self-revoke endpoints accept
+exactly their dedicated Bearer credential and nothing else. Every
+response carries the canonical envelope and ``Cache-Control: no-store``;
+the credential-rendering creation, poll, refresh and revoke responses also
+carry ``Pragma: no-cache`` (spec 16). Service rejections raise the typed
+authentication error and reach the shared application handler, which maps
+them onto the closed registry codes (spec 17) with the same
+cache-suppression posture.
 """
 
 from __future__ import annotations
@@ -28,10 +30,12 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from api_runtime.authentication_composition import WebAuthenticationRuntime
 from api_runtime.authentication_dependencies import (
+    REFRESH_BEARER_SCHEME,
     AuthenticatedWebRequest,
     client_source_address,
     create_session_route_dependencies,
     require_polling_credential,
+    require_refresh_credential,
 )
 from api_runtime.authentication_models import (
     DeviceGrantContextData,
@@ -40,6 +44,9 @@ from api_runtime.authentication_models import (
     DeviceGrantExchangeData,
     DeviceGrantLookupRequest,
     DeviceGrantRequest,
+    DeviceRefreshRequest,
+    DeviceSelfRevokeData,
+    RefreshedDeviceTokenData,
 )
 from personal_os.api_contracts import (
     ApiRouteTemplate,
@@ -68,13 +75,15 @@ _POLLING_BEARER_SCHEME = HTTPBearer(
 
 @dataclass(frozen=True, slots=True)
 class DeviceAuthorizationRouteEndpoints:
-    """The five endpoint callables of the closed device-authorization set."""
+    """The seven endpoint callables of the closed device-credential set."""
 
     create_grant: Callable[..., Awaitable[JSONResponse]]
     lookup_grant: Callable[..., Awaitable[JSONResponse]]
     approve_grant: Callable[..., Awaitable[JSONResponse]]
     deny_grant: Callable[..., Awaitable[JSONResponse]]
     poll_grant: Callable[..., Awaitable[JSONResponse]]
+    refresh_device_tokens: Callable[..., Awaitable[JSONResponse]]
+    revoke_current_device_token: Callable[..., Awaitable[JSONResponse]]
 
 
 def _bound_diagnostic_context() -> DiagnosticContext:
@@ -105,7 +114,9 @@ def create_device_authorization_route_endpoints(
         data: DeviceGrantData
         | DeviceGrantContextData
         | DeviceGrantDecisionData
-        | DeviceGrantExchangeData,
+        | DeviceGrantExchangeData
+        | RefreshedDeviceTokenData
+        | DeviceSelfRevokeData,
         *,
         headers: dict[str, str] = _NO_STORE_HEADERS,
     ) -> JSONResponse:
@@ -253,10 +264,79 @@ def create_device_authorization_route_endpoints(
             headers=_NO_STORE_NO_CACHE_HEADERS,
         )
 
+    async def refresh_device_tokens(
+        request: Request,
+        refresh_request: DeviceRefreshRequest,
+        refresh_credential: str = Depends(require_refresh_credential),
+        authorization: HTTPAuthorizationCredentials | None = Depends(  # noqa: B008
+            REFRESH_BEARER_SCHEME
+        ),
+    ) -> JSONResponse:
+        """Rotate the current refresh credential or replay the successor (13.4).
+
+        The refresh Bearer credential in its dedicated scheme is the only
+        authority: session cookies, polling credentials and access
+        credentials close with the registered invalid-credential code. The
+        presented rotation identity is the plugin-owned retry identity — one
+        stable identity replays the byte-identical committed successor, a new
+        identity on a rotated predecessor commits the confirmed-reuse
+        revocation and surfaces the terminal reuse code.
+        """
+        del authorization  # the closed registry answers bad presentations
+        request.scope["route_template"] = ApiRouteTemplate.AUTH_DEVICE_TOKENS_REFRESH
+        refreshed = await runtime.device_token_service.refresh(
+            refresh_credential=refresh_credential,
+            rotation_id=refresh_request.rotation_id,
+            diagnostic_context=_bound_diagnostic_context(),
+        )
+        return _success_json(
+            RefreshedDeviceTokenData(
+                token_family_id=refreshed.token_family_id,
+                refresh_generation=refreshed.refresh_generation,
+                access_credential=refreshed.access_credential,
+                refresh_credential=refreshed.refresh_credential,
+                access_expires_at=refreshed.access_expires_at,
+                refresh_expires_at=refreshed.refresh_expires_at,
+                family_absolute_expires_at=refreshed.family_absolute_expires_at,
+            ),
+            headers=_NO_STORE_NO_CACHE_HEADERS,
+        )
+
+    async def revoke_current_device_token(
+        request: Request,
+        refresh_credential: str = Depends(require_refresh_credential),
+        authorization: HTTPAuthorizationCredentials | None = Depends(  # noqa: B008
+            REFRESH_BEARER_SCHEME
+        ),
+    ) -> JSONResponse:
+        """Self-revoke the family of the presented refresh credential (14.2).
+
+        The current refresh credential authenticates the disconnect: one
+        locked transaction revokes its family and every usable token, and
+        the confirmed response tells the plugin to overwrite its local
+        credential record with the non-secret tombstone. Spec 14.2 names no
+        request body — the credential itself is the whole authority.
+        """
+        del authorization  # the closed registry answers bad presentations
+        request.scope["route_template"] = ApiRouteTemplate.AUTH_DEVICE_TOKENS_REVOKE_CURRENT
+        revoked = await runtime.device_token_service.revoke_current(
+            refresh_credential=refresh_credential,
+            diagnostic_context=_bound_diagnostic_context(),
+        )
+        return _success_json(
+            DeviceSelfRevokeData(
+                device_id=revoked.device_id,
+                token_family_id=revoked.token_family_id,
+                revoked_at=revoked.revoked_at,
+            )
+        )
+
     return DeviceAuthorizationRouteEndpoints(
         create_grant=create_grant,
         lookup_grant=lookup_grant,
         approve_grant=approve_grant,
         deny_grant=deny_grant,
         poll_grant=poll_grant,
+        refresh_device_tokens=refresh_device_tokens,
+        revoke_current_device_token=revoke_current_device_token,
     )

@@ -4,6 +4,46 @@
  */
 
 export type paths = {
+    readonly "/api/admin/devices": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * List Devices
+         * @description List the workspace's plugin devices for the Admin page (18.3).
+         */
+        readonly get: operations["listAdminDevices"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/admin/devices/{device_id}/revoke": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Revoke Device
+         * @description Revoke one device behind the full spec 14.1 guard chain.
+         */
+        readonly post: operations["revokeAdminDevice"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/auth/device-authorizations": {
         readonly parameters: {
             readonly query?: never;
@@ -105,6 +145,60 @@ export type paths = {
          *     committed credentials while the initial generation stays current.
          */
         readonly post: operations["pollDeviceAuthorization"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/auth/device-tokens/refresh": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Refresh Device Tokens
+         * @description Rotate the current refresh credential or replay the successor (13.4).
+         *
+         *     The refresh Bearer credential in its dedicated scheme is the only
+         *     authority: session cookies, polling credentials and access
+         *     credentials close with the registered invalid-credential code. The
+         *     presented rotation identity is the plugin-owned retry identity — one
+         *     stable identity replays the byte-identical committed successor, a new
+         *     identity on a rotated predecessor commits the confirmed-reuse
+         *     revocation and surfaces the terminal reuse code.
+         */
+        readonly post: operations["refreshDeviceTokens"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/auth/device-tokens/revoke-current": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Revoke Current Device Token
+         * @description Self-revoke the family of the presented refresh credential (14.2).
+         *
+         *     The current refresh credential authenticates the disconnect: one
+         *     locked transaction revokes its family and every usable token, and
+         *     the confirmed response tells the plugin to overwrite its local
+         *     credential record with the non-secret tombstone. Spec 14.2 names no
+         *     request body — the credential itself is the whole authority.
+         */
+        readonly post: operations["revokeCurrentDeviceToken"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -376,7 +470,110 @@ export type paths = {
 export type webhooks = Record<string, never>;
 export type components = {
     schemas: {
+        /**
+         * AdminDeviceData
+         * @description One Admin device-list row: spec-approved fields only (16.4, 18.3).
+         *
+         *     Carries the display identity, the Desktop/Mobile class, the platform, the
+         *     validated plugin version, the closed lifecycle status, the
+         *     registered/last-seen/revoked moments, the grant approval moment and the
+         *     family expiry; never a credential, hash or polling identity.
+         */
+        readonly AdminDeviceData: {
+            /** Approved At */
+            readonly approved_at?: string | null;
+            /**
+             * Device Id
+             * Format: uuid
+             */
+            readonly device_id: string;
+            /** Device Name */
+            readonly device_name: string;
+            /** Family Absolute Expires At */
+            readonly family_absolute_expires_at?: string | null;
+            /** Last Seen At */
+            readonly last_seen_at?: string | null;
+            readonly platform_class: components["schemas"]["DevicePlatformClass"];
+            /** Platform Name */
+            readonly platform_name: string;
+            /** Plugin Version */
+            readonly plugin_version: string;
+            /**
+             * Registered At
+             * Format: date-time
+             */
+            readonly registered_at: string;
+            /** Revoked At */
+            readonly revoked_at?: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            readonly status: "active" | "revoked";
+        };
+        /**
+         * AdminDeviceListData
+         * @description The Admin device list of one workspace (spec 16.4, 18.3).
+         */
+        readonly AdminDeviceListData: {
+            /** Devices */
+            readonly devices: readonly components["schemas"]["AdminDeviceData"][];
+        };
+        /**
+         * AdminDeviceRevokeData
+         * @description The committed — or already committed — Admin revocation (spec 14.1).
+         */
+        readonly AdminDeviceRevokeData: {
+            /**
+             * Device Id
+             * Format: uuid
+             */
+            readonly device_id: string;
+            /**
+             * Revoked At
+             * Format: date-time
+             */
+            readonly revoked_at: string;
+        };
+        /**
+         * AdminDeviceRevokeRequest
+         * @description The exact display-name confirmation body of one Admin revoke (14.1).
+         */
+        readonly AdminDeviceRevokeRequest: {
+            /** Device Name Confirmation */
+            readonly device_name_confirmation: string;
+        };
         readonly ApiDetailValue: boolean | number | string | readonly (boolean | number | string)[];
+        /** ApiEnvelope[AdminDeviceListData] */
+        readonly ApiEnvelope_AdminDeviceListData_: {
+            readonly data: components["schemas"]["AdminDeviceListData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[AdminDeviceRevokeData] */
+        readonly ApiEnvelope_AdminDeviceRevokeData_: {
+            readonly data: components["schemas"]["AdminDeviceRevokeData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
         /** ApiEnvelope[DeviceGrantContextData] */
         readonly ApiEnvelope_DeviceGrantContextData_: {
             readonly data: components["schemas"]["DeviceGrantContextData"] | null;
@@ -437,6 +634,21 @@ export type components = {
              */
             readonly warnings: readonly components["schemas"]["ApiWarning"][];
         };
+        /** ApiEnvelope[DeviceSelfRevokeData] */
+        readonly ApiEnvelope_DeviceSelfRevokeData_: {
+            readonly data: components["schemas"]["DeviceSelfRevokeData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
         /** ApiEnvelope[LivenessData] */
         readonly ApiEnvelope_LivenessData_: {
             readonly data: components["schemas"]["LivenessData"] | null;
@@ -485,6 +697,21 @@ export type components = {
         /** ApiEnvelope[RecoveryLimitedContext] */
         readonly ApiEnvelope_RecoveryLimitedContext_: {
             readonly data: components["schemas"]["RecoveryLimitedContext"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[RefreshedDeviceTokenData] */
+        readonly ApiEnvelope_RefreshedDeviceTokenData_: {
+            readonly data: components["schemas"]["RefreshedDeviceTokenData"] | null;
             readonly error: components["schemas"]["ApiErrorBody"] | null;
             /**
              * Request Id
@@ -724,16 +951,52 @@ export type components = {
          */
         readonly DevicePlatformClass: "obsidian_desktop" | "obsidian_mobile";
         /**
+         * DeviceRefreshRequest
+         * @description The strict rotation body of one refresh presentation (spec 13.4).
+         *
+         *     ``rotation_id`` is the plugin-owned UUID retry identity: one stable
+         *     identity replays the exact committed successor, a new identity on a
+         *     rotated predecessor is confirmed reuse.
+         */
+        readonly DeviceRefreshRequest: {
+            /**
+             * Rotation Id
+             * Format: uuid
+             */
+            readonly rotation_id: string;
+        };
+        /**
          * DeviceScope
          * @description The closed fixed Obsidian device scope (spec 6.2).
          * @enum {string}
          */
         readonly DeviceScope: "obsidian_sync";
         /**
+         * DeviceSelfRevokeData
+         * @description The confirmed terminal revoke of one plugin self-revoke (spec 14.2).
+         */
+        readonly DeviceSelfRevokeData: {
+            /**
+             * Device Id
+             * Format: uuid
+             */
+            readonly device_id: string;
+            /**
+             * Revoked At
+             * Format: date-time
+             */
+            readonly revoked_at: string;
+            /**
+             * Token Family Id
+             * Format: uuid
+             */
+            readonly token_family_id: string;
+        };
+        /**
          * ErrorCode
          * @enum {string}
          */
-        readonly ErrorCode: "configuration_invalid" | "configuration_unknown_key" | "configuration_secret_invalid" | "secret_file_missing" | "secret_file_outside_root" | "secret_file_invalid_type" | "secret_file_insecure_permissions" | "secret_file_too_large" | "secret_file_invalid_encoding" | "secret_file_empty" | "diagnostic_context_invalid" | "diagnostic_payload_rejected" | "internal_error" | "database_migration_configuration_invalid" | "database_connection_unavailable" | "database_migration_busy" | "database_schema_contract_invalid" | "database_destructive_downgrade_refused" | "object_storage_configuration_invalid" | "object_storage_input_invalid" | "object_storage_busy" | "object_storage_unavailable" | "object_storage_access_denied" | "object_storage_contract_invalid" | "object_storage_object_missing" | "object_storage_integrity_failed" | "object_storage_metadata_conflict" | "source_publish_input_invalid" | "source_not_found" | "source_already_exists" | "source_state_invalid" | "source_version_conflict" | "source_idempotency_mismatch" | "source_event_identity_mismatch" | "source_verified_receipt_stale" | "source_content_object_conflict" | "source_concurrency_busy" | "source_concurrency_invariant_failed" | "source_commit_outcome_unknown" | "projection_dispatch_unavailable" | "projection_intent_contract_invalid" | "identity_bootstrap_input_invalid" | "identity_bootstrap_state_conflict" | "canonical_read_state_invalid" | "canonical_recovery_environment_refused" | "canonical_recovery_configuration_invalid" | "canonical_recovery_snapshot_busy" | "canonical_recovery_bundle_exists" | "canonical_recovery_bundle_invalid" | "canonical_recovery_target_not_empty" | "canonical_recovery_dependency_unavailable" | "canonical_recovery_integrity_failed" | "canonical_recovery_restore_failed" | "api_request_malformed" | "api_request_validation_failed" | "api_route_not_found" | "api_method_not_allowed" | "authentication_required" | "authentication_failed" | "authentication_rate_limited" | "recent_authentication_required" | "csrf_validation_failed" | "authorization_scope_denied" | "totp_enrollment_state_invalid" | "device_authorization_pending" | "device_authorization_slow_down" | "device_authorization_denied" | "device_authorization_expired" | "device_authorization_state_invalid" | "device_credential_invalid" | "device_revoked" | "device_token_reuse_detected" | "plugin_version_unsupported";
+        readonly ErrorCode: "configuration_invalid" | "configuration_unknown_key" | "configuration_secret_invalid" | "secret_file_missing" | "secret_file_outside_root" | "secret_file_invalid_type" | "secret_file_insecure_permissions" | "secret_file_too_large" | "secret_file_invalid_encoding" | "secret_file_empty" | "diagnostic_context_invalid" | "diagnostic_payload_rejected" | "internal_error" | "database_migration_configuration_invalid" | "database_connection_unavailable" | "database_migration_busy" | "database_schema_contract_invalid" | "database_destructive_downgrade_refused" | "object_storage_configuration_invalid" | "object_storage_input_invalid" | "object_storage_busy" | "object_storage_unavailable" | "object_storage_access_denied" | "object_storage_contract_invalid" | "object_storage_object_missing" | "object_storage_integrity_failed" | "object_storage_metadata_conflict" | "source_publish_input_invalid" | "source_not_found" | "source_already_exists" | "source_state_invalid" | "source_version_conflict" | "source_idempotency_mismatch" | "source_event_identity_mismatch" | "source_verified_receipt_stale" | "source_content_object_conflict" | "source_concurrency_busy" | "source_concurrency_invariant_failed" | "source_commit_outcome_unknown" | "projection_dispatch_unavailable" | "projection_intent_contract_invalid" | "identity_bootstrap_input_invalid" | "identity_bootstrap_state_conflict" | "canonical_read_state_invalid" | "canonical_recovery_environment_refused" | "canonical_recovery_configuration_invalid" | "canonical_recovery_snapshot_busy" | "canonical_recovery_bundle_exists" | "canonical_recovery_bundle_invalid" | "canonical_recovery_target_not_empty" | "canonical_recovery_dependency_unavailable" | "canonical_recovery_integrity_failed" | "canonical_recovery_restore_failed" | "api_request_malformed" | "api_request_validation_failed" | "api_route_not_found" | "api_method_not_allowed" | "authentication_required" | "authentication_failed" | "authentication_rate_limited" | "recent_authentication_required" | "csrf_validation_failed" | "authorization_scope_denied" | "totp_enrollment_state_invalid" | "device_authorization_pending" | "device_authorization_slow_down" | "device_authorization_denied" | "device_authorization_expired" | "device_authorization_state_invalid" | "device_revocation_confirmation_invalid" | "device_credential_invalid" | "device_revoked" | "device_token_reuse_detected" | "plugin_version_unsupported";
         /**
          * LivenessData
          * @description Process-liveness success data; it implies no I/O by construction.
@@ -846,6 +1109,43 @@ export type components = {
             /** Permitted Actions */
             readonly permitted_actions: readonly ("totp_replacement" | "logout")[];
             readonly state: components["schemas"]["WebSessionState"];
+        };
+        /**
+         * RefreshedDeviceTokenData
+         * @description The successor credentials of one refresh rotation (spec 13.3, 13.4).
+         *
+         *     The access and refresh credentials render under the provisioning
+         *     cache-suppression headers; an exact replay re-renders the byte-identical
+         *     successor with its original anchored timestamps and never extends the
+         *     family's absolute expiry.
+         */
+        readonly RefreshedDeviceTokenData: {
+            /** Access Credential */
+            readonly access_credential: string;
+            /**
+             * Access Expires At
+             * Format: date-time
+             */
+            readonly access_expires_at: string;
+            /**
+             * Family Absolute Expires At
+             * Format: date-time
+             */
+            readonly family_absolute_expires_at: string;
+            /** Refresh Credential */
+            readonly refresh_credential: string;
+            /**
+             * Refresh Expires At
+             * Format: date-time
+             */
+            readonly refresh_expires_at: string;
+            /** Refresh Generation */
+            readonly refresh_generation: number;
+            /**
+             * Token Family Id
+             * Format: uuid
+             */
+            readonly token_family_id: string;
         };
         /**
          * SessionData
@@ -975,6 +1275,52 @@ export type components = {
 };
 export type $defs = Record<string, never>;
 export interface operations {
+    readonly listAdminDevices: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_AdminDeviceListData_"];
+                };
+            };
+        };
+    };
+    readonly revokeAdminDevice: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly device_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["AdminDeviceRevokeRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_AdminDeviceRevokeData_"];
+                };
+            };
+        };
+    };
     readonly createDeviceAuthorization: {
         readonly parameters: {
             readonly query?: never;
@@ -1085,6 +1431,50 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["ApiEnvelope_DeviceGrantExchangeData_"];
+                };
+            };
+        };
+    };
+    readonly refreshDeviceTokens: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["DeviceRefreshRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_RefreshedDeviceTokenData_"];
+                };
+            };
+        };
+    };
+    readonly revokeCurrentDeviceToken: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_DeviceSelfRevokeData_"];
                 };
             };
         };

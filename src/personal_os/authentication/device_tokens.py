@@ -53,6 +53,7 @@ from personal_os.authentication.contracts import (
     DeviceTokenFamilyState,
     DeviceTokenKind,
     DeviceTokenState,
+    WebScope,
 )
 from personal_os.authentication.crypto import (
     ACCESS_CREDENTIAL_DERIVATION_LABEL,
@@ -70,7 +71,12 @@ from personal_os.authentication.device_authorization import (
 )
 from personal_os.authentication.errors import AuthenticationError
 from personal_os.authentication.ports import AuthenticationCryptoPort
-from personal_os.authentication.sessions import AuthenticationClockPort
+from personal_os.authentication.sessions import (
+    AuthenticatedSession,
+    AuthenticationClockPort,
+    SessionService,
+    is_recently_authenticated,
+)
 from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import InternalApplicationError
@@ -91,6 +97,15 @@ INITIAL_REFRESH_GENERATION: Final[int] = 1
 
 #: ``devices.last_seen_at`` advances at most once per five minutes (13.1).
 DEVICE_LAST_SEEN_MAXIMUM_UPDATE_INTERVAL: Final[timedelta] = timedelta(minutes=5)
+
+#: Audit actions of the two revoke paths (spec 14, 21): the Admin device
+#: revocation and the terminal family revoke the plugin self-revoke commits.
+DEVICE_REVOKED_AUDIT_ACTION: Final[str] = "authentication.device_revoked"
+DEVICE_TOKEN_FAMILY_REVOKED_AUDIT_ACTION: Final[str] = "authentication.device_token_family_revoked"
+
+#: Closed family revocation reasons of the two revoke paths (spec 14).
+ADMIN_REVOCATION_REASON: Final[str] = "admin_revoked"
+SELF_REVOCATION_REASON: Final[str] = "self_revoked"
 
 #: Polling credential grammar bounds (spec 11.1): url-safe secret segment.
 POLLING_CREDENTIAL_PREFIX: Final[str] = "pg1"
@@ -640,6 +655,69 @@ class AuthenticatedAccessToken:
     database_now: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class RevokeCurrentRefreshCommand:
+    """One plugin self-revoke's transactional writes (spec 14.2)."""
+
+    refresh_token_id: UUID
+    secret_hashes_by_key_id: dict[str, str] = field(repr=False)
+    database_now: datetime
+    diagnostic_context: DiagnosticContext
+
+
+@dataclass(frozen=True, slots=True)
+class RevokedCurrentTokenFamily:
+    """The committed terminal revoke of one presented family (spec 14.2)."""
+
+    token_family_id: UUID
+    device_id: UUID
+    revoked_at: datetime
+    database_now: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AdminRevokeDeviceCommand:
+    """One Admin device revocation's transactional writes (spec 14.1)."""
+
+    device_id: UUID
+    workspace_id: UUID
+    actor_user_id: UUID
+    device_name_confirmation: str
+    database_now: datetime
+    diagnostic_context: DiagnosticContext
+
+
+@dataclass(frozen=True, slots=True)
+class AdminRevokedDevice:
+    """The committed — or already committed — Admin revocation of one device."""
+
+    device_id: UUID
+    revoked_at: datetime
+    database_now: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ListedAdminDevice:
+    """One Admin device-list row: spec-approved fields only (spec 16.4, 18.3).
+
+    Carries the display identity, the validated platform/plugin metadata of
+    the exchanged grant, the lifecycle timestamps, the closed status and the
+    family expiry; never a credential, a secret digest or a grant hash.
+    """
+
+    device_id: UUID
+    device_name: str
+    platform_class: str
+    platform_name: str
+    plugin_version: str
+    status: str
+    registered_at: datetime
+    last_seen_at: datetime | None = None
+    revoked_at: datetime | None = None
+    approved_at: datetime | None = None
+    family_absolute_expires_at: datetime | None = None
+
+
 @runtime_checkable
 class DeviceGrantExchangePort(Protocol):
     """The grant-side exchange transaction surface (spec 11.4, 12)."""
@@ -649,13 +727,23 @@ class DeviceGrantExchangePort(Protocol):
 
 @runtime_checkable
 class DeviceTokenTransactionPort(Protocol):
-    """The token rotation and access-authentication surface (spec 13)."""
+    """The token rotation, revoke and access-authentication surface (13, 14)."""
 
     async def resolve_refresh_predecessor(self, *, token_id: UUID) -> StoredDeviceToken | None: ...
 
     async def refresh_rotation(
         self, command: RefreshRotationCommand
     ) -> CommittedRefreshRotation: ...
+
+    async def revoke_current_refresh(
+        self, command: RevokeCurrentRefreshCommand
+    ) -> RevokedCurrentTokenFamily: ...
+
+    async def admin_revoke_device(
+        self, command: AdminRevokeDeviceCommand
+    ) -> AdminRevokedDevice: ...
+
+    async def list_admin_devices(self, *, workspace_id: UUID) -> tuple[ListedAdminDevice, ...]: ...
 
     async def authenticate_access_token(
         self, command: AccessTokenAuthenticationCommand
@@ -1002,6 +1090,39 @@ class DeviceTokenService:
             )
         )
 
+    # -- plugin self-revoke (spec 14.2) -------------------------------------------------
+
+    async def revoke_current(
+        self,
+        *,
+        refresh_credential: str,
+        diagnostic_context: DiagnosticContext,
+    ) -> RevokedCurrentTokenFamily:
+        """Revoke the family behind the presented current refresh credential.
+
+        The presented secret is hashed under every keyring key outside the
+        transaction; the locked transition verifies it against the row's
+        anchored key, then revokes the family and every usable token in one
+        commit with the terminal family-revoke audit row. A stale or already
+        revoked credential surfaces the same closed terminal vocabulary the
+        refresh route answers with, so the plugin tombstones either way.
+        """
+        parsed = parse_refresh_credential(refresh_credential)
+        database_now = await self._clock.database_now()
+        return await self._tokens.revoke_current_refresh(
+            RevokeCurrentRefreshCommand(
+                refresh_token_id=parsed.lookup_id,
+                secret_hashes_by_key_id={
+                    candidate_key_id: refresh_secret_hash_of(
+                        master_key=candidate_key, secret=parsed.secret
+                    )
+                    for candidate_key_id, candidate_key in self._keyring.keys_by_id().items()
+                },
+                database_now=database_now,
+                diagnostic_context=diagnostic_context,
+            )
+        )
+
     # -- internal helpers ----------------------------------------------------------------
 
     def _resolve_anchored_key(self, derivation_key_id: str) -> bytes:
@@ -1014,6 +1135,78 @@ class DeviceTokenService:
         if master_key is None:
             raise InternalApplicationError(ErrorCode.INTERNAL_ERROR)
         return master_key
+
+
+# --- the Admin device administration service (spec 14.1, 18.3) --------------------------
+
+
+class DeviceAdministrationService:
+    """The Admin device list and revocation choreography (spec 14.1).
+
+    One invocation of any method resolves the presented Web session at its
+    single ``database_now`` and enforces the fixed
+    ``device_administration_manage`` scope of spec 6.1; the revocation adds
+    the spec 9.4 recent re-authentication window before the locked store
+    transition runs. The display-name confirmation and every state decision
+    live in the transaction, so a mismatched name never revokes anything.
+    """
+
+    def __init__(
+        self,
+        *,
+        tokens: DeviceTokenTransactionPort,
+        session_service: SessionService,
+        clock: AuthenticationClockPort,
+    ) -> None:
+        self._tokens = tokens
+        self._session_service = session_service
+        self._clock = clock
+
+    async def list_devices(self, *, session_secret: str) -> tuple[ListedAdminDevice, ...]:
+        """List the workspace's plugin devices behind the active session."""
+        database_now = await self._clock.database_now()
+        resolved = await self._session_service.resolve(
+            session_secret=session_secret, database_now=database_now
+        )
+        self._require_administration_authority(resolved)
+        return await self._tokens.list_admin_devices(workspace_id=resolved.context.workspace_id)
+
+    async def revoke_device(
+        self,
+        *,
+        device_id: UUID,
+        session_secret: str,
+        device_name_confirmation: str,
+        diagnostic_context: DiagnosticContext,
+    ) -> AdminRevokedDevice:
+        """Revoke one device behind the recent re-authentication gate (14.1)."""
+        database_now = await self._clock.database_now()
+        resolved = await self._session_service.resolve(
+            session_secret=session_secret, database_now=database_now
+        )
+        self._require_administration_authority(resolved)
+        if not is_recently_authenticated(
+            resolved.session,
+            database_now=database_now,
+            policy=self._session_service.session_policy,
+        ):
+            raise AuthenticationError(ErrorCode.RECENT_AUTHENTICATION_REQUIRED)
+        return await self._tokens.admin_revoke_device(
+            AdminRevokeDeviceCommand(
+                device_id=device_id,
+                workspace_id=resolved.context.workspace_id,
+                actor_user_id=resolved.context.user_id,
+                device_name_confirmation=device_name_confirmation,
+                database_now=database_now,
+                diagnostic_context=diagnostic_context,
+            )
+        )
+
+    @staticmethod
+    def _require_administration_authority(resolved: AuthenticatedSession) -> None:
+        """Enforce the fixed administration scope of the active session (6.1)."""
+        if WebScope.DEVICE_ADMINISTRATION_MANAGE not in resolved.context.scopes:
+            raise AuthenticationError(ErrorCode.AUTHORIZATION_SCOPE_DENIED)
 
 
 def _presented_segment(secret: bytes) -> bytes:
@@ -1029,14 +1222,21 @@ def _presented_segment(secret: bytes) -> bytes:
 __all__ = [
     "ACCESS_TOKEN_LIFETIME",
     "ACCESS_TOKEN_LIFETIME_SECONDS",
+    "ADMIN_REVOCATION_REASON",
     "DEVICE_LAST_SEEN_MAXIMUM_UPDATE_INTERVAL",
+    "DEVICE_REVOKED_AUDIT_ACTION",
+    "DEVICE_TOKEN_FAMILY_REVOKED_AUDIT_ACTION",
     "INITIAL_REFRESH_GENERATION",
     "REFRESH_ABSOLUTE_LIFETIME",
     "REFRESH_INACTIVITY_LIFETIME",
     "REFRESH_INACTIVITY_LIFETIME_SECONDS",
+    "SELF_REVOCATION_REASON",
     "AccessTokenAuthenticationCommand",
+    "AdminRevokeDeviceCommand",
+    "AdminRevokedDevice",
     "AuthenticatedAccessToken",
     "CommittedRefreshRotation",
+    "DeviceAdministrationService",
     "DeviceGrantExchangePort",
     "DeviceTokenKeyringPort",
     "DeviceTokenService",
@@ -1045,10 +1245,13 @@ __all__ = [
     "ExchangeProvisioning",
     "ExchangedDeviceCredentials",
     "GrantPollPacer",
+    "ListedAdminDevice",
     "ParsedPollingCredential",
     "RefreshPresentationKind",
     "RefreshRotationCommand",
     "RefreshedDeviceCredentials",
+    "RevokeCurrentRefreshCommand",
+    "RevokedCurrentTokenFamily",
     "StoredDeviceToken",
     "StoredTokenFamily",
     "access_secret_hash_of",

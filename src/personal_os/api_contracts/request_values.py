@@ -39,12 +39,17 @@ class ApiRouteTemplate(StrEnum):
     AUTH_DEVICE_AUTHORIZATION_APPROVE = "/api/auth/device-authorizations/{grant_id}/approve"
     AUTH_DEVICE_AUTHORIZATION_DENY = "/api/auth/device-authorizations/{grant_id}/deny"
     AUTH_DEVICE_AUTHORIZATION_POLL = "/api/auth/device-authorizations/{grant_id}/poll"
+    AUTH_DEVICE_TOKENS_REFRESH = "/api/auth/device-tokens/refresh"
+    AUTH_DEVICE_TOKENS_REVOKE_CURRENT = "/api/auth/device-tokens/revoke-current"
+    ADMIN_DEVICES = "/api/admin/devices"
+    ADMIN_DEVICE_REVOKE = "/api/admin/devices/{device_id}/revoke"
     OPENAPI_DOCUMENT = "/api/openapi.json"
     UNMATCHED = "unmatched"
 
 
 #: Every authentication-bound route template of the closed session/password,
-#: TOTP/recovery and device-authorization route sets (spec 16.1-16.3).
+#: TOTP/recovery, device-authorization, device-token and Admin device route
+#: sets (spec 16.1-16.4).
 #: Responses on these routes carry the authentication cache-suppression and
 #: privacy posture, so the error handlers need the same closed membership the
 #: correlation middleware uses.
@@ -66,6 +71,10 @@ AUTHENTICATION_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset(
         ApiRouteTemplate.AUTH_DEVICE_AUTHORIZATION_APPROVE,
         ApiRouteTemplate.AUTH_DEVICE_AUTHORIZATION_DENY,
         ApiRouteTemplate.AUTH_DEVICE_AUTHORIZATION_POLL,
+        ApiRouteTemplate.AUTH_DEVICE_TOKENS_REFRESH,
+        ApiRouteTemplate.AUTH_DEVICE_TOKENS_REVOKE_CURRENT,
+        ApiRouteTemplate.ADMIN_DEVICES,
+        ApiRouteTemplate.ADMIN_DEVICE_REVOKE,
     }
 )
 

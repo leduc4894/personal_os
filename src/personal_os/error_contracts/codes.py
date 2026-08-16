@@ -89,6 +89,7 @@ class ErrorCode(StrEnum):
     DEVICE_AUTHORIZATION_DENIED = "device_authorization_denied"
     DEVICE_AUTHORIZATION_EXPIRED = "device_authorization_expired"
     DEVICE_AUTHORIZATION_STATE_INVALID = "device_authorization_state_invalid"
+    DEVICE_REVOCATION_CONFIRMATION_INVALID = "device_revocation_confirmation_invalid"
     DEVICE_CREDENTIAL_INVALID = "device_credential_invalid"
     DEVICE_REVOKED = "device_revoked"
     DEVICE_TOKEN_REUSE_DETECTED = "device_token_reuse_detected"
@@ -521,6 +522,12 @@ ERROR_DEFINITIONS: Final[Mapping[ErrorCode, ErrorDefinition]] = MappingProxyType
             category=ErrorCategory.CONFLICT,
             is_retryable=False,
             safe_message="Device authorization state does not accept this action",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.DEVICE_REVOCATION_CONFIRMATION_INVALID: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The device-name confirmation does not match",
             allowed_detail_fields=frozenset(),
         ),
         ErrorCode.DEVICE_CREDENTIAL_INVALID: ErrorDefinition(

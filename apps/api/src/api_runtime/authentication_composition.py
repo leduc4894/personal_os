@@ -45,7 +45,12 @@ from api_runtime.authentication_dependencies import (
 )
 from api_runtime.authentication_settings import AuthenticationSettings
 from personal_os.authentication.contracts import (
+    FIXED_DEVICE_SCOPE,
+    AuthenticatedDeviceContext,
     DeviceAuthorizationGrantState,
+    DeviceTokenFamilyState,
+    DeviceTokenKind,
+    DeviceTokenState,
     TotpCredentialState,
     WebSessionState,
 )
@@ -66,14 +71,29 @@ from personal_os.authentication.device_authorization import (
     resolve_terminal_rejection_code,
 )
 from personal_os.authentication.device_tokens import (
+    ADMIN_REVOCATION_REASON,
+    DEVICE_REVOKED_AUDIT_ACTION,
+    DEVICE_TOKEN_FAMILY_REVOKED_AUDIT_ACTION,
     INITIAL_REFRESH_GENERATION,
+    REFRESH_INACTIVITY_LIFETIME,
+    SELF_REVOCATION_REASON,
     AccessTokenAuthenticationCommand,
+    AdminRevokedDevice,
+    AdminRevokeDeviceCommand,
     AuthenticatedAccessToken,
     CommittedRefreshRotation,
+    DeviceAdministrationService,
     DeviceTokenService,
     ExchangeGrantCommand,
     ExchangeProvisioning,
+    ListedAdminDevice,
+    RefreshPresentationKind,
     RefreshRotationCommand,
+    RevokeCurrentRefreshCommand,
+    RevokedCurrentTokenFamily,
+    StoredDeviceToken,
+    StoredTokenFamily,
+    classify_refresh_presentation,
 )
 from personal_os.authentication.errors import AuthenticationError
 from personal_os.authentication.passwords import (
@@ -193,6 +213,7 @@ class WebAuthenticationRuntime:
     totp_service: TotpService
     device_authorization_service: DeviceAuthorizationService
     device_token_service: DeviceTokenService
+    device_administration_service: DeviceAdministrationService
     verify_csrf_token: Callable[[str, str], bool]
 
 
@@ -364,6 +385,11 @@ def compose_web_authentication(
             crypto=crypto,
             clock=clock,
         ),
+        device_administration_service=DeviceAdministrationService(
+            tokens=device_tokens_store,
+            session_service=session_service,
+            clock=clock,
+        ),
         verify_csrf_token=_build_csrf_verifier(crypto, master_key),
     )
 
@@ -508,12 +534,13 @@ class OfflineRegisteredDeviceRow:
         user_id: UUID,
         device_name: str,
         registered_at: datetime,
+        device_kind: str = "obsidian",
     ) -> None:
         self.device_id = device_id
         self.workspace_id = workspace_id
         self.user_id = user_id
         self.device_name = device_name
-        self.device_kind = "obsidian"
+        self.device_kind = device_kind
         self.status = "active"
         self.registered_at = registered_at
         self.last_seen_at: datetime | None = None
@@ -650,6 +677,19 @@ class OfflineAuthenticationState:
         self.device_family_rows: list[OfflineTokenFamilyRow] = []
         self.device_token_rows: list[OfflineDeviceTokenRow] = []
         self.device_exchange_audit_actions: list[str] = []
+        self.device_revoke_audit_actions: list[str] = []
+        # The system bootstrap device of the canonical baseline: the Admin
+        # device surface excludes it by its kind marker (spec 14.1).
+        self.device_rows.append(
+            OfflineRegisteredDeviceRow(
+                device_id=UUID("00000000-0000-7000-8000-0000000000dd"),
+                workspace_id=_OFFLINE_WORKSPACE_ID,
+                user_id=_OFFLINE_USER_ID,
+                device_name="System bootstrap",
+                registered_at=_OFFLINE_DATABASE_NOW,
+                device_kind="system",
+            )
+        )
         if totp_active:
             self.totp_credential_rows.append(
                 OfflineTotpCredentialRow(
@@ -1605,32 +1645,391 @@ class OfflineDeviceAuthorizationStore:
         )
 
 
-class OfflineDeviceTokenStore:
-    """In-memory token transaction double behind the offline poll route.
+def _stored_token_view(row: OfflineDeviceTokenRow) -> StoredDeviceToken:
+    """Build the typed token view of one offline row."""
+    return StoredDeviceToken(
+        device_token_id=row.device_token_id,
+        token_family_id=row.token_family_id,
+        user_id=row.user_id,
+        workspace_id=row.workspace_id,
+        device_id=row.device_id,
+        token_kind=DeviceTokenKind(row.token_kind),
+        generation=row.generation,
+        state=DeviceTokenState(row.state),
+        predecessor_token_id=row.predecessor_token_id,
+        successor_token_id=row.successor_token_id,
+        rotation_id=row.rotation_id,
+        derivation_key_id=row.derivation_key_id,
+        issued_at=row.issued_at,
+        expires_at=row.expires_at,
+        rotated_at=row.rotated_at,
+        revoked_at=row.revoked_at,
+    )
 
-    The offline graph exists for the byte-deterministic contract document and
-    the route tests; its grant double implements the exchange the poll route
-    needs, while the rotation and access surfaces land with their own routes
-    and stay unreachable here - mirroring the sealed-secret doubles of the
-    offline crypto adapter.
+
+def _stored_family_view(row: OfflineTokenFamilyRow) -> StoredTokenFamily:
+    """Build the typed family view of one offline row."""
+    return StoredTokenFamily(
+        token_family_id=row.token_family_id,
+        user_id=row.user_id,
+        workspace_id=row.workspace_id,
+        device_id=row.device_id,
+        state=DeviceTokenFamilyState(row.state),
+        current_refresh_generation=row.current_refresh_generation,
+        created_at=row.created_at,
+        last_refreshed_at=row.last_refreshed_at,
+        inactivity_expires_at=row.inactivity_expires_at,
+        absolute_expires_at=row.absolute_expires_at,
+        revoked_at=row.revoked_at,
+        revocation_reason=row.revocation_reason,
+    )
+
+
+class OfflineDeviceTokenStore:
+    """In-memory token transaction double mirroring the store contracts.
+
+    One ``asyncio.Lock`` serializes every operation, so the offline graph
+    reproduces the row-lock serialization points of the real store with the
+    real pure domain logic - the exact replay classification, the rotation
+    order and both revoke transitions - and the same closed rejections.
     """
 
     def __init__(self, state: OfflineAuthenticationState) -> None:
         self._state = state
+        self._lock = asyncio.Lock()
 
-    async def resolve_refresh_predecessor(self, *, token_id: UUID) -> None:
-        del token_id
-        raise AssertionError("the offline composition never rotates device tokens")
+    def _token_row(self, token_id: UUID, *, token_kind: str) -> OfflineDeviceTokenRow | None:
+        return next(
+            (
+                row
+                for row in self._state.device_token_rows
+                if row.device_token_id == token_id and row.token_kind == token_kind
+            ),
+            None,
+        )
+
+    def _family_row(self, token_family_id: UUID) -> OfflineTokenFamilyRow | None:
+        return next(
+            (
+                row
+                for row in self._state.device_family_rows
+                if row.token_family_id == token_family_id
+            ),
+            None,
+        )
+
+    def _verify_presented_hash(
+        self, row: OfflineDeviceTokenRow, hashes_by_key_id: Mapping[str, str]
+    ) -> bool:
+        presented = hashes_by_key_id.get(row.derivation_key_id)
+        return presented is not None and hmac.compare_digest(presented, row.secret_hash)
+
+    async def resolve_refresh_predecessor(self, *, token_id: UUID) -> StoredDeviceToken | None:
+        async with self._lock:
+            row = self._token_row(token_id, token_kind="refresh")
+            return None if row is None else _stored_token_view(row)
 
     async def refresh_rotation(self, command: RefreshRotationCommand) -> CommittedRefreshRotation:
-        del command
-        raise AssertionError("the offline composition never rotates device tokens")
+        async with self._lock:
+            predecessor_row = self._token_row(command.predecessor_token_id, token_kind="refresh")
+            if predecessor_row is None or not self._verify_presented_hash(
+                predecessor_row, command.predecessor_secret_hashes_by_key_id
+            ):
+                raise AuthenticationError(ErrorCode.DEVICE_CREDENTIAL_INVALID)
+            family_row = self._family_row(predecessor_row.token_family_id)
+            if family_row is None:
+                raise AuthenticationError(ErrorCode.DEVICE_CREDENTIAL_INVALID)
+
+            successor_row = (
+                self._token_row(predecessor_row.successor_token_id, token_kind="refresh")
+                if predecessor_row.state == "rotated"
+                and predecessor_row.successor_token_id is not None
+                else None
+            )
+            presentation = classify_refresh_presentation(
+                predecessor=_stored_token_view(predecessor_row),
+                successor=None if successor_row is None else _stored_token_view(successor_row),
+                family=_stored_family_view(family_row),
+                presented_rotation_id=command.rotation_id,
+                database_now=command.database_now,
+            )
+            if presentation is RefreshPresentationKind.REUSE_DETECTED:
+                self._revoke_family_for_reuse(family_row, decided_at=command.database_now)
+                raise AuthenticationError(ErrorCode.DEVICE_TOKEN_REUSE_DETECTED)
+            if presentation is RefreshPresentationKind.EXACT_REPLAY:
+                assert successor_row is not None
+                assert predecessor_row.rotated_at is not None
+                successor_access = next(
+                    row
+                    for row in self._state.device_token_rows
+                    if row.token_family_id == family_row.token_family_id
+                    and row.token_kind == "access"
+                    and row.generation == successor_row.generation
+                )
+                return CommittedRefreshRotation(
+                    token_family_id=family_row.token_family_id,
+                    successor_refresh_token_id=successor_row.device_token_id,
+                    successor_access_token_id=successor_access.device_token_id,
+                    successor_generation=successor_row.generation,
+                    derivation_key_id=successor_row.derivation_key_id,
+                    rotated_at=predecessor_row.rotated_at,
+                    access_expires_at=successor_access.expires_at,
+                    refresh_expires_at=successor_row.expires_at,
+                    family_inactivity_expires_at=family_row.inactivity_expires_at,
+                    family_absolute_expires_at=family_row.absolute_expires_at,
+                    database_now=command.database_now,
+                )
+
+            successor_generation = predecessor_row.generation + 1
+            assert family_row.absolute_expires_at is not None
+            refresh_expires_at = min(
+                command.database_now + REFRESH_INACTIVITY_LIFETIME,
+                family_row.absolute_expires_at,
+            )
+            predecessor_row.state = "rotated"
+            predecessor_row.rotated_at = command.database_now
+            for token_kind, token_id, secret_hash, expires_at in (
+                (
+                    "refresh",
+                    command.successor_refresh_token_id,
+                    command.successor_refresh_secret_hash,
+                    refresh_expires_at,
+                ),
+                (
+                    "access",
+                    command.successor_access_token_id,
+                    command.successor_access_secret_hash,
+                    command.access_expires_at,
+                ),
+            ):
+                successor_row_offline = OfflineDeviceTokenRow(
+                    device_token_id=token_id,
+                    token_family_id=family_row.token_family_id,
+                    workspace_id=predecessor_row.workspace_id,
+                    user_id=predecessor_row.user_id,
+                    device_id=predecessor_row.device_id,
+                    token_kind=token_kind,
+                    secret_hash=secret_hash,
+                    expires_at=expires_at,
+                    issued_at=command.database_now,
+                    derivation_key_id=command.derivation_key_id,
+                )
+                successor_row_offline.generation = successor_generation
+                if token_kind == "refresh":
+                    successor_row_offline.predecessor_token_id = predecessor_row.device_token_id
+                    successor_row_offline.rotation_id = command.rotation_id
+                self._state.device_token_rows.append(successor_row_offline)
+            predecessor_row.successor_token_id = command.successor_refresh_token_id
+            family_row.current_refresh_generation = successor_generation
+            family_row.last_refreshed_at = command.database_now
+            family_row.inactivity_expires_at = refresh_expires_at
+            return CommittedRefreshRotation(
+                token_family_id=family_row.token_family_id,
+                successor_refresh_token_id=command.successor_refresh_token_id,
+                successor_access_token_id=command.successor_access_token_id,
+                successor_generation=successor_generation,
+                derivation_key_id=command.derivation_key_id,
+                rotated_at=command.database_now,
+                access_expires_at=command.access_expires_at,
+                refresh_expires_at=refresh_expires_at,
+                family_inactivity_expires_at=refresh_expires_at,
+                family_absolute_expires_at=family_row.absolute_expires_at,
+                database_now=command.database_now,
+            )
+
+    def _revoke_family_for_reuse(
+        self, family_row: OfflineTokenFamilyRow, *, decided_at: datetime
+    ) -> None:
+        """Mirror the confirmed-reuse revocation of the real store (13.5)."""
+        if family_row.state == "revoked":
+            return
+        family_row.state = "revoked"
+        family_row.revoked_at = decided_at
+        family_row.revocation_reason = "token_reuse"
+        for row in self._state.device_token_rows:
+            if row.token_family_id == family_row.token_family_id and row.state == "active":
+                row.state = "revoked"
+                row.revoked_at = decided_at
+        device_row = next(
+            (
+                candidate
+                for candidate in self._state.device_rows
+                if candidate.device_id == family_row.device_id
+            ),
+            None,
+        )
+        if device_row is not None and device_row.status == "active":
+            device_row.status = "revoked"
+            device_row.revoked_at = decided_at
+        self._state.device_revoke_audit_actions.append("authentication.device_token_reuse_detected")
+
+    async def revoke_current_refresh(
+        self, command: RevokeCurrentRefreshCommand
+    ) -> RevokedCurrentTokenFamily:
+        async with self._lock:
+            predecessor_row = self._token_row(command.refresh_token_id, token_kind="refresh")
+            if predecessor_row is None or not self._verify_presented_hash(
+                predecessor_row, command.secret_hashes_by_key_id
+            ):
+                raise AuthenticationError(ErrorCode.DEVICE_CREDENTIAL_INVALID)
+            family_row = self._family_row(predecessor_row.token_family_id)
+            if family_row is None:
+                raise AuthenticationError(ErrorCode.DEVICE_CREDENTIAL_INVALID)
+            if family_row.state == "revoked" or predecessor_row.state == "revoked":
+                raise AuthenticationError(ErrorCode.DEVICE_REVOKED)
+            if (
+                predecessor_row.state == "rotated"
+                or family_row.current_refresh_generation != predecessor_row.generation
+            ):
+                self._revoke_family_for_reuse(family_row, decided_at=command.database_now)
+                raise AuthenticationError(ErrorCode.DEVICE_TOKEN_REUSE_DETECTED)
+            family_row.state = "revoked"
+            family_row.revoked_at = command.database_now
+            family_row.revocation_reason = SELF_REVOCATION_REASON
+            for row in self._state.device_token_rows:
+                if row.token_family_id == family_row.token_family_id and row.state == "active":
+                    row.state = "revoked"
+                    row.revoked_at = command.database_now
+            self._state.device_revoke_audit_actions.append(DEVICE_TOKEN_FAMILY_REVOKED_AUDIT_ACTION)
+            return RevokedCurrentTokenFamily(
+                token_family_id=family_row.token_family_id,
+                device_id=predecessor_row.device_id,
+                revoked_at=command.database_now,
+                database_now=command.database_now,
+            )
+
+    async def admin_revoke_device(self, command: AdminRevokeDeviceCommand) -> AdminRevokedDevice:
+        async with self._lock:
+            device_row = next(
+                (
+                    candidate
+                    for candidate in self._state.device_rows
+                    if candidate.device_id == command.device_id
+                ),
+                None,
+            )
+            if (
+                device_row is None
+                or device_row.device_kind == "system"
+                or device_row.workspace_id != command.workspace_id
+            ):
+                raise AuthenticationError(ErrorCode.DEVICE_CREDENTIAL_INVALID)
+            if device_row.device_name != command.device_name_confirmation:
+                raise AuthenticationError(ErrorCode.DEVICE_REVOCATION_CONFIRMATION_INVALID)
+            if device_row.status == "revoked":
+                assert device_row.revoked_at is not None
+                return AdminRevokedDevice(
+                    device_id=command.device_id,
+                    revoked_at=device_row.revoked_at,
+                    database_now=command.database_now,
+                )
+            device_row.status = "revoked"
+            device_row.revoked_at = command.database_now
+            for family_row in self._state.device_family_rows:
+                if family_row.device_id != command.device_id or family_row.state != "active":
+                    continue
+                family_row.state = "revoked"
+                family_row.revoked_at = command.database_now
+                family_row.revocation_reason = ADMIN_REVOCATION_REASON
+            for token_row in self._state.device_token_rows:
+                if token_row.device_id == command.device_id and token_row.state == "active":
+                    token_row.state = "revoked"
+                    token_row.revoked_at = command.database_now
+            for grant_row in self._state.device_grant_rows:
+                if grant_row.claimed_device_id == command.device_id and grant_row.state in (
+                    DeviceAuthorizationGrantState.PENDING,
+                    DeviceAuthorizationGrantState.APPROVED,
+                ):
+                    grant_row.state = DeviceAuthorizationGrantState.DENIED
+                    grant_row.denied_at = command.database_now
+            self._state.device_revoke_audit_actions.append(DEVICE_REVOKED_AUDIT_ACTION)
+            return AdminRevokedDevice(
+                device_id=command.device_id,
+                revoked_at=command.database_now,
+                database_now=command.database_now,
+            )
+
+    async def list_admin_devices(self, *, workspace_id: UUID) -> tuple[ListedAdminDevice, ...]:
+        async with self._lock:
+            exchanged_grants_by_device = {
+                grant_row.device_id: grant_row
+                for grant_row in self._state.device_grant_rows
+                if grant_row.state is DeviceAuthorizationGrantState.EXCHANGED
+                and grant_row.device_id is not None
+            }
+            rows = sorted(
+                (
+                    candidate
+                    for candidate in self._state.device_rows
+                    if candidate.workspace_id == workspace_id
+                    and candidate.device_kind != "system"
+                    and candidate.device_id in exchanged_grants_by_device
+                ),
+                key=lambda candidate: (candidate.registered_at, candidate.device_id),
+                reverse=True,
+            )
+            return tuple(
+                ListedAdminDevice(
+                    device_id=row.device_id,
+                    device_name=row.device_name,
+                    platform_class=exchanged_grants_by_device[row.device_id].platform_class,
+                    platform_name=exchanged_grants_by_device[row.device_id].platform_name,
+                    plugin_version=exchanged_grants_by_device[row.device_id].plugin_version,
+                    status=row.status,
+                    registered_at=row.registered_at,
+                    last_seen_at=row.last_seen_at,
+                    revoked_at=row.revoked_at,
+                    approved_at=exchanged_grants_by_device[row.device_id].approved_at,
+                    family_absolute_expires_at=max(
+                        (
+                            family.absolute_expires_at
+                            for family in self._state.device_family_rows
+                            if family.device_id == row.device_id
+                            and family.absolute_expires_at is not None
+                        ),
+                        default=None,
+                    ),
+                )
+                for row in rows
+            )
 
     async def authenticate_access_token(
         self, command: AccessTokenAuthenticationCommand
     ) -> AuthenticatedAccessToken:
-        del command
-        raise AssertionError("the offline composition never authenticates device tokens")
+        async with self._lock:
+            token_row = self._token_row(command.token_id, token_kind="access")
+            if token_row is None or not self._verify_presented_hash(
+                token_row, command.secret_hashes_by_key_id
+            ):
+                raise AuthenticationError(ErrorCode.DEVICE_CREDENTIAL_INVALID)
+            family_row = self._family_row(token_row.token_family_id)
+            if token_row.state == "revoked" or (
+                family_row is not None and family_row.state == "revoked"
+            ):
+                raise AuthenticationError(ErrorCode.DEVICE_REVOKED)
+            if token_row.state != "active" or command.database_now >= token_row.expires_at:
+                raise AuthenticationError(ErrorCode.DEVICE_CREDENTIAL_INVALID)
+            if family_row is None or command.database_now >= family_row.absolute_expires_at:
+                raise AuthenticationError(ErrorCode.DEVICE_CREDENTIAL_INVALID)
+            device_row = next(
+                (
+                    candidate
+                    for candidate in self._state.device_rows
+                    if candidate.device_id == token_row.device_id
+                ),
+                None,
+            )
+            if device_row is None or device_row.status == "revoked":
+                raise AuthenticationError(ErrorCode.DEVICE_REVOKED)
+            return AuthenticatedAccessToken(
+                context=AuthenticatedDeviceContext(
+                    user_id=token_row.user_id,
+                    workspace_id=token_row.workspace_id,
+                    device_id=token_row.device_id,
+                    scope=FIXED_DEVICE_SCOPE,
+                ),
+                database_now=command.database_now,
+            )
 
 
 class OfflineDeviceTokenKeyring:
@@ -1727,6 +2126,11 @@ def compose_offline_web_authentication(
             tokens=OfflineDeviceTokenStore(offline_state),
             keyring=OfflineDeviceTokenKeyring(),
             crypto=crypto,
+            clock=offline_clock,
+        ),
+        device_administration_service=DeviceAdministrationService(
+            tokens=OfflineDeviceTokenStore(offline_state),
+            session_service=session_service,
             clock=offline_clock,
         ),
         verify_csrf_token=_build_csrf_verifier(crypto, _OFFLINE_MASTER_KEY),

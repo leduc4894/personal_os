@@ -1,6 +1,161 @@
 {
   "components": {
     "schemas": {
+      "AdminDeviceData": {
+        "additionalProperties": false,
+        "description": "One Admin device-list row: spec-approved fields only (16.4, 18.3).\n\nCarries the display identity, the Desktop/Mobile class, the platform, the\nvalidated plugin version, the closed lifecycle status, the\nregistered/last-seen/revoked moments, the grant approval moment and the\nfamily expiry; never a credential, hash or polling identity.",
+        "properties": {
+          "approved_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved At"
+          },
+          "device_id": {
+            "format": "uuid",
+            "title": "Device Id",
+            "type": "string"
+          },
+          "device_name": {
+            "title": "Device Name",
+            "type": "string"
+          },
+          "family_absolute_expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family Absolute Expires At"
+          },
+          "last_seen_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen At"
+          },
+          "platform_class": {
+            "$ref": "#/components/schemas/DevicePlatformClass"
+          },
+          "platform_name": {
+            "title": "Platform Name",
+            "type": "string"
+          },
+          "plugin_version": {
+            "title": "Plugin Version",
+            "type": "string"
+          },
+          "registered_at": {
+            "format": "date-time",
+            "title": "Registered At",
+            "type": "string"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "revoked"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "device_id",
+          "device_name",
+          "platform_class",
+          "platform_name",
+          "plugin_version",
+          "status",
+          "registered_at"
+        ],
+        "title": "AdminDeviceData",
+        "type": "object"
+      },
+      "AdminDeviceListData": {
+        "additionalProperties": false,
+        "description": "The Admin device list of one workspace (spec 16.4, 18.3).",
+        "properties": {
+          "devices": {
+            "items": {
+              "$ref": "#/components/schemas/AdminDeviceData"
+            },
+            "title": "Devices",
+            "type": "array"
+          }
+        },
+        "required": [
+          "devices"
+        ],
+        "title": "AdminDeviceListData",
+        "type": "object"
+      },
+      "AdminDeviceRevokeData": {
+        "additionalProperties": false,
+        "description": "The committed — or already committed — Admin revocation (spec 14.1).",
+        "properties": {
+          "device_id": {
+            "format": "uuid",
+            "title": "Device Id",
+            "type": "string"
+          },
+          "revoked_at": {
+            "format": "date-time",
+            "title": "Revoked At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "device_id",
+          "revoked_at"
+        ],
+        "title": "AdminDeviceRevokeData",
+        "type": "object"
+      },
+      "AdminDeviceRevokeRequest": {
+        "additionalProperties": false,
+        "description": "The exact display-name confirmation body of one Admin revoke (14.1).",
+        "properties": {
+          "device_name_confirmation": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Device Name Confirmation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "device_name_confirmation"
+        ],
+        "title": "AdminDeviceRevokeRequest",
+        "type": "object"
+      },
       "ApiDetailValue": {
         "anyOf": [
           {
@@ -29,6 +184,96 @@
             "type": "array"
           }
         ]
+      },
+      "ApiEnvelope_AdminDeviceListData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AdminDeviceListData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[AdminDeviceListData]",
+        "type": "object"
+      },
+      "ApiEnvelope_AdminDeviceRevokeData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AdminDeviceRevokeData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[AdminDeviceRevokeData]",
+        "type": "object"
       },
       "ApiEnvelope_DeviceGrantContextData_": {
         "additionalProperties": false,
@@ -210,6 +455,51 @@
         "title": "ApiEnvelope[DeviceGrantExchangeData]",
         "type": "object"
       },
+      "ApiEnvelope_DeviceSelfRevokeData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeviceSelfRevokeData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[DeviceSelfRevokeData]",
+        "type": "object"
+      },
       "ApiEnvelope_LivenessData_": {
         "additionalProperties": false,
         "properties": {
@@ -388,6 +678,51 @@
           "error"
         ],
         "title": "ApiEnvelope[RecoveryLimitedContext]",
+        "type": "object"
+      },
+      "ApiEnvelope_RefreshedDeviceTokenData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RefreshedDeviceTokenData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[RefreshedDeviceTokenData]",
         "type": "object"
       },
       "ApiEnvelope_SessionData_": {
@@ -812,6 +1147,22 @@
         "title": "DevicePlatformClass",
         "type": "string"
       },
+      "DeviceRefreshRequest": {
+        "additionalProperties": false,
+        "description": "The strict rotation body of one refresh presentation (spec 13.4).\n\n``rotation_id`` is the plugin-owned UUID retry identity: one stable\nidentity replays the exact committed successor, a new identity on a\nrotated predecessor is confirmed reuse.",
+        "properties": {
+          "rotation_id": {
+            "format": "uuid",
+            "title": "Rotation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rotation_id"
+        ],
+        "title": "DeviceRefreshRequest",
+        "type": "object"
+      },
       "DeviceScope": {
         "description": "The closed fixed Obsidian device scope (spec 6.2).",
         "enum": [
@@ -819,6 +1170,34 @@
         ],
         "title": "DeviceScope",
         "type": "string"
+      },
+      "DeviceSelfRevokeData": {
+        "additionalProperties": false,
+        "description": "The confirmed terminal revoke of one plugin self-revoke (spec 14.2).",
+        "properties": {
+          "device_id": {
+            "format": "uuid",
+            "title": "Device Id",
+            "type": "string"
+          },
+          "revoked_at": {
+            "format": "date-time",
+            "title": "Revoked At",
+            "type": "string"
+          },
+          "token_family_id": {
+            "format": "uuid",
+            "title": "Token Family Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "device_id",
+          "token_family_id",
+          "revoked_at"
+        ],
+        "title": "DeviceSelfRevokeData",
+        "type": "object"
       },
       "ErrorCode": {
         "enum": [
@@ -891,6 +1270,7 @@
           "device_authorization_denied",
           "device_authorization_expired",
           "device_authorization_state_invalid",
+          "device_revocation_confirmation_invalid",
           "device_credential_invalid",
           "device_revoked",
           "device_token_reuse_detected",
@@ -1084,6 +1464,55 @@
           "absolute_expires_at"
         ],
         "title": "RecoveryLimitedContext",
+        "type": "object"
+      },
+      "RefreshedDeviceTokenData": {
+        "additionalProperties": false,
+        "description": "The successor credentials of one refresh rotation (spec 13.3, 13.4).\n\nThe access and refresh credentials render under the provisioning\ncache-suppression headers; an exact replay re-renders the byte-identical\nsuccessor with its original anchored timestamps and never extends the\nfamily's absolute expiry.",
+        "properties": {
+          "access_credential": {
+            "title": "Access Credential",
+            "type": "string"
+          },
+          "access_expires_at": {
+            "format": "date-time",
+            "title": "Access Expires At",
+            "type": "string"
+          },
+          "family_absolute_expires_at": {
+            "format": "date-time",
+            "title": "Family Absolute Expires At",
+            "type": "string"
+          },
+          "refresh_credential": {
+            "title": "Refresh Credential",
+            "type": "string"
+          },
+          "refresh_expires_at": {
+            "format": "date-time",
+            "title": "Refresh Expires At",
+            "type": "string"
+          },
+          "refresh_generation": {
+            "title": "Refresh Generation",
+            "type": "integer"
+          },
+          "token_family_id": {
+            "format": "uuid",
+            "title": "Token Family Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token_family_id",
+          "refresh_generation",
+          "access_credential",
+          "refresh_credential",
+          "access_expires_at",
+          "refresh_expires_at",
+          "family_absolute_expires_at"
+        ],
+        "title": "RefreshedDeviceTokenData",
         "type": "object"
       },
       "SessionData": {
@@ -1301,6 +1730,11 @@
       }
     },
     "securitySchemes": {
+      "RefreshCredential": {
+        "description": "The rt1 refresh credential of one device token family",
+        "scheme": "bearer",
+        "type": "http"
+      },
       "devicePollingCredential": {
         "description": "The pg1 polling credential of one device-authorization grant",
         "scheme": "bearer",
@@ -1314,6 +1748,66 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/admin/devices": {
+      "get": {
+        "description": "List the workspace's plugin devices for the Admin page (18.3).",
+        "operationId": "listAdminDevices",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_AdminDeviceListData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Devices"
+      }
+    },
+    "/api/admin/devices/{device_id}/revoke": {
+      "post": {
+        "description": "Revoke one device behind the full spec 14.1 guard chain.",
+        "operationId": "revokeAdminDevice",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "device_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Device Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminDeviceRevokeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_AdminDeviceRevokeData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Revoke Device"
+      }
+    },
     "/api/auth/device-authorizations": {
       "post": {
         "description": "Create one grant and render the one-time provisioning payload.",
@@ -1468,6 +1962,64 @@
           }
         ],
         "summary": "Poll Grant"
+      }
+    },
+    "/api/auth/device-tokens/refresh": {
+      "post": {
+        "description": "Rotate the current refresh credential or replay the successor (13.4).\n\nThe refresh Bearer credential in its dedicated scheme is the only\nauthority: session cookies, polling credentials and access\ncredentials close with the registered invalid-credential code. The\npresented rotation identity is the plugin-owned retry identity — one\nstable identity replays the byte-identical committed successor, a new\nidentity on a rotated predecessor commits the confirmed-reuse\nrevocation and surfaces the terminal reuse code.",
+        "operationId": "refreshDeviceTokens",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceRefreshRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_RefreshedDeviceTokenData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "RefreshCredential": []
+          }
+        ],
+        "summary": "Refresh Device Tokens"
+      }
+    },
+    "/api/auth/device-tokens/revoke-current": {
+      "post": {
+        "description": "Self-revoke the family of the presented refresh credential (14.2).\n\nThe current refresh credential authenticates the disconnect: one\nlocked transaction revokes its family and every usable token, and\nthe confirmed response tells the plugin to overwrite its local\ncredential record with the non-secret tombstone. Spec 14.2 names no\nrequest body — the credential itself is the whole authority.",
+        "operationId": "revokeCurrentDeviceToken",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_DeviceSelfRevokeData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "RefreshCredential": []
+          }
+        ],
+        "summary": "Revoke Current Device Token"
       }
     },
     "/api/auth/login": {

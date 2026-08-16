@@ -36,6 +36,7 @@ _APPROVED_HTTP_STATUS_CODES: Final[frozenset[ErrorCode]] = frozenset(
         ErrorCode.DEVICE_AUTHORIZATION_DENIED,
         ErrorCode.DEVICE_AUTHORIZATION_EXPIRED,
         ErrorCode.DEVICE_AUTHORIZATION_STATE_INVALID,
+        ErrorCode.DEVICE_REVOCATION_CONFIRMATION_INVALID,
         ErrorCode.DEVICE_CREDENTIAL_INVALID,
         ErrorCode.DEVICE_REVOKED,
         ErrorCode.DEVICE_TOKEN_REUSE_DETECTED,
@@ -84,6 +85,9 @@ HTTP_ERROR_STATUSES: Final[Mapping[ErrorCode, int]] = MappingProxyType(
             ErrorCode.DEVICE_AUTHORIZATION_DENIED: 403,
             ErrorCode.DEVICE_AUTHORIZATION_EXPIRED: 410,
             ErrorCode.DEVICE_AUTHORIZATION_STATE_INVALID: 409,
+            # The exact device-name confirmation mismatch of the Admin
+            # revoke route (spec 14.1): a closed conflict with no detail.
+            ErrorCode.DEVICE_REVOCATION_CONFIRMATION_INVALID: 409,
             ErrorCode.DEVICE_CREDENTIAL_INVALID: 401,
             ErrorCode.DEVICE_REVOKED: 401,
             ErrorCode.DEVICE_TOKEN_REUSE_DETECTED: 401,

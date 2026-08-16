@@ -1,9 +1,10 @@
 """FastAPI application factory: closed route set, envelopes and error handlers.
 
 The factory composes exactly two health routes plus the five session/password
-routes, six TOTP/recovery routes and five browser device-authorization routes
-of the injected web-authentication runtime and the local/test-only OpenAPI
-document route, registers the four envelope exception handlers,
+routes, six TOTP/recovery routes, seven browser device-authorization and
+device-token routes and two Admin device routes of the injected
+web-authentication runtime and the local/test-only OpenAPI document route,
+registers the four envelope exception handlers,
 strips FastAPI's default validation-error response from the generated
 document (the shared handler emits the canonical error envelope instead), and
 wraps the finished middleware stack with :class:`RequestContextMiddleware`
@@ -34,15 +35,20 @@ from starlette.types import ASGIApp, ExceptionHandler, Lifespan
 from api_runtime import health_routes
 from api_runtime.authentication_composition import WebAuthenticationRuntime
 from api_runtime.authentication_models import (
+    AdminDeviceListData,
+    AdminDeviceRevokeData,
     DeviceGrantContextData,
     DeviceGrantData,
     DeviceGrantDecisionData,
     DeviceGrantExchangeData,
+    DeviceSelfRevokeData,
     RecoveryCodesData,
     RecoveryLimitedContext,
+    RefreshedDeviceTokenData,
     SessionData,
     TotpEnrollmentData,
 )
+from api_runtime.device_admin_routes import create_device_admin_route_endpoints
 from api_runtime.device_authorization_routes import create_device_authorization_route_endpoints
 from api_runtime.request_context import ASGIApp as CorrelationApp
 from api_runtime.request_context import RequestContextMiddleware
@@ -146,6 +152,7 @@ def create_api_application(
     _register_session_routes(app, web_authentication)
     _register_totp_routes(app, web_authentication)
     _register_device_authorization_routes(app, web_authentication)
+    _register_device_admin_routes(app, web_authentication)
     _classify_openapi_route(app)
     _suppress_framework_validation_error_document(app)
     # The pure-ASGI correlation middleware declares read-only ``Mapping``
@@ -316,6 +323,47 @@ def _register_device_authorization_routes(
         methods=["POST"],
         operation_id="pollDeviceAuthorization",
         response_model=ApiEnvelope[DeviceGrantExchangeData],
+    )
+    app.add_api_route(
+        "/api/auth/device-tokens/refresh",
+        endpoints.refresh_device_tokens,
+        methods=["POST"],
+        operation_id="refreshDeviceTokens",
+        response_model=ApiEnvelope[RefreshedDeviceTokenData],
+    )
+    app.add_api_route(
+        "/api/auth/device-tokens/revoke-current",
+        endpoints.revoke_current_device_token,
+        methods=["POST"],
+        operation_id="revokeCurrentDeviceToken",
+        response_model=ApiEnvelope[DeviceSelfRevokeData],
+    )
+
+
+def _register_device_admin_routes(
+    app: FastAPI, web_authentication: WebAuthenticationRuntime
+) -> None:
+    """Register the closed Admin device route set (spec 16.4).
+
+    Each route carries its manually assigned semantic operation id and the
+    envelope response model of its strict payload; the active-session and
+    CSRF dependencies and the exact display-name confirmation live in the
+    endpoint factory and the administration service.
+    """
+    endpoints = create_device_admin_route_endpoints(web_authentication)
+    app.add_api_route(
+        "/api/admin/devices",
+        endpoints.list_devices,
+        methods=["GET"],
+        operation_id="listAdminDevices",
+        response_model=ApiEnvelope[AdminDeviceListData],
+    )
+    app.add_api_route(
+        "/api/admin/devices/{device_id}/revoke",
+        endpoints.revoke_device,
+        methods=["POST"],
+        operation_id="revokeAdminDevice",
+        response_model=ApiEnvelope[AdminDeviceRevokeData],
     )
 
 

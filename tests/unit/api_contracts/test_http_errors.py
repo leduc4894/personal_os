@@ -71,6 +71,9 @@ def test_http_status_map_is_closed_for_the_api_surface() -> None:
         ErrorCode.DEVICE_AUTHORIZATION_DENIED: 403,
         ErrorCode.DEVICE_AUTHORIZATION_EXPIRED: 410,
         ErrorCode.DEVICE_AUTHORIZATION_STATE_INVALID: 409,
+        # The exact device-name confirmation mismatch of the Admin revoke
+        # route (spec 14.1): a closed 409 conflict carrying no detail.
+        ErrorCode.DEVICE_REVOCATION_CONFIRMATION_INVALID: 409,
         ErrorCode.DEVICE_CREDENTIAL_INVALID: 401,
         ErrorCode.DEVICE_REVOKED: 401,
         ErrorCode.DEVICE_TOKEN_REUSE_DETECTED: 401,

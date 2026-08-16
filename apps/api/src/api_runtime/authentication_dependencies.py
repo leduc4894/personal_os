@@ -34,6 +34,7 @@ from urllib.parse import urlsplit
 
 from fastapi import Request
 from fastapi.responses import Response
+from fastapi.security import HTTPBearer
 
 from personal_os.authentication.contracts import AuthenticatedWebContext
 from personal_os.authentication.errors import AuthenticationError
@@ -206,6 +207,47 @@ async def require_polling_credential(request: Request) -> str:
     never read here, so presenting them changes nothing.
     """
     return extract_bearer_credential(request)
+
+
+async def require_refresh_credential(request: Request) -> str:
+    """Resolve the refresh Bearer credential of one rotation or self-revoke.
+
+    The dedicated refresh scheme of spec 16 is the only authority these
+    routes accept: a missing header, a non-Bearer scheme or an empty
+    credential closes with the registered invalid-credential code, and the
+    credential kind itself is verified where the secret is verified — the
+    wrong-kind presentation answers the same closed code.
+    """
+    return extract_bearer_credential(request)
+
+
+async def require_access_credential(request: Request) -> str:
+    """Resolve the access Bearer credential of one device-scoped request.
+
+    The dedicated access scheme of spec 16 is the authority of the
+    access-authenticated device surface; the sync routes of the later
+    children bind it, and the wrong-kind presentation answers the same
+    closed invalid-credential code as a missing one.
+    """
+    return extract_bearer_credential(request)
+
+
+#: The dedicated OpenAPI security scheme of the access Bearer credential
+#: (spec 16). It never auto-rejects so the closed registry code answers every
+#: bad presentation; the Task 11 sync routes bind it.
+ACCESS_BEARER_SCHEME = HTTPBearer(
+    scheme_name="AccessCredential",
+    description="The at1 access credential of one approved device",
+    auto_error=False,
+)
+
+#: The dedicated OpenAPI security scheme of the refresh Bearer credential
+#: (spec 16): the only authority the refresh and self-revoke routes accept.
+REFRESH_BEARER_SCHEME = HTTPBearer(
+    scheme_name="RefreshCredential",
+    description="The rt1 refresh credential of one device token family",
+    auto_error=False,
+)
 
 
 def create_session_route_dependencies(

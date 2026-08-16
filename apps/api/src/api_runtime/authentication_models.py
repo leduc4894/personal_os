@@ -1,4 +1,4 @@
-"""Strict session/password/TOTP/device request and response models (spec 8-11, 16).
+"""Strict session/password/TOTP/device request and response models (spec 8-14, 16).
 
 Every model is frozen and closed for extra fields. Password fields exist only
 on request models, are bounded by the canonical 15-128 code-point policy and
@@ -317,3 +317,102 @@ class DeviceGrantExchangeData(BaseModel):
     refresh_credential: str
     access_expires_at: datetime
     refresh_expires_at: datetime
+
+
+class DeviceRefreshRequest(BaseModel):
+    """The strict rotation body of one refresh presentation (spec 13.4).
+
+    ``rotation_id`` is the plugin-owned UUID retry identity: one stable
+    identity replays the exact committed successor, a new identity on a
+    rotated predecessor is confirmed reuse.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    rotation_id: UUID
+
+
+class RefreshedDeviceTokenData(BaseModel):
+    """The successor credentials of one refresh rotation (spec 13.3, 13.4).
+
+    The access and refresh credentials render under the provisioning
+    cache-suppression headers; an exact replay re-renders the byte-identical
+    successor with its original anchored timestamps and never extends the
+    family's absolute expiry.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    token_family_id: UUID
+    refresh_generation: int
+    access_credential: str
+    refresh_credential: str
+    access_expires_at: datetime
+    refresh_expires_at: datetime
+    family_absolute_expires_at: datetime
+
+
+class DeviceSelfRevokeData(BaseModel):
+    """The confirmed terminal revoke of one plugin self-revoke (spec 14.2)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    device_id: UUID
+    token_family_id: UUID
+    revoked_at: datetime
+
+
+#: The closed device lifecycle status vocabulary of the Admin list (18.3).
+DeviceLifecycleStatus = Literal["active", "revoked"]
+
+
+class AdminDeviceData(BaseModel):
+    """One Admin device-list row: spec-approved fields only (16.4, 18.3).
+
+    Carries the display identity, the Desktop/Mobile class, the platform, the
+    validated plugin version, the closed lifecycle status, the
+    registered/last-seen/revoked moments, the grant approval moment and the
+    family expiry; never a credential, hash or polling identity.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    device_id: UUID
+    device_name: str
+    platform_class: DevicePlatformClass
+    platform_name: str
+    plugin_version: str
+    status: DeviceLifecycleStatus
+    registered_at: datetime
+    last_seen_at: datetime | None = None
+    revoked_at: datetime | None = None
+    approved_at: datetime | None = None
+    family_absolute_expires_at: datetime | None = None
+
+
+class AdminDeviceListData(BaseModel):
+    """The Admin device list of one workspace (spec 16.4, 18.3)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    devices: tuple[AdminDeviceData, ...]
+
+
+class AdminDeviceRevokeRequest(BaseModel):
+    """The exact display-name confirmation body of one Admin revoke (14.1)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    device_name_confirmation: str = Field(
+        min_length=DEVICE_NAME_MINIMUM_LENGTH_CHARACTERS,
+        max_length=DEVICE_NAME_MAXIMUM_LENGTH_CHARACTERS,
+    )
+
+
+class AdminDeviceRevokeData(BaseModel):
+    """The committed — or already committed — Admin revocation (spec 14.1)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    device_id: UUID
+    revoked_at: datetime
