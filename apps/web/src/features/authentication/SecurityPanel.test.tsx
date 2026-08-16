@@ -27,6 +27,7 @@ import {
   enrollmentStateInvalidResponse,
   installMockCsrfCookie,
   mockApi,
+  rateLimitedResponse,
   recoveryCodesResponse,
   recentAuthenticationRequiredResponse,
   sessionResponse,
@@ -195,5 +196,37 @@ describe("SecurityPanel", () => {
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("Disabling two-factor authentication failed. Try again.");
     expect(alert).toHaveFocus();
+  });
+
+  it("shows bounded retry guidance when the disable throttle is active", async () => {
+    const user = userEvent.setup();
+    server.use(mockApi("post", "/api/auth/totp/enrollments", () => enrollmentStateInvalidResponse()));
+    server.use(mockApi("delete", "/api/auth/totp", () => rateLimitedResponse(540)));
+    render(<SecurityPanel client={createTestClient()} sessionStore={createAuthenticationSessionStore()} />);
+    await screen.findByText("Two-factor authentication is active.");
+    await user.type(screen.getByLabelText("Disable password"), "correct horse battery staple!");
+    await user.type(screen.getByLabelText("Disable TOTP code"), "123456");
+    await user.click(screen.getByRole("button", { name: "Disable two-factor authentication" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Too many attempts. Try again in 9 minutes.");
+    expect(alert.textContent).not.toContain("540");
+    expect(alert.textContent).not.toContain("Simulated");
+  });
+
+  it("shows bounded retry guidance when the recovery-code regeneration throttle is active", async () => {
+    const user = userEvent.setup();
+    server.use(mockApi("post", "/api/auth/totp/enrollments", () => enrollmentStateInvalidResponse()));
+    server.use(
+      mockApi("post", "/api/auth/totp/recovery-codes/regenerate", () => rateLimitedResponse(65)),
+    );
+    render(<SecurityPanel client={createTestClient()} sessionStore={createAuthenticationSessionStore()} />);
+    await screen.findByText("Two-factor authentication is active.");
+    await user.type(screen.getByLabelText("Regenerate password"), "correct horse battery staple!");
+    await user.type(screen.getByLabelText("Regenerate TOTP code"), "123456");
+    await user.click(screen.getByRole("button", { name: "Regenerate recovery codes" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Too many attempts. Try again in 2 minutes.");
+    expect(alert.textContent).not.toContain("65");
+    expect(alert.textContent).not.toContain("Simulated");
   });
 });

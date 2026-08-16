@@ -10,6 +10,7 @@ import type {
   TotpEnrollmentOfferData,
 } from "../../api/authentication-client";
 import { createBrowserAuthenticationClient } from "../../api/authentication-client";
+import { rateLimitedRetryMessage } from "./rate-limit-copy";
 import { browserSessionStore, type AuthenticationSessionStore } from "./session-store";
 import { TotpEnrollmentOffer } from "./TotpChallenge";
 
@@ -133,7 +134,13 @@ export function SecurityPanel({
       password: disableFields.password,
       totpCode: disableFields.totpCode,
     });
-    if (!result.ok || result.data.state !== "active") {
+    if (!result.ok) {
+      setErrorMessage(
+        rateLimitedRetryMessage(result.error) ?? "Disabling two-factor authentication failed. Try again.",
+      );
+      return;
+    }
+    if (result.data.state !== "active") {
       setErrorMessage("Disabling two-factor authentication failed. Try again.");
       return;
     }
@@ -149,7 +156,9 @@ export function SecurityPanel({
       totpCode: regenerateFields.totpCode,
     });
     if (!result.ok) {
-      setErrorMessage("Regenerating recovery codes failed. Try again.");
+      setErrorMessage(
+        rateLimitedRetryMessage(result.error) ?? "Regenerating recovery codes failed. Try again.",
+      );
       return;
     }
     setRegenerateFields({ password: "", totpCode: "" });

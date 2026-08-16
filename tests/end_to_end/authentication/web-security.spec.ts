@@ -83,8 +83,23 @@ function jsonResponse(body: string, status = 200, headers: Record<string, string
   };
 }
 
-async function stubUnauthenticatedSession(page: Page): Promise<void> {
-  await page.route("**/api/auth/session", jsonResponse(errorEnvelopeBody("authentication_required"), 401));
+/**
+ * A session route that answers unauthenticated until the login journey
+ * succeeds, then active — the /admin/devices landing page re-probes the
+ * session on mount, so its mock must reflect the signed-in state.
+ */
+async function stubSessionActivatingOnSignIn(page: Page): Promise<() => void> {
+  let isSignedIn = false;
+  await page.route("**/api/auth/session", async (route) => {
+    await route.fulfill({
+      status: isSignedIn ? 200 : 401,
+      headers: { "content-type": "application/json" },
+      body: isSignedIn ? envelopeBody(activeSession()) : errorEnvelopeBody("authentication_required"),
+    });
+  });
+  return () => {
+    isSignedIn = true;
+  };
 }
 
 async function stubActiveSession(page: Page): Promise<void> {
@@ -95,8 +110,9 @@ test("login offers skippable TOTP enrollment with a local QR, then reveals one-t
   const csrfHeaders: (string | undefined)[] = [];
   let enrollmentActionCalls = 0;
 
-  await stubUnauthenticatedSession(page);
+  const markSignedIn = await stubSessionActivatingOnSignIn(page);
   await page.route("**/api/auth/login", async (route) => {
+    markSignedIn();
     await route.fulfill({
       status: 200,
       headers: envelope(null, { "set-cookie": [...SESSION_COOKIES, ...CSRF_COOKIE].join("\n") }),
@@ -169,8 +185,9 @@ test("login offers skippable TOTP enrollment with a local QR, then reveals one-t
 test("the first-login offer can be skipped and dismissed", async ({ page }) => {
   const enrollmentBodies: string[] = [];
 
-  await stubUnauthenticatedSession(page);
+  const markSignedIn = await stubSessionActivatingOnSignIn(page);
   await page.route("**/api/auth/login", async (route) => {
+    markSignedIn();
     await route.fulfill({
       status: 200,
       headers: envelope(null, { "set-cookie": [...SESSION_COOKIES, ...CSRF_COOKIE].join("\n") }),
@@ -201,7 +218,7 @@ test("the first-login offer can be skipped and dismissed", async ({ page }) => {
 });
 
 test("a pending_totp login completes through the TOTP challenge", async ({ page }) => {
-  await stubUnauthenticatedSession(page);
+  const markSignedIn = await stubSessionActivatingOnSignIn(page);
   await page.route("**/api/auth/login", async (route) => {
     await route.fulfill({
       status: 200,
@@ -211,6 +228,7 @@ test("a pending_totp login completes through the TOTP challenge", async ({ page 
   });
   await page.route("**/api/auth/totp/verify", async (route) => {
     expect(route.request().postData()).toBe('{"code":"654321"}');
+    markSignedIn();
     await route.fulfill({
       status: 200,
       headers: envelope(null, { "set-cookie": SESSION_COOKIES.join("\n") }),
