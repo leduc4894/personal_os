@@ -459,7 +459,15 @@ class DeviceAuthorizationStore:
         command: ExchangeGrantCommand,
         decided_at: datetime,
     ) -> ExchangeProvisioning:
-        """Run the nine-step exchange of one approved grant (spec 12)."""
+        """Run the nine-step exchange of one approved grant (spec 12).
+
+        Step 1 verifies expiry against ``expires_at`` first: an approved
+        grant polled after its 600-second window is closed without any
+        write and keeps its approved state — expiry is derived, exactly as
+        the pending branch treats it.
+        """
+        if command.database_now >= row.expires_at:
+            raise AuthenticationError(ErrorCode.DEVICE_AUTHORIZATION_EXPIRED)
         user_row = (
             await connection.execute(
                 sa.select(users.c.status).where(users.c.user_id == row.approved_by_user_id)

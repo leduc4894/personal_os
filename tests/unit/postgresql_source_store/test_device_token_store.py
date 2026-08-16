@@ -432,6 +432,25 @@ async def test_expired_pending_poll_closes_with_the_expired_code() -> None:
 
 
 @pytest.mark.asyncio
+async def test_expired_approved_grant_refuses_the_first_exchange() -> None:
+    expired_row = _grant_row(state="approved")
+    expired_row.expires_at = _DATABASE_NOW - timedelta(seconds=1)
+    engine = ScriptedEngine([ScriptedResult(rows=(expired_row,))])
+    store = DeviceAuthorizationStore(engine)  # type: ignore[arg-type]
+    with pytest.raises(AuthenticationError) as raised:
+        await store.poll_exchange(_exchange_command())
+    assert raised.value.error_code is ErrorCode.DEVICE_AUTHORIZATION_EXPIRED
+    # The closed expiry precedes every write: no recheck, no rows, no audit,
+    # and the grant keeps its approved state with unset anchors.
+    connection = engine.connections[0]
+    assert _statements_of(connection, sa.Insert, "devices") == []
+    assert _statements_of(connection, sa.Insert, "device_token_families") == []
+    assert _statements_of(connection, sa.Insert, "device_tokens") == []
+    assert _statements_of(connection, sa.Insert, "audit_events") == []
+    assert _statements_of(connection, sa.Update, "device_authorization_grants") == []
+
+
+@pytest.mark.asyncio
 async def test_unknown_polling_secret_fails_closed() -> None:
     engine = ScriptedEngine([ScriptedResult()])
     store = DeviceAuthorizationStore(engine)  # type: ignore[arg-type]

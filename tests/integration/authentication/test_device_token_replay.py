@@ -49,6 +49,7 @@ from personal_os.authentication.errors import AuthenticationError
 from personal_os.authentication.sessions import DUMMY_LOGIN_PHC_HASH, SessionService
 from personal_os.error_contracts.codes import ErrorCode
 from postgresql_source_store.device_authorization_store import (
+    DEVICE_AUTHORIZATION_APPROVED_AUDIT_ACTION,
     DEVICE_TOKEN_FAMILY_CREATED_AUDIT_ACTION,
     DeviceAuthorizationStore,
 )
@@ -501,6 +502,55 @@ async def test_exchange_replay_is_terminated_after_first_rotation(
     with pytest.raises(AuthenticationError) as raised:
         await harness.poll(created.grant_id, created.polling_secret)
     assert raised.value.error_code is ErrorCode.DEVICE_AUTHORIZATION_STATE_INVALID
+
+
+@pytest.mark.asyncio
+async def test_expired_approved_grant_refuses_the_exchange_without_rows(
+    harness: TokenHarness,
+) -> None:
+    account = await harness.seed_account()
+    created = await harness.create_approved_grant(account)
+    harness.clock.database_now_value += timedelta(minutes=11)
+
+    with pytest.raises(AuthenticationError) as raised:
+        await harness.poll(created.grant_id, created.polling_secret)
+    assert raised.value.error_code is ErrorCode.DEVICE_AUTHORIZATION_EXPIRED
+
+    # The grant keeps its approved state with unset anchors, and no device,
+    # family, token or audit row exists for the workspace the exchange would
+    # have used.
+    grant = await harness.grant_row(created.grant_id)
+    assert grant is not None
+    assert grant.state == "approved"
+    assert grant.exchanged_at is None
+    assert grant.device_id is None
+    assert grant.token_family_id is None
+    assert grant.initial_access_token_id is None
+    assert grant.initial_refresh_token_id is None
+    async with harness.engine.connect() as connection:
+        device_count = await connection.scalar(
+            sa.select(sa.func.count())
+            .select_from(devices)
+            .where(devices.c.workspace_id == account.workspace_id)
+        )
+        family_count = await connection.scalar(
+            sa.select(sa.func.count())
+            .select_from(device_token_families)
+            .where(device_token_families.c.workspace_id == account.workspace_id)
+        )
+        token_count = await connection.scalar(
+            sa.select(sa.func.count())
+            .select_from(device_tokens)
+            .where(device_tokens.c.workspace_id == account.workspace_id)
+        )
+    assert device_count == 0
+    assert family_count == 0
+    assert token_count == 0
+    # Only the approval's own audit row targets the grant; the refused
+    # exchange writes none.
+    assert [row.action for row in await harness.audit_rows(created.grant_id)] == [
+        DEVICE_AUTHORIZATION_APPROVED_AUDIT_ACTION
+    ]
 
 
 # --- refresh exact replay ---------------------------------------------------------------
