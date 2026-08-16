@@ -3,6 +3,8 @@ name = "api-runtime"
 version = "0.1.0"
 requires-python = ">=3.14,<3.15"
 dependencies = [
+  "argon2-cffi==25.1.0",
+  "cryptography==49.0.0",
   "fastapi==0.139.2",
   "knowledge-core==0.1.0",
   "postgresql-source-store==0.1.0",

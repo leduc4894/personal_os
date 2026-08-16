@@ -136,10 +136,14 @@ class ApplicationError(Exception):
 
 
 class ConfigurationError(ApplicationError):
-    """Configuration shape or unknown-key failures."""
+    """Configuration shape, unknown-key or invalid-secret-value failures."""
 
     allowed_codes = frozenset(
-        {ErrorCode.CONFIGURATION_INVALID, ErrorCode.CONFIGURATION_UNKNOWN_KEY}
+        {
+            ErrorCode.CONFIGURATION_INVALID,
+            ErrorCode.CONFIGURATION_UNKNOWN_KEY,
+            ErrorCode.CONFIGURATION_SECRET_INVALID,
+        }
     )
 
 

@@ -86,6 +86,25 @@ API_SERVER_ENVIRONMENT_NAMES: Final[frozenset[str]] = frozenset(
     }
 )
 
+#: Authentication fragment: the non-secret Web/session configuration surface.
+#: It names the allowed origin, trusted-proxy CIDRs, plugin version bounds and
+#: the versioned key IDs/file names resolved beneath ``KNOWLEDGE_SECRET_ROOT``;
+#: key material itself never appears as an environment value, only in exact
+#: secret files, so no plaintext key variable belongs to this fragment.
+AUTHENTICATION_ENVIRONMENT_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "KNOWLEDGE_ENVIRONMENT",
+        "KNOWLEDGE_SECRET_ROOT",
+        "KNOWLEDGE_AUTH_ALLOWED_ORIGIN",
+        "KNOWLEDGE_AUTH_TRUSTED_PROXY_CIDRS",
+        "KNOWLEDGE_AUTH_CURRENT_KEY_ID",
+        "KNOWLEDGE_AUTH_CURRENT_KEY_FILE",
+        "KNOWLEDGE_AUTH_PREVIOUS_KEYS",
+        "KNOWLEDGE_AUTH_MIN_PLUGIN_VERSION",
+        "KNOWLEDGE_AUTH_MAX_PLUGIN_VERSION",
+    }
+)
+
 #: Repository-wide union of every approved ``KNOWLEDGE_*`` name. A loader treats
 #: any prefixed name outside this set as terminal ``configuration_unknown_key``.
 KNOWN_KNOWLEDGE_ENVIRONMENT_NAMES: Final[frozenset[str]] = frozenset(
@@ -95,4 +114,5 @@ KNOWN_KNOWLEDGE_ENVIRONMENT_NAMES: Final[frozenset[str]] = frozenset(
     | TEMPORAL_ENVIRONMENT_NAMES
     | CANONICAL_RECOVERY_ENVIRONMENT_NAMES
     | API_SERVER_ENVIRONMENT_NAMES
+    | AUTHENTICATION_ENVIRONMENT_NAMES
 )

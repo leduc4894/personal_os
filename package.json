@@ -14,5 +14,8 @@
     "lint": "pnpm --recursive --if-present run lint",
     "test": "pnpm --recursive --if-present run test",
     "type-check": "pnpm --recursive --if-present run type-check"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1"
   }
 }

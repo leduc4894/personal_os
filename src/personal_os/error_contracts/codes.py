@@ -22,6 +22,7 @@ class ErrorCategory(StrEnum):
 class ErrorCode(StrEnum):
     CONFIGURATION_INVALID = "configuration_invalid"
     CONFIGURATION_UNKNOWN_KEY = "configuration_unknown_key"
+    CONFIGURATION_SECRET_INVALID = "configuration_secret_invalid"
     SECRET_FILE_MISSING = "secret_file_missing"
     SECRET_FILE_OUTSIDE_ROOT = "secret_file_outside_root"
     SECRET_FILE_INVALID_TYPE = "secret_file_invalid_type"
@@ -101,6 +102,12 @@ ERROR_DEFINITIONS: Final[Mapping[ErrorCode, ErrorDefinition]] = MappingProxyType
             is_retryable=False,
             safe_message="Runtime configuration contains an unsupported key",
             allowed_detail_fields=frozenset({"count"}),
+        ),
+        ErrorCode.CONFIGURATION_SECRET_INVALID: ErrorDefinition(
+            category=ErrorCategory.CONFIGURATION,
+            is_retryable=False,
+            safe_message="A configured secret value is invalid",
+            allowed_detail_fields=frozenset({"reason"}),
         ),
         ErrorCode.SECRET_FILE_MISSING: ErrorDefinition(
             category=ErrorCategory.CONFIGURATION,
