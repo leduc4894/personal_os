@@ -1,12 +1,16 @@
 """FastAPI application factory: closed route set, envelopes and error handlers.
 
-The factory composes exactly two health routes plus the local/test-only
+The factory composes exactly two health routes plus the five session/password
+routes of the injected web-authentication runtime and the local/test-only
 OpenAPI document route, registers the four envelope exception handlers, and
 wraps the finished middleware stack with :class:`RequestContextMiddleware`
 from the outside so request correlation owns every exchange, including the
 catch-all internal error response. No CORS, GZip, session or authentication
-middleware is added, and the request id in every envelope is read from the
-bound diagnostic context rather than minted here.
+middleware is added — cookies, the exact-origin gate and the CSRF checks live
+in the runtime dependencies of the session routes — and the request id in
+every envelope is read from the bound diagnostic context rather than minted
+here. Authentication-route failures carry ``Cache-Control: no-store`` exactly
+like the route's own success and rejection responses.
 """
 
 from __future__ import annotations
@@ -25,9 +29,13 @@ from starlette.routing import request_response
 from starlette.types import ASGIApp, ExceptionHandler, Lifespan
 
 from api_runtime import health_routes
+from api_runtime.authentication_composition import WebAuthenticationRuntime
+from api_runtime.authentication_models import SessionData
 from api_runtime.request_context import ASGIApp as CorrelationApp
 from api_runtime.request_context import RequestContextMiddleware
+from api_runtime.session_routes import create_session_route_endpoints
 from personal_os.api_contracts import (
+    AUTHENTICATION_ROUTE_TEMPLATE_VALUES,
     HTTP_ERROR_STATUSES,
     ApiEnvelope,
     ApiRouteTemplate,
@@ -36,6 +44,7 @@ from personal_os.api_contracts import (
     LivenessData,
     ReadinessData,
     error_envelope,
+    is_authentication_route_template,
 )
 from personal_os.diagnostics.context import current_diagnostic_context
 from personal_os.diagnostics.events import DiagnosticEventSink, SafeToken
@@ -50,6 +59,11 @@ LOCAL_ENVIRONMENTS: Final[frozenset[RuntimeEnvironment]] = frozenset(
 
 _MALFORMED_JSON_ERROR_TYPE: Final = "json_invalid"
 _MAX_VALIDATION_FIELD_NAMES: Final = 8
+
+#: Header every authentication-route response carries, success or failure
+#: alike (spec 16.1); the error handlers apply it through the same closed
+#: route-template membership the correlation middleware uses.
+_NO_STORE_HEADERS: Final[Mapping[str, str]] = MappingProxyType({"cache-control": "no-store"})
 
 #: Closed status-to-code table for framework ``HTTPException`` responses. The
 #: two dependency statuses (503) are absent on purpose: a bare status cannot
@@ -72,6 +86,7 @@ def create_api_application(
     *,
     environment: RuntimeEnvironment,
     readiness_probe: CanonicalDatabaseReadinessProbe,
+    web_authentication: WebAuthenticationRuntime,
     event_sink: DiagnosticEventSink | None = None,
     lifespan: Lifespan[FastAPI] | None = None,
 ) -> FastAPI:
@@ -105,6 +120,7 @@ def create_api_application(
         operation_id="getApiReadiness",
         response_model=ApiEnvelope[ReadinessData],
     )
+    _register_session_routes(app, web_authentication)
     _classify_openapi_route(app)
     # The pure-ASGI correlation middleware declares read-only ``Mapping``
     # message aliases; every ASGI message mapping is mutable in practice, so
@@ -127,6 +143,55 @@ def register_api_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(HTTPException, _as_http_handler(_handle_http_exception))
     app.add_exception_handler(ApplicationError, _as_http_handler(_handle_application_error))
     app.add_exception_handler(Exception, _handle_unexpected_exception)
+
+
+def _register_session_routes(
+    app: FastAPI, web_authentication: WebAuthenticationRuntime
+) -> None:
+    """Register the closed session/password route set (spec 16.1).
+
+    Each route carries its manually assigned semantic operation id and the
+    envelope response model of its strict session payload; the cookie, origin
+    and CSRF behavior lives entirely in the runtime dependencies bound inside
+    the endpoint factory.
+    """
+    endpoints = create_session_route_endpoints(web_authentication)
+    session_envelope_model = ApiEnvelope[SessionData]
+    app.add_api_route(
+        "/api/auth/login",
+        endpoints.login,
+        methods=["POST"],
+        operation_id="login",
+        response_model=session_envelope_model,
+    )
+    app.add_api_route(
+        "/api/auth/session",
+        endpoints.get_session,
+        methods=["GET"],
+        operation_id="getSession",
+        response_model=session_envelope_model,
+    )
+    app.add_api_route(
+        "/api/auth/logout",
+        endpoints.logout,
+        methods=["POST"],
+        operation_id="logout",
+        response_model=session_envelope_model,
+    )
+    app.add_api_route(
+        "/api/auth/reauthenticate",
+        endpoints.reauthenticate,
+        methods=["POST"],
+        operation_id="reauthenticate",
+        response_model=session_envelope_model,
+    )
+    app.add_api_route(
+        "/api/auth/password",
+        endpoints.change_password,
+        methods=["PUT"],
+        operation_id="changePassword",
+        response_model=session_envelope_model,
+    )
 
 
 def _as_http_handler(
@@ -220,10 +285,38 @@ def _internal_fallback_response(request: Request) -> JSONResponse:
 
 
 def _error_response(request: Request, error: ApplicationError) -> JSONResponse:
-    """Render one error envelope with its closed-table status."""
+    """Render one error envelope with its closed-table status.
+
+    Authentication-route failures carry ``Cache-Control: no-store`` like every
+    other authentication response (spec 16.1); the route is classified through
+    the assigned route template or, when a dependency rejected the request
+    before the endpoint published it, through the matched route path mapped
+    against the same closed template vocabulary.
+    """
     envelope = error_envelope(request_id=_request_id(), error=error)
     status_code = HTTP_ERROR_STATUSES[error.error_code]
-    return JSONResponse(content=envelope.model_dump(mode="json"), status_code=status_code)
+    return JSONResponse(
+        content=envelope.model_dump(mode="json"),
+        status_code=status_code,
+        headers=_authentication_error_headers(request),
+    )
+
+
+def _authentication_error_headers(request: Request) -> Mapping[str, str]:
+    """Return the no-store headers when the rejected route is an auth route."""
+    template = request.scope.get("route_template")
+    if not isinstance(template, ApiRouteTemplate):
+        matched_path = getattr(request.scope.get("route"), "path", None)
+        if (
+            isinstance(matched_path, str)
+            and matched_path in AUTHENTICATION_ROUTE_TEMPLATE_VALUES
+        ):
+            template = ApiRouteTemplate(matched_path)
+        else:
+            template = None
+    if isinstance(template, ApiRouteTemplate) and is_authentication_route_template(template):
+        return _NO_STORE_HEADERS
+    return {}
 
 
 def _request_id() -> UUID:

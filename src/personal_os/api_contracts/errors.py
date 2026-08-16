@@ -24,6 +24,22 @@ _APPROVED_HTTP_STATUS_CODES: Final[frozenset[ErrorCode]] = frozenset(
         ErrorCode.DATABASE_CONNECTION_UNAVAILABLE,
         ErrorCode.DATABASE_SCHEMA_CONTRACT_INVALID,
         ErrorCode.INTERNAL_ERROR,
+        ErrorCode.AUTHENTICATION_REQUIRED,
+        ErrorCode.AUTHENTICATION_FAILED,
+        ErrorCode.AUTHENTICATION_RATE_LIMITED,
+        ErrorCode.RECENT_AUTHENTICATION_REQUIRED,
+        ErrorCode.CSRF_VALIDATION_FAILED,
+        ErrorCode.AUTHORIZATION_SCOPE_DENIED,
+        ErrorCode.TOTP_ENROLLMENT_STATE_INVALID,
+        ErrorCode.DEVICE_AUTHORIZATION_PENDING,
+        ErrorCode.DEVICE_AUTHORIZATION_SLOW_DOWN,
+        ErrorCode.DEVICE_AUTHORIZATION_DENIED,
+        ErrorCode.DEVICE_AUTHORIZATION_EXPIRED,
+        ErrorCode.DEVICE_AUTHORIZATION_STATE_INVALID,
+        ErrorCode.DEVICE_CREDENTIAL_INVALID,
+        ErrorCode.DEVICE_REVOKED,
+        ErrorCode.DEVICE_TOKEN_REUSE_DETECTED,
+        ErrorCode.PLUGIN_VERSION_UNSUPPORTED,
     }
 )
 
@@ -31,7 +47,7 @@ _APPROVED_HTTP_STATUS_CODES: Final[frozenset[ErrorCode]] = frozenset(
 def _build_closed_http_status_map(
     status_by_code: Mapping[ErrorCode, int],
 ) -> dict[ErrorCode, int]:
-    """Validate one status-table draft against the approved seven-code set.
+    """Validate one status-table draft against the approved code set.
 
     Rejects drafts that map a code outside the approved table and drafts that
     miss an approved code, so the public map is closed by construction.
@@ -55,6 +71,23 @@ HTTP_ERROR_STATUSES: Final[Mapping[ErrorCode, int]] = MappingProxyType(
             ErrorCode.DATABASE_CONNECTION_UNAVAILABLE: 503,
             ErrorCode.DATABASE_SCHEMA_CONTRACT_INVALID: 503,
             ErrorCode.INTERNAL_ERROR: 500,
+            # The authentication block of the design error contract (spec 17).
+            ErrorCode.AUTHENTICATION_REQUIRED: 401,
+            ErrorCode.AUTHENTICATION_FAILED: 401,
+            ErrorCode.AUTHENTICATION_RATE_LIMITED: 429,
+            ErrorCode.RECENT_AUTHENTICATION_REQUIRED: 403,
+            ErrorCode.CSRF_VALIDATION_FAILED: 403,
+            ErrorCode.AUTHORIZATION_SCOPE_DENIED: 403,
+            ErrorCode.TOTP_ENROLLMENT_STATE_INVALID: 409,
+            ErrorCode.DEVICE_AUTHORIZATION_PENDING: 409,
+            ErrorCode.DEVICE_AUTHORIZATION_SLOW_DOWN: 429,
+            ErrorCode.DEVICE_AUTHORIZATION_DENIED: 403,
+            ErrorCode.DEVICE_AUTHORIZATION_EXPIRED: 410,
+            ErrorCode.DEVICE_AUTHORIZATION_STATE_INVALID: 409,
+            ErrorCode.DEVICE_CREDENTIAL_INVALID: 401,
+            ErrorCode.DEVICE_REVOKED: 401,
+            ErrorCode.DEVICE_TOKEN_REUSE_DETECTED: 401,
+            ErrorCode.PLUGIN_VERSION_UNSUPPORTED: 426,
         }
     )
 )

@@ -24,21 +24,31 @@ from personal_os.package_metadata import distribution_version
 
 SNAPSHOT_PATH = Path(__file__).resolve().parents[3] / "packages" / "api-client" / "openapi.json"
 
-#: The closed route set with its canonical operation ids, keyed by path.
-HEALTH_OPERATION_IDS: dict[str, str] = {
-    "/api/health/live": "getApiLiveness",
-    "/api/health/ready": "getApiReadiness",
+#: The closed route set with its canonical operation ids and methods.
+ROUTE_OPERATION_IDS: dict[str, dict[str, str]] = {
+    "/api/health/live": {"get": "getApiLiveness"},
+    "/api/health/ready": {"get": "getApiReadiness"},
+    "/api/auth/login": {"post": "login"},
+    "/api/auth/session": {"get": "getSession"},
+    "/api/auth/logout": {"post": "logout"},
+    "/api/auth/reauthenticate": {"post": "reauthenticate"},
+    "/api/auth/password": {"put": "changePassword"},
 }
 
 #: Component schema names emitted for every frozen ``extra="forbid"`` model.
 STRICT_MODEL_SCHEMA_NAMES: tuple[str, ...] = (
     "ApiEnvelope_LivenessData_",
     "ApiEnvelope_ReadinessData_",
+    "ApiEnvelope_SessionData_",
     "ApiErrorBody",
     "ApiWarning",
     "LivenessData",
+    "LoginRequest",
+    "PasswordChangeRequest",
     "ReadinessData",
     "ReadinessChecks",
+    "ReauthenticateRequest",
+    "SessionData",
 )
 
 _URL_PATTERN = re.compile(r"\w+://")
@@ -92,11 +102,12 @@ def test_document_header_and_route_set_are_pinned(snapshot_document: dict[str, A
     }
     assert "servers" not in snapshot_document
     paths = snapshot_document["paths"]
-    assert set(paths) == set(HEALTH_OPERATION_IDS)
-    for path, operation_id in HEALTH_OPERATION_IDS.items():
+    assert set(paths) == set(ROUTE_OPERATION_IDS)
+    for path, expected_operations in ROUTE_OPERATION_IDS.items():
         operations = paths[path]
-        assert set(operations) == {"get"}, path
-        assert operations["get"]["operationId"] == operation_id, path
+        assert set(operations) == set(expected_operations), path
+        for method, operation_id in expected_operations.items():
+            assert operations[method]["operationId"] == operation_id, (path, method)
 
 
 def test_every_response_references_a_named_component_schema(

@@ -1,13 +1,17 @@
 """API server runner: snapshot loading, diagnostics, lifespan and Uvicorn.
 
 This module is the serve composition root. :func:`run_server` captures the
-process environment exactly once at entry, loads the runtime, API and database
-settings plus the secret-file password, configures structured diagnostics,
-builds the database lifecycle and the FastAPI application (wiring the lifecycle
-into the application lifespan so the engine starts on startup and is disposed
-on shutdown), then runs Uvicorn in single-process mode with the approved
-flags: no server header, no proxy headers, no access log, no reload and
-exactly one worker.
+process environment exactly once at entry, loads the runtime, API, database
+and authentication settings plus the secret-file password, loads the
+versioned authentication keyring from its exact secret files (refusing with
+the configuration exit before any socket exists when a key file is missing or
+malformed), configures structured diagnostics, builds the database lifecycle,
+the web-authentication runtime and the FastAPI application (wiring the
+lifecycle into the application lifespan so the engine starts on startup, the
+keyring-reference verification refuses startup when PostgreSQL references a
+key ID the keyring omits, and the engine is disposed on shutdown), then runs
+Uvicorn in single-process mode with the approved flags: no server header, no
+proxy headers, no access log, no reload and exactly one worker.
 
 Exit codes follow the process contract: configuration and secret failures
 exit ``78`` with one safe emergency record, unexpected startup failures exit
@@ -30,6 +34,12 @@ import uvicorn
 from fastapi import FastAPI
 
 from api_runtime.application import create_api_application
+from api_runtime.authentication_composition import (
+    compose_web_authentication,
+    verify_keyring_covers_required_key_ids,
+)
+from api_runtime.authentication_crypto import load_authentication_keyring
+from api_runtime.authentication_settings import load_authentication_settings
 from api_runtime.database_lifecycle import DatabaseRuntimeLifecycle
 from api_runtime.server_settings import load_api_server_settings
 from personal_os.diagnostics.context import bind_diagnostic_context, create_diagnostic_context
@@ -41,6 +51,7 @@ from personal_os.diagnostics.logging import (
 from personal_os.error_contracts.exceptions import ApplicationError
 from personal_os.runtime_configuration.loading import load_runtime_settings
 from personal_os.runtime_configuration.models import ServiceName
+from postgresql_source_store.engine import create_source_store_engine
 from postgresql_source_store.settings import (
     load_database_runtime_settings,
     read_database_runtime_password,
@@ -81,6 +92,10 @@ def run_server(
             api_settings = load_api_server_settings(environ=environment_snapshot)
             database_settings = load_database_runtime_settings(environ=environment_snapshot)
             password = read_database_runtime_password(database_settings)
+            authentication_settings = load_authentication_settings(
+                environ=environment_snapshot
+            )
+            keyring = load_authentication_keyring(authentication_settings)
         except ApplicationError as error:
             emit_emergency_application_error(ServiceName.API, context, error)
             return _EXIT_CONFIGURATION_FAILURE
@@ -90,11 +105,29 @@ def run_server(
 
         try:
             logger = configure_diagnostics(runtime_settings)
-            lifecycle = DatabaseRuntimeLifecycle(database_settings, password)
+            # The engine opens no connection here: pools connect lazily, so the
+            # same engine can serve the readiness probe, the authentication
+            # transactions and the pre-bind keyring verification while the
+            # lifecycle keeps owning its exactly-once disposal.
+            engine = create_source_store_engine(database_settings, password)
+            lifecycle = DatabaseRuntimeLifecycle(
+                database_settings,
+                password,
+                engine_factory=lambda _settings, _password: engine,
+            )
+            web_authentication = compose_web_authentication(
+                settings=authentication_settings,
+                keyring=keyring,
+                engine=engine,
+            )
 
             @asynccontextmanager
             async def database_lifespan(_app: FastAPI) -> AsyncIterator[None]:
+                # Uvicorn runs the lifespan startup before binding the
+                # listening socket, so the keyring-reference refusal of spec
+                # 20.1 fails startup without ever exposing the socket.
                 await lifecycle.start()
+                await verify_keyring_covers_required_key_ids(engine=engine, keyring=keyring)
                 try:
                     yield
                 finally:
@@ -103,6 +136,7 @@ def run_server(
             application = create_api_application(
                 environment=api_settings.environment,
                 readiness_probe=lifecycle,
+                web_authentication=web_authentication,
                 event_sink=logger,
                 lifespan=database_lifespan,
             )

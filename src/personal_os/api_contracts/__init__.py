@@ -26,11 +26,16 @@ from personal_os.api_contracts.health import (
     ReadinessData,
 )
 from personal_os.api_contracts.request_values import (
+    AUTHENTICATION_ROUTE_TEMPLATE_VALUES,
+    AUTHENTICATION_ROUTE_TEMPLATES,
     ApiHttpMethod,
     ApiRouteTemplate,
+    is_authentication_route_template,
 )
 
 __all__ = [
+    "AUTHENTICATION_ROUTE_TEMPLATES",
+    "AUTHENTICATION_ROUTE_TEMPLATE_VALUES",
     "HTTP_ERROR_STATUSES",
     "ApiDetailValue",
     "ApiEnvelope",
@@ -44,5 +49,6 @@ __all__ = [
     "ReadinessChecks",
     "ReadinessData",
     "error_envelope",
+    "is_authentication_route_template",
     "success_envelope",
 ]

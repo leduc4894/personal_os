@@ -4,6 +4,106 @@
  */
 
 export type paths = {
+    readonly "/api/auth/login": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Login
+         * @description Run one password login and issue the session and CSRF bindings.
+         */
+        readonly post: operations["login"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/auth/logout": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Logout
+         * @description Revoke the session row, then clear both browser cookies.
+         */
+        readonly post: operations["logout"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/auth/password": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        /**
+         * Change Password
+         * @description Change the password, revoke other sessions and rotate this one.
+         */
+        readonly put: operations["changePassword"];
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/auth/reauthenticate": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Reauthenticate
+         * @description Verify the password again and rotate the session binding (spec 9.4).
+         */
+        readonly post: operations["reauthenticate"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/auth/session": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Get Session
+         * @description Return the authenticated session view of the presented binding.
+         */
+        readonly get: operations["getSession"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/health/live": {
         readonly parameters: {
             readonly query?: never;
@@ -76,6 +176,21 @@ export type components = {
              */
             readonly warnings: readonly components["schemas"]["ApiWarning"][];
         };
+        /** ApiEnvelope[SessionData] */
+        readonly ApiEnvelope_SessionData_: {
+            readonly data: components["schemas"]["SessionData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
         /**
          * ApiErrorBody
          * @description The failure body: registry code, safe message, retryability and details.
@@ -114,6 +229,11 @@ export type components = {
          * @enum {string}
          */
         readonly ErrorCode: "configuration_invalid" | "configuration_unknown_key" | "configuration_secret_invalid" | "secret_file_missing" | "secret_file_outside_root" | "secret_file_invalid_type" | "secret_file_insecure_permissions" | "secret_file_too_large" | "secret_file_invalid_encoding" | "secret_file_empty" | "diagnostic_context_invalid" | "diagnostic_payload_rejected" | "internal_error" | "database_migration_configuration_invalid" | "database_connection_unavailable" | "database_migration_busy" | "database_schema_contract_invalid" | "database_destructive_downgrade_refused" | "object_storage_configuration_invalid" | "object_storage_input_invalid" | "object_storage_busy" | "object_storage_unavailable" | "object_storage_access_denied" | "object_storage_contract_invalid" | "object_storage_object_missing" | "object_storage_integrity_failed" | "object_storage_metadata_conflict" | "source_publish_input_invalid" | "source_not_found" | "source_already_exists" | "source_state_invalid" | "source_version_conflict" | "source_idempotency_mismatch" | "source_event_identity_mismatch" | "source_verified_receipt_stale" | "source_content_object_conflict" | "source_concurrency_busy" | "source_concurrency_invariant_failed" | "source_commit_outcome_unknown" | "projection_dispatch_unavailable" | "projection_intent_contract_invalid" | "identity_bootstrap_input_invalid" | "identity_bootstrap_state_conflict" | "canonical_read_state_invalid" | "canonical_recovery_environment_refused" | "canonical_recovery_configuration_invalid" | "canonical_recovery_snapshot_busy" | "canonical_recovery_bundle_exists" | "canonical_recovery_bundle_invalid" | "canonical_recovery_target_not_empty" | "canonical_recovery_dependency_unavailable" | "canonical_recovery_integrity_failed" | "canonical_recovery_restore_failed" | "api_request_malformed" | "api_request_validation_failed" | "api_route_not_found" | "api_method_not_allowed" | "authentication_required" | "authentication_failed" | "authentication_rate_limited" | "recent_authentication_required" | "csrf_validation_failed" | "authorization_scope_denied" | "totp_enrollment_state_invalid" | "device_authorization_pending" | "device_authorization_slow_down" | "device_authorization_denied" | "device_authorization_expired" | "device_authorization_state_invalid" | "device_credential_invalid" | "device_revoked" | "device_token_reuse_detected" | "plugin_version_unsupported";
+        /** HTTPValidationError */
+        readonly HTTPValidationError: {
+            /** Detail */
+            readonly detail?: readonly components["schemas"]["ValidationError"][];
+        };
         /**
          * LivenessData
          * @description Process-liveness success data; it implies no I/O by construction.
@@ -131,6 +251,24 @@ export type components = {
              * @constant
              */
             readonly status: "live";
+        };
+        /**
+         * LoginRequest
+         * @description The strict username/password login body (spec 8.2).
+         */
+        readonly LoginRequest: {
+            /** Password */
+            readonly password: string;
+            /** Username */
+            readonly username: string;
+        };
+        /**
+         * PasswordChangeRequest
+         * @description The new-password body of one password change (spec 9.5).
+         */
+        readonly PasswordChangeRequest: {
+            /** New Password */
+            readonly new_password: string;
         };
         /**
          * ReadinessChecks
@@ -163,6 +301,69 @@ export type components = {
              */
             readonly status: "ready";
         };
+        /**
+         * ReauthenticateRequest
+         * @description The password body of one recent re-authentication attempt (spec 9.4).
+         */
+        readonly ReauthenticateRequest: {
+            /** Password */
+            readonly password: string;
+        };
+        /**
+         * SessionData
+         * @description The public view of one Web session (spec 9.2).
+         *
+         *     ``state`` covers the closed session-state vocabulary including ``revoked``
+         *     (the logout response); ``authenticated`` is true only for an ``active``
+         *     session, and the granted scopes stay empty in every non-active state so a
+         *     client learns from the login response alone whether a TOTP or recovery
+         *     challenge remains before any route authorizes.
+         */
+        readonly SessionData: {
+            /**
+             * Absolute Expires At
+             * Format: date-time
+             */
+            readonly absolute_expires_at: string;
+            /** Authenticated */
+            readonly authenticated: boolean;
+            /**
+             * Idle Expires At
+             * Format: date-time
+             */
+            readonly idle_expires_at: string;
+            /** Scopes */
+            readonly scopes: readonly components["schemas"]["WebScope"][];
+            readonly state: components["schemas"]["WebSessionState"];
+        };
+        /** ValidationError */
+        readonly ValidationError: {
+            /** Context */
+            readonly ctx?: Record<string, never>;
+            /** Input */
+            readonly input?: unknown;
+            /** Location */
+            readonly loc: readonly (string | number)[];
+            /** Message */
+            readonly msg: string;
+            /** Error Type */
+            readonly type: string;
+        };
+        /**
+         * WebScope
+         * @description The fixed Phase 2 Web administration scopes (spec 6.1).
+         *
+         *     A Web session always carries the full surface; the client never chooses,
+         *     widens or customizes these values.
+         * @enum {string}
+         */
+        readonly WebScope: "web_security_manage" | "device_authorization_approve" | "device_administration_manage";
+        /**
+         * WebSessionState
+         * @description Closed Web session states (spec 9.2).
+         * @enum {string}
+         */
+        readonly WebSessionState: "pending_totp" | "active" | "recovery_limited" | "revoked";
     };
     responses: never;
     parameters: never;
@@ -172,6 +373,145 @@ export type components = {
 };
 export type $defs = Record<string, never>;
 export interface operations {
+    readonly login: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["LoginRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_SessionData_"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly logout: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_SessionData_"];
+                };
+            };
+        };
+    };
+    readonly changePassword: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["PasswordChangeRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_SessionData_"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly reauthenticate: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ReauthenticateRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_SessionData_"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readonly getSession: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_SessionData_"];
+                };
+            };
+        };
+    };
     readonly getApiLiveness: {
         readonly parameters: {
             readonly query?: never;

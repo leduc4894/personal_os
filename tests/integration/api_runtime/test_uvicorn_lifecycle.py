@@ -23,6 +23,7 @@ import httpx
 import pytest
 import uvicorn
 from api_runtime.application import create_api_application
+from api_runtime.authentication_composition import compose_offline_web_authentication
 from fastapi import FastAPI
 
 from personal_os.runtime_configuration.models import RuntimeEnvironment
@@ -65,6 +66,7 @@ async def test_server_serves_liveness_and_stops_lifecycle_once() -> None:
     application = create_api_application(
         environment=RuntimeEnvironment.TEST,
         readiness_probe=lifecycle,
+        web_authentication=compose_offline_web_authentication(),
         lifespan=database_lifespan,
     )
     server = uvicorn.Server(

@@ -108,9 +108,22 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
     assert set(document["paths"]) == {
         "/api/health/live",
         "/api/health/ready",
+        "/api/auth/login",
+        "/api/auth/session",
+        "/api/auth/logout",
+        "/api/auth/reauthenticate",
+        "/api/auth/password",
     }
     assert document["paths"]["/api/health/live"]["get"]["operationId"] == "getApiLiveness"
     assert document["paths"]["/api/health/ready"]["get"]["operationId"] == "getApiReadiness"
+    assert document["paths"]["/api/auth/login"]["post"]["operationId"] == "login"
+    assert document["paths"]["/api/auth/session"]["get"]["operationId"] == "getSession"
+    assert document["paths"]["/api/auth/logout"]["post"]["operationId"] == "logout"
+    assert (
+        document["paths"]["/api/auth/reauthenticate"]["post"]["operationId"]
+        == "reauthenticate"
+    )
+    assert document["paths"]["/api/auth/password"]["put"]["operationId"] == "changePassword"
 
 
 def test_export_never_reads_environment_secret_or_network(

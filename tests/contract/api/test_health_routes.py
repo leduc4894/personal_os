@@ -20,6 +20,7 @@ from uuid import UUID
 import httpx
 import pytest
 from api_runtime.application import create_api_application
+from api_runtime.authentication_composition import compose_offline_web_authentication
 from fastapi import FastAPI
 
 from personal_os.api_contracts import CanonicalDatabaseReadinessProbe
@@ -65,6 +66,7 @@ def create_test_app(probe: CanonicalDatabaseReadinessProbe) -> FastAPI:
     return create_api_application(
         environment=RuntimeEnvironment.TEST,
         readiness_probe=probe,
+        web_authentication=compose_offline_web_authentication(),
     )
 
 

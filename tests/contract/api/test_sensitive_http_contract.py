@@ -10,11 +10,12 @@ emits. The corpus also pins the exposure posture: no ``server`` version
 header, no CORS header, no Swagger/ReDoc HTML and no production OpenAPI
 document body.
 
-Body-accepting routes cannot exist on the closed composed route set, so the
-malformed-JSON and validation cases follow the ``test_error_envelopes``
-convention: a test-only application carrying the production exception
-handlers and the production request correlation middleware with a recording
-event sink. Every other case runs against the real composed application from
+The malformed-JSON and validation cases keep following the
+``test_error_envelopes`` convention — a test-only application carrying the
+production exception handlers and the production request correlation
+middleware with a recording event sink — so they exercise the shared handler
+layer directly instead of one particular composed body route. Every other
+case runs against the real composed application from
 ``create_api_application``.
 """
 
@@ -28,6 +29,7 @@ from typing import Any
 import httpx
 import pytest
 from api_runtime.application import create_api_application, register_api_exception_handlers
+from api_runtime.authentication_composition import compose_offline_web_authentication
 from api_runtime.request_context import RequestContextMiddleware
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -117,7 +119,12 @@ def create_composed_app(
     sink: RecordingEventSink,
     environment: RuntimeEnvironment = RuntimeEnvironment.TEST,
 ) -> FastAPI:
-    return create_api_application(environment=environment, readiness_probe=probe, event_sink=sink)
+    return create_api_application(
+        environment=environment,
+        readiness_probe=probe,
+        web_authentication=compose_offline_web_authentication(),
+        event_sink=sink,
+    )
 
 
 def create_body_test_app(sink: RecordingEventSink) -> FastAPI:

@@ -120,6 +120,51 @@
         "title": "ApiEnvelope[ReadinessData]",
         "type": "object"
       },
+      "ApiEnvelope_SessionData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[SessionData]",
+        "type": "object"
+      },
       "ApiErrorBody": {
         "additionalProperties": false,
         "description": "The failure body: registry code, safe message, retryability and details.",
@@ -262,6 +307,19 @@
         "title": "ErrorCode",
         "type": "string"
       },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
       "LivenessData": {
         "additionalProperties": false,
         "description": "Process-liveness success data; it implies no I/O by construction.",
@@ -280,6 +338,46 @@
           }
         },
         "title": "LivenessData",
+        "type": "object"
+      },
+      "LoginRequest": {
+        "additionalProperties": false,
+        "description": "The strict username/password login body (spec 8.2).",
+        "properties": {
+          "password": {
+            "maxLength": 128,
+            "minLength": 15,
+            "title": "Password",
+            "type": "string"
+          },
+          "username": {
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "title": "LoginRequest",
+        "type": "object"
+      },
+      "PasswordChangeRequest": {
+        "additionalProperties": false,
+        "description": "The new-password body of one password change (spec 9.5).",
+        "properties": {
+          "new_password": {
+            "maxLength": 128,
+            "minLength": 15,
+            "title": "New Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "new_password"
+        ],
+        "title": "PasswordChangeRequest",
         "type": "object"
       },
       "ReadinessChecks": {
@@ -318,6 +416,123 @@
         },
         "title": "ReadinessData",
         "type": "object"
+      },
+      "ReauthenticateRequest": {
+        "additionalProperties": false,
+        "description": "The password body of one recent re-authentication attempt (spec 9.4).",
+        "properties": {
+          "password": {
+            "maxLength": 128,
+            "minLength": 15,
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "password"
+        ],
+        "title": "ReauthenticateRequest",
+        "type": "object"
+      },
+      "SessionData": {
+        "additionalProperties": false,
+        "description": "The public view of one Web session (spec 9.2).\n\n``state`` covers the closed session-state vocabulary including ``revoked``\n(the logout response); ``authenticated`` is true only for an ``active``\nsession, and the granted scopes stay empty in every non-active state so a\nclient learns from the login response alone whether a TOTP or recovery\nchallenge remains before any route authorizes.",
+        "properties": {
+          "absolute_expires_at": {
+            "format": "date-time",
+            "title": "Absolute Expires At",
+            "type": "string"
+          },
+          "authenticated": {
+            "title": "Authenticated",
+            "type": "boolean"
+          },
+          "idle_expires_at": {
+            "format": "date-time",
+            "title": "Idle Expires At",
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "$ref": "#/components/schemas/WebScope"
+            },
+            "title": "Scopes",
+            "type": "array"
+          },
+          "state": {
+            "$ref": "#/components/schemas/WebSessionState"
+          }
+        },
+        "required": [
+          "state",
+          "authenticated",
+          "scopes",
+          "idle_expires_at",
+          "absolute_expires_at"
+        ],
+        "title": "SessionData",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "WebScope": {
+        "description": "The fixed Phase 2 Web administration scopes (spec 6.1).\n\nA Web session always carries the full surface; the client never chooses,\nwidens or customizes these values.",
+        "enum": [
+          "web_security_manage",
+          "device_authorization_approve",
+          "device_administration_manage"
+        ],
+        "title": "WebScope",
+        "type": "string"
+      },
+      "WebSessionState": {
+        "description": "Closed Web session states (spec 9.2).",
+        "enum": [
+          "pending_totp",
+          "active",
+          "recovery_limited",
+          "revoked"
+        ],
+        "title": "WebSessionState",
+        "type": "string"
       }
     }
   },
@@ -327,6 +542,161 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/auth/login": {
+      "post": {
+        "description": "Run one password login and issue the session and CSRF bindings.",
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_SessionData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Login"
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "description": "Revoke the session row, then clear both browser cookies.",
+        "operationId": "logout",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_SessionData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Logout"
+      }
+    },
+    "/api/auth/password": {
+      "put": {
+        "description": "Change the password, revoke other sessions and rotate this one.",
+        "operationId": "changePassword",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordChangeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_SessionData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Change Password"
+      }
+    },
+    "/api/auth/reauthenticate": {
+      "post": {
+        "description": "Verify the password again and rotate the session binding (spec 9.4).",
+        "operationId": "reauthenticate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReauthenticateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_SessionData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reauthenticate"
+      }
+    },
+    "/api/auth/session": {
+      "get": {
+        "description": "Return the authenticated session view of the presented binding.",
+        "operationId": "getSession",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_SessionData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Session"
+      }
+    },
     "/api/health/live": {
       "get": {
         "description": "Report process liveness: a constant payload, no dependency consulted.",

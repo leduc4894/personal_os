@@ -1,0 +1,261 @@
+"""FastAPI session dependencies, cookie contract and CSRF triple check.
+
+This module is the only place the session and CSRF cookies are read or
+written. The cookie contract picks the production ``__Host-`` Secure names
+against a real allowed origin and the explicit loopback local-development
+names without ``Secure`` only when the runtime environment is local or test
+AND the allowed origin is a plain-HTTP loopback origin (spec 9.1). The origin
+guard enforces exact string equality against the configured allowed origin on
+every session/password request (spec 9.3); a missing or merely similar origin
+closes the request with the registered CSRF failure code. The session
+dependency resolves the opaque cookie secret through the session service and
+attaches the typed authenticated request context to ``request.state``; the
+CSRF dependency adds the three further checks spec 9.3 names: the CSRF cookie,
+an exactly equal ``X-CSRF-Token`` header, and a hash match against the stored
+session binding. Response helpers render the approved cookie attributes for
+issue, rotation and logout clearing — routes never build cookie headers.
+
+The runtime is consumed structurally through :class:`WebAuthenticationRuntimePort`
+so this adapter layer stays independent of the composition module that builds
+real and offline runtimes.
+"""
+
+from __future__ import annotations
+
+import hmac
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import Final, Literal, Protocol
+from urllib.parse import urlsplit
+
+from fastapi import Request
+from fastapi.responses import Response
+
+from personal_os.authentication.contracts import AuthenticatedWebContext
+from personal_os.authentication.errors import AuthenticationError
+from personal_os.authentication.sessions import SessionService, StoredWebSession
+from personal_os.error_contracts.codes import ErrorCode
+from personal_os.runtime_configuration.models import RuntimeEnvironment
+
+#: Production cookie names (spec 9.1): browser-session cookies, no Domain.
+SESSION_COOKIE_NAME: Final[str] = "__Host-admin_session"
+CSRF_COOKIE_NAME: Final[str] = "__Host-admin_csrf"
+
+#: Explicit loopback local-development names without the Secure attribute.
+LOCAL_SESSION_COOKIE_NAME: Final[str] = "admin_session_local"
+LOCAL_CSRF_COOKIE_NAME: Final[str] = "admin_csrf_local"
+
+#: The single header the CSRF double-submit check compares (spec 9.3).
+CSRF_HEADER_NAME: Final[str] = "x-csrf-token"
+
+#: Cookie attributes shared by both bindings (spec 9.1, 9.3).
+_COOKIE_PATH: Final[str] = "/"
+_COOKIE_SAMESITE: Final[Literal["lax"]] = "lax"
+
+#: The environments allowed to activate the loopback local cookie mode.
+_LOCAL_COOKIE_ENVIRONMENTS: Final[frozenset[RuntimeEnvironment]] = frozenset(
+    {RuntimeEnvironment.LOCAL, RuntimeEnvironment.TEST}
+)
+
+#: Loopback host spellings of the explicit local-development origin.
+_LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset({"localhost", "127.0.0.1", "::1"})
+
+#: Closed fallback when the ASGI server reports no socket peer: it is only
+#: HMACed throttle material and never rendered or logged.
+_UNKNOWN_SOURCE_ADDRESS: Final[str] = "unknown-source"
+
+
+class WebAuthenticationRuntimePort(Protocol):
+    """The structural slice of one composed authentication runtime.
+
+    The composition module owns the concrete runtime dataclass; the
+    dependencies here need exactly the allowed origin, the cookie contract,
+    the session service and the stored-hash CSRF verifier.
+    """
+
+    @property
+    def allowed_origin(self) -> str: ...
+
+    @property
+    def cookie_contract(self) -> SessionCookieContract: ...
+
+    @property
+    def session_service(self) -> SessionService: ...
+
+    @property
+    def verify_csrf_token(self) -> Callable[[str, str], bool]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class SessionCookieContract:
+    """The frozen cookie names and flags of one composed runtime."""
+
+    session_cookie_name: str
+    csrf_cookie_name: str
+    is_secure: bool
+    is_local_loopback: bool
+
+
+def build_session_cookie_contract(
+    allowed_origin: str, environment: RuntimeEnvironment
+) -> SessionCookieContract:
+    """Select the cookie contract for one allowed origin and environment.
+
+    The loopback local-development mode requires both a plain-HTTP loopback
+    origin and a local/test runtime environment; every other combination —
+    including loopback origins in staging and production — keeps the
+    production ``__Host-`` names with the Secure attribute.
+    """
+    parsed = urlsplit(allowed_origin)
+    host = parsed.hostname or ""
+    is_local_loopback = (
+        parsed.scheme == "http"
+        and host in _LOOPBACK_HOSTS
+        and environment in _LOCAL_COOKIE_ENVIRONMENTS
+    )
+    if is_local_loopback:
+        return SessionCookieContract(
+            session_cookie_name=LOCAL_SESSION_COOKIE_NAME,
+            csrf_cookie_name=LOCAL_CSRF_COOKIE_NAME,
+            is_secure=False,
+            is_local_loopback=True,
+        )
+    return SessionCookieContract(
+        session_cookie_name=SESSION_COOKIE_NAME,
+        csrf_cookie_name=CSRF_COOKIE_NAME,
+        is_secure=True,
+        is_local_loopback=False,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedWebRequest:
+    """The typed authenticated context one route handler consumes.
+
+    ``session_secret`` is the presented cookie value a handler needs to drive
+    service calls (rotation, revocation, password change); its ``repr`` is
+    suppressed so no diagnostic sink or error rendering can echo it.
+    """
+
+    context: AuthenticatedWebContext
+    session: StoredWebSession
+    session_secret: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRouteDependencies:
+    """The three FastAPI dependency callables of the session/password routes."""
+
+    require_allowed_origin: Callable[[Request], Awaitable[None]]
+    require_session_request: Callable[[Request], Awaitable[AuthenticatedWebRequest]]
+    require_csrf_protected_request: Callable[[Request], Awaitable[AuthenticatedWebRequest]]
+
+
+def client_source_address(request: Request) -> str:
+    """Return the immediate socket peer address of one request.
+
+    Spec 20.3 makes the socket peer the default resolver output before any
+    trusted-proxy handling; the value only ever feeds the HMACed throttle
+    material and is never logged.
+    """
+    if request.client is None:
+        return _UNKNOWN_SOURCE_ADDRESS
+    return request.client.host
+
+
+def create_session_route_dependencies(
+    runtime: WebAuthenticationRuntimePort,
+) -> SessionRouteDependencies:
+    """Build the origin, session and CSRF dependencies over one runtime."""
+
+    async def require_allowed_origin(request: Request) -> None:
+        """Reject any request whose origin is not exactly the allowed one."""
+        origin = request.headers.get("origin")
+        if origin is None or not hmac.compare_digest(origin, runtime.allowed_origin):
+            raise AuthenticationError(ErrorCode.CSRF_VALIDATION_FAILED)
+
+    async def _resolve_authenticated_session(request: Request) -> AuthenticatedWebRequest:
+        """Resolve the session cookie to the typed authenticated request."""
+        session_secret = request.cookies.get(runtime.cookie_contract.session_cookie_name)
+        if session_secret is None:
+            raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
+        resolved = await runtime.session_service.authenticate(session_secret=session_secret)
+        authenticated_request = AuthenticatedWebRequest(
+            context=resolved.context,
+            session=resolved.session,
+            session_secret=session_secret,
+        )
+        request.state.authentication = authenticated_request
+        return authenticated_request
+
+    async def require_session_request(request: Request) -> AuthenticatedWebRequest:
+        """Exact-origin gate plus the authenticated session resolution."""
+        await require_allowed_origin(request)
+        return await _resolve_authenticated_session(request)
+
+    async def require_csrf_protected_request(
+        request: Request,
+    ) -> AuthenticatedWebRequest:
+        """Origin, session cookie, CSRF pair and stored-hash match (spec 9.3)."""
+        await require_allowed_origin(request)
+        authenticated_request = await _resolve_authenticated_session(request)
+        csrf_cookie = request.cookies.get(runtime.cookie_contract.csrf_cookie_name)
+        csrf_header = request.headers.get(CSRF_HEADER_NAME)
+        if csrf_cookie is None or csrf_header is None:
+            raise AuthenticationError(ErrorCode.CSRF_VALIDATION_FAILED)
+        if not hmac.compare_digest(csrf_cookie, csrf_header):
+            raise AuthenticationError(ErrorCode.CSRF_VALIDATION_FAILED)
+        stored_hash = authenticated_request.session.csrf_secret_hash
+        if not runtime.verify_csrf_token(csrf_cookie, stored_hash):
+            raise AuthenticationError(ErrorCode.CSRF_VALIDATION_FAILED)
+        return authenticated_request
+
+    return SessionRouteDependencies(
+        require_allowed_origin=require_allowed_origin,
+        require_session_request=require_session_request,
+        require_csrf_protected_request=require_csrf_protected_request,
+    )
+
+
+def apply_session_cookies(
+    response: Response,
+    contract: SessionCookieContract,
+    *,
+    session_secret: str,
+    csrf_secret: str,
+) -> None:
+    """Issue one session binding: HttpOnly session cookie plus readable CSRF."""
+    response.set_cookie(
+        contract.session_cookie_name,
+        session_secret,
+        path=_COOKIE_PATH,
+        secure=contract.is_secure,
+        httponly=True,
+        samesite=_COOKIE_SAMESITE,
+    )
+    response.set_cookie(
+        contract.csrf_cookie_name,
+        csrf_secret,
+        path=_COOKIE_PATH,
+        secure=contract.is_secure,
+        httponly=False,
+        samesite=_COOKIE_SAMESITE,
+    )
+
+
+def clear_session_cookies(response: Response, contract: SessionCookieContract) -> None:
+    """Clear both bindings of one logout with expiring empty cookies."""
+    response.delete_cookie(
+        contract.session_cookie_name,
+        path=_COOKIE_PATH,
+        secure=contract.is_secure,
+        httponly=True,
+        samesite=_COOKIE_SAMESITE,
+    )
+    response.delete_cookie(
+        contract.csrf_cookie_name,
+        path=_COOKIE_PATH,
+        secure=contract.is_secure,
+        httponly=False,
+        samesite=_COOKIE_SAMESITE,
+    )

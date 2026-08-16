@@ -49,7 +49,7 @@ def test_api_error_registry_entries_are_pinned_exactly() -> None:
         assert definition.allowed_detail_fields == allowed_detail_fields
 
 
-def test_http_status_map_is_closed_for_child_one() -> None:
+def test_http_status_map_is_closed_for_the_api_surface() -> None:
     assert HTTP_ERROR_STATUSES == {
         ErrorCode.API_REQUEST_MALFORMED: 400,
         ErrorCode.API_REQUEST_VALIDATION_FAILED: 422,
@@ -58,6 +58,23 @@ def test_http_status_map_is_closed_for_child_one() -> None:
         ErrorCode.DATABASE_CONNECTION_UNAVAILABLE: 503,
         ErrorCode.DATABASE_SCHEMA_CONTRACT_INVALID: 503,
         ErrorCode.INTERNAL_ERROR: 500,
+        # The authentication block of the design error contract (spec 17).
+        ErrorCode.AUTHENTICATION_REQUIRED: 401,
+        ErrorCode.AUTHENTICATION_FAILED: 401,
+        ErrorCode.AUTHENTICATION_RATE_LIMITED: 429,
+        ErrorCode.RECENT_AUTHENTICATION_REQUIRED: 403,
+        ErrorCode.CSRF_VALIDATION_FAILED: 403,
+        ErrorCode.AUTHORIZATION_SCOPE_DENIED: 403,
+        ErrorCode.TOTP_ENROLLMENT_STATE_INVALID: 409,
+        ErrorCode.DEVICE_AUTHORIZATION_PENDING: 409,
+        ErrorCode.DEVICE_AUTHORIZATION_SLOW_DOWN: 429,
+        ErrorCode.DEVICE_AUTHORIZATION_DENIED: 403,
+        ErrorCode.DEVICE_AUTHORIZATION_EXPIRED: 410,
+        ErrorCode.DEVICE_AUTHORIZATION_STATE_INVALID: 409,
+        ErrorCode.DEVICE_CREDENTIAL_INVALID: 401,
+        ErrorCode.DEVICE_REVOKED: 401,
+        ErrorCode.DEVICE_TOKEN_REUSE_DETECTED: 401,
+        ErrorCode.PLUGIN_VERSION_UNSUPPORTED: 426,
     }
 
 

@@ -15,6 +15,7 @@ import re
 import httpx
 import pytest
 from api_runtime.application import create_api_application
+from api_runtime.authentication_composition import compose_offline_web_authentication
 from fastapi import FastAPI
 from starlette.routing import Route as StarletteRoute
 
@@ -22,7 +23,17 @@ from personal_os.package_metadata import distribution_version
 from personal_os.runtime_configuration.models import RuntimeEnvironment
 
 _TRACEPARENT_PATTERN = re.compile(r"00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}")
-_HEALTH_ROUTE_PATHS = frozenset({"/api/health/live", "/api/health/ready"})
+_API_ROUTE_PATHS = frozenset(
+    {
+        "/api/health/live",
+        "/api/health/ready",
+        "/api/auth/login",
+        "/api/auth/session",
+        "/api/auth/logout",
+        "/api/auth/reauthenticate",
+        "/api/auth/password",
+    }
+)
 
 
 class ReadyProbe:
@@ -35,6 +46,7 @@ def create_test_app(environment: RuntimeEnvironment) -> FastAPI:
     return create_api_application(
         environment=environment,
         readiness_probe=ReadyProbe(),
+        web_authentication=compose_offline_web_authentication(),
     )
 
 
@@ -59,13 +71,21 @@ async def test_local_environments_serve_raw_openapi_document_with_correlation(
         "title": "Personal Knowledge API",
         "version": distribution_version(),
     }
-    assert set(document["paths"]) == _HEALTH_ROUTE_PATHS
+    assert set(document["paths"]) == _API_ROUTE_PATHS
     operation_ids = {
         operation["operationId"]
         for path_operations in document["paths"].values()
         for operation in path_operations.values()
     }
-    assert operation_ids == {"getApiLiveness", "getApiReadiness"}
+    assert operation_ids == {
+        "getApiLiveness",
+        "getApiReadiness",
+        "login",
+        "getSession",
+        "logout",
+        "reauthenticate",
+        "changePassword",
+    }
     assert "data" not in document
     assert "request_id" not in document
     assert response.headers["x-request-id"]
@@ -76,7 +96,7 @@ async def test_local_environments_serve_raw_openapi_document_with_correlation(
 async def test_production_hides_the_openapi_route_entirely() -> None:
     app = create_test_app(RuntimeEnvironment.PRODUCTION)
     assert app.openapi_url is None
-    assert {getattr(route, "path", None) for route in app.routes} == _HEALTH_ROUTE_PATHS
+    assert {getattr(route, "path", None) for route in app.routes} == _API_ROUTE_PATHS
     response = await request(app, "GET", "/api/openapi.json")
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "api_route_not_found"
@@ -91,10 +111,13 @@ async def test_docs_and_redoc_are_disabled_in_every_environment(path: str) -> No
 
 
 @pytest.mark.asyncio
-async def test_route_set_is_closed_to_health_and_local_document_routes() -> None:
+async def test_route_set_is_closed_to_the_api_and_local_document_routes() -> None:
     app = create_test_app(RuntimeEnvironment.TEST)
     routes = {route.path: route for route in app.routes if hasattr(route, "path")}
-    assert set(routes) == _HEALTH_ROUTE_PATHS | {"/api/openapi.json"}
-    for path, route in routes.items():
-        assert "GET" in route.methods, path
+    assert set(routes) == _API_ROUTE_PATHS | {"/api/openapi.json"}
+    for path in ("/api/health/live", "/api/health/ready", "/api/auth/session"):
+        assert "GET" in routes[path].methods, path
+    for path in ("/api/auth/login", "/api/auth/logout", "/api/auth/reauthenticate"):
+        assert "POST" in routes[path].methods, path
+    assert "PUT" in routes["/api/auth/password"].methods
     assert isinstance(routes["/api/openapi.json"], StarletteRoute)

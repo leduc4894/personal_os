@@ -26,18 +26,27 @@ from api_runtime.server import run_server
 from fastapi import FastAPI
 
 # One hermetic secret root backing the local environment snapshot, so the
-# password read inside run_server succeeds without touching process secrets.
+# password and authentication key reads inside run_server succeed without
+# touching process secrets.
 _SECRET_DIRECTORY = tempfile.TemporaryDirectory(prefix="api-runtime-server-secrets-")
 atexit.register(_SECRET_DIRECTORY.cleanup)
 _SECRET_ROOT = Path(_SECRET_DIRECTORY.name)
 (_SECRET_ROOT / "postgres_application_password").write_text(
     "server-test-password\n", encoding="utf-8"
 )
+(_SECRET_ROOT / "authentication_current_key").write_text(
+    "00" * 32 + "\n", encoding="utf-8"
+)
 
 LOCAL_ENVIRONMENT: Final[Mapping[str, str]] = MappingProxyType(
     {
         "KNOWLEDGE_ENVIRONMENT": "local",
         "KNOWLEDGE_SECRET_ROOT": str(_SECRET_ROOT),
+        "KNOWLEDGE_AUTH_ALLOWED_ORIGIN": "http://127.0.0.1:8000",
+        "KNOWLEDGE_AUTH_CURRENT_KEY_ID": "auth-key-v1",
+        "KNOWLEDGE_AUTH_CURRENT_KEY_FILE": "authentication_current_key",
+        "KNOWLEDGE_AUTH_MIN_PLUGIN_VERSION": "1.13.1",
+        "KNOWLEDGE_AUTH_MAX_PLUGIN_VERSION": "1.20.0",
     }
 )
 
@@ -128,6 +137,44 @@ def test_server_builds_local_application_with_openapi_route() -> None:
     assert "/api/health/live" in paths
     assert "/api/health/ready" in paths
     assert "/api/openapi.json" in paths
+    assert "/api/auth/login" in paths
+    assert "/api/auth/session" in paths
+    assert "/api/auth/logout" in paths
+    assert "/api/auth/reauthenticate" in paths
+    assert "/api/auth/password" in paths
+
+
+def test_server_missing_authentication_key_file_exits_seventy_eight(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    environment: dict[str, str] = dict(LOCAL_ENVIRONMENT)
+    environment["KNOWLEDGE_AUTH_CURRENT_KEY_FILE"] = "missing_authentication_key"
+    result = run_server(environ=environment, server_factory=RecordingServerFactory())
+    assert result == 78
+    captured = capsys.readouterr()
+    assert "runtime_configuration_failed" in captured.err
+    assert "secret_file_missing" in captured.err
+    assert "missing_authentication_key" not in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_server_malformed_authentication_key_material_exits_seventy_eight(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (_SECRET_ROOT / "malformed_authentication_key").write_text(
+        "not-hexadecimal-key-material\n", encoding="utf-8"
+    )
+    environment: dict[str, str] = dict(LOCAL_ENVIRONMENT)
+    environment["KNOWLEDGE_AUTH_CURRENT_KEY_FILE"] = "malformed_authentication_key"
+    try:
+        result = run_server(environ=environment, server_factory=RecordingServerFactory())
+    finally:
+        (_SECRET_ROOT / "malformed_authentication_key").unlink()
+    assert result == 78
+    captured = capsys.readouterr()
+    assert "configuration_secret_invalid" in captured.err
+    assert "not-hexadecimal-key-material" not in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_server_uses_the_passed_environment_snapshot_exclusively(
