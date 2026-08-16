@@ -337,6 +337,7 @@ AUTHENTICATION_DOMAIN_MODULE_FILES = (
     "contracts.py",
     "crypto.py",
     "device_authorization.py",
+    "device_tokens.py",
     "errors.py",
     "passwords.py",
     "ports.py",

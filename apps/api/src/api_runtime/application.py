@@ -1,7 +1,7 @@
 """FastAPI application factory: closed route set, envelopes and error handlers.
 
 The factory composes exactly two health routes plus the five session/password
-routes, six TOTP/recovery routes and four browser device-authorization routes
+routes, six TOTP/recovery routes and five browser device-authorization routes
 of the injected web-authentication runtime and the local/test-only OpenAPI
 document route, registers the four envelope exception handlers,
 strips FastAPI's default validation-error response from the generated
@@ -37,6 +37,7 @@ from api_runtime.authentication_models import (
     DeviceGrantContextData,
     DeviceGrantData,
     DeviceGrantDecisionData,
+    DeviceGrantExchangeData,
     RecoveryCodesData,
     RecoveryLimitedContext,
     SessionData,
@@ -308,6 +309,13 @@ def _register_device_authorization_routes(
         methods=["POST"],
         operation_id="denyDeviceAuthorization",
         response_model=ApiEnvelope[DeviceGrantDecisionData],
+    )
+    app.add_api_route(
+        "/api/auth/device-authorizations/{grant_id}/poll",
+        endpoints.poll_grant,
+        methods=["POST"],
+        operation_id="pollDeviceAuthorization",
+        response_model=ApiEnvelope[DeviceGrantExchangeData],
     )
 
 

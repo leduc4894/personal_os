@@ -165,6 +165,51 @@
         "title": "ApiEnvelope[DeviceGrantDecisionData]",
         "type": "object"
       },
+      "ApiEnvelope_DeviceGrantExchangeData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeviceGrantExchangeData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[DeviceGrantExchangeData]",
+        "type": "object"
+      },
       "ApiEnvelope_LivenessData_": {
         "additionalProperties": false,
         "properties": {
@@ -629,6 +674,61 @@
           "decided_at"
         ],
         "title": "DeviceGrantDecisionData",
+        "type": "object"
+      },
+      "DeviceGrantExchangeData": {
+        "additionalProperties": false,
+        "description": "The exchanged device credentials of one grant poll (spec 12.1, 12.2).\n\nThe access and refresh credentials render under the provisioning\ncache-suppression headers; an exact replay after a lost acknowledgement\nre-renders the byte-identical values with the original anchored\ntimestamps.",
+        "properties": {
+          "access_credential": {
+            "title": "Access Credential",
+            "type": "string"
+          },
+          "access_expires_at": {
+            "format": "date-time",
+            "title": "Access Expires At",
+            "type": "string"
+          },
+          "device_id": {
+            "format": "uuid",
+            "title": "Device Id",
+            "type": "string"
+          },
+          "grant_id": {
+            "format": "uuid",
+            "title": "Grant Id",
+            "type": "string"
+          },
+          "refresh_credential": {
+            "title": "Refresh Credential",
+            "type": "string"
+          },
+          "refresh_expires_at": {
+            "format": "date-time",
+            "title": "Refresh Expires At",
+            "type": "string"
+          },
+          "refresh_generation": {
+            "title": "Refresh Generation",
+            "type": "integer"
+          },
+          "token_family_id": {
+            "format": "uuid",
+            "title": "Token Family Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "grant_id",
+          "device_id",
+          "token_family_id",
+          "refresh_generation",
+          "access_credential",
+          "refresh_credential",
+          "access_expires_at",
+          "refresh_expires_at"
+        ],
+        "title": "DeviceGrantExchangeData",
         "type": "object"
       },
       "DeviceGrantLookupRequest": {
@@ -1199,6 +1299,13 @@
         "title": "WebSessionState",
         "type": "string"
       }
+    },
+    "securitySchemes": {
+      "devicePollingCredential": {
+        "description": "The pg1 polling credential of one device-authorization grant",
+        "scheme": "bearer",
+        "type": "http"
+      }
     }
   },
   "info": {
@@ -1325,6 +1432,42 @@
           }
         },
         "summary": "Deny Grant"
+      }
+    },
+    "/api/auth/device-authorizations/{grant_id}/poll": {
+      "post": {
+        "description": "Poll one grant with its polling credential (spec 11.4, 12).\n\nThe polling Bearer credential in the dedicated scheme is the only\nauthority: session cookies and every other credential are never\nread. A pending grant answers the closed pending outcome with the\nfive-second hint, a too-fast poll the slow-down outcome, and an\napproved grant exchanges once — an exchanged grant replays the exact\ncommitted credentials while the initial generation stays current.",
+        "operationId": "pollDeviceAuthorization",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "grant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Grant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_DeviceGrantExchangeData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "devicePollingCredential": []
+          }
+        ],
+        "summary": "Poll Grant"
       }
     },
     "/api/auth/login": {

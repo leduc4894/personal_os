@@ -24,17 +24,20 @@ from uuid import UUID
 
 from fastapi import Depends, Request
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from api_runtime.authentication_composition import WebAuthenticationRuntime
 from api_runtime.authentication_dependencies import (
     AuthenticatedWebRequest,
     client_source_address,
     create_session_route_dependencies,
+    require_polling_credential,
 )
 from api_runtime.authentication_models import (
     DeviceGrantContextData,
     DeviceGrantData,
     DeviceGrantDecisionData,
+    DeviceGrantExchangeData,
     DeviceGrantLookupRequest,
     DeviceGrantRequest,
 )
@@ -53,15 +56,25 @@ _NO_STORE_NO_CACHE_HEADERS: Final[dict[str, str]] = {
     "pragma": "no-cache",
 }
 
+#: The dedicated OpenAPI security scheme of the polling Bearer credential
+#: (spec 16): the only authority the poll route accepts. The scheme never
+#: auto-rejects so the closed registry code answers every bad presentation.
+_POLLING_BEARER_SCHEME = HTTPBearer(
+    scheme_name="devicePollingCredential",
+    description="The pg1 polling credential of one device-authorization grant",
+    auto_error=False,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class DeviceAuthorizationRouteEndpoints:
-    """The four endpoint callables of the closed device-authorization set."""
+    """The five endpoint callables of the closed device-authorization set."""
 
     create_grant: Callable[..., Awaitable[JSONResponse]]
     lookup_grant: Callable[..., Awaitable[JSONResponse]]
     approve_grant: Callable[..., Awaitable[JSONResponse]]
     deny_grant: Callable[..., Awaitable[JSONResponse]]
+    poll_grant: Callable[..., Awaitable[JSONResponse]]
 
 
 def _bound_diagnostic_context() -> DiagnosticContext:
@@ -89,7 +102,10 @@ def create_device_authorization_route_endpoints(
         return context.request_id
 
     def _success_json(
-        data: DeviceGrantData | DeviceGrantContextData | DeviceGrantDecisionData,
+        data: DeviceGrantData
+        | DeviceGrantContextData
+        | DeviceGrantDecisionData
+        | DeviceGrantExchangeData,
         *,
         headers: dict[str, str] = _NO_STORE_HEADERS,
     ) -> JSONResponse:
@@ -199,9 +215,48 @@ def create_device_authorization_route_endpoints(
             )
         )
 
+    async def poll_grant(
+        request: Request,
+        grant_id: UUID,
+        polling_credential: str = Depends(require_polling_credential),
+        authorization: HTTPAuthorizationCredentials | None = Depends(  # noqa: B008
+            _POLLING_BEARER_SCHEME
+        ),
+    ) -> JSONResponse:
+        """Poll one grant with its polling credential (spec 11.4, 12).
+
+        The polling Bearer credential in the dedicated scheme is the only
+        authority: session cookies and every other credential are never
+        read. A pending grant answers the closed pending outcome with the
+        five-second hint, a too-fast poll the slow-down outcome, and an
+        approved grant exchanges once — an exchanged grant replays the exact
+        committed credentials while the initial generation stays current.
+        """
+        del authorization  # the closed registry answers bad presentations
+        request.scope["route_template"] = ApiRouteTemplate.AUTH_DEVICE_AUTHORIZATION_POLL
+        exchanged = await runtime.device_token_service.exchange_grant(
+            grant_id=grant_id,
+            polling_credential=polling_credential,
+            diagnostic_context=_bound_diagnostic_context(),
+        )
+        return _success_json(
+            DeviceGrantExchangeData(
+                grant_id=exchanged.grant_id,
+                device_id=exchanged.device_id,
+                token_family_id=exchanged.token_family_id,
+                refresh_generation=exchanged.refresh_generation,
+                access_credential=exchanged.access_credential,
+                refresh_credential=exchanged.refresh_credential,
+                access_expires_at=exchanged.access_expires_at,
+                refresh_expires_at=exchanged.refresh_expires_at,
+            ),
+            headers=_NO_STORE_NO_CACHE_HEADERS,
+        )
+
     return DeviceAuthorizationRouteEndpoints(
         create_grant=create_grant,
         lookup_grant=lookup_grant,
         approve_grant=approve_grant,
         deny_grant=deny_grant,
+        poll_grant=poll_grant,
     )

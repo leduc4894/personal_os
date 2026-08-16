@@ -84,6 +84,33 @@ export type paths = {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/auth/device-authorizations/{grant_id}/poll": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Poll Grant
+         * @description Poll one grant with its polling credential (spec 11.4, 12).
+         *
+         *     The polling Bearer credential in the dedicated scheme is the only
+         *     authority: session cookies and every other credential are never
+         *     read. A pending grant answers the closed pending outcome with the
+         *     five-second hint, a too-fast poll the slow-down outcome, and an
+         *     approved grant exchanges once — an exchanged grant replays the exact
+         *     committed credentials while the initial generation stays current.
+         */
+        readonly post: operations["pollDeviceAuthorization"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/auth/login": {
         readonly parameters: {
             readonly query?: never;
@@ -395,6 +422,21 @@ export type components = {
              */
             readonly warnings: readonly components["schemas"]["ApiWarning"][];
         };
+        /** ApiEnvelope[DeviceGrantExchangeData] */
+        readonly ApiEnvelope_DeviceGrantExchangeData_: {
+            readonly data: components["schemas"]["DeviceGrantExchangeData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
         /** ApiEnvelope[LivenessData] */
         readonly ApiEnvelope_LivenessData_: {
             readonly data: components["schemas"]["LivenessData"] | null;
@@ -600,6 +642,48 @@ export type components = {
              */
             readonly grant_id: string;
             readonly state: components["schemas"]["DeviceAuthorizationGrantState"];
+        };
+        /**
+         * DeviceGrantExchangeData
+         * @description The exchanged device credentials of one grant poll (spec 12.1, 12.2).
+         *
+         *     The access and refresh credentials render under the provisioning
+         *     cache-suppression headers; an exact replay after a lost acknowledgement
+         *     re-renders the byte-identical values with the original anchored
+         *     timestamps.
+         */
+        readonly DeviceGrantExchangeData: {
+            /** Access Credential */
+            readonly access_credential: string;
+            /**
+             * Access Expires At
+             * Format: date-time
+             */
+            readonly access_expires_at: string;
+            /**
+             * Device Id
+             * Format: uuid
+             */
+            readonly device_id: string;
+            /**
+             * Grant Id
+             * Format: uuid
+             */
+            readonly grant_id: string;
+            /** Refresh Credential */
+            readonly refresh_credential: string;
+            /**
+             * Refresh Expires At
+             * Format: date-time
+             */
+            readonly refresh_expires_at: string;
+            /** Refresh Generation */
+            readonly refresh_generation: number;
+            /**
+             * Token Family Id
+             * Format: uuid
+             */
+            readonly token_family_id: string;
         };
         /**
          * DeviceGrantLookupRequest
@@ -979,6 +1063,28 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["ApiEnvelope_DeviceGrantDecisionData_"];
+                };
+            };
+        };
+    };
+    readonly pollDeviceAuthorization: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly grant_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_DeviceGrantExchangeData_"];
                 };
             };
         };

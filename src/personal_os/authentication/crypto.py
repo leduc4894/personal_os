@@ -10,8 +10,9 @@ rejected through one failure path that never retains or echoes the rejected
 value — not in the exception, its ``str``/``repr`` or its safe details.
 
 The HKDF domain labels of spec 20.1 — TOTP-secret authenticated encryption,
-CSRF hashing, throttle-bucket HMAC, recovery-code hashing and the two
-exact-replay derivations — are pinned to exact bytes here as the closed
+CSRF hashing, throttle-bucket HMAC, recovery-code hashing, the grant/exchange
+exact-replay derivations and the access/refresh credential derivations — are
+pinned to exact bytes here as the closed
 vocabulary every subkey derivation must name; deriving with a label outside
 this set is a contract violation, not a configuration choice.
 """
@@ -44,6 +45,12 @@ GRANT_REPLAY_DERIVATION_LABEL: Final[str] = "auth/grant-replay/v1"
 #: Refresh rotation exact-replay derivation domain (spec 13.4, 20.1).
 REFRESH_REPLAY_DERIVATION_LABEL: Final[str] = "auth/refresh-replay/v1"
 
+#: Initial-exchange refresh-credential derivation domain (spec 12.2, 20.1).
+EXCHANGE_CREDENTIAL_DERIVATION_LABEL: Final[str] = "auth/exchange-credential/v1"
+
+#: Access-credential derivation and verification domain (spec 12.2, 13.1, 20.1).
+ACCESS_CREDENTIAL_DERIVATION_LABEL: Final[str] = "auth/access-credential/v1"
+
 #: The closed domain-separation label vocabulary (exact bytes).
 CRYPTO_DOMAIN_LABELS: Final[frozenset[str]] = frozenset(
     {
@@ -53,6 +60,8 @@ CRYPTO_DOMAIN_LABELS: Final[frozenset[str]] = frozenset(
         RECOVERY_CODE_HASH_LABEL,
         GRANT_REPLAY_DERIVATION_LABEL,
         REFRESH_REPLAY_DERIVATION_LABEL,
+        EXCHANGE_CREDENTIAL_DERIVATION_LABEL,
+        ACCESS_CREDENTIAL_DERIVATION_LABEL,
     }
 )
 

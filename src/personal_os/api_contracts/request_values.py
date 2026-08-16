@@ -38,6 +38,7 @@ class ApiRouteTemplate(StrEnum):
     AUTH_DEVICE_AUTHORIZATION_LOOKUP = "/api/auth/device-authorizations/lookup"
     AUTH_DEVICE_AUTHORIZATION_APPROVE = "/api/auth/device-authorizations/{grant_id}/approve"
     AUTH_DEVICE_AUTHORIZATION_DENY = "/api/auth/device-authorizations/{grant_id}/deny"
+    AUTH_DEVICE_AUTHORIZATION_POLL = "/api/auth/device-authorizations/{grant_id}/poll"
     OPENAPI_DOCUMENT = "/api/openapi.json"
     UNMATCHED = "unmatched"
 
@@ -64,6 +65,7 @@ AUTHENTICATION_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset(
         ApiRouteTemplate.AUTH_DEVICE_AUTHORIZATION_LOOKUP,
         ApiRouteTemplate.AUTH_DEVICE_AUTHORIZATION_APPROVE,
         ApiRouteTemplate.AUTH_DEVICE_AUTHORIZATION_DENY,
+        ApiRouteTemplate.AUTH_DEVICE_AUTHORIZATION_POLL,
     }
 )
 

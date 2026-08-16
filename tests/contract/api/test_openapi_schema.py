@@ -43,6 +43,7 @@ ROUTE_OPERATION_IDS: dict[str, dict[str, str]] = {
     "/api/auth/device-authorizations/lookup": {"post": "lookupDeviceAuthorization"},
     "/api/auth/device-authorizations/{grant_id}/approve": {"post": "approveDeviceAuthorization"},
     "/api/auth/device-authorizations/{grant_id}/deny": {"post": "denyDeviceAuthorization"},
+    "/api/auth/device-authorizations/{grant_id}/poll": {"post": "pollDeviceAuthorization"},
 }
 
 #: Component schema names emitted for every frozen ``extra="forbid"`` model.
@@ -70,6 +71,7 @@ STRICT_MODEL_SCHEMA_NAMES: tuple[str, ...] = (
     "DeviceGrantContextData",
     "DeviceGrantData",
     "DeviceGrantDecisionData",
+    "DeviceGrantExchangeData",
     "DeviceGrantLookupRequest",
     "DeviceGrantRequest",
 )

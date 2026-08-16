@@ -296,3 +296,24 @@ class DeviceGrantDecisionData(BaseModel):
     grant_id: UUID
     state: DeviceAuthorizationGrantState
     decided_at: datetime
+
+
+class DeviceGrantExchangeData(BaseModel):
+    """The exchanged device credentials of one grant poll (spec 12.1, 12.2).
+
+    The access and refresh credentials render under the provisioning
+    cache-suppression headers; an exact replay after a lost acknowledgement
+    re-renders the byte-identical values with the original anchored
+    timestamps.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    grant_id: UUID
+    device_id: UUID
+    token_family_id: UUID
+    refresh_generation: int
+    access_credential: str
+    refresh_credential: str
+    access_expires_at: datetime
+    refresh_expires_at: datetime

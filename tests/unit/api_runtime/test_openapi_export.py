@@ -123,6 +123,7 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
         "/api/auth/device-authorizations/lookup",
         "/api/auth/device-authorizations/{grant_id}/approve",
         "/api/auth/device-authorizations/{grant_id}/deny",
+        "/api/auth/device-authorizations/{grant_id}/poll",
     }
     assert document["paths"]["/api/health/live"]["get"]["operationId"] == "getApiLiveness"
     assert document["paths"]["/api/health/ready"]["get"]["operationId"] == "getApiReadiness"
@@ -169,6 +170,10 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
     assert (
         document["paths"]["/api/auth/device-authorizations/{grant_id}/deny"]["post"]["operationId"]
         == "denyDeviceAuthorization"
+    )
+    assert (
+        document["paths"]["/api/auth/device-authorizations/{grant_id}/poll"]["post"]["operationId"]
+        == "pollDeviceAuthorization"
     )
 
 

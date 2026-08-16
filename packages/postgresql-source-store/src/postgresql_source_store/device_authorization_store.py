@@ -14,6 +14,11 @@ decision against the caller's single ``database_now``, update behind the
 pending-state guard with a rowcount check so a racing transition commits
 exactly one terminal winner, and append exactly one audit event naming the
 authenticated user, the deciding session and the grant.
+``poll_exchange`` locks the grant by its polling-secret digest and either
+answers the closed poll outcome vocabulary or commits the nine-step exchange
+of spec 12 — one device, family, access token and refresh token with the
+grant anchors and the two registration audits — and replays the anchored
+exchange while the initial refresh generation stays current.
 
 Secret generation and hashing stay with the caller outside the transactions.
 Every statement is schema-qualified through the Task 6 Core metadata and
@@ -36,6 +41,7 @@ from personal_os.authentication.contracts import (
     DeviceScope,
 )
 from personal_os.authentication.device_authorization import (
+    POLL_INTERVAL_SECONDS,
     ApprovedGrant,
     ApproveGrantCommand,
     DeniedGrant,
@@ -47,6 +53,11 @@ from personal_os.authentication.device_authorization import (
     StoredDeviceAuthorizationGrant,
     resolve_lookup_rejection_code,
     resolve_terminal_rejection_code,
+)
+from personal_os.authentication.device_tokens import (
+    INITIAL_REFRESH_GENERATION,
+    ExchangeGrantCommand,
+    ExchangeProvisioning,
 )
 from personal_os.authentication.errors import AuthenticationError
 from personal_os.authentication.sessions import (
@@ -67,10 +78,23 @@ from postgresql_source_store.tables import (
     audit_events,
     authentication_throttle_buckets,
     device_authorization_grants,
+    device_token_families,
+    device_tokens,
+    devices,
+    users,
+    workspaces,
 )
 
 #: Lifecycle states referenced by the guards.
 _GRANT_STATE_PENDING: Final[str] = DeviceAuthorizationGrantState.PENDING.value
+
+#: Lifecycle states of the other rechecked surfaces.
+_USER_STATUS_ACTIVE: Final[str] = "active"
+_WORKSPACE_STATUS_ACTIVE: Final[str] = "active"
+_TOKEN_STATE_ACTIVE: Final[str] = "active"
+_FAMILY_STATE_ACTIVE: Final[str] = "active"
+_DEVICE_KIND_OBSIDIAN: Final[str] = "obsidian"
+_DEVICE_STATUS_ACTIVE: Final[str] = "active"
 
 #: Audit target kind and actions of the terminal grant transitions (spec 21).
 AUDIT_TARGET_KIND_DEVICE_AUTHORIZATION_GRANT: Final[str] = "device_authorization_grant"
@@ -78,6 +102,12 @@ DEVICE_AUTHORIZATION_APPROVED_AUDIT_ACTION: Final[str] = (
     "authentication.device_authorization_approved"
 )
 DEVICE_AUTHORIZATION_DENIED_AUDIT_ACTION: Final[str] = "authentication.device_authorization_denied"
+
+#: Audit target kinds and actions of the grant exchange (spec 12 step 8, 21).
+AUDIT_TARGET_KIND_DEVICE: Final[str] = "device"
+AUDIT_TARGET_KIND_DEVICE_TOKEN_FAMILY: Final[str] = "device_token_family"
+DEVICE_REGISTERED_AUDIT_ACTION: Final[str] = "authentication.device_registered"
+DEVICE_TOKEN_FAMILY_CREATED_AUDIT_ACTION: Final[str] = "authentication.device_token_family_created"
 
 #: Every ``device_authorization_grants`` column the typed row view carries
 #: except the two secret digests, which the domain never consumes.
@@ -371,6 +401,240 @@ class DeviceAuthorizationStore:
 
         return await run_authentication_transaction(self._engine, operation)
 
+    # -- grant exchange (spec 11.4, 12) --------------------------------------------------
+
+    async def poll_exchange(self, command: ExchangeGrantCommand) -> ExchangeProvisioning:
+        """Lock one grant by its polling digest and exchange or replay it.
+
+        The locked grant resolves through the closed poll outcome vocabulary:
+        a pending, unexpired grant raises the pending outcome with the
+        five-second hint; a denied or expired grant raises its closed code;
+        an approved grant runs the nine-step exchange of spec 12 — one
+        device, family, access token and refresh token, the grant anchors,
+        the exchanged state matrix and the two registration audit rows — in
+        this one transaction; an exchanged grant replays the anchored
+        identities and timestamps only while the initial refresh generation
+        is still the family's current generation.
+        """
+        decided_at = command.database_now
+
+        async def operation(connection: AsyncConnection) -> ExchangeProvisioning:
+            locked = await connection.execute(
+                sa.select(
+                    *_GRANT_ROW_COLUMNS,
+                    device_authorization_grants.c.device_id,
+                    device_authorization_grants.c.token_family_id,
+                    device_authorization_grants.c.initial_access_token_id,
+                    device_authorization_grants.c.initial_refresh_token_id,
+                    device_authorization_grants.c.derivation_key_id,
+                )
+                .where(
+                    device_authorization_grants.c.polling_secret_hash == command.polling_secret_hash
+                )
+                .with_for_update(of=device_authorization_grants)
+            )
+            row = locked.one_or_none()
+            if row is None or row.grant_id != command.grant_id:
+                raise AuthenticationError(ErrorCode.DEVICE_CREDENTIAL_INVALID)
+            state = DeviceAuthorizationGrantState(row.state)
+            if state is DeviceAuthorizationGrantState.DENIED:
+                raise AuthenticationError(ErrorCode.DEVICE_AUTHORIZATION_DENIED)
+            if state is DeviceAuthorizationGrantState.PENDING:
+                if command.database_now >= row.expires_at:
+                    raise AuthenticationError(ErrorCode.DEVICE_AUTHORIZATION_EXPIRED)
+                raise AuthenticationError(
+                    ErrorCode.DEVICE_AUTHORIZATION_PENDING,
+                    safe_details={"retry_after_seconds": POLL_INTERVAL_SECONDS},
+                )
+            if state is DeviceAuthorizationGrantState.EXCHANGED:
+                return await self._replay_committed_exchange(connection, row, command)
+            return await self._commit_first_exchange(connection, row, command, decided_at)
+
+        return await run_authentication_transaction(self._engine, operation)
+
+    async def _commit_first_exchange(
+        self,
+        connection: AsyncConnection,
+        row: Any,
+        command: ExchangeGrantCommand,
+        decided_at: datetime,
+    ) -> ExchangeProvisioning:
+        """Run the nine-step exchange of one approved grant (spec 12)."""
+        user_row = (
+            await connection.execute(
+                sa.select(users.c.status).where(users.c.user_id == row.approved_by_user_id)
+            )
+        ).one_or_none()
+        if user_row is None or user_row.status != _USER_STATUS_ACTIVE:
+            raise AuthenticationError(ErrorCode.DEVICE_AUTHORIZATION_STATE_INVALID)
+        workspace_row = (
+            await connection.execute(
+                sa.select(workspaces.c.workspace_id).where(
+                    workspaces.c.owner_user_id == row.approved_by_user_id,
+                    workspaces.c.status == _WORKSPACE_STATUS_ACTIVE,
+                )
+            )
+        ).one_or_none()
+        if workspace_row is None:
+            raise AuthenticationError(ErrorCode.DEVICE_AUTHORIZATION_STATE_INVALID)
+        workspace_id = workspace_row.workspace_id
+        await connection.execute(
+            sa.insert(devices).values(
+                device_id=command.device_id,
+                workspace_id=workspace_id,
+                user_id=row.approved_by_user_id,
+                device_name=row.device_name,
+                device_kind=_DEVICE_KIND_OBSIDIAN,
+                status=_DEVICE_STATUS_ACTIVE,
+                registered_at=decided_at,
+            )
+        )
+        await connection.execute(
+            sa.insert(device_token_families).values(
+                token_family_id=command.token_family_id,
+                user_id=row.approved_by_user_id,
+                workspace_id=workspace_id,
+                device_id=command.device_id,
+                state=_FAMILY_STATE_ACTIVE,
+                current_refresh_generation=INITIAL_REFRESH_GENERATION,
+                created_at=decided_at,
+                last_refreshed_at=decided_at,
+                inactivity_expires_at=command.refresh_expires_at,
+                absolute_expires_at=command.family_absolute_expires_at,
+            )
+        )
+        for token_kind, token_id, secret_hash, expires_at in (
+            (
+                "access",
+                command.access_token_id,
+                command.access_secret_hash,
+                command.access_expires_at,
+            ),
+            (
+                "refresh",
+                command.refresh_token_id,
+                command.refresh_secret_hash,
+                command.refresh_expires_at,
+            ),
+        ):
+            await connection.execute(
+                sa.insert(device_tokens).values(
+                    device_token_id=token_id,
+                    token_family_id=command.token_family_id,
+                    user_id=row.approved_by_user_id,
+                    workspace_id=workspace_id,
+                    device_id=command.device_id,
+                    token_kind=token_kind,
+                    generation=INITIAL_REFRESH_GENERATION,
+                    secret_hash=secret_hash,
+                    state=_TOKEN_STATE_ACTIVE,
+                    derivation_key_id=command.derivation_key_id,
+                    issued_at=decided_at,
+                    expires_at=expires_at,
+                )
+            )
+        await connection.execute(
+            sa.update(device_authorization_grants)
+            .values(
+                state=DeviceAuthorizationGrantState.EXCHANGED.value,
+                exchanged_at=decided_at,
+                device_id=command.device_id,
+                token_family_id=command.token_family_id,
+                initial_access_token_id=command.access_token_id,
+                initial_refresh_token_id=command.refresh_token_id,
+                derivation_key_id=command.derivation_key_id,
+            )
+            .where(
+                device_authorization_grants.c.grant_id == command.grant_id,
+                device_authorization_grants.c.state == DeviceAuthorizationGrantState.APPROVED.value,
+            )
+        )
+        for action, target_kind, target_id in (
+            (DEVICE_REGISTERED_AUDIT_ACTION, AUDIT_TARGET_KIND_DEVICE, command.device_id),
+            (
+                DEVICE_TOKEN_FAMILY_CREATED_AUDIT_ACTION,
+                AUDIT_TARGET_KIND_DEVICE_TOKEN_FAMILY,
+                command.token_family_id,
+            ),
+        ):
+            await _append_authentication_audit_event(
+                connection,
+                diagnostic_context=command.diagnostic_context,
+                workspace_id=workspace_id,
+                actor_kind=AUDIT_ACTOR_KIND_USER,
+                actor_id=row.approved_by_user_id,
+                action=action,
+                target_kind=target_kind,
+                target_id=target_id,
+                occurred_at=decided_at,
+            )
+        return ExchangeProvisioning(
+            grant_id=command.grant_id,
+            device_id=command.device_id,
+            token_family_id=command.token_family_id,
+            access_token_id=command.access_token_id,
+            refresh_token_id=command.refresh_token_id,
+            derivation_key_id=command.derivation_key_id,
+            refresh_generation=INITIAL_REFRESH_GENERATION,
+            access_issued_at=decided_at,
+            access_expires_at=command.access_expires_at,
+            refresh_expires_at=command.refresh_expires_at,
+            database_now=decided_at,
+        )
+
+    async def _replay_committed_exchange(
+        self,
+        connection: AsyncConnection,
+        row: Any,
+        command: ExchangeGrantCommand,
+    ) -> ExchangeProvisioning:
+        """Replay one exchanged grant while generation one stays current (12.2)."""
+        initial_refresh = await connection.execute(
+            sa.select(
+                device_tokens.c.state,
+                device_tokens.c.generation,
+                device_tokens.c.expires_at,
+            ).where(device_tokens.c.device_token_id == row.initial_refresh_token_id)
+        )
+        refresh_row = initial_refresh.one_or_none()
+        family_row = (
+            await connection.execute(
+                sa.select(device_token_families.c.current_refresh_generation).where(
+                    device_token_families.c.token_family_id == row.token_family_id
+                )
+            )
+        ).one_or_none()
+        is_initial_generation_current = (
+            refresh_row is not None
+            and family_row is not None
+            and refresh_row.state == _TOKEN_STATE_ACTIVE
+            and family_row.current_refresh_generation == refresh_row.generation
+        )
+        if not is_initial_generation_current:
+            raise AuthenticationError(ErrorCode.DEVICE_AUTHORIZATION_STATE_INVALID)
+        initial_access = await connection.execute(
+            sa.select(
+                device_tokens.c.issued_at,
+                device_tokens.c.expires_at,
+            ).where(device_tokens.c.device_token_id == row.initial_access_token_id)
+        )
+        access_row = initial_access.one_or_none()
+        if access_row is None or refresh_row is None:
+            raise AuthenticationError(ErrorCode.DEVICE_AUTHORIZATION_STATE_INVALID)
+        return ExchangeProvisioning(
+            grant_id=row.grant_id,
+            device_id=row.device_id,
+            token_family_id=row.token_family_id,
+            access_token_id=row.initial_access_token_id,
+            refresh_token_id=row.initial_refresh_token_id,
+            derivation_key_id=row.derivation_key_id,
+            refresh_generation=int(refresh_row.generation),
+            access_issued_at=access_row.issued_at,
+            access_expires_at=access_row.expires_at,
+            refresh_expires_at=refresh_row.expires_at,
+            database_now=command.database_now,
+        )
+
     # -- internal helpers ----------------------------------------------------------------
 
     async def _select_grant_by_user_code_hash(
@@ -491,6 +755,40 @@ class DeviceAuthorizationStore:
         )
 
 
+async def _append_authentication_audit_event(
+    connection: AsyncConnection,
+    *,
+    diagnostic_context: DiagnosticContext,
+    workspace_id: UUID,
+    actor_kind: str,
+    actor_id: UUID | None,
+    action: str,
+    target_kind: str,
+    target_id: UUID,
+    occurred_at: datetime,
+) -> None:
+    """Insert one append-only authentication audit row (spec 21)."""
+    await connection.execute(
+        sa.insert(audit_events).values(
+            audit_event_id=uuid7(),
+            workspace_id=workspace_id,
+            actor_kind=actor_kind,
+            actor_id=actor_id,
+            actor_reference=None,
+            action=action,
+            target_kind=target_kind,
+            target_id=target_id,
+            request_id=diagnostic_context.request_id,
+            client_request_id=diagnostic_context.client_request_id,
+            trace_id=diagnostic_context.trace.trace_id.value,
+            result=AUDIT_RESULT_SUCCEEDED,
+            reason_code=None,
+            safe_diff_hash=None,
+            occurred_at=occurred_at,
+        )
+    )
+
+
 async def _append_grant_audit_event(
     connection: AsyncConnection,
     *,
@@ -502,22 +800,14 @@ async def _append_grant_audit_event(
     occurred_at: datetime,
 ) -> None:
     """Insert one append-only terminal-transition audit row (spec 21)."""
-    await connection.execute(
-        sa.insert(audit_events).values(
-            audit_event_id=uuid7(),
-            workspace_id=workspace_id,
-            actor_kind=AUDIT_ACTOR_KIND_USER,
-            actor_id=user_id,
-            actor_reference=None,
-            action=action,
-            target_kind=AUDIT_TARGET_KIND_DEVICE_AUTHORIZATION_GRANT,
-            target_id=grant_id,
-            request_id=diagnostic_context.request_id,
-            client_request_id=diagnostic_context.client_request_id,
-            trace_id=diagnostic_context.trace.trace_id.value,
-            result=AUDIT_RESULT_SUCCEEDED,
-            reason_code=None,
-            safe_diff_hash=None,
-            occurred_at=occurred_at,
-        )
+    await _append_authentication_audit_event(
+        connection,
+        diagnostic_context=diagnostic_context,
+        workspace_id=workspace_id,
+        actor_kind=AUDIT_ACTOR_KIND_USER,
+        actor_id=user_id,
+        action=action,
+        target_kind=AUDIT_TARGET_KIND_DEVICE_AUTHORIZATION_GRANT,
+        target_id=grant_id,
+        occurred_at=occurred_at,
     )

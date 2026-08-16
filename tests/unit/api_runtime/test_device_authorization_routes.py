@@ -560,3 +560,156 @@ def test_unknown_grant_decisions_fail_closed(
     )
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "device_credential_invalid"
+
+
+# --- polling --------------------------------------------------------------------------
+
+
+def poll_headers(polling_secret: str) -> dict[str, str]:
+    """The dedicated polling Bearer header of one grant poll (spec 11.4)."""
+    return {"Authorization": f"Bearer {polling_secret}"}
+
+
+def approve_grant(
+    test_client: TestClient, cookies: dict[str, str], data: dict[str, object]
+) -> None:
+    """Approve one grant through the recent-authenticated session."""
+    response = test_client.post(
+        f"/api/auth/device-authorizations/{data['grant_id']}/approve",
+        headers=authenticated_headers(ORIGIN, cookies),
+    )
+    assert response.status_code == 200, response.text
+
+
+def test_poll_of_a_pending_grant_reports_the_five_second_interval(
+    harness: DeviceRouteHarness,
+) -> None:
+    data = create_grant(harness.client)
+    response = harness.client.post(
+        f"/api/auth/device-authorizations/{data['grant_id']}/poll",
+        headers=poll_headers(str(data["polling_secret"])),
+    )
+    assert response.status_code == 409
+    error = response.json()["error"]
+    assert error["code"] == "device_authorization_pending"
+    assert error["details"]["retry_after_seconds"] == 5
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_poll_of_a_too_fast_pending_grant_slows_down(harness: DeviceRouteHarness) -> None:
+    data = create_grant(harness.client)
+    for _ in range(2):
+        harness.client.post(
+            f"/api/auth/device-authorizations/{data['grant_id']}/poll",
+            headers=poll_headers(str(data["polling_secret"])),
+        )
+    slowed = harness.client.post(
+        f"/api/auth/device-authorizations/{data['grant_id']}/poll",
+        headers=poll_headers(str(data["polling_secret"])),
+    )
+    assert slowed.status_code == 429
+    assert slowed.json()["error"]["code"] == "device_authorization_slow_down"
+    assert slowed.json()["error"]["details"]["retry_after_seconds"] >= 1
+
+
+def test_poll_accepts_only_the_polling_bearer_credential(
+    harness: DeviceRouteHarness,
+) -> None:
+    data = create_grant(harness.client)
+    missing = harness.client.post(f"/api/auth/device-authorizations/{data['grant_id']}/poll")
+    assert missing.status_code == 401
+    assert missing.json()["error"]["code"] == "device_credential_invalid"
+
+    # A fully valid Web session with its CSRF pair is not this route's
+    # authority: the dedicated Bearer credential is the only accepted one.
+    cookies = login(harness.client)
+    session_only = harness.client.post(
+        f"/api/auth/device-authorizations/{data['grant_id']}/poll",
+        headers=authenticated_headers(ORIGIN, cookies),
+    )
+    assert session_only.status_code == 401
+    assert session_only.json()["error"]["code"] == "device_credential_invalid"
+
+    wrong_scheme = harness.client.post(
+        f"/api/auth/device-authorizations/{data['grant_id']}/poll",
+        headers={"Authorization": f"Basic {data['polling_secret']}"},
+    )
+    assert wrong_scheme.status_code == 401
+    assert wrong_scheme.json()["error"]["code"] == "device_credential_invalid"
+
+    mismatched_grant = harness.client.post(
+        f"/api/auth/device-authorizations/{uuid4()}/poll",
+        headers=poll_headers(str(data["polling_secret"])),
+    )
+    assert mismatched_grant.status_code == 401
+    assert mismatched_grant.json()["error"]["code"] == "device_credential_invalid"
+
+
+def test_poll_after_approval_exchanges_once_then_replays_identically(
+    harness: DeviceRouteHarness,
+) -> None:
+    cookies = login(harness.client)
+    data = create_grant(harness.client)
+    approve_grant(harness.client, cookies, data)
+
+    exchanged = harness.client.post(
+        f"/api/auth/device-authorizations/{data['grant_id']}/poll",
+        headers=poll_headers(str(data["polling_secret"])),
+    )
+    assert exchanged.status_code == 200, exchanged.text
+    assert exchanged.headers["cache-control"] == "no-store"
+    assert exchanged.headers["pragma"] == "no-cache"
+    payload = exchanged.json()["data"]
+    assert set(payload) == {
+        "grant_id",
+        "device_id",
+        "token_family_id",
+        "refresh_generation",
+        "access_credential",
+        "refresh_credential",
+        "access_expires_at",
+        "refresh_expires_at",
+    }
+    assert payload["grant_id"] == data["grant_id"]
+    assert payload["refresh_generation"] == 1
+    assert str(payload["access_credential"]).startswith("at1.")
+    assert str(payload["refresh_credential"]).startswith("rt1.")
+
+    # A lost acknowledgement replays the byte-identical exchange payload.
+    replayed = harness.client.post(
+        f"/api/auth/device-authorizations/{data['grant_id']}/poll",
+        headers=poll_headers(str(data["polling_secret"])),
+    )
+    assert replayed.status_code == 200, replayed.text
+    assert replayed.json()["data"] == payload
+
+
+def test_poll_of_a_denied_grant_reports_the_denied_code(
+    harness: DeviceRouteHarness,
+) -> None:
+    cookies = login(harness.client)
+    data = create_grant(harness.client)
+    denial = harness.client.post(
+        f"/api/auth/device-authorizations/{data['grant_id']}/deny",
+        headers=authenticated_headers(ORIGIN, cookies),
+    )
+    assert denial.status_code == 200, denial.text
+    response = harness.client.post(
+        f"/api/auth/device-authorizations/{data['grant_id']}/poll",
+        headers=poll_headers(str(data["polling_secret"])),
+    )
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "device_authorization_denied"
+
+
+def test_poll_of_an_expired_grant_reports_the_expired_code(
+    harness: DeviceRouteHarness,
+) -> None:
+    data = create_grant(harness.client)
+    harness.clock.database_now_value += timedelta(minutes=11)
+    response = harness.client.post(
+        f"/api/auth/device-authorizations/{data['grant_id']}/poll",
+        headers=poll_headers(str(data["polling_secret"])),
+    )
+    assert response.status_code == 410
+    assert response.json()["error"]["code"] == "device_authorization_expired"

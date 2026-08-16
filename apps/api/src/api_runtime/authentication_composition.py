@@ -25,7 +25,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Final, cast
@@ -51,6 +51,7 @@ from personal_os.authentication.contracts import (
 )
 from personal_os.authentication.crypto import TOTP_SECRET_AEAD_LABEL
 from personal_os.authentication.device_authorization import (
+    POLL_INTERVAL_SECONDS,
     ApprovedGrant,
     ApproveGrantCommand,
     DeniedGrant,
@@ -63,6 +64,16 @@ from personal_os.authentication.device_authorization import (
     PluginVersionBounds,
     StoredDeviceAuthorizationGrant,
     resolve_terminal_rejection_code,
+)
+from personal_os.authentication.device_tokens import (
+    INITIAL_REFRESH_GENERATION,
+    AccessTokenAuthenticationCommand,
+    AuthenticatedAccessToken,
+    CommittedRefreshRotation,
+    DeviceTokenService,
+    ExchangeGrantCommand,
+    ExchangeProvisioning,
+    RefreshRotationCommand,
 )
 from personal_os.authentication.errors import AuthenticationError
 from personal_os.authentication.passwords import (
@@ -135,6 +146,7 @@ from postgresql_source_store.authentication_credentials import (
     run_authentication_transaction,
 )
 from postgresql_source_store.device_authorization_store import DeviceAuthorizationStore
+from postgresql_source_store.device_token_store import DeviceTokenStore
 from postgresql_source_store.totp_store import TotpStore
 from postgresql_source_store.web_session_store import WebSessionStore
 
@@ -180,7 +192,26 @@ class WebAuthenticationRuntime:
     password_change_service: PasswordChangeService
     totp_service: TotpService
     device_authorization_service: DeviceAuthorizationService
+    device_token_service: DeviceTokenService
     verify_csrf_token: Callable[[str, str], bool]
+
+
+class KeyringDeviceTokenKeyring:
+    """Versioned-keyring adapter view for device-token derivations (20.1).
+
+    The domain service resolves the current key and the key that anchored a
+    committed derivation through this structural view; the concrete keyring
+    keeps ownership of the key material.
+    """
+
+    def __init__(self, keyring: AuthenticationKeyring) -> None:
+        self._keyring = keyring
+
+    def current_key_id(self) -> str:
+        return self._keyring.current_key_id
+
+    def keys_by_id(self) -> Mapping[str, bytes]:
+        return self._keyring.keys_by_id
 
 
 class KeyringTotpSecretCodec:
@@ -292,7 +323,8 @@ def compose_web_authentication(
         clock=clock,
         totp_leg=totp_service,
     )
-    device_grants: DeviceAuthorizationTransactionPort = DeviceAuthorizationStore(engine)
+    device_grant_store = DeviceAuthorizationStore(engine)
+    device_tokens_store = DeviceTokenStore(engine)
     return WebAuthenticationRuntime(
         allowed_origin=settings.allowed_origin,
         cookie_contract=build_session_cookie_contract(
@@ -314,7 +346,7 @@ def compose_web_authentication(
         ),
         totp_service=totp_service,
         device_authorization_service=DeviceAuthorizationService(
-            grants=device_grants,
+            grants=device_grant_store,
             session_service=session_service,
             crypto=crypto,
             master_key=master_key,
@@ -324,6 +356,13 @@ def compose_web_authentication(
                 maximum_plugin_version=settings.maximum_plugin_version,
             ),
             verification_base_url=settings.allowed_origin,
+        ),
+        device_token_service=DeviceTokenService(
+            exchange=device_grant_store,
+            tokens=device_tokens_store,
+            keyring=KeyringDeviceTokenKeyring(keyring),
+            crypto=crypto,
+            clock=clock,
         ),
         verify_csrf_token=_build_csrf_verifier(crypto, master_key),
     )
@@ -458,6 +497,93 @@ class OfflineRecoveryCodeRow:
         self.used_at: datetime | None = None
 
 
+class OfflineRegisteredDeviceRow:
+    """In-memory ``devices`` row of one offline exchange."""
+
+    def __init__(
+        self,
+        *,
+        device_id: UUID,
+        workspace_id: UUID,
+        user_id: UUID,
+        device_name: str,
+        registered_at: datetime,
+    ) -> None:
+        self.device_id = device_id
+        self.workspace_id = workspace_id
+        self.user_id = user_id
+        self.device_name = device_name
+        self.device_kind = "obsidian"
+        self.status = "active"
+        self.registered_at = registered_at
+        self.last_seen_at: datetime | None = None
+        self.revoked_at: datetime | None = None
+
+
+class OfflineTokenFamilyRow:
+    """In-memory ``device_token_families`` row of one offline exchange."""
+
+    def __init__(
+        self,
+        *,
+        token_family_id: UUID,
+        workspace_id: UUID,
+        user_id: UUID,
+        device_id: UUID,
+        inactivity_expires_at: datetime,
+        absolute_expires_at: datetime,
+        created_at: datetime,
+    ) -> None:
+        self.token_family_id = token_family_id
+        self.workspace_id = workspace_id
+        self.user_id = user_id
+        self.device_id = device_id
+        self.state = "active"
+        self.current_refresh_generation = INITIAL_REFRESH_GENERATION
+        self.created_at = created_at
+        self.last_refreshed_at = created_at
+        self.inactivity_expires_at = inactivity_expires_at
+        self.absolute_expires_at = absolute_expires_at
+        self.revoked_at: datetime | None = None
+        self.revocation_reason: str | None = None
+
+
+class OfflineDeviceTokenRow:
+    """In-memory ``device_tokens`` row of one offline exchange."""
+
+    def __init__(
+        self,
+        *,
+        device_token_id: UUID,
+        token_family_id: UUID,
+        workspace_id: UUID,
+        user_id: UUID,
+        device_id: UUID,
+        token_kind: str,
+        secret_hash: str,
+        expires_at: datetime,
+        issued_at: datetime,
+        derivation_key_id: str,
+    ) -> None:
+        self.device_token_id = device_token_id
+        self.token_family_id = token_family_id
+        self.workspace_id = workspace_id
+        self.user_id = user_id
+        self.device_id = device_id
+        self.token_kind = token_kind
+        self.generation = INITIAL_REFRESH_GENERATION
+        self.secret_hash = secret_hash
+        self.state = "active"
+        self.predecessor_token_id: UUID | None = None
+        self.successor_token_id: UUID | None = None
+        self.rotation_id: UUID | None = None
+        self.derivation_key_id = derivation_key_id
+        self.issued_at = issued_at
+        self.expires_at = expires_at
+        self.rotated_at: datetime | None = None
+        self.revoked_at: datetime | None = None
+
+
 class OfflineDeviceGrantRow:
     """In-memory ``device_authorization_grants`` row of the offline graph."""
 
@@ -480,6 +606,11 @@ class OfflineDeviceGrantRow:
         self.exchanged_at: datetime | None = None
         self.approved_by_user_id: UUID | None = None
         self.approved_web_session_id: UUID | None = None
+        self.device_id: UUID | None = None
+        self.token_family_id: UUID | None = None
+        self.initial_access_token_id: UUID | None = None
+        self.initial_refresh_token_id: UUID | None = None
+        self.derivation_key_id: str | None = None
 
 
 class OfflineTotpSecretCodec:
@@ -515,6 +646,10 @@ class OfflineAuthenticationState:
         self.recovery_code_rows: list[OfflineRecoveryCodeRow] = []
         self.device_grant_rows: list[OfflineDeviceGrantRow] = []
         self.device_grant_audit_actions: list[str] = []
+        self.device_rows: list[OfflineRegisteredDeviceRow] = []
+        self.device_family_rows: list[OfflineTokenFamilyRow] = []
+        self.device_token_rows: list[OfflineDeviceTokenRow] = []
+        self.device_exchange_audit_actions: list[str] = []
         if totp_active:
             self.totp_credential_rows.append(
                 OfflineTotpCredentialRow(
@@ -1319,6 +1454,196 @@ class OfflineDeviceAuthorizationStore:
                 )
             return row
 
+    async def poll_exchange(self, command: ExchangeGrantCommand) -> ExchangeProvisioning:
+        """Lock-free in-memory exchange mirroring the real transaction.
+
+        One ``asyncio.Lock`` serializes the operation exactly like the row
+        lock of the real store: the closed poll outcome vocabulary answers
+        pending, denied and expired grants before any write; an approved
+        grant commits one device, family and token pair with the grant
+        anchors and the two registration audits; an exchanged grant replays
+        the anchored identities and timestamps while generation one stays
+        current.
+        """
+        async with self._lock:
+            row = next(
+                (
+                    candidate
+                    for candidate in self._state.device_grant_rows
+                    if candidate.polling_secret_hash == command.polling_secret_hash
+                ),
+                None,
+            )
+            if row is None or row.grant_id != command.grant_id:
+                raise AuthenticationError(ErrorCode.DEVICE_CREDENTIAL_INVALID)
+            if row.state is DeviceAuthorizationGrantState.DENIED:
+                raise AuthenticationError(ErrorCode.DEVICE_AUTHORIZATION_DENIED)
+            if row.state is DeviceAuthorizationGrantState.PENDING:
+                if command.database_now >= row.expires_at:
+                    raise AuthenticationError(ErrorCode.DEVICE_AUTHORIZATION_EXPIRED)
+                raise AuthenticationError(
+                    ErrorCode.DEVICE_AUTHORIZATION_PENDING,
+                    safe_details={"retry_after_seconds": POLL_INTERVAL_SECONDS},
+                )
+            if row.state is DeviceAuthorizationGrantState.EXCHANGED:
+                return self._replay_offline_exchange(row, command)
+            row.state = DeviceAuthorizationGrantState.EXCHANGED
+            row.exchanged_at = command.database_now
+            row.device_id = command.device_id
+            row.token_family_id = command.token_family_id
+            row.initial_access_token_id = command.access_token_id
+            row.initial_refresh_token_id = command.refresh_token_id
+            row.derivation_key_id = command.derivation_key_id
+            self._state.device_rows.append(
+                OfflineRegisteredDeviceRow(
+                    device_id=command.device_id,
+                    workspace_id=_OFFLINE_WORKSPACE_ID,
+                    user_id=_OFFLINE_USER_ID,
+                    device_name=row.device_name,
+                    registered_at=command.database_now,
+                )
+            )
+            self._state.device_family_rows.append(
+                OfflineTokenFamilyRow(
+                    token_family_id=command.token_family_id,
+                    workspace_id=_OFFLINE_WORKSPACE_ID,
+                    user_id=_OFFLINE_USER_ID,
+                    device_id=command.device_id,
+                    inactivity_expires_at=command.refresh_expires_at,
+                    absolute_expires_at=command.family_absolute_expires_at,
+                    created_at=command.database_now,
+                )
+            )
+            for token_kind, token_id, secret_hash, expires_at in (
+                (
+                    "access",
+                    command.access_token_id,
+                    command.access_secret_hash,
+                    command.access_expires_at,
+                ),
+                (
+                    "refresh",
+                    command.refresh_token_id,
+                    command.refresh_secret_hash,
+                    command.refresh_expires_at,
+                ),
+            ):
+                self._state.device_token_rows.append(
+                    OfflineDeviceTokenRow(
+                        device_token_id=token_id,
+                        token_family_id=command.token_family_id,
+                        workspace_id=_OFFLINE_WORKSPACE_ID,
+                        user_id=_OFFLINE_USER_ID,
+                        device_id=command.device_id,
+                        token_kind=token_kind,
+                        secret_hash=secret_hash,
+                        expires_at=expires_at,
+                        issued_at=command.database_now,
+                        derivation_key_id=command.derivation_key_id,
+                    )
+                )
+            self._state.device_exchange_audit_actions.append("authentication.device_registered")
+            self._state.device_exchange_audit_actions.append(
+                "authentication.device_token_family_created"
+            )
+            return ExchangeProvisioning(
+                grant_id=command.grant_id,
+                device_id=command.device_id,
+                token_family_id=command.token_family_id,
+                access_token_id=command.access_token_id,
+                refresh_token_id=command.refresh_token_id,
+                derivation_key_id=command.derivation_key_id,
+                refresh_generation=INITIAL_REFRESH_GENERATION,
+                access_issued_at=command.database_now,
+                access_expires_at=command.access_expires_at,
+                refresh_expires_at=command.refresh_expires_at,
+                database_now=command.database_now,
+            )
+
+    def _replay_offline_exchange(
+        self, row: OfflineDeviceGrantRow, command: ExchangeGrantCommand
+    ) -> ExchangeProvisioning:
+        """Replay the anchored offline exchange while generation one is current."""
+        assert row.initial_refresh_token_id is not None
+        assert row.initial_access_token_id is not None
+        initial_refresh = next(
+            candidate
+            for candidate in self._state.device_token_rows
+            if candidate.device_token_id == row.initial_refresh_token_id
+        )
+        family = next(
+            candidate
+            for candidate in self._state.device_family_rows
+            if candidate.token_family_id == row.token_family_id
+        )
+        is_initial_generation_current = (
+            initial_refresh.state == "active"
+            and family.current_refresh_generation == initial_refresh.generation
+        )
+        if not is_initial_generation_current:
+            raise AuthenticationError(ErrorCode.DEVICE_AUTHORIZATION_STATE_INVALID)
+        initial_access = next(
+            candidate
+            for candidate in self._state.device_token_rows
+            if candidate.device_token_id == row.initial_access_token_id
+        )
+        assert row.device_id is not None
+        assert row.token_family_id is not None
+        assert row.derivation_key_id is not None
+        return ExchangeProvisioning(
+            grant_id=row.grant_id,
+            device_id=row.device_id,
+            token_family_id=row.token_family_id,
+            access_token_id=row.initial_access_token_id,
+            refresh_token_id=row.initial_refresh_token_id,
+            derivation_key_id=row.derivation_key_id,
+            refresh_generation=initial_refresh.generation,
+            access_issued_at=initial_access.issued_at,
+            access_expires_at=initial_access.expires_at,
+            refresh_expires_at=initial_refresh.expires_at,
+            database_now=command.database_now,
+        )
+
+
+class OfflineDeviceTokenStore:
+    """In-memory token transaction double behind the offline poll route.
+
+    The offline graph exists for the byte-deterministic contract document and
+    the route tests; its grant double implements the exchange the poll route
+    needs, while the rotation and access surfaces land with their own routes
+    and stay unreachable here - mirroring the sealed-secret doubles of the
+    offline crypto adapter.
+    """
+
+    def __init__(self, state: OfflineAuthenticationState) -> None:
+        self._state = state
+
+    async def resolve_refresh_predecessor(self, *, token_id: UUID) -> None:
+        del token_id
+        raise AssertionError("the offline composition never rotates device tokens")
+
+    async def refresh_rotation(self, command: RefreshRotationCommand) -> CommittedRefreshRotation:
+        del command
+        raise AssertionError("the offline composition never rotates device tokens")
+
+    async def authenticate_access_token(
+        self, command: AccessTokenAuthenticationCommand
+    ) -> AuthenticatedAccessToken:
+        del command
+        raise AssertionError("the offline composition never authenticates device tokens")
+
+
+class OfflineDeviceTokenKeyring:
+    """Fixed offline keyring view: one deterministic key."""
+
+    _CURRENT_KEY_ID: str = "offline-device-token-key-current"
+
+    def current_key_id(self) -> str:
+        return self._CURRENT_KEY_ID
+
+    def keys_by_id(self) -> dict[str, bytes]:
+        return {self._CURRENT_KEY_ID: _OFFLINE_MASTER_KEY}
+
 
 def compose_offline_web_authentication(
     *,
@@ -1396,6 +1721,13 @@ def compose_offline_web_authentication(
             plugin_version_bounds=OFFLINE_PLUGIN_VERSION_BOUNDS,
             verification_base_url=OFFLINE_WEB_ALLOWED_ORIGIN,
             session_policy=_OFFLINE_SESSION_POLICY,
+        ),
+        device_token_service=DeviceTokenService(
+            exchange=OfflineDeviceAuthorizationStore(offline_state),
+            tokens=OfflineDeviceTokenStore(offline_state),
+            keyring=OfflineDeviceTokenKeyring(),
+            crypto=crypto,
+            clock=offline_clock,
         ),
         verify_csrf_token=_build_csrf_verifier(crypto, _OFFLINE_MASTER_KEY),
     )

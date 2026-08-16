@@ -42,6 +42,7 @@ _API_ROUTE_PATHS = frozenset(
         "/api/auth/device-authorizations/lookup",
         "/api/auth/device-authorizations/{grant_id}/approve",
         "/api/auth/device-authorizations/{grant_id}/deny",
+        "/api/auth/device-authorizations/{grant_id}/poll",
     }
 )
 
@@ -105,6 +106,7 @@ async def test_local_environments_serve_raw_openapi_document_with_correlation(
         "lookupDeviceAuthorization",
         "approveDeviceAuthorization",
         "denyDeviceAuthorization",
+        "pollDeviceAuthorization",
     }
     assert "data" not in document
     assert "request_id" not in document

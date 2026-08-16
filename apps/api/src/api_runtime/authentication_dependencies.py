@@ -56,6 +56,12 @@ LOCAL_CSRF_COOKIE_NAME: Final[str] = "admin_csrf_local"
 #: The single header the CSRF double-submit check compares (spec 9.3).
 CSRF_HEADER_NAME: Final[str] = "x-csrf-token"
 
+#: The dedicated Bearer authentication scheme header (spec 16): the opaque
+#: device-credential routes accept exactly one credential in the standard
+#: Authorization header and nothing else — no cookie, no query, no body.
+_AUTHORIZATION_HEADER_NAME: Final[str] = "authorization"
+_BEARER_AUTHENTICATION_SCHEME: Final[str] = "bearer"
+
 #: Cookie attributes shared by both bindings (spec 9.1, 9.3).
 _COOKIE_PATH: Final[str] = "/"
 _COOKIE_SAMESITE: Final[Literal["lax"]] = "lax"
@@ -172,6 +178,34 @@ def client_source_address(request: Request) -> str:
     if request.client is None:
         return _UNKNOWN_SOURCE_ADDRESS
     return request.client.host
+
+
+def extract_bearer_credential(request: Request) -> str:
+    """Return the one Bearer credential of a device-credential request.
+
+    The dedicated Bearer scheme of spec 16 is the only authority these
+    routes accept: a missing header, a non-Bearer scheme or an empty
+    credential closes with the registered invalid-credential code. The
+    value never renders in logs or diagnostics; the presented credential
+    string is only ever hashed by the service that verifies it.
+    """
+    authorization = request.headers.get(_AUTHORIZATION_HEADER_NAME)
+    if authorization is None:
+        raise AuthenticationError(ErrorCode.DEVICE_CREDENTIAL_INVALID)
+    scheme, _, credential = authorization.partition(" ")
+    if scheme.lower() != _BEARER_AUTHENTICATION_SCHEME or not credential.strip():
+        raise AuthenticationError(ErrorCode.DEVICE_CREDENTIAL_INVALID)
+    return credential.strip()
+
+
+async def require_polling_credential(request: Request) -> str:
+    """Resolve the polling Bearer credential of one grant poll (spec 11.4).
+
+    The polling credential is the only authority this route accepts: Web
+    session cookies, CSRF material and every other credential are simply
+    never read here, so presenting them changes nothing.
+    """
+    return extract_bearer_credential(request)
 
 
 def create_session_route_dependencies(
