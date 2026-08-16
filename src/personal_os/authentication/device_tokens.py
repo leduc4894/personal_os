@@ -714,7 +714,6 @@ class ListedAdminDevice:
     registered_at: datetime
     last_seen_at: datetime | None = None
     revoked_at: datetime | None = None
-    approved_at: datetime | None = None
     family_absolute_expires_at: datetime | None = None
 
 

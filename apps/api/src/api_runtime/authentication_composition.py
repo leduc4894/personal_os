@@ -1979,7 +1979,6 @@ class OfflineDeviceTokenStore:
                     registered_at=row.registered_at,
                     last_seen_at=row.last_seen_at,
                     revoked_at=row.revoked_at,
-                    approved_at=exchanged_grants_by_device[row.device_id].approved_at,
                     family_absolute_expires_at=max(
                         (
                             family.absolute_expires_at

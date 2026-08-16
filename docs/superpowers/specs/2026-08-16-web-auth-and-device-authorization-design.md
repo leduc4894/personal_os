@@ -918,10 +918,15 @@ The child extends the closed registry and HTTP mapping:
 | `device_authorization_denied` | 403 | no | none |
 | `device_authorization_expired` | 410 | no | none |
 | `device_authorization_state_invalid` | 409 | no | none |
+| `device_revocation_confirmation_invalid` | 409 | no | none |
 | `device_credential_invalid` | 401 | no | none |
 | `device_revoked` | 401 | no | none |
 | `device_token_reuse_detected` | 401 | no | none |
 | `plugin_version_unsupported` | 426 | no | approved version bounds only |
+
+`device_revocation_confirmation_invalid` answers the section 14.1 exact
+display-name confirmation mismatch; it was added at implementation because the
+table had no expression for it.
 
 No error contains username, user code, device name, token/lookup ID, source
 address, rejected field value, SQL/driver text or crypto exception.

@@ -665,7 +665,6 @@ async def test_admin_list_excludes_the_bootstrap_and_joins_the_grant_metadata(
     assert entry.registered_at == harness.database_now
     assert entry.last_seen_at is None
     assert entry.revoked_at is None
-    assert entry.approved_at is not None
     assert entry.family_absolute_expires_at is not None
 
 

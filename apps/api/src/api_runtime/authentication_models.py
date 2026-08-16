@@ -371,8 +371,8 @@ class AdminDeviceData(BaseModel):
 
     Carries the display identity, the Desktop/Mobile class, the platform, the
     validated plugin version, the closed lifecycle status, the
-    registered/last-seen/revoked moments, the grant approval moment and the
-    family expiry; never a credential, hash or polling identity.
+    registered/last-seen/revoked moments and the family expiry; never a
+    credential, hash or polling identity.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -386,7 +386,6 @@ class AdminDeviceData(BaseModel):
     registered_at: datetime
     last_seen_at: datetime | None = None
     revoked_at: datetime | None = None
-    approved_at: datetime | None = None
     family_absolute_expires_at: datetime | None = None
 
 

@@ -229,7 +229,6 @@ def test_device_list_excludes_the_bootstrap_device_and_joins_the_grant_metadata(
         "registered_at",
         "last_seen_at",
         "revoked_at",
-        "approved_at",
         "family_absolute_expires_at",
     }
     assert entry["device_name"] == "Personal desktop"
@@ -239,7 +238,6 @@ def test_device_list_excludes_the_bootstrap_device_and_joins_the_grant_metadata(
     assert entry["status"] == "active"
     assert entry["revoked_at"] is None
     assert entry["registered_at"]
-    assert entry["approved_at"]
     assert entry["family_absolute_expires_at"]
 
 

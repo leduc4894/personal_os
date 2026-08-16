@@ -98,7 +98,6 @@ def create_device_admin_route_endpoints(
                         registered_at=device.registered_at,
                         last_seen_at=device.last_seen_at,
                         revoked_at=device.revoked_at,
-                        approved_at=device.approved_at,
                         family_absolute_expires_at=device.family_absolute_expires_at,
                     )
                     for device in listed

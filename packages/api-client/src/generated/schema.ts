@@ -476,12 +476,10 @@ export type components = {
          *
          *     Carries the display identity, the Desktop/Mobile class, the platform, the
          *     validated plugin version, the closed lifecycle status, the
-         *     registered/last-seen/revoked moments, the grant approval moment and the
-         *     family expiry; never a credential, hash or polling identity.
+         *     registered/last-seen/revoked moments and the family expiry; never a
+         *     credential, hash or polling identity.
          */
         readonly AdminDeviceData: {
-            /** Approved At */
-            readonly approved_at?: string | null;
             /**
              * Device Id
              * Format: uuid

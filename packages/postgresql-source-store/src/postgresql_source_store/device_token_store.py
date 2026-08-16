@@ -759,7 +759,6 @@ class DeviceTokenStore:
                 device_authorization_grants.c.platform_class,
                 device_authorization_grants.c.platform_name,
                 device_authorization_grants.c.plugin_version,
-                device_authorization_grants.c.approved_at,
                 family_absolute_expires_at,
             )
             .select_from(devices)
@@ -791,7 +790,6 @@ class DeviceTokenStore:
                     registered_at=row.registered_at,
                     last_seen_at=row.last_seen_at,
                     revoked_at=row.revoked_at,
-                    approved_at=row.approved_at,
                     family_absolute_expires_at=row.family_absolute_expires_at,
                 )
                 for row in rows

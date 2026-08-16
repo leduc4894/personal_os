@@ -3,20 +3,8 @@
     "schemas": {
       "AdminDeviceData": {
         "additionalProperties": false,
-        "description": "One Admin device-list row: spec-approved fields only (16.4, 18.3).\n\nCarries the display identity, the Desktop/Mobile class, the platform, the\nvalidated plugin version, the closed lifecycle status, the\nregistered/last-seen/revoked moments, the grant approval moment and the\nfamily expiry; never a credential, hash or polling identity.",
+        "description": "One Admin device-list row: spec-approved fields only (16.4, 18.3).\n\nCarries the display identity, the Desktop/Mobile class, the platform, the\nvalidated plugin version, the closed lifecycle status, the\nregistered/last-seen/revoked moments and the family expiry; never a\ncredential, hash or polling identity.",
         "properties": {
-          "approved_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Approved At"
-          },
           "device_id": {
             "format": "uuid",
             "title": "Device Id",
