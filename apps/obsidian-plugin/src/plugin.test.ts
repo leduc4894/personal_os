@@ -66,6 +66,18 @@ describe("Obsidian plugin composition root", () => {
     expect(startupCalls.length).toBe(2);
   });
 
+  it("registers the settings tab before any fire-and-forget startup action", () => {
+    const tabRegistrationIndex = pluginSource.indexOf("addSettingTab(");
+    const startupActionIndex = pluginSource.search(/resumePendingGrant|session\.refresh/);
+    expect(tabRegistrationIndex).toBeGreaterThanOrEqual(0);
+    expect(startupActionIndex).toBeGreaterThan(tabRegistrationIndex);
+    // The bounded startup task must never suspend onload awaiting the poll
+    // loop; the spec-19 affordances (Cancel/Open browser again) stay reachable
+    // while a pending grant resumes.
+    expect(pluginSource).not.toContain("await controller.resumePendingGrant");
+    expect(pluginSource).not.toContain("await session.refresh");
+  });
+
   it("pins the production origin policy to HTTPS-only", () => {
     expect(pluginSource).toContain("ALLOW_LOOPBACK_HTTP_ORIGIN = false");
   });

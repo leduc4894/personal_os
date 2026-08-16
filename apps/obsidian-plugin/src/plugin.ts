@@ -189,15 +189,6 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     this.#session = session;
     this.#controller = controller;
 
-    // The single bounded startup action of spec 19 — never a background loop.
-    const startupRecord = readDeviceSecretRecord(secretStore, DEVICE_CREDENTIAL_RECORD_NAME);
-    const startupAction = resolveStartupAction(startupRecord);
-    if (startupAction === "resume_pending_grant") {
-      await controller.resumePendingGrant().catch(() => undefined);
-    } else if (startupAction === "refresh_credential") {
-      await session.refresh().catch(() => undefined);
-    }
-
     this.#settingTab = new DeviceAuthenticationSettingTab(this.app, this, {
       getSnapshot: () => ({
         connectionState: this.#connectionState,
@@ -221,6 +212,23 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       disconnect: () => session.disconnect(),
     });
     this.addSettingTab(this.#settingTab);
+
+    // The settings tab is registered before any bounded startup work so the
+    // spec-19 affordances (Cancel pending login, Open browser again) stay
+    // reachable while a pending grant resumes. The single bounded startup
+    // action then runs fire-and-forget — never awaited in onload — and never
+    // starts a background sync loop. The crash-window reconciliation is
+    // local-only (one settings persist) and precedes the refresh.
+    const startupRecord = readDeviceSecretRecord(secretStore, DEVICE_CREDENTIAL_RECORD_NAME);
+    const startupAction = resolveStartupAction(startupRecord);
+    if (startupAction === "resume_pending_grant") {
+      void controller.resumePendingGrant().catch(() => undefined);
+    } else {
+      await controller.reconcileCrashWindow();
+      if (startupAction === "refresh_credential") {
+        void session.refresh().catch(() => undefined);
+      }
+    }
   }
 
   override onunload(): void {

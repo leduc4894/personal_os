@@ -130,14 +130,64 @@ export class DeviceAuthorizationController {
 
   /**
    * Cancel a pending login: stop polling, tombstone the record locally and
-   * clear the non-secret settings reference. No network call is made.
+   * clear the non-secret settings reference. No network call is made. A
+   * stale reference over an already-exchanged record is dropped without
+   * touching the live credential.
    */
   async cancelPendingLogin(): Promise<void> {
     this.#stopRequested = true;
     if (this.#deps.settings.pending_grant === null) {
       return;
     }
+    const record = readDeviceSecretRecord(this.#deps.secretStore, this.#deps.recordName);
+    if (record?.state === "active") {
+      // Crash window: the grant already exchanged before the pending
+      // reference was cleared, so cancelling must keep the credential.
+      this.#deps.settings.pending_grant = null;
+      this.#deps.settings.secret_record_name = this.#deps.recordName;
+      await this.#deps.persistSettings();
+      this.#deps.onStateChange("connected", null);
+      return;
+    }
     await this.#terminatePendingGrant("login_cancelled", "not_connected");
+  }
+
+  /**
+   * Reconcile the crash-window pairings between the record and the pending
+   * grant reference (spec 19 bounded startup), locally and without network:
+   * a poll exchange commits the active record before the pending reference
+   * is cleared, and a tombstone commits before the reference is cleared, so
+   * a crash in either gap leaves a stale reference that must never destroy
+   * the committed record. An active record keeps its credential and reports
+   * connected; a cleared (or absent) record drops the stale reference and
+   * reports not_connected. Pending records belong to the resume path.
+   */
+  async reconcileCrashWindow(): Promise<void> {
+    const record = readDeviceSecretRecord(this.#deps.secretStore, this.#deps.recordName);
+    if (record?.state === "pending_grant") {
+      return;
+    }
+    if (record?.state === "active") {
+      const referenceIsStale =
+        this.#deps.settings.pending_grant !== null ||
+        this.#deps.settings.secret_record_name !== this.#deps.recordName;
+      if (referenceIsStale) {
+        this.#deps.settings.pending_grant = null;
+        this.#deps.settings.secret_record_name = this.#deps.recordName;
+        await this.#deps.persistSettings();
+      }
+      this.#deps.onStateChange("connected", null);
+      return;
+    }
+    const referenceIsStale =
+      this.#deps.settings.pending_grant !== null ||
+      this.#deps.settings.secret_record_name !== null;
+    if (referenceIsStale) {
+      this.#deps.settings.pending_grant = null;
+      this.#deps.settings.secret_record_name = null;
+      await this.#deps.persistSettings();
+      this.#deps.onStateChange("not_connected", null);
+    }
   }
 
   /**
@@ -233,6 +283,16 @@ export class DeviceAuthorizationController {
           return;
         }
         this.#deps.onStateChange("offline", null);
+        return;
+      }
+      if (this.#stopRequested || this.#deps.settings.pending_grant === null) {
+        // A cancel or unload raced the in-flight poll. The terminating path
+        // already owns the record and the state, so the late result is
+        // discarded — nothing is written, no credential is adopted — and the
+        // truthful cancel state is re-asserted.
+        if (this.#deps.settings.pending_grant === null) {
+          this.#deps.onStateChange("not_connected", null);
+        }
         return;
       }
       writeActiveDeviceRecord(this.#deps.secretStore, this.#deps.recordName, {

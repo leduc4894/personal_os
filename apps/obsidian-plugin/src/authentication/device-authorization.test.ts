@@ -390,6 +390,34 @@ describe("DeviceAuthorizationController polling", () => {
     expect(harness.settings.pending_grant).not.toBeNull();
     expect(harness.states[harness.states.length - 1]).toBe("offline");
   });
+
+  it("discards a late poll result that lands after cancel", async () => {
+    const harness = createHarness();
+    harness.transport.createGrant.mockResolvedValue(GRANT_DATA);
+    let resolveLatePoll: (value: unknown) => void = () => undefined;
+    const latePoll = new Promise<unknown>((resolve) => {
+      resolveLatePoll = resolve;
+    });
+    harness.transport.pollGrant.mockReturnValue(latePoll);
+
+    const loginPromise = harness.controller.login();
+    // Release the pacing delay so the loop is inside the in-flight poll.
+    await harness.timeline.releaseOneDelay();
+    await harness.controller.cancelPendingLogin();
+    resolveLatePoll(EXCHANGE_DATA);
+    await harness.timeline.settle();
+    await loginPromise;
+
+    expect(JSON.parse(harness.stored.get(DEVICE_CREDENTIAL_RECORD_NAME) ?? "{}")).toEqual({
+      record_version: 1,
+      state: "cleared",
+      cleared_reason: "login_cancelled",
+    });
+    expect(harness.onExchange).not.toHaveBeenCalled();
+    expect(harness.settings.pending_grant).toBeNull();
+    expect(harness.settings.secret_record_name).toBeNull();
+    expect(harness.states[harness.states.length - 1]).toBe("not_connected");
+  });
 });
 
 describe("cancel and resume", () => {
@@ -485,5 +513,94 @@ describe("cancel and resume", () => {
     });
     expect(harness.transport.pollGrant).not.toHaveBeenCalled();
     expect(harness.settings.pending_grant).toBeNull();
+  });
+});
+
+describe("crash-window reconciliation of the pending reference", () => {
+  function createActiveRecordHarness(): TestHarness {
+    const harness = createHarness({
+      pending_grant: {
+        grant_id: GRANT_DATA.grant_id,
+        user_code: GRANT_DATA.user_code,
+        verification_uri: GRANT_DATA.verification_uri,
+        expires_at_epoch_seconds: (1_000_000 + 600_000) / 1000,
+        poll_interval_seconds: 5,
+      },
+      secret_record_name: DEVICE_CREDENTIAL_RECORD_NAME,
+    });
+    harness.stored.set(
+      DEVICE_CREDENTIAL_RECORD_NAME,
+      JSON.stringify({
+        record_version: 1,
+        state: "active",
+        refresh_credential: NEXT_REFRESH_CREDENTIAL,
+        refresh_generation: 1,
+        pending_rotation_id: null,
+      }),
+    );
+    return harness;
+  }
+
+  it("keeps the active record and drops the stale pending reference", async () => {
+    const harness = createActiveRecordHarness();
+
+    await harness.controller.reconcileCrashWindow();
+
+    expect(harness.settings.pending_grant).toBeNull();
+    expect(harness.settings.secret_record_name).toBe(DEVICE_CREDENTIAL_RECORD_NAME);
+    expect(JSON.parse(harness.stored.get(DEVICE_CREDENTIAL_RECORD_NAME) ?? "{}")).toEqual({
+      record_version: 1,
+      state: "active",
+      refresh_credential: NEXT_REFRESH_CREDENTIAL,
+      refresh_generation: 1,
+      pending_rotation_id: null,
+    });
+    expect(harness.transport.pollGrant).not.toHaveBeenCalled();
+    expect(harness.states).toEqual(["connected"]);
+  });
+
+  it("drops a stale pending reference over a cleared record and reports not_connected", async () => {
+    const harness = createHarness({
+      pending_grant: {
+        grant_id: GRANT_DATA.grant_id,
+        user_code: GRANT_DATA.user_code,
+        verification_uri: GRANT_DATA.verification_uri,
+        expires_at_epoch_seconds: (1_000_000 + 600_000) / 1000,
+        poll_interval_seconds: 5,
+      },
+      secret_record_name: DEVICE_CREDENTIAL_RECORD_NAME,
+    });
+    harness.stored.set(
+      DEVICE_CREDENTIAL_RECORD_NAME,
+      JSON.stringify({ record_version: 1, state: "cleared", cleared_reason: "token_reuse" }),
+    );
+
+    await harness.controller.reconcileCrashWindow();
+
+    expect(harness.settings.pending_grant).toBeNull();
+    expect(harness.settings.secret_record_name).toBeNull();
+    expect(JSON.parse(harness.stored.get(DEVICE_CREDENTIAL_RECORD_NAME) ?? "{}")).toEqual({
+      record_version: 1,
+      state: "cleared",
+      cleared_reason: "token_reuse",
+    });
+    expect(harness.states).toEqual(["not_connected"]);
+  });
+
+  it("cancel keeps a live credential when the pending reference is stale", async () => {
+    const harness = createActiveRecordHarness();
+
+    await harness.controller.cancelPendingLogin();
+
+    expect(JSON.parse(harness.stored.get(DEVICE_CREDENTIAL_RECORD_NAME) ?? "{}")).toEqual({
+      record_version: 1,
+      state: "active",
+      refresh_credential: NEXT_REFRESH_CREDENTIAL,
+      refresh_generation: 1,
+      pending_rotation_id: null,
+    });
+    expect(harness.settings.pending_grant).toBeNull();
+    expect(harness.settings.secret_record_name).toBe(DEVICE_CREDENTIAL_RECORD_NAME);
+    expect(harness.states[harness.states.length - 1]).toBe("connected");
   });
 });
