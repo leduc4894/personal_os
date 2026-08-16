@@ -6,15 +6,26 @@ bytes of valid hexadecimal key material, malformed or wrongly sized material
 fails with ``configuration_secret_invalid``, a boundary failure (missing file)
 propagates its own registered code, and the returned keyring exposes only
 immutable mappings.
+
+They also prove the concrete Argon2id password-hashing and AEAD/HKDF/HMAC
+adapters that implement the framework-neutral authentication ports: the
+pinned work parameters round-trip through the PHC string, weak parameter sets
+demand a rehash, malformed stored hashes and AEAD failures fail closed as the
+safe ``internal_error`` without echoing crypto text, and the HKDF/HMAC
+composition reproduces the reviewed golden derivation vector.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from uuid import UUID
 
+import argon2
 import pytest
 from api_runtime.authentication_crypto import (
+    Argon2PasswordHasher,
     AuthenticationKeyring,
+    CryptographyAuthenticationCrypto,
     load_authentication_keyring,
 )
 from api_runtime.authentication_settings import (
@@ -22,9 +33,26 @@ from api_runtime.authentication_settings import (
     load_authentication_settings,
 )
 
+from personal_os.authentication.crypto import (
+    CSRF_HASH_LABEL,
+    REFRESH_REPLAY_DERIVATION_LABEL,
+    THROTTLE_HMAC_LABEL,
+)
+from personal_os.authentication.passwords import (
+    ARGON2ID_MEMORY_COST_KIB,
+    ARGON2ID_TIME_COST_ITERATIONS,
+)
+from personal_os.authentication.ports import (
+    AuthenticationCryptoPort,
+    PasswordHasherPort,
+)
 from personal_os.diagnostics.events import SafeToken
 from personal_os.error_contracts.codes import ErrorCode
-from personal_os.error_contracts.exceptions import ConfigurationError, SecretFileError
+from personal_os.error_contracts.exceptions import (
+    ConfigurationError,
+    InternalApplicationError,
+    SecretFileError,
+)
 
 CURRENT_KEY_BYTES: bytes = bytes(range(32))
 CURRENT_KEY_HEX: str = CURRENT_KEY_BYTES.hex()
@@ -136,3 +164,127 @@ def test_malformed_previous_key_material_fails_before_keyring_return(
     with pytest.raises(ConfigurationError) as raised:
         load_authentication_keyring(settings)
     assert raised.value.error_code is ErrorCode.CONFIGURATION_SECRET_INVALID
+
+
+# --- Argon2id password-hashing adapter ---------------------------------------
+
+
+def test_argon2_adapter_implements_the_password_hasher_port() -> None:
+    hasher = Argon2PasswordHasher()
+    assert isinstance(hasher, PasswordHasherPort)
+
+
+def test_argon2_adapter_hashes_with_pinned_argon2id_parameters() -> None:
+    password_hash = Argon2PasswordHasher().hash_password("correct horse battery staple!")
+    assert password_hash.startswith(
+        f"$argon2id$v=19$m={ARGON2ID_MEMORY_COST_KIB},t={ARGON2ID_TIME_COST_ITERATIONS},p=1$"
+    )
+
+
+def test_argon2_adapter_verifies_and_rejects_passwords() -> None:
+    hasher = Argon2PasswordHasher()
+    password_hash = hasher.hash_password("a unique passphrase value")
+    assert hasher.verify_password(password_hash, "a unique passphrase value") is True
+    assert hasher.verify_password(password_hash, "another passphrase value") is False
+
+
+def test_argon2_adapter_demands_rehash_only_for_obsolete_parameters() -> None:
+    hasher = Argon2PasswordHasher()
+    assert hasher.needs_rehash(hasher.hash_password("a unique passphrase value")) is False
+    obsolete_hasher = argon2.PasswordHasher(
+        type=argon2.Type.ID,
+        memory_cost=19456,
+        time_cost=2,
+        parallelism=1,
+        salt_len=16,
+        hash_len=32,
+    )
+    assert hasher.needs_rehash(obsolete_hasher.hash("a unique passphrase value")) is True
+
+
+def test_argon2_adapter_fails_closed_on_malformed_stored_hash() -> None:
+    hasher = Argon2PasswordHasher()
+    with pytest.raises(InternalApplicationError) as raised:
+        hasher.verify_password("not-a-phc-string", "a unique passphrase value")
+    assert raised.value.error_code is ErrorCode.INTERNAL_ERROR
+    rendered = f"{raised.value!r} {raised.value}"
+    assert "not-a-phc-string" not in rendered
+
+
+# --- AEAD/HKDF/HMAC crypto adapter -------------------------------------------
+
+
+def test_crypto_adapter_implements_the_authentication_crypto_port() -> None:
+    assert isinstance(CryptographyAuthenticationCrypto(), AuthenticationCryptoPort)
+
+
+def test_hmac_sha256_matches_rfc_4231_test_case_one() -> None:
+    digest = CryptographyAuthenticationCrypto().hmac_sha256(
+        key=bytes([0x0B] * 20),
+        message=b"Hi There",
+    )
+    assert digest.hex() == "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+
+
+def test_refresh_replay_derivation_reproduces_the_reviewed_golden_vector() -> None:
+    crypto = CryptographyAuthenticationCrypto()
+    prf_key = crypto.derive_subkey(
+        master_key=bytes(range(32)),
+        label=REFRESH_REPLAY_DERIVATION_LABEL,
+    )
+    successor_secret = crypto.hmac_sha256(
+        key=prf_key,
+        message=(
+            bytes(range(32, 64))
+            + UUID("00000000-0000-0000-0000-000000000001").bytes
+            + UUID("00000000-0000-0000-0000-000000000002").bytes
+            + (2).to_bytes(8, "big")
+        ),
+    )
+    assert successor_secret.hex() == (
+        "266ad59acb65e0a437eb79891fa1a349fd1a5e90f531ccf3e442b1920d8a5141"
+    )
+
+
+def test_domain_separated_subkeys_differ_per_label() -> None:
+    crypto = CryptographyAuthenticationCrypto()
+    csrf_key = crypto.derive_subkey(master_key=CURRENT_KEY_BYTES, label=CSRF_HASH_LABEL)
+    throttle_key = crypto.derive_subkey(master_key=CURRENT_KEY_BYTES, label=THROTTLE_HMAC_LABEL)
+    assert csrf_key != throttle_key
+    assert len(csrf_key) == 32
+    assert csrf_key == crypto.derive_subkey(master_key=CURRENT_KEY_BYTES, label=CSRF_HASH_LABEL)
+
+
+def test_seal_and_open_secret_roundtrip_with_fresh_twelve_byte_nonces() -> None:
+    crypto = CryptographyAuthenticationCrypto()
+    first_nonce, first_ciphertext = crypto.seal_secret(
+        key=CURRENT_KEY_BYTES, plaintext=PREVIOUS_KEY_BYTES
+    )
+    second_nonce, second_ciphertext = crypto.seal_secret(
+        key=CURRENT_KEY_BYTES, plaintext=PREVIOUS_KEY_BYTES
+    )
+    assert len(first_nonce) == 12
+    assert first_nonce != second_nonce
+    assert first_ciphertext != second_ciphertext
+    opened = crypto.open_secret(
+        key=CURRENT_KEY_BYTES, nonce=first_nonce, ciphertext=first_ciphertext
+    )
+    assert opened == PREVIOUS_KEY_BYTES
+
+
+def test_open_secret_fails_closed_without_leaking_crypto_text() -> None:
+    crypto = CryptographyAuthenticationCrypto()
+    nonce, ciphertext = crypto.seal_secret(key=CURRENT_KEY_BYTES, plaintext=b"secret payload")
+    with pytest.raises(InternalApplicationError) as raised:
+        crypto.open_secret(key=PREVIOUS_KEY_BYTES, nonce=nonce, ciphertext=ciphertext)
+    assert raised.value.error_code is ErrorCode.INTERNAL_ERROR
+    rendered = f"{raised.value!r} {raised.value}"
+    assert "secret payload" not in rendered
+
+
+def test_derive_subkey_rejects_non_ascii_labels_and_wrong_key_sizes() -> None:
+    crypto = CryptographyAuthenticationCrypto()
+    with pytest.raises(InternalApplicationError):
+        crypto.derive_subkey(master_key=CURRENT_KEY_BYTES, label="auth/ütf/v1")
+    with pytest.raises(InternalApplicationError):
+        crypto.derive_subkey(master_key=b"short", label=CSRF_HASH_LABEL)

@@ -77,6 +77,22 @@ class ErrorCode(StrEnum):
     API_REQUEST_VALIDATION_FAILED = "api_request_validation_failed"
     API_ROUTE_NOT_FOUND = "api_route_not_found"
     API_METHOD_NOT_ALLOWED = "api_method_not_allowed"
+    AUTHENTICATION_REQUIRED = "authentication_required"
+    AUTHENTICATION_FAILED = "authentication_failed"
+    AUTHENTICATION_RATE_LIMITED = "authentication_rate_limited"
+    RECENT_AUTHENTICATION_REQUIRED = "recent_authentication_required"
+    CSRF_VALIDATION_FAILED = "csrf_validation_failed"
+    AUTHORIZATION_SCOPE_DENIED = "authorization_scope_denied"
+    TOTP_ENROLLMENT_STATE_INVALID = "totp_enrollment_state_invalid"
+    DEVICE_AUTHORIZATION_PENDING = "device_authorization_pending"
+    DEVICE_AUTHORIZATION_SLOW_DOWN = "device_authorization_slow_down"
+    DEVICE_AUTHORIZATION_DENIED = "device_authorization_denied"
+    DEVICE_AUTHORIZATION_EXPIRED = "device_authorization_expired"
+    DEVICE_AUTHORIZATION_STATE_INVALID = "device_authorization_state_invalid"
+    DEVICE_CREDENTIAL_INVALID = "device_credential_invalid"
+    DEVICE_REVOKED = "device_revoked"
+    DEVICE_TOKEN_REUSE_DETECTED = "device_token_reuse_detected"
+    PLUGIN_VERSION_UNSUPPORTED = "plugin_version_unsupported"
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,6 +450,102 @@ ERROR_DEFINITIONS: Final[Mapping[ErrorCode, ErrorDefinition]] = MappingProxyType
             is_retryable=False,
             safe_message="The API route does not allow this method",
             allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.AUTHENTICATION_REQUIRED: ErrorDefinition(
+            category=ErrorCategory.AUTHORIZATION,
+            is_retryable=False,
+            safe_message="Authentication is required",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.AUTHENTICATION_FAILED: ErrorDefinition(
+            category=ErrorCategory.AUTHORIZATION,
+            is_retryable=False,
+            safe_message="Authentication failed",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.AUTHENTICATION_RATE_LIMITED: ErrorDefinition(
+            category=ErrorCategory.AUTHORIZATION,
+            is_retryable=True,
+            safe_message="Authentication is temporarily rate limited",
+            allowed_detail_fields=frozenset({"retry_after_seconds"}),
+        ),
+        ErrorCode.RECENT_AUTHENTICATION_REQUIRED: ErrorDefinition(
+            category=ErrorCategory.AUTHORIZATION,
+            is_retryable=False,
+            safe_message="Recent re-authentication is required",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.CSRF_VALIDATION_FAILED: ErrorDefinition(
+            category=ErrorCategory.AUTHORIZATION,
+            is_retryable=False,
+            safe_message="CSRF validation failed",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.AUTHORIZATION_SCOPE_DENIED: ErrorDefinition(
+            category=ErrorCategory.AUTHORIZATION,
+            is_retryable=False,
+            safe_message="The granted scope does not authorize this operation",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.TOTP_ENROLLMENT_STATE_INVALID: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The TOTP enrollment state does not accept this action",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.DEVICE_AUTHORIZATION_PENDING: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=True,
+            safe_message="Device authorization is still pending",
+            allowed_detail_fields=frozenset({"retry_after_seconds"}),
+        ),
+        ErrorCode.DEVICE_AUTHORIZATION_SLOW_DOWN: ErrorDefinition(
+            category=ErrorCategory.AUTHORIZATION,
+            is_retryable=True,
+            safe_message="Device authorization polling is too frequent",
+            allowed_detail_fields=frozenset({"retry_after_seconds"}),
+        ),
+        ErrorCode.DEVICE_AUTHORIZATION_DENIED: ErrorDefinition(
+            category=ErrorCategory.AUTHORIZATION,
+            is_retryable=False,
+            safe_message="Device authorization was denied",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.DEVICE_AUTHORIZATION_EXPIRED: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="Device authorization expired",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.DEVICE_AUTHORIZATION_STATE_INVALID: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="Device authorization state does not accept this action",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.DEVICE_CREDENTIAL_INVALID: ErrorDefinition(
+            category=ErrorCategory.AUTHORIZATION,
+            is_retryable=False,
+            safe_message="The device credential is invalid",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.DEVICE_REVOKED: ErrorDefinition(
+            category=ErrorCategory.AUTHORIZATION,
+            is_retryable=False,
+            safe_message="The device is revoked",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.DEVICE_TOKEN_REUSE_DETECTED: ErrorDefinition(
+            category=ErrorCategory.AUTHORIZATION,
+            is_retryable=False,
+            safe_message="Device credential reuse was detected",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.PLUGIN_VERSION_UNSUPPORTED: ErrorDefinition(
+            category=ErrorCategory.VALIDATION,
+            is_retryable=False,
+            safe_message="The plugin version is not supported",
+            allowed_detail_fields=frozenset({"approved_version_bounds"}),
         ),
     }
 )

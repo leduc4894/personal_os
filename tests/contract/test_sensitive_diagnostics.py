@@ -22,6 +22,8 @@ from uuid import UUID
 import pytest
 from api_runtime.request_context import RequestContextMiddleware
 
+from personal_os.authentication.crypto import parse_access_credential
+from personal_os.authentication.errors import AuthenticationError
 from personal_os.diagnostics.context import (
     DiagnosticContext,
     bind_diagnostic_context,
@@ -594,6 +596,35 @@ def test_emergency_helpers_never_leak_context_or_exception_text(
     _assert_no_sentinel(
         emergency_stderr.getvalue(),
         sentinels=(cause_sentinel, internal_sentinel),
+    )
+
+
+# --- authentication credential parser boundary ------------------------------
+
+
+def test_rejected_device_credential_never_leaks_to_sinks_or_error_rendering(
+    runtime_settings: RuntimeSettings,
+) -> None:
+    """A malformed opaque credential must fail closed without any echo.
+
+    The rejected value carries a credential-shaped sentinel; the typed error,
+    its serialized form and the diagnostic sinks may only carry the registered
+    code and safe message.
+    """
+    rejected = "at1.do-not-emit-lookup-id.do-not-emit-credential-secret"
+    with pytest.raises(AuthenticationError) as raised:
+        parse_access_credential(rejected)
+    error = raised.value
+    assert error.error_code is ErrorCode.DEVICE_CREDENTIAL_INVALID
+
+    logger, stdout, stderr = _configure(runtime_settings)
+    logger.emit_application_error(error)
+    _all_records_parsable(stdout, stderr)
+    _assert_no_sentinel(
+        _blob(stdout, stderr),
+        str(error),
+        repr(error),
+        sentinels=("do-not-emit-lookup-id", "do-not-emit-credential-secret"),
     )
 
 

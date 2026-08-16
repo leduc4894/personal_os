@@ -326,6 +326,46 @@ def test_api_contracts_modules_reject_web_framework_and_provider_imports() -> No
     )
 
 
+# The framework-neutral authentication domain package: exactly these modules,
+# and never a crypto implementation package, web framework, database driver,
+# provider SDK, composition root or sibling adapter. The concrete Argon2id and
+# AEAD/HKDF/HMAC adapters live in the API composition root, so the domain
+# package pins only parameter constants and ports.
+AUTHENTICATION_DOMAIN_ROOT = REPO_ROOT / "src" / "personal_os" / "authentication"
+AUTHENTICATION_DOMAIN_MODULE_FILES = (
+    "__init__.py",
+    "contracts.py",
+    "crypto.py",
+    "errors.py",
+    "passwords.py",
+    "ports.py",
+)
+AUTHENTICATION_DOMAIN_FORBIDDEN_IMPORT_ROOTS = API_CONTRACTS_FORBIDDEN_IMPORT_ROOTS | {
+    "argon2",
+    "cryptography",
+}
+
+
+def test_authentication_domain_rejects_crypto_and_framework_imports() -> None:
+    module_paths = sorted(path for path in AUTHENTICATION_DOMAIN_ROOT.rglob("*.py"))
+    assert module_paths, "personal_os.authentication must exist as the domain package"
+    assert [path.name for path in module_paths] == sorted(AUTHENTICATION_DOMAIN_MODULE_FILES), (
+        "personal_os.authentication must stay the closed six-module domain package"
+    )
+    offenders: list[str] = []
+    for path in module_paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for module_name in _iter_imported_module_names(tree):
+            root = module_name.partition(".")[0]
+            if root in AUTHENTICATION_DOMAIN_FORBIDDEN_IMPORT_ROOTS:
+                offenders.append(f"{path}: forbidden import {module_name!r}")
+    assert not offenders, (
+        "personal_os.authentication must not import crypto implementations, web frameworks, "
+        "database drivers, provider SDKs, composition roots or sibling adapters:\n"
+        + "\n".join(offenders)
+    )
+
+
 def test_typescript_imports_stay_within_member_boundaries() -> None:
     offenders: list[str] = []
     for path in _iter_typescript_files():
