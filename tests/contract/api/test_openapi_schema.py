@@ -44,7 +44,7 @@ ROUTE_OPERATION_IDS: dict[str, dict[str, str]] = {
     "/api/auth/device-authorizations/{grant_id}/approve": {"post": "approveDeviceAuthorization"},
     "/api/auth/device-authorizations/{grant_id}/deny": {"post": "denyDeviceAuthorization"},
     "/api/auth/device-authorizations/{grant_id}/poll": {"post": "pollDeviceAuthorization"},
-    "/api/auth/device-tokens/refresh": {"post": "refreshDeviceTokens"},
+    "/api/auth/device-tokens/refresh": {"post": "refreshDeviceToken"},
     "/api/auth/device-tokens/revoke-current": {"post": "revokeCurrentDeviceToken"},
     "/api/admin/devices": {"get": "listAdminDevices"},
     "/api/admin/devices/{device_id}/revoke": {"post": "revokeAdminDevice"},

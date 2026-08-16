@@ -27,7 +27,7 @@ real and offline runtimes.
 from __future__ import annotations
 
 import hmac
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Final, Literal, Protocol
 from urllib.parse import urlsplit
@@ -36,6 +36,7 @@ from fastapi import Request
 from fastapi.responses import Response
 from fastapi.security import HTTPBearer
 
+from api_runtime.trusted_proxy import resolve_client_address
 from personal_os.authentication.contracts import AuthenticatedWebContext
 from personal_os.authentication.errors import AuthenticationError
 from personal_os.authentication.sessions import (
@@ -56,6 +57,9 @@ LOCAL_CSRF_COOKIE_NAME: Final[str] = "admin_csrf_local"
 
 #: The single header the CSRF double-submit check compares (spec 9.3).
 CSRF_HEADER_NAME: Final[str] = "x-csrf-token"
+
+#: The forwarded chain header the trusted-proxy resolver consumes (spec 20.3).
+_FORWARDED_FOR_HEADER_NAME: Final[str] = "x-forwarded-for"
 
 #: The dedicated Bearer authentication scheme header (spec 16): the opaque
 #: device-credential routes accept exactly one credential in the standard
@@ -169,16 +173,28 @@ class SessionRouteDependencies:
     ]
 
 
-def client_source_address(request: Request) -> str:
-    """Return the immediate socket peer address of one request.
+def client_source_address(
+    request: Request,
+    *,
+    trusted_proxy_cidrs: Sequence[str] = (),
+) -> str:
+    """Return the resolved client address of one request for throttle buckets.
 
-    Spec 20.3 makes the socket peer the default resolver output before any
-    trusted-proxy handling; the value only ever feeds the HMACed throttle
-    material and is never logged.
+    Spec 20.3: a forwarded chain is honored only when the immediate socket
+    peer belongs to an exact configured trusted-proxy CIDR, and the resolver
+    then selects the rightmost untrusted hop of a chain bounded to eight
+    hops. With no trusted proxies configured — the default until the
+    deployment contract names them — the socket peer always wins, so a
+    spoofed header can never widen trust. The value only ever feeds the
+    HMACed throttle material and is never logged.
     """
     if request.client is None:
         return _UNKNOWN_SOURCE_ADDRESS
-    return request.client.host
+    return resolve_client_address(
+        socket_peer=request.client.host,
+        forwarded_for=request.headers.get(_FORWARDED_FOR_HEADER_NAME, ""),
+        trusted_proxy_cidrs=trusted_proxy_cidrs,
+    )
 
 
 def extract_bearer_credential(request: Request) -> str:

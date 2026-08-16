@@ -172,7 +172,7 @@ export type paths = {
          *     identity on a rotated predecessor commits the confirmed-reuse
          *     revocation and surfaces the terminal reuse code.
          */
-        readonly post: operations["refreshDeviceTokens"];
+        readonly post: operations["refreshDeviceToken"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -1433,7 +1433,7 @@ export interface operations {
             };
         };
     };
-    readonly refreshDeviceTokens: {
+    readonly refreshDeviceToken: {
         readonly parameters: {
             readonly query?: never;
             readonly header?: never;

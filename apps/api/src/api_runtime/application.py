@@ -6,10 +6,12 @@ device-token routes and two Admin device routes of the injected
 web-authentication runtime and the local/test-only OpenAPI document route,
 registers the four envelope exception handlers,
 strips FastAPI's default validation-error response from the generated
-document (the shared handler emits the canonical error envelope instead), and
-wraps the finished middleware stack with :class:`RequestContextMiddleware`
-from the outside so request correlation owns every exchange, including the
-catch-all internal error response. No CORS, GZip, session or authentication
+document (the shared handler emits the canonical error envelope instead),
+declares the dedicated device Bearer schemes of spec 16 the routes have not
+bound yet, and wraps the finished middleware stack with the nonce-CSP web
+security headers middleware and then :class:`RequestContextMiddleware`
+from the outside so request correlation owns every exchange, including
+the catch-all internal error response. No CORS, GZip, session or authentication
 middleware is added — cookies, the exact-origin gate and the CSRF checks live
 in the runtime dependencies of the authentication routes — and the request id
 in every envelope is read from the bound diagnostic context rather than
@@ -27,6 +29,7 @@ from uuid import UUID
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
+from fastapi.security import HTTPBearer
 from starlette.exceptions import HTTPException
 from starlette.routing import Route as StarletteRoute
 from starlette.routing import request_response
@@ -34,6 +37,7 @@ from starlette.types import ASGIApp, ExceptionHandler, Lifespan
 
 from api_runtime import health_routes
 from api_runtime.authentication_composition import WebAuthenticationRuntime
+from api_runtime.authentication_dependencies import ACCESS_BEARER_SCHEME, REFRESH_BEARER_SCHEME
 from api_runtime.authentication_models import (
     AdminDeviceListData,
     AdminDeviceRevokeData,
@@ -49,11 +53,15 @@ from api_runtime.authentication_models import (
     TotpEnrollmentData,
 )
 from api_runtime.device_admin_routes import create_device_admin_route_endpoints
-from api_runtime.device_authorization_routes import create_device_authorization_route_endpoints
+from api_runtime.device_authorization_routes import (
+    POLLING_BEARER_SCHEME,
+    create_device_authorization_route_endpoints,
+)
 from api_runtime.request_context import ASGIApp as CorrelationApp
 from api_runtime.request_context import RequestContextMiddleware
 from api_runtime.session_routes import create_session_route_endpoints
 from api_runtime.totp_routes import create_totp_route_endpoints
+from api_runtime.web_security import WebSecurityHeadersMiddleware
 from personal_os.api_contracts import (
     AUTHENTICATION_ROUTE_TEMPLATE_VALUES,
     HTTP_ERROR_STATUSES,
@@ -87,6 +95,18 @@ _HTTP_VALIDATION_STATUS: Final = "422"
 _FRAMEWORK_VALIDATION_SCHEMA_NAMES: Final[tuple[str, ...]] = (
     "HTTPValidationError",
     "ValidationError",
+)
+
+#: The dedicated device Bearer schemes of spec 16 the published document must
+#: carry. Polling and refresh render through their routes; the access scheme
+#: authenticates the device-scoped surface of the later sync children, so it
+#: is declared on the document ahead of any route binding rather than waiting
+#: for a consumer to appear. Route-driven rendering always wins over the
+#: declared entry.
+_DECLARED_DEVICE_BEARER_SCHEMES: Final[tuple[HTTPBearer, ...]] = (
+    POLLING_BEARER_SCHEME,
+    ACCESS_BEARER_SCHEME,
+    REFRESH_BEARER_SCHEME,
 )
 
 #: Header every authentication-route response carries, success or failure
@@ -158,12 +178,16 @@ def create_api_application(
     # The pure-ASGI correlation middleware declares read-only ``Mapping``
     # message aliases; every ASGI message mapping is mutable in practice, so
     # the static mismatch with Starlette's ``ASGIApp`` is bridged here once at
-    # composition time. Assigning the built stack keeps the correlation
-    # middleware outermost, ahead of the framework error middleware, so even
-    # the catch-all internal response stays correlated.
+    # composition time. The web security headers middleware wraps the built
+    # stack from the inside — every framework response, error envelope
+    # included, receives the fresh nonce CSP and the fixed security headers —
+    # while assigning the finished stack keeps the correlation middleware
+    # outermost, ahead of both, so even the catch-all internal response stays
+    # correlated.
     correlation_app = cast("CorrelationApp", app.build_middleware_stack())
+    secured_app = WebSecurityHeadersMiddleware(correlation_app)
     app.middleware_stack = cast(
-        "ASGIApp", RequestContextMiddleware(correlation_app, event_sink=event_sink)
+        "ASGIApp", RequestContextMiddleware(secured_app, event_sink=event_sink)
     )
     return app
 
@@ -328,7 +352,7 @@ def _register_device_authorization_routes(
         "/api/auth/device-tokens/refresh",
         endpoints.refresh_device_tokens,
         methods=["POST"],
-        operation_id="refreshDeviceTokens",
+        operation_id="refreshDeviceToken",
         response_model=ApiEnvelope[RefreshedDeviceTokenData],
     )
     app.add_api_route(
@@ -419,7 +443,10 @@ def _suppress_framework_validation_error_document(app: FastAPI) -> None:
     field names — exactly like every other failure, and no route documents
     error envelopes. Suppressing the default keeps the advertised response set
     closed over the shapes actually emitted, for the served document and the
-    exported snapshot alike.
+    exported snapshot alike. The same pass declares the dedicated device
+    Bearer schemes of spec 16 that no route binds yet, so the published
+    contract carries every credential scheme of the web authentication
+    surface while route-driven rendering still wins where a route exists.
     """
     framework_openapi = app.openapi
 
@@ -438,10 +465,30 @@ def _suppress_framework_validation_error_document(app: FastAPI) -> None:
         if isinstance(schemas, dict):
             for schema_name in _FRAMEWORK_VALIDATION_SCHEMA_NAMES:
                 schemas.pop(schema_name, None)
+        _declare_device_bearer_schemes(document)
         app.openapi_schema = document
         return document
 
     app.openapi = openapi  # type: ignore[method-assign]
+
+
+def _declare_device_bearer_schemes(document: dict[str, Any]) -> None:
+    """Publish the declared device Bearer schemes on the document.
+
+    Schemes a route already renders keep their framework-generated
+    definition; a declared scheme with no route binding — the access
+    credential until the sync children land — is rendered from its own model
+    in the same shape the framework would emit.
+    """
+    components = document.setdefault("components", {})
+    security_schemes = components.setdefault("securitySchemes", {})
+    if not isinstance(security_schemes, dict):
+        return
+    for scheme in _DECLARED_DEVICE_BEARER_SCHEMES:
+        security_schemes.setdefault(
+            scheme.scheme_name,
+            scheme.model.model_dump(by_alias=True, exclude_none=True, mode="json"),
+        )
 
 
 async def _handle_request_validation_error(

@@ -111,7 +111,7 @@ async def test_local_environments_serve_raw_openapi_document_with_correlation(
         "approveDeviceAuthorization",
         "denyDeviceAuthorization",
         "pollDeviceAuthorization",
-        "refreshDeviceTokens",
+        "refreshDeviceToken",
         "revokeCurrentDeviceToken",
         "listAdminDevices",
         "revokeAdminDevice",

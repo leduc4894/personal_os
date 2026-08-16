@@ -1718,13 +1718,18 @@
       }
     },
     "securitySchemes": {
-      "RefreshCredential": {
-        "description": "The rt1 refresh credential of one device token family",
+      "AccessCredential": {
+        "description": "The at1 access credential of one approved device",
         "scheme": "bearer",
         "type": "http"
       },
-      "devicePollingCredential": {
+      "PollingCredential": {
         "description": "The pg1 polling credential of one device-authorization grant",
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "RefreshCredential": {
+        "description": "The rt1 refresh credential of one device token family",
         "scheme": "bearer",
         "type": "http"
       }
@@ -1946,7 +1951,7 @@
         },
         "security": [
           {
-            "devicePollingCredential": []
+            "PollingCredential": []
           }
         ],
         "summary": "Poll Grant"
@@ -1955,7 +1960,7 @@
     "/api/auth/device-tokens/refresh": {
       "post": {
         "description": "Rotate the current refresh credential or replay the successor (13.4).\n\nThe refresh Bearer credential in its dedicated scheme is the only\nauthority: session cookies, polling credentials and access\ncredentials close with the registered invalid-credential code. The\npresented rotation identity is the plugin-owned retry identity — one\nstable identity replays the byte-identical committed successor, a new\nidentity on a rotated predecessor commits the confirmed-reuse\nrevocation and surfaces the terminal reuse code.",
-        "operationId": "refreshDeviceTokens",
+        "operationId": "refreshDeviceToken",
         "requestBody": {
           "content": {
             "application/json": {

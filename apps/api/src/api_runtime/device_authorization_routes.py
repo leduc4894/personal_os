@@ -66,8 +66,8 @@ _NO_STORE_NO_CACHE_HEADERS: Final[dict[str, str]] = {
 #: The dedicated OpenAPI security scheme of the polling Bearer credential
 #: (spec 16): the only authority the poll route accepts. The scheme never
 #: auto-rejects so the closed registry code answers every bad presentation.
-_POLLING_BEARER_SCHEME = HTTPBearer(
-    scheme_name="devicePollingCredential",
+POLLING_BEARER_SCHEME = HTTPBearer(
+    scheme_name="PollingCredential",
     description="The pg1 polling credential of one device-authorization grant",
     auto_error=False,
 )
@@ -231,7 +231,7 @@ def create_device_authorization_route_endpoints(
         grant_id: UUID,
         polling_credential: str = Depends(require_polling_credential),
         authorization: HTTPAuthorizationCredentials | None = Depends(  # noqa: B008
-            _POLLING_BEARER_SCHEME
+            POLLING_BEARER_SCHEME
         ),
     ) -> JSONResponse:
         """Poll one grant with its polling credential (spec 11.4, 12).

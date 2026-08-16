@@ -181,7 +181,7 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
     )
     assert (
         document["paths"]["/api/auth/device-tokens/refresh"]["post"]["operationId"]
-        == "refreshDeviceTokens"
+        == "refreshDeviceToken"
     )
     assert (
         document["paths"]["/api/auth/device-tokens/revoke-current"]["post"]["operationId"]
