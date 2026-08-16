@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Web Auth — Login and Session Lifecycle</title>
+  <style>
+    :root { color-scheme:light dark; --bg:#f8fafc; --surface:#fff; --text:#0f172a; --muted:#475569; --line:#cbd5e1; --blue:#2563eb; --green:#059669; --amber:#d97706; --purple:#7c3aed; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui,sans-serif; }
+    main { max-width:1360px; margin:auto; padding:38px 24px 52px; }
+    h1 { margin:0 0 8px; font-size:clamp(28px,4vw,44px); } h2 { margin:0 0 12px; font-size:21px; } h3 { margin:0 0 6px; font-size:16px; } p { margin:5px 0; }
+    .subtitle { color:var(--muted); margin-bottom:26px; }
+    .panel,.card { background:var(--surface); border:1px solid var(--line); border-radius:14px; box-shadow:0 8px 22px rgb(15 23 42 / .06); }
+    .panel { padding:20px; }
+    .flow { display:grid; grid-template-columns:1fr 54px 1.1fr 54px 1fr 54px 1.1fr; gap:8px; align-items:stretch; text-align:center; }
+    .step { border:2px solid var(--line); border-radius:12px; padding:14px; } .amber { border-color:var(--amber); } .purple { border-color:var(--purple); } .green { border-color:var(--green); }
+    .label { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }
+    .arrow { display:grid; place-items:center; color:var(--muted); font-size:24px; }
+    .two { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:20px; }
+    .card { padding:18px; }
+    .item { border:1px solid var(--line); border-radius:9px; padding:11px; margin-top:9px; }
+    li { margin:6px 0; }
+    .approved { margin-top:20px; padding:14px 16px; border-left:4px solid var(--green); background:color-mix(in srgb,var(--green) 10%,var(--surface)); }
+    code { font-size:.92em; }
+    a { color:var(--blue); }
+    @media (max-width:980px) { .flow,.two { grid-template-columns:1fr; } .arrow { min-height:30px; } }
+    @media (prefers-color-scheme:dark) { :root { --bg:#0f172a; --surface:#111827; --text:#e5e7eb; --muted:#a8b3c7; --line:#334155; --blue:#60a5fa; --green:#34d399; --amber:#fbbf24; --purple:#c4b5fd; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Web login and session lifecycle</h1>
+    <p class="subtitle">Password-first login, optional TOTP, PostgreSQL-backed session và recent re-auth cho sensitive actions.</p>
+
+    <section class="panel">
+      <div class="flow">
+        <div class="step"><div class="label">Step 1</div><h3>Login form</h3><p>username + password</p><p class="label">same-origin POST</p></div>
+        <div class="arrow">→</div>
+        <div class="step amber"><div class="label">Step 2</div><h3>Throttle + Argon2id</h3><p>5 failures / 15 min</p><p class="label">generic failure · dummy hash</p></div>
+        <div class="arrow">→</div>
+        <div class="step purple"><div class="label">Conditional</div><h3>TOTP challenge</h3><p>chỉ khi đã enroll</p><p class="label">pending session · 5 min</p></div>
+        <div class="arrow">→</div>
+        <div class="step green"><div class="label">Authenticated</div><h3>Active session</h3><p>12h idle · 7d absolute</p><p class="label">rotate ID on activation</p></div>
+      </div>
+    </section>
+
+    <section class="two">
+      <article class="card">
+        <h2>Browser credentials</h2>
+        <div class="item"><h3>Session cookie</h3><p><code>__Host-admin_session</code> · Secure · HttpOnly · SameSite=Lax · Path=/ · browser-session only.</p></div>
+        <div class="item"><h3>CSRF proof</h3><p>Exact Origin + session-bound token trên mọi state-changing request.</p></div>
+        <div class="item"><h3>Server authority</h3><p>Idle/absolute expiry, revocation và credential revision được enforce trong PostgreSQL.</p></div>
+      </article>
+      <article class="card">
+        <h2>Sensitive actions</h2>
+        <div class="item"><h3>Recent re-auth — 5 phút</h3><p>Password luôn bắt buộc; thêm TOTP nếu credential đã bật.</p></div>
+        <div class="item"><h3>Rotation</h3><p>Activation, recent re-auth và password change đều rotate session ID cùng CSRF binding.</p></div>
+        <div class="item"><h3>Password change</h3><p>Revoke mọi Web session khác nhưng giữ approved plugin devices.</p></div>
+      </article>
+    </section>
+
+    <section class="two">
+      <article class="card">
+        <h2>Password policy</h2>
+        <ul>
+          <li>15–128 Unicode characters; cho phép khoảng trắng.</li>
+          <li>Không composition rule hoặc periodic reset.</li>
+          <li>Chặn common/known-compromised values bằng offline blocklist.</li>
+          <li>Nâng Argon2id parameters khi successful login nếu hash cũ.</li>
+        </ul>
+      </article>
+      <article class="card">
+        <h2>Failure behavior</h2>
+        <ul>
+          <li>Unknown user và wrong password không thể phân biệt qua response.</li>
+          <li>Throttle bucket lưu HMAC username/source, không raw IP.</li>
+          <li>Expired/revoked session làm browser state bị clear.</li>
+          <li>Logout revoke row trước; xóa cookie không đủ để kết thúc server session.</li>
+        </ul>
+      </article>
+    </section>
+
+    <p class="approved"><strong>Approved:</strong> login, password, rate-limit, session, CSRF và recent re-auth được duyệt ngày 2026-08-16.</p>
+    <p>References: <a href="https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html">OWASP Password Storage</a> · <a href="https://pages.nist.gov/800-63-4/sp800-63b.html">NIST SP 800-63B</a>.</p>
+  </main>
+</body>
+</html>

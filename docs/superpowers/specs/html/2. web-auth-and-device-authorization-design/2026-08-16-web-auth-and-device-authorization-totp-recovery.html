@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Web Auth — TOTP Enrollment and Recovery</title>
+  <style>
+    :root { color-scheme:light dark; --bg:#f8fafc; --surface:#fff; --text:#0f172a; --muted:#475569; --line:#cbd5e1; --blue:#2563eb; --green:#059669; --amber:#d97706; --purple:#7c3aed; }
+    * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui,sans-serif; } main { max-width:1360px; margin:auto; padding:38px 24px 52px; }
+    h1 { margin:0 0 8px; font-size:clamp(28px,4vw,44px); } h2 { margin:0 0 12px; font-size:21px; } h3 { margin:0 0 6px; font-size:16px; } p { margin:5px 0; }
+    .subtitle { color:var(--muted); margin-bottom:26px; } .panel,.card { background:var(--surface); border:1px solid var(--line); border-radius:14px; box-shadow:0 8px 22px rgb(15 23 42 / .06); } .panel { padding:20px; }
+    .flow { display:grid; grid-template-columns:1fr 50px 1fr 50px 1fr 50px 1fr; gap:8px; align-items:stretch; text-align:center; } .step { border:2px solid var(--line); border-radius:12px; padding:14px; } .blue{border-color:var(--blue)} .purple{border-color:var(--purple)} .amber{border-color:var(--amber)} .green{border-color:var(--green)} .arrow { display:grid;place-items:center;color:var(--muted);font-size:23px; }
+    .label { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; } .two { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:20px; } .card { padding:18px; } .item { border:1px solid var(--line); border-radius:9px; padding:11px; margin-top:9px; } li { margin:6px 0; }
+    .approved { margin-top:20px; padding:14px 16px; border-left:4px solid var(--green); background:color-mix(in srgb,var(--green) 10%,var(--surface)); } a { color:var(--blue); }
+    @media(max-width:980px){.flow,.two{grid-template-columns:1fr}.arrow{min-height:30px}} @media(prefers-color-scheme:dark){:root{--bg:#0f172a;--surface:#111827;--text:#e5e7eb;--muted:#a8b3c7;--line:#334155;--blue:#60a5fa;--green:#34d399;--amber:#fbbf24;--purple:#c4b5fd}}
+  </style>
+</head>
+<body><main>
+  <h1>TOTP enrollment and recovery</h1>
+  <p class="subtitle">Optional second factor với one-time provisioning, replay defense và bounded recovery.</p>
+  <section class="panel"><div class="flow">
+    <div class="step blue"><div class="label">1. Protect action</div><h3>Recent re-auth</h3><p>Password<br>+ current TOTP khi thay thế</p></div><div class="arrow">→</div>
+    <div class="step purple"><div class="label">2. Provision once</div><h3>Scan QR</h3><p>160-bit secret<br>pending 10 phút</p></div><div class="arrow">→</div>
+    <div class="step amber"><div class="label">3. Prove possession</div><h3>Enter TOTP</h3><p>6 digits · 30 sec<br>±1 step window</p></div><div class="arrow">→</div>
+    <div class="step green"><div class="label">4. Activate</div><h3>Recovery codes</h3><p>10 one-use codes<br>displayed once</p></div>
+  </div></section>
+  <section class="two">
+    <article class="card"><h2>Stored state</h2>
+      <div class="item"><h3>TOTP secret</h3><p>AEAD ciphertext + nonce + key ID; plaintext chỉ tồn tại trong bounded verification.</p></div>
+      <div class="item"><h3>Replay marker</h3><p><code>last_accepted_time_step</code> update dưới row lock; cùng một mã không thể thắng hai lần.</p></div>
+      <div class="item"><h3>Recovery codes</h3><p>Domain-separated hashes; mỗi row có revision và <code>used_at</code>.</p></div>
+    </article>
+    <article class="card"><h2>Recovery path</h2>
+      <div class="item"><h3>Password + one recovery code</h3><p>Consume đúng một lần và tạo <code>recovery_limited</code> session.</p></div>
+      <div class="item"><h3>Allowed surface</h3><p>Session chỉ được thay TOTP hoặc logout; không được device/Admin/password writes.</p></div>
+      <div class="item"><h3>Completion</h3><p>Thay TOTP rotate session và tạo recovery-code revision mới. Emergency CLI là đường cuối.</p></div>
+    </article>
+  </section>
+  <section class="two">
+    <article class="card"><h2>Compatibility</h2><ul><li>RFC 6238 SHA-1, 6 digits, 30-second step.</li><li>Issuer/account label không chứa path hoặc secret.</li><li>QR render tại client; response dùng <code>no-store</code>.</li><li>Clock drift ngoài ±1 step fail safely.</li></ul></article>
+    <article class="card"><h2>Never allowed</h2><ul><li>Không secret/provisioning URI trong log, analytics hoặc URL.</li><li>Không redisplay recovery code.</li><li>Không disable TOTP bằng một old Web session.</li><li>Không recovery session access tới device/Admin writes.</li></ul></article>
+  </section>
+  <p class="approved"><strong>Approved:</strong> TOTP enrollment, anti-replay và recovery semantics được duyệt ngày 2026-08-16.</p>
+  <p>Reference: <a href="https://www.rfc-editor.org/rfc/rfc6238">RFC 6238</a>.</p>
+</main></body></html>

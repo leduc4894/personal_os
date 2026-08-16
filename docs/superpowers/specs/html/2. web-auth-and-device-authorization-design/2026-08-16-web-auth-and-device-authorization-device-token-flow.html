@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Device Authorization and Token Lifecycle</title>
+  <style>
+    :root{color-scheme:light dark;--bg:#f8fafc;--surface:#fff;--text:#0f172a;--muted:#475569;--line:#cbd5e1;--blue:#2563eb;--green:#059669;--amber:#d97706;--purple:#7c3aed;--red:#dc2626}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif}main{max-width:1420px;margin:auto;padding:38px 24px 52px}h1{margin:0 0 8px;font-size:clamp(28px,4vw,44px)}h2{margin:0 0 12px;font-size:21px}h3{margin:0 0 6px;font-size:16px}p{margin:5px 0}.subtitle{color:var(--muted);margin-bottom:26px}.panel,.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;box-shadow:0 8px 22px rgb(15 23 42/.06)}.panel{padding:20px}.grant{display:grid;grid-template-columns:repeat(9,minmax(72px,1fr));gap:7px;align-items:stretch;text-align:center}.step{border:2px solid var(--line);border-radius:10px;padding:11px}.blue{border-color:var(--blue)}.green{border-color:var(--green)}.amber{border-color:var(--amber)}.purple{border-color:var(--purple)}.arrow{display:grid;place-items:center;color:var(--muted);font-size:20px}.label{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em}.two{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:20px}.card{padding:18px}.item{border:1px solid var(--line);border-radius:9px;padding:11px;margin-top:9px}.rotation{display:grid;grid-template-columns:1fr 72px 1fr 72px 1fr;gap:10px;align-items:center;text-align:center}.danger{margin-top:12px;border-left:4px solid var(--red);padding:10px 12px;background:color-mix(in srgb,var(--red) 8%,var(--surface))}.approved{margin-top:20px;padding:14px 16px;border-left:4px solid var(--green);background:color-mix(in srgb,var(--green) 10%,var(--surface))}li{margin:6px 0}a{color:var(--blue)}@media(max-width:1020px){.grant,.rotation,.two{grid-template-columns:1fr}.arrow{min-height:28px}}@media(prefers-color-scheme:dark){:root{--bg:#0f172a;--surface:#111827;--text:#e5e7eb;--muted:#a8b3c7;--line:#334155;--blue:#60a5fa;--green:#34d399;--amber:#fbbf24;--purple:#c4b5fd;--red:#fb7185}}
+  </style>
+</head>
+<body><main>
+  <h1>Device authorization and token lifecycle</h1>
+  <p class="subtitle">Browser approves; plugin polling nhận credential; retry hội tụ mà không lưu plaintext token trong PostgreSQL.</p>
+  <section class="panel"><div class="grant">
+    <div class="step blue"><div class="label">Plugin</div><h3>Login</h3><p>request grant</p></div><div class="arrow">→</div>
+    <div class="step amber"><div class="label">API</div><h3>Issue</h3><p>user code + polling secret</p></div><div class="arrow">→</div>
+    <div class="step purple"><div class="label">Browser</div><h3>Review</h3><p>login · re-auth · approve</p></div><div class="arrow">→</div>
+    <div class="step blue"><div class="label">Plugin</div><h3>Poll</h3><p>≥ 5 seconds</p></div><div class="arrow">→</div>
+    <div class="step green"><div class="label">Transaction</div><h3>Register</h3><p>device + family + audit</p></div>
+  </div></section>
+  <section class="two">
+    <article class="card"><h2>Approval contract</h2><div class="item"><p>User code, device name, platform, validated plugin version, fixed <code>obsidian_sync</code> scope và expiry.</p></div><div class="item"><p>Approval link chỉ mang user code trong URL fragment rồi xóa ngay; không polling/access/refresh secret trong URL.</p></div><div class="item"><p>Approve cần recent re-auth; Deny là terminal.</p></div></article>
+    <article class="card"><h2>Plugin secure storage</h2><div class="item"><h3>Pending</h3><p>Polling secret trong SecretStorage; grant metadata không nhạy cảm trong plugin data.</p></div><div class="item"><h3>Registered</h3><p>Refresh credential trong SecretStorage; access token chỉ trong memory.</p></div><div class="item"><h3>Crash-safe refresh</h3><p>Persist stable <code>rotation_id</code> trước khi gửi request; ghi nguyên record bằng một <code>setSecret</code> rồi đọc lại.</p></div><div class="item"><h3>Clear without delete API</h3><p>Ghi đè tombstone không chứa credential rồi xóa settings reference; không tuyên bố xóa key SecretStorage.</p></div></article>
+  </section>
+  <section class="panel" style="margin-top:20px"><h2>Rotating refresh family — 30-day inactivity / 90-day absolute</h2><div class="rotation">
+    <div class="step blue"><div class="label">Generation N</div><h3>Current refresh</h3><p>active</p></div><div class="arrow" style="font-size:13px">stable<br>rotation ID<br>→</div>
+    <div class="step green"><div class="label">Atomic rotate</div><h3>Successor N+1</h3><p>new refresh + 15m access</p></div><div class="arrow" style="font-size:13px">lost reply?<br>same ID<br>→</div>
+    <div class="step amber"><div class="label">Exact replay</div><h3>Same credentials</h3><p>same issued/expires</p></div>
+  </div><div class="danger">Different rotation ID, predecessor use after successor rotates, hoặc revoked/expired state sẽ revoke toàn bộ token family.</div></section>
+  <section class="two">
+    <article class="card"><h2>Retry-safe invariants</h2><ul><li>Grant exchange exact-replay từ cùng high-entropy polling secret.</li><li>Refresh response loss không bị hiểu nhầm là theft.</li><li>Domain-separated keyed PRF derive replay material; DB chỉ giữ hashes.</li><li>Concurrent exchange/refresh được serialize bằng row lock.</li></ul></article>
+    <article class="card"><h2>Terminal outcomes</h2><ul><li>Deny/expiry chỉ clear pending onboarding secret.</li><li>Revoked device không dùng được access token chưa hết hạn.</li><li>Confirmed reuse yêu cầu browser approval lại.</li><li>Admin revoke không xóa local Vault hoặc queue.</li></ul></article>
+  </section>
+  <p class="approved"><strong>Approved:</strong> device grant, exact exchange replay, token storage, refresh rotation và revocation được duyệt ngày 2026-08-16.</p>
+  <p>Reference: <a href="https://www.rfc-editor.org/info/rfc8628/">RFC 8628</a>.</p>
+</main></body></html>

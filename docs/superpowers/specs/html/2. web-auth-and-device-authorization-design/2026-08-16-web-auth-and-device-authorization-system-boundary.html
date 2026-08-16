@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Web Auth and Device Authorization — System Boundary</title>
+  <style>
+    :root { color-scheme:light dark; --bg:#f8fafc; --surface:#fff; --text:#0f172a; --muted:#475569; --line:#cbd5e1; --blue:#2563eb; --green:#059669; --red:#dc2626; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui,sans-serif; }
+    main { max-width:1420px; margin:auto; padding:38px 24px 52px; }
+    h1 { margin:0 0 8px; font-size:clamp(28px,4vw,44px); }
+    h2 { margin:0 0 12px; font-size:21px; }
+    h3 { margin:0 0 7px; font-size:16px; }
+    p { margin:5px 0; }
+    .subtitle { color:var(--muted); margin-bottom:26px; }
+    .flow { display:grid; grid-template-columns:1fr 90px 1.3fr 90px 1.1fr; gap:12px; align-items:stretch; }
+    .panel,.card { background:var(--surface); border:1px solid var(--line); border-radius:14px; box-shadow:0 8px 22px rgb(15 23 42 / .06); }
+    .panel { padding:18px; }
+    .blue { border-color:var(--blue); }
+    .item { border:1px solid var(--line); border-radius:10px; padding:11px; margin-top:9px; }
+    .domain { border-color:color-mix(in srgb,var(--green) 55%,var(--line)); background:color-mix(in srgb,var(--green) 8%,var(--surface)); }
+    .arrow { display:grid; place-items:center; color:var(--muted); text-align:center; font-size:13px; }
+    .tables { display:grid; grid-template-columns:1fr 1fr; gap:6px; color:var(--muted); font-size:12px; margin-top:10px; }
+    .two { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:20px; }
+    .card { padding:18px; }
+    .card li { margin:6px 0; }
+    .approved { margin-top:20px; padding:14px 16px; border-left:4px solid var(--green); background:color-mix(in srgb,var(--green) 10%,var(--surface)); }
+    .absent { border-left:4px solid var(--red); }
+    a { color:var(--blue); }
+    @media (max-width:980px) { .flow,.two { grid-template-columns:1fr; } .arrow { min-height:34px; } }
+    @media (prefers-color-scheme:dark) { :root { --bg:#0f172a; --surface:#111827; --text:#e5e7eb; --muted:#a8b3c7; --line:#334155; --blue:#60a5fa; --green:#34d399; --red:#fb7185; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Child 2 — System boundary</h1>
+    <p class="subtitle">Một HTTPS origin, một auth authority và hai loại credential tách biệt cho Web và Obsidian.</p>
+
+    <section class="flow">
+      <article class="panel">
+        <h2>Clients</h2>
+        <div class="item"><h3>Web Admin</h3><p>Next.js UI; opaque HttpOnly cookie; CSRF proof trên writes.</p></div>
+        <div class="item"><h3>Obsidian plugin</h3><p><code>requestUrl</code>; access token 15 phút; refresh secret trong SecretStorage.</p></div>
+        <div class="item"><h3>Internal CLI</h3><p>Enroll/reset credential và emergency recovery.</p></div>
+      </article>
+
+      <div class="arrow"><strong>same origin</strong><br>HTTPS<br>→ <code>/api/*</code></div>
+
+      <article class="panel blue">
+        <h2>FastAPI composition root</h2>
+        <div class="item"><h3>HTTP adapters</h3><p>Cookie/Bearer extraction, CSRF, envelopes và OpenAPI.</p></div>
+        <div class="item domain"><h3>Framework-neutral auth services</h3><p>Login, TOTP, session, device grant, refresh rotation, revoke và authorization.</p></div>
+        <div class="item"><h3>Crypto adapters</h3><p>Argon2id password hashing và authenticated encryption cho TOTP.</p></div>
+        <div class="item"><h3>Repository ports</h3><p>Domain không import FastAPI, SQLAlchemy hoặc provider SDK.</p></div>
+      </article>
+
+      <div class="arrow"><strong>bounded</strong><br>transactions<br>→</div>
+
+      <article class="panel">
+        <h2>Canonical state</h2>
+        <div class="item"><h3>PostgreSQL</h3>
+          <div class="tables">
+            <span>user_credentials</span><span>web_sessions</span>
+            <span>totp_credentials</span><span>totp_recovery_codes</span>
+            <span>device_authorization_grants</span><span>device_tokens</span>
+            <span>authentication_throttle_buckets</span><span>audit_events</span>
+          </div>
+        </div>
+        <div class="item"><p>Chỉ lưu hash của session ID, device secrets, access/refresh token và recovery codes.</p></div>
+        <div class="item"><p>TOTP encryption key đọc từ exact server secret file.</p></div>
+      </article>
+    </section>
+
+    <section class="two">
+      <article class="card">
+        <h2>Invariants</h2>
+        <ul>
+          <li>PostgreSQL là auth correctness authority duy nhất.</li>
+          <li>Credential quyết định user, workspace, device và scope; request body không chọn workspace.</li>
+          <li>Revoke có hiệu lực ở request kế tiếp.</li>
+          <li>Redis không cần thiết cho correctness của auth hay throttle.</li>
+          <li>Next.js và plugin chỉ là clients của generated API contract.</li>
+        </ul>
+      </article>
+      <article class="card absent">
+        <h2>Explicitly absent</h2>
+        <ul>
+          <li>Không public signup, email recovery, OIDC hoặc passkey.</li>
+          <li>Không JWT hoặc client-trusted token claims.</li>
+          <li>Không auth authority nằm trong Next.js hay plugin.</li>
+          <li>Không raw credential trong database, logs, URL hoặc plugin settings.</li>
+        </ul>
+      </article>
+    </section>
+
+    <p class="approved"><strong>Approved:</strong> phần kiến trúc và ranh giới sở hữu được duyệt ngày 2026-08-16.</p>
+    <p>Standards: <a href="https://www.rfc-editor.org/info/rfc8628/">RFC 8628</a> · <a href="https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html">OWASP Password Storage</a>.</p>
+  </main>
+</body>
+</html>
