@@ -387,6 +387,12 @@ response asks the Web client to offer a skippable enrollment. Dismissal is
 recorded so every login does not interrupt the user; Security continues to
 show the optional control.
 
+`POST /api/auth/totp/enrollments` accepts one strict discriminated action.
+`start` follows the enrollment flow below and requires recent
+re-authentication. `dismiss_initial_offer` requires an active session, exact
+Origin and CSRF proof, records `totp_prompt_dismissed_at`, returns no secret and
+does not create a pending credential. No additional dismissal endpoint exists.
+
 Enrollment requires recent re-auth and:
 
 1. creates a 160-bit random secret;
@@ -855,7 +861,7 @@ PUT  /api/auth/password
 
 ```text
 POST   /api/auth/totp/verify
-POST   /api/auth/totp/enrollments
+POST   /api/auth/totp/enrollments  # action = start | dismiss_initial_offer
 POST   /api/auth/totp/enrollments/{enrollment_id}/verify
 POST   /api/auth/totp/recovery
 POST   /api/auth/totp/recovery-codes/regenerate
