@@ -106,6 +106,24 @@ export function errorBody(code: string): Record<string, unknown> {
   };
 }
 
+/** The throttled exit the API renders with its registered safe retry detail. */
+export function rateLimitedResponse(retryAfterSeconds: number): HttpResponse<DefaultBodyType> {
+  return HttpResponse.json(
+    {
+      data: null,
+      error: {
+        code: "authentication_rate_limited",
+        details: { retry_after_seconds: retryAfterSeconds },
+        message: "Simulated authentication_rate_limited failure.",
+        retryable: false,
+      },
+      request_id: REQUEST_ID,
+      warnings: [],
+    },
+    { status: 429 },
+  );
+}
+
 export function errorResponse(code: string, status = 400): HttpResponse<DefaultBodyType> {
   return HttpResponse.json(errorBody(code), { status });
 }

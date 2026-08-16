@@ -17,6 +17,7 @@ import {
   authenticationFailedResponse,
   installMockCsrfCookie,
   mockApi,
+  rateLimitedResponse,
   recoveryCodesResponse,
   recoveryLimitedResponse,
   sessionResponse,
@@ -103,6 +104,27 @@ describe("TotpChallenge", () => {
     expect(onActiveSession).not.toHaveBeenCalled();
   });
 
+  it("shows bounded retry guidance when the challenge throttle is active", async () => {
+    const user = userEvent.setup();
+    server.use(mockApi("post", "/api/auth/totp/verify", () => rateLimitedResponse(125)));
+    const onActiveSession = vi.fn();
+    render(
+      <TotpChallenge
+        client={createTestClient()}
+        password="correct horse battery staple!"
+        onActiveSession={onActiveSession}
+        onRecoveryLimited={vi.fn()}
+      />,
+    );
+    await user.type(screen.getByLabelText("Authentication code"), "123456");
+    await user.click(screen.getByRole("button", { name: "Verify" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Too many attempts. Try again in 3 minutes.");
+    expect(alert).toHaveFocus();
+    expect(alert.textContent).not.toContain("125");
+    expect(onActiveSession).not.toHaveBeenCalled();
+  });
+
   it("switches to recovery-code entry and reports the recovery-limited session", async () => {
     const user = userEvent.setup();
     const seenRequests: Request[] = [];
@@ -129,6 +151,27 @@ describe("TotpChallenge", () => {
     expect(await new Response(seenRequests[0]?.body ?? "").text()).toBe(
       '{"password":"correct horse battery staple!","recovery_code":"ABCD-EFGH-IJKL"}',
     );
+  });
+
+  it("shows bounded retry guidance when the recovery throttle is active", async () => {
+    const user = userEvent.setup();
+    server.use(mockApi("post", "/api/auth/totp/recovery", () => rateLimitedResponse(60)));
+    const onRecoveryLimited = vi.fn();
+    render(
+      <TotpChallenge
+        client={createTestClient()}
+        password="correct horse battery staple!"
+        onActiveSession={vi.fn()}
+        onRecoveryLimited={onRecoveryLimited}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Use a recovery code instead" }));
+    await user.type(screen.getByLabelText("Recovery code"), "ABCD-EFGH-IJKL");
+    await user.click(screen.getByRole("button", { name: "Continue with recovery code" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Too many attempts. Try again in 1 minute.");
+    expect(alert.textContent).not.toContain("60");
+    expect(onRecoveryLimited).not.toHaveBeenCalled();
   });
 });
 
@@ -255,5 +298,27 @@ describe("TotpEnrollmentOffer", () => {
       "Activation failed. Check the code and try again.",
     );
     expect(codeInput).toHaveFocus();
+  });
+
+  it("shows bounded retry guidance when the activation throttle is active", async () => {
+    const user = userEvent.setup();
+    server.use(
+      mockApi("post", "/api/auth/totp/enrollments/e26e0f1c-9884-4d84-a2c3-9d64a0b1f001/verify", () =>
+        rateLimitedResponse(300),
+      ),
+    );
+    render(
+      <TotpEnrollmentOffer
+        client={createTestClient()}
+        enrollment={testEnrollment()}
+        onCompleted={vi.fn()}
+        onSkipped={vi.fn()}
+      />,
+    );
+    await user.type(screen.getByLabelText("Verification code"), "123456");
+    await user.click(screen.getByRole("button", { name: "Activate" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Too many attempts. Try again in 5 minutes.",
+    );
   });
 });

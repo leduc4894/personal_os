@@ -28,6 +28,7 @@ import {
   enrollmentStateInvalidResponse,
   installMockCsrfCookie,
   mockApi,
+  rateLimitedResponse,
   recoveryCodesResponse,
   recoveryLimitedResponse,
   sessionResponse,
@@ -96,6 +97,19 @@ describe("LoginForm", () => {
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("Sign-in failed. Check your username and password.");
     expect(alert).toHaveFocus();
+    expect(replaceMock).not.toHaveBeenCalled();
+  });
+
+  it("shows bounded retry guidance when the login throttle is active", async () => {
+    const user = userEvent.setup();
+    server.use(mockApi("post", "/api/auth/login", () => rateLimitedResponse(540)));
+    render(<LoginForm client={createTestClient()} sessionStore={createAuthenticationSessionStore()} />);
+    await submitPassword(user);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Too many attempts. Try again in 9 minutes.");
+    expect(alert).toHaveFocus();
+    expect(alert.textContent).not.toContain("540");
+    expect(alert.textContent).not.toContain("Simulated");
     expect(replaceMock).not.toHaveBeenCalled();
   });
 

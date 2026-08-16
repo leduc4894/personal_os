@@ -17,6 +17,7 @@ import type {
   SessionData,
   TotpEnrollmentOfferData,
 } from "../../api/authentication-client";
+import { rateLimitedRetryMessage } from "./rate-limit-copy";
 
 /** A shared error region that steals focus once so screen readers announce it. */
 function ErrorAnnouncement({
@@ -74,7 +75,10 @@ export function TotpChallenge({
       onActiveSession(result.data);
       return;
     }
-    setErrorMessage("Verification failed. Check the code and try again.");
+    const genericMessage = "Verification failed. Check the code and try again.";
+    setErrorMessage(
+      result.ok ? genericMessage : (rateLimitedRetryMessage(result.error) ?? genericMessage),
+    );
   }
 
   async function submitRecovery(submittedRecoveryCode: string): Promise<void> {
@@ -90,7 +94,10 @@ export function TotpChallenge({
       onRecoveryLimited();
       return;
     }
-    setErrorMessage("Recovery failed. Check the recovery code and try again.");
+    const genericMessage = "Recovery failed. Check the recovery code and try again.";
+    setErrorMessage(
+      result.ok ? genericMessage : (rateLimitedRetryMessage(result.error) ?? genericMessage),
+    );
   }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>): void {
@@ -231,7 +238,8 @@ export function TotpEnrollmentOffer({
       onCompleted(result.data);
       return;
     }
-    setErrorMessage("Activation failed. Check the code and try again.");
+    const genericMessage = "Activation failed. Check the code and try again.";
+    setErrorMessage(rateLimitedRetryMessage(result.error) ?? genericMessage);
   }
 
   async function skip(): Promise<void> {

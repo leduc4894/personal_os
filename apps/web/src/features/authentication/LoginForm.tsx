@@ -14,6 +14,7 @@ import {
   browserSessionStore,
   type AuthenticationSessionStore,
 } from "./session-store";
+import { rateLimitedRetryMessage } from "./rate-limit-copy";
 import { TotpChallenge, TotpEnrollmentOffer } from "./TotpChallenge";
 
 type LoginStep = "password" | "challenge" | "initial-offer" | "replacement" | "recovery-codes";
@@ -113,7 +114,9 @@ export function LoginForm({
     });
     setIsSubmitting(false);
     if (!result.ok) {
-      setErrorMessage("Sign-in failed. Check your username and password.");
+      setErrorMessage(
+        rateLimitedRetryMessage(result.error) ?? "Sign-in failed. Check your username and password.",
+      );
       return;
     }
     const session = result.data;
