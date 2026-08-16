@@ -130,9 +130,7 @@ class WebSessionStore:
         """Resolve, validate and conditionally touch one session row."""
 
         async def operation(connection: AsyncConnection) -> ResolvedWebSession:
-            row = await self._select_session_by_secret_hash(
-                connection, session_secret_hash
-            )
+            row = await self._select_session_by_secret_hash(connection, session_secret_hash)
             if row is None:
                 raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
             session = stored_web_session_from_row(row)
@@ -184,9 +182,7 @@ class WebSessionStore:
         """
 
         async def operation(connection: AsyncConnection) -> ResolvedWebSession:
-            row = await self._select_session_by_secret_hash(
-                connection, session_secret_hash
-            )
+            row = await self._select_session_by_secret_hash(connection, session_secret_hash)
             if row is None:
                 raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
             session = stored_web_session_from_row(row)
@@ -270,9 +266,7 @@ class WebSessionStore:
         """
 
         async def operation(connection: AsyncConnection) -> RevokedWebSession:
-            row = await self._select_session_by_secret_hash(
-                connection, command.session_secret_hash
-            )
+            row = await self._select_session_by_secret_hash(connection, command.session_secret_hash)
             if row is None or row.state == _SESSION_STATE_REVOKED:
                 raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
             revoked = await connection.execute(
@@ -307,9 +301,7 @@ class WebSessionStore:
         )
         return result.one_or_none()
 
-    async def _select_session_by_id(
-        self, connection: AsyncConnection, web_session_id: UUID
-    ) -> Any:
+    async def _select_session_by_id(self, connection: AsyncConnection, web_session_id: UUID) -> Any:
         result = await connection.execute(
             self._session_lookup_statement()
             .where(web_sessions.c.web_session_id == web_session_id)

@@ -34,9 +34,7 @@ _SECRET_ROOT = Path(_SECRET_DIRECTORY.name)
 (_SECRET_ROOT / "postgres_application_password").write_text(
     "server-test-password\n", encoding="utf-8"
 )
-(_SECRET_ROOT / "authentication_current_key").write_text(
-    "00" * 32 + "\n", encoding="utf-8"
-)
+(_SECRET_ROOT / "authentication_current_key").write_text("00" * 32 + "\n", encoding="utf-8")
 
 LOCAL_ENVIRONMENT: Final[Mapping[str, str]] = MappingProxyType(
     {

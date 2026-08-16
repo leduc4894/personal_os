@@ -223,9 +223,7 @@ class TransactionHarness:
                     password_changed_at=self.database_now,
                 )
             )
-        return SeededAccount(
-            user_id=user_id, workspace_id=workspace_id, username=self.username
-        )
+        return SeededAccount(user_id=user_id, workspace_id=workspace_id, username=self.username)
 
     async def login(
         self,
@@ -337,12 +335,8 @@ async def test_unknown_and_wrong_password_both_call_hasher_once(harness: Any) ->
     for row in buckets:
         assert row.locked_until is None
         assert len(row.bucket_hash) == 64
-        assert row.bucket_hash != hashlib.sha256(
-            harness.source_bucket.encode("utf-8")
-        ).hexdigest()
-        assert row.bucket_hash != hashlib.sha256(
-            harness.username.encode("utf-8")
-        ).hexdigest()
+        assert row.bucket_hash != hashlib.sha256(harness.source_bucket.encode("utf-8")).hexdigest()
+        assert row.bucket_hash != hashlib.sha256(harness.username.encode("utf-8")).hexdigest()
 
 
 @pytest.mark.asyncio
@@ -380,9 +374,10 @@ async def test_successful_login_resets_streak_and_starts_active_session(harness:
     assert row.created_at == harness.database_now
     assert row.idle_expires_at == harness.database_now + timedelta(hours=12)
     assert row.absolute_expires_at == harness.database_now + timedelta(days=7)
-    assert row.session_secret_hash == hashlib.sha256(
-        started.session_secret.encode("utf-8")
-    ).hexdigest()
+    assert (
+        row.session_secret_hash
+        == hashlib.sha256(started.session_secret.encode("utf-8")).hexdigest()
+    )
     assert row.csrf_secret_hash == started.csrf_secret_hash
     buckets = await harness.throttle_rows()
     username_bucket = next(row for row in buckets if row.bucket_kind == "login_username")
@@ -572,9 +567,7 @@ async def test_required_key_ids_returns_referenced_keys_only(harness: Any) -> No
                     secret_ciphertext="QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWQ",
                     secret_nonce="c2FsdHNhbHQ",
                     key_id=(
-                        "authkey-totp-active"
-                        if state == "active"
-                        else "authkey-totp-replaced"
+                        "authkey-totp-active" if state == "active" else "authkey-totp-replaced"
                     ),
                     algorithm="SHA1",
                     digits=6,
@@ -583,9 +576,7 @@ async def test_required_key_ids_returns_referenced_keys_only(harness: Any) -> No
                     created_at=harness.database_now - timedelta(days=2),
                     activated_at=harness.database_now - timedelta(days=2),
                     replaced_at=(
-                        harness.database_now - timedelta(days=1)
-                        if state == "replaced"
-                        else None
+                        harness.database_now - timedelta(days=1) if state == "replaced" else None
                     ),
                 )
             )

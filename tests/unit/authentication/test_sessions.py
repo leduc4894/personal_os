@@ -250,9 +250,9 @@ class FakeCredentialTransactions:
         self, command: CommitLoginSuccessCommand
     ) -> CommittedLoginSuccess:
         self.success_commands.append(command)
-        self.buckets[
-            (ThrottleBucketKind.LOGIN_USERNAME.value, command.username_bucket_hash)
-        ] = successful_authentication_reset(database_now=command.database_now)
+        self.buckets[(ThrottleBucketKind.LOGIN_USERNAME.value, command.username_bucket_hash)] = (
+            successful_authentication_reset(database_now=command.database_now)
+        )
         state = WebSessionState.PENDING_TOTP if self.has_active_totp else WebSessionState.ACTIVE
         idle_expires_at = (
             command.pending_totp_idle_expires_at
@@ -272,9 +272,7 @@ class FakeCredentialTransactions:
                     authentication_method=command.authentication_method,
                     created_at=command.database_now,
                     authenticated_at=(
-                        command.database_now
-                        if state is WebSessionState.ACTIVE
-                        else None
+                        command.database_now if state is WebSessionState.ACTIVE else None
                     ),
                     reauthenticated_at=None,
                     last_seen_at=None,
@@ -284,9 +282,7 @@ class FakeCredentialTransactions:
                     revocation_reason=None,
                 ),
                 current_credential_revision=command.expected_credential_revision,
-                password_hash=self.password_hashes.get(
-                    command.user_id, DUMMY_LOGIN_PHC_HASH
-                ),
+                password_hash=self.password_hashes.get(command.user_id, DUMMY_LOGIN_PHC_HASH),
             )
         return CommittedLoginSuccess(
             web_session_id=command.web_session_id,
@@ -396,9 +392,7 @@ class FakeWebSessionTransactions:
         self, *, session_secret_hash: str, database_now: datetime
     ) -> ResolvedWebSession:
         session = self.rows_by_secret_hash.get(session_secret_hash)
-        if session is None or not is_challenge_eligible_session(
-            session, database_now=database_now
-        ):
+        if session is None or not is_challenge_eligible_session(session, database_now=database_now):
             raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
         return ResolvedWebSession(
             session=session,
@@ -543,9 +537,7 @@ def _active_session(
         reauthenticated_at=None,
         last_seen_at=None,
         idle_expires_at=(
-            idle_expires_at
-            if idle_expires_at is not None
-            else _DATABASE_NOW + timedelta(hours=12)
+            idle_expires_at if idle_expires_at is not None else _DATABASE_NOW + timedelta(hours=12)
         ),
         absolute_expires_at=(
             absolute_expires_at
@@ -578,9 +570,7 @@ async def test_fifth_failure_locks_bucket_for_fifteen_minutes() -> None:
     harness = LoginHarness()
     outcomes = [await harness.reject_login() for _ in range(5)]
     assert outcomes[-1].locked_until == harness.database_now + timedelta(minutes=15)
-    assert [outcome.public_error for outcome in outcomes] == [
-        ErrorCode.AUTHENTICATION_FAILED
-    ] * 5
+    assert [outcome.public_error for outcome in outcomes] == [ErrorCode.AUTHENTICATION_FAILED] * 5
     for outcome in outcomes[:-1]:
         assert outcome.locked_until is None
 
@@ -627,12 +617,13 @@ async def test_successful_login_resets_credential_streak_and_starts_active_sessi
     assert started.absolute_expires_at == harness.database_now + timedelta(days=7)
     assert started.database_now == harness.database_now
     # PostgreSQL stores only hashes of both secrets, never the secrets.
-    assert started.session_secret_hash == hashlib.sha256(
-        started.session_secret.encode("utf-8")
-    ).hexdigest()
-    assert started.csrf_secret_hash != hashlib.sha256(
-        started.csrf_secret.encode("utf-8")
-    ).hexdigest()
+    assert (
+        started.session_secret_hash
+        == hashlib.sha256(started.session_secret.encode("utf-8")).hexdigest()
+    )
+    assert (
+        started.csrf_secret_hash != hashlib.sha256(started.csrf_secret.encode("utf-8")).hexdigest()
+    )
     assert started.session_secret != started.csrf_secret
     username_bucket = harness.credentials.buckets[
         (
@@ -727,12 +718,8 @@ async def test_authenticate_rejects_unknown_revoked_stale_and_expired_sessions()
             session_secret=b"absolute-secret",
         ),
         _active_session(state=WebSessionState.REVOKED, session_secret=b"revoked-secret"),
-        _active_session(
-            state=WebSessionState.PENDING_TOTP, session_secret=b"pending-secret"
-        ),
-        _active_session(
-            state=WebSessionState.RECOVERY_LIMITED, session_secret=b"recovery-secret"
-        ),
+        _active_session(state=WebSessionState.PENDING_TOTP, session_secret=b"pending-secret"),
+        _active_session(state=WebSessionState.RECOVERY_LIMITED, session_secret=b"recovery-secret"),
     ):
         harness.sessions.register(expired, current_credential_revision=1)
     for secret in ("idle", "absolute", "revoked", "pending", "recovery"):
@@ -750,9 +737,7 @@ async def test_challenge_resolution_accepts_unrevoked_states_without_scopes_or_i
         ("active", WebSessionState.ACTIVE),
     ):
         harness.sessions.register(
-            _active_session(
-                state=state, session_secret=f"{secret_suffix}-secret".encode()
-            ),
+            _active_session(state=state, session_secret=f"{secret_suffix}-secret".encode()),
             current_credential_revision=1,
         )
     pending = await harness.session_service.resolve_challenge_eligible(
@@ -780,9 +765,7 @@ async def test_challenge_resolution_rejects_unknown_revoked_and_expired_bindings
     harness = LoginHarness()
     for session in (
         _active_session(state=WebSessionState.REVOKED, session_secret=b"revoked-secret"),
-        _active_session(
-            idle_expires_at=_DATABASE_NOW, session_secret=b"idle-expired-secret"
-        ),
+        _active_session(idle_expires_at=_DATABASE_NOW, session_secret=b"idle-expired-secret"),
         _active_session(
             absolute_expires_at=_DATABASE_NOW - timedelta(seconds=1),
             session_secret=b"absolute-expired-secret",
@@ -939,9 +922,7 @@ def test_throttle_threshold_locks_exactly_on_the_fifth_failure() -> None:
     policy = ThrottleWindowPolicy()
     state: ThrottleBucketState | None = None
     for failure_number in range(1, LOGIN_FAILURE_THRESHOLD + 1):
-        transition = next_login_failure_transition(
-            state, database_now=_DATABASE_NOW, policy=policy
-        )
+        transition = next_login_failure_transition(state, database_now=_DATABASE_NOW, policy=policy)
         assert transition.failed_attempt_count == failure_number
         if failure_number < LOGIN_FAILURE_THRESHOLD:
             assert transition.locked_until is None

@@ -110,10 +110,7 @@ def create_totp_route_endpoints(
         return context.request_id
 
     def _success_json(
-        data: SessionData
-        | TotpEnrollmentData
-        | RecoveryCodesData
-        | RecoveryLimitedContext,
+        data: SessionData | TotpEnrollmentData | RecoveryCodesData | RecoveryLimitedContext,
         *,
         headers: dict[str, str] = _NO_STORE_HEADERS,
     ) -> JSONResponse:

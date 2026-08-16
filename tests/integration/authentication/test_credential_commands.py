@@ -178,9 +178,7 @@ class AuthFixture:
                     display_name="Credential Workspace",
                 )
             )
-        return SeededAccount(
-            user_id=user_id, workspace_id=workspace_id, username=username
-        )
+        return SeededAccount(user_id=user_id, workspace_id=workspace_id, username=username)
 
     async def enroll_web_credential(
         self, *, username: str, password: str = _ENROLLMENT_PASSWORD
@@ -323,9 +321,7 @@ class AuthFixture:
                 sa.insert(device_authorization_grants).values(
                     grant_id=grant_id,
                     user_code_hash=hashlib.sha256(uuid4().hex.encode("utf-8")).hexdigest(),
-                    polling_secret_hash=hashlib.sha256(
-                        uuid4().hex.encode("utf-8")
-                    ).hexdigest(),
+                    polling_secret_hash=hashlib.sha256(uuid4().hex.encode("utf-8")).hexdigest(),
                     client_instance_id=uuid4(),
                     device_name="Reset Grant Device",
                     platform_class="obsidian_desktop",
@@ -523,9 +519,7 @@ async def test_emergency_reset_revokes_every_auth_surface(database: Any) -> None
     assert device_row.status == "revoked"
     assert device_row.revoked_at == database.database_now
     family_row = await database.fetch_one_row(
-        sa.select(device_token_families).where(
-            device_token_families.c.token_family_id == family_id
-        )
+        sa.select(device_token_families).where(device_token_families.c.token_family_id == family_id)
     )
     assert family_row.state == "revoked"
     assert family_row.revocation_reason == "emergency_reset"
@@ -548,9 +542,7 @@ async def test_emergency_reset_revokes_every_auth_surface(database: Any) -> None
     assert totp_row.replaced_at == database.database_now
     assert totp_row.enrollment_expires_at is None
     recovery_rows = await database.fetch_all_rows(
-        sa.select(totp_recovery_codes).where(
-            totp_recovery_codes.c.totp_credential_id == totp_id
-        )
+        sa.select(totp_recovery_codes).where(totp_recovery_codes.c.totp_credential_id == totp_id)
     )
     assert len(recovery_rows) == 2
     assert all(row.used_at == database.database_now for row in recovery_rows)

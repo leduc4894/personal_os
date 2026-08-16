@@ -146,9 +146,7 @@ def _statement_parameters(statement: object) -> dict[str, object]:
     return resolved
 
 
-def _statements_of(
-    connection: ScriptedConnection, kind: type, table_name: str
-) -> list[object]:
+def _statements_of(connection: ScriptedConnection, kind: type, table_name: str) -> list[object]:
     return [
         statement
         for statement in connection.executed_statements
@@ -248,11 +246,7 @@ async def test_verify_totp_advances_marker_under_lock_and_reseals_previous_key()
 async def test_verify_totp_replays_the_same_step_without_a_write() -> None:
     current_step = _DATABASE_NOW_UNIX_SECONDS // 30
     engine = ScriptedEngine(
-        [
-            ScriptedResult(
-                rows=(_credential_row(last_accepted_time_step=current_step),)
-            )
-        ]
+        [ScriptedResult(rows=(_credential_row(last_accepted_time_step=current_step),))]
     )
     store = TotpStore(engine, secret_codec=ScriptedTotpCodec())
     with pytest.raises(AuthenticationError) as rejected:
@@ -313,9 +307,7 @@ async def test_insert_pending_enrollment_supersedes_stale_pending_row() -> None:
     )
     assert inserted.username == "store-owner"
     connection = engine.connections[0]
-    supersede_updates = _statements_of(
-        connection, sa.sql.dml.Update, "totp_credentials"
-    )
+    supersede_updates = _statements_of(connection, sa.sql.dml.Update, "totp_credentials")
     assert len(supersede_updates) == 1
     assert _statement_parameters(supersede_updates[0])["state"] == "replaced"
     inserts = _statements_of(connection, sa.sql.dml.Insert, "totp_credentials")
@@ -417,17 +409,10 @@ async def test_activate_enrollment_replaces_previous_and_inserts_ten_hashed_code
     assert activation_parameters["state"] == "active"
     assert activation_parameters["activated_at"] == _DATABASE_NOW
     assert activation_parameters["enrollment_expires_at"] is None
-    assert (
-        activation_parameters["last_accepted_time_step"]
-        == _DATABASE_NOW_UNIX_SECONDS // 30
-    )
-    recovery_inserts = _statements_of(
-        connection, sa.sql.dml.Insert, "totp_recovery_codes"
-    )
+    assert activation_parameters["last_accepted_time_step"] == _DATABASE_NOW_UNIX_SECONDS // 30
+    recovery_inserts = _statements_of(connection, sa.sql.dml.Insert, "totp_recovery_codes")
     assert len(recovery_inserts) == 10
-    inserted_hashes = {
-        _statement_parameters(insert)["code_hash"] for insert in recovery_inserts
-    }
+    inserted_hashes = {_statement_parameters(insert)["code_hash"] for insert in recovery_inserts}
     assert inserted_hashes == set(_RECOVERY_HASHES)
     assert _statements_of(connection, sa.sql.dml.Update, "web_sessions") == []
 
@@ -493,9 +478,7 @@ async def test_activate_enrollment_rotates_recovery_limited_session_to_active() 
         )
     )
     assert activated.replaced_previous_credential is False
-    session_updates = _statements_of(
-        engine.connections[0], sa.sql.dml.Update, "web_sessions"
-    )
+    session_updates = _statements_of(engine.connections[0], sa.sql.dml.Update, "web_sessions")
     assert len(session_updates) == 1
     parameters = _statement_parameters(session_updates[0])
     assert parameters["state"] == "active"
@@ -552,9 +535,7 @@ async def test_recover_session_consumes_one_code_and_transitions_the_binding() -
 
 @pytest.mark.asyncio
 async def test_recover_session_without_an_unused_code_fails_closed() -> None:
-    engine = ScriptedEngine(
-        [ScriptedResult(rows=(_credential_row(),)), ScriptedResult(rows=())]
-    )
+    engine = ScriptedEngine([ScriptedResult(rows=(_credential_row(),)), ScriptedResult(rows=())])
     store = TotpStore(engine, secret_codec=ScriptedTotpCodec())
     with pytest.raises(AuthenticationError) as rejected:
         await store.recover_session(
@@ -599,13 +580,9 @@ async def test_regenerate_recovery_codes_invalidates_unused_prior_revision() -> 
     assert regenerated.revision == 4
     assert regenerated.invalidated_code_count == 4
     connection = engine.connections[0]
-    recovery_inserts = _statements_of(
-        connection, sa.sql.dml.Insert, "totp_recovery_codes"
-    )
+    recovery_inserts = _statements_of(connection, sa.sql.dml.Insert, "totp_recovery_codes")
     assert len(recovery_inserts) == 10
-    assert all(
-        _statement_parameters(insert)["revision"] == 4 for insert in recovery_inserts
-    )
+    assert all(_statement_parameters(insert)["revision"] == 4 for insert in recovery_inserts)
 
 
 @pytest.mark.asyncio

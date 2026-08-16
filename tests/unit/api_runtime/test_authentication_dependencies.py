@@ -112,9 +112,7 @@ def test_secure_loopback_origin_still_uses_the_secure_contract() -> None:
 
 
 def test_apply_session_cookies_renders_the_approved_attributes() -> None:
-    contract = build_session_cookie_contract(
-        OFFLINE_WEB_ALLOWED_ORIGIN, RuntimeEnvironment.TEST
-    )
+    contract = build_session_cookie_contract(OFFLINE_WEB_ALLOWED_ORIGIN, RuntimeEnvironment.TEST)
     response = JSONResponse(content={})
     apply_session_cookies(
         response,
@@ -302,9 +300,7 @@ async def test_csrf_dependency_requires_the_stored_hash_match() -> None:
     forged_pair = "forged-but-equal-csrf-pair"
     with pytest.raises(AuthenticationError) as rejection:
         await dependencies.require_csrf_protected_request(
-            build_request(
-                headers=csrf_request_headers(started_session, csrf_value=forged_pair)
-            )
+            build_request(headers=csrf_request_headers(started_session, csrf_value=forged_pair))
         )
     assert rejection.value.error_code is ErrorCode.CSRF_VALIDATION_FAILED
 
@@ -316,9 +312,7 @@ async def test_csrf_dependency_rejects_a_non_ascii_but_equal_pair_closed() -> No
     non_ascii_pair = "f\xf6rged-but-equal-pair"
     with pytest.raises(AuthenticationError) as rejection:
         await dependencies.require_csrf_protected_request(
-            build_request(
-                headers=csrf_request_headers(started_session, csrf_value=non_ascii_pair)
-            )
+            build_request(headers=csrf_request_headers(started_session, csrf_value=non_ascii_pair))
         )
     assert rejection.value.error_code is ErrorCode.CSRF_VALIDATION_FAILED
 
@@ -453,9 +447,7 @@ def test_covering_keyring_passes_the_startup_refusal() -> None:
 def test_missing_referenced_key_id_refuses_startup_safely() -> None:
     keyring = _keyring_of(("auth-key-v1",))
     with pytest.raises(ConfigurationError) as rejection:
-        assert_keyring_covers_required_key_ids(
-            frozenset({"auth-key-v0", "auth-key-v1"}), keyring
-        )
+        assert_keyring_covers_required_key_ids(frozenset({"auth-key-v0", "auth-key-v1"}), keyring)
     assert rejection.value.error_code is ErrorCode.CONFIGURATION_SECRET_INVALID
     rendered = str(rejection.value)
     assert "auth-key-v0" not in rendered

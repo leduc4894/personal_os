@@ -81,9 +81,7 @@ def test_time_step_of_partitions_thirty_second_periods() -> None:
 
 
 def _code_at(step: int) -> str:
-    return totp_code(
-        secret=_WINDOW_SECRET, unix_time_seconds=step * TOTP_PERIOD_SECONDS
-    )
+    return totp_code(secret=_WINDOW_SECRET, unix_time_seconds=step * TOTP_PERIOD_SECONDS)
 
 
 def test_window_accepts_previous_current_and_next_step() -> None:

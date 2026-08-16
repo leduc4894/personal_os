@@ -66,8 +66,6 @@ _PLUGIN_VERSION_PATTERN: Final[str] = r"^[0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}$"
 TotpRecoveryPermittedAction = Literal["totp_replacement", "logout"]
 
 
-
-
 class LoginRequest(BaseModel):
     """The strict username/password login body (spec 8.2)."""
 

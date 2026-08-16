@@ -386,9 +386,7 @@ class CredentialStore:
                 if bool(recheck.has_active_totp)
                 else WebSessionState.ACTIVE
             )
-            authenticated_at = (
-                command.database_now if state is WebSessionState.ACTIVE else None
-            )
+            authenticated_at = command.database_now if state is WebSessionState.ACTIVE else None
             idle_expires_at = (
                 command.pending_totp_idle_expires_at
                 if state is WebSessionState.PENDING_TOTP
@@ -405,8 +403,7 @@ class CredentialStore:
                 .where(
                     authentication_throttle_buckets.c.bucket_kind
                     == ThrottleBucketKind.LOGIN_USERNAME.value,
-                    authentication_throttle_buckets.c.bucket_hash
-                    == command.username_bucket_hash,
+                    authentication_throttle_buckets.c.bucket_hash == command.username_bucket_hash,
                 )
             )
             if command.upgraded_password_hash is not None:
@@ -545,15 +542,15 @@ class CredentialStore:
         composition root fails ``serve`` before bind when the configured
         keyring omits any returned ID (spec 20.1).
         """
-        totp_statement = sa.select(
-            totp_credentials.c.key_id.label("referenced_key_id")
-        ).where(totp_credentials.c.state.in_((_TOTP_STATE_ACTIVE, _TOTP_STATE_PENDING)))
-        token_statement = (
-            sa.select(device_tokens.c.derivation_key_id.label("referenced_key_id")).where(
-                device_tokens.c.token_kind == _REFRESH_TOKEN_KIND,
-                device_tokens.c.state == _TOKEN_STATE_ACTIVE,
-                device_tokens.c.expires_at > database_now,
-            )
+        totp_statement = sa.select(totp_credentials.c.key_id.label("referenced_key_id")).where(
+            totp_credentials.c.state.in_((_TOTP_STATE_ACTIVE, _TOTP_STATE_PENDING))
+        )
+        token_statement = sa.select(
+            device_tokens.c.derivation_key_id.label("referenced_key_id")
+        ).where(
+            device_tokens.c.token_kind == _REFRESH_TOKEN_KIND,
+            device_tokens.c.state == _TOKEN_STATE_ACTIVE,
+            device_tokens.c.expires_at > database_now,
         )
         grant_statement = sa.select(
             device_authorization_grants.c.derivation_key_id.label("referenced_key_id")
@@ -571,9 +568,7 @@ class CredentialStore:
 
         return await run_authentication_transaction(self._engine, operation)
 
-    async def resolve_web_credential_status(
-        self, *, username: str
-    ) -> ResolvedWebCredentialStatus:
+    async def resolve_web_credential_status(self, *, username: str) -> ResolvedWebCredentialStatus:
         """Read one canonical username's enrollment state lock-free (spec 7.1).
 
         An unresolvable username fails closed as the generic
@@ -600,9 +595,7 @@ class CredentialStore:
                 user_id=row.user_id,
                 workspace_id=row.workspace_id,
                 credential_revision=(
-                    int(row.credential_revision)
-                    if row.credential_revision is not None
-                    else None
+                    int(row.credential_revision) if row.credential_revision is not None else None
                 ),
             )
 
@@ -686,9 +679,7 @@ class CredentialStore:
             if identity is None:
                 raise AuthenticationError(ErrorCode.AUTHENTICATION_FAILED)
             locked_credential = await connection.execute(
-                sa.select(
-                    user_credentials.c.workspace_id, user_credentials.c.credential_revision
-                )
+                sa.select(user_credentials.c.workspace_id, user_credentials.c.credential_revision)
                 .where(user_credentials.c.user_id == identity.user_id)
                 .with_for_update(of=user_credentials)
             )
@@ -777,8 +768,7 @@ class CredentialStore:
                         device_authorization_grants.c.state == _GRANT_STATE_PENDING,
                         sa.and_(
                             device_authorization_grants.c.state == _GRANT_STATE_APPROVED,
-                            device_authorization_grants.c.approved_by_user_id
-                            == identity.user_id,
+                            device_authorization_grants.c.approved_by_user_id == identity.user_id,
                         ),
                     )
                 )
@@ -900,8 +890,7 @@ class CredentialStore:
                     updated_at=database_now,
                 )
                 .where(
-                    authentication_throttle_buckets.c.throttle_bucket_id
-                    == row.throttle_bucket_id
+                    authentication_throttle_buckets.c.throttle_bucket_id == row.throttle_bucket_id
                 )
             )
         return next_state
@@ -965,9 +954,7 @@ class CredentialStore:
         return row is not None
 
 
-async def _select_locked_canonical_identity(
-    connection: AsyncConnection, username: str
-) -> Any:
+async def _select_locked_canonical_identity(connection: AsyncConnection, username: str) -> Any:
     """Lock the canonical user row and resolve exactly one active workspace.
 
     ``FOR UPDATE OF users`` serialises concurrent enrollments and emergency
@@ -995,11 +982,7 @@ async def _select_locked_canonical_identity(
         .with_for_update(of=users)
     )
     rows = result.all()
-    if (
-        len(rows) != 1
-        or rows[0].user_status != _USER_STATUS_ACTIVE
-        or rows[0].workspace_id is None
-    ):
+    if len(rows) != 1 or rows[0].user_status != _USER_STATUS_ACTIVE or rows[0].workspace_id is None:
         return None
     return rows[0]
 

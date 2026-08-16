@@ -92,9 +92,7 @@ def run_server(
             api_settings = load_api_server_settings(environ=environment_snapshot)
             database_settings = load_database_runtime_settings(environ=environment_snapshot)
             password = read_database_runtime_password(database_settings)
-            authentication_settings = load_authentication_settings(
-                environ=environment_snapshot
-            )
+            authentication_settings = load_authentication_settings(environ=environment_snapshot)
             keyring = load_authentication_keyring(authentication_settings)
         except ApplicationError as error:
             emit_emergency_application_error(ServiceName.API, context, error)

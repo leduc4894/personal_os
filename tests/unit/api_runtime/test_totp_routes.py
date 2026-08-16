@@ -55,9 +55,7 @@ _VALID_LOGIN: Final[dict[str, str]] = {
 }
 _WRONG_PASSWORD: Final[str] = "sentinel-wrong-password-value"
 
-_PERMITTED_RECOVERY_ACTIONS: Final[frozenset[str]] = frozenset(
-    {"totp_replacement", "logout"}
-)
+_PERMITTED_RECOVERY_ACTIONS: Final[frozenset[str]] = frozenset({"totp_replacement", "logout"})
 
 
 class _ReadyProbe:
@@ -107,8 +105,7 @@ def authenticated_headers(cookies: dict[str, str]) -> dict[str, str]:
     return {
         "Origin": ORIGIN,
         "Cookie": (
-            f"{SESSION_COOKIE_NAME}={cookies['session']}; "
-            f"{CSRF_COOKIE_NAME}={cookies['csrf']}"
+            f"{SESSION_COOKIE_NAME}={cookies['session']}; {CSRF_COOKIE_NAME}={cookies['csrf']}"
         ),
         "X-CSRF-Token": cookies["csrf"],
     }
@@ -116,14 +113,10 @@ def authenticated_headers(cookies: dict[str, str]) -> dict[str, str]:
 
 def code_at(clock: OfflineAuthenticationClock, secret: bytes) -> str:
     """The valid TOTP code for one secret at the pinned offline clock moment."""
-    return totp_code(
-        secret=secret, unix_time_seconds=int(clock.database_now_value.timestamp())
-    )
+    return totp_code(secret=secret, unix_time_seconds=int(clock.database_now_value.timestamp()))
 
 
-def start_enrollment(
-    test_client: TestClient, cookies: dict[str, str]
-) -> tuple[UUID, bytes]:
+def start_enrollment(test_client: TestClient, cookies: dict[str, str]) -> tuple[UUID, bytes]:
     """Start one enrollment and return its id and raw secret bytes."""
     response = test_client.post(
         "/api/auth/totp/enrollments",
@@ -245,9 +238,7 @@ def test_totp_verify_rejects_active_and_recovery_limited_bindings() -> None:
         assert active_response.status_code == 401
         assert active_response.json()["error"]["code"] == "authentication_required"
     state = OfflineAuthenticationState(totp_active=False)
-    with TestClient(
-        create_totp_test_app(state=state), base_url=_SECURE_BASE_URL
-    ) as limited_client:
+    with TestClient(create_totp_test_app(state=state), base_url=_SECURE_BASE_URL) as limited_client:
         cookies = login(limited_client)
         stored = state.sessions_by_secret_hash[session_secret_hash_of(cookies["session"])]
         state.sessions_by_secret_hash[stored.session_secret_hash] = replace(
@@ -309,9 +300,7 @@ def test_enrollment_start_returns_the_one_time_provisioning_uri(client: TestClie
 
 def test_enrollment_start_requires_recent_reauthentication(client: TestClient) -> None:
     clock = OfflineAuthenticationClock()
-    with TestClient(
-        create_totp_test_app(clock=clock), base_url=_SECURE_BASE_URL
-    ) as timed_client:
+    with TestClient(create_totp_test_app(clock=clock), base_url=_SECURE_BASE_URL) as timed_client:
         cookies = login(timed_client)
         clock.database_now_value += timedelta(minutes=6)
         response = timed_client.post(
@@ -328,9 +317,7 @@ def test_dismiss_initial_offer_records_no_secret_and_no_pending_row(
     client: TestClient,
 ) -> None:
     state = OfflineAuthenticationState(totp_active=False)
-    with TestClient(
-        create_totp_test_app(state=state), base_url=_SECURE_BASE_URL
-    ) as offer_client:
+    with TestClient(create_totp_test_app(state=state), base_url=_SECURE_BASE_URL) as offer_client:
         cookies = login(offer_client)
         response = offer_client.post(
             "/api/auth/totp/enrollments",
@@ -350,9 +337,7 @@ def test_enrollment_verification_returns_ten_one_time_recovery_codes(
     client: TestClient,
 ) -> None:
     clock = OfflineAuthenticationClock()
-    with TestClient(
-        create_totp_test_app(clock=clock), base_url=_SECURE_BASE_URL
-    ) as enroll_client:
+    with TestClient(create_totp_test_app(clock=clock), base_url=_SECURE_BASE_URL) as enroll_client:
         cookies = login(enroll_client)
         enrollment_id, secret = start_enrollment(enroll_client, cookies)
         response = enroll_client.post(
@@ -377,9 +362,7 @@ def test_expired_enrollment_is_rejected_with_the_enrollment_state_error(
     client: TestClient,
 ) -> None:
     clock = OfflineAuthenticationClock()
-    with TestClient(
-        create_totp_test_app(clock=clock), base_url=_SECURE_BASE_URL
-    ) as enroll_client:
+    with TestClient(create_totp_test_app(clock=clock), base_url=_SECURE_BASE_URL) as enroll_client:
         cookies = login(enroll_client)
         enrollment_id, secret = start_enrollment(enroll_client, cookies)
         clock.database_now_value += timedelta(minutes=11)
@@ -395,9 +378,7 @@ def test_expired_enrollment_is_rejected_with_the_enrollment_state_error(
 
 def test_second_start_while_totp_is_active_is_rejected(client: TestClient) -> None:
     clock = OfflineAuthenticationClock()
-    with TestClient(
-        create_totp_test_app(clock=clock), base_url=_SECURE_BASE_URL
-    ) as enroll_client:
+    with TestClient(create_totp_test_app(clock=clock), base_url=_SECURE_BASE_URL) as enroll_client:
         cookies = login(enroll_client)
         complete_enrollment(enroll_client, cookies, clock)
         response = enroll_client.post(
@@ -572,7 +553,8 @@ def test_disable_rotates_to_password_only_and_revokes_other_sessions() -> None:
         _second_cookies = login(second_client)
         _, secret, _ = complete_enrollment(first_client, first_cookies, clock)
         clock.database_now_value += timedelta(seconds=30)
-        disabled = first_client.request("DELETE", 
+        disabled = first_client.request(
+            "DELETE",
             "/api/auth/totp",
             headers=authenticated_headers(first_cookies),
             json={"password": _VALID_LOGIN["password"], "totp_code": code_at(clock, secret)},
@@ -600,13 +582,15 @@ def test_disable_requires_both_proofs(client: TestClient) -> None:
         cookies = login(security_client)
         _, secret, _ = complete_enrollment(security_client, cookies, clock)
         clock.database_now_value += timedelta(seconds=30)
-        wrong_totp = security_client.request("DELETE", 
+        wrong_totp = security_client.request(
+            "DELETE",
             "/api/auth/totp",
             headers=authenticated_headers(cookies),
             json={"password": _VALID_LOGIN["password"], "totp_code": "000000"},
         )
         assert wrong_totp.status_code == 401
-        wrong_password = security_client.request("DELETE", 
+        wrong_password = security_client.request(
+            "DELETE",
             "/api/auth/totp",
             headers=authenticated_headers(cookies),
             json={"password": _WRONG_PASSWORD, "totp_code": code_at(clock, secret)},
@@ -619,9 +603,7 @@ def test_disable_requires_both_proofs(client: TestClient) -> None:
 
 def test_reauthenticate_demands_a_totp_code_when_totp_is_active() -> None:
     clock = OfflineAuthenticationClock()
-    with TestClient(
-        create_totp_test_app(clock=clock), base_url=_SECURE_BASE_URL
-    ) as reauth_client:
+    with TestClient(create_totp_test_app(clock=clock), base_url=_SECURE_BASE_URL) as reauth_client:
         cookies = login(reauth_client)
         _, secret, _ = complete_enrollment(reauth_client, cookies, clock)
         clock.database_now_value += timedelta(seconds=30)
@@ -712,9 +694,7 @@ async def test_same_totp_step_is_accepted_once_under_serialized_race() -> None:
     ],
 )
 def test_totp_route_set_stays_closed(client: TestClient, method: str, path: str) -> None:
-    response = client.request(
-        method, path, headers={"Origin": ORIGIN}, json={"code": "123456"}
-    )
+    response = client.request(method, path, headers={"Origin": ORIGIN}, json={"code": "123456"})
     assert response.status_code in (404, 405)
     assert response.json()["error"]["code"] in {
         "api_route_not_found",

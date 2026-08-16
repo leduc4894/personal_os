@@ -36,9 +36,7 @@ _VALID_LOGIN: Final[dict[str, str]] = {
     "password": "correct-horse-battery-staple",
 }
 _PASSWORD_SENTINEL: Final[str] = "sentinel-password-do-not-emit"
-_ENVELOPE_KEYS: Final[frozenset[str]] = frozenset(
-    {"request_id", "data", "warnings", "error"}
-)
+_ENVELOPE_KEYS: Final[frozenset[str]] = frozenset({"request_id", "data", "warnings", "error"})
 
 
 class _ReadyProbe:
@@ -163,8 +161,8 @@ def test_non_ascii_attacker_headers_close_with_documented_codes(
             if method == "POST"
             else _ORIGIN,
             "Cookie": (
-                f"{SESSION_COOKIE_NAME}={session_cookie}; "
-                f"{CSRF_COOKIE_NAME}=".encode("ascii") + non_ascii_pair
+                f"{SESSION_COOKIE_NAME}={session_cookie}; {CSRF_COOKIE_NAME}=".encode("ascii")
+                + non_ascii_pair
             ),
             "X-CSRF-Token": non_ascii_pair,
         },

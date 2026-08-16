@@ -202,9 +202,7 @@ class TotpTransactionHarness:
             clock=self.clock,
             secret_codec=self.secret_codec,
         )
-        self._recovery_hmac_key = derive_recovery_code_hmac_key(
-            self.hmac_crypto, _MASTER_KEY
-        )
+        self._recovery_hmac_key = derive_recovery_code_hmac_key(self.hmac_crypto, _MASTER_KEY)
 
     @property
     def database_now(self) -> datetime:
@@ -222,9 +220,7 @@ class TotpTransactionHarness:
     def seal_under_key(self, *, key_id: str, plaintext: bytes) -> SealedTotpSecret:
         """Seal one secret under an explicit keyring key, mirroring the codec."""
         master_key = _build_keyring().keys_by_id[key_id]
-        subkey = self.aead_crypto.derive_subkey(
-            master_key=master_key, label=TOTP_SECRET_AEAD_LABEL
-        )
+        subkey = self.aead_crypto.derive_subkey(master_key=master_key, label=TOTP_SECRET_AEAD_LABEL)
         nonce, ciphertext = self.aead_crypto.seal_secret(key=subkey, plaintext=plaintext)
         return SealedTotpSecret(
             key_id=key_id,
@@ -261,9 +257,7 @@ class TotpTransactionHarness:
                     password_changed_at=self.database_now,
                 )
             )
-        return SeededAccount(
-            user_id=user_id, workspace_id=workspace_id, username=self.username
-        )
+        return SeededAccount(user_id=user_id, workspace_id=workspace_id, username=self.username)
 
     async def insert_active_credential(
         self, account: SeededAccount, *, secret: bytes = _SECRET, key_id: str = _CURRENT_KEY_ID
@@ -308,9 +302,7 @@ class TotpTransactionHarness:
                     )
                 )
 
-    async def insert_session(
-        self, account: SeededAccount, *, state: str
-    ) -> tuple[UUID, str]:
+    async def insert_session(self, account: SeededAccount, *, state: str) -> tuple[UUID, str]:
         """Insert one session row and return its id and raw cookie secret."""
         web_session_id = uuid4()
         raw_secret = f"session-secret-{web_session_id.hex}"
@@ -349,9 +341,7 @@ class TotpTransactionHarness:
     async def pending_credential_row(self, user_id: UUID) -> Any:
         return await self.fetch_one_row(
             sa.select(totp_credentials)
-            .where(
-                totp_credentials.c.user_id == user_id, totp_credentials.c.state == "pending"
-            )
+            .where(totp_credentials.c.user_id == user_id, totp_credentials.c.state == "pending")
             .limit(1)
         )
 
@@ -632,12 +622,8 @@ async def test_recovery_consumes_exactly_one_code_under_race(harness: Any) -> No
     credential_id = await harness.insert_active_credential(account)
     codes = list(generate_recovery_codes())
     await harness.insert_recovery_codes(account, credential_id, codes=codes)
-    first_session_id, first_secret = await harness.insert_session(
-        account, state="pending_totp"
-    )
-    second_session_id, second_secret = await harness.insert_session(
-        account, state="pending_totp"
-    )
+    first_session_id, first_secret = await harness.insert_session(account, state="pending_totp")
+    second_session_id, second_secret = await harness.insert_session(account, state="pending_totp")
     code_hash = harness.recovery_hash_of(codes[0])
 
     async def recover(web_session_id: UUID, raw_secret: str) -> RecoveredSession:
@@ -695,9 +681,7 @@ async def test_consumed_recovery_code_cannot_be_reused(harness: Any) -> None:
         )
     )
     assert first.web_session_id == session_id
-    second_session_id, second_secret = await harness.insert_session(
-        account, state="pending_totp"
-    )
+    second_session_id, second_secret = await harness.insert_session(account, state="pending_totp")
     with pytest.raises(AuthenticationError) as rejected:
         await harness.totp_store.recover_session(
             RecoverSessionCommand(
@@ -729,9 +713,7 @@ async def test_regenerate_invalidates_unused_prior_revision(harness: Any) -> Non
         RegenerateRecoveryCodesCommand(
             user_id=account.user_id,
             workspace_id=account.workspace_id,
-            recovery_code_hashes=tuple(
-                harness.recovery_hash_of(code) for code in fresh_codes
-            ),
+            recovery_code_hashes=tuple(harness.recovery_hash_of(code) for code in fresh_codes),
             database_now=harness.database_now,
             diagnostic_context=harness.diagnostic_context(),
         )
@@ -752,9 +734,7 @@ async def test_disable_closes_every_surface_and_rotates_password_only(harness: A
     await harness.insert_recovery_codes(
         account, credential_id, codes=list(generate_recovery_codes())
     )
-    current_session_id, current_secret = await harness.insert_session(
-        account, state="active"
-    )
+    current_session_id, current_secret = await harness.insert_session(account, state="active")
     other_session_id, _other_secret = await harness.insert_session(account, state="active")
     disabled = await harness.totp_store.disable_totp(
         DisableTotpCommand(
@@ -808,9 +788,7 @@ async def test_verify_session_totp_rejects_an_unknown_binding(harness: Any) -> N
 @pytest.mark.asyncio
 async def test_service_challenge_and_recovery_choreography(harness: Any) -> None:
     account = await harness.seed_account()
-    credential_id = await harness.insert_active_credential(
-        account, secret=_ALTERNATE_SECRET
-    )
+    credential_id = await harness.insert_active_credential(account, secret=_ALTERNATE_SECRET)
     codes = list(generate_recovery_codes())
     await harness.insert_recovery_codes(account, credential_id, codes=codes)
     # The pending_totp challenge resolves to active with rotated secrets.
@@ -846,9 +824,7 @@ async def test_service_challenge_and_recovery_choreography(harness: Any) -> None
         recovery.entered.rotated_session.session_secret
     )
     # A wrong password never reaches the code consumption.
-    _wrong_session_id, wrong_secret = await harness.insert_session(
-        account, state="pending_totp"
-    )
+    _wrong_session_id, wrong_secret = await harness.insert_session(account, state="pending_totp")
     wrong_password = await harness.totp_service.recover_with_code(
         session_secret=wrong_secret,
         password="sentinel-wrong-password-value",

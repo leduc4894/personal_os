@@ -147,9 +147,7 @@ def _session_row(
         reauthenticated_at=reauthenticated_at,
         last_seen_at=last_seen_at,
         idle_expires_at=(
-            idle_expires_at
-            if idle_expires_at is not None
-            else _DATABASE_NOW + timedelta(hours=12)
+            idle_expires_at if idle_expires_at is not None else _DATABASE_NOW + timedelta(hours=12)
         ),
         absolute_expires_at=(
             absolute_expires_at
@@ -179,9 +177,7 @@ async def test_resolve_session_advances_idle_without_passing_absolute_expiry() -
     absolute_expiry = _DATABASE_NOW + timedelta(hours=8)
     engine = ScriptedEngine(
         [
-            ScriptedResult(
-                rows=(_resolved_session_row(absolute_expires_at=absolute_expiry),)
-            ),
+            ScriptedResult(rows=(_resolved_session_row(absolute_expires_at=absolute_expiry),)),
             ScriptedResult(rowcount=1),
         ]
     )
@@ -257,9 +253,7 @@ async def test_resolve_session_rejects_stale_revision_without_activity_write() -
 
 @pytest.mark.asyncio
 async def test_rotate_for_reauthentication_records_the_moment_and_new_hashes() -> None:
-    engine = ScriptedEngine(
-        [ScriptedResult(rows=(_session_row(),)), ScriptedResult(rowcount=1)]
-    )
+    engine = ScriptedEngine([ScriptedResult(rows=(_session_row(),)), ScriptedResult(rowcount=1)])
     store = WebSessionStore(engine)
     rotated = await store.rotate_session_secrets(
         RotateWebSessionSecretsCommand(
@@ -333,9 +327,7 @@ async def test_rotate_for_activation_activates_and_rebinds_the_method() -> None:
 
 @pytest.mark.asyncio
 async def test_rotate_rejects_a_guard_mismatch() -> None:
-    engine = ScriptedEngine(
-        [ScriptedResult(rows=(_session_row(),)), ScriptedResult(rowcount=0)]
-    )
+    engine = ScriptedEngine([ScriptedResult(rows=(_session_row(),)), ScriptedResult(rowcount=0)])
     store = WebSessionStore(engine)
     with pytest.raises(AuthenticationError) as rejected:
         await store.rotate_session_secrets(
@@ -357,9 +349,7 @@ async def test_rotate_rejects_a_guard_mismatch() -> None:
 
 @pytest.mark.asyncio
 async def test_revoke_clears_both_authenticated_timestamps() -> None:
-    engine = ScriptedEngine(
-        [ScriptedResult(rows=(_session_row(),)), ScriptedResult(rowcount=1)]
-    )
+    engine = ScriptedEngine([ScriptedResult(rows=(_session_row(),)), ScriptedResult(rowcount=1)])
     store = WebSessionStore(engine)
     revoked = await store.revoke_session(
         RevokeWebSessionCommand(
@@ -386,9 +376,7 @@ async def test_revoke_clears_both_authenticated_timestamps() -> None:
 
 @pytest.mark.asyncio
 async def test_revoke_rejects_an_already_revoked_row() -> None:
-    engine = ScriptedEngine(
-        [ScriptedResult(rows=(_session_row(state="revoked"),))]
-    )
+    engine = ScriptedEngine([ScriptedResult(rows=(_session_row(state="revoked"),))])
     store = WebSessionStore(engine)
     with pytest.raises(AuthenticationError) as rejected:
         await store.revoke_session(

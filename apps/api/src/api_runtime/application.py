@@ -170,9 +170,7 @@ def register_api_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(Exception, _handle_unexpected_exception)
 
 
-def _register_session_routes(
-    app: FastAPI, web_authentication: WebAuthenticationRuntime
-) -> None:
+def _register_session_routes(app: FastAPI, web_authentication: WebAuthenticationRuntime) -> None:
     """Register the closed session/password route set (spec 16.1).
 
     Each route carries its manually assigned semantic operation id and the
@@ -219,9 +217,7 @@ def _register_session_routes(
     )
 
 
-def _register_totp_routes(
-    app: FastAPI, web_authentication: WebAuthenticationRuntime
-) -> None:
+def _register_totp_routes(app: FastAPI, web_authentication: WebAuthenticationRuntime) -> None:
     """Register the closed TOTP/recovery route set (spec 16.2).
 
     Each route carries its manually assigned semantic operation id and the
@@ -463,10 +459,7 @@ def _authentication_error_headers(request: Request) -> Mapping[str, str]:
     template = request.scope.get("route_template")
     if not isinstance(template, ApiRouteTemplate):
         matched_path = getattr(request.scope.get("route"), "path", None)
-        if (
-            isinstance(matched_path, str)
-            and matched_path in AUTHENTICATION_ROUTE_TEMPLATE_VALUES
-        ):
+        if isinstance(matched_path, str) and matched_path in AUTHENTICATION_ROUTE_TEMPLATE_VALUES:
             template = ApiRouteTemplate(matched_path)
         else:
             template = None

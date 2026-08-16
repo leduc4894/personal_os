@@ -56,9 +56,7 @@ _WRONG_LOGIN: Final[dict[str, str]] = {
 }
 _VALID_CHANGE: Final[dict[str, str]] = {"new_password": "fresh-trebuchet-unlock-phrase"}
 
-_ENVELOPE_KEYS: Final[frozenset[str]] = frozenset(
-    {"request_id", "data", "warnings", "error"}
-)
+_ENVELOPE_KEYS: Final[frozenset[str]] = frozenset({"request_id", "data", "warnings", "error"})
 _WEB_SCOPES: Final[tuple[str, ...]] = (
     "device_administration_manage",
     "device_authorization_approve",
@@ -113,8 +111,7 @@ def authenticated_headers(origin: str, cookies: dict[str, str]) -> dict[str, str
     return {
         "Origin": origin,
         "Cookie": (
-            f"{SESSION_COOKIE_NAME}={cookies['session']}; "
-            f"{CSRF_COOKIE_NAME}={cookies['csrf']}"
+            f"{SESSION_COOKIE_NAME}={cookies['session']}; {CSRF_COOKIE_NAME}={cookies['csrf']}"
         ),
         "X-CSRF-Token": cookies["csrf"],
     }
@@ -192,9 +189,7 @@ def test_login_with_wrong_password_fails_closed_without_cookies(client: TestClie
 
 
 @pytest.mark.parametrize("origin", ["https://attacker.example", "null"])
-def test_login_requires_the_exact_configured_origin(
-    client: TestClient, origin: str
-) -> None:
+def test_login_requires_the_exact_configured_origin(client: TestClient, origin: str) -> None:
     response = client.post("/api/auth/login", headers={"Origin": origin}, json=_VALID_LOGIN)
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "csrf_validation_failed"
@@ -222,9 +217,7 @@ def test_login_with_non_ascii_origin_bytes_is_rejected_closed(client: TestClient
 
 def test_login_locks_after_five_failures_with_safe_retry_detail(client: TestClient) -> None:
     for _ in range(5):
-        rejected = client.post(
-            "/api/auth/login", headers={"Origin": ORIGIN}, json=_WRONG_LOGIN
-        )
+        rejected = client.post("/api/auth/login", headers={"Origin": ORIGIN}, json=_WRONG_LOGIN)
         assert rejected.status_code == 401
     locked = client.post("/api/auth/login", headers={"Origin": ORIGIN}, json=_VALID_LOGIN)
     assert locked.status_code == 429
@@ -298,8 +291,7 @@ def test_logout_revokes_the_session_and_clears_cookies(client: TestClient) -> No
         for cookie in clearing
     )
     assert any(
-        cookie.startswith(f"{CSRF_COOKIE_NAME}=") and "Max-Age=0" in cookie
-        for cookie in clearing
+        cookie.startswith(f"{CSRF_COOKIE_NAME}=") and "Max-Age=0" in cookie for cookie in clearing
     )
     assert response.headers["cache-control"] == "no-store"
     revoked = client.get("/api/auth/session", headers={"Origin": ORIGIN})
@@ -347,9 +339,7 @@ def test_logout_succeeds_from_a_recovery_limited_session() -> None:
         create_session_test_app(state=offline_state), base_url=_SECURE_BASE_URL
     ) as recovery_client:
         cookies = login(recovery_client)
-        stored = offline_state.sessions_by_secret_hash[
-            session_secret_hash_of(cookies["session"])
-        ]
+        stored = offline_state.sessions_by_secret_hash[session_secret_hash_of(cookies["session"])]
         offline_state.sessions_by_secret_hash[stored.session_secret_hash] = replace(
             stored, state=WebSessionState.RECOVERY_LIMITED
         )
@@ -439,8 +429,7 @@ def test_password_change_rejects_an_unequal_csrf_header(client: TestClient) -> N
         headers={
             "Origin": ORIGIN,
             "Cookie": (
-                f"{SESSION_COOKIE_NAME}={cookies['session']}; "
-                f"{CSRF_COOKIE_NAME}={cookies['csrf']}"
+                f"{SESSION_COOKIE_NAME}={cookies['session']}; {CSRF_COOKIE_NAME}={cookies['csrf']}"
             ),
             "X-CSRF-Token": "forged-csrf-header-value",
         },
@@ -460,8 +449,8 @@ def test_password_change_with_a_non_ascii_csrf_pair_is_rejected_closed(
         headers={
             "Origin": ORIGIN,
             "Cookie": (
-                f"{SESSION_COOKIE_NAME}={cookies['session']}; "
-                f"{CSRF_COOKIE_NAME}=".encode("ascii") + non_ascii_pair
+                f"{SESSION_COOKIE_NAME}={cookies['session']}; {CSRF_COOKIE_NAME}=".encode("ascii")
+                + non_ascii_pair
             ),
             "X-CSRF-Token": non_ascii_pair,
         },

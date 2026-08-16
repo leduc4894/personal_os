@@ -95,9 +95,7 @@ def test_invalid_username_grammar_rejects_before_password_input(
     assert "Not Valid!" not in captured.out + captured.err
 
 
-@pytest.mark.parametrize(
-    "subcommand", ("enroll-web-credential", "reset-web-authentication")
-)
+@pytest.mark.parametrize("subcommand", ("enroll-web-credential", "reset-web-authentication"))
 def test_invalid_password_file_name_rejects_before_password_input(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], subcommand: str
 ) -> None:
@@ -113,9 +111,7 @@ def test_invalid_password_file_name_rejects_before_password_input(
 # --- the interactive and file input boundary ----------------------------------------
 
 
-def _patch_getpass_sequence(
-    monkeypatch: pytest.MonkeyPatch, responses: Iterator[str]
-) -> list[str]:
+def _patch_getpass_sequence(monkeypatch: pytest.MonkeyPatch, responses: Iterator[str]) -> list[str]:
     prompts: list[str] = []
 
     def fake_getpass(prompt: str = "") -> str:
@@ -179,9 +175,7 @@ def test_reset_confirmation_must_equal_the_canonical_username(
 
     typed_lines = iter(["owner"])
     monkeypatch.setattr("builtins.input", lambda _prompt: next(typed_lines))
-    assert (
-        credential_commands.read_emergency_reset_confirmation(username="owner") == "owner"
-    )
+    assert credential_commands.read_emergency_reset_confirmation(username="owner") == "owner"
 
 
 def test_password_file_names_outside_the_closed_grammar_are_rejected() -> None:

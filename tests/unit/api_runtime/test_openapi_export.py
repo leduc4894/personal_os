@@ -129,14 +129,10 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
     assert document["paths"]["/api/auth/login"]["post"]["operationId"] == "login"
     assert document["paths"]["/api/auth/session"]["get"]["operationId"] == "getSession"
     assert document["paths"]["/api/auth/logout"]["post"]["operationId"] == "logout"
-    assert (
-        document["paths"]["/api/auth/reauthenticate"]["post"]["operationId"]
-        == "reauthenticate"
-    )
+    assert document["paths"]["/api/auth/reauthenticate"]["post"]["operationId"] == "reauthenticate"
     assert document["paths"]["/api/auth/password"]["put"]["operationId"] == "changePassword"
     assert (
-        document["paths"]["/api/auth/totp/verify"]["post"]["operationId"]
-        == "verifyTotpChallenge"
+        document["paths"]["/api/auth/totp/verify"]["post"]["operationId"] == "verifyTotpChallenge"
     )
     assert (
         document["paths"]["/api/auth/totp/enrollments"]["post"]["operationId"]
@@ -149,8 +145,7 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
         == "verifyTotpEnrollment"
     )
     assert (
-        document["paths"]["/api/auth/totp/recovery"]["post"]["operationId"]
-        == "startTotpRecovery"
+        document["paths"]["/api/auth/totp/recovery"]["post"]["operationId"] == "startTotpRecovery"
     )
     assert (
         document["paths"]["/api/auth/totp/recovery-codes/regenerate"]["post"]["operationId"]
@@ -162,9 +157,7 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
         == "createDeviceAuthorization"
     )
     assert (
-        document["paths"]["/api/auth/device-authorizations/lookup"]["post"][
-            "operationId"
-        ]
+        document["paths"]["/api/auth/device-authorizations/lookup"]["post"]["operationId"]
         == "lookupDeviceAuthorization"
     )
     assert (
@@ -174,9 +167,7 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
         == "approveDeviceAuthorization"
     )
     assert (
-        document["paths"]["/api/auth/device-authorizations/{grant_id}/deny"]["post"][
-            "operationId"
-        ]
+        document["paths"]["/api/auth/device-authorizations/{grant_id}/deny"]["post"]["operationId"]
         == "denyDeviceAuthorization"
     )
 

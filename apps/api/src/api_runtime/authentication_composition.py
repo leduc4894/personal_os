@@ -166,9 +166,7 @@ _OFFLINE_THROTTLE_POLICY: Final[ThrottleWindowPolicy] = ThrottleWindowPolicy()
 _OFFLINE_SESSION_POLICY: Final[SessionWindowPolicy] = SessionWindowPolicy()
 
 #: Safe reason token of the spec 20.1 startup refusal.
-_MISSING_REFERENCED_KEY_REASON: Final[SafeToken] = SafeToken.parse(
-    "keyring_missing_referenced_key"
-)
+_MISSING_REFERENCED_KEY_REASON: Final[SafeToken] = SafeToken.parse("keyring_missing_referenced_key")
 
 
 @dataclass(frozen=True, slots=True)
@@ -556,9 +554,7 @@ class OfflineCredentialStore:
             workspace_id=_OFFLINE_WORKSPACE_ID if is_enrolled_account else None,
             is_trusted_account=is_enrolled_account,
             password_hash=self._state.password_hash if is_enrolled_account else None,
-            credential_revision=(
-                self._state.credential_revision if is_enrolled_account else None
-            ),
+            credential_revision=(self._state.credential_revision if is_enrolled_account else None),
             username_bucket=self._state.buckets.get(username_bucket_hash),
             source_bucket=self._state.buckets.get(source_bucket_hash),
         )
@@ -716,9 +712,7 @@ class OfflineSessionStore:
         self, *, session_secret_hash: str, database_now: datetime
     ) -> ResolvedWebSession:
         session = self._state.sessions_by_secret_hash.get(session_secret_hash)
-        if session is None or not is_challenge_eligible_session(
-            session, database_now=database_now
-        ):
+        if session is None or not is_challenge_eligible_session(session, database_now=database_now):
             raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
         return ResolvedWebSession(
             session=session,
@@ -731,10 +725,7 @@ class OfflineSessionStore:
         self, command: RotateWebSessionSecretsCommand
     ) -> RotatedWebSessionSecrets:
         session = self._session_by_id(command.web_session_id)
-        if (
-            session is None
-            or session.session_secret_hash != command.prior_session_secret_hash
-        ):
+        if session is None or session.session_secret_hash != command.prior_session_secret_hash:
             raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
         if command.cause is SessionRotationCause.RECENT_REAUTHENTICATION:
             if session.state is not WebSessionState.ACTIVE:
@@ -812,8 +803,7 @@ class OfflineTotpStore:
             (
                 row
                 for row in self._state.totp_credential_rows
-                if row.user_id == _OFFLINE_USER_ID
-                and row.state is TotpCredentialState.ACTIVE
+                if row.user_id == _OFFLINE_USER_ID and row.state is TotpCredentialState.ACTIVE
             ),
             None,
         )
@@ -925,9 +915,7 @@ class OfflineTotpStore:
                 was_reencrypted = True
             if command.reset_bucket_hash is not None:
                 self._state.buckets[
-                    self._bucket(
-                        ThrottleBucketKind.TOTP_VERIFICATION, command.reset_bucket_hash
-                    )
+                    self._bucket(ThrottleBucketKind.TOTP_VERIFICATION, command.reset_bucket_hash)
                 ] = ThrottleBucketState(
                     window_started_at=command.database_now,
                     failed_attempt_count=0,
@@ -1046,8 +1034,7 @@ class OfflineTotpStore:
             if (
                 session is None
                 or session.session_secret_hash != command.prior_session_secret_hash
-                or session.state
-                not in (WebSessionState.PENDING_TOTP, WebSessionState.ACTIVE)
+                or session.state not in (WebSessionState.PENDING_TOTP, WebSessionState.ACTIVE)
             ):
                 raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
             rotated = replace(
@@ -1123,9 +1110,9 @@ class OfflineTotpStore:
                         authentication_method=PASSWORD_AUTHENTICATION_METHOD,
                     )
                     del self._state.sessions_by_secret_hash[secret_hash]
-                    self._state.sessions_by_secret_hash[
-                        command.new_session_secret_hash
-                    ] = rotated_session
+                    self._state.sessions_by_secret_hash[command.new_session_secret_hash] = (
+                        rotated_session
+                    )
                 elif session.state is not WebSessionState.REVOKED:
                     self._state.sessions_by_secret_hash[secret_hash] = replace(
                         session,
@@ -1227,9 +1214,7 @@ class OfflineDeviceAuthorizationStore:
     ) -> InsertedPendingGrant:
         async with self._lock:
             if command.creation_bucket_hash is not None:
-                key = self._bucket(
-                    ThrottleBucketKind.GRANT_CREATION, command.creation_bucket_hash
-                )
+                key = self._bucket(ThrottleBucketKind.GRANT_CREATION, command.creation_bucket_hash)
                 transition = next_login_failure_transition(
                     self._state.buckets.get(key),
                     database_now=command.database_now,
@@ -1266,9 +1251,11 @@ class OfflineDeviceAuthorizationStore:
             if row is None:
                 return None
             stored = self._stored_view(row)
-            if reset_bucket_hash is not None and stored.state is (
-                DeviceAuthorizationGrantState.PENDING
-            ) and database_now < stored.expires_at:
+            if (
+                reset_bucket_hash is not None
+                and stored.state is (DeviceAuthorizationGrantState.PENDING)
+                and database_now < stored.expires_at
+            ):
                 self._state.buckets[
                     self._bucket(ThrottleBucketKind.USER_CODE_LOOKUP, reset_bucket_hash)
                 ] = ThrottleBucketState(

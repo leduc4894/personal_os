@@ -199,9 +199,7 @@ def _bucket_row(
 ) -> SimpleNamespace:
     return SimpleNamespace(
         throttle_bucket_id=throttle_bucket_id if throttle_bucket_id is not None else uuid4(),
-        window_started_at=(
-            window_started_at if window_started_at is not None else _DATABASE_NOW
-        ),
+        window_started_at=(window_started_at if window_started_at is not None else _DATABASE_NOW),
         failed_attempt_count=failed_attempt_count,
         locked_until=locked_until,
     )
@@ -247,9 +245,7 @@ async def test_resolve_login_material_binds_username_and_bucket_hashes() -> None
     assert material.source_bucket is not None
     assert material.source_bucket.failed_attempt_count == 0
     connection = engine.connections[0]
-    material_statement, username_statement, source_statement = connection.executed_statements[
-        3:
-    ]
+    material_statement, username_statement, source_statement = connection.executed_statements[3:]
     assert "users" in str(material_statement)
     assert _statement_parameters(material_statement)["username"] == "owner"
     username_parameters = _statement_parameters(username_statement)
@@ -330,8 +326,7 @@ async def test_fifth_failure_persists_locked_bucket_and_audits_trusted_account()
     audit_inserts = [
         statement
         for statement in connection.executed_statements
-        if isinstance(statement, sa.sql.dml.Insert)
-        and statement.table.name == "audit_events"
+        if isinstance(statement, sa.sql.dml.Insert) and statement.table.name == "audit_events"
     ]
     assert len(audit_inserts) == 1
     audit_parameters = _statement_parameters(audit_inserts[0])
@@ -399,8 +394,7 @@ async def test_commit_login_success_rechecks_and_inserts_active_session() -> Non
         next(
             statement
             for statement in connection.executed_statements
-            if isinstance(statement, sa.sql.dml.Insert)
-            and statement.table.name == "audit_events"
+            if isinstance(statement, sa.sql.dml.Insert) and statement.table.name == "audit_events"
         )
     )
     assert audit_parameters["action"] == LOGIN_SUCCEEDED_AUDIT_ACTION
@@ -456,15 +450,12 @@ async def test_commit_login_success_upgrades_obsolete_hash() -> None:
         ]
     )
     store = CredentialStore(engine)
-    command = dataclasses.replace(
-        _commit_login_success_command(), upgraded_password_hash=_PHC_HASH
-    )
+    command = dataclasses.replace(_commit_login_success_command(), upgraded_password_hash=_PHC_HASH)
     await store.commit_login_success(command)
     upgrades = [
         statement
         for statement in engine.connections[0].executed_statements
-        if isinstance(statement, sa.sql.dml.Update)
-        and statement.table.name == "user_credentials"
+        if isinstance(statement, sa.sql.dml.Update) and statement.table.name == "user_credentials"
     ]
     assert len(upgrades) == 1
     upgrade_parameters = _statement_parameters(upgrades[0])
@@ -496,8 +487,7 @@ async def test_change_password_bumps_revision_revokes_and_rotates() -> None:
     credential_updates = [
         statement
         for statement in connection.executed_statements
-        if isinstance(statement, sa.sql.dml.Update)
-        and statement.table.name == "user_credentials"
+        if isinstance(statement, sa.sql.dml.Update) and statement.table.name == "user_credentials"
     ]
     assert len(credential_updates) == 1
     credential_parameters = _statement_parameters(credential_updates[0])

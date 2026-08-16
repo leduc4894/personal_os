@@ -158,9 +158,7 @@ class ThrottleFailureTransition:
     became_locked: bool
 
 
-def is_throttle_bucket_locked(
-    state: ThrottleBucketState | None, *, database_now: datetime
-) -> bool:
+def is_throttle_bucket_locked(state: ThrottleBucketState | None, *, database_now: datetime) -> bool:
     """Return whether the bucket still locks attempts at ``database_now``."""
     if state is None or state.locked_until is None:
         return False
@@ -285,16 +283,12 @@ def evaluate_session_authentication(
     )
 
 
-def clamp_idle_expiry(
-    candidate_idle_expiry: datetime, absolute_expires_at: datetime
-) -> datetime:
+def clamp_idle_expiry(candidate_idle_expiry: datetime, absolute_expires_at: datetime) -> datetime:
     """Return the idle expiry that never passes the absolute boundary."""
     return min(candidate_idle_expiry, absolute_expires_at)
 
 
-def is_challenge_eligible_session(
-    session: StoredWebSession, *, database_now: datetime
-) -> bool:
+def is_challenge_eligible_session(session: StoredWebSession, *, database_now: datetime) -> bool:
     """Whether one session binding may drive its own challenge routes (spec 9.2).
 
     Every unrevoked state qualifies while both expiry boundaries hold, so the
@@ -633,9 +627,7 @@ def session_secret_hash_of(session_secret: str) -> str:
     return hashlib.sha256(session_secret.encode("utf-8")).hexdigest()
 
 
-def derive_throttle_hmac_key(
-    crypto: AuthenticationCryptoPort, master_key: bytes
-) -> bytes:
+def derive_throttle_hmac_key(crypto: AuthenticationCryptoPort, master_key: bytes) -> bytes:
     """Derive the ``auth/throttle/v1`` HMAC subkey (spec 8.3, 20.1)."""
     return crypto.derive_subkey(master_key=master_key, label=THROTTLE_HMAC_LABEL)
 
@@ -657,9 +649,7 @@ def throttle_bucket_hash(
     return hmac.new(hmac_key, message, hashlib.sha256).hexdigest()
 
 
-def generate_session_secret_material(
-    *, csrf_hmac_key: bytes
-) -> tuple[str, str, str, str]:
+def generate_session_secret_material(*, csrf_hmac_key: bytes) -> tuple[str, str, str, str]:
     """Generate one session's opaque secrets and their two stored hashes.
 
     Returns ``(session_secret, csrf_secret, session_secret_hash,
@@ -673,9 +663,7 @@ def generate_session_secret_material(
         session_secret,
         csrf_secret,
         session_secret_hash_of(session_secret),
-        hmac.new(
-            csrf_hmac_key, csrf_secret.encode("utf-8"), hashlib.sha256
-        ).hexdigest(),
+        hmac.new(csrf_hmac_key, csrf_secret.encode("utf-8"), hashlib.sha256).hexdigest(),
     )
 
 
@@ -759,9 +747,7 @@ class LoginService:
                 started_session=None,
             )
         selected_hash = (
-            material.password_hash
-            if material.password_hash is not None
-            else DUMMY_LOGIN_PHC_HASH
+            material.password_hash if material.password_hash is not None else DUMMY_LOGIN_PHC_HASH
         )
         is_password_valid = self._hasher.verify_password(selected_hash, password)
         if not is_password_valid:
@@ -808,9 +794,7 @@ class LoginService:
                 authentication_method=PASSWORD_AUTHENTICATION_METHOD,
                 database_now=database_now,
                 active_idle_expires_at=database_now + self._session_policy.idle_ttl,
-                pending_totp_idle_expires_at=(
-                    database_now + self._session_policy.pending_totp_ttl
-                ),
+                pending_totp_idle_expires_at=(database_now + self._session_policy.pending_totp_ttl),
                 absolute_expires_at=database_now + self._session_policy.absolute_ttl,
                 upgraded_password_hash=upgraded_password_hash,
                 diagnostic_context=diagnostic_context,
@@ -919,9 +903,7 @@ class SessionService:
         omitted, the resolution takes its own read.
         """
         transaction_now = (
-            database_now
-            if database_now is not None
-            else await self._clock.database_now()
+            database_now if database_now is not None else await self._clock.database_now()
         )
         resolved = await self._sessions.resolve_session(
             session_secret_hash=session_secret_hash_of(session_secret),
@@ -947,9 +929,7 @@ class SessionService:
         like the strict resolution.
         """
         transaction_now = (
-            database_now
-            if database_now is not None
-            else await self._clock.database_now()
+            database_now if database_now is not None else await self._clock.database_now()
         )
         resolved = await self._sessions.resolve_challenge_eligible_session(
             session_secret_hash=session_secret_hash_of(session_secret),

@@ -97,9 +97,9 @@ _SESSION_STATE_ACTIVE: Final[str] = "active"
 TOTP_ENROLLMENT_STARTED_AUDIT_ACTION: Final[str] = "authentication.totp_enrollment_started"
 TOTP_ACTIVATED_AUDIT_ACTION: Final[str] = "authentication.totp_activated"
 TOTP_RECOVERY_CODE_USED_AUDIT_ACTION: Final[str] = "authentication.totp_recovery_code_used"
-TOTP_RECOVERY_CODES_REGENERATED_AUDIT_ACTION: Final[
-    str
-] = "authentication.totp_recovery_codes_regenerated"
+TOTP_RECOVERY_CODES_REGENERATED_AUDIT_ACTION: Final[str] = (
+    "authentication.totp_recovery_codes_regenerated"
+)
 TOTP_DISABLED_AUDIT_ACTION: Final[str] = "authentication.totp_disabled"
 
 #: Every ``totp_credentials`` column the typed verification path reads.
@@ -244,10 +244,7 @@ class TotpStore:
                 )
                 .limit(1)
             )
-            if (
-                active_exists.one_or_none() is not None
-                and not command.allow_active_credential
-            ):
+            if active_exists.one_or_none() is not None and not command.allow_active_credential:
                 raise AuthenticationError(ErrorCode.TOTP_ENROLLMENT_STATE_INVALID)
             await connection.execute(
                 sa.update(totp_credentials)
@@ -396,8 +393,7 @@ class TotpStore:
                     )
                     .where(
                         web_sessions.c.web_session_id == command.current_web_session_id,
-                        web_sessions.c.session_secret_hash
-                        == command.prior_session_secret_hash,
+                        web_sessions.c.session_secret_hash == command.prior_session_secret_hash,
                         web_sessions.c.state == WebSessionState.RECOVERY_LIMITED.value,
                     )
                 )
@@ -426,9 +422,7 @@ class TotpStore:
         """Replay-locked verification of one submitted code (spec 10.2)."""
 
         async def operation(connection: AsyncConnection) -> TotpVerified:
-            locked = await connection.execute(
-                self._active_credential_statement(command.user_id)
-            )
+            locked = await connection.execute(self._active_credential_statement(command.user_id))
             row = locked.one_or_none()
             if row is None:
                 raise AuthenticationError(ErrorCode.AUTHENTICATION_FAILED)
@@ -481,8 +475,7 @@ class TotpStore:
                     .where(
                         authentication_throttle_buckets.c.bucket_kind
                         == ThrottleBucketKind.TOTP_VERIFICATION.value,
-                        authentication_throttle_buckets.c.bucket_hash
-                        == command.reset_bucket_hash,
+                        authentication_throttle_buckets.c.bucket_hash == command.reset_bucket_hash,
                     )
                 )
             return TotpVerified(
@@ -509,8 +502,7 @@ class TotpStore:
             matching = await connection.execute(
                 sa.select(totp_recovery_codes.c.recovery_code_id)
                 .where(
-                    totp_recovery_codes.c.totp_credential_id
-                    == credential_row.totp_credential_id,
+                    totp_recovery_codes.c.totp_credential_id == credential_row.totp_credential_id,
                     totp_recovery_codes.c.code_hash == command.recovery_code_hash,
                     totp_recovery_codes.c.used_at.is_(None),
                 )
@@ -587,17 +579,13 @@ class TotpStore:
             await connection.execute(
                 sa.update(totp_credentials)
                 .values(revision=next_revision)
-                .where(
-                    totp_credentials.c.totp_credential_id
-                    == credential_row.totp_credential_id
-                )
+                .where(totp_credentials.c.totp_credential_id == credential_row.totp_credential_id)
             )
             invalidated = await connection.execute(
                 sa.update(totp_recovery_codes)
                 .values(used_at=command.database_now)
                 .where(
-                    totp_recovery_codes.c.totp_credential_id
-                    == credential_row.totp_credential_id,
+                    totp_recovery_codes.c.totp_credential_id == credential_row.totp_credential_id,
                     totp_recovery_codes.c.used_at.is_(None),
                 )
             )
@@ -634,9 +622,7 @@ class TotpStore:
 
         async def operation(connection: AsyncConnection) -> DisabledTotp:
             locked_credential = await connection.execute(
-                sa.select(
-                    user_credentials.c.workspace_id, user_credentials.c.credential_revision
-                )
+                sa.select(user_credentials.c.workspace_id, user_credentials.c.credential_revision)
                 .where(
                     user_credentials.c.user_id == command.user_id,
                     user_credentials.c.workspace_id == command.workspace_id,
@@ -728,9 +714,7 @@ class TotpStore:
 
         return await run_authentication_transaction(self._engine, operation)
 
-
     # -- internal helpers -------------------------------------------------
-
 
     def _active_credential_statement(self, user_id: UUID) -> sa.Select[tuple[Any, ...]]:
         return (
@@ -823,12 +807,10 @@ class TotpStore:
                     updated_at=database_now,
                 )
                 .where(
-                    authentication_throttle_buckets.c.throttle_bucket_id
-                    == row.throttle_bucket_id
+                    authentication_throttle_buckets.c.throttle_bucket_id == row.throttle_bucket_id
                 )
             )
         return transition
-
 
 
 async def _append_audit_event(

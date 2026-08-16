@@ -135,9 +135,7 @@ def totp_code(
     return f"{binary % (10**digits):0{digits}d}"
 
 
-def time_step_of(
-    *, unix_time_seconds: int, period_seconds: int = TOTP_PERIOD_SECONDS
-) -> int:
+def time_step_of(*, unix_time_seconds: int, period_seconds: int = TOTP_PERIOD_SECONDS) -> int:
     """Map one unix moment onto its time-step index."""
     return unix_time_seconds // period_seconds
 
@@ -159,9 +157,7 @@ def resolve_totp_step(
     fails safely (spec 10.1, 10.2). The smallest accepted matching step wins,
     so the replay marker advances exactly as far as the submission proves.
     """
-    current_step = time_step_of(
-        unix_time_seconds=unix_time_seconds, period_seconds=period_seconds
-    )
+    current_step = time_step_of(unix_time_seconds=unix_time_seconds, period_seconds=period_seconds)
     for offset in range(-TOTP_ACCEPTED_STEP_WINDOW, TOTP_ACCEPTED_STEP_WINDOW + 1):
         candidate_step = current_step + offset
         if last_accepted_time_step is not None and candidate_step <= last_accepted_time_step:
@@ -234,17 +230,14 @@ def normalize_recovery_code(value: str) -> str:
     rejected value.
     """
     normalized = value.replace("-", "").replace(" ", "").upper()
-    if (
-        len(normalized) != RECOVERY_CODE_LENGTH_CHARACTERS
-        or any(character not in RECOVERY_CODE_ALPHABET for character in normalized)
+    if len(normalized) != RECOVERY_CODE_LENGTH_CHARACTERS or any(
+        character not in RECOVERY_CODE_ALPHABET for character in normalized
     ):
         raise AuthenticationError(ErrorCode.AUTHENTICATION_FAILED)
     return normalized
 
 
-def derive_recovery_code_hmac_key(
-    crypto: AuthenticationCryptoPort, master_key: bytes
-) -> bytes:
+def derive_recovery_code_hmac_key(crypto: AuthenticationCryptoPort, master_key: bytes) -> bytes:
     """Derive the ``auth/recovery/v1`` HMAC subkey (spec 10.3, 20.1)."""
     return crypto.derive_subkey(master_key=master_key, label=RECOVERY_CODE_HASH_LABEL)
 
@@ -664,9 +657,7 @@ class TotpService:
         session = resolved.session
         if session.state is not WebSessionState.PENDING_TOTP:
             raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
-        bucket_hash = self._bucket_hash(
-            ThrottleBucketKind.TOTP_VERIFICATION, str(session.user_id)
-        )
+        bucket_hash = self._bucket_hash(ThrottleBucketKind.TOTP_VERIFICATION, str(session.user_id))
         locked_until = self._active_lock(
             await self._transactions.resolve_verification_bucket(
                 bucket_kind=ThrottleBucketKind.TOTP_VERIFICATION, bucket_hash=bucket_hash
@@ -765,9 +756,7 @@ class TotpService:
         inserted = await self._transactions.insert_pending_enrollment(
             InsertPendingEnrollmentCommand(
                 user_id=session.user_id,
-                allow_active_credential=(
-                    session.state is WebSessionState.RECOVERY_LIMITED
-                ),
+                allow_active_credential=(session.state is WebSessionState.RECOVERY_LIMITED),
                 sealed_secret=sealed,
                 enrollment_expires_at=database_now + TOTP_ENROLLMENT_EXPIRY,
                 database_now=database_now,
@@ -779,9 +768,7 @@ class TotpService:
             started=StartedTotpEnrollment(
                 enrollment_id=inserted.totp_credential_id,
                 username=inserted.username,
-                provisioning_uri=totp_provisioning_uri(
-                    secret=secret, username=inserted.username
-                ),
+                provisioning_uri=totp_provisioning_uri(secret=secret, username=inserted.username),
                 secret_base32=base64.b32encode(secret).decode("ascii"),
                 enrollment_expires_at=inserted.enrollment_expires_at,
                 database_now=database_now,
@@ -803,9 +790,7 @@ class TotpService:
         session = resolved.session
         if session.state not in REPLACEMENT_ELIGIBLE_SESSION_STATES:
             raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
-        bucket_hash = self._bucket_hash(
-            ThrottleBucketKind.TOTP_VERIFICATION, str(session.user_id)
-        )
+        bucket_hash = self._bucket_hash(ThrottleBucketKind.TOTP_VERIFICATION, str(session.user_id))
         locked_until = self._active_lock(
             await self._transactions.resolve_verification_bucket(
                 bucket_kind=ThrottleBucketKind.TOTP_VERIFICATION, bucket_hash=bucket_hash
@@ -845,9 +830,7 @@ class TotpService:
                     new_session_secret_hash=(
                         rotated.session_secret_hash if rotated is not None else ""
                     ),
-                    new_csrf_secret_hash=(
-                        rotated.csrf_secret_hash if rotated is not None else ""
-                    ),
+                    new_csrf_secret_hash=(rotated.csrf_secret_hash if rotated is not None else ""),
                     database_now=database_now,
                     diagnostic_context=diagnostic_context,
                 )
@@ -1019,9 +1002,7 @@ class TotpService:
         return TotpRegenerationOutcome(
             public_error=None,
             locked_until=None,
-            issued_codes=IssuedRecoveryCodes(
-                codes=codes, revision=regenerated.revision
-            ),
+            issued_codes=IssuedRecoveryCodes(codes=codes, revision=regenerated.revision),
         )
 
     async def disable_totp(
@@ -1168,9 +1149,7 @@ class TotpService:
             resolved_password_hash, password
         ):
             return TotpProofFailure(ErrorCode.AUTHENTICATION_FAILED, None)
-        bucket_hash = self._bucket_hash(
-            ThrottleBucketKind.TOTP_VERIFICATION, str(session.user_id)
-        )
+        bucket_hash = self._bucket_hash(ThrottleBucketKind.TOTP_VERIFICATION, str(session.user_id))
         locked_until = self._active_lock(
             await self._transactions.resolve_verification_bucket(
                 bucket_kind=ThrottleBucketKind.TOTP_VERIFICATION, bucket_hash=bucket_hash

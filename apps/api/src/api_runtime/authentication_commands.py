@@ -125,9 +125,7 @@ def read_emergency_reset_confirmation(username: str) -> str:
     """
     confirmation = input("type the username to confirm the emergency reset: ")
     if confirmation != username:
-        raise CredentialCommandInputError(
-            "reset confirmation did not match the canonical username"
-        )
+        raise CredentialCommandInputError("reset confirmation did not match the canonical username")
     return confirmation
 
 
@@ -153,9 +151,7 @@ def run_enroll_web_credential(arguments: Namespace) -> int:
 
     def operation() -> int:
         username = validate_command_username(arguments.username)
-        password_file_name = _validated_optional_password_file_name(
-            arguments.password_file_name
-        )
+        password_file_name = _validated_optional_password_file_name(arguments.password_file_name)
         return _enroll_web_credential(username, password_file_name)
 
     return _run_protected_command(operation)
@@ -176,9 +172,7 @@ def run_reset_web_authentication(arguments: Namespace) -> int:
 
     def operation() -> int:
         username = validate_command_username(arguments.username)
-        password_file_name = _validated_optional_password_file_name(
-            arguments.password_file_name
-        )
+        password_file_name = _validated_optional_password_file_name(arguments.password_file_name)
         return _reset_web_authentication(username, password_file_name)
 
     return _run_protected_command(operation)

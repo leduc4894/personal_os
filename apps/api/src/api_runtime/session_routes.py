@@ -97,9 +97,7 @@ def create_session_route_endpoints(
 
     def _success_json(data: SessionData) -> JSONResponse:
         envelope = success_envelope(request_id=_request_id(), data=data)
-        return JSONResponse(
-            content=envelope.model_dump(mode="json"), headers=_NO_STORE_HEADERS
-        )
+        return JSONResponse(content=envelope.model_dump(mode="json"), headers=_NO_STORE_HEADERS)
 
     def _error_json(error: AuthenticationError) -> JSONResponse:
         envelope = error_envelope(request_id=_request_id(), error=error)
@@ -222,9 +220,7 @@ def create_session_route_endpoints(
         """
         request.scope["route_template"] = ApiRouteTemplate.AUTH_LOGOUT
         revoked_session = authentication.session
-        await runtime.session_service.revoke(
-            session_secret=authentication.session_secret
-        )
+        await runtime.session_service.revoke(session_secret=authentication.session_secret)
         response = _success_json(
             _session_data(
                 WebSessionState.REVOKED,
