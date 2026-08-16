@@ -417,6 +417,40 @@ def _canonical_postgresql_project_identity_is_ci_scoped(text: str) -> bool:
     )
 
 
+_AUTHENTICATION_ACCEPTANCE_GUARD_PATTERN = re.compile(
+    r'\$LOCAL_STACK_TEST_PROJECT" =~ (\^[^^][^ ]*\$)\s*\]\]; then', re.MULTILINE
+)
+
+
+def test_authentication_acceptance_project_name_satisfies_its_own_guard() -> None:
+    """The stack project env must satisfy the job's validation guard.
+
+    The guard step rejects any project name outside its bash regex before
+    the gate runs, so a drift between the ``LOCAL_STACK_TEST_PROJECT``
+    expression and that pattern (for example an infix the pattern forbids)
+    would fail every CI run before the acceptance gate executes. The guard
+    pattern is extracted from the workflow itself and checked against the
+    concrete name a real run would render.
+    """
+    text = (WORKFLOW_DIRECTORY / "authentication-acceptance.yml").read_text(encoding="utf-8")
+    project_template = re.search(r"LOCAL_STACK_TEST_PROJECT: (.+)$", text, re.MULTILINE)
+    assert project_template is not None, "the stack job must set its project name"
+    rendered_name = (
+        project_template.group(1)
+        .strip()
+        .replace("${{ github.run_id }}", "154938123456")
+        .replace("${{ github.run_attempt }}", "1")
+    )
+    guard_pattern = _AUTHENTICATION_ACCEPTANCE_GUARD_PATTERN.search(text)
+    assert guard_pattern is not None, "the stack job must validate its project identity"
+    assert re.search(guard_pattern.group(1), rendered_name) is not None, (
+        f"rendered project name {rendered_name!r} is rejected by the guard "
+        f"pattern {guard_pattern.group(1)!r}: the gate would never run"
+    )
+    assert rendered_name.startswith("knowledge-ci-")
+    assert len(rendered_name) <= 63
+
+
 def _canonical_postgresql_cleanup_is_always_gated(text: str) -> bool:
     cleanup = _canonical_postgresql_step_block(
         text,

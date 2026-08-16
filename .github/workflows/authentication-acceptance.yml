@@ -24,7 +24,7 @@ jobs:
     timeout-minutes: 45
     env:
       CI: "true"
-      LOCAL_STACK_TEST_PROJECT: knowledge-ci-auth-${{ github.run_id }}-${{ github.run_attempt }}
+      LOCAL_STACK_TEST_PROJECT: knowledge-ci-${{ github.run_id }}-${{ github.run_attempt }}
       NEXT_TELEMETRY_DISABLED: "1"
     steps:
       - name: Checkout repository
