@@ -187,6 +187,7 @@
         "enum": [
           "configuration_invalid",
           "configuration_unknown_key",
+          "configuration_secret_invalid",
           "secret_file_missing",
           "secret_file_outside_root",
           "secret_file_invalid_type",
@@ -240,7 +241,23 @@
           "api_request_malformed",
           "api_request_validation_failed",
           "api_route_not_found",
-          "api_method_not_allowed"
+          "api_method_not_allowed",
+          "authentication_required",
+          "authentication_failed",
+          "authentication_rate_limited",
+          "recent_authentication_required",
+          "csrf_validation_failed",
+          "authorization_scope_denied",
+          "totp_enrollment_state_invalid",
+          "device_authorization_pending",
+          "device_authorization_slow_down",
+          "device_authorization_denied",
+          "device_authorization_expired",
+          "device_authorization_state_invalid",
+          "device_credential_invalid",
+          "device_revoked",
+          "device_token_reuse_detected",
+          "plugin_version_unsupported"
         ],
         "title": "ErrorCode",
         "type": "string"
