@@ -30,6 +30,141 @@
           }
         ]
       },
+      "ApiEnvelope_DeviceGrantContextData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeviceGrantContextData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[DeviceGrantContextData]",
+        "type": "object"
+      },
+      "ApiEnvelope_DeviceGrantData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeviceGrantData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[DeviceGrantData]",
+        "type": "object"
+      },
+      "ApiEnvelope_DeviceGrantDecisionData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeviceGrantDecisionData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[DeviceGrantDecisionData]",
+        "type": "object"
+      },
       "ApiEnvelope_LivenessData_": {
         "additionalProperties": false,
         "properties": {
@@ -362,6 +497,228 @@
         ],
         "title": "ApiWarning",
         "type": "object"
+      },
+      "DeviceAuthorizationGrantState": {
+        "description": "Closed browser device-authorization grant states (spec 11.4/12, 15.5).\n\nGrant expiry is decided against ``expires_at`` while pending; it is not a\nstored state.",
+        "enum": [
+          "pending",
+          "approved",
+          "denied",
+          "exchanged"
+        ],
+        "title": "DeviceAuthorizationGrantState",
+        "type": "string"
+      },
+      "DeviceGrantContextData": {
+        "additionalProperties": false,
+        "description": "The approval-page display context of one pending grant (spec 11.3).\n\nCarries exactly the values the page must show before any decision: the\nsame user code the plugin displays, the escaped device name, the platform\nclass and token, the validated plugin version, the fixed scope and the\nexpiry. The polling secret never appears.",
+        "properties": {
+          "device_name": {
+            "title": "Device Name",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "grant_id": {
+            "format": "uuid",
+            "title": "Grant Id",
+            "type": "string"
+          },
+          "platform_class": {
+            "$ref": "#/components/schemas/DevicePlatformClass"
+          },
+          "platform_name": {
+            "title": "Platform Name",
+            "type": "string"
+          },
+          "plugin_version": {
+            "title": "Plugin Version",
+            "type": "string"
+          },
+          "requested_scope": {
+            "$ref": "#/components/schemas/DeviceScope"
+          },
+          "user_code": {
+            "title": "User Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "grant_id",
+          "user_code",
+          "device_name",
+          "platform_class",
+          "platform_name",
+          "plugin_version",
+          "requested_scope",
+          "expires_at"
+        ],
+        "title": "DeviceGrantContextData",
+        "type": "object"
+      },
+      "DeviceGrantData": {
+        "additionalProperties": false,
+        "description": "The one-time provisioning payload of one created grant (spec 11.1).\n\nThe user code and polling secret render exactly once here, under the\nprovisioning cache-suppression headers, and never again.",
+        "properties": {
+          "expires_in_seconds": {
+            "title": "Expires In Seconds",
+            "type": "integer"
+          },
+          "grant_id": {
+            "format": "uuid",
+            "title": "Grant Id",
+            "type": "string"
+          },
+          "poll_interval_seconds": {
+            "title": "Poll Interval Seconds",
+            "type": "integer"
+          },
+          "polling_secret": {
+            "title": "Polling Secret",
+            "type": "string"
+          },
+          "user_code": {
+            "title": "User Code",
+            "type": "string"
+          },
+          "verification_uri": {
+            "title": "Verification Uri",
+            "type": "string"
+          },
+          "verification_uri_complete": {
+            "title": "Verification Uri Complete",
+            "type": "string"
+          }
+        },
+        "required": [
+          "grant_id",
+          "user_code",
+          "polling_secret",
+          "verification_uri",
+          "verification_uri_complete",
+          "expires_in_seconds",
+          "poll_interval_seconds"
+        ],
+        "title": "DeviceGrantData",
+        "type": "object"
+      },
+      "DeviceGrantDecisionData": {
+        "additionalProperties": false,
+        "description": "The committed terminal decision of one approve/deny action (11.3).",
+        "properties": {
+          "decided_at": {
+            "format": "date-time",
+            "title": "Decided At",
+            "type": "string"
+          },
+          "grant_id": {
+            "format": "uuid",
+            "title": "Grant Id",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/DeviceAuthorizationGrantState"
+          }
+        },
+        "required": [
+          "grant_id",
+          "state",
+          "decided_at"
+        ],
+        "title": "DeviceGrantDecisionData",
+        "type": "object"
+      },
+      "DeviceGrantLookupRequest": {
+        "additionalProperties": false,
+        "description": "The user-code body the approval page resolves a grant with (11.2).",
+        "properties": {
+          "user_code": {
+            "pattern": "^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}$",
+            "title": "User Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_code"
+        ],
+        "title": "DeviceGrantLookupRequest",
+        "type": "object"
+      },
+      "DeviceGrantRequest": {
+        "additionalProperties": false,
+        "description": "The strict unauthenticated plugin grant-creation body (spec 11.1).\n\n``client_instance_id`` is the non-secret UUID the plugin generated once;\n``claimed_device_id`` optionally carries one prior non-secret device id.",
+        "properties": {
+          "claimed_device_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Claimed Device Id"
+          },
+          "client_instance_id": {
+            "format": "uuid",
+            "title": "Client Instance Id",
+            "type": "string"
+          },
+          "device_name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Device Name",
+            "type": "string"
+          },
+          "platform_class": {
+            "$ref": "#/components/schemas/DevicePlatformClass"
+          },
+          "platform_name": {
+            "maxLength": 64,
+            "pattern": "^[a-z0-9]+([.-][a-z0-9]+)*$",
+            "title": "Platform Name",
+            "type": "string"
+          },
+          "plugin_version": {
+            "pattern": "^[0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}$",
+            "title": "Plugin Version",
+            "type": "string"
+          },
+          "requested_scope": {
+            "$ref": "#/components/schemas/DeviceScope"
+          }
+        },
+        "required": [
+          "client_instance_id",
+          "device_name",
+          "platform_class",
+          "platform_name",
+          "plugin_version",
+          "requested_scope"
+        ],
+        "title": "DeviceGrantRequest",
+        "type": "object"
+      },
+      "DevicePlatformClass": {
+        "description": "The closed plugin platform classes (spec 11.1).",
+        "enum": [
+          "obsidian_desktop",
+          "obsidian_mobile"
+        ],
+        "title": "DevicePlatformClass",
+        "type": "string"
+      },
+      "DeviceScope": {
+        "description": "The closed fixed Obsidian device scope (spec 6.2).",
+        "enum": [
+          "obsidian_sync"
+        ],
+        "title": "DeviceScope",
+        "type": "string"
       },
       "ErrorCode": {
         "enum": [
@@ -850,6 +1207,126 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/auth/device-authorizations": {
+      "post": {
+        "description": "Create one grant and render the one-time provisioning payload.",
+        "operationId": "createDeviceAuthorization",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceGrantRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_DeviceGrantData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Create Grant"
+      }
+    },
+    "/api/auth/device-authorizations/lookup": {
+      "post": {
+        "description": "Resolve one user code to its approval-page display context.",
+        "operationId": "lookupDeviceAuthorization",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceGrantLookupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_DeviceGrantContextData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Lookup Grant"
+      }
+    },
+    "/api/auth/device-authorizations/{grant_id}/approve": {
+      "post": {
+        "description": "Approve one grant behind the recent-authentication gate (11.3).",
+        "operationId": "approveDeviceAuthorization",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "grant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Grant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_DeviceGrantDecisionData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Approve Grant"
+      }
+    },
+    "/api/auth/device-authorizations/{grant_id}/deny": {
+      "post": {
+        "description": "Deny one grant: explicit, terminal, no recent window (spec 11.3).",
+        "operationId": "denyDeviceAuthorization",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "grant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Grant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_DeviceGrantDecisionData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Deny Grant"
+      }
+    },
     "/api/auth/login": {
       "post": {
         "description": "Run one password login and issue the session and CSRF bindings.",

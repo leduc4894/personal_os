@@ -34,15 +34,19 @@ class ApiRouteTemplate(StrEnum):
     AUTH_TOTP_RECOVERY = "/api/auth/totp/recovery"
     AUTH_TOTP_RECOVERY_CODES_REGENERATE = "/api/auth/totp/recovery-codes/regenerate"
     AUTH_TOTP_DISABLE = "/api/auth/totp"
+    AUTH_DEVICE_AUTHORIZATIONS = "/api/auth/device-authorizations"
+    AUTH_DEVICE_AUTHORIZATION_LOOKUP = "/api/auth/device-authorizations/lookup"
+    AUTH_DEVICE_AUTHORIZATION_APPROVE = "/api/auth/device-authorizations/{grant_id}/approve"
+    AUTH_DEVICE_AUTHORIZATION_DENY = "/api/auth/device-authorizations/{grant_id}/deny"
     OPENAPI_DOCUMENT = "/api/openapi.json"
     UNMATCHED = "unmatched"
 
 
-#: Every authentication-bound route template of the closed session/password
-#: and TOTP/recovery route sets (spec 16.1, 16.2). Responses on these routes
-#: carry the authentication cache-suppression and privacy posture, so the
-#: error handlers need the same closed membership the correlation middleware
-#: uses.
+#: Every authentication-bound route template of the closed session/password,
+#: TOTP/recovery and device-authorization route sets (spec 16.1-16.3).
+#: Responses on these routes carry the authentication cache-suppression and
+#: privacy posture, so the error handlers need the same closed membership the
+#: correlation middleware uses.
 AUTHENTICATION_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset(
     {
         ApiRouteTemplate.AUTH_LOGIN,
@@ -56,6 +60,10 @@ AUTHENTICATION_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset(
         ApiRouteTemplate.AUTH_TOTP_RECOVERY,
         ApiRouteTemplate.AUTH_TOTP_RECOVERY_CODES_REGENERATE,
         ApiRouteTemplate.AUTH_TOTP_DISABLE,
+        ApiRouteTemplate.AUTH_DEVICE_AUTHORIZATIONS,
+        ApiRouteTemplate.AUTH_DEVICE_AUTHORIZATION_LOOKUP,
+        ApiRouteTemplate.AUTH_DEVICE_AUTHORIZATION_APPROVE,
+        ApiRouteTemplate.AUTH_DEVICE_AUTHORIZATION_DENY,
     }
 )
 

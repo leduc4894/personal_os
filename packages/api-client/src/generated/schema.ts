@@ -4,6 +4,86 @@
  */
 
 export type paths = {
+    readonly "/api/auth/device-authorizations": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Create Grant
+         * @description Create one grant and render the one-time provisioning payload.
+         */
+        readonly post: operations["createDeviceAuthorization"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/auth/device-authorizations/lookup": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Lookup Grant
+         * @description Resolve one user code to its approval-page display context.
+         */
+        readonly post: operations["lookupDeviceAuthorization"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/auth/device-authorizations/{grant_id}/approve": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Approve Grant
+         * @description Approve one grant behind the recent-authentication gate (11.3).
+         */
+        readonly post: operations["approveDeviceAuthorization"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/auth/device-authorizations/{grant_id}/deny": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Deny Grant
+         * @description Deny one grant: explicit, terminal, no recent window (spec 11.3).
+         */
+        readonly post: operations["denyDeviceAuthorization"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/auth/login": {
         readonly parameters: {
             readonly query?: never;
@@ -270,6 +350,51 @@ export type webhooks = Record<string, never>;
 export type components = {
     schemas: {
         readonly ApiDetailValue: boolean | number | string | readonly (boolean | number | string)[];
+        /** ApiEnvelope[DeviceGrantContextData] */
+        readonly ApiEnvelope_DeviceGrantContextData_: {
+            readonly data: components["schemas"]["DeviceGrantContextData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[DeviceGrantData] */
+        readonly ApiEnvelope_DeviceGrantData_: {
+            readonly data: components["schemas"]["DeviceGrantData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[DeviceGrantDecisionData] */
+        readonly ApiEnvelope_DeviceGrantDecisionData_: {
+            readonly data: components["schemas"]["DeviceGrantDecisionData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
         /** ApiEnvelope[LivenessData] */
         readonly ApiEnvelope_LivenessData_: {
             readonly data: components["schemas"]["LivenessData"] | null;
@@ -393,6 +518,133 @@ export type components = {
             /** Message */
             readonly message: string;
         };
+        /**
+         * DeviceAuthorizationGrantState
+         * @description Closed browser device-authorization grant states (spec 11.4/12, 15.5).
+         *
+         *     Grant expiry is decided against ``expires_at`` while pending; it is not a
+         *     stored state.
+         * @enum {string}
+         */
+        readonly DeviceAuthorizationGrantState: "pending" | "approved" | "denied" | "exchanged";
+        /**
+         * DeviceGrantContextData
+         * @description The approval-page display context of one pending grant (spec 11.3).
+         *
+         *     Carries exactly the values the page must show before any decision: the
+         *     same user code the plugin displays, the escaped device name, the platform
+         *     class and token, the validated plugin version, the fixed scope and the
+         *     expiry. The polling secret never appears.
+         */
+        readonly DeviceGrantContextData: {
+            /** Device Name */
+            readonly device_name: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            readonly expires_at: string;
+            /**
+             * Grant Id
+             * Format: uuid
+             */
+            readonly grant_id: string;
+            readonly platform_class: components["schemas"]["DevicePlatformClass"];
+            /** Platform Name */
+            readonly platform_name: string;
+            /** Plugin Version */
+            readonly plugin_version: string;
+            readonly requested_scope: components["schemas"]["DeviceScope"];
+            /** User Code */
+            readonly user_code: string;
+        };
+        /**
+         * DeviceGrantData
+         * @description The one-time provisioning payload of one created grant (spec 11.1).
+         *
+         *     The user code and polling secret render exactly once here, under the
+         *     provisioning cache-suppression headers, and never again.
+         */
+        readonly DeviceGrantData: {
+            /** Expires In Seconds */
+            readonly expires_in_seconds: number;
+            /**
+             * Grant Id
+             * Format: uuid
+             */
+            readonly grant_id: string;
+            /** Poll Interval Seconds */
+            readonly poll_interval_seconds: number;
+            /** Polling Secret */
+            readonly polling_secret: string;
+            /** User Code */
+            readonly user_code: string;
+            /** Verification Uri */
+            readonly verification_uri: string;
+            /** Verification Uri Complete */
+            readonly verification_uri_complete: string;
+        };
+        /**
+         * DeviceGrantDecisionData
+         * @description The committed terminal decision of one approve/deny action (11.3).
+         */
+        readonly DeviceGrantDecisionData: {
+            /**
+             * Decided At
+             * Format: date-time
+             */
+            readonly decided_at: string;
+            /**
+             * Grant Id
+             * Format: uuid
+             */
+            readonly grant_id: string;
+            readonly state: components["schemas"]["DeviceAuthorizationGrantState"];
+        };
+        /**
+         * DeviceGrantLookupRequest
+         * @description The user-code body the approval page resolves a grant with (11.2).
+         */
+        readonly DeviceGrantLookupRequest: {
+            /** User Code */
+            readonly user_code: string;
+        };
+        /**
+         * DeviceGrantRequest
+         * @description The strict unauthenticated plugin grant-creation body (spec 11.1).
+         *
+         *     ``client_instance_id`` is the non-secret UUID the plugin generated once;
+         *     ``claimed_device_id`` optionally carries one prior non-secret device id.
+         */
+        readonly DeviceGrantRequest: {
+            /** Claimed Device Id */
+            readonly claimed_device_id?: string | null;
+            /**
+             * Client Instance Id
+             * Format: uuid
+             */
+            readonly client_instance_id: string;
+            /** Device Name */
+            readonly device_name: string;
+            readonly platform_class: components["schemas"]["DevicePlatformClass"];
+            /** Platform Name */
+            readonly platform_name: string;
+            /** Plugin Version */
+            readonly plugin_version: string;
+            readonly requested_scope: components["schemas"]["DeviceScope"];
+        };
+        /**
+         * DevicePlatformClass
+         * @description The closed plugin platform classes (spec 11.1).
+         * @enum {string}
+         */
+        readonly DevicePlatformClass: "obsidian_desktop" | "obsidian_mobile";
+        /**
+         * DeviceScope
+         * @description The closed fixed Obsidian device scope (spec 6.2).
+         * @enum {string}
+         */
+        readonly DeviceScope: "obsidian_sync";
         /**
          * ErrorCode
          * @enum {string}
@@ -639,6 +891,98 @@ export type components = {
 };
 export type $defs = Record<string, never>;
 export interface operations {
+    readonly createDeviceAuthorization: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["DeviceGrantRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_DeviceGrantData_"];
+                };
+            };
+        };
+    };
+    readonly lookupDeviceAuthorization: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["DeviceGrantLookupRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_DeviceGrantContextData_"];
+                };
+            };
+        };
+    };
+    readonly approveDeviceAuthorization: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly grant_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_DeviceGrantDecisionData_"];
+                };
+            };
+        };
+    };
+    readonly denyDeviceAuthorization: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly grant_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_DeviceGrantDecisionData_"];
+                };
+            };
+        };
+    };
     readonly login: {
         readonly parameters: {
             readonly query?: never;

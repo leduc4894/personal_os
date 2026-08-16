@@ -1,19 +1,19 @@
 """FastAPI application factory: closed route set, envelopes and error handlers.
 
 The factory composes exactly two health routes plus the five session/password
-routes and six TOTP/recovery routes of the injected web-authentication runtime
-and the local/test-only OpenAPI document route, registers the four envelope
-exception handlers,
+routes, six TOTP/recovery routes and four browser device-authorization routes
+of the injected web-authentication runtime and the local/test-only OpenAPI
+document route, registers the four envelope exception handlers,
 strips FastAPI's default validation-error response from the generated
 document (the shared handler emits the canonical error envelope instead), and
 wraps the finished middleware stack with :class:`RequestContextMiddleware`
 from the outside so request correlation owns every exchange, including the
 catch-all internal error response. No CORS, GZip, session or authentication
 middleware is added — cookies, the exact-origin gate and the CSRF checks live
-in the runtime dependencies of the session routes — and the request id in
-every envelope is read from the bound diagnostic context rather than minted
-here. Authentication-route failures carry ``Cache-Control: no-store`` exactly
-like the route's own success and rejection responses.
+in the runtime dependencies of the authentication routes — and the request id
+in every envelope is read from the bound diagnostic context rather than
+minted here. Authentication-route failures carry ``Cache-Control: no-store``
+exactly like the route's own success and rejection responses.
 """
 
 from __future__ import annotations
@@ -34,11 +34,15 @@ from starlette.types import ASGIApp, ExceptionHandler, Lifespan
 from api_runtime import health_routes
 from api_runtime.authentication_composition import WebAuthenticationRuntime
 from api_runtime.authentication_models import (
+    DeviceGrantContextData,
+    DeviceGrantData,
+    DeviceGrantDecisionData,
     RecoveryCodesData,
     RecoveryLimitedContext,
     SessionData,
     TotpEnrollmentData,
 )
+from api_runtime.device_authorization_routes import create_device_authorization_route_endpoints
 from api_runtime.request_context import ASGIApp as CorrelationApp
 from api_runtime.request_context import RequestContextMiddleware
 from api_runtime.session_routes import create_session_route_endpoints
@@ -140,6 +144,7 @@ def create_api_application(
     )
     _register_session_routes(app, web_authentication)
     _register_totp_routes(app, web_authentication)
+    _register_device_authorization_routes(app, web_authentication)
     _classify_openapi_route(app)
     _suppress_framework_validation_error_document(app)
     # The pure-ASGI correlation middleware declares read-only ``Mapping``
@@ -266,6 +271,47 @@ def _register_totp_routes(
         methods=["DELETE"],
         operation_id="disableTotp",
         response_model=ApiEnvelope[SessionData],
+    )
+
+
+def _register_device_authorization_routes(
+    app: FastAPI, web_authentication: WebAuthenticationRuntime
+) -> None:
+    """Register the closed browser device-authorization route set (16.3).
+
+    Each route carries its manually assigned semantic operation id and the
+    envelope response model of its strict payload; the exact-origin gate of
+    the unauthenticated creation endpoint and the strict CSRF dependency of
+    the browser endpoints live in the endpoint factory.
+    """
+    endpoints = create_device_authorization_route_endpoints(web_authentication)
+    app.add_api_route(
+        "/api/auth/device-authorizations",
+        endpoints.create_grant,
+        methods=["POST"],
+        operation_id="createDeviceAuthorization",
+        response_model=ApiEnvelope[DeviceGrantData],
+    )
+    app.add_api_route(
+        "/api/auth/device-authorizations/lookup",
+        endpoints.lookup_grant,
+        methods=["POST"],
+        operation_id="lookupDeviceAuthorization",
+        response_model=ApiEnvelope[DeviceGrantContextData],
+    )
+    app.add_api_route(
+        "/api/auth/device-authorizations/{grant_id}/approve",
+        endpoints.approve_grant,
+        methods=["POST"],
+        operation_id="approveDeviceAuthorization",
+        response_model=ApiEnvelope[DeviceGrantDecisionData],
+    )
+    app.add_api_route(
+        "/api/auth/device-authorizations/{grant_id}/deny",
+        endpoints.deny_grant,
+        methods=["POST"],
+        operation_id="denyDeviceAuthorization",
+        response_model=ApiEnvelope[DeviceGrantDecisionData],
     )
 
 

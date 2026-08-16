@@ -39,6 +39,14 @@ ROUTE_OPERATION_IDS: dict[str, dict[str, str]] = {
     "/api/auth/totp/recovery": {"post": "startTotpRecovery"},
     "/api/auth/totp/recovery-codes/regenerate": {"post": "regenerateTotpRecoveryCodes"},
     "/api/auth/totp": {"delete": "disableTotp"},
+    "/api/auth/device-authorizations": {"post": "createDeviceAuthorization"},
+    "/api/auth/device-authorizations/lookup": {"post": "lookupDeviceAuthorization"},
+    "/api/auth/device-authorizations/{grant_id}/approve": {
+        "post": "approveDeviceAuthorization"
+    },
+    "/api/auth/device-authorizations/{grant_id}/deny": {
+        "post": "denyDeviceAuthorization"
+    },
 }
 
 #: Component schema names emitted for every frozen ``extra="forbid"`` model.
@@ -63,6 +71,11 @@ STRICT_MODEL_SCHEMA_NAMES: tuple[str, ...] = (
     "TotpEnrollmentRequest",
     "TotpProofRequest",
     "TotpRecoveryRequest",
+    "DeviceGrantContextData",
+    "DeviceGrantData",
+    "DeviceGrantDecisionData",
+    "DeviceGrantLookupRequest",
+    "DeviceGrantRequest",
 )
 
 _URL_PATTERN = re.compile(r"\w+://")

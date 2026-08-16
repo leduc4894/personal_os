@@ -119,6 +119,10 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
         "/api/auth/totp/recovery",
         "/api/auth/totp/recovery-codes/regenerate",
         "/api/auth/totp",
+        "/api/auth/device-authorizations",
+        "/api/auth/device-authorizations/lookup",
+        "/api/auth/device-authorizations/{grant_id}/approve",
+        "/api/auth/device-authorizations/{grant_id}/deny",
     }
     assert document["paths"]["/api/health/live"]["get"]["operationId"] == "getApiLiveness"
     assert document["paths"]["/api/health/ready"]["get"]["operationId"] == "getApiReadiness"
@@ -153,6 +157,28 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
         == "regenerateTotpRecoveryCodes"
     )
     assert document["paths"]["/api/auth/totp"]["delete"]["operationId"] == "disableTotp"
+    assert (
+        document["paths"]["/api/auth/device-authorizations"]["post"]["operationId"]
+        == "createDeviceAuthorization"
+    )
+    assert (
+        document["paths"]["/api/auth/device-authorizations/lookup"]["post"][
+            "operationId"
+        ]
+        == "lookupDeviceAuthorization"
+    )
+    assert (
+        document["paths"]["/api/auth/device-authorizations/{grant_id}/approve"]["post"][
+            "operationId"
+        ]
+        == "approveDeviceAuthorization"
+    )
+    assert (
+        document["paths"]["/api/auth/device-authorizations/{grant_id}/deny"]["post"][
+            "operationId"
+        ]
+        == "denyDeviceAuthorization"
+    )
 
 
 def test_openapi_render_omits_the_framework_validation_error_documentation() -> None:

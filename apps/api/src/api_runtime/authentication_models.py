@@ -1,4 +1,4 @@
-"""Strict session/password/TOTP request and response models (spec 8-10, 16).
+"""Strict session/password/TOTP/device request and response models (spec 8-11, 16).
 
 Every model is frozen and closed for extra fields. Password fields exist only
 on request models, are bounded by the canonical 15-128 code-point policy and
@@ -7,7 +7,9 @@ spec-9-named values a client needs — the closed session state, whether the
 session authenticates right now, the granted scope set and the two expiry
 hints — and never a username, cookie, credential or secret value. The
 provisioning secret and the recovery codes render only in their intended
-one-time responses.
+one-time responses; the device-grant payload renders the user code and the
+polling secret exactly once at creation, and the approval-page context never
+carries the polling secret at all.
 """
 
 from __future__ import annotations
@@ -18,7 +20,19 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from personal_os.authentication.contracts import WebScope, WebSessionState
+from personal_os.authentication.contracts import (
+    DeviceAuthorizationGrantState,
+    DeviceScope,
+    WebScope,
+    WebSessionState,
+)
+from personal_os.authentication.device_authorization import (
+    DEVICE_NAME_MAXIMUM_LENGTH_CHARACTERS,
+    DEVICE_NAME_MINIMUM_LENGTH_CHARACTERS,
+    PLATFORM_NAME_MAXIMUM_LENGTH_CHARACTERS,
+    USER_CODE_ALPHABET,
+    DevicePlatformClass,
+)
 from personal_os.authentication.passwords import (
     PASSWORD_MAXIMUM_LENGTH_CHARACTERS,
     PASSWORD_MINIMUM_LENGTH_CHARACTERS,
@@ -37,8 +51,21 @@ _TOTP_CODE_PATTERN: Final[str] = r"^[0-9]{6}$"
 #: spelling, with optional single separators (spec 10.3).
 _RECOVERY_CODE_PATTERN: Final[str] = r"^[A-Za-z2-7]{4}([- ]?[A-Za-z2-7]{4}){2}$"
 
+#: The closed user-code grammar (spec 11.1): two four-character blocks of
+#: the unambiguous domain alphabet separated by exactly one hyphen.
+_USER_CODE_PATTERN: Final[str] = rf"^[{USER_CODE_ALPHABET}]{{4}}-[{USER_CODE_ALPHABET}]{{4}}$"
+
+#: The closed supported platform token grammar (spec 11.1).
+_PLATFORM_NAME_PATTERN: Final[str] = r"^[a-z0-9]+([.-][a-z0-9]+)*$"
+
+#: The semantic plugin version grammar (spec 11.1); character classes only,
+#: because the exported document forbids backslash escapes in pattern strings.
+_PLUGIN_VERSION_PATTERN: Final[str] = r"^[0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}$"
+
 #: The closed actions a recovery-limited binding permits (spec 10.3).
 TotpRecoveryPermittedAction = Literal["totp_replacement", "logout"]
+
+
 
 
 class LoginRequest(BaseModel):
@@ -191,3 +218,83 @@ class RecoveryLimitedContext(BaseModel):
     permitted_actions: tuple[TotpRecoveryPermittedAction, ...]
     idle_expires_at: datetime
     absolute_expires_at: datetime
+
+
+class DeviceGrantRequest(BaseModel):
+    """The strict unauthenticated plugin grant-creation body (spec 11.1).
+
+    ``client_instance_id`` is the non-secret UUID the plugin generated once;
+    ``claimed_device_id`` optionally carries one prior non-secret device id.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    client_instance_id: UUID
+    device_name: str = Field(
+        min_length=DEVICE_NAME_MINIMUM_LENGTH_CHARACTERS,
+        max_length=DEVICE_NAME_MAXIMUM_LENGTH_CHARACTERS,
+    )
+    platform_class: DevicePlatformClass
+    platform_name: str = Field(
+        pattern=_PLATFORM_NAME_PATTERN, max_length=PLATFORM_NAME_MAXIMUM_LENGTH_CHARACTERS
+    )
+    plugin_version: str = Field(pattern=_PLUGIN_VERSION_PATTERN)
+    requested_scope: DeviceScope
+    claimed_device_id: UUID | None = None
+
+
+class DeviceGrantData(BaseModel):
+    """The one-time provisioning payload of one created grant (spec 11.1).
+
+    The user code and polling secret render exactly once here, under the
+    provisioning cache-suppression headers, and never again.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    grant_id: UUID
+    user_code: str
+    polling_secret: str
+    verification_uri: str
+    verification_uri_complete: str
+    expires_in_seconds: int
+    poll_interval_seconds: int
+
+
+class DeviceGrantLookupRequest(BaseModel):
+    """The user-code body the approval page resolves a grant with (11.2)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    user_code: str = Field(pattern=_USER_CODE_PATTERN)
+
+
+class DeviceGrantContextData(BaseModel):
+    """The approval-page display context of one pending grant (spec 11.3).
+
+    Carries exactly the values the page must show before any decision: the
+    same user code the plugin displays, the escaped device name, the platform
+    class and token, the validated plugin version, the fixed scope and the
+    expiry. The polling secret never appears.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    grant_id: UUID
+    user_code: str
+    device_name: str
+    platform_class: DevicePlatformClass
+    platform_name: str
+    plugin_version: str
+    requested_scope: DeviceScope
+    expires_at: datetime
+
+
+class DeviceGrantDecisionData(BaseModel):
+    """The committed terminal decision of one approve/deny action (11.3)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    grant_id: UUID
+    state: DeviceAuthorizationGrantState
+    decided_at: datetime

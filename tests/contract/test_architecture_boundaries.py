@@ -336,6 +336,7 @@ AUTHENTICATION_DOMAIN_MODULE_FILES = (
     "__init__.py",
     "contracts.py",
     "crypto.py",
+    "device_authorization.py",
     "errors.py",
     "passwords.py",
     "ports.py",
@@ -352,7 +353,7 @@ def test_authentication_domain_rejects_crypto_and_framework_imports() -> None:
     module_paths = sorted(path for path in AUTHENTICATION_DOMAIN_ROOT.rglob("*.py"))
     assert module_paths, "personal_os.authentication must exist as the domain package"
     assert [path.name for path in module_paths] == sorted(AUTHENTICATION_DOMAIN_MODULE_FILES), (
-        "personal_os.authentication must stay the closed seven-module domain package"
+        "personal_os.authentication must stay the closed eight-module domain package"
     )
     offenders: list[str] = []
     for path in module_paths:

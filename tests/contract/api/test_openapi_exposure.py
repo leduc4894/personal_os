@@ -38,6 +38,10 @@ _API_ROUTE_PATHS = frozenset(
         "/api/auth/totp/recovery",
         "/api/auth/totp/recovery-codes/regenerate",
         "/api/auth/totp",
+        "/api/auth/device-authorizations",
+        "/api/auth/device-authorizations/lookup",
+        "/api/auth/device-authorizations/{grant_id}/approve",
+        "/api/auth/device-authorizations/{grant_id}/deny",
     }
 )
 
@@ -97,6 +101,10 @@ async def test_local_environments_serve_raw_openapi_document_with_correlation(
         "startTotpRecovery",
         "regenerateTotpRecoveryCodes",
         "disableTotp",
+        "createDeviceAuthorization",
+        "lookupDeviceAuthorization",
+        "approveDeviceAuthorization",
+        "denyDeviceAuthorization",
     }
     assert "data" not in document
     assert "request_id" not in document

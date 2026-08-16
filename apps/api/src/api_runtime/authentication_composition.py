@@ -44,8 +44,26 @@ from api_runtime.authentication_dependencies import (
     build_session_cookie_contract,
 )
 from api_runtime.authentication_settings import AuthenticationSettings
-from personal_os.authentication.contracts import TotpCredentialState, WebSessionState
+from personal_os.authentication.contracts import (
+    DeviceAuthorizationGrantState,
+    TotpCredentialState,
+    WebSessionState,
+)
 from personal_os.authentication.crypto import TOTP_SECRET_AEAD_LABEL
+from personal_os.authentication.device_authorization import (
+    ApprovedGrant,
+    ApproveGrantCommand,
+    DeniedGrant,
+    DenyGrantCommand,
+    DeviceAuthorizationService,
+    DeviceAuthorizationTransactionPort,
+    InsertedPendingGrant,
+    InsertPendingGrantCommand,
+    LiveGrantWindow,
+    PluginVersionBounds,
+    StoredDeviceAuthorizationGrant,
+    resolve_terminal_rejection_code,
+)
 from personal_os.authentication.errors import AuthenticationError
 from personal_os.authentication.passwords import (
     PasswordBlocklist,
@@ -116,6 +134,7 @@ from postgresql_source_store.authentication_credentials import (
     CredentialStore,
     run_authentication_transaction,
 )
+from postgresql_source_store.device_authorization_store import DeviceAuthorizationStore
 from postgresql_source_store.totp_store import TotpStore
 from postgresql_source_store.web_session_store import WebSessionStore
 
@@ -137,6 +156,11 @@ _OFFLINE_WORKSPACE_ID: Final[UUID] = UUID("00000000-0000-7000-8000-000000000002"
 #: compute challenge codes from it. It never renders in the contract document.
 OFFLINE_TOTP_SECRET: Final[bytes] = b"offline-totp-secret-"
 
+#: The approved plugin version window of the offline graph.
+OFFLINE_PLUGIN_VERSION_BOUNDS: Final[PluginVersionBounds] = PluginVersionBounds(
+    minimum=(1, 0, 0), maximum=(2, 0, 0)
+)
+
 #: The offline graph pins the domain default window policies.
 _OFFLINE_THROTTLE_POLICY: Final[ThrottleWindowPolicy] = ThrottleWindowPolicy()
 _OFFLINE_SESSION_POLICY: Final[SessionWindowPolicy] = SessionWindowPolicy()
@@ -157,6 +181,7 @@ class WebAuthenticationRuntime:
     session_service: SessionService
     password_change_service: PasswordChangeService
     totp_service: TotpService
+    device_authorization_service: DeviceAuthorizationService
     verify_csrf_token: Callable[[str, str], bool]
 
 
@@ -269,6 +294,7 @@ def compose_web_authentication(
         clock=clock,
         totp_leg=totp_service,
     )
+    device_grants: DeviceAuthorizationTransactionPort = DeviceAuthorizationStore(engine)
     return WebAuthenticationRuntime(
         allowed_origin=settings.allowed_origin,
         cookie_contract=build_session_cookie_contract(
@@ -289,6 +315,18 @@ def compose_web_authentication(
             blocklist=load_common_password_blocklist(),
         ),
         totp_service=totp_service,
+        device_authorization_service=DeviceAuthorizationService(
+            grants=device_grants,
+            session_service=session_service,
+            crypto=crypto,
+            master_key=master_key,
+            clock=clock,
+            plugin_version_bounds=PluginVersionBounds.from_strings(
+                minimum_plugin_version=settings.minimum_plugin_version,
+                maximum_plugin_version=settings.maximum_plugin_version,
+            ),
+            verification_base_url=settings.allowed_origin,
+        ),
         verify_csrf_token=_build_csrf_verifier(crypto, master_key),
     )
 
@@ -422,6 +460,30 @@ class OfflineRecoveryCodeRow:
         self.used_at: datetime | None = None
 
 
+class OfflineDeviceGrantRow:
+    """In-memory ``device_authorization_grants`` row of the offline graph."""
+
+    def __init__(self, command: InsertPendingGrantCommand) -> None:
+        self.grant_id = command.grant_id
+        self.user_code_hash = command.user_code_hash
+        self.polling_secret_hash = command.polling_secret_hash
+        self.client_instance_id = command.client_instance_id
+        self.claimed_device_id = command.claimed_device_id
+        self.device_name = command.device_name
+        self.platform_class = command.platform_class
+        self.platform_name = command.platform_name
+        self.plugin_version = command.plugin_version
+        self.requested_scope = command.requested_scope
+        self.state: DeviceAuthorizationGrantState = DeviceAuthorizationGrantState.PENDING
+        self.created_at = command.database_now
+        self.expires_at = command.expires_at
+        self.approved_at: datetime | None = None
+        self.denied_at: datetime | None = None
+        self.exchanged_at: datetime | None = None
+        self.approved_by_user_id: UUID | None = None
+        self.approved_web_session_id: UUID | None = None
+
+
 class OfflineTotpSecretCodec:
     """Deterministic AEAD double: reversible transform, fixed key id."""
 
@@ -453,6 +515,8 @@ class OfflineAuthenticationState:
         self.totp_prompt_dismissed_at: datetime | None = None
         self.totp_credential_rows: list[OfflineTotpCredentialRow] = []
         self.recovery_code_rows: list[OfflineRecoveryCodeRow] = []
+        self.device_grant_rows: list[OfflineDeviceGrantRow] = []
+        self.device_grant_audit_actions: list[str] = []
         if totp_active:
             self.totp_credential_rows.append(
                 OfflineTotpCredentialRow(
@@ -1081,6 +1145,194 @@ class OfflineTotpStore:
             )
 
 
+class OfflineDeviceAuthorizationStore:
+    """In-memory grant transaction double mirroring the store contracts.
+
+    One ``asyncio.Lock`` serializes every operation, so the offline graph
+    reproduces the row-lock serialization points of the real store — one
+    terminal winner per grant, one audit action per committed transition —
+    with the real pure domain logic and the same closed rejections.
+    """
+
+    def __init__(self, state: OfflineAuthenticationState) -> None:
+        self._state = state
+        self._lock = asyncio.Lock()
+
+    def _bucket(self, bucket_kind: ThrottleBucketKind, bucket_hash: str) -> str:
+        return f"{bucket_kind.value}:{bucket_hash}"
+
+    def _stored_view(self, row: OfflineDeviceGrantRow) -> StoredDeviceAuthorizationGrant:
+        return StoredDeviceAuthorizationGrant(
+            grant_id=row.grant_id,
+            client_instance_id=row.client_instance_id,
+            claimed_device_id=row.claimed_device_id,
+            device_name=row.device_name,
+            platform_class=row.platform_class,
+            platform_name=row.platform_name,
+            plugin_version=row.plugin_version,
+            requested_scope=row.requested_scope,
+            state=row.state,
+            created_at=row.created_at,
+            expires_at=row.expires_at,
+            approved_at=row.approved_at,
+            denied_at=row.denied_at,
+            exchanged_at=row.exchanged_at,
+            approved_by_user_id=row.approved_by_user_id,
+            approved_web_session_id=row.approved_web_session_id,
+        )
+
+    async def resolve_throttle_bucket(
+        self, *, bucket_kind: ThrottleBucketKind, bucket_hash: str
+    ) -> ThrottleBucketState | None:
+        async with self._lock:
+            return self._state.buckets.get(self._bucket(bucket_kind, bucket_hash))
+
+    async def record_throttle_attempt(
+        self, *, bucket_kind: ThrottleBucketKind, bucket_hash: str, database_now: datetime
+    ) -> ThrottleFailureTransition:
+        async with self._lock:
+            key = self._bucket(bucket_kind, bucket_hash)
+            transition = next_login_failure_transition(
+                self._state.buckets.get(key),
+                database_now=database_now,
+                policy=_OFFLINE_THROTTLE_POLICY,
+            )
+            self._state.buckets[key] = ThrottleBucketState(
+                window_started_at=transition.window_started_at,
+                failed_attempt_count=transition.failed_attempt_count,
+                locked_until=transition.locked_until,
+            )
+            return transition
+
+    async def live_grant_window(
+        self, *, client_instance_id: UUID, database_now: datetime
+    ) -> LiveGrantWindow:
+        async with self._lock:
+            live_rows = [
+                row
+                for row in self._state.device_grant_rows
+                if row.client_instance_id == client_instance_id
+                and row.state is DeviceAuthorizationGrantState.PENDING
+                and database_now < row.expires_at
+            ]
+            return LiveGrantWindow(
+                live_grant_count=len(live_rows),
+                earliest_expires_at=(
+                    min(row.expires_at for row in live_rows) if live_rows else None
+                ),
+            )
+
+    async def insert_pending_grant(
+        self, command: InsertPendingGrantCommand
+    ) -> InsertedPendingGrant:
+        async with self._lock:
+            if command.creation_bucket_hash is not None:
+                key = self._bucket(
+                    ThrottleBucketKind.GRANT_CREATION, command.creation_bucket_hash
+                )
+                transition = next_login_failure_transition(
+                    self._state.buckets.get(key),
+                    database_now=command.database_now,
+                    policy=_OFFLINE_THROTTLE_POLICY,
+                )
+                self._state.buckets[key] = ThrottleBucketState(
+                    window_started_at=transition.window_started_at,
+                    failed_attempt_count=transition.failed_attempt_count,
+                    locked_until=transition.locked_until,
+                )
+            self._state.device_grant_rows.append(OfflineDeviceGrantRow(command))
+            return InsertedPendingGrant(
+                grant_id=command.grant_id,
+                expires_at=command.expires_at,
+                database_now=command.database_now,
+            )
+
+    async def lookup_grant_by_user_code(
+        self,
+        *,
+        user_code_hash: str,
+        database_now: datetime,
+        reset_bucket_hash: str | None = None,
+    ) -> StoredDeviceAuthorizationGrant | None:
+        async with self._lock:
+            row = next(
+                (
+                    candidate
+                    for candidate in self._state.device_grant_rows
+                    if candidate.user_code_hash == user_code_hash
+                ),
+                None,
+            )
+            if row is None:
+                return None
+            stored = self._stored_view(row)
+            if reset_bucket_hash is not None and stored.state is (
+                DeviceAuthorizationGrantState.PENDING
+            ) and database_now < stored.expires_at:
+                self._state.buckets[
+                    self._bucket(ThrottleBucketKind.USER_CODE_LOOKUP, reset_bucket_hash)
+                ] = ThrottleBucketState(
+                    window_started_at=database_now,
+                    failed_attempt_count=0,
+                    locked_until=None,
+                )
+            return stored
+
+    async def approve_grant(self, command: ApproveGrantCommand) -> ApprovedGrant:
+        committed = await self._terminal_transition(command)
+        return ApprovedGrant(
+            grant_id=committed.grant_id,
+            state=DeviceAuthorizationGrantState.APPROVED,
+            approved_at=command.database_now,
+            database_now=command.database_now,
+        )
+
+    async def deny_grant(self, command: DenyGrantCommand) -> DeniedGrant:
+        committed = await self._terminal_transition(command)
+        return DeniedGrant(
+            grant_id=committed.grant_id,
+            state=DeviceAuthorizationGrantState.DENIED,
+            denied_at=command.database_now,
+            database_now=command.database_now,
+        )
+
+    async def _terminal_transition(
+        self, command: ApproveGrantCommand | DenyGrantCommand
+    ) -> OfflineDeviceGrantRow:
+        async with self._lock:
+            row = next(
+                (
+                    candidate
+                    for candidate in self._state.device_grant_rows
+                    if candidate.grant_id == command.grant_id
+                ),
+                None,
+            )
+            rejection_code = resolve_terminal_rejection_code(
+                None if row is None else self._stored_view(row),
+                database_now=command.database_now,
+            )
+            if rejection_code is not None:
+                raise AuthenticationError(rejection_code)
+            assert row is not None
+            is_approval = isinstance(command, ApproveGrantCommand)
+            if is_approval:
+                row.state = DeviceAuthorizationGrantState.APPROVED
+                row.approved_at = command.database_now
+                row.approved_by_user_id = command.user_id
+                row.approved_web_session_id = command.web_session_id
+                self._state.device_grant_audit_actions.append(
+                    "authentication.device_authorization_approved"
+                )
+            else:
+                row.state = DeviceAuthorizationGrantState.DENIED
+                row.denied_at = command.database_now
+                self._state.device_grant_audit_actions.append(
+                    "authentication.device_authorization_denied"
+                )
+            return row
+
+
 def compose_offline_web_authentication(
     *,
     totp_active: bool = False,
@@ -1123,6 +1375,9 @@ def compose_offline_web_authentication(
         session_policy=_OFFLINE_SESSION_POLICY,
         totp_leg=totp_service,
     )
+    device_grants: DeviceAuthorizationTransactionPort = OfflineDeviceAuthorizationStore(
+        offline_state
+    )
     return WebAuthenticationRuntime(
         allowed_origin=OFFLINE_WEB_ALLOWED_ORIGIN,
         cookie_contract=build_session_cookie_contract(
@@ -1145,5 +1400,15 @@ def compose_offline_web_authentication(
             blocklist=PasswordBlocklist(digests=()),
         ),
         totp_service=totp_service,
+        device_authorization_service=DeviceAuthorizationService(
+            grants=device_grants,
+            session_service=session_service,
+            crypto=crypto,
+            master_key=_OFFLINE_MASTER_KEY,
+            clock=offline_clock,
+            plugin_version_bounds=OFFLINE_PLUGIN_VERSION_BOUNDS,
+            verification_base_url=OFFLINE_WEB_ALLOWED_ORIGIN,
+            session_policy=_OFFLINE_SESSION_POLICY,
+        ),
         verify_csrf_token=_build_csrf_verifier(crypto, _OFFLINE_MASTER_KEY),
     )
