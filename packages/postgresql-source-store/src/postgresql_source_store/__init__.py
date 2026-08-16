@@ -41,9 +41,11 @@ from postgresql_source_store.publication_store import (
     classify_replay,
 )
 from postgresql_source_store.readiness import PostgresqlReadinessProbe
+from postgresql_source_store.tables import SOURCE_STORE_TABLES
 
 __all__ = [
     "ACCEPTED_READ_SOURCE_STATES",
+    "SOURCE_STORE_TABLES",
     "DatabaseRetryPolicy",
     "PostgresqlBackupSnapshotStore",
     "PostgresqlCanonicalSourceReadStore",

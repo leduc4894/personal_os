@@ -1,12 +1,13 @@
-"""DML Core metadata contract against the baseline migration DDL authority.
+"""DML Core metadata contract against the migration DDL authority.
 
-The Alembic migration ``20260813_01`` is the single DDL authority. This test
-loads the migration module, replays its ``upgrade()`` against a recording stub
-of ``alembic.op`` and compares the nine schema-qualified tables the migration
-creates with the typed DML metadata in ``postgresql_source_store.tables``:
-identical table names, schema, column names, column types and nullability,
-with full coverage in both directions and no ``create_all()`` path anywhere in
-the adapter package.
+The Alembic migrations ``20260813_01`` (baseline) and ``20260816_01``
+(authentication schema) are the DDL authority. This test loads both migration
+modules, replays their ``upgrade()`` against a recording stub of ``alembic.op``
+and compares the seventeen schema-qualified tables the migrations create with
+the typed DML metadata in ``postgresql_source_store.tables``: identical table
+names, schema, column names, column types and nullability, with full coverage
+in both directions and no ``create_all()`` path anywhere in the adapter
+package.
 """
 
 from __future__ import annotations
@@ -25,13 +26,13 @@ from postgresql_source_store.tables import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-MIGRATION_GLOB = "20260813_01*.py"
+MIGRATION_GLOBS: tuple[str, ...] = ("20260813_01*.py", "20260816_01*.py")
 MIGRATION_DIRECTORY = REPO_ROOT / "migrations" / "versions"
 PACKAGE_SOURCE_ROOT = (
     REPO_ROOT / "packages" / "postgresql-source-store" / "src" / "postgresql_source_store"
 )
 
-EXPECTED_TABLE_NAMES = frozenset(
+BASELINE_TABLE_NAMES = frozenset(
     {
         "users",
         "workspaces",
@@ -44,6 +45,21 @@ EXPECTED_TABLE_NAMES = frozenset(
         "audit_events",
     }
 )
+
+AUTHENTICATION_TABLE_NAMES = frozenset(
+    {
+        "user_credentials",
+        "web_sessions",
+        "totp_credentials",
+        "totp_recovery_codes",
+        "device_token_families",
+        "device_tokens",
+        "device_authorization_grants",
+        "authentication_throttle_buckets",
+    }
+)
+
+EXPECTED_TABLE_NAMES = BASELINE_TABLE_NAMES | AUTHENTICATION_TABLE_NAMES
 
 
 class _RecordingAlembicOp:
@@ -71,23 +87,34 @@ class _RecordingAlembicOp:
         return None
 
 
-def _load_baseline_migration() -> Any:
-    matches = sorted(MIGRATION_DIRECTORY.glob(MIGRATION_GLOB))
-    assert len(matches) == 1, f"expected exactly one baseline migration, found {matches}"
-    spec = importlib.util.spec_from_file_location("canonical_baseline_migration", matches[0])
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def _load_migrations() -> list[Any]:
+    migrations: list[Any] = []
+    matched_paths: list[Path] = []
+    for migration_glob in MIGRATION_GLOBS:
+        matches = sorted(MIGRATION_DIRECTORY.glob(migration_glob))
+        assert len(matches) == 1, (
+            f"expected exactly one migration matching {migration_glob}, found {matches}"
+        )
+        matched_paths.append(matches[0])
+    for index, migration_path in enumerate(matched_paths):
+        spec = importlib.util.spec_from_file_location(
+            f"canonical_migration_{index}", migration_path
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        migrations.append(module)
+    return migrations
 
 
 def _collect_migration_tables() -> dict[str, sa.Table]:
-    migration = _load_baseline_migration()
     recorder = _RecordingAlembicOp()
-    # The migration resolves ``op`` from its module globals at call time, so the
-    # recorder replays ``upgrade()`` without any database or Alembic context.
-    migration.op = recorder  # type: ignore[attr-defined]
-    migration.upgrade()
+    # Each migration resolves ``op`` from its module globals at call time, so
+    # the recorder replays ``upgrade()`` without any database or Alembic
+    # context, in revision-chain order.
+    for migration in _load_migrations():
+        migration.op = recorder  # type: ignore[attr-defined]
+        migration.upgrade()
     return {table.name: table for table in recorder.created_tables}
 
 

@@ -257,6 +257,14 @@ def _assert_only_one_rejection_audit_was_added(counts_before: dict, counts_after
         "sync_events": 0,
         "projection_intents": 0,
         "audit_events": 1,
+        "user_credentials": 0,
+        "web_sessions": 0,
+        "totp_credentials": 0,
+        "totp_recovery_codes": 0,
+        "device_token_families": 0,
+        "device_tokens": 0,
+        "device_authorization_grants": 0,
+        "authentication_throttle_buckets": 0,
     }
 
 
@@ -312,6 +320,14 @@ async def test_changed_update_commits_next_ordinal_graph(preflight_harness, upda
         "sync_events": 1,
         "projection_intents": 2,
         "audit_events": 1,
+        "user_credentials": 0,
+        "web_sessions": 0,
+        "totp_credentials": 0,
+        "totp_recovery_codes": 0,
+        "device_token_families": 0,
+        "device_tokens": 0,
+        "device_authorization_grants": 0,
+        "authentication_throttle_buckets": 0,
     }
 
     source_row = await _fetch_source_row(update_engine, first.source_id)
@@ -439,6 +455,14 @@ async def test_no_change_update_writes_only_event_and_audit(
         "sync_events": 1,
         "projection_intents": 0,
         "audit_events": 1,
+        "user_credentials": 0,
+        "web_sessions": 0,
+        "totp_credentials": 0,
+        "totp_recovery_codes": 0,
+        "device_token_families": 0,
+        "device_tokens": 0,
+        "device_authorization_grants": 0,
+        "authentication_throttle_buckets": 0,
     }
     assert await preflight_harness.fetch_source_updated_at(first.source_id) == updated_at_before
     source_row = await _fetch_source_row(update_engine, first.source_id)

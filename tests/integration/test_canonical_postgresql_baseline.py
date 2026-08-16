@@ -3,7 +3,8 @@
 This is the first live integration test for the canonical application database.
 It owns a single disposable ``knowledge-ci-*`` local-stack project, proves the
 real Alembic empty-to-head upgrade against PostgreSQL 18.4, fingerprints the
-resulting catalog, inserts a valid row graph across all nine baseline tables,
+resulting catalog (baseline plus authentication schema), inserts a valid
+row graph across the nine baseline tables,
 exercises the allowed-behavior cases, asserts ownership/grants/data-minimization,
 and proves the full lifecycle (``upgrade -> downgrade -> re-upgrade``) yields a
 stable normalized catalog fingerprint.
@@ -51,9 +52,10 @@ _DATABASE_HOST: str = "127.0.0.1"
 _SSL_MODE: str = "disable"
 _APPLICATION_PASSWORD_FILENAME: str = "postgres_application_password"
 _ALEMBIC_APPLICATION_NAME: str = "knowledge-baseline-test"
-_BASELINE_REVISION: str = "20260813_01"
+_HEAD_REVISION: str = "20260816_01"
+_PHASE1_REVISION: str = "20260813_01"
 
-_TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
+_PHASE1_TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
     "users",
     "workspaces",
     "devices",
@@ -65,10 +67,26 @@ _TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
     "audit_events",
 )
 
+_AUTHENTICATION_TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
+    "user_credentials",
+    "web_sessions",
+    "totp_credentials",
+    "totp_recovery_codes",
+    "device_token_families",
+    "device_tokens",
+    "device_authorization_grants",
+    "authentication_throttle_buckets",
+)
+
+_TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
+    *_PHASE1_TABLES_IN_COUNT_ORDER,
+    *_AUTHENTICATION_TABLES_IN_COUNT_ORDER,
+)
+
 # Exact expected object sets (the migration is the source of truth for names).
 _EXPECTED_TABLES: frozenset[str] = frozenset(_TABLES_IN_COUNT_ORDER)
 _EXPECTED_FUNCTIONS: frozenset[str] = frozenset(
-    {"reject_immutable_update", "reject_audit_mutation"}
+    {"reject_recovery_code_used_at_change", "reject_immutable_update", "reject_audit_mutation"}
 )
 _EXPECTED_TRIGGERS: frozenset[str] = frozenset(
     {
@@ -76,6 +94,7 @@ _EXPECTED_TRIGGERS: frozenset[str] = frozenset(
         "trg_content_objects__reject_update",
         "trg_source_versions__reject_update",
         "trg_sync_events__reject_update",
+        "trg_totp_recovery_codes__reject_used_at_change",
     }
 )
 _EXPECTED_INDEXES: frozenset[str] = frozenset(
@@ -2152,17 +2171,23 @@ def test_canonical_postgresql_baseline_upgrade_catalog_and_valid_graph(
 
     # Step 3: valid canonical graph across all nine tables.
     _insert_valid_graph(conn)
-    assert _row_counts(conn) == [1, 1, 1, 1, 1, 1, 1, 2, 1], "valid graph row counts differ"
+    assert _row_counts(conn) == [1, 1, 1, 1, 1, 1, 1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0], (
+        "valid graph row counts differ"
+    )
 
     # Step 3: allowed-behavior cases (each accepted, then rolled back).
     _assert_allowed_behaviors(conn)
-    assert _row_counts(conn) == [1, 1, 1, 1, 1, 1, 1, 2, 1], "allowed cases must not persist rows"
+    assert _row_counts(conn) == [1, 1, 1, 1, 1, 1, 1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0], (
+        "allowed cases must not persist rows"
+    )
 
     # Task 4: every baseline invariant is database-enforced. Each mutation runs
     # in its own savepoint and is rolled back, so the committed valid graph is
     # never mutated.
     _assert_negative_invariants(conn)
-    assert _row_counts(conn) == [1, 1, 1, 1, 1, 1, 1, 2, 1], "negative cases must not persist rows"
+    assert _row_counts(conn) == [1, 1, 1, 1, 1, 1, 1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0], (
+        "negative cases must not persist rows"
+    )
     # The current-version pointer is restored after the lineage/pointer cases.
     with conn.cursor() as _pointer_cursor:
         _pointer_cursor.execute(
@@ -2234,7 +2259,7 @@ def _baseline_revision_applied(conn: psycopg.Connection[Any]) -> bool:
         return False
     count = _scalar(
         conn,
-        f"SELECT count(*) FROM public.alembic_version WHERE version_num = '{_BASELINE_REVISION}'",
+        f"SELECT count(*) FROM public.alembic_version WHERE version_num = '{_HEAD_REVISION}'",
     )
     return bool(count)
 
@@ -2280,12 +2305,12 @@ def test_upgrade_head_is_a_noop_when_already_at_head(
 
     fingerprint_before = _catalog_fingerprint(conn)
     counts_before = _row_counts(conn)
-    assert _current_revision(conn) == _BASELINE_REVISION
+    assert _current_revision(conn) == _HEAD_REVISION
 
     noop = run_alembic(["upgrade", "head"], alembic_env)
     assert noop.returncode == 0, _alembic_failure("no-op upgrade head", noop)
 
-    assert _current_revision(conn) == _BASELINE_REVISION
+    assert _current_revision(conn) == _HEAD_REVISION
     assert _row_counts(conn) == counts_before, "no-op upgrade changed row counts"
     assert _catalog_fingerprint(conn) == fingerprint_before, (
         "no-op upgrade changed the catalog fingerprint"
@@ -2306,7 +2331,7 @@ def test_downgrade_without_destructive_authorization_is_refused(
 
     fingerprint_before = _catalog_fingerprint(conn)
     counts_before = _row_counts(conn)
-    assert _current_revision(conn) == _BASELINE_REVISION
+    assert _current_revision(conn) == _HEAD_REVISION
 
     refusal = run_alembic(["downgrade", "base"], alembic_env)
     assert refusal.returncode != 0, "unauthorized downgrade must not return zero"
@@ -2320,7 +2345,7 @@ def test_downgrade_without_destructive_authorization_is_refused(
     )
     _assert_captured_output_is_leak_safe(captured, password=password)
 
-    assert _current_revision(conn) == _BASELINE_REVISION
+    assert _current_revision(conn) == _HEAD_REVISION
     assert _row_counts(conn) == counts_before, "refused downgrade changed row counts"
     assert _catalog_fingerprint(conn) == fingerprint_before
 
@@ -2416,9 +2441,9 @@ def test_two_first_upgrade_processes_leave_exactly_one_head(
     )
 
     # Final state: exactly one head, exact catalog, no duplicate objects.
-    assert _current_revision(conn) == _BASELINE_REVISION
-    assert _knowledge_table_count(conn) == 9, (
-        "two first-upgrade attempts must leave exactly nine tables, no duplicates"
+    assert _current_revision(conn) == _HEAD_REVISION
+    assert _knowledge_table_count(conn) == 17, (
+        "two first-upgrade attempts must leave exactly seventeen tables, no duplicates"
     )
     _assert_exact_object_set(conn)
 
@@ -2516,11 +2541,19 @@ def test_restrictive_downgrade_re_upgrade_and_dependent_view_rollback(
     assert blocked_downgrade.returncode != 0, (
         "gated downgrade must fail when a dependent object exists"
     )
-    # Exact head + view intact: the entire downgrade transaction rolled back.
-    assert _knowledge_table_count(conn) == 9, (
-        "blocked downgrade must leave all nine tables in place"
+    # Baseline rollback is per revision (transaction_per_migration): the
+    # authentication revision's downgrade committed first, so the catalog sits
+    # at the exact phase-1 baseline with the view intact. The dependent view
+    # then blocked the BASELINE downgrade, which rolled back completely.
+    assert _current_revision(conn) == _PHASE1_REVISION, (
+        "the authentication downgrade must have committed before the blocked baseline downgrade"
     )
-    _assert_exact_object_set(conn)
+    assert _knowledge_table_count(conn) == 9, (
+        "blocked baseline downgrade must leave all nine phase-1 tables in place"
+    )
+    assert _names(
+        conn, "SELECT tablename FROM pg_tables WHERE schemaname = 'knowledge'"
+    ) == frozenset(_PHASE1_TABLES_IN_COUNT_ORDER), "partial baseline catalog after block"
     assert _relation_exists(conn, "knowledge.ci_dependent_audit_view"), (
         "the dependent view must survive the rolled-back downgrade"
     )
@@ -2642,15 +2675,18 @@ def test_first_upgrade_interrupted_after_ddl_leaves_base_or_head(
 
     table_set = _names(conn, "SELECT tablename FROM pg_tables WHERE schemaname = 'knowledge'")
     if table_set:
-        # Head case: the server committed the migration transaction before the
-        # terminate landed. The catalog must be the exact head, never a subset.
-        assert table_set == _EXPECTED_TABLES, (
+        # Head case: the server committed the interrupted baseline migration
+        # transaction before the terminate landed. The catalog must be exactly
+        # the phase-1 baseline (the before-verify hook fires inside that
+        # revision), never a subset; the authentication revision either fully
+        # applies or never started.
+        assert table_set == frozenset(_PHASE1_TABLES_IN_COUNT_ORDER), (
             f"interrupted upgrade exposed a partial baseline: {sorted(table_set)}"
         )
-        assert _current_revision(conn) == _BASELINE_REVISION
+        assert _current_revision(conn) == _PHASE1_REVISION
     else:
         # Base case: the server aborted the transaction. No knowledge object
-        # may remain; in particular, no subset of the nine tables.
+        # may remain; in particular, no subset of the baseline tables.
         assert not _schema_exists(conn), (
             "interrupted upgrade left the knowledge schema with no tables"
         )

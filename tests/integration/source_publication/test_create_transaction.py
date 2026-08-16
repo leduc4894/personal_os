@@ -245,6 +245,14 @@ def _assert_only_one_rejection_audit_was_added(counts_before: dict, counts_after
         "sync_events": 0,
         "projection_intents": 0,
         "audit_events": 1,
+        "user_credentials": 0,
+        "web_sessions": 0,
+        "totp_credentials": 0,
+        "totp_recovery_codes": 0,
+        "device_token_families": 0,
+        "device_tokens": 0,
+        "device_authorization_grants": 0,
+        "authentication_throttle_buckets": 0,
     }
 
 
@@ -294,6 +302,14 @@ async def test_create_commits_exact_canonical_graph(
         "sync_events": 1,
         "projection_intents": 2,
         "audit_events": 1,
+        "user_credentials": 0,
+        "web_sessions": 0,
+        "totp_credentials": 0,
+        "totp_recovery_codes": 0,
+        "device_token_families": 0,
+        "device_tokens": 0,
+        "device_authorization_grants": 0,
+        "authentication_throttle_buckets": 0,
     }
 
     source_row = await _fetch_source_row(inspection_engine, command.source_id)

@@ -1,13 +1,13 @@
 """Schema-qualified SQLAlchemy Core table metadata for DML against the baseline.
 
-The Alembic migration ``20260813_01`` is the DDL authority: it owns the
-schema, columns, constraints, indexes and triggers. This module is the typed
-DML representation of exactly the nine migrated tables: identical table names,
-schema (``knowledge``), column names, column types, nullability and primary
-keys, contract-tested against the migration source. There is deliberately no
-``create_all()`` path and no constraint duplication: check, unique and foreign
-key constraints stay owned by the migration, while reads and writes address
-the tables through this metadata.
+The Alembic migrations ``20260813_01`` and ``20260816_01`` are the DDL
+authority: they own the schema, columns, constraints, indexes and triggers.
+This module is the typed DML representation of exactly the seventeen migrated
+tables: identical table names, schema (``knowledge``), column names, column
+types, nullability and primary keys, contract-tested against the migration
+sources. There is deliberately no ``create_all()`` path and no constraint
+duplication: check, unique and foreign key constraints stay owned by the
+migrations, while reads and writes address the tables through this metadata.
 """
 
 from __future__ import annotations
@@ -170,10 +170,165 @@ audit_events: Final[Table] = Table(
     sa.PrimaryKeyConstraint("audit_event_id", name="pk_audit_events"),
 )
 
+user_credentials: Final[Table] = Table(
+    "user_credentials",
+    _SOURCE_STORE_METADATA,
+    Column("user_id", sa.Uuid(), nullable=False),
+    Column("workspace_id", sa.Uuid(), nullable=False),
+    Column("password_hash", sa.String(length=255), nullable=False),
+    Column("credential_revision", sa.BigInteger(), nullable=False),
+    Column("totp_prompt_dismissed_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("password_changed_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("created_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("updated_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    sa.PrimaryKeyConstraint("user_id", name="pk_user_credentials"),
+)
+
+web_sessions: Final[Table] = Table(
+    "web_sessions",
+    _SOURCE_STORE_METADATA,
+    Column("web_session_id", sa.Uuid(), nullable=False),
+    Column("user_id", sa.Uuid(), nullable=False),
+    Column("workspace_id", sa.Uuid(), nullable=False),
+    Column("session_secret_hash", sa.String(length=64), nullable=False),
+    Column("csrf_secret_hash", sa.String(length=64), nullable=False),
+    Column("state", sa.Text(), nullable=False),
+    Column("credential_revision", sa.BigInteger(), nullable=False),
+    Column("authentication_method", sa.Text(), nullable=False),
+    Column("created_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("authenticated_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("reauthenticated_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("last_seen_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("idle_expires_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("absolute_expires_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("revoked_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("revocation_reason", sa.String(length=100), nullable=True),
+    sa.PrimaryKeyConstraint("web_session_id", name="pk_web_sessions"),
+)
+
+totp_credentials: Final[Table] = Table(
+    "totp_credentials",
+    _SOURCE_STORE_METADATA,
+    Column("totp_credential_id", sa.Uuid(), nullable=False),
+    Column("user_id", sa.Uuid(), nullable=False),
+    Column("workspace_id", sa.Uuid(), nullable=False),
+    Column("state", sa.Text(), nullable=False),
+    Column("secret_ciphertext", sa.String(length=255), nullable=False),
+    Column("secret_nonce", sa.String(length=64), nullable=False),
+    Column("key_id", sa.String(length=100), nullable=False),
+    Column("algorithm", sa.Text(), nullable=False),
+    Column("digits", sa.Integer(), nullable=False),
+    Column("period_seconds", sa.Integer(), nullable=False),
+    Column("last_accepted_time_step", sa.BigInteger(), nullable=True),
+    Column("enrollment_expires_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("revision", sa.BigInteger(), nullable=False),
+    Column("created_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("activated_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("replaced_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    sa.PrimaryKeyConstraint("totp_credential_id", name="pk_totp_credentials"),
+)
+
+totp_recovery_codes: Final[Table] = Table(
+    "totp_recovery_codes",
+    _SOURCE_STORE_METADATA,
+    Column("recovery_code_id", sa.Uuid(), nullable=False),
+    Column("totp_credential_id", sa.Uuid(), nullable=False),
+    Column("user_id", sa.Uuid(), nullable=False),
+    Column("workspace_id", sa.Uuid(), nullable=False),
+    Column("revision", sa.BigInteger(), nullable=False),
+    Column("code_hash", sa.String(length=64), nullable=False),
+    Column("created_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("used_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    sa.PrimaryKeyConstraint("recovery_code_id", name="pk_totp_recovery_codes"),
+)
+
+device_token_families: Final[Table] = Table(
+    "device_token_families",
+    _SOURCE_STORE_METADATA,
+    Column("token_family_id", sa.Uuid(), nullable=False),
+    Column("user_id", sa.Uuid(), nullable=False),
+    Column("workspace_id", sa.Uuid(), nullable=False),
+    Column("device_id", sa.Uuid(), nullable=False),
+    Column("state", sa.Text(), nullable=False),
+    Column("current_refresh_generation", sa.BigInteger(), nullable=False),
+    Column("created_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("last_refreshed_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("inactivity_expires_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("absolute_expires_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("revoked_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("revocation_reason", sa.String(length=100), nullable=True),
+    sa.PrimaryKeyConstraint("token_family_id", name="pk_device_token_families"),
+)
+
+device_tokens: Final[Table] = Table(
+    "device_tokens",
+    _SOURCE_STORE_METADATA,
+    Column("device_token_id", sa.Uuid(), nullable=False),
+    Column("token_family_id", sa.Uuid(), nullable=False),
+    Column("user_id", sa.Uuid(), nullable=False),
+    Column("workspace_id", sa.Uuid(), nullable=False),
+    Column("device_id", sa.Uuid(), nullable=False),
+    Column("token_kind", sa.Text(), nullable=False),
+    Column("generation", sa.BigInteger(), nullable=False),
+    Column("secret_hash", sa.String(length=64), nullable=False),
+    Column("state", sa.Text(), nullable=False),
+    Column("predecessor_token_id", sa.Uuid(), nullable=True),
+    Column("successor_token_id", sa.Uuid(), nullable=True),
+    Column("rotation_id", sa.Uuid(), nullable=True),
+    Column("derivation_key_id", sa.String(length=100), nullable=False),
+    Column("issued_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("expires_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("rotated_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("revoked_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    sa.PrimaryKeyConstraint("device_token_id", name="pk_device_tokens"),
+)
+
+device_authorization_grants: Final[Table] = Table(
+    "device_authorization_grants",
+    _SOURCE_STORE_METADATA,
+    Column("grant_id", sa.Uuid(), nullable=False),
+    Column("user_code_hash", sa.String(length=64), nullable=False),
+    Column("polling_secret_hash", sa.String(length=64), nullable=False),
+    Column("client_instance_id", sa.Uuid(), nullable=False),
+    Column("claimed_device_id", sa.Uuid(), nullable=True),
+    Column("device_name", sa.String(length=80), nullable=False),
+    Column("platform_class", sa.Text(), nullable=False),
+    Column("platform_name", sa.String(length=64), nullable=False),
+    Column("plugin_version", sa.String(length=64), nullable=False),
+    Column("requested_scope", sa.Text(), nullable=False),
+    Column("state", sa.Text(), nullable=False),
+    Column("created_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("expires_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("approved_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("denied_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("exchanged_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("approved_by_user_id", sa.Uuid(), nullable=True),
+    Column("approved_web_session_id", sa.Uuid(), nullable=True),
+    Column("device_id", sa.Uuid(), nullable=True),
+    Column("token_family_id", sa.Uuid(), nullable=True),
+    Column("initial_access_token_id", sa.Uuid(), nullable=True),
+    Column("initial_refresh_token_id", sa.Uuid(), nullable=True),
+    Column("derivation_key_id", sa.String(length=100), nullable=True),
+    sa.PrimaryKeyConstraint("grant_id", name="pk_device_authorization_grants"),
+)
+
+authentication_throttle_buckets: Final[Table] = Table(
+    "authentication_throttle_buckets",
+    _SOURCE_STORE_METADATA,
+    Column("throttle_bucket_id", sa.Uuid(), nullable=False),
+    Column("bucket_kind", sa.Text(), nullable=False),
+    Column("bucket_hash", sa.String(length=64), nullable=False),
+    Column("window_started_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("failed_attempt_count", sa.Integer(), nullable=False),
+    Column("locked_until", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("updated_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    sa.PrimaryKeyConstraint("throttle_bucket_id", name="pk_authentication_throttle_buckets"),
+)
+
 #: Single frozen metadata collection owning every DML table.
 SOURCE_STORE_METADATA: Final[MetaData] = _SOURCE_STORE_METADATA
 
-#: Immutable name-indexed view of the nine migrated tables, keyed by their
+#: Immutable name-indexed view of the seventeen migrated tables, keyed by their
 #: unqualified table names (``metadata.tables`` itself is schema-qualified).
 SOURCE_STORE_TABLES: Final[Mapping[str, Table]] = MappingProxyType(
     {
@@ -188,6 +343,14 @@ SOURCE_STORE_TABLES: Final[Mapping[str, Table]] = MappingProxyType(
             sync_events,
             projection_intents,
             audit_events,
+            user_credentials,
+            web_sessions,
+            totp_credentials,
+            totp_recovery_codes,
+            device_token_families,
+            device_tokens,
+            device_authorization_grants,
+            authentication_throttle_buckets,
         )
     }
 )

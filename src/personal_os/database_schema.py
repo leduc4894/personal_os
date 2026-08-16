@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Final
 
-#: Canonical PostgreSQL baseline pinned by the acceptance/recovery contract;
-#: readiness accepts exactly this head and nothing else.
-CANONICAL_POSTGRESQL_SCHEMA_REVISION: Final[str] = "20260813_01"
+#: Canonical PostgreSQL schema revision pinned by the acceptance/recovery contract;
+#: readiness accepts exactly this head and nothing else. The authentication
+#: revision ``20260816_01`` stacks on the ``20260813_01`` baseline.
+CANONICAL_POSTGRESQL_SCHEMA_REVISION: Final[str] = "20260816_01"

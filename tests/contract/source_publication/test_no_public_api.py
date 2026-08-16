@@ -130,15 +130,16 @@ def _iter_surface_documents() -> list[Path]:
     return sorted(found)
 
 
-def test_alembic_heads_and_migration_file_count_are_unchanged() -> None:
+def test_alembic_heads_and_migration_files_are_pinned() -> None:
     script_directory = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert script_directory.get_heads() == [BASELINE_REVISION]
+    assert script_directory.get_heads() == ["20260816_01"]
     migration_files = [
         path for path in MIGRATIONS_VERSIONS.glob("*.py") if not path.name.startswith("__")
     ]
     assert [path.name for path in migration_files] == [
-        "20260813_01_create_canonical_postgresql_baseline.py"
-    ], "the acceptance task must not add, rename or remove a migration file"
+        "20260813_01_create_canonical_postgresql_baseline.py",
+        "20260816_01_add_web_authentication_and_device_tokens.py",
+    ], "the migrations directory must stay exactly at the pinned revisions"
 
 
 def test_api_and_mcp_sources_declare_no_source_publication_route() -> None:

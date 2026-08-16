@@ -207,6 +207,14 @@ async def test_hundred_exact_concurrent_replays_commit_one_event(
         "sync_events": 1,
         "projection_intents": 2,
         "audit_events": 1,
+        "user_credentials": 0,
+        "web_sessions": 0,
+        "totp_credentials": 0,
+        "totp_recovery_codes": 0,
+        "device_token_families": 0,
+        "device_tokens": 0,
+        "device_authorization_grants": 0,
+        "authentication_throttle_buckets": 0,
     }
     assert (
         await _count_rows(
@@ -291,6 +299,14 @@ async def test_two_updates_from_one_base_yield_one_publish_and_one_conflict(
         # One in-transaction success audit plus the loser's standalone
         # rejection audit.
         "audit_events": 2,
+        "user_credentials": 0,
+        "web_sessions": 0,
+        "totp_credentials": 0,
+        "totp_recovery_codes": 0,
+        "device_token_families": 0,
+        "device_tokens": 0,
+        "device_authorization_grants": 0,
+        "authentication_throttle_buckets": 0,
     }
     rejection_audits = await preflight_harness.rejection_audit_rows(
         workspace_id=workspace.workspace_id
@@ -386,6 +402,14 @@ async def test_two_concurrent_creates_for_one_source_yield_one_source_and_one_re
         # One in-transaction success audit plus the loser's standalone
         # rejection audit.
         "audit_events": 2,
+        "user_credentials": 0,
+        "web_sessions": 0,
+        "totp_credentials": 0,
+        "totp_recovery_codes": 0,
+        "device_token_families": 0,
+        "device_tokens": 0,
+        "device_authorization_grants": 0,
+        "authentication_throttle_buckets": 0,
     }
     rejection_audits = await preflight_harness.rejection_audit_rows(
         workspace_id=workspace.workspace_id

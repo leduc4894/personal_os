@@ -173,8 +173,9 @@ def test_no_new_alembic_revision() -> None:
         for path in versions
         for match in _MIGRATION_REVISION_RE.findall(path.read_text(encoding="utf-8"))
     }
-    assert revisions == {"20260813_01"}, (
-        f"the Alembic graph must stay exactly at 20260813_01, got {sorted(revisions)}"
+    assert revisions == {"20260813_01", "20260816_01"}, (
+        f"the Alembic graph must stay exactly at the baseline plus authentication "
+        f"revisions, got {sorted(revisions)}"
     )
 
 

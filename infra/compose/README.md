@@ -162,7 +162,7 @@ uv run poe database-upgrade
 uv run poe database-current
 ```
 
-`database-heads` must report exactly one head, `20260813_01`, both before and
+`database-heads` must report exactly one head, `20260816_01`, both before and
 after the upgrade. `database-current` exits non-zero if the applied revision is
 not a head.
 

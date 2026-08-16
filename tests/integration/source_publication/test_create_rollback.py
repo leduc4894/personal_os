@@ -325,6 +325,14 @@ async def test_returned_invariant_rejection_after_writes_rolls_back_whole_graph(
         "sync_events": 0,
         "projection_intents": 0,
         "audit_events": 1,
+        "user_credentials": 0,
+        "web_sessions": 0,
+        "totp_credentials": 0,
+        "totp_recovery_codes": 0,
+        "device_token_families": 0,
+        "device_tokens": 0,
+        "device_authorization_grants": 0,
+        "authentication_throttle_buckets": 0,
     }
     assert not await _source_exists(fault_engine, command.source_id)
     rejection_audits = await preflight_harness.rejection_audit_rows(
