@@ -170,7 +170,11 @@ async def test_hundred_replays_and_hundred_independent_publishes_hold_their_boun
     preflight_harness, large_fixture_engine: AsyncEngine
 ) -> None:
     workspace = await preflight_harness.seed_workspace()
-    store = PostgresqlSourcePublicationStore(large_fixture_engine)
+    from api_runtime.exclusion_policy_crypto import TrustAnchorEd25519Verifier
+
+    store = PostgresqlSourcePublicationStore(
+        large_fixture_engine, policy_verifier=TrustAnchorEd25519Verifier()
+    )
 
     seed_salt = f"large-fixture-seed-{uuid4()}"
     seed_command = _create_command(

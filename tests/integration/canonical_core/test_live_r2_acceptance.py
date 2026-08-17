@@ -323,14 +323,28 @@ async def live_restore_target_context(
         disposable_restore_database.settings, canonical_core_stack.password
     )
     try:
+        from api_runtime.exclusion_policy_crypto import TrustAnchorEd25519Verifier
+
+        from personal_os.exclusion_policy.metrics import InMemoryExclusionPolicyMetrics
+        from postgresql_source_store.policy_enforcement import compose_policy_enforcement
+
+        policy_verifier = TrustAnchorEd25519Verifier()
+        policy_metrics = InMemoryExclusionPolicyMetrics()
         yield LiveRestoreTargetContext(
             database=disposable_restore_database,
             engine=engine,
             restore_target=PostgresqlRestoreTarget(engine),
             read_service=CanonicalSourceReadService(
-                store=PostgresqlCanonicalSourceReadStore(engine),
+                store=PostgresqlCanonicalSourceReadStore(
+                    engine,
+                    policy_verifier=policy_verifier,
+                    policy_metrics=policy_metrics,
+                ),
                 object_store=live_r2_harness.store,
                 metrics=InMemoryCanonicalReadMetrics(),
+                policy_guard=compose_policy_enforcement(
+                    engine, verifier=policy_verifier, metrics=policy_metrics
+                ),
             ),
         )
     finally:

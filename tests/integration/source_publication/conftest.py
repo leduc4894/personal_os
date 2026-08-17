@@ -34,8 +34,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+from api_runtime.exclusion_policy_crypto import TrustAnchorEd25519Verifier
 from tools.local_service_stack import main as stack_main
 from tools.local_service_stack import validate_project_name
+from tools.signed_policy_seed import seed_signed_policy
 
 from postgresql_source_store.engine import create_source_store_engine, dispose_source_store_engine
 from postgresql_source_store.publication_store import PostgresqlSourcePublicationStore
@@ -52,6 +54,7 @@ from postgresql_source_store.tables import (
     sources,
     sync_events,
     users,
+    workspace_policy_state,
     workspaces,
 )
 
@@ -275,6 +278,21 @@ class PreflightHarness:
                         device_kind="obsidian",
                     )
                 )
+            await connection.execute(
+                sa.insert(workspace_policy_state).values(
+                    workspace_id=workspace_id,
+                    active_policy_revision_id=None,
+                    active_revision_number=0,
+                )
+            )
+        # Task 11: every workspace the harness publishes or replays under
+        # carries an explicitly seeded signed empty policy (spec 14: before
+        # revision 1 every content operation fails closed).
+        await seed_signed_policy(
+            self._engine,
+            workspace_id=workspace_id,
+            published_by_user_id=owner_user_id,
+        )
         return SeededWorkspace(
             owner_user_id=owner_user_id, workspace_id=workspace_id, device_id=device_id
         )
@@ -469,7 +487,13 @@ async def preflight_harness(
         source_publication_stack.settings, source_publication_stack.password
     )
     try:
-        yield PreflightHarness(engine, PostgresqlSourcePublicationStore(engine))
+        yield PreflightHarness(
+            engine,
+            PostgresqlSourcePublicationStore(
+                engine,
+                policy_verifier=TrustAnchorEd25519Verifier(),
+            ),
+        )
     finally:
         await dispose_source_store_engine(engine)
 

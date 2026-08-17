@@ -21,6 +21,7 @@ import psycopg
 import pytest
 import pytest_asyncio
 import sqlalchemy as sa
+from api_runtime.exclusion_policy_crypto import TrustAnchorEd25519Verifier
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from personal_os.diagnostics.context import DiagnosticContext, create_diagnostic_context
@@ -137,7 +138,7 @@ class _LostAcknowledgementStore(PostgresqlSourcePublicationStore):
     """
 
     def __init__(self, engine: AsyncEngine) -> None:
-        super().__init__(engine)
+        super().__init__(engine, policy_verifier=TrustAnchorEd25519Verifier())
         self._acknowledgement_lost_once = False
 
     async def _commit_update_once(
@@ -147,9 +148,15 @@ class _LostAcknowledgementStore(PostgresqlSourcePublicationStore):
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
         identities: SourceUpdateIdentities,
+        preflight_decision: Any = None,
     ) -> Any:
         result = await super()._commit_update_once(
-            command, request_fingerprint, receipt, diagnostic_context, identities
+            command,
+            request_fingerprint,
+            receipt,
+            diagnostic_context,
+            identities,
+            preflight_decision,
         )
         if not self._acknowledgement_lost_once:
             self._acknowledgement_lost_once = True

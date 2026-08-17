@@ -59,7 +59,11 @@ from personal_os.sources.metrics import (
     PublicationRejectionReason,
     SourcePublicationMetrics,
 )
-from personal_os.sources.ports import AwareUtcClock, SourcePublicationStore
+from personal_os.sources.ports import (
+    AwareUtcClock,
+    PolicyEnforcementGuard,
+    SourcePublicationStore,
+)
 from personal_os.sources.results import SourceVersionPublicationResult
 
 #: Maximum age of an accepted receipt (spec section 5.3: at most five minutes).
@@ -167,23 +171,30 @@ def validate_verified_receipt(
         )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class SourceVersionPublicationService:
     """Orchestrates one idempotent source-version publication over injected ports.
 
     Depends only on provider-neutral ports and contracts: the durable
-    :class:`SourcePublicationStore`, the
+    :class:`SourcePublicationStore`, the mandatory
+    :class:`~personal_os.sources.ports.PolicyEnforcementGuard`, the
     :class:`~personal_os.object_storage.CanonicalObjectStore`, the closed
-    low-cardinality metrics sink and the aware UTC clock seam. An exact replay
-    returns the committed result without a single object-store call; a miss
-    resolves deduplicated canonical bytes before uploading the caller-owned
-    stream, validates exactly one receipt, and commits through the store port.
+    low-cardinality metrics sink and the aware UTC clock seam. The guard
+    evaluates the active exclusion policy before the idempotent preflight and
+    before any object-store access, so an excluded or indeterminate subject,
+    a missing active signed policy or corrupt signature material fails closed
+    with the typed denial and zero object-store calls — including an exact
+    replay, whose committed data is canonical data the current policy must
+    permit before it is returned. The store re-evaluates independently under
+    the policy-state row lock inside the commit transaction; the decision
+    handed to the commit is only non-authoritative evidence.
     """
 
     store: SourcePublicationStore
     object_store: CanonicalObjectStore
     metrics: SourcePublicationMetrics
     clock: AwareUtcClock
+    policy_guard: PolicyEnforcementGuard
 
     async def publish_create(
         self,
@@ -252,6 +263,13 @@ class SourceVersionPublicationService:
         # actor shape and the aware client timestamp; the expected-object claim
         # is re-validated here because its value objects do not self-validate.
         validate_expected_object(command.expected_object)
+        # Policy preflight (spec 14): the active signed policy is verified and
+        # the candidate evaluated before the idempotent preflight and before
+        # any object-store access, so a denied subject never observes or
+        # replays canonical data and never touches object storage.
+        preflight_decision = await self.policy_guard.authorize_publication(
+            command, diagnostic_context
+        )
         # Fingerprint.
         request_fingerprint = compute_request_fingerprint(command)
         # Idempotent preflight: an exact replay never touches the object store.
@@ -271,11 +289,19 @@ class SourceVersionPublicationService:
         receipt = await self._obtain_verified_receipt(command=command, stream=stream)
         if isinstance(command, CreateSourceVersion):
             committed = await self.store.commit_create(
-                command, request_fingerprint, receipt, diagnostic_context
+                command,
+                request_fingerprint,
+                receipt,
+                diagnostic_context,
+                preflight_decision=preflight_decision,
             )
         else:
             committed = await self.store.commit_update(
-                command, request_fingerprint, receipt, diagnostic_context
+                command,
+                request_fingerprint,
+                receipt,
+                diagnostic_context,
+                preflight_decision=preflight_decision,
             )
         self.metrics.record_publication(
             operation=operation,

@@ -51,6 +51,14 @@ from personal_os.exclusion_policy.contracts import (
     SourceTypeOperand,
     preview_match_state,
 )
+from personal_os.exclusion_policy.enforcement import (
+    ActivePolicySnapshotMaterial,
+    PolicyDecision,
+    PolicyEnforcementService,
+    enforce_policy_decision,
+    evaluate_policy_decision,
+    parse_verified_policy_revision,
+)
 from personal_os.exclusion_policy.errors import (
     INPUT_REASONS,
     PAYLOAD_CONTRACT_REASONS,
@@ -133,6 +141,7 @@ __all__ = [
     "SIGNED_SNAPSHOT_MAXIMUM_BYTES",
     "SNAPSHOT_PAYLOAD_CONTRACT",
     "SNAPSHOT_SIGNING_DOMAIN",
+    "ActivePolicySnapshotMaterial",
     "CanonicalJsonValue",
     "CompiledGlob",
     "EnforcedPolicyDecision",
@@ -155,6 +164,8 @@ __all__ = [
     "PathGlobOperand",
     "PolicyBoundary",
     "PolicyContractError",
+    "PolicyDecision",
+    "PolicyEnforcementService",
     "PolicyEvaluationOutcome",
     "PolicyKeysetKey",
     "PolicyKeysetState",
@@ -177,12 +188,15 @@ __all__ = [
     "decode_base64url_without_padding",
     "derive_ed25519_key_id",
     "encode_base64url_without_padding",
+    "enforce_policy_decision",
     "evaluate_policy",
+    "evaluate_policy_decision",
     "fold_ascii_lowercase",
     "glob_matches",
     "is_wellformed_ed25519_key_id",
     "normalize_locator",
     "normalize_rule",
+    "parse_verified_policy_revision",
     "payload_contract_error",
     "preview_match_state",
 ]

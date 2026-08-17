@@ -42,7 +42,9 @@ from personal_os.object_storage import (
     VerifiedObjectReader,
 )
 from personal_os.sources.actors import reject_nil_uuid
+from personal_os.sources.commands import SourceType
 from personal_os.sources.metrics import CanonicalReadMetrics, ReadOutcome
+from personal_os.sources.ports import PolicyEnforcementGuard
 
 __all__ = [
     "CanonicalReadStateError",
@@ -82,13 +84,16 @@ class CanonicalSourceReference:
 
     Produced only by the trusted store port; ``content_version`` is a positive
     integer and ``expected_object`` is the verification claim the object store
-    must independently prove before any byte is exposed.
+    must independently prove before any byte is exposed. ``source_type`` is
+    the stored canonical type evidence the policy guard evaluates alongside
+    the expected object's media type and size.
     """
 
     workspace_id: UUID
     source_id: UUID
     source_version_id: UUID
     content_version: int
+    source_type: SourceType
     expected_object: ExpectedObject
     committed_at: datetime
 
@@ -98,6 +103,8 @@ class CanonicalSourceReference:
         reject_nil_uuid("source_version_id", self.source_version_id)
         if self.content_version < 1:
             raise ValueError("content_version must be a positive integer")
+        if not isinstance(self.source_type, SourceType):
+            raise ValueError("source_type must be a closed SourceType member")
 
 
 class CanonicalSourceReadStore(Protocol):
@@ -113,12 +120,15 @@ class CanonicalSourceReadStore(Protocol):
     ) -> CanonicalSourceReference: ...
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class CanonicalSourceReadService:
     """Resolves the current version and exposes only verified bytes.
 
     Depends only on provider-neutral ports: the read-only
-    :class:`CanonicalSourceReadStore`, the
+    :class:`CanonicalSourceReadStore` (which resolves the active exclusion
+    policy and the source state transactionally before returning), the
+    mandatory :class:`~personal_os.sources.ports.PolicyEnforcementGuard`
+    re-checked before any object-store request, the
     :class:`~personal_os.object_storage.CanonicalObjectStore`, the closed
     low-cardinality read metrics sink and the optional diagnostics sink the
     composition root satisfies with its configured logger. The service never
@@ -129,6 +139,7 @@ class CanonicalSourceReadService:
     store: CanonicalSourceReadStore
     object_store: CanonicalObjectStore
     metrics: CanonicalReadMetrics
+    policy_guard: PolicyEnforcementGuard
     diagnostics: DiagnosticEventSink | None = None
 
     @asynccontextmanager
@@ -137,12 +148,14 @@ class CanonicalSourceReadService:
     ) -> AsyncIterator[tuple[CanonicalSourceReference, VerifiedObjectReader]]:
         """Yield the current reference and a reader over its verified bytes.
 
-        The consumer body is entered only after the object store verified the
-        full size, media type and digest; any typed failure — including
-        verification failures raised before the first byte — surfaces the
-        original error unchanged after the failed outcome is recorded. Caller
-        cancellation propagates while the ``async with`` teardown closes the
-        reader and clears the adapter's spool state.
+        The consumer body is entered only after the store resolved the source
+        state transactionally under the active policy, the guard re-authorized
+        the resolved reference, and the object store verified the full size,
+        media type and digest; any typed failure — including verification
+        failures raised before the first byte — surfaces the original error
+        unchanged after the failed outcome is recorded. Caller cancellation
+        propagates while the ``async with`` teardown closes the reader and
+        clears the adapter's spool state.
         """
         validate_read_current_source_command(command)
         started = time.monotonic()
@@ -150,6 +163,7 @@ class CanonicalSourceReadService:
         try:
             reference = await self.store.resolve_current(command, diagnostic_context)
             _validate_reference_matches_command(reference, command)
+            await self.policy_guard.authorize_read(reference, diagnostic_context)
             async with self.object_store.open_verified_reader(reference.expected_object) as reader:
                 yield reference, reader
         except ApplicationError as error:

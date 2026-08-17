@@ -92,6 +92,7 @@ if TYPE_CHECKING:
     from workflow_worker.projection_workflow_starter import ProjectionWorkflowStarter
 
     from personal_os.diagnostics.context import DiagnosticContext
+    from personal_os.exclusion_policy.enforcement import PolicyTrustAnchorVerifier
     from personal_os.identity.bootstrap import IdentityBootstrapService
     from personal_os.identity.contracts import BootstrapIdentityCommand
     from personal_os.object_storage.contracts import (
@@ -452,6 +453,34 @@ def _operations_diagnostic_logger() -> DiagnosticLogger:
     return DiagnosticLogger({"service": _OPERATIONS_SERVICE.value})
 
 
+def _policy_enforcement_verifier() -> PolicyTrustAnchorVerifier:
+    """The trust-anchor Ed25519 verifier shared by the guarded compositions.
+
+    Backend enforcement resolves each revision's trust anchor from canonical
+    PostgreSQL state, so one process-wide verifier that verifies under
+    exactly the provided anchor bytes serves every workspace.
+    """
+
+    from api_runtime.exclusion_policy_crypto import TrustAnchorEd25519Verifier
+
+    return TrustAnchorEd25519Verifier()
+
+
+async def _seed_signed_empty_policy(
+    engine: AsyncEngine,
+    *,
+    workspace_id: UUID,
+    owner_user_id: UUID,
+) -> None:
+    """Seed the workspace's revision-1 signed empty policy (spec 14)."""
+
+    try:
+        from tools.signed_policy_seed import seed_signed_policy
+    except ImportError:
+        seed_signed_policy = _sibling_tool_member("signed_policy_seed", "seed_signed_policy")
+    await seed_signed_policy(engine, workspace_id=workspace_id, published_by_user_id=owner_user_id)
+
+
 def _uuid_text(value: UUID) -> str:
     return str(value)
 
@@ -711,16 +740,24 @@ def _compose_bootstrap_identity(
 def _compose_read_current_source(
     invocation: ReadCurrentSourceInvocation, environ: Mapping[str, str]
 ) -> CommandComposition:
-    """Engine -> read store + verified R2 reader -> canonical bytes."""
+    """Engine -> guarded read store + verified object reader -> canonical bytes."""
 
+    from personal_os.exclusion_policy.metrics import InMemoryExclusionPolicyMetrics
     from personal_os.sources.metrics import InMemoryCanonicalReadMetrics
     from personal_os.sources.reading import CanonicalSourceReadService, ReadCurrentSourceCommand
     from postgresql_source_store.canonical_read import PostgresqlCanonicalSourceReadStore
     from postgresql_source_store.engine import dispose_source_store_engine
+    from postgresql_source_store.policy_enforcement import compose_policy_enforcement
 
     database_settings, password = _load_database_parts(environ)
     engine = _create_database_engine(database_settings, password)
-    read_store = PostgresqlCanonicalSourceReadStore(engine)
+    policy_verifier = _policy_enforcement_verifier()
+    policy_metrics = InMemoryExclusionPolicyMetrics()
+    read_store = PostgresqlCanonicalSourceReadStore(
+        engine,
+        policy_verifier=policy_verifier,
+        policy_metrics=policy_metrics,
+    )
     command = ReadCurrentSourceCommand(
         workspace_id=invocation.workspace_id, source_id=invocation.source_id
     )
@@ -736,6 +773,11 @@ def _compose_read_current_source(
                     store=read_store,
                     object_store=object_store,
                     metrics=InMemoryCanonicalReadMetrics(),
+                    policy_guard=compose_policy_enforcement(
+                        engine,
+                        verifier=policy_verifier,
+                        metrics=policy_metrics,
+                    ),
                     diagnostics=_operations_diagnostic_logger(),
                 )
                 content = await service.read_current_source_bytes(command, resolution.context)
@@ -844,6 +886,7 @@ def _compose_restore_empty(
 ) -> CommandComposition:
     """Restore target + read service + dump adapter + bundle store -> restore."""
 
+    from personal_os.exclusion_policy.metrics import InMemoryExclusionPolicyMetrics
     from personal_os.recovery.contracts import InMemoryCanonicalBackupMetrics
     from personal_os.recovery.service import RecoveryService, RestoreEmptyCommand
     from personal_os.sources.metrics import InMemoryCanonicalReadMetrics
@@ -851,12 +894,19 @@ def _compose_restore_empty(
     from postgresql_source_store.backup_snapshot import PostgresqlRestoreTarget
     from postgresql_source_store.canonical_read import PostgresqlCanonicalSourceReadStore
     from postgresql_source_store.engine import dispose_source_store_engine
+    from postgresql_source_store.policy_enforcement import compose_policy_enforcement
 
     recovery_settings = _load_canonical_recovery_settings(environ)
     database_settings, password = _load_database_parts(environ)
     engine = _create_database_engine(database_settings, password)
     restore_target = PostgresqlRestoreTarget(engine)
-    read_store = PostgresqlCanonicalSourceReadStore(engine)
+    policy_verifier = _policy_enforcement_verifier()
+    policy_metrics = InMemoryExclusionPolicyMetrics()
+    read_store = PostgresqlCanonicalSourceReadStore(
+        engine,
+        policy_verifier=policy_verifier,
+        policy_metrics=policy_metrics,
+    )
     dump_process = _compose_dump_process(password)
     command = RestoreEmptyCommand(
         environment=_recovery_environment(recovery_settings.environment.value, "restore_empty"),
@@ -878,6 +928,11 @@ def _compose_restore_empty(
                     store=read_store,
                     object_store=object_store,
                     metrics=InMemoryCanonicalReadMetrics(),
+                    policy_guard=compose_policy_enforcement(
+                        engine,
+                        verifier=policy_verifier,
+                        metrics=policy_metrics,
+                    ),
                     diagnostics=_operations_diagnostic_logger(),
                 )
                 service = RecoveryService(
@@ -918,20 +973,35 @@ class AcceptanceDiagnosticSink(Protocol):
     def emit(self, event_name: EventName, fields: Mapping[str, object] | None = None) -> None: ...
 
 
+class SignedEmptyPolicySeeder(Protocol):
+    """Publishes the signed empty policy a fresh smoke workspace needs.
+
+    Spec 14: before revision 1 every canonical content operation fails
+    closed, so the internal smoke fixture explicitly publishes a signed
+    empty policy between identity bootstrap and the first publication.
+    """
+
+    async def seed(
+        self, workspace_id: UUID, owner_user_id: UUID, diagnostic_context: DiagnosticContext
+    ) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class PhaseOneAcceptanceCollaborators:
     """Every injectable collaborator of the design-spec-7 acceptance flow.
 
     Unit tests satisfy each port with fakes; the CLI composition binds the
-    production PostgreSQL adapters, the R2 object store and the Temporal
-    workflow starter. ``table_counts`` returns the per-table row counts of the
-    canonical database so the no-new-row proofs never trust the services, and
-    the clock seam feeds every time-dependent decision.
+    production PostgreSQL adapters, the R2 object store, the Temporal
+    workflow starter and the signed empty-policy seeder. ``table_counts``
+    returns the per-table row counts of the canonical database so the
+    no-new-row proofs never trust the services, and the clock seam feeds
+    every time-dependent decision.
     """
 
     identity_service: IdentityBootstrapService
     publication_service: SourceVersionPublicationService
     read_service: CanonicalSourceReadService
+    policy_seeder: SignedEmptyPolicySeeder
     intent_store: ProjectionIntentStore
     workflow_starter: ProjectionWorkflowStarter
     table_counts: Callable[[], Awaitable[Mapping[str, int]]]
@@ -1045,6 +1115,12 @@ async def _run_acceptance_flow(
         raise _acceptance_integrity_failure("identity_bootstrap_replay")
     if await collaborators.table_counts() != counts_after_bootstrap:
         raise _acceptance_integrity_failure("identity_bootstrap_replay_row_count")
+
+    # 2b. Explicitly publish the signed empty policy (spec 14): before
+    #     revision 1 every canonical content operation fails closed.
+    await collaborators.policy_seeder.seed(
+        bootstrapped.workspace_id, bootstrapped.user_id, diagnostic_context
+    )
 
     # 3. The synthetic bootstrap device publishes one unique synthetic source.
     source_id = uuid.uuid4()
@@ -1266,6 +1342,7 @@ def _compose_phase_one_acceptance(
     from workflow_worker.projection_workflow_starter import TemporalProjectionWorkflowStarter
 
     from personal_os.diagnostics.logging import DiagnosticLogger
+    from personal_os.exclusion_policy.metrics import InMemoryExclusionPolicyMetrics
     from personal_os.identity.bootstrap import IdentityBootstrapService
     from personal_os.identity.contracts import InMemoryIdentityBootstrapMetrics
     from personal_os.recovery.contracts import InMemoryCanonicalAcceptanceMetrics
@@ -1278,6 +1355,7 @@ def _compose_phase_one_acceptance(
     from postgresql_source_store.canonical_read import PostgresqlCanonicalSourceReadStore
     from postgresql_source_store.engine import dispose_source_store_engine
     from postgresql_source_store.identity_bootstrap import PostgresqlIdentityBootstrapStore
+    from postgresql_source_store.policy_enforcement import compose_policy_enforcement
     from postgresql_source_store.projection_intents import PostgresqlProjectionIntentStore
     from postgresql_source_store.publication_store import PostgresqlSourcePublicationStore
 
@@ -1304,6 +1382,19 @@ def _compose_phase_one_acceptance(
                 counts[table_name] = int(result.scalar_one())
         return counts
 
+    policy_verifier = _policy_enforcement_verifier()
+    policy_metrics = InMemoryExclusionPolicyMetrics()
+
+    class CliSignedEmptyPolicySeeder:
+        # Seeds the workspace's revision-1 signed empty policy on the engine.
+        async def seed(
+            self, workspace_id: UUID, owner_user_id: UUID, diagnostic_context: DiagnosticContext
+        ) -> None:
+            del diagnostic_context  # The seeding helper runs on the engine.
+            await _seed_signed_empty_policy(
+                engine, workspace_id=workspace_id, owner_user_id=owner_user_id
+            )
+
     async def run() -> Mapping[str, object]:
         resolution = create_diagnostic_context()
         manager: R2ClientManager | None = None
@@ -1322,17 +1413,36 @@ def _compose_phase_one_acceptance(
                         diagnostics=diagnostic_logger,
                     ),
                     publication_service=SourceVersionPublicationService(
-                        store=PostgresqlSourcePublicationStore(engine),
+                        store=PostgresqlSourcePublicationStore(
+                            engine,
+                            policy_verifier=policy_verifier,
+                            policy_metrics=policy_metrics,
+                        ),
                         object_store=object_store,
                         metrics=InMemorySourcePublicationMetrics(),
                         clock=_recovery_clock,
+                        policy_guard=compose_policy_enforcement(
+                            engine,
+                            verifier=policy_verifier,
+                            metrics=policy_metrics,
+                        ),
                     ),
                     read_service=CanonicalSourceReadService(
-                        store=PostgresqlCanonicalSourceReadStore(engine),
+                        store=PostgresqlCanonicalSourceReadStore(
+                            engine,
+                            policy_verifier=policy_verifier,
+                            policy_metrics=policy_metrics,
+                        ),
                         object_store=object_store,
                         metrics=InMemoryCanonicalReadMetrics(),
+                        policy_guard=compose_policy_enforcement(
+                            engine,
+                            verifier=policy_verifier,
+                            metrics=policy_metrics,
+                        ),
                         diagnostics=diagnostic_logger,
                     ),
+                    policy_seeder=CliSignedEmptyPolicySeeder(),
                     intent_store=PostgresqlProjectionIntentStore(engine),
                     workflow_starter=TemporalProjectionWorkflowStarter(temporal_client),
                     table_counts=read_table_counts,

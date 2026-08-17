@@ -16,13 +16,15 @@ and source values.
 from __future__ import annotations
 
 import hashlib
-from typing import Final
+from typing import Any, Final
 from uuid import UUID
 
 import sqlalchemy as sa
 from sqlalchemy import TextClause
+from sqlalchemy.sql import Select
 
 from personal_os.sources.commands import IdempotencyKey
+from postgresql_source_store.tables import workspace_policy_state
 
 #: Idempotency lock namespace (``"SVCI"`` ASCII) for replay-identity locks.
 IDEMPOTENCY_LOCK_NAMESPACE: Final[int] = 0x53564349
@@ -87,4 +89,26 @@ def source_lock_statement(source_id: UUID) -> TextClause:
     return advisory_xact_lock_statement(
         SOURCE_LOCK_NAMESPACE,
         source_lock_key(source_id),
+    )
+
+
+def policy_state_lock_statement(workspace_id: UUID) -> Select[tuple[Any, ...]]:
+    """Build the ``FOR UPDATE`` lock of the workspace policy-state row.
+
+    The frozen global row-lock order is: publication idempotency advisory
+    lock, then this ``workspace_policy_state`` row, then the source advisory
+    lock / source rows. Policy publication takes its own idempotency advisory
+    lock before this row and never acquires source rows, and reconciliation
+    never holds this row while acquiring source rows, so no inverse order
+    exists anywhere. Source-store enforcement acquires this row between the
+    replay recheck and the source advisory lock (spec 14).
+    """
+
+    return (
+        sa.select(
+            workspace_policy_state.c.active_policy_revision_id,
+            workspace_policy_state.c.active_revision_number,
+        )
+        .where(workspace_policy_state.c.workspace_id == workspace_id)
+        .with_for_update()
     )

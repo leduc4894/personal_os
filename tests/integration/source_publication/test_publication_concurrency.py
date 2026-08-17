@@ -215,6 +215,18 @@ async def test_hundred_exact_concurrent_replays_commit_one_event(
         "device_tokens": 0,
         "device_authorization_grants": 0,
         "authentication_throttle_buckets": 0,
+        "workspace_policy_state": 0,
+        "policy_drafts": 0,
+        "policy_draft_rules": 0,
+        "source_policies": 0,
+        "policy_rules": 0,
+        "policy_previews": 0,
+        "policy_preview_results": 0,
+        "policy_evaluations": 0,
+        "policy_signing_keys": 0,
+        "policy_keysets": 0,
+        "policy_keyset_signatures": 0,
+        "policy_reconciliation_intents": 0,
     }
     assert (
         await _count_rows(
@@ -307,6 +319,18 @@ async def test_two_updates_from_one_base_yield_one_publish_and_one_conflict(
         "device_tokens": 0,
         "device_authorization_grants": 0,
         "authentication_throttle_buckets": 0,
+        "workspace_policy_state": 0,
+        "policy_drafts": 0,
+        "policy_draft_rules": 0,
+        "source_policies": 0,
+        "policy_rules": 0,
+        "policy_previews": 0,
+        "policy_preview_results": 0,
+        "policy_evaluations": 0,
+        "policy_signing_keys": 0,
+        "policy_keysets": 0,
+        "policy_keyset_signatures": 0,
+        "policy_reconciliation_intents": 0,
     }
     rejection_audits = await preflight_harness.rejection_audit_rows(
         workspace_id=workspace.workspace_id
@@ -410,6 +434,18 @@ async def test_two_concurrent_creates_for_one_source_yield_one_source_and_one_re
         "device_tokens": 0,
         "device_authorization_grants": 0,
         "authentication_throttle_buckets": 0,
+        "workspace_policy_state": 0,
+        "policy_drafts": 0,
+        "policy_draft_rules": 0,
+        "source_policies": 0,
+        "policy_rules": 0,
+        "policy_previews": 0,
+        "policy_preview_results": 0,
+        "policy_evaluations": 0,
+        "policy_signing_keys": 0,
+        "policy_keysets": 0,
+        "policy_keyset_signatures": 0,
+        "policy_reconciliation_intents": 0,
     }
     rejection_audits = await preflight_harness.rejection_audit_rows(
         workspace_id=workspace.workspace_id

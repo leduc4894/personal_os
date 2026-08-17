@@ -115,6 +115,31 @@ class Ed25519PolicyVerifier(PolicySignatureVerifier):
             return False
         try:
             Ed25519PublicKey.from_public_bytes(public_key_bytes).verify(signature, message)
-        except InvalidSignature, ValueError:
+        except (InvalidSignature, ValueError):
+            return False
+        return True
+
+
+class TrustAnchorEd25519Verifier:
+    """Fail-closed Ed25519 verifier under exactly the provided anchor bytes.
+
+    Backend enforcement resolves a revision's trust anchor from canonical
+    PostgreSQL state (the joined ``policy_signing_keys`` row), so verification
+    runs under exactly those bytes rather than a process-frozen key mapping:
+    the persisted row is the workspace's committed anchor. :meth:`verify`
+    answers ``False`` for wrong geometry and every failed or malformed
+    verification; it never raises and never echoes key or message material.
+    """
+
+    def verify(
+        self, *, public_key_bytes: bytes, signature_bytes: bytes, message: bytes
+    ) -> bool:
+        if len(public_key_bytes) != ED25519_PUBLIC_KEY_BYTES:
+            return False
+        if len(signature_bytes) != ED25519_SIGNATURE_BYTES:
+            return False
+        try:
+            Ed25519PublicKey.from_public_bytes(public_key_bytes).verify(signature_bytes, message)
+        except (InvalidSignature, ValueError):
             return False
         return True

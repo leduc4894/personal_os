@@ -46,6 +46,7 @@ def _reference_row(**overrides: Any) -> dict[str, Any]:
         "workspace_id": _WORKSPACE_ID,
         "source_id": _SOURCE_ID,
         "sync_state": "active",
+        "source_type": "markdown",
         "current_source_version_id": _SOURCE_VERSION_ID,
         "version_workspace_id": _WORKSPACE_ID,
         "version_source_id": _SOURCE_ID,
@@ -74,6 +75,7 @@ def test_hydrates_reference_for_accepted_source_states(sync_state: str) -> None:
     assert reference.source_id == _SOURCE_ID
     assert reference.source_version_id == _SOURCE_VERSION_ID
     assert reference.content_version == 1
+    assert reference.source_type.value == "markdown"
     assert reference.expected_object.content_digest.hexadecimal == _CONTENT_HASH
     assert reference.expected_object.size_bytes == 42
     assert reference.expected_object.media_type.value == "text/markdown"
@@ -187,6 +189,7 @@ def test_lookup_statement_selects_the_pointer_consistency_columns() -> None:
         "workspace_id",
         "source_id",
         "sync_state",
+        "source_type",
         "current_source_version_id",
         "version_workspace_id",
         "version_source_id",

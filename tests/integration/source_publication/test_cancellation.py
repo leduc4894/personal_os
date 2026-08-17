@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 import pytest
 import pytest_asyncio
 import sqlalchemy as sa
+from api_runtime.exclusion_policy_crypto import TrustAnchorEd25519Verifier
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from personal_os.diagnostics.context import DiagnosticContext, create_diagnostic_context
@@ -96,7 +97,7 @@ class _HangingIntentStore(PostgresqlSourcePublicationStore):
     """
 
     def __init__(self, engine: AsyncEngine) -> None:
-        super().__init__(engine)
+        super().__init__(engine, policy_verifier=TrustAnchorEd25519Verifier())
         self.hang_reached = asyncio.Event()
         self._hang_armed = True
 

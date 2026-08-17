@@ -16,11 +16,14 @@ from uuid import UUID, uuid4
 
 import pytest
 from tests.unit.sources.fakes import (
+    AllowingPolicyGuard,
+    CallLedger,
     FakeCanonicalSourceReadStore,
     LeakCheckingObjectStore,
     build_diagnostic_context,
     build_read_command,
     build_read_reference,
+    denying_policy_guard,
 )
 
 from personal_os.diagnostics.events import (
@@ -31,6 +34,7 @@ from personal_os.diagnostics.events import (
 )
 from personal_os.error_contracts.codes import ErrorCategory, ErrorCode
 from personal_os.error_contracts.exceptions import InternalApplicationError
+from personal_os.exclusion_policy.errors import ExclusionPolicyError
 from personal_os.object_storage.errors import ObjectStorageError
 from personal_os.sources import (
     CanonicalReadMetrics,
@@ -72,6 +76,7 @@ async def test_service_rejects_nil_uuids_before_any_port_call() -> None:
         store=store,
         object_store=object_store,
         metrics=InMemoryCanonicalReadMetrics(),
+        policy_guard=AllowingPolicyGuard(ledger=CallLedger()),
     )
     with pytest.raises(ValueError, match="workspace_id"):
         await service.read_current_source_bytes(command, build_diagnostic_context())
@@ -88,7 +93,12 @@ async def test_verified_read_returns_exact_bytes_and_emits_success(
     store = FakeCanonicalSourceReadStore(reference)
     object_store = LeakCheckingObjectStore()
     metrics = InMemoryCanonicalReadMetrics()
-    service = CanonicalSourceReadService(store=store, object_store=object_store, metrics=metrics)
+    service = CanonicalSourceReadService(
+        store=store,
+        object_store=object_store,
+        metrics=metrics,
+        policy_guard=AllowingPolicyGuard(ledger=CallLedger()),
+    )
     registry_calls: list[tuple[EventName, dict[str, object]]] = []
     original_registry = reading_module.build_registered_event
 
@@ -136,7 +146,12 @@ async def test_read_never_updates_any_canonical_state() -> None:
     store = FakeCanonicalSourceReadStore(reference)
     object_store = LeakCheckingObjectStore()
     metrics = InMemoryCanonicalReadMetrics()
-    service = CanonicalSourceReadService(store=store, object_store=object_store, metrics=metrics)
+    service = CanonicalSourceReadService(
+        store=store,
+        object_store=object_store,
+        metrics=metrics,
+        policy_guard=AllowingPolicyGuard(ledger=CallLedger()),
+    )
 
     await service.read_current_source_bytes(command, build_diagnostic_context())
 
@@ -155,7 +170,12 @@ async def test_missing_reference_fails_closed_with_state_invalid(
     store = FakeCanonicalSourceReadStore(None)
     object_store = LeakCheckingObjectStore()
     metrics = InMemoryCanonicalReadMetrics()
-    service = CanonicalSourceReadService(store=store, object_store=object_store, metrics=metrics)
+    service = CanonicalSourceReadService(
+        store=store,
+        object_store=object_store,
+        metrics=metrics,
+        policy_guard=AllowingPolicyGuard(ledger=CallLedger()),
+    )
     registry_calls: list[tuple[EventName, dict[str, object]]] = []
     original_registry = reading_module.build_registered_event
 
@@ -205,6 +225,7 @@ async def test_reference_identity_mismatch_fails_closed_with_state_invalid() -> 
         store=store,
         object_store=object_store,
         metrics=InMemoryCanonicalReadMetrics(),
+        policy_guard=AllowingPolicyGuard(ledger=CallLedger()),
     )
 
     with pytest.raises(CanonicalReadStateError) as excinfo:
@@ -220,7 +241,12 @@ async def test_object_store_missing_error_surfaces_unchanged() -> None:
     store = FakeCanonicalSourceReadStore(build_read_reference(command))
     object_store = LeakCheckingObjectStore(missing=True)
     metrics = InMemoryCanonicalReadMetrics()
-    service = CanonicalSourceReadService(store=store, object_store=object_store, metrics=metrics)
+    service = CanonicalSourceReadService(
+        store=store,
+        object_store=object_store,
+        metrics=metrics,
+        policy_guard=AllowingPolicyGuard(ledger=CallLedger()),
+    )
 
     with pytest.raises(ObjectStorageError) as excinfo:
         await service.read_current_source_bytes(command, build_diagnostic_context())
@@ -239,7 +265,12 @@ async def test_corrupt_object_error_surfaces_before_any_byte_reaches_consumer() 
     store = FakeCanonicalSourceReadStore(reference)
     object_store = LeakCheckingObjectStore(fail_verification=True)
     metrics = InMemoryCanonicalReadMetrics()
-    service = CanonicalSourceReadService(store=store, object_store=object_store, metrics=metrics)
+    service = CanonicalSourceReadService(
+        store=store,
+        object_store=object_store,
+        metrics=metrics,
+        policy_guard=AllowingPolicyGuard(ledger=CallLedger()),
+    )
 
     body_entered = False
     observed_bytes = b""
@@ -267,6 +298,7 @@ async def test_caller_cancellation_closes_reader_and_clears_spool_state() -> Non
         store=store,
         object_store=object_store,
         metrics=InMemoryCanonicalReadMetrics(),
+        policy_guard=AllowingPolicyGuard(ledger=CallLedger()),
     )
 
     with pytest.raises(asyncio.CancelledError):
@@ -288,6 +320,7 @@ async def test_service_raises_internal_error_when_registry_rejects_the_payload(
         store=store,
         object_store=object_store,
         metrics=InMemoryCanonicalReadMetrics(),
+        policy_guard=AllowingPolicyGuard(ledger=CallLedger()),
     )
 
     def rejecting_registry(
@@ -355,6 +388,7 @@ async def test_success_event_is_delivered_to_the_bound_diagnostics_sink() -> Non
         store=store,
         object_store=object_store,
         metrics=InMemoryCanonicalReadMetrics(),
+        policy_guard=AllowingPolicyGuard(ledger=CallLedger()),
         diagnostics=sink,
     )
 
@@ -382,6 +416,7 @@ async def test_failure_event_is_delivered_to_the_bound_diagnostics_sink() -> Non
         store=store,
         object_store=object_store,
         metrics=InMemoryCanonicalReadMetrics(),
+        policy_guard=AllowingPolicyGuard(ledger=CallLedger()),
         diagnostics=sink,
     )
 
@@ -394,3 +429,67 @@ async def test_failure_event_is_delivered_to_the_bound_diagnostics_sink() -> Non
     assert event_fields["source_id"] == command.source_id
     assert event_fields["workspace_id"] == command.workspace_id
     assert event_fields["error_code"] is ErrorCode.CANONICAL_READ_STATE_INVALID
+
+
+# --- mandatory policy re-check before the object-store request (spec 14) ---------
+
+
+@pytest.mark.asyncio
+async def test_denied_reference_never_reaches_the_object_store() -> None:
+    command = build_read_command()
+    reference = build_read_reference(command)
+    store = FakeCanonicalSourceReadStore(reference)
+    object_store = LeakCheckingObjectStore()
+    metrics = InMemoryCanonicalReadMetrics()
+    service = CanonicalSourceReadService(
+        store=store,
+        object_store=object_store,
+        metrics=metrics,
+        policy_guard=denying_policy_guard(ErrorCode.EXCLUSION_POLICY_DENIED),
+    )
+
+    with pytest.raises(ExclusionPolicyError) as raised:
+        await service.read_current_source_bytes(command, build_diagnostic_context())
+
+    assert raised.value.error_code is ErrorCode.EXCLUSION_POLICY_DENIED
+    # The store resolved the state transactionally, the guard denied, and no
+    # object-store reader was ever opened.
+    assert store.resolve_calls == [(command.workspace_id, command.source_id)]
+    assert object_store.opened == []
+    assert metrics.read_count(ReadOutcome.FAILED) == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_active_policy_denies_the_read_before_object_store() -> None:
+    command = build_read_command()
+    service = CanonicalSourceReadService(
+        store=FakeCanonicalSourceReadStore(build_read_reference(command)),
+        object_store=LeakCheckingObjectStore(),
+        metrics=InMemoryCanonicalReadMetrics(),
+        policy_guard=denying_policy_guard(ErrorCode.EXCLUSION_POLICY_NOT_INITIALIZED),
+    )
+
+    with pytest.raises(ExclusionPolicyError) as raised:
+        await service.read_current_source_bytes(command, build_diagnostic_context())
+
+    assert raised.value.error_code is ErrorCode.EXCLUSION_POLICY_NOT_INITIALIZED
+
+
+@pytest.mark.asyncio
+async def test_guard_receives_the_resolved_reference_and_allows_the_read() -> None:
+    command = build_read_command()
+    reference = build_read_reference(command)
+    ledger = CallLedger()
+    guard = AllowingPolicyGuard(ledger=ledger)
+    service = CanonicalSourceReadService(
+        store=FakeCanonicalSourceReadStore(reference),
+        object_store=LeakCheckingObjectStore(),
+        metrics=InMemoryCanonicalReadMetrics(),
+        policy_guard=guard,
+    )
+
+    await service.read_current_source_bytes(command, build_diagnostic_context())
+
+    # The guard re-check happens after resolution and before the verified
+    # reader opens, exactly once per read.
+    assert guard.read_calls == [command.source_id]

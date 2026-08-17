@@ -17,7 +17,10 @@ only the typed error, never an audit row.
 (design sections 8.6-8.8) each run one canonical ``READ COMMITTED``
 transaction behind the same locked prefix: the pinned ``SET LOCAL`` bounds,
 the idempotency advisory lock, the trusted workspace/actor revalidation, the
-replay/mismatch recheck, the source advisory lock. The create then performs
+replay/mismatch recheck, the ``workspace_policy_state`` row lock with the
+authoritative active-policy re-evaluation (spec 14: a policy change during
+the upload fails closed without publishing the source version), then the
+source advisory lock. The create then performs
 the global source-existence rejection, the exact content-object
 upsert/select/compare, the pending source, version 1 with a null parent, the
 guarded active-pointer transition, the create event with a null base, the
@@ -55,12 +58,16 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.diagnostics.events import SafeToken
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.exclusion_policy.contracts import PolicySubject
+from personal_os.exclusion_policy.enforcement import PolicyDecision, PolicyTrustAnchorVerifier
+from personal_os.exclusion_policy.metrics import ExclusionPolicyMetrics
 from personal_os.object_storage import VerifiedObjectReceipt
 from personal_os.object_storage.keys import ContentDigest
 from personal_os.sources.actors import ActorKind, SourceActor
 from personal_os.sources.commands import (
     CreateSourceVersion,
     IdempotencyKey,
+    SourceType,
     UpdateSourceVersion,
 )
 from personal_os.sources.errors import ACTOR_INVALID, SOURCE_STATES, SourcePublicationError
@@ -74,6 +81,10 @@ from personal_os.sources.results import PublicationOutcome, SourceVersionPublica
 from postgresql_source_store.engine import apply_transaction_bounds
 from postgresql_source_store.error_mapping import DatabaseRetryPolicy
 from postgresql_source_store.locks import idempotency_lock_statement, source_lock_statement
+from postgresql_source_store.policy_enforcement import (
+    evaluate_locked_policy_decision,
+    source_type_select_statement,
+)
 from postgresql_source_store.tables import (
     audit_events,
     content_objects,
@@ -460,9 +471,18 @@ class PostgresqlSourcePublicationStore:
     bounded retry for the uncertain-commit case.
     """
 
-    def __init__(self, engine: AsyncEngine, *, retry: DatabaseRetryPolicy | None = None) -> None:
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        *,
+        retry: DatabaseRetryPolicy | None = None,
+        policy_verifier: PolicyTrustAnchorVerifier,
+        policy_metrics: ExclusionPolicyMetrics | None = None,
+    ) -> None:
         self._engine = engine
         self._retry = retry if retry is not None else DatabaseRetryPolicy()
+        self._policy_verifier = policy_verifier
+        self._policy_metrics = policy_metrics
 
     async def resolve_committed(
         self,
@@ -483,11 +503,18 @@ class PostgresqlSourcePublicationStore:
         request_fingerprint: RequestFingerprint,
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
+        *,
+        preflight_decision: PolicyDecision | None = None,
     ) -> SourceVersionPublicationResult:
         identities = SourceCreateIdentities.allocate()
         return await self._retry.run(
             lambda _attempt: self._commit_create_once(
-                command, request_fingerprint, receipt, diagnostic_context, identities
+                command,
+                request_fingerprint,
+                receipt,
+                diagnostic_context,
+                identities,
+                preflight_decision,
             ),
             source_id=command.source_id,
             recover=lambda: self._resolve_committed_once(
@@ -501,11 +528,18 @@ class PostgresqlSourcePublicationStore:
         request_fingerprint: RequestFingerprint,
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
+        *,
+        preflight_decision: PolicyDecision | None = None,
     ) -> SourceVersionPublicationResult:
         identities = SourceUpdateIdentities.allocate()
         return await self._retry.run(
             lambda _attempt: self._commit_update_once(
-                command, request_fingerprint, receipt, diagnostic_context, identities
+                command,
+                request_fingerprint,
+                receipt,
+                diagnostic_context,
+                identities,
+                preflight_decision,
             ),
             source_id=command.source_id,
             recover=lambda: self._resolve_committed_once(
@@ -520,10 +554,12 @@ class PostgresqlSourcePublicationStore:
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
         identities: SourceCreateIdentities,
+        preflight_decision: PolicyDecision | None,
     ) -> SourceVersionPublicationResult:
         return await self._run_locked_transition(
             command,
             request_fingerprint,
+            receipt,
             diagnostic_context,
             lambda connection: self._create_transition(
                 connection,
@@ -533,6 +569,7 @@ class PostgresqlSourcePublicationStore:
                 diagnostic_context,
                 identities,
             ),
+            preflight_decision=preflight_decision,
         )
 
     async def _commit_update_once(
@@ -542,10 +579,12 @@ class PostgresqlSourcePublicationStore:
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
         identities: SourceUpdateIdentities,
+        preflight_decision: PolicyDecision | None,
     ) -> SourceVersionPublicationResult:
         return await self._run_locked_transition(
             command,
             request_fingerprint,
+            receipt,
             diagnostic_context,
             lambda connection: self._update_transition(
                 connection,
@@ -555,28 +594,39 @@ class PostgresqlSourcePublicationStore:
                 diagnostic_context,
                 identities,
             ),
+            preflight_decision=preflight_decision,
         )
 
     async def _run_locked_transition(
         self,
         command: SourceVersionCommand,
         request_fingerprint: RequestFingerprint,
+        receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
         transition: Callable[
             [AsyncConnection],
             Awaitable[tuple[_PendingRejection | None, SourceVersionPublicationResult | None]],
         ],
+        *,
+        preflight_decision: PolicyDecision | None = None,
     ) -> SourceVersionPublicationResult:
         """Run the common locked prefix and one command-specific transition.
 
-        The prefix follows design section 8.3: ``SET LOCAL`` bounds, the
-        idempotency advisory lock, the trusted workspace/actor revalidation,
-        the replay/mismatch recheck under lock, then the source advisory lock.
-        Every rejection raises out of the ``async with`` block via
+        The prefix follows design section 8.3 plus the spec-14 policy recheck:
+        ``SET LOCAL`` bounds, the idempotency advisory lock, the trusted
+        workspace/actor revalidation, the replay/mismatch recheck under lock,
+        then the ``workspace_policy_state`` row lock with the authoritative
+        policy re-evaluation, then the source advisory lock. The policy recheck
+        runs for the replay-return path too — a replay must not return
+        canonical data until the current policy permits the subject — and any
+        preflight decision is a non-authoritative hint never consulted for the
+        outcome. Every rejection raises out of the ``async with`` block via
         :class:`_RejectionAbort` so the transaction always rolls back — a
         rejection found after a canonical write must never commit a partial
         graph — and the standalone rejection audit is written only after the
-        rollback, in its own transaction.
+        rollback, in its own transaction. A policy denial is not a business
+        rejection: it raises the typed exclusion-policy error, rolls the
+        transaction back and writes no rejection audit row.
         """
         result: SourceVersionPublicationResult | None = None
         rejection: _PendingRejection | None = None
@@ -610,6 +660,23 @@ class PostgresqlSourcePublicationStore:
                 )
                 if rejection is not None:
                     raise _RejectionAbort(rejection)
+                if preflight_decision is not None and (
+                    preflight_decision.workspace_id != command.workspace_id
+                ):
+                    # Evidence from another workspace can never authorize this
+                    # publication; fail closed without publishing.
+                    raise SourcePublicationError(
+                        ErrorCode.SOURCE_CONCURRENCY_INVARIANT_FAILED,
+                        safe_details={"source_id": command.source_id},
+                    )
+                subject = await self._build_authoritative_subject(connection, command, receipt)
+                await evaluate_locked_policy_decision(
+                    connection,
+                    workspace_id=command.workspace_id,
+                    subject=subject,
+                    verifier=self._policy_verifier,
+                    metrics=self._policy_metrics,
+                )
                 if result is None:
                     await connection.execute(source_lock_statement(command.source_id))
                     rejection, result = await transition(connection)
@@ -629,6 +696,40 @@ class PostgresqlSourcePublicationStore:
                 safe_details={"source_id": command.source_id},
             )
         return result
+
+    async def _build_authoritative_subject(
+        self,
+        connection: AsyncConnection,
+        command: SourceVersionCommand,
+        receipt: VerifiedObjectReceipt,
+    ) -> PolicySubject:
+        """Rebuild the evaluation subject from the command's own evidence.
+
+        A create carries its declared source type; an update reads the stored
+        immutable source type of the workspace-bound row (a plain read before
+        the source advisory lock — the type never changes, so the value is
+        stable across the lock). The media type and byte size come from the
+        verified receipt the service already validated against the expected
+        object, so the subject reflects the canonical content being published
+        rather than a client claim.
+        """
+
+        source_type: SourceType | None
+        if isinstance(command, CreateSourceVersion):
+            source_type = command.source_type
+        else:
+            result = await connection.execute(
+                source_type_select_statement(command.workspace_id, command.source_id)
+            )
+            stored = result.scalar_one_or_none()
+            source_type = SourceType(str(stored)) if stored is not None else None
+        return PolicySubject(
+            workspace_id=command.workspace_id,
+            source_id=command.source_id,
+            source_type=source_type,
+            media_type=receipt.media_type,
+            size_bytes=receipt.size_bytes,
+        )
 
     async def _create_transition(
         self,

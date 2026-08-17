@@ -1,14 +1,17 @@
 """Narrow in-memory fakes proving the publication and read service orchestrations.
 
 Every fake records the exact port call sequence into one shared ledger so a
-test can assert the full cross-port order (store preflight, object-store
-resolve/store, receipt validation, commit) with string entries only. The read
-fakes extend the same discipline: the scripted current-reference resolver
-records every resolve call, and the leak-checking object store proves no byte
-reaches the consumer before verification passes and that the reader closes on
-every exit path. The fakes never retain, echo or log command payloads: titles,
-idempotency keys and fingerprints are compared by identity/equality in the
-assertions, not recorded.
+test can assert the full cross-port order (policy preflight, store preflight,
+object-store resolve/store, receipt validation, commit) with string entries
+only. The read fakes extend the same discipline: the scripted
+current-reference resolver records every resolve call, and the leak-checking
+object store proves no byte reaches the consumer before verification passes
+and that the reader closes on every exit path. The policy-guard fakes follow
+the same shape: the allowing guard records the exact boundary call and returns
+one fixed allowing decision; a scripted guard raises the typed denial. The
+fakes never retain, echo or log command payloads: titles, idempotency keys and
+fingerprints are compared by identity/equality in the assertions, not
+recorded.
 """
 
 from __future__ import annotations
@@ -23,6 +26,11 @@ from uuid import UUID, uuid4
 
 from personal_os.diagnostics.context import DiagnosticContext, create_diagnostic_context
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.exclusion_policy.contracts import (
+    EnforcedPolicyDecision,
+    RawPolicyDecision,
+)
+from personal_os.exclusion_policy.enforcement import PolicyDecision
 from personal_os.object_storage import (
     CanonicalMediaType,
     CanonicalObjectKey,
@@ -57,6 +65,8 @@ STORE_COMMIT_CREATE: Final[str] = "store.commit_create"
 STORE_COMMIT_UPDATE: Final[str] = "store.commit_update"
 OBJECT_STORE_RESOLVE: Final[str] = "object_store.resolve_verified_object"
 OBJECT_STORE_STORE_STREAM: Final[str] = "object_store.store_stream"
+POLICY_GUARD_PUBLICATION: Final[str] = "policy_guard.authorize_publication"
+POLICY_GUARD_READ: Final[str] = "policy_guard.authorize_read"
 
 #: The maximum allowed receipt age from spec section 5.3 (five minutes).
 MAXIMUM_RECEIPT_AGE: Final[timedelta] = timedelta(minutes=5)
@@ -252,7 +262,8 @@ class FakeSourcePublicationStore:
     ``resolve_error`` to model a mismatch found by preflight. Each commit
     performs ``1 + internal_retry_attempts`` attempts, recording the receipt
     passed by the service for every attempt (the bounded database retry reuses
-    exactly the receipt the service obtained). ``committed_result`` is never
+    exactly the receipt the service obtained) and the policy preflight
+    evidence handed through by the service. ``committed_result`` is never
     mutated by a commit: a test that wants a later preflight to hit sets it
     explicitly, so a second invocation misses by default.
     """
@@ -265,6 +276,7 @@ class FakeSourcePublicationStore:
     resolve_committed_fingerprints: list[RequestFingerprint] = field(default_factory=list)
     commit_receipt_identities: list[list[int]] = field(default_factory=list)
     commit_fingerprints: list[RequestFingerprint] = field(default_factory=list)
+    commit_policy_decisions: list[PolicyDecision | None] = field(default_factory=list)
 
     async def resolve_committed(
         self,
@@ -284,9 +296,11 @@ class FakeSourcePublicationStore:
         request_fingerprint: RequestFingerprint,
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
+        *,
+        preflight_decision: PolicyDecision | None = None,
     ) -> SourceVersionPublicationResult:
         self.ledger.record(STORE_COMMIT_CREATE)
-        return self._commit(receipt, request_fingerprint)
+        return self._commit(receipt, request_fingerprint, preflight_decision)
 
     async def commit_update(
         self,
@@ -294,12 +308,17 @@ class FakeSourcePublicationStore:
         request_fingerprint: RequestFingerprint,
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
+        *,
+        preflight_decision: PolicyDecision | None = None,
     ) -> SourceVersionPublicationResult:
         self.ledger.record(STORE_COMMIT_UPDATE)
-        return self._commit(receipt, request_fingerprint)
+        return self._commit(receipt, request_fingerprint, preflight_decision)
 
     def _commit(
-        self, receipt: VerifiedObjectReceipt, request_fingerprint: RequestFingerprint
+        self,
+        receipt: VerifiedObjectReceipt,
+        request_fingerprint: RequestFingerprint,
+        preflight_decision: PolicyDecision | None,
     ) -> SourceVersionPublicationResult:
         attempt_receipt_identities: list[int] = []
         for _ in range(1 + self.internal_retry_attempts):
@@ -308,6 +327,7 @@ class FakeSourcePublicationStore:
             attempt_receipt_identities.append(id(receipt))
         self.commit_receipt_identities.append(attempt_receipt_identities)
         self.commit_fingerprints.append(request_fingerprint)
+        self.commit_policy_decisions.append(preflight_decision)
         return self.commit_result
 
 
@@ -315,6 +335,75 @@ def build_idempotency_mismatch_error() -> SourcePublicationError:
     """The typed error a preflight mismatch raises before any object-store call."""
 
     return SourcePublicationError(ErrorCode.SOURCE_IDEMPOTENCY_MISMATCH)
+
+
+def build_policy_decision(
+    *,
+    workspace_id: UUID | None = None,
+    revision_number: int = 1,
+) -> PolicyDecision:
+    """One fixed allowing decision the fakes return as preflight evidence."""
+
+    return PolicyDecision(
+        workspace_id=workspace_id if workspace_id is not None else uuid4(),
+        policy_revision_id=uuid4(),
+        revision_number=revision_number,
+        subject_fingerprint=bytes(range(32)),
+        raw_decision=RawPolicyDecision.ALLOWED,
+        enforced_decision=EnforcedPolicyDecision.ALLOWED,
+        matched_rule_ids=(),
+        missing_fields=(),
+        evaluated_at=datetime.now(UTC),
+    )
+
+
+@dataclass
+class AllowingPolicyGuard:
+    """Guard fake recording both boundary calls and returning one decision."""
+
+    ledger: CallLedger
+    decision: PolicyDecision = field(default_factory=build_policy_decision)
+    publication_calls: list[UUID] = field(default_factory=list)
+    read_calls: list[UUID] = field(default_factory=list)
+
+    async def authorize_publication(
+        self, command: SourceVersionCommand, diagnostic_context: DiagnosticContext
+    ) -> PolicyDecision:
+        self.ledger.record(POLICY_GUARD_PUBLICATION)
+        self.publication_calls.append(command.source_id)
+        return self.decision
+
+    async def authorize_read(
+        self, reference: CanonicalSourceReference, diagnostic_context: DiagnosticContext
+    ) -> PolicyDecision:
+        self.ledger.record(POLICY_GUARD_READ)
+        self.read_calls.append(reference.source_id)
+        return self.decision
+
+
+@dataclass
+class DenyingPolicyGuard:
+    """Guard fake raising the scripted typed denial at both boundaries."""
+
+    error: Exception
+
+    async def authorize_publication(
+        self, command: SourceVersionCommand, diagnostic_context: DiagnosticContext
+    ) -> PolicyDecision:
+        raise self.error
+
+    async def authorize_read(
+        self, reference: CanonicalSourceReference, diagnostic_context: DiagnosticContext
+    ) -> PolicyDecision:
+        raise self.error
+
+
+def denying_policy_guard(error_code: ErrorCode) -> DenyingPolicyGuard:
+    """Build the guard fake raising one typed exclusion-policy denial."""
+
+    from personal_os.exclusion_policy.errors import ExclusionPolicyError
+
+    return DenyingPolicyGuard(error=ExclusionPolicyError(error_code))
 
 
 class FakeCanonicalSourceReadStore:
@@ -455,6 +544,7 @@ def build_read_reference(
         source_id=command.source_id,
         source_version_id=uuid4(),
         content_version=content_version,
+        source_type=SourceType.MARKDOWN,
         expected_object=build_expected_object(),
         committed_at=datetime.now(UTC),
     )

@@ -264,8 +264,10 @@ class FakePublicationStore:
         request_fingerprint: object,
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
+        *,
+        preflight_decision: object | None = None,
     ) -> SourceVersionPublicationResult:
-        del request_fingerprint, receipt, diagnostic_context
+        del request_fingerprint, receipt, diagnostic_context, preflight_decision
         self.ledger.append("commit_create")
         self.commit_count += 1
         self.commands.append(command)
@@ -312,6 +314,7 @@ class FakeReadStore:
             source_id=command.source_id,
             source_version_id=committed.source_version_id,
             content_version=committed.content_version,
+            source_type=published_command.source_type,
             expected_object=published_command.expected_object,
             committed_at=committed.committed_at,
         )
@@ -410,6 +413,42 @@ class FakeWorkflowStarter:
 
 
 @dataclass
+class FakePolicySeeder:
+    """Signed empty-policy seeder recording the seeded workspaces in order."""
+
+    ledger: list[str]
+    seeded_workspaces: list[UUID] = field(default_factory=list)
+
+    async def seed(
+        self, workspace_id: UUID, owner_user_id: UUID, diagnostic_context: DiagnosticContext
+    ) -> None:
+        del owner_user_id, diagnostic_context
+        self.ledger.append("policy:seed")
+        self.seeded_workspaces.append(workspace_id)
+
+
+@dataclass
+class AllowingGuard:
+    """Policy guard allowing both boundaries while recording the calls."""
+
+    ledger: list[str]
+
+    async def authorize_publication(
+        self, command: object, diagnostic_context: DiagnosticContext
+    ) -> object:
+        del diagnostic_context
+        self.ledger.append("policy:publication")
+        return None
+
+    async def authorize_read(
+        self, reference: object, diagnostic_context: DiagnosticContext
+    ) -> object:
+        del diagnostic_context
+        self.ledger.append("policy:read")
+        return None
+
+
+@dataclass
 class TableCountsProbe:
     """Table-count provider snapshotting every read for the no-new-row proofs."""
 
@@ -447,6 +486,8 @@ def _build_collaborators(
         "projection_intents": 0,
         "content_objects": 0,
     }
+    guard = AllowingGuard(ledger=ledger)
+    policy_seeder = FakePolicySeeder(ledger=ledger)
     identity = FakeIdentityService(ledger=ledger, counts=counts)
     object_store = FakeObjectStore(ledger=ledger, clock=_fixed_clock)
     publication_store = FakePublicationStore(ledger=ledger, counts=counts)
@@ -469,12 +510,15 @@ def _build_collaborators(
             object_store=object_store,  # type: ignore[arg-type]
             metrics=InMemorySourcePublicationMetrics(),
             clock=_fixed_clock,
+            policy_guard=guard,  # type: ignore[arg-type]
         ),
         read_service=CanonicalSourceReadService(
             store=read_store,  # type: ignore[arg-type]
             object_store=object_store,  # type: ignore[arg-type]
             metrics=InMemoryCanonicalReadMetrics(),
+            policy_guard=guard,  # type: ignore[arg-type]
         ),
+        policy_seeder=policy_seeder,
         intent_store=intent_store,  # type: ignore[arg-type]
         workflow_starter=starter,  # type: ignore[arg-type]
         table_counts=table_counts,
@@ -524,12 +568,16 @@ async def test_flow_proves_all_spec_7_claims() -> None:
     assert ledger == [
         "bootstrap:create",
         "bootstrap:replay",
+        "policy:seed",
+        "policy:publication",
         "preflight:miss",
         "object:resolve",
         "object:store_stream",
         "commit_create",
         "read_current",
+        "policy:read",
         "object:open_reader",
+        "policy:publication",
         "preflight:hit",
         "claim_batch",
         "start_workflow",

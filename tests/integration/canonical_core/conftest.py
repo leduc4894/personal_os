@@ -53,6 +53,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 # Registers the live R2 harness fixture (fail-closed credential gating plus
 # per-run exact-key cleanup) for the Task 14 live acceptance drills in this
 # directory; every offline test here leaves the fixture uninstantiated.
+from api_runtime.exclusion_policy_crypto import TrustAnchorEd25519Verifier
 from tests.integration.r2_object_storage.conftest import live_r2_harness  # noqa: F401
 from tools.local_service_stack import main as stack_main
 from tools.local_service_stack import validate_project_name
@@ -62,10 +63,12 @@ from tools.postgresql_dump_process import (
     check_client_tools,
     run_bounded_child,
 )
+from tools.signed_policy_seed import seed_signed_policy
 
 from personal_os.diagnostics.context import DiagnosticContext, create_diagnostic_context
 from personal_os.diagnostics.events import EventName
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.exclusion_policy.metrics import InMemoryExclusionPolicyMetrics
 from personal_os.object_storage import (
     CanonicalMediaType,
     ContentDigest,
@@ -108,6 +111,7 @@ from postgresql_source_store.backup_snapshot import (
 from postgresql_source_store.canonical_read import PostgresqlCanonicalSourceReadStore
 from postgresql_source_store.engine import create_source_store_engine, dispose_source_store_engine
 from postgresql_source_store.identity_bootstrap import PostgresqlIdentityBootstrapStore
+from postgresql_source_store.policy_enforcement import compose_policy_enforcement
 from postgresql_source_store.publication_store import PostgresqlSourcePublicationStore
 from postgresql_source_store.settings import (
     DatabaseRuntimeSettings,
@@ -117,6 +121,7 @@ from postgresql_source_store.tables import (
     SOURCE_STORE_TABLES,
     devices,
     users,
+    workspace_policy_state,
     workspaces,
 )
 
@@ -695,16 +700,32 @@ class CanonicalCoreHarness:
     def __init__(self, engine: AsyncEngine, object_store: LocalFilesystemObjectStore) -> None:
         self._engine = engine
         self.object_store = object_store
+        policy_verifier = TrustAnchorEd25519Verifier()
+        policy_metrics = InMemoryExclusionPolicyMetrics()
         self.publication_service = SourceVersionPublicationService(
-            store=PostgresqlSourcePublicationStore(engine),
+            store=PostgresqlSourcePublicationStore(
+                engine,
+                policy_verifier=policy_verifier,
+                policy_metrics=policy_metrics,
+            ),
             object_store=object_store,
             metrics=InMemorySourcePublicationMetrics(),
             clock=lambda: datetime.now(UTC),
+            policy_guard=compose_policy_enforcement(
+                engine, verifier=policy_verifier, metrics=policy_metrics
+            ),
         )
         self.read_service = CanonicalSourceReadService(
-            store=PostgresqlCanonicalSourceReadStore(engine),
+            store=PostgresqlCanonicalSourceReadStore(
+                engine,
+                policy_verifier=policy_verifier,
+                policy_metrics=policy_metrics,
+            ),
             object_store=object_store,
             metrics=InMemoryCanonicalReadMetrics(),
+            policy_guard=compose_policy_enforcement(
+                engine, verifier=policy_verifier, metrics=policy_metrics
+            ),
         )
         self.identity_diagnostics = RecordingIdentityDiagnostics(events=[])
         self.identity_store = PostgresqlIdentityBootstrapStore(
@@ -746,6 +767,20 @@ class CanonicalCoreHarness:
                     device_kind="obsidian",
                 )
             )
+            await connection.execute(
+                sa.insert(workspace_policy_state).values(
+                    workspace_id=workspace_id,
+                    active_policy_revision_id=None,
+                    active_revision_number=0,
+                )
+            )
+        # Task 11: the harness explicitly seeds a signed empty policy per
+        # workspace (spec 14) so the guarded services can publish and read.
+        await seed_signed_policy(
+            self._engine,
+            workspace_id=workspace_id,
+            published_by_user_id=owner_user_id,
+        )
         return SeededWorkspace(
             owner_user_id=owner_user_id, workspace_id=workspace_id, device_id=device_id
         )
@@ -874,14 +909,23 @@ async def restore_target_context(
         disposable_restore_database.settings, canonical_core_stack.password
     )
     try:
+        policy_verifier = TrustAnchorEd25519Verifier()
+        policy_metrics = InMemoryExclusionPolicyMetrics()
         yield RestoreTargetContext(
             database=disposable_restore_database,
             engine=engine,
             restore_target=PostgresqlRestoreTarget(engine),
             read_service=CanonicalSourceReadService(
-                store=PostgresqlCanonicalSourceReadStore(engine),
+                store=PostgresqlCanonicalSourceReadStore(
+                    engine,
+                    policy_verifier=policy_verifier,
+                    policy_metrics=policy_metrics,
+                ),
                 object_store=canonical_core_harness.object_store,
                 metrics=InMemoryCanonicalReadMetrics(),
+                policy_guard=compose_policy_enforcement(
+                    engine, verifier=policy_verifier, metrics=policy_metrics
+                ),
             ),
         )
     finally:

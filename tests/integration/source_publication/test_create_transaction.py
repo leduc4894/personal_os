@@ -253,6 +253,18 @@ def _assert_only_one_rejection_audit_was_added(counts_before: dict, counts_after
         "device_tokens": 0,
         "device_authorization_grants": 0,
         "authentication_throttle_buckets": 0,
+        "workspace_policy_state": 0,
+        "policy_drafts": 0,
+        "policy_draft_rules": 0,
+        "source_policies": 0,
+        "policy_rules": 0,
+        "policy_previews": 0,
+        "policy_preview_results": 0,
+        "policy_evaluations": 0,
+        "policy_signing_keys": 0,
+        "policy_keysets": 0,
+        "policy_keyset_signatures": 0,
+        "policy_reconciliation_intents": 0,
     }
 
 
@@ -310,6 +322,18 @@ async def test_create_commits_exact_canonical_graph(
         "device_tokens": 0,
         "device_authorization_grants": 0,
         "authentication_throttle_buckets": 0,
+        "workspace_policy_state": 0,
+        "policy_drafts": 0,
+        "policy_draft_rules": 0,
+        "source_policies": 0,
+        "policy_rules": 0,
+        "policy_previews": 0,
+        "policy_preview_results": 0,
+        "policy_evaluations": 0,
+        "policy_signing_keys": 0,
+        "policy_keysets": 0,
+        "policy_keyset_signatures": 0,
+        "policy_reconciliation_intents": 0,
     }
 
     source_row = await _fetch_source_row(inspection_engine, command.source_id)

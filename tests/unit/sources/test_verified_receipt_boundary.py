@@ -17,6 +17,7 @@ from typing import Final
 
 import pytest
 from tests.unit.sources.fakes import (
+    AllowingPolicyGuard,
     CallLedger,
     FakeCanonicalObjectStore,
     FakeSourcePublicationStore,
@@ -70,6 +71,7 @@ def _build_boundary_service(
         object_store=object_store,
         metrics=InMemorySourcePublicationMetrics(),
         clock=SequencedUtcClock(moments=[_NOW, _NOW]),
+        policy_guard=AllowingPolicyGuard(ledger=ledger),
     )
     return service, store, ledger
 

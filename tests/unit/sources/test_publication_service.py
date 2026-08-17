@@ -16,9 +16,11 @@ import pytest
 from tests.unit.sources.fakes import (
     OBJECT_STORE_RESOLVE,
     OBJECT_STORE_STORE_STREAM,
+    POLICY_GUARD_PUBLICATION,
     STORE_COMMIT_CREATE,
     STORE_COMMIT_UPDATE,
     STORE_RESOLVE_COMMITTED,
+    AllowingPolicyGuard,
     CallLedger,
     FakeCanonicalObjectStore,
     FakeSourcePublicationStore,
@@ -29,11 +31,14 @@ from tests.unit.sources.fakes import (
     build_diagnostic_context,
     build_expected_object,
     build_idempotency_mismatch_error,
+    build_policy_decision,
     build_update_command,
     build_verified_receipt,
+    denying_policy_guard,
 )
 
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.exclusion_policy.errors import ExclusionPolicyError
 from personal_os.object_storage import ContentDigest, ExpectedObject, VerifiedObjectReceipt
 from personal_os.sources import (
     PublicationOperation,
@@ -86,6 +91,7 @@ def _build_service(
         object_store=object_store,
         metrics=metrics,
         clock=SequencedUtcClock(moments=[_PUBLICATION_START, _PUBLICATION_START]),
+        policy_guard=AllowingPolicyGuard(ledger=ledger),
     )
     return service, store, object_store, metrics, ledger
 
@@ -103,7 +109,7 @@ async def test_exact_replay_returns_committed_result_without_object_store_calls(
     )
 
     assert result is committed
-    assert ledger.entries == [STORE_RESOLVE_COMMITTED]
+    assert ledger.entries == [POLICY_GUARD_PUBLICATION, STORE_RESOLVE_COMMITTED]
     assert object_store.resolve_call_count() == 0
     assert store.resolve_committed_fingerprints == [compute_request_fingerprint(command)]
     assert metrics.replay_count(PublicationOperation.CREATE) == 1
@@ -145,6 +151,7 @@ async def test_new_commit_resolves_existing_object_and_commits_without_upload() 
     )
 
     assert ledger.entries == [
+        POLICY_GUARD_PUBLICATION,
         STORE_RESOLVE_COMMITTED,
         OBJECT_STORE_RESOLVE,
         STORE_COMMIT_CREATE,
@@ -176,6 +183,7 @@ async def test_new_commit_stores_caller_stream_when_no_object_exists() -> None:
     )
 
     assert ledger.entries == [
+        POLICY_GUARD_PUBLICATION,
         STORE_RESOLVE_COMMITTED,
         OBJECT_STORE_RESOLVE,
         OBJECT_STORE_STORE_STREAM,
@@ -206,6 +214,7 @@ async def test_update_publication_commits_via_commit_update() -> None:
     )
 
     assert ledger.entries == [
+        POLICY_GUARD_PUBLICATION,
         STORE_RESOLVE_COMMITTED,
         OBJECT_STORE_RESOLVE,
         STORE_COMMIT_UPDATE,
@@ -227,7 +236,7 @@ async def test_preflight_mismatch_stops_before_any_object_store_call() -> None:
         )
 
     assert exc_info.value.error_code is ErrorCode.SOURCE_IDEMPOTENCY_MISMATCH
-    assert ledger.entries == [STORE_RESOLVE_COMMITTED]
+    assert ledger.entries == [POLICY_GUARD_PUBLICATION, STORE_RESOLVE_COMMITTED]
     assert object_store.resolve_call_count() == 0
     assert store.commit_receipt_identities == []
     assert (
@@ -288,9 +297,11 @@ async def test_fresh_invocation_obtains_another_receipt_when_preflight_misses() 
     )
 
     assert ledger.entries == [
+        POLICY_GUARD_PUBLICATION,
         STORE_RESOLVE_COMMITTED,
         OBJECT_STORE_RESOLVE,
         STORE_COMMIT_CREATE,
+        POLICY_GUARD_PUBLICATION,
         STORE_RESOLVE_COMMITTED,
         OBJECT_STORE_RESOLVE,
         STORE_COMMIT_CREATE,
@@ -357,3 +368,173 @@ async def test_invalid_expected_object_is_rejected_before_any_io() -> None:
         )
         == 1
     )
+
+
+# --- mandatory policy preflight (spec 14) ----------------------------------------
+
+
+def _build_service_with_guard(
+    guard: object,
+) -> tuple[
+    SourceVersionPublicationService,
+    FakeSourcePublicationStore,
+    FakeCanonicalObjectStore,
+    InMemorySourcePublicationMetrics,
+    CallLedger,
+]:
+    """Wire the service against fakes with one scripted policy guard."""
+
+    ledger = CallLedger()
+    store = FakeSourcePublicationStore(
+        ledger=ledger,
+        commit_result=build_committed_result(build_create_command()),
+    )
+    object_store = FakeCanonicalObjectStore(
+        ledger=ledger,
+        resolve_receipts=[build_verified_receipt(build_expected_object(), _PUBLICATION_START)],
+    )
+    metrics = InMemorySourcePublicationMetrics()
+    service = SourceVersionPublicationService(
+        store=store,
+        object_store=object_store,
+        metrics=metrics,
+        clock=SequencedUtcClock(moments=[_PUBLICATION_START, _PUBLICATION_START]),
+        policy_guard=guard,  # type: ignore[arg-type]
+    )
+    return service, store, object_store, metrics, ledger
+
+
+@pytest.mark.asyncio
+async def test_excluded_source_never_calls_object_store() -> None:
+    service, store, object_store, metrics, ledger = _build_service_with_guard(
+        denying_policy_guard(ErrorCode.EXCLUSION_POLICY_DENIED)
+    )
+
+    with pytest.raises(ExclusionPolicyError) as raised:
+        await service.publish_create(
+            command=build_create_command(),
+            stream=ProbedByteStream([b"must-not-be-read"]),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+    assert raised.value.error_code is ErrorCode.EXCLUSION_POLICY_DENIED
+    # The denial stops the invocation before the store preflight, before any
+    # object-store call and before the caller's stream was read.
+    assert ledger.entries == []
+    assert object_store.resolve_call_count() == 0
+    assert object_store.store_stream_calls == []
+    assert store.commit_receipt_identities == []
+    assert (
+        metrics.publication_count(PublicationOperation.CREATE, PublicationMetricOutcome.REJECTED)
+        == 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_indeterminate_subject_fails_closed_before_any_io() -> None:
+    service, _store, object_store, _, ledger = _build_service_with_guard(
+        denying_policy_guard(ErrorCode.EXCLUSION_POLICY_INDETERMINATE)
+    )
+
+    with pytest.raises(ExclusionPolicyError) as raised:
+        await service.publish_create(
+            command=build_create_command(),
+            stream=ProbedByteStream([b"must-not-be-read"]),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+    assert raised.value.error_code is ErrorCode.EXCLUSION_POLICY_INDETERMINATE
+    assert ledger.entries == []
+    assert object_store.resolve_call_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_missing_active_policy_fails_closed_before_any_io() -> None:
+    service, _store, object_store, _, ledger = _build_service_with_guard(
+        denying_policy_guard(ErrorCode.EXCLUSION_POLICY_NOT_INITIALIZED)
+    )
+
+    with pytest.raises(ExclusionPolicyError) as raised:
+        await service.publish_create(
+            command=build_create_command(),
+            stream=ProbedByteStream([b"must-not-be-read"]),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+    assert raised.value.error_code is ErrorCode.EXCLUSION_POLICY_NOT_INITIALIZED
+    assert ledger.entries == []
+    assert object_store.resolve_call_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_corrupt_signature_material_fails_closed_before_any_io() -> None:
+    service, _store, object_store, _, ledger = _build_service_with_guard(
+        denying_policy_guard(ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE)
+    )
+
+    with pytest.raises(ExclusionPolicyError) as raised:
+        await service.publish_create(
+            command=build_create_command(),
+            stream=ProbedByteStream([b"must-not-be-read"]),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+    assert raised.value.error_code is ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE
+    assert ledger.entries == []
+    assert object_store.resolve_call_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_exact_replay_now_excluded_returns_no_canonical_data() -> None:
+    command = build_create_command()
+    service, store, object_store, _, ledger = _build_service_with_guard(
+        denying_policy_guard(ErrorCode.EXCLUSION_POLICY_DENIED)
+    )
+    # Even with the committed replay result already resolvable, the now-denied
+    # subject must not receive the canonical replay data.
+    store.committed_result = build_committed_result(command)
+
+    with pytest.raises(ExclusionPolicyError) as raised:
+        await service.publish_create(
+            command=command,
+            stream=ProbedByteStream([b"must-not-be-read"]),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+    assert raised.value.error_code is ErrorCode.EXCLUSION_POLICY_DENIED
+    # The denial precedes the store's replay lookup entirely.
+    assert ledger.entries == []
+    assert store.resolve_committed_fingerprints == []
+    assert object_store.resolve_call_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_preflight_evidence_flows_to_the_commit_as_a_hint() -> None:
+    receipt = build_verified_receipt(build_expected_object(), _PUBLICATION_START)
+    command = build_create_command()
+    decision = build_policy_decision(workspace_id=command.workspace_id)
+    ledger = CallLedger()
+    guard = AllowingPolicyGuard(ledger=ledger, decision=decision)
+    store = FakeSourcePublicationStore(
+        ledger=ledger, commit_result=build_committed_result(command)
+    )
+    object_store = FakeCanonicalObjectStore(ledger=ledger, resolve_receipts=[receipt])
+    service = SourceVersionPublicationService(
+        store=store,
+        object_store=object_store,
+        metrics=InMemorySourcePublicationMetrics(),
+        clock=SequencedUtcClock(moments=[_PUBLICATION_START, _PUBLICATION_START]),
+        policy_guard=guard,
+    )
+
+    result = await service.publish_create(
+        command=command,
+        stream=ProbedByteStream([b"unused"]),
+        diagnostic_context=build_diagnostic_context(),
+    )
+
+    assert result is store.commit_result
+    # The store receives exactly the guard's decision as non-authoritative
+    # preflight evidence, once per commit invocation.
+    assert store.commit_policy_decisions == [decision]
+    assert guard.publication_calls == [command.source_id]

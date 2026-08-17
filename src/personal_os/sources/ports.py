@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
 from personal_os.diagnostics.context import DiagnosticContext
@@ -29,8 +29,37 @@ from personal_os.sources.fingerprint import RequestFingerprint, SourceVersionCom
 from personal_os.sources.projection_dispatch import LeasedProjectionIntent
 from personal_os.sources.results import SourceVersionPublicationResult
 
+if TYPE_CHECKING:
+    from personal_os.exclusion_policy.enforcement import PolicyDecision
+    from personal_os.sources.reading import CanonicalSourceReference
+
 #: Injectable clock returning the current aware UTC moment.
 type AwareUtcClock = Callable[[], datetime]
+
+
+class PolicyEnforcementGuard(Protocol):
+    """The mandatory exclusion-policy guard of the canonical boundaries.
+
+    The composition root binds the domain
+    :class:`~personal_os.exclusion_policy.enforcement.PolicyEnforcementService`
+    here. ``authorize_publication`` evaluates the candidate before any
+    object-store access; ``authorize_read`` evaluates the resolved reference
+    before any object-store request. Both are non-authoritative hints — the
+    store adapters independently re-evaluate under the policy-state row lock
+    inside the guarded transaction.
+    """
+
+    async def authorize_publication(
+        self,
+        command: SourceVersionCommand,
+        diagnostic_context: DiagnosticContext,
+    ) -> PolicyDecision: ...
+
+    async def authorize_read(
+        self,
+        reference: CanonicalSourceReference,
+        diagnostic_context: DiagnosticContext,
+    ) -> PolicyDecision: ...
 
 
 class SourcePublicationStore(Protocol):
@@ -42,7 +71,11 @@ class SourcePublicationStore(Protocol):
     identity-mismatch error when the key or event was reused by another
     request. The commit methods run the transaction, rechecking idempotency
     under lock, and may internally perform the bounded database retry reusing
-    the one receipt passed in.
+    the one receipt passed in. ``preflight_decision`` is the service's
+    non-authoritative policy evidence: the store independently locks the
+    policy-state row and re-evaluates the active revision before any source
+    mutation, so a policy change during the upload fails closed without
+    publishing the source version.
     """
 
     async def resolve_committed(
@@ -58,6 +91,8 @@ class SourcePublicationStore(Protocol):
         request_fingerprint: RequestFingerprint,
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
+        *,
+        preflight_decision: PolicyDecision | None = None,
     ) -> SourceVersionPublicationResult: ...
 
     async def commit_update(
@@ -66,6 +101,8 @@ class SourcePublicationStore(Protocol):
         request_fingerprint: RequestFingerprint,
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
+        *,
+        preflight_decision: PolicyDecision | None = None,
     ) -> SourceVersionPublicationResult: ...
 
 

@@ -36,12 +36,16 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import ApplicationError, InternalApplicationError
+from personal_os.exclusion_policy.contracts import PolicySubject
+from personal_os.exclusion_policy.enforcement import PolicyTrustAnchorVerifier
+from personal_os.exclusion_policy.metrics import ExclusionPolicyMetrics, PolicyBoundary
 from personal_os.object_storage import (
     CanonicalMediaType,
     ContentDigest,
     ExpectedObject,
     derive_canonical_object_key,
 )
+from personal_os.sources.commands import SourceType
 from personal_os.sources.errors import SourcePublicationError
 from personal_os.sources.reading import (
     CanonicalReadStateError,
@@ -50,6 +54,7 @@ from personal_os.sources.reading import (
 )
 from postgresql_source_store.engine import apply_transaction_bounds
 from postgresql_source_store.error_mapping import map_database_failure
+from postgresql_source_store.policy_enforcement import evaluate_locked_policy_decision
 from postgresql_source_store.tables import content_objects, source_versions, sources
 
 #: The only source states whose current reference may be read.
@@ -71,6 +76,7 @@ def current_reference_lookup_statement(
             sources.c.workspace_id.label("workspace_id"),
             sources.c.source_id.label("source_id"),
             sources.c.sync_state.label("sync_state"),
+            sources.c.source_type.label("source_type"),
             sources.c.current_version_id.label("current_source_version_id"),
             source_versions.c.workspace_id.label("version_workspace_id"),
             source_versions.c.source_id.label("version_source_id"),
@@ -152,6 +158,12 @@ def hydrate_canonical_source_reference(row: Mapping[str, Any]) -> CanonicalSourc
         media_type = CanonicalMediaType.parse(media_type_value)
     except ValueError as cause:
         raise invalid() from cause
+    source_type_value = row["source_type"]
+    try:
+        source_type = SourceType(str(source_type_value))
+    except ValueError as cause:
+        # Impossible against the CHECK constraint; fail closed as drift.
+        raise InternalApplicationError(ErrorCode.INTERNAL_ERROR) from cause
     if object_key != derive_canonical_object_key(digest).value:
         raise invalid()
     return CanonicalSourceReference(
@@ -159,6 +171,7 @@ def hydrate_canonical_source_reference(row: Mapping[str, Any]) -> CanonicalSourc
         source_id=source_id,
         source_version_id=source_version_id,
         content_version=content_version,
+        source_type=source_type,
         expected_object=ExpectedObject(
             content_digest=digest,
             size_bytes=byte_size,
@@ -171,14 +184,26 @@ def hydrate_canonical_source_reference(row: Mapping[str, Any]) -> CanonicalSourc
 class PostgresqlCanonicalSourceReadStore:
     """Read-only canonical current-reference store over the PostgreSQL baseline.
 
-    The store takes the composition-owned :class:`AsyncEngine`; it opens no
-    connection at construction. ``resolve_current`` performs exactly one
-    bounded joined read and never mutates state, pointer, versions, events,
-    audit or intents.
+    The store takes the composition-owned :class:`AsyncEngine` and the
+    mandatory policy trust-anchor verifier; it opens no connection at
+    construction. ``resolve_current`` performs exactly one bounded joined
+    read, hydrates the reference and — inside the same transaction — locks the
+    ``workspace_policy_state`` row and re-evaluates the active signed policy
+    against the hydrated subject, so no object-store request can be issued
+    before the current policy permits the source. It never mutates state,
+    pointer, versions, events, audit or intents.
     """
 
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        *,
+        policy_verifier: PolicyTrustAnchorVerifier,
+        policy_metrics: ExclusionPolicyMetrics | None = None,
+    ) -> None:
         self._engine = engine
+        self._policy_verifier = policy_verifier
+        self._policy_metrics = policy_metrics
 
     async def resolve_current(
         self, command: ReadCurrentSourceCommand, diagnostic_context: DiagnosticContext
@@ -193,13 +218,33 @@ class PostgresqlCanonicalSourceReadStore:
                     current_reference_lookup_statement(command.workspace_id, command.source_id)
                 )
                 row = result.one_or_none()
+                if row is None:
+                    raise SourcePublicationError(
+                        ErrorCode.SOURCE_NOT_FOUND,
+                        safe_details={"source_id": command.source_id},
+                    )
+                reference = hydrate_canonical_source_reference(row._mapping)
+                # Spec 14: the policy recheck shares the read transaction that
+                # resolves the source state, so the pointer cannot move and a
+                # policy revision cannot activate between resolution and the
+                # authorization decision.
+                subject = PolicySubject(
+                    workspace_id=reference.workspace_id,
+                    source_id=reference.source_id,
+                    source_type=reference.source_type,
+                    media_type=reference.expected_object.media_type,
+                    size_bytes=reference.expected_object.size_bytes,
+                )
+                await evaluate_locked_policy_decision(
+                    connection,
+                    workspace_id=command.workspace_id,
+                    subject=subject,
+                    verifier=self._policy_verifier,
+                    metrics=self._policy_metrics,
+                    boundary=PolicyBoundary.CANONICAL_READ,
+                )
         except ApplicationError:
             raise
         except Exception as cause:
             raise map_database_failure(cause, source_id=command.source_id) from cause
-        if row is None:
-            raise SourcePublicationError(
-                ErrorCode.SOURCE_NOT_FOUND,
-                safe_details={"source_id": command.source_id},
-            )
-        return hydrate_canonical_source_reference(row._mapping)
+        return reference
