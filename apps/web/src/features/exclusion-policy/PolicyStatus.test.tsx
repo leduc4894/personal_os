@@ -100,6 +100,19 @@ describe("PolicyStatus", () => {
     expect(screen.getByText(/exact replay of an already committed publication/)).toBeInTheDocument();
   });
 
+  it("shows the signer of the committed revision as an opaque key identifier", () => {
+    render(
+      <PolicyStatus status={statusData()} lastPublication={publicationData({ signing_key_id: "key-2026-08" })} />,
+    );
+    expect(screen.getByText(/signed by key/i)).toBeInTheDocument();
+    expect(screen.getByText("key-2026-08")).toBeInTheDocument();
+  });
+
+  it("renders no signer claim when no committed publication result exists", () => {
+    render(<PolicyStatus status={statusData()} />);
+    expect(screen.queryByText(/signed by key/i)).not.toBeInTheDocument();
+  });
+
   it("renders only closed metadata and never rule or secret material", () => {
     const { container } = render(
       <PolicyStatus

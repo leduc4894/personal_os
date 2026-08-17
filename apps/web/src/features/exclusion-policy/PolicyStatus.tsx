@@ -55,15 +55,21 @@ export function PolicyStatus({ status, lastPublication = null }: PolicyStatusPro
         </p>
       )}
       {lastPublication !== null && (
-        <p>
-          Published revision {lastPublication.revision_number} · {lastPublication.rule_count}{" "}
-          {lastPublication.rule_count === 1 ? "rule" : "rules"} · reconciliation{" "}
-          {lastPublication.reconciliation_status}
-          {lastPublication.is_replay
-            ? " · exact replay of an already committed publication"
-            : ""}
-          .
-        </p>
+        <>
+          <p>
+            Published revision {lastPublication.revision_number} · {lastPublication.rule_count}{" "}
+            {lastPublication.rule_count === 1 ? "rule" : "rules"} · reconciliation{" "}
+            {lastPublication.reconciliation_status}
+            {lastPublication.is_replay
+              ? " · exact replay of an already committed publication"
+              : ""}
+            .
+          </p>
+          <p>
+            Signed by key <code>{lastPublication.signing_key_id}</code>. The key identifier is an
+            opaque public id; no key material is ever displayed.
+          </p>
+        </>
       )}
     </section>
   );
