@@ -47,6 +47,10 @@ SUBJECT_FIELD_TYPE_INVALID: SafeToken = SafeToken.parse("subject_field_type_inva
 SUBJECT_SIZE_INVALID: SafeToken = SafeToken.parse("subject_size_invalid")
 SUBJECT_WORKSPACE_MISMATCH: SafeToken = SafeToken.parse("subject_workspace_mismatch")
 
+#: Preview read orchestration reason tokens (spec 10): the bounded result-page
+#: bound and the required preview subjects.
+PREVIEW_LIMIT_INVALID: SafeToken = SafeToken.parse("preview_limit_invalid")
+
 #: Closed reason tokens accepted by ``exclusion_policy_input_invalid``.
 INPUT_REASONS: tuple[SafeToken, ...] = (
     LOCATOR_NOT_VALID_UNICODE,
@@ -75,6 +79,7 @@ INPUT_REASONS: tuple[SafeToken, ...] = (
     SUBJECT_FIELD_TYPE_INVALID,
     SUBJECT_SIZE_INVALID,
     SUBJECT_WORKSPACE_MISMATCH,
+    PREVIEW_LIMIT_INVALID,
 )
 
 

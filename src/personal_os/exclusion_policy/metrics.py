@@ -1,12 +1,15 @@
-"""Low-cardinality exclusion-policy evaluation metrics contracts.
+"""Low-cardinality exclusion-policy evaluation and preview metrics contracts.
 
 Spec 21 requires ``exclusion_policy_evaluation_total{boundary,decision}`` and
 ``exclusion_policy_evaluation_duration_seconds{boundary,decision}`` for
-per-source evaluations. Every label is a closed :class:`enum.StrEnum` member:
-the boundary vocabulary mirrors the mandatory boundaries of spec 14.2 and the
+per-source evaluations plus ``exclusion_policy_preview_total{outcome}`` and
+``exclusion_policy_preview_duration_seconds{outcome}`` for complete preview
+executions. Every label is a closed :class:`enum.StrEnum` member:
+the boundary vocabulary mirrors the mandatory boundaries of spec 14.2, the
 decision label is the raw three-value decision so indeterminacy stays
-observable. Workspace, source, rule, preview, revision, path, media type and
-key ID are prohibited labels and can never be recorded.
+observable, and the preview outcome is the durable execution outcome recorded
+only after it is known. Workspace, source, rule, preview, revision, path,
+media type and key ID are prohibited labels and can never be recorded.
 
 :class:`ExclusionPolicyMetrics` is the injectable Protocol enforcement paths
 depend on; :class:`InMemoryExclusionPolicyMetrics` is the bounded test and
@@ -50,12 +53,26 @@ class EvaluationMetricOutcome(StrEnum):
     INDETERMINATE = "indeterminate"
 
 
-#: The exact evaluation metric names and their label dimensions (spec 21).
-#: IDs, locators, operands and revision numbers are never metric labels.
+class PreviewMetricOutcome(StrEnum):
+    """The closed preview outcomes used as metric labels (spec 21).
+
+    Recorded only after the durable outcome is known: ``ready`` for a complete
+    atomic result set and ``failed`` for every durable failure transition.
+    Workspace, preview and source IDs are prohibited labels.
+    """
+
+    READY = "ready"
+    FAILED = "failed"
+
+
+#: The exact evaluation and preview metric names and their label dimensions
+#: (spec 21). IDs, locators, operands and revision numbers are never labels.
 EXCLUSION_POLICY_METRIC_CONTRACTS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
     {
         "exclusion_policy_evaluation_total": frozenset({"boundary", "decision"}),
         "exclusion_policy_evaluation_duration_seconds": frozenset({"boundary", "decision"}),
+        "exclusion_policy_preview_total": frozenset({"outcome"}),
+        "exclusion_policy_preview_duration_seconds": frozenset({"outcome"}),
     }
 )
 
@@ -78,6 +95,18 @@ class EvaluationRecord:
     duration_seconds: float
 
 
+@dataclass(frozen=True, slots=True)
+class PreviewRecord:
+    """One recorded preview outcome.
+
+    Carries only the closed outcome enum plus a finite non-negative duration;
+    never a workspace, preview or source ID.
+    """
+
+    outcome: PreviewMetricOutcome
+    duration_seconds: float
+
+
 def _validate_label(field_name: str, expected_type: type, value: object) -> None:
     if not isinstance(value, expected_type):
         raise ValueError(f"{field_name} label must be a closed enum member")
@@ -90,7 +119,7 @@ def _validate_finite_non_negative(field_name: str, value: float) -> None:
 
 @runtime_checkable
 class ExclusionPolicyMetrics(Protocol):
-    """The low-cardinality exclusion-policy evaluation metrics sink."""
+    """The low-cardinality exclusion-policy metrics sink."""
 
     def record_evaluation(
         self,
@@ -102,18 +131,28 @@ class ExclusionPolicyMetrics(Protocol):
         """Record one completed evaluation outcome and its duration in seconds."""
         ...
 
+    def record_preview(
+        self,
+        *,
+        outcome: PreviewMetricOutcome,
+        duration_seconds: float,
+    ) -> None:
+        """Record one durable preview outcome and its duration in seconds."""
+        ...
+
 
 class InMemoryExclusionPolicyMetrics:
     """Bounded in-memory recorder implementing :class:`ExclusionPolicyMetrics`.
 
-    Keeps at most :data:`_MAXIMUM_EVALUATION_RECORDS` evaluation records in a
-    ring buffer keyed only by the closed enum labels, and rejects negative or
-    non-finite durations and any non-enum label so a UUID, locator or operand
-    can never become a label.
+    Keeps at most :data:`_MAXIMUM_EVALUATION_RECORDS` evaluation and preview
+    records in ring buffers keyed only by the closed enum labels, and rejects
+    negative or non-finite durations and any non-enum label so a UUID, locator
+    or operand can never become a label.
     """
 
     def __init__(self) -> None:
         self._evaluations: deque[EvaluationRecord] = deque(maxlen=_MAXIMUM_EVALUATION_RECORDS)
+        self._previews: deque[PreviewRecord] = deque(maxlen=_MAXIMUM_EVALUATION_RECORDS)
 
     def record_evaluation(
         self,
@@ -137,6 +176,24 @@ class InMemoryExclusionPolicyMetrics:
         """A snapshot list of recorded evaluation outcomes (oldest first)."""
 
         return list(self._evaluations)
+
+    def record_preview(
+        self,
+        *,
+        outcome: PreviewMetricOutcome,
+        duration_seconds: float,
+    ) -> None:
+        _validate_label("outcome", PreviewMetricOutcome, outcome)
+        _validate_finite_non_negative("duration_seconds", duration_seconds)
+        self._previews.append(PreviewRecord(outcome=outcome, duration_seconds=duration_seconds))
+
+    def preview_records(self) -> list[PreviewRecord]:
+        """A snapshot list of recorded preview outcomes (oldest first)."""
+
+        return list(self._previews)
+
+    def preview_count(self, outcome: PreviewMetricOutcome) -> int:
+        return sum(1 for record in self._previews if record.outcome is outcome)
 
     def evaluation_count(self, boundary: PolicyBoundary, decision: EvaluationMetricOutcome) -> int:
         return sum(
