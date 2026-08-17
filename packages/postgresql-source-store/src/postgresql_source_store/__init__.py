@@ -30,6 +30,8 @@ from postgresql_source_store.error_mapping import (
     map_database_failure,
 )
 from postgresql_source_store.identity_bootstrap import PostgresqlIdentityBootstrapStore
+from postgresql_source_store.policy_drafts import PostgresqlPolicyDraftStore
+from postgresql_source_store.policy_keysets import PostgresqlPolicyKeysetStore
 from postgresql_source_store.projection_intents import (
     PostgresqlProjectionIntentStore,
     ProjectionDiagnosticSink,
@@ -50,6 +52,8 @@ __all__ = [
     "PostgresqlBackupSnapshotStore",
     "PostgresqlCanonicalSourceReadStore",
     "PostgresqlIdentityBootstrapStore",
+    "PostgresqlPolicyDraftStore",
+    "PostgresqlPolicyKeysetStore",
     "PostgresqlProjectionIntentStore",
     "PostgresqlReadinessProbe",
     "PostgresqlRestoreTarget",

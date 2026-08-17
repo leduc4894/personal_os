@@ -6,9 +6,9 @@ paths, snapshots and subject fingerprints remain chained only as internal
 causes and never enter the typed error, its safe details or diagnostics.
 
 The reason tokens below are closed ``SafeToken`` constants: every
-normalization or evaluation rejection names exactly one of them. ``reason``
-plus the optional zero-based ``rule_index`` are the only safe details
-``exclusion_policy_input_invalid`` accepts.
+normalization, evaluation or draft-list validation rejection names exactly
+one of them. ``reason`` plus the optional zero-based ``rule_index`` are the
+only safe details ``exclusion_policy_input_invalid`` accepts.
 """
 
 from __future__ import annotations
@@ -35,6 +35,8 @@ GLOB_TOO_MANY_SEGMENTS: SafeToken = SafeToken.parse("glob_too_many_segments")
 GLOB_TOO_MANY_WILDCARDS: SafeToken = SafeToken.parse("glob_too_many_wildcards")
 
 RULE_ID_INVALID: SafeToken = SafeToken.parse("rule_id_invalid")
+RULE_COUNT_INVALID: SafeToken = SafeToken.parse("rule_count_invalid")
+RULE_FINGERPRINT_DUPLICATE: SafeToken = SafeToken.parse("rule_fingerprint_duplicate")
 OPERAND_MISSING: SafeToken = SafeToken.parse("operand_missing")
 OPERAND_CONFLICT: SafeToken = SafeToken.parse("operand_conflict")
 OPERAND_INVALID: SafeToken = SafeToken.parse("operand_invalid")
@@ -63,6 +65,8 @@ INPUT_REASONS: tuple[SafeToken, ...] = (
     GLOB_TOO_MANY_SEGMENTS,
     GLOB_TOO_MANY_WILDCARDS,
     RULE_ID_INVALID,
+    RULE_COUNT_INVALID,
+    RULE_FINGERPRINT_DUPLICATE,
     OPERAND_MISSING,
     OPERAND_CONFLICT,
     OPERAND_INVALID,
