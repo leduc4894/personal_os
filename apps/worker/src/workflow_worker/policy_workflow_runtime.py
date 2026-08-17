@@ -38,6 +38,7 @@ from temporalio.worker import Worker
 
 from personal_os.diagnostics.events import SafeToken
 from personal_os.error_contracts.exceptions import ApplicationError
+from personal_os.exclusion_policy.reconciliation import ReconciliationInput
 from personal_os.runtime_configuration.loading import load_runtime_settings
 from personal_os.runtime_configuration.models import ServiceName
 from postgresql_source_store.engine import (
@@ -49,6 +50,12 @@ from postgresql_source_store.policy_previews import (
     PREVIEW_DISPATCH_TERMINAL_ERROR_CODE,
     LeasedPolicyPreview,
     PostgresqlPolicyPreviewStore,
+)
+from postgresql_source_store.policy_reconciliation import (
+    POLICY_RECONCILIATION_CLAIM_BATCH_LIMIT,
+    RECONCILIATION_DISPATCH_TERMINAL_ERROR_CODE,
+    LeasedPolicyReconciliation,
+    PostgresqlPolicyReconciliationStore,
 )
 from postgresql_source_store.settings import (
     load_database_runtime_settings,
@@ -63,6 +70,15 @@ from workflow_worker.policy_preview_workflow import (
     PolicyPreviewWorkflow,
     TemporalPolicyPreviewStarter,
     preview_reference_for_lease,
+)
+from workflow_worker.policy_reconciliation_workflow import (
+    POLICY_RECONCILIATION_START_TIMEOUT,
+    POLICY_RECONCILIATION_TASK_QUEUE,
+    PolicyReconciliationActivities,
+    PolicyReconciliationStartOutcome,
+    PolicyReconciliationWorkflow,
+    TemporalPolicyReconciliationStarter,
+    reconciliation_input_for_lease,
 )
 from workflow_worker.projection_dispatch_runtime import (
     DEFAULT_TEMPORAL_NAMESPACE,
@@ -264,6 +280,124 @@ class PolicyPreviewProcess:
     shutdown: asyncio.Event
 
 
+class PolicyReconciliationOutboxStore(Protocol):
+    """The leased-outbox slice of the reconciliation store the runtime consumes."""
+
+    async def reclaim_expired(self, now: datetime) -> int: ...
+
+    async def claim_pending(
+        self, now: datetime, limit: int
+    ) -> list[LeasedPolicyReconciliation]: ...
+
+    async def acknowledge_dispatched(
+        self, intent_id: UUID, lease_token: UUID, now: datetime
+    ) -> bool: ...
+
+    async def release_retry(
+        self,
+        intent_id: UUID,
+        lease_token: UUID,
+        error_code: SafeToken,
+        now: datetime,
+    ) -> bool: ...
+
+    async def mark_terminal(
+        self,
+        intent_id: UUID,
+        lease_token: UUID,
+        error_code: SafeToken,
+        now: datetime,
+    ) -> bool: ...
+
+
+class PolicyReconciliationStarterPort(Protocol):
+    """The start port the reconciliation dispatch runtime consumes."""
+
+    async def start_policy_reconciliation(
+        self, reference: ReconciliationInput
+    ) -> PolicyReconciliationStartOutcome: ...
+
+
+class PolicyReconciliationDispatchRuntime:
+    """One dispatcher's bounded reclaim/claim/start/acknowledge loop (spec 15).
+
+    All time arrives through the injected clock; persistence stamps database
+    time. A converged start (started or the exact existing execution)
+    acknowledges ``dispatched`` — the durable resting state whose workflow
+    owns the revision. A retryable start failure releases the lease back to
+    pending with the bounded backoff; a terminal contract failure marks the
+    row terminal; an unknown outcome stays leased for expiry. The
+    deterministic workflow ID makes every re-dispatch converge on one
+    execution after a lost start acknowledgement.
+    """
+
+    def __init__(
+        self,
+        *,
+        store: PolicyReconciliationOutboxStore,
+        starter: PolicyReconciliationStarterPort,
+        clock: AwareUtcClock,
+    ) -> None:
+        self._store = store
+        self._starter = starter
+        self._clock = clock
+
+    async def run_until_shutdown(
+        self,
+        shutdown: asyncio.Event,
+        *,
+        poll_interval_seconds: float = POLICY_PREVIEW_DISPATCH_POLL_INTERVAL_SECONDS,
+    ) -> None:
+        """Reclaim, claim and dispatch until shutdown is signalled."""
+
+        while not shutdown.is_set():
+            await self.dispatch_pending_reconciliations_once()
+            if shutdown.is_set():
+                break
+            try:
+                await asyncio.wait_for(shutdown.wait(), timeout=poll_interval_seconds)
+            except TimeoutError:
+                continue
+
+    async def dispatch_pending_reconciliations_once(self) -> int:
+        """Run one reclaim/claim/dispatch cycle and return the claimed count."""
+
+        now = self._clock()
+        await self._store.reclaim_expired(now)
+        claimed = await self._store.claim_pending(now, POLICY_RECONCILIATION_CLAIM_BATCH_LIMIT)
+        for lease in claimed:
+            await self._dispatch_lease(lease, now)
+        return len(claimed)
+
+    async def _dispatch_lease(self, lease: LeasedPolicyReconciliation, now: datetime) -> None:
+        reference = reconciliation_input_for_lease(lease)
+        try:
+            await self._starter.start_policy_reconciliation(reference)
+        except ApplicationError as error:
+            if error.is_retryable:
+                await self._store.release_retry(
+                    lease.policy_reconciliation_intent_id,
+                    lease.lease_token,
+                    _safe_code(error),
+                    now,
+                )
+            else:
+                await self._store.mark_terminal(
+                    lease.policy_reconciliation_intent_id,
+                    lease.lease_token,
+                    RECONCILIATION_DISPATCH_TERMINAL_ERROR_CODE,
+                    now,
+                )
+            return
+        except Exception:
+            # An unexpected start failure leaves the outcome unknown: the
+            # lease stays held and lease expiry reclaims it.
+            return
+        await self._store.acknowledge_dispatched(
+            lease.policy_reconciliation_intent_id, lease.lease_token, now
+        )
+
+
 def build_policy_preview_process(
     *,
     engine: AsyncEngine,
@@ -315,9 +449,7 @@ async def run_policy_preview_process() -> None:
     engine = create_source_store_engine(database_settings, password)
     try:
         temporal_client = await asyncio.wait_for(
-            TemporalClient.connect(
-                temporal_settings.target, namespace=temporal_settings.namespace
-            ),
+            TemporalClient.connect(temporal_settings.target, namespace=temporal_settings.namespace),
             timeout=POLICY_PREVIEW_START_TIMEOUT.total_seconds(),
         )
     except TimeoutError as cause:
@@ -334,15 +466,106 @@ async def run_policy_preview_process() -> None:
         await dispose_source_store_engine(engine)
 
 
+@dataclass(frozen=True, slots=True)
+class PolicyReconciliationProcess:
+    """The composed reconciliation worker pieces one process run owns."""
+
+    worker: Worker
+    dispatch_runtime: PolicyReconciliationDispatchRuntime
+    shutdown: asyncio.Event
+
+
+def build_policy_reconciliation_process(
+    *,
+    engine: AsyncEngine,
+    temporal_client: TemporalClient,
+    lease_token_generator: Callable[[], UUID] | None = None,
+    clock: AwareUtcClock = _utc_now,
+) -> PolicyReconciliationProcess:
+    """Compose the reconciliation store, activities, worker and dispatcher.
+
+    Pure composition: no connection is opened here beyond what the caller
+    already owns (the engine and the connected Temporal client), so tests
+    build the same graph against disposable stacks.
+    """
+
+    store = PostgresqlPolicyReconciliationStore(
+        engine,
+        lease_token_generator=(
+            lease_token_generator if lease_token_generator is not None else uuid4
+        ),
+    )
+    activities = PolicyReconciliationActivities(store=store)
+    worker = Worker(
+        temporal_client,
+        task_queue=POLICY_RECONCILIATION_TASK_QUEUE,
+        workflows=[PolicyReconciliationWorkflow],
+        activities=[
+            activities.run_reconciliation_batch_activity,
+            activities.complete_reconciliation_activity,
+        ],
+    )
+    starter = TemporalPolicyReconciliationStarter(temporal_client)
+    dispatch_runtime = PolicyReconciliationDispatchRuntime(
+        store=store, starter=starter, clock=clock
+    )
+    return PolicyReconciliationProcess(
+        worker=worker, dispatch_runtime=dispatch_runtime, shutdown=asyncio.Event()
+    )
+
+
+async def run_policy_reconciliation_process() -> None:
+    """Compose and run one reconciliation worker process until shutdown.
+
+    Loads the validated runtime, database and Temporal settings (the policy
+    target/namespace reuse the preview loader's validation rules with the
+    reconciliation queue pinned), refuses activation outside the loopback
+    local/test exception, connects the Temporal client under the pinned
+    bound, then runs the registered worker and the leased dispatch loop
+    concurrently. The engine is disposed on exit.
+    """
+
+    runtime_settings = load_runtime_settings(ServiceName.WORKER)
+    database_settings = load_database_runtime_settings()
+    temporal_settings = load_policy_temporal_settings()
+    require_dispatcher_activation_allowed(runtime_settings.environment, temporal_settings)
+    password = read_database_runtime_password(database_settings)
+    engine = create_source_store_engine(database_settings, password)
+    try:
+        temporal_client = await asyncio.wait_for(
+            TemporalClient.connect(temporal_settings.target, namespace=temporal_settings.namespace),
+            timeout=POLICY_RECONCILIATION_START_TIMEOUT.total_seconds(),
+        )
+    except TimeoutError as cause:
+        from personal_os.error_contracts.codes import ErrorCode
+        from personal_os.exclusion_policy.errors import ExclusionPolicyError
+
+        raise ExclusionPolicyError(ErrorCode.EXCLUSION_POLICY_COMMIT_OUTCOME_UNKNOWN) from cause
+    process = build_policy_reconciliation_process(engine=engine, temporal_client=temporal_client)
+    _install_shutdown_signals(process.shutdown)
+    try:
+        async with process.worker:
+            await process.dispatch_runtime.run_until_shutdown(process.shutdown)
+    finally:
+        await dispose_source_store_engine(engine)
+
+
 __all__ = [
     "POLICY_PREVIEW_DISPATCH_POLL_INTERVAL_SECONDS",
     "AwareUtcClock",
     "LeasedPolicyPreview",
+    "LeasedPolicyReconciliation",
     "PolicyPreviewDispatchRuntime",
     "PolicyPreviewOutboxStore",
     "PolicyPreviewProcess",
     "PolicyPreviewStarterPort",
+    "PolicyReconciliationDispatchRuntime",
+    "PolicyReconciliationOutboxStore",
+    "PolicyReconciliationProcess",
+    "PolicyReconciliationStarterPort",
     "build_policy_preview_process",
+    "build_policy_reconciliation_process",
     "load_policy_temporal_settings",
     "run_policy_preview_process",
+    "run_policy_reconciliation_process",
 ]

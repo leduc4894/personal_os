@@ -338,6 +338,39 @@ async def test_intent_without_source_version_id_marks_terminal() -> None:
 
 
 @pytest.mark.asyncio
+async def test_claimed_policy_transition_origin_could_never_start_source_ingestion() -> None:
+    # Defense in depth behind the claim SQL's origin filter: if a
+    # policy-transition intent ever reached the dispatch loop, the closed
+    # input contract rejects it before any workflow start and the row goes
+    # terminal — it can never reach SourceIngestionWorkflow.
+    from personal_os.sources.projection_dispatch import ProjectionIntentOriginKind
+
+    intent = LeasedProjectionIntent(
+        projection_intent_id=uuid4(),
+        workspace_id=uuid4(),
+        origin_kind=ProjectionIntentOriginKind.POLICY_TRANSITION,
+        event_id=None,
+        policy_revision_id=uuid4(),
+        source_id=uuid4(),
+        source_version_id=uuid4(),
+        projection_kind=SafeToken.parse("qdrant"),
+        operation=SafeToken.parse("delete"),
+        attempt_count=0,
+        lease_token=uuid4(),
+        leased_until=_FIXED_NOW + timedelta(seconds=60),
+    )
+    store = FakeIntentStore((intent,))
+    starter = FakeStarter()
+    runtime, _, _ = _runtime(store, starter)
+
+    await runtime.dispatch_pending_intents_once()
+
+    assert starter.calls == []
+    assert len(store.terminals) == 1
+    assert store.terminals[0].error_code == SafeToken.parse("projection_intent_contract_invalid")
+
+
+@pytest.mark.asyncio
 async def test_stale_fence_never_overwrites_and_records_no_dispatch_outcome() -> None:
     intent = _leased_intent()
     store = FakeIntentStore((intent,), acknowledge_result=False)
