@@ -94,6 +94,19 @@ class ErrorCode(StrEnum):
     DEVICE_REVOKED = "device_revoked"
     DEVICE_TOKEN_REUSE_DETECTED = "device_token_reuse_detected"
     PLUGIN_VERSION_UNSUPPORTED = "plugin_version_unsupported"
+    EXCLUSION_POLICY_INPUT_INVALID = "exclusion_policy_input_invalid"
+    EXCLUSION_POLICY_NOT_INITIALIZED = "exclusion_policy_not_initialized"
+    EXCLUSION_POLICY_DRAFT_CONFLICT = "exclusion_policy_draft_conflict"
+    EXCLUSION_POLICY_PREVIEW_PENDING = "exclusion_policy_preview_pending"
+    EXCLUSION_POLICY_PREVIEW_FAILED = "exclusion_policy_preview_failed"
+    EXCLUSION_POLICY_PREVIEW_EXPIRED = "exclusion_policy_preview_expired"
+    EXCLUSION_POLICY_PREVIEW_STALE = "exclusion_policy_preview_stale"
+    EXCLUSION_POLICY_CONFIRMATION_INVALID = "exclusion_policy_confirmation_invalid"
+    EXCLUSION_POLICY_DENIED = "exclusion_policy_denied"
+    EXCLUSION_POLICY_INDETERMINATE = "exclusion_policy_indeterminate"
+    EXCLUSION_POLICY_SNAPSHOT_OUTDATED = "exclusion_policy_snapshot_outdated"
+    EXCLUSION_POLICY_SIGNING_UNAVAILABLE = "exclusion_policy_signing_unavailable"
+    EXCLUSION_POLICY_COMMIT_OUTCOME_UNKNOWN = "exclusion_policy_commit_outcome_unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -553,6 +566,87 @@ ERROR_DEFINITIONS: Final[Mapping[ErrorCode, ErrorDefinition]] = MappingProxyType
             is_retryable=False,
             safe_message="The plugin version is not supported",
             allowed_detail_fields=frozenset({"approved_version_bounds"}),
+        ),
+        # The exclusion-policy block of the design error contract (spec 19).
+        # HTTP statuses come from that table (422/409/410/403/503) and are wired
+        # into the closed api_contracts status map when the routes land.
+        ErrorCode.EXCLUSION_POLICY_INPUT_INVALID: ErrorDefinition(
+            category=ErrorCategory.VALIDATION,
+            is_retryable=False,
+            safe_message="Exclusion policy input is invalid",
+            allowed_detail_fields=frozenset({"reason", "rule_index"}),
+        ),
+        ErrorCode.EXCLUSION_POLICY_NOT_INITIALIZED: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="No exclusion policy revision has been published",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.EXCLUSION_POLICY_DRAFT_CONFLICT: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The exclusion policy draft was modified concurrently",
+            allowed_detail_fields=frozenset({"current_draft_version"}),
+        ),
+        ErrorCode.EXCLUSION_POLICY_PREVIEW_PENDING: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=True,
+            safe_message="The exclusion policy preview is not ready yet",
+            allowed_detail_fields=frozenset({"retry_after_seconds"}),
+        ),
+        ErrorCode.EXCLUSION_POLICY_PREVIEW_FAILED: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The exclusion policy preview failed",
+            allowed_detail_fields=frozenset({"reason"}),
+        ),
+        ErrorCode.EXCLUSION_POLICY_PREVIEW_EXPIRED: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The exclusion policy preview expired",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.EXCLUSION_POLICY_PREVIEW_STALE: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The exclusion policy preview is stale",
+            allowed_detail_fields=frozenset({"reason"}),
+        ),
+        ErrorCode.EXCLUSION_POLICY_CONFIRMATION_INVALID: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The exclusion policy confirmation phrase is invalid",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.EXCLUSION_POLICY_DENIED: ErrorDefinition(
+            category=ErrorCategory.AUTHORIZATION,
+            is_retryable=False,
+            safe_message="The exclusion policy denied this operation",
+            allowed_detail_fields=frozenset({"policy_revision_number"}),
+        ),
+        ErrorCode.EXCLUSION_POLICY_INDETERMINATE: ErrorDefinition(
+            category=ErrorCategory.AUTHORIZATION,
+            is_retryable=False,
+            safe_message="The exclusion policy decision is indeterminate",
+            allowed_detail_fields=frozenset({"reason"}),
+        ),
+        ErrorCode.EXCLUSION_POLICY_SNAPSHOT_OUTDATED: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=True,
+            safe_message="The exclusion policy snapshot is outdated",
+            allowed_detail_fields=frozenset({"current_policy_revision_number"}),
+        ),
+        ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE: ErrorDefinition(
+            category=ErrorCategory.DEPENDENCY,
+            is_retryable=False,
+            safe_message="Exclusion policy signing is unavailable",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.EXCLUSION_POLICY_COMMIT_OUTCOME_UNKNOWN: ErrorDefinition(
+            category=ErrorCategory.DEPENDENCY,
+            is_retryable=True,
+            safe_message="The exclusion policy commit outcome could not be determined",
+            allowed_detail_fields=frozenset(),
         ),
     }
 )

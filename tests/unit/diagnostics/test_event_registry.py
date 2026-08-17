@@ -188,3 +188,49 @@ def test_source_publication_events_are_registered_with_exact_contracts() -> None
         assert (definition.level, definition.result_code) == (level, result_code), event_name
         assert definition.required_fields == required, event_name
         assert definition.allowed_fields == allowed, event_name
+
+
+def test_exclusion_policy_evaluation_events_are_registered_with_exact_contracts() -> None:
+    """Spec 21 evaluation events: closed boundary/decision labels and counts only.
+
+    Field values stay inside the spec 21 allowed vocabulary — boundary,
+    decision, revision number, rule/matched/missing counts and duration — and
+    never include a locator, operand, path or subject fingerprint.
+    """
+
+    expected = {
+        EventName.EXCLUSION_POLICY_EVALUATION_COMPLETED: (
+            DiagnosticLevel.INFO,
+            ResultCode.SUCCEEDED,
+            frozenset({"boundary", "decision", "rule_count"}),
+            frozenset(
+                {
+                    "boundary",
+                    "decision",
+                    "rule_count",
+                    "revision_number",
+                    "duration_ms",
+                    "matched_rule_count",
+                    "missing_field_count",
+                }
+            ),
+        ),
+        EventName.EXCLUSION_POLICY_EVALUATION_REJECTED: (
+            DiagnosticLevel.WARNING,
+            ResultCode.REJECTED,
+            frozenset({"boundary", "error_code"}),
+            frozenset(
+                {
+                    "boundary",
+                    "error_code",
+                    "error_category",
+                    "is_retryable",
+                }
+            ),
+        ),
+    }
+    for event_name, (level, result_code, required, allowed) in expected.items():
+        definition = EVENT_DEFINITIONS[event_name]
+        assert (definition.level, definition.result_code) == (level, result_code), event_name
+        assert definition.required_fields == required, event_name
+        assert definition.allowed_fields == allowed, event_name

@@ -1,0 +1,801 @@
+{
+  "contract": "exclusion_policy_evaluator_golden/v1",
+  "evaluation_cases": [
+    {
+      "case_id": "empty_policy_allows_subject_without_fields",
+      "expected": {
+        "enforced": "allowed",
+        "matched_rule_ids": [],
+        "missing_fields": [],
+        "raw": "allowed"
+      },
+      "rules": [],
+      "subject": {}
+    },
+    {
+      "case_id": "maximum_size_missing_field_is_indeterminate",
+      "expected": {
+        "enforced": "excluded",
+        "matched_rule_ids": [],
+        "missing_fields": [
+          "size_bytes"
+        ],
+        "raw": "indeterminate"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000301",
+          "rule_kind": "maximum_size",
+          "size_bytes_operand": 8388608
+        }
+      ],
+      "subject": {}
+    },
+    {
+      "case_id": "definite_match_over_missing_field",
+      "expected": {
+        "enforced": "excluded",
+        "matched_rule_ids": [
+          "018f47a0-7b00-7000-8000-000000000302"
+        ],
+        "missing_fields": [
+          "size_bytes"
+        ],
+        "raw": "excluded"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000302",
+          "rule_kind": "extension",
+          "text_operand": ".pdf"
+        },
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000303",
+          "rule_kind": "maximum_size",
+          "size_bytes_operand": 1024
+        }
+      ],
+      "subject": {
+        "normalized_locator": "vault/a.pdf"
+      }
+    },
+    {
+      "case_id": "maximum_size_equality_allows",
+      "expected": {
+        "enforced": "allowed",
+        "matched_rule_ids": [],
+        "missing_fields": [],
+        "raw": "allowed"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000304",
+          "rule_kind": "maximum_size",
+          "size_bytes_operand": 1024
+        }
+      ],
+      "subject": {
+        "size_bytes": 1024
+      }
+    },
+    {
+      "case_id": "maximum_size_above_excludes",
+      "expected": {
+        "enforced": "excluded",
+        "matched_rule_ids": [
+          "018f47a0-7b00-7000-8000-000000000305"
+        ],
+        "missing_fields": [],
+        "raw": "excluded"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000305",
+          "rule_kind": "maximum_size",
+          "size_bytes_operand": 1024
+        }
+      ],
+      "subject": {
+        "size_bytes": 1025
+      }
+    },
+    {
+      "case_id": "maximum_size_zero_allows_empty_subject",
+      "expected": {
+        "enforced": "allowed",
+        "matched_rule_ids": [],
+        "missing_fields": [],
+        "raw": "allowed"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000306",
+          "rule_kind": "maximum_size",
+          "size_bytes_operand": 0
+        }
+      ],
+      "subject": {
+        "size_bytes": 0
+      }
+    },
+    {
+      "case_id": "maximum_size_zero_excludes_non_empty_subject",
+      "expected": {
+        "enforced": "excluded",
+        "matched_rule_ids": [
+          "018f47a0-7b00-7000-8000-000000000307"
+        ],
+        "missing_fields": [],
+        "raw": "excluded"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000307",
+          "rule_kind": "maximum_size",
+          "size_bytes_operand": 0
+        }
+      ],
+      "subject": {
+        "size_bytes": 1
+      }
+    },
+    {
+      "case_id": "folder_prefix_segment_boundary_match",
+      "expected": {
+        "enforced": "excluded",
+        "matched_rule_ids": [
+          "018f47a0-7b00-7000-8000-000000000308"
+        ],
+        "missing_fields": [],
+        "raw": "excluded"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000308",
+          "rule_kind": "folder_prefix",
+          "text_operand": "private"
+        }
+      ],
+      "subject": {
+        "normalized_locator": "private/a.md"
+      }
+    },
+    {
+      "case_id": "folder_prefix_deep_match",
+      "expected": {
+        "enforced": "excluded",
+        "matched_rule_ids": [
+          "018f47a0-7b00-7000-8000-000000000309"
+        ],
+        "missing_fields": [],
+        "raw": "excluded"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000309",
+          "rule_kind": "folder_prefix",
+          "text_operand": "private"
+        }
+      ],
+      "subject": {
+        "normalized_locator": "private/b/c.md"
+      }
+    },
+    {
+      "case_id": "folder_prefix_partial_segment_no_match",
+      "expected": {
+        "enforced": "allowed",
+        "matched_rule_ids": [],
+        "missing_fields": [],
+        "raw": "allowed"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-00000000030a",
+          "rule_kind": "folder_prefix",
+          "text_operand": "private"
+        }
+      ],
+      "subject": {
+        "normalized_locator": "private-notes/a.md"
+      }
+    },
+    {
+      "case_id": "folder_prefix_not_nested_no_match",
+      "expected": {
+        "enforced": "allowed",
+        "matched_rule_ids": [],
+        "missing_fields": [],
+        "raw": "allowed"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-00000000030b",
+          "rule_kind": "folder_prefix",
+          "text_operand": "private"
+        }
+      ],
+      "subject": {
+        "normalized_locator": "notes/private/a.md"
+      }
+    },
+    {
+      "case_id": "nfc_equivalent_prefix_and_locator",
+      "expected": {
+        "enforced": "excluded",
+        "matched_rule_ids": [
+          "018f47a0-7b00-7000-8000-00000000030c"
+        ],
+        "missing_fields": [],
+        "raw": "excluded"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-00000000030c",
+          "rule_kind": "folder_prefix",
+          "text_operand": "café"
+        }
+      ],
+      "subject": {
+        "normalized_locator": "café/x.md"
+      }
+    },
+    {
+      "case_id": "extension_ascii_case_insensitive",
+      "expected": {
+        "enforced": "excluded",
+        "matched_rule_ids": [
+          "018f47a0-7b00-7000-8000-00000000030d"
+        ],
+        "missing_fields": [],
+        "raw": "excluded"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-00000000030d",
+          "rule_kind": "extension",
+          "text_operand": ".pdf"
+        }
+      ],
+      "subject": {
+        "normalized_locator": "NOTES/a.PDF"
+      }
+    },
+    {
+      "case_id": "path_glob_case_sensitive",
+      "expected": {
+        "enforced": "allowed",
+        "matched_rule_ids": [],
+        "missing_fields": [],
+        "raw": "allowed"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-00000000030e",
+          "rule_kind": "path_glob",
+          "text_operand": "Notes/*.md"
+        }
+      ],
+      "subject": {
+        "normalized_locator": "notes/a.md"
+      }
+    },
+    {
+      "case_id": "glob_single_star_anchored_no_subdirectory",
+      "expected": {
+        "enforced": "allowed",
+        "matched_rule_ids": [],
+        "missing_fields": [],
+        "raw": "allowed"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-00000000030f",
+          "rule_kind": "path_glob",
+          "text_operand": "*.md"
+        }
+      ],
+      "subject": {
+        "normalized_locator": "sub/a.md"
+      }
+    },
+    {
+      "case_id": "glob_double_star_deep_match",
+      "expected": {
+        "enforced": "excluded",
+        "matched_rule_ids": [
+          "018f47a0-7b00-7000-8000-000000000310"
+        ],
+        "missing_fields": [],
+        "raw": "excluded"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000310",
+          "rule_kind": "path_glob",
+          "text_operand": "**/*.md"
+        }
+      ],
+      "subject": {
+        "normalized_locator": "deep/x/y.md"
+      }
+    },
+    {
+      "case_id": "glob_double_star_zero_segments",
+      "expected": {
+        "enforced": "excluded",
+        "matched_rule_ids": [
+          "018f47a0-7b00-7000-8000-000000000311"
+        ],
+        "missing_fields": [],
+        "raw": "excluded"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000311",
+          "rule_kind": "path_glob",
+          "text_operand": "a/**/b"
+        }
+      ],
+      "subject": {
+        "normalized_locator": "a/b"
+      }
+    },
+    {
+      "case_id": "glob_multistar_segment",
+      "expected": {
+        "enforced": "excluded",
+        "matched_rule_ids": [
+          "018f47a0-7b00-7000-8000-000000000312"
+        ],
+        "missing_fields": [],
+        "raw": "excluded"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000312",
+          "rule_kind": "path_glob",
+          "text_operand": "a*b/c.md"
+        }
+      ],
+      "subject": {
+        "normalized_locator": "axxb/c.md"
+      }
+    },
+    {
+      "case_id": "media_family_match",
+      "expected": {
+        "enforced": "excluded",
+        "matched_rule_ids": [
+          "018f47a0-7b00-7000-8000-000000000313"
+        ],
+        "missing_fields": [],
+        "raw": "excluded"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000313",
+          "rule_kind": "media_type",
+          "text_operand": "text/*"
+        }
+      ],
+      "subject": {
+        "media_type": "text/markdown"
+      }
+    },
+    {
+      "case_id": "media_family_no_match",
+      "expected": {
+        "enforced": "allowed",
+        "matched_rule_ids": [],
+        "missing_fields": [],
+        "raw": "allowed"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000314",
+          "rule_kind": "media_type",
+          "text_operand": "text/*"
+        }
+      ],
+      "subject": {
+        "media_type": "application/pdf"
+      }
+    },
+    {
+      "case_id": "media_exact_match",
+      "expected": {
+        "enforced": "excluded",
+        "matched_rule_ids": [
+          "018f47a0-7b00-7000-8000-000000000315"
+        ],
+        "missing_fields": [],
+        "raw": "excluded"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000315",
+          "rule_kind": "media_type",
+          "text_operand": "application/pdf"
+        }
+      ],
+      "subject": {
+        "media_type": "application/pdf"
+      }
+    },
+    {
+      "case_id": "source_type_match",
+      "expected": {
+        "enforced": "excluded",
+        "matched_rule_ids": [
+          "018f47a0-7b00-7000-8000-000000000316"
+        ],
+        "missing_fields": [],
+        "raw": "excluded"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000316",
+          "rule_kind": "source_type",
+          "text_operand": "markdown"
+        }
+      ],
+      "subject": {
+        "source_type": "markdown"
+      }
+    },
+    {
+      "case_id": "exact_source_id_match",
+      "expected": {
+        "enforced": "excluded",
+        "matched_rule_ids": [
+          "018f47a0-7b00-7000-8000-000000000317"
+        ],
+        "missing_fields": [],
+        "raw": "excluded"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000317",
+          "rule_kind": "exact_source_id",
+          "source_id_operand": "018f47a0-7b00-7000-8000-0000000000a1"
+        }
+      ],
+      "subject": {
+        "source_id": "018f47a0-7b00-7000-8000-0000000000a1"
+      }
+    },
+    {
+      "case_id": "exact_source_id_no_match",
+      "expected": {
+        "enforced": "allowed",
+        "matched_rule_ids": [],
+        "missing_fields": [],
+        "raw": "allowed"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000318",
+          "rule_kind": "exact_source_id",
+          "source_id_operand": "018f47a0-7b00-7000-8000-0000000000a2"
+        }
+      ],
+      "subject": {
+        "source_id": "018f47a0-7b00-7000-8000-0000000000a1"
+      }
+    },
+    {
+      "case_id": "multiple_missing_fields_sorted",
+      "expected": {
+        "enforced": "excluded",
+        "matched_rule_ids": [],
+        "missing_fields": [
+          "media_type",
+          "size_bytes",
+          "source_type"
+        ],
+        "raw": "indeterminate"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000319",
+          "rule_kind": "source_type",
+          "text_operand": "markdown"
+        },
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-00000000031a",
+          "rule_kind": "media_type",
+          "text_operand": "text/*"
+        },
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-00000000031b",
+          "rule_kind": "maximum_size",
+          "size_bytes_operand": 10
+        }
+      ],
+      "subject": {}
+    },
+    {
+      "case_id": "all_kinds_together_definite_wins",
+      "expected": {
+        "enforced": "excluded",
+        "matched_rule_ids": [
+          "018f47a0-7b00-7000-8000-00000000031c",
+          "018f47a0-7b00-7000-8000-00000000031d",
+          "018f47a0-7b00-7000-8000-00000000031e",
+          "018f47a0-7b00-7000-8000-00000000031f",
+          "018f47a0-7b00-7000-8000-000000000320",
+          "018f47a0-7b00-7000-8000-000000000322"
+        ],
+        "missing_fields": [],
+        "raw": "excluded"
+      },
+      "rules": [
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-00000000031c",
+          "rule_kind": "exact_source_id",
+          "source_id_operand": "018f47a0-7b00-7000-8000-0000000000a1"
+        },
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-00000000031d",
+          "rule_kind": "folder_prefix",
+          "text_operand": "private"
+        },
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-00000000031e",
+          "rule_kind": "path_glob",
+          "text_operand": "**/*.md"
+        },
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-00000000031f",
+          "rule_kind": "extension",
+          "text_operand": ".md"
+        },
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000320",
+          "rule_kind": "media_type",
+          "text_operand": "text/*"
+        },
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000321",
+          "rule_kind": "maximum_size",
+          "size_bytes_operand": 100
+        },
+        {
+          "rule_id": "018f47a0-7b00-7000-8000-000000000322",
+          "rule_kind": "source_type",
+          "text_operand": "markdown"
+        }
+      ],
+      "subject": {
+        "media_type": "text/markdown",
+        "normalized_locator": "private/note.md",
+        "size_bytes": 50,
+        "source_id": "018f47a0-7b00-7000-8000-0000000000a1",
+        "source_type": "markdown"
+      }
+    }
+  ],
+  "normalization_cases": [
+    {
+      "case_id": "nfc_composition",
+      "expected": "café/a.md",
+      "value": "café/a.md"
+    },
+    {
+      "case_id": "plain_passthrough",
+      "expected": "plain/Notes/a.md",
+      "value": "plain/Notes/a.md"
+    },
+    {
+      "case_id": "percent_and_space_literal",
+      "expected": "100%25/a b.md",
+      "value": "100%25/a b.md"
+    },
+    {
+      "case_id": "unicode_literal",
+      "expected": "café/sub note/gráfile.md",
+      "value": "café/sub note/gráfile.md"
+    },
+    {
+      "case_id": "empty",
+      "error_reason": "locator_empty",
+      "value": ""
+    },
+    {
+      "case_id": "leading_separator",
+      "error_reason": "locator_absolute",
+      "value": "/absolute.md"
+    },
+    {
+      "case_id": "trailing_separator",
+      "error_reason": "locator_trailing_separator",
+      "value": "notes/"
+    },
+    {
+      "case_id": "backslash_separator",
+      "error_reason": "locator_backslash_separator",
+      "value": "notes\\a.md"
+    },
+    {
+      "case_id": "scheme_like",
+      "error_reason": "locator_scheme_or_drive",
+      "value": "c:/notes/a.md"
+    },
+    {
+      "case_id": "empty_segment",
+      "error_reason": "locator_invalid_segment",
+      "value": "notes//a.md"
+    },
+    {
+      "case_id": "parent_segment",
+      "error_reason": "locator_invalid_segment",
+      "value": "notes/../a.md"
+    },
+    {
+      "case_id": "control_character",
+      "error_reason": "locator_control_character",
+      "value": "notes/\u0000a.md"
+    },
+    {
+      "case_id": "too_many_bytes",
+      "error_reason": "locator_too_long",
+      "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "case_id": "too_many_segments",
+      "error_reason": "locator_too_many_segments",
+      "value": "s00/s01/s02/s03/s04/s05/s06/s07/s08/s09/s10/s11/s12/s13/s14/s15/s16/s17/s18/s19/s20/s21/s22/s23/s24/s25/s26/s27/s28/s29/s30/s31/s32/s33/s34/s35/s36/s37/s38/s39/s40/s41/s42/s43/s44/s45/s46/s47/s48/s49/s50/s51/s52/s53/s54/s55/s56/s57/s58/s59/s60/s61/s62/s63/s64/s65/s66/s67/s68/s69/s70/s71/s72/s73/s74/s75/s76/s77/s78/s79/s80/s81/s82/s83/s84/s85/s86/s87/s88/s89/s90/s91/s92/s93/s94/s95/s96/s97/s98/s99/s100/s101/s102/s103/s104/s105/s106/s107/s108/s109/s110/s111/s112/s113/s114/s115/s116/s117/s118/s119/s120/s121/s122/s123/s124/s125/s126/s127/s128/s129/s130/s131/s132/s133/s134/s135/s136/s137/s138/s139/s140/s141/s142/s143/s144/s145/s146/s147/s148/s149/s150/s151/s152/s153/s154/s155/s156/s157/s158/s159/s160/s161/s162/s163/s164/s165/s166/s167/s168/s169/s170/s171/s172/s173/s174/s175/s176/s177/s178/s179/s180/s181/s182/s183/s184/s185/s186/s187/s188/s189/s190/s191/s192/s193/s194/s195/s196/s197/s198/s199/s200/s201/s202/s203/s204/s205/s206/s207/s208/s209/s210/s211/s212/s213/s214/s215/s216/s217/s218/s219/s220/s221/s222/s223/s224/s225/s226/s227/s228/s229/s230/s231/s232/s233/s234/s235/s236/s237/s238/s239/s240/s241/s242/s243/s244/s245/s246/s247/s248/s249/s250/s251/s252/s253/s254/s255/s256"
+    },
+    {
+      "case_id": "segment_too_long",
+      "error_reason": "locator_segment_too_long",
+      "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "policy_revision_id": "018f47a0-7b00-7000-8000-0000000000e1",
+  "revision_number": 1,
+  "rule_cases": [
+    {
+      "case_id": "extension_normalized",
+      "expected_fingerprint": "c0ef02c48b26911f85fe51e0ccdf0de4a3a7bfe3bb804b58565efbcbefd23001",
+      "rule_id": "018f47a0-7b00-7000-8000-000000000101",
+      "rule_kind": "extension",
+      "text_operand": ".pdf"
+    },
+    {
+      "case_id": "extension_folded_same_semantics",
+      "expected_fingerprint": "c0ef02c48b26911f85fe51e0ccdf0de4a3a7bfe3bb804b58565efbcbefd23001",
+      "rule_id": "018f47a0-7b00-7000-8000-000000000102",
+      "rule_kind": "extension",
+      "text_operand": ".PDF"
+    },
+    {
+      "case_id": "extension_multi_suffix",
+      "expected_fingerprint": "3cd6948da1a8992d3aed4f3445d17f40bb801ccbcd6c9cf9aa41595c6a4fabec",
+      "rule_id": "018f47a0-7b00-7000-8000-000000000103",
+      "rule_kind": "extension",
+      "text_operand": ".tar.gz"
+    },
+    {
+      "case_id": "folder_prefix_nfc",
+      "expected_fingerprint": "9977ea53c99ab1eb116493e21afc7537c9729d880fdd88f3739fafeed19e2349",
+      "rule_id": "018f47a0-7b00-7000-8000-000000000104",
+      "rule_kind": "folder_prefix",
+      "text_operand": "café"
+    },
+    {
+      "case_id": "folder_prefix_nfd_same_semantics",
+      "expected_fingerprint": "9977ea53c99ab1eb116493e21afc7537c9729d880fdd88f3739fafeed19e2349",
+      "rule_id": "018f47a0-7b00-7000-8000-000000000105",
+      "rule_kind": "folder_prefix",
+      "text_operand": "café"
+    },
+    {
+      "case_id": "path_glob_double_star",
+      "expected_fingerprint": "f8483bb16aea127d4320c96409ef3781286fece7c7937e8304df0095ac724ec2",
+      "rule_id": "018f47a0-7b00-7000-8000-000000000106",
+      "rule_kind": "path_glob",
+      "text_operand": "**/*.md"
+    },
+    {
+      "case_id": "media_family",
+      "expected_fingerprint": "9f19a474a80cdd7f649d0d1147e000c8a36b778d19f878a8e33a60e0b84b0ab8",
+      "rule_id": "018f47a0-7b00-7000-8000-000000000107",
+      "rule_kind": "media_type",
+      "text_operand": "text/*"
+    },
+    {
+      "case_id": "media_exact",
+      "expected_fingerprint": "3524c8d58f49b3aa3c3c2e14a08a74bdf7bd0186ec02a166ea35438b3b10ead7",
+      "rule_id": "018f47a0-7b00-7000-8000-000000000108",
+      "rule_kind": "media_type",
+      "text_operand": "application/pdf"
+    },
+    {
+      "case_id": "maximum_size",
+      "expected_fingerprint": "e250a9c87368b2abf8c35bb8108b9ffd4676b5897a5b9ff8b54f15687b2df043",
+      "rule_id": "018f47a0-7b00-7000-8000-000000000109",
+      "rule_kind": "maximum_size",
+      "size_bytes_operand": 1024
+    },
+    {
+      "case_id": "maximum_size_ceiling",
+      "expected_fingerprint": "c82b9a68aa0c06a3a91a0b350eab810efefcda66936c9873f2791e45ecc49682",
+      "rule_id": "018f47a0-7b00-7000-8000-00000000010a",
+      "rule_kind": "maximum_size",
+      "size_bytes_operand": 104857600
+    },
+    {
+      "case_id": "source_type",
+      "expected_fingerprint": "c76308549e48b9c4d76c7a35b66ddacec1802173431c249d3a2d31149472f87e",
+      "rule_id": "018f47a0-7b00-7000-8000-00000000010b",
+      "rule_kind": "source_type",
+      "text_operand": "markdown"
+    },
+    {
+      "case_id": "exact_source_id",
+      "expected_fingerprint": "9487140a661488ded6eb6a33723579c92705e59d95f9df25b7f27fc48ce6352c",
+      "rule_id": "018f47a0-7b00-7000-8000-00000000010c",
+      "rule_kind": "exact_source_id",
+      "source_id_operand": "018f47a0-7b00-7000-8000-0000000000a1"
+    },
+    {
+      "case_id": "extension_without_dot",
+      "error_reason": "operand_invalid",
+      "rule_id": "018f47a0-7b00-7000-8000-000000000201",
+      "rule_index": 2,
+      "rule_kind": "extension",
+      "text_operand": "pdf"
+    },
+    {
+      "case_id": "glob_question_token",
+      "error_reason": "glob_unsupported_token",
+      "rule_id": "018f47a0-7b00-7000-8000-000000000202",
+      "rule_index": 2,
+      "rule_kind": "path_glob",
+      "text_operand": "a?b.md"
+    },
+    {
+      "case_id": "glob_brace_token",
+      "error_reason": "glob_unsupported_token",
+      "rule_id": "018f47a0-7b00-7000-8000-000000000203",
+      "rule_index": 2,
+      "rule_kind": "path_glob",
+      "text_operand": "no{ne}.md"
+    },
+    {
+      "case_id": "size_above_ceiling",
+      "error_reason": "operand_invalid",
+      "rule_id": "018f47a0-7b00-7000-8000-000000000204",
+      "rule_index": 2,
+      "rule_kind": "maximum_size",
+      "size_bytes_operand": 104857601
+    },
+    {
+      "case_id": "media_uppercase_family",
+      "error_reason": "operand_invalid",
+      "rule_id": "018f47a0-7b00-7000-8000-000000000205",
+      "rule_index": 2,
+      "rule_kind": "media_type",
+      "text_operand": "TEXT/*"
+    },
+    {
+      "case_id": "folder_prefix_backslash",
+      "error_reason": "locator_backslash_separator",
+      "rule_id": "018f47a0-7b00-7000-8000-000000000206",
+      "rule_index": 2,
+      "rule_kind": "folder_prefix",
+      "text_operand": "a\\b"
+    },
+    {
+      "case_id": "source_type_unknown",
+      "error_reason": "operand_invalid",
+      "rule_id": "018f47a0-7b00-7000-8000-000000000207",
+      "rule_index": 2,
+      "rule_kind": "source_type",
+      "text_operand": "carrier"
+    }
+  ],
+  "workspace_id": "018f47a0-7b00-7000-8000-000000000001"
+}

@@ -72,4 +72,6 @@ def test_event_names_are_closed() -> None:
         "api_request_completed",
         "api_request_rejected",
         "api_request_failed",
+        "exclusion_policy_evaluation_completed",
+        "exclusion_policy_evaluation_rejected",
     }

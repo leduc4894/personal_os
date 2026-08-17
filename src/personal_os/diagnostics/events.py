@@ -118,6 +118,8 @@ class EventName(StrEnum):
     API_REQUEST_COMPLETED = "api_request_completed"
     API_REQUEST_REJECTED = "api_request_rejected"
     API_REQUEST_FAILED = "api_request_failed"
+    EXCLUSION_POLICY_EVALUATION_COMPLETED = "exclusion_policy_evaluation_completed"
+    EXCLUSION_POLICY_EVALUATION_REJECTED = "exclusion_policy_evaluation_rejected"
 
 
 type SafeDiagnosticScalar = (
@@ -551,6 +553,39 @@ EVENT_DEFINITIONS: Final[Mapping[EventName, EventDefinition]] = MappingProxyType
             result_code=ResultCode.FAILED,
             required_fields=frozenset({"http_method", "route", "status_code", "duration_ms"}),
             allowed_fields=frozenset({"http_method", "route", "status_code", "duration_ms"}),
+        ),
+        # Spec 21 evaluation events: per-source evaluations use metrics rather
+        # than one audit row each, so these carry only the closed boundary and
+        # decision labels plus counts — never a locator, operand, path or
+        # subject fingerprint.
+        EventName.EXCLUSION_POLICY_EVALUATION_COMPLETED: EventDefinition(
+            level=DiagnosticLevel.INFO,
+            result_code=ResultCode.SUCCEEDED,
+            required_fields=frozenset({"boundary", "decision", "rule_count"}),
+            allowed_fields=frozenset(
+                {
+                    "boundary",
+                    "decision",
+                    "rule_count",
+                    "revision_number",
+                    "duration_ms",
+                    "matched_rule_count",
+                    "missing_field_count",
+                }
+            ),
+        ),
+        EventName.EXCLUSION_POLICY_EVALUATION_REJECTED: EventDefinition(
+            level=DiagnosticLevel.WARNING,
+            result_code=ResultCode.REJECTED,
+            required_fields=frozenset({"boundary", "error_code"}),
+            allowed_fields=frozenset(
+                {
+                    "boundary",
+                    "error_code",
+                    "error_category",
+                    "is_retryable",
+                }
+            ),
         ),
     }
 )
