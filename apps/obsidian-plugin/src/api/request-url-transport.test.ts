@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RequestUrlParam, RequestUrlResponse } from "obsidian";
 
-import { createRequestUrlTransport } from "./request-url-transport";
+import {
+  createRequestUrlPolicyHttpTransport,
+  createRequestUrlTransport,
+} from "./request-url-transport";
 import type { RequestUrlFunction } from "./request-url-transport";
 
 function responseWithBytes(
@@ -155,5 +158,52 @@ describe("createRequestUrlTransport", () => {
     for (const spy of consoleSpies) {
       expect(spy).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe("createRequestUrlPolicyHttpTransport", () => {
+  it("issues GET requests with the given headers and no body", async () => {
+    const calls: RequestUrlParam[] = [];
+    const transport = createRequestUrlPolicyHttpTransport(async (request) => {
+      calls.push(request);
+      return {
+        status: 200,
+        headers: { etag: '"tag"' },
+        arrayBuffer: new ArrayBuffer(0),
+        json: undefined,
+        text: "ok",
+      };
+    });
+    const response = await transport({
+      url: "https://vault.example.com/api/sync/exclusion-policy/snapshot",
+      headers: { authorization: "Bearer at1-x", accept: "application/json" },
+    });
+    expect(response).toEqual({ status: 200, bodyText: "ok", etag: '"tag"' });
+    expect(calls).toEqual([
+      {
+        url: "https://vault.example.com/api/sync/exclusion-policy/snapshot",
+        method: "GET",
+        headers: { authorization: "Bearer at1-x", accept: "application/json" },
+        throw: false,
+      },
+    ]);
+  });
+
+  it("resolves the entity tag case-insensitively and tolerates its absence", async () => {
+    const withHeader = (headers: Record<string, string>): RequestUrlFunction => {
+      return async () => ({
+        status: 200,
+        headers,
+        arrayBuffer: new ArrayBuffer(0),
+        json: undefined,
+        text: "",
+      });
+    };
+    const upper = createRequestUrlPolicyHttpTransport(withHeader({ ETag: '"upper"' }));
+    expect((await upper({ url: "https://x.example.com", headers: {} })).etag).toBe('"upper"');
+    const lower = createRequestUrlPolicyHttpTransport(withHeader({ etag: '"lower"' }));
+    expect((await lower({ url: "https://x.example.com", headers: {} })).etag).toBe('"lower"');
+    const none = createRequestUrlPolicyHttpTransport(withHeader({}));
+    expect((await none({ url: "https://x.example.com", headers: {} })).etag).toBeNull();
   });
 });

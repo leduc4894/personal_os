@@ -10,6 +10,7 @@
 
 import { Platform, Plugin, requestUrl } from "obsidian";
 
+import { createObsidianPolicyHttpTransport } from "./api/obsidian-api-transport";
 import {
   createDeviceApiTransport,
   parseServerOrigin,
@@ -32,6 +33,9 @@ import {
 } from "./authentication/secret-storage-record";
 import { DeviceAuthenticationSettingTab } from "./authentication/settings-tab";
 import { DeviceTokenSession, resolveStartupAction } from "./authentication/token-session";
+import { PolicySession } from "./exclusion-policy/policy-session";
+import type { PolicyCacheAdapter } from "./exclusion-policy/policy-cache";
+import type { PolicyIntegrityState } from "./exclusion-policy/contracts";
 
 /**
  * The explicit development-build flag of spec 19. Production builds accept
@@ -42,6 +46,13 @@ const ALLOW_LOOPBACK_HTTP_ORIGIN = false;
 
 const DEFAULT_DEVICE_NAME = "Obsidian vault";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The single plugin-data member holding the versioned exclusion-policy cache
+ * record (spec 18). Settings and the policy cache share one document, so
+ * every persist path merges instead of replacing.
+ */
+const POLICY_CACHE_PLUGIN_DATA_KEY = "policy_cache";
 
 function createRequestUrlDeviceHttpTransport(): DeviceHttpTransport {
   return async (request: DeviceHttpRequest): Promise<DeviceHttpResponse> => {
@@ -140,6 +151,8 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   #controller: DeviceAuthorizationController | null = null;
   #session: DeviceTokenSession | null = null;
   #settingTab: DeviceAuthenticationSettingTab | null = null;
+  #policySession: PolicySession | null = null;
+  #policyState: PolicyIntegrityState = "policy_not_initialized";
 
   override async onload(): Promise<void> {
     this.#settings = normalizeSettings(await this.loadData());
@@ -162,6 +175,22 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       createRotationId: () => crypto.randomUUID(),
       onStateChange: (state, detail) => this.#setConnectionState(state, detail),
     });
+    const policySession = new PolicySession({
+      http: createObsidianPolicyHttpTransport(),
+      resolveOrigin: () =>
+        parseServerOrigin(this.#settings.server_origin, {
+          allowLoopbackHttp: ALLOW_LOOPBACK_HTTP_ORIGIN,
+        }) ?? "",
+      getAccessToken: () => session.accessCredential,
+      cache: this.#createPolicyCacheAdapter(),
+      onStateChange: (state) => {
+        this.#policyState = state;
+      },
+    });
+    // Offline startup: restore the last verified policy cache from plugin
+    // data (local-only, bounded) before any network work is considered.
+    await policySession.restoreFromCache();
+    this.#policyState = policySession.state;
     const controller = new DeviceAuthorizationController({
       transport,
       secretStore,
@@ -184,10 +213,16 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         }),
       nowEpochMs: () => Date.now(),
       onStateChange: (state, detail) => this.#setConnectionState(state, detail),
-      onExchange: (exchange) => session.adoptExchange(exchange),
+      onExchange: (exchange) => {
+        session.adoptExchange(exchange);
+        // Initial policy trust exists ONLY immediately after the
+        // authenticated onboarding exchange (spec 13.2).
+        void policySession.adoptOnboardingTrust().catch(() => undefined);
+      },
     });
     this.#session = session;
     this.#controller = controller;
+    this.#policySession = policySession;
 
     this.#settingTab = new DeviceAuthenticationSettingTab(this.app, this, {
       getSnapshot: () => ({
@@ -226,7 +261,11 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     } else {
       await controller.reconcileCrashWindow();
       if (startupAction === "refresh_credential") {
-        void session.refresh().catch(() => undefined);
+        // Policy keyset/snapshot are fetched only AFTER a successful token
+        // refresh (spec 18), still fire-and-forget and never awaited here.
+        void session.refresh()
+          .then(() => policySession.refresh())
+          .catch(() => undefined);
       }
     }
   }
@@ -250,6 +289,30 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   }
 
   async #persistSettings(): Promise<void> {
-    await this.saveData(this.#settings);
+    // Merge into the single plugin-data document so the versioned policy
+    // cache record survives settings persistence (spec 18 storage adapter).
+    const loaded = (await this.loadData()) as Record<string, unknown> | null;
+    await this.saveData({ ...(loaded ?? {}), ...this.#settings });
+  }
+
+  /**
+   * The narrow settings adapter of spec 18: the accepted policy state lives
+   * in ONE versioned plugin-data record under a reserved member. No Vault
+   * content, credential or diagnostic path ever enters this record.
+   */
+  #createPolicyCacheAdapter(): PolicyCacheAdapter {
+    return {
+      readPolicyCacheRecord: async (): Promise<unknown> => {
+        const loaded = (await this.loadData()) as Record<string, unknown> | null;
+        return loaded === null ? null : (loaded[POLICY_CACHE_PLUGIN_DATA_KEY] ?? null);
+      },
+      writePolicyCacheRecord: async (record: unknown): Promise<void> => {
+        const loaded = (await this.loadData()) as Record<string, unknown> | null;
+        await this.saveData({
+          ...(loaded ?? {}),
+          [POLICY_CACHE_PLUGIN_DATA_KEY]: record,
+        });
+      },
+    };
   }
 }

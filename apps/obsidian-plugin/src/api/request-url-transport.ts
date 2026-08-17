@@ -1,5 +1,6 @@
 import type { RequestUrlParam, RequestUrlResponse } from "obsidian";
 import type { ApiTransport } from "@workspace/api-client";
+import type { PolicyHttpTransport } from "../exclusion-policy/contracts";
 
 export type RequestUrlFunction = (
   request: RequestUrlParam,
@@ -51,5 +52,32 @@ export function createRequestUrlTransport(
       status: result.status,
       headers: result.headers,
     });
+  };
+}
+
+/**
+ * The pure GET adapter for policy keyset/snapshot fetches: authenticated
+ * headers in, status/body text/entity tag out. It adds no retry and performs
+ * no body parsing — the closed parser owns the response text.
+ */
+export function createRequestUrlPolicyHttpTransport(
+  requestUrlFunction: RequestUrlFunction,
+): PolicyHttpTransport {
+  return async (request) => {
+    const result = await requestUrlFunction({
+      url: request.url,
+      method: "GET",
+      headers: { ...request.headers },
+      throw: false,
+    });
+    const headers = result.headers ?? {};
+    let etag: string | null = null;
+    for (const name of Object.keys(headers)) {
+      if (name.toLowerCase() === "etag") {
+        etag = headers[name] ?? null;
+        break;
+      }
+    }
+    return { status: result.status, bodyText: result.text, etag };
   };
 }

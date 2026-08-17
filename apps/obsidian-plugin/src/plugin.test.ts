@@ -78,6 +78,33 @@ describe("Obsidian plugin composition root", () => {
     expect(pluginSource).not.toContain("await session.refresh");
   });
 
+  it("wires the policy session into the authenticated lifecycle", () => {
+    expect(pluginSource).toContain("new PolicySession(");
+    expect(pluginSource).toContain("createObsidianPolicyHttpTransport");
+    expect(pluginSource).toContain("adoptOnboardingTrust");
+    expect(pluginSource).toContain("policySession.refresh");
+    // Initial policy trust is acquired only immediately after the
+    // authenticated onboarding exchange completes.
+    const exchangeIndex = pluginSource.indexOf("adoptExchange");
+    const onboardingTrustIndex = pluginSource.indexOf("adoptOnboardingTrust");
+    expect(exchangeIndex).toBeGreaterThanOrEqual(0);
+    expect(onboardingTrustIndex).toBeGreaterThan(exchangeIndex);
+    // Policy refresh happens only after a successful token refresh.
+    const refreshIndex = pluginSource.indexOf("session.refresh");
+    const policyRefreshIndex = pluginSource.indexOf("policySession.refresh");
+    expect(refreshIndex).toBeGreaterThanOrEqual(0);
+    expect(policyRefreshIndex).toBeGreaterThan(refreshIndex);
+  });
+
+  it("persists the policy cache inside the single plugin-data document", () => {
+    expect(pluginSource).toContain("POLICY_CACHE_PLUGIN_DATA_KEY");
+    // Settings persistence must preserve the policy cache member instead of
+    // replacing the whole document.
+    const persistIndex = pluginSource.indexOf("async #persistSettings");
+    const persistBody = pluginSource.slice(persistIndex, persistIndex + 500);
+    expect(persistBody).toContain("loadData()");
+  });
+
   it("pins the production origin policy to HTTPS-only", () => {
     expect(pluginSource).toContain("ALLOW_LOOPBACK_HTTP_ORIGIN = false");
   });
