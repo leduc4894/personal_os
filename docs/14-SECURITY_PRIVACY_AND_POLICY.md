@@ -33,6 +33,8 @@ Unknown hoặc evaluation failure mặc định deny. Policy revision gắn vào
 
 Admin Dashboard là authority cho exclusion rules. Backend re-evaluate mọi upload, projection và query. Plugin-side filter chỉ tối ưu bandwidth. Rule changes tạo auditable transition và removal workflow.
 
+Phase 2 exclusion là deny-only với default allow. Missing active revision, missing required evidence hoặc evaluation failure tạo `indeterminate` và được enforce như deny. Plugin snapshot Ed25519 không phải authorization capability; snapshot không hết hạn nhưng phải qua exact hash/signature, monotonic revision và authenticated cross-signed keyset checks. Policy state nằm ngoài source lifecycle state.
+
 ## 6. Prompt injection defense
 
 - Source text luôn được đóng khung là untrusted data.

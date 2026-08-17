@@ -42,9 +42,9 @@ Reconciliation chạy sau onboarding, cursor gap, theo lịch định kỳ và k
 
 ## 5. Exclusion policy
 
-Exclusion được cấu hình trong Admin Dashboard, không lấy plugin settings làm authority. Policy hỗ trợ exact source ID, folder prefix, glob path, extension/media type, property predicate, maximum size, source type và AI access class.
+Exclusion được cấu hình trong Admin Dashboard, không lấy plugin settings làm authority. Phase 2 dùng deny-only rules với default allow cho exact source ID, folder prefix, bounded glob path, extension, media type, maximum size và source type. Property predicate cùng `local_only`/`cloud_ok` thuộc policy mở rộng của Phase 3/4, không được giả lập sớm trong exclusion evaluator.
 
-Backend là policy authority. Plugin nhận signed policy snapshot để tránh upload không cần thiết; backend vẫn kiểm tra lại mọi event.
+Backend là policy authority. Plugin nhận signed policy snapshot Ed25519 để tránh upload không cần thiết; snapshot không có TTL nhưng chống rollback theo monotonic revision và authenticated cross-signed keyset. Backend vẫn kiểm tra lại mọi event. Missing evidence hoặc evaluation failure là `indeterminate` và được enforce như deny.
 
 Khi allow chuyển thành deny: dừng ingest, ghi transition, tạo projection tombstones, xóa cache và giữ/GC canonical bytes theo retention.
 

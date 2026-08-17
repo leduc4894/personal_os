@@ -178,9 +178,11 @@ Delete retains the current version, creates a tombstone, marks the source
 locator, closes the tombstone, returns the source to `active` and emits upsert
 intents.
 
-`active` means the canonical source is current and allowed. It does not assert
-that a projection is searchable. Phase 3 may later set `stored_not_indexed` for
-an unsupported parser or terminal indexing reason.
+`active` means the canonical source has a current version and is not deleted.
+It does not assert that policy allows the source or that a projection is
+searchable. Effective exclusion is a separate `policy_evaluations` axis. Phase
+3 may later set `stored_not_indexed` for an unsupported parser or terminal
+indexing reason.
 
 ### 6.3 Upload and conflicts
 
@@ -279,7 +281,15 @@ Phase 2 Web Admin contains only:
 
 The server is authoritative. Initial rule kinds are exact source ID, normalized
 folder prefix, bounded glob, extension/media type, maximum size and source type.
-Property predicates remain inactive until Phase 3 provides canonical metadata.
+Rules are deny-only with default allow. Property predicates and the
+`local_only`/`cloud_ok` AI access classes remain inactive until their Phase 3/4
+owners provide canonical metadata and provider boundaries.
+
+Impact preview runs as a bounded asynchronous job over an exact draft, active
+revision and source-event checkpoint. It reports newly/still allowed or
+excluded sources plus `indeterminate`; missing locator/evidence is never hidden
+as a successful match. Publication requires an unexpired exact preview, recent
+re-authentication and typed confirmation.
 
 Publishing creates an immutable policy revision. The plugin receives a bounded
 canonical-JSON snapshot with an Ed25519 detached signature to avoid unnecessary
@@ -289,10 +299,13 @@ are delivered during authenticated onboarding and rotated by an authenticated
 keyset contract. Adding the pinned Ed25519/Argon2 implementation libraries
 requires an explicit production-dependency review in the implementation plan.
 
-Unknown revision, invalid signature or evaluation failure defaults to deny.
-Changing allow to deny stops upload/ingestion, creates projection delete intents
-for an existing source and preserves canonical bytes according to retention.
-The plugin keeps the local file.
+Snapshot has no TTL; plugin anti-rollback state and an authenticated,
+cross-signed keyset chain govern acceptance. Unknown revision, invalid
+signature, missing evidence or evaluation failure defaults to deny. Changing
+allow to deny stops upload/ingestion immediately, creates durable projection
+delete intents for an existing source and preserves canonical bytes according
+to retention. The plugin keeps the local file. The child contract is
+`docs/superpowers/specs/2026-08-17-exclusion-policy-publication-design.md`.
 
 ## 10. Public API groups
 

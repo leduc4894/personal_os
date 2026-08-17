@@ -132,8 +132,13 @@ section 17). Trạng thái từng child:
   runbook:
   `docs/operations/web-authentication-and-device-authorization.md`.
   Deliverable 1 của phase (plugin auth/onboarding và secure token store) đã
-  đóng; deliverables 2-7 (Vault synchronization) thuộc các child sau và chưa
-  bắt đầu.
+  đóng; implementation deliverables 2-7 thuộc các child sau và chưa hoàn tất.
+- Child 3 `exclusion-policy-publication-design.md` — **design đã duyệt,
+  implementation chưa bắt đầu (2026-08-17)**: deny-only rule model, async
+  preview, immutable/idempotent publication, Ed25519 snapshot với cross-signed
+  key rotation, backend fail-closed enforcement và durable reconciliation.
+  Spec:
+  `docs/superpowers/specs/2026-08-17-exclusion-policy-publication-design.md`.
 
 Deliverables:
 

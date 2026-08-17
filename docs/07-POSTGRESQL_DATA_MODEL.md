@@ -33,6 +33,8 @@ PostgreSQL là canonical application state và correctness authority cho source 
 
 JSONB dùng cho raw source metadata, provider-neutral structured output và bounded diagnostic detail. Không dùng JSONB thay stable foreign key, current pointer, query-critical lifecycle state, typed range value hoặc authorization scope. Mọi JSONB có Pydantic contract và schema revision.
 
+Exclusion policy dùng immutable relational revisions và normalized typed rule operands; active policy pointer cùng `policy_evaluations` là trục riêng với `sources.sync_state`. Một source `active`, `stored_not_indexed` hoặc `deleted` vẫn có effective decision `allowed` hay `denied`; không thêm `excluded` vào lifecycle enum. Signed snapshot canonical bytes/signature được persist cùng revision để read không regenerate hoặc resign.
+
 ## 5. Transaction boundaries
 
 ### Publish source version
