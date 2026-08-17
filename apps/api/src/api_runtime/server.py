@@ -45,6 +45,7 @@ from api_runtime.authentication_composition import (
 from api_runtime.authentication_crypto import load_authentication_keyring
 from api_runtime.authentication_settings import load_authentication_settings
 from api_runtime.database_lifecycle import DatabaseRuntimeLifecycle
+from api_runtime.exclusion_policy_composition import compose_exclusion_policy
 from api_runtime.exclusion_policy_settings import (
     load_exclusion_policy_signer,
     load_exclusion_policy_signing_settings,
@@ -132,6 +133,9 @@ def run_server(
                 keyring=keyring,
                 engine=engine,
             )
+            exclusion_policy = compose_exclusion_policy(
+                engine=engine, signer=policy_signer
+            )
 
             @asynccontextmanager
             async def database_lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -151,6 +155,7 @@ def run_server(
                 environment=api_settings.environment,
                 readiness_probe=lifecycle,
                 web_authentication=web_authentication,
+                exclusion_policy=exclusion_policy,
                 event_sink=logger,
                 lifespan=database_lifespan,
             )

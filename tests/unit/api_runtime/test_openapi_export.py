@@ -128,6 +128,13 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
         "/api/auth/device-tokens/revoke-current",
         "/api/admin/devices",
         "/api/admin/devices/{device_id}/revoke",
+        "/api/admin/exclusion-policy",
+        "/api/admin/exclusion-policy/draft",
+        "/api/admin/exclusion-policy/previews",
+        "/api/admin/exclusion-policy/previews/{policy_preview_id}",
+        "/api/admin/exclusion-policy/publications",
+        "/api/sync/exclusion-policy/keysets",
+        "/api/sync/exclusion-policy/snapshot",
     }
     assert document["paths"]["/api/health/live"]["get"]["operationId"] == "getApiLiveness"
     assert document["paths"]["/api/health/ready"]["get"]["operationId"] == "getApiReadiness"

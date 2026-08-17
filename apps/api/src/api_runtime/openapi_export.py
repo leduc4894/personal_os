@@ -25,6 +25,7 @@ from fastapi import FastAPI
 
 from api_runtime.application import create_api_application
 from api_runtime.authentication_composition import compose_offline_web_authentication
+from api_runtime.exclusion_policy_composition import compose_offline_exclusion_policy
 from personal_os.runtime_configuration.models import RuntimeEnvironment
 
 _EXIT_INTERNAL_FAILURE: Final[int] = 70
@@ -47,14 +48,16 @@ def create_contract_application() -> FastAPI:
 
     The fixed test environment keeps the OpenAPI document route enabled, the
     injected probe performs no I/O, and the deterministic offline
-    authentication runtime carries fixed non-secret ports: no environment
-    value, key file or database is ever read, and the application lifespan is
-    never entered because the document is read directly from the route graph.
+    authentication and exclusion-policy runtimes carry fixed non-secret
+    ports: no environment value, key file or database is ever read, and the
+    application lifespan is never entered because the document is read
+    directly from the route graph.
     """
     return create_api_application(
         environment=RuntimeEnvironment.TEST,
         readiness_probe=_ReadyProbe(),
         web_authentication=compose_offline_web_authentication(),
+        exclusion_policy=compose_offline_exclusion_policy(),
     )
 
 

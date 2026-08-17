@@ -41,6 +41,20 @@ _APPROVED_HTTP_STATUS_CODES: Final[frozenset[ErrorCode]] = frozenset(
         ErrorCode.DEVICE_REVOKED,
         ErrorCode.DEVICE_TOKEN_REUSE_DETECTED,
         ErrorCode.PLUGIN_VERSION_UNSUPPORTED,
+        # The exclusion-policy block of the design error contract (spec 19).
+        ErrorCode.EXCLUSION_POLICY_INPUT_INVALID,
+        ErrorCode.EXCLUSION_POLICY_NOT_INITIALIZED,
+        ErrorCode.EXCLUSION_POLICY_DRAFT_CONFLICT,
+        ErrorCode.EXCLUSION_POLICY_PREVIEW_PENDING,
+        ErrorCode.EXCLUSION_POLICY_PREVIEW_FAILED,
+        ErrorCode.EXCLUSION_POLICY_PREVIEW_EXPIRED,
+        ErrorCode.EXCLUSION_POLICY_PREVIEW_STALE,
+        ErrorCode.EXCLUSION_POLICY_CONFIRMATION_INVALID,
+        ErrorCode.EXCLUSION_POLICY_DENIED,
+        ErrorCode.EXCLUSION_POLICY_INDETERMINATE,
+        ErrorCode.EXCLUSION_POLICY_SNAPSHOT_OUTDATED,
+        ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE,
+        ErrorCode.EXCLUSION_POLICY_COMMIT_OUTCOME_UNKNOWN,
     }
 )
 
@@ -92,6 +106,23 @@ HTTP_ERROR_STATUSES: Final[Mapping[ErrorCode, int]] = MappingProxyType(
             ErrorCode.DEVICE_REVOKED: 401,
             ErrorCode.DEVICE_TOKEN_REUSE_DETECTED: 401,
             ErrorCode.PLUGIN_VERSION_UNSUPPORTED: 426,
+            # The exclusion-policy status column of the spec 19 table: 422 for
+            # input validation, 409 for the closed conflicts, 410 for the
+            # expired preview, 403 for denial/indeterminacy and 503 for the
+            # two dependency failures.
+            ErrorCode.EXCLUSION_POLICY_INPUT_INVALID: 422,
+            ErrorCode.EXCLUSION_POLICY_NOT_INITIALIZED: 409,
+            ErrorCode.EXCLUSION_POLICY_DRAFT_CONFLICT: 409,
+            ErrorCode.EXCLUSION_POLICY_PREVIEW_PENDING: 409,
+            ErrorCode.EXCLUSION_POLICY_PREVIEW_FAILED: 409,
+            ErrorCode.EXCLUSION_POLICY_PREVIEW_EXPIRED: 410,
+            ErrorCode.EXCLUSION_POLICY_PREVIEW_STALE: 409,
+            ErrorCode.EXCLUSION_POLICY_CONFIRMATION_INVALID: 409,
+            ErrorCode.EXCLUSION_POLICY_DENIED: 403,
+            ErrorCode.EXCLUSION_POLICY_INDETERMINATE: 403,
+            ErrorCode.EXCLUSION_POLICY_SNAPSHOT_OUTDATED: 409,
+            ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE: 503,
+            ErrorCode.EXCLUSION_POLICY_COMMIT_OUTCOME_UNKNOWN: 503,
         }
     )
 )

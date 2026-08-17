@@ -44,6 +44,106 @@ export type paths = {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/admin/exclusion-policy": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Get Policy Status
+         * @description Return revision metadata, the exact draft and reconciliation.
+         */
+        readonly get: operations["getExclusionPolicyStatus"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/admin/exclusion-policy/draft": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        /**
+         * Replace Draft
+         * @description Validate and atomically replace the complete desired rule list.
+         */
+        readonly put: operations["replaceExclusionPolicyDraft"];
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/admin/exclusion-policy/previews": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Create Preview
+         * @description Bind one asynchronous preview to the workspace's current draft.
+         */
+        readonly post: operations["createExclusionPolicyPreview"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/admin/exclusion-policy/previews/{policy_preview_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Get Preview
+         * @description Answer 202 while pending/running and 200 once ready (spec 16.1).
+         */
+        readonly get: operations["getExclusionPolicyPreview"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/admin/exclusion-policy/publications": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Publish
+         * @description Validate, replay-resolve and atomically publish (spec 11/16.1).
+         */
+        readonly post: operations["publishExclusionPolicy"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/auth/device-authorizations": {
         readonly parameters: {
             readonly query?: never;
@@ -466,6 +566,46 @@ export type paths = {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/sync/exclusion-policy/keysets": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * List Keysets
+         * @description Return the next bounded ordered keyset chain page (spec 13.3).
+         */
+        readonly get: operations["listExclusionPolicyKeysets"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/sync/exclusion-policy/snapshot": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Get Snapshot
+         * @description Serve the active signed envelope with conditional GET (spec 12/16.2).
+         */
+        readonly get: operations["getExclusionPolicySnapshot"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
 };
 export type webhooks = Record<string, never>;
 export type components = {
@@ -647,9 +787,84 @@ export type components = {
              */
             readonly warnings: readonly components["schemas"]["ApiWarning"][];
         };
+        /** ApiEnvelope[ExclusionPolicyStatusData] */
+        readonly ApiEnvelope_ExclusionPolicyStatusData_: {
+            readonly data: components["schemas"]["ExclusionPolicyStatusData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
         /** ApiEnvelope[LivenessData] */
         readonly ApiEnvelope_LivenessData_: {
             readonly data: components["schemas"]["LivenessData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[PolicyDraftData] */
+        readonly ApiEnvelope_PolicyDraftData_: {
+            readonly data: components["schemas"]["PolicyDraftData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[PolicyKeysetPageData] */
+        readonly ApiEnvelope_PolicyKeysetPageData_: {
+            readonly data: components["schemas"]["PolicyKeysetPageData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[PolicyPreviewData] */
+        readonly ApiEnvelope_PolicyPreviewData_: {
+            readonly data: components["schemas"]["PolicyPreviewData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[PolicyPublicationData] */
+        readonly ApiEnvelope_PolicyPublicationData_: {
+            readonly data: components["schemas"]["PolicyPublicationData"] | null;
             readonly error: components["schemas"]["ApiErrorBody"] | null;
             /**
              * Request Id
@@ -725,6 +940,21 @@ export type components = {
         /** ApiEnvelope[SessionData] */
         readonly ApiEnvelope_SessionData_: {
             readonly data: components["schemas"]["SessionData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[SignedPolicySnapshotData] */
+        readonly ApiEnvelope_SignedPolicySnapshotData_: {
+            readonly data: components["schemas"]["SignedPolicySnapshotData"] | null;
             readonly error: components["schemas"]["ApiErrorBody"] | null;
             /**
              * Request Id
@@ -994,7 +1224,19 @@ export type components = {
          * ErrorCode
          * @enum {string}
          */
-        readonly ErrorCode: "configuration_invalid" | "configuration_unknown_key" | "configuration_secret_invalid" | "secret_file_missing" | "secret_file_outside_root" | "secret_file_invalid_type" | "secret_file_insecure_permissions" | "secret_file_too_large" | "secret_file_invalid_encoding" | "secret_file_empty" | "diagnostic_context_invalid" | "diagnostic_payload_rejected" | "internal_error" | "database_migration_configuration_invalid" | "database_connection_unavailable" | "database_migration_busy" | "database_schema_contract_invalid" | "database_destructive_downgrade_refused" | "object_storage_configuration_invalid" | "object_storage_input_invalid" | "object_storage_busy" | "object_storage_unavailable" | "object_storage_access_denied" | "object_storage_contract_invalid" | "object_storage_object_missing" | "object_storage_integrity_failed" | "object_storage_metadata_conflict" | "source_publish_input_invalid" | "source_not_found" | "source_already_exists" | "source_state_invalid" | "source_version_conflict" | "source_idempotency_mismatch" | "source_event_identity_mismatch" | "source_verified_receipt_stale" | "source_content_object_conflict" | "source_concurrency_busy" | "source_concurrency_invariant_failed" | "source_commit_outcome_unknown" | "projection_dispatch_unavailable" | "projection_intent_contract_invalid" | "identity_bootstrap_input_invalid" | "identity_bootstrap_state_conflict" | "canonical_read_state_invalid" | "canonical_recovery_environment_refused" | "canonical_recovery_configuration_invalid" | "canonical_recovery_snapshot_busy" | "canonical_recovery_bundle_exists" | "canonical_recovery_bundle_invalid" | "canonical_recovery_target_not_empty" | "canonical_recovery_dependency_unavailable" | "canonical_recovery_integrity_failed" | "canonical_recovery_restore_failed" | "api_request_malformed" | "api_request_validation_failed" | "api_route_not_found" | "api_method_not_allowed" | "authentication_required" | "authentication_failed" | "authentication_rate_limited" | "recent_authentication_required" | "csrf_validation_failed" | "authorization_scope_denied" | "totp_enrollment_state_invalid" | "device_authorization_pending" | "device_authorization_slow_down" | "device_authorization_denied" | "device_authorization_expired" | "device_authorization_state_invalid" | "device_revocation_confirmation_invalid" | "device_credential_invalid" | "device_revoked" | "device_token_reuse_detected" | "plugin_version_unsupported";
+        readonly ErrorCode: "configuration_invalid" | "configuration_unknown_key" | "configuration_secret_invalid" | "secret_file_missing" | "secret_file_outside_root" | "secret_file_invalid_type" | "secret_file_insecure_permissions" | "secret_file_too_large" | "secret_file_invalid_encoding" | "secret_file_empty" | "diagnostic_context_invalid" | "diagnostic_payload_rejected" | "internal_error" | "database_migration_configuration_invalid" | "database_connection_unavailable" | "database_migration_busy" | "database_schema_contract_invalid" | "database_destructive_downgrade_refused" | "object_storage_configuration_invalid" | "object_storage_input_invalid" | "object_storage_busy" | "object_storage_unavailable" | "object_storage_access_denied" | "object_storage_contract_invalid" | "object_storage_object_missing" | "object_storage_integrity_failed" | "object_storage_metadata_conflict" | "source_publish_input_invalid" | "source_not_found" | "source_already_exists" | "source_state_invalid" | "source_version_conflict" | "source_idempotency_mismatch" | "source_event_identity_mismatch" | "source_verified_receipt_stale" | "source_content_object_conflict" | "source_concurrency_busy" | "source_concurrency_invariant_failed" | "source_commit_outcome_unknown" | "projection_dispatch_unavailable" | "projection_intent_contract_invalid" | "identity_bootstrap_input_invalid" | "identity_bootstrap_state_conflict" | "canonical_read_state_invalid" | "canonical_recovery_environment_refused" | "canonical_recovery_configuration_invalid" | "canonical_recovery_snapshot_busy" | "canonical_recovery_bundle_exists" | "canonical_recovery_bundle_invalid" | "canonical_recovery_target_not_empty" | "canonical_recovery_dependency_unavailable" | "canonical_recovery_integrity_failed" | "canonical_recovery_restore_failed" | "api_request_malformed" | "api_request_validation_failed" | "api_route_not_found" | "api_method_not_allowed" | "authentication_required" | "authentication_failed" | "authentication_rate_limited" | "recent_authentication_required" | "csrf_validation_failed" | "authorization_scope_denied" | "totp_enrollment_state_invalid" | "device_authorization_pending" | "device_authorization_slow_down" | "device_authorization_denied" | "device_authorization_expired" | "device_authorization_state_invalid" | "device_revocation_confirmation_invalid" | "device_credential_invalid" | "device_revoked" | "device_token_reuse_detected" | "plugin_version_unsupported" | "exclusion_policy_input_invalid" | "exclusion_policy_not_initialized" | "exclusion_policy_draft_conflict" | "exclusion_policy_preview_pending" | "exclusion_policy_preview_failed" | "exclusion_policy_preview_expired" | "exclusion_policy_preview_stale" | "exclusion_policy_confirmation_invalid" | "exclusion_policy_denied" | "exclusion_policy_indeterminate" | "exclusion_policy_snapshot_outdated" | "exclusion_policy_signing_unavailable" | "exclusion_policy_commit_outcome_unknown";
+        /**
+         * ExclusionPolicyStatusData
+         * @description The Admin status read: revision metadata, draft and reconciliation.
+         */
+        readonly ExclusionPolicyStatusData: {
+            /** Active Policy Revision Id */
+            readonly active_policy_revision_id: string | null;
+            /** Active Revision Number */
+            readonly active_revision_number: number;
+            readonly draft: components["schemas"]["PolicyDraftData"];
+            readonly reconciliation: components["schemas"]["PolicyReconciliationSummaryData"] | null;
+        };
         /**
          * LivenessData
          * @description Process-liveness success data; it implies no I/O by construction.
@@ -1030,6 +1272,449 @@ export type components = {
         readonly PasswordChangeRequest: {
             /** New Password */
             readonly new_password: string;
+        };
+        /**
+         * PolicyDraftData
+         * @description The working draft with its exact version (spec 16.1).
+         */
+        readonly PolicyDraftData: {
+            /** Base Policy Revision Id */
+            readonly base_policy_revision_id: string | null;
+            /**
+             * Draft Id
+             * Format: uuid
+             */
+            readonly draft_id: string;
+            /** Draft Version */
+            readonly draft_version: number;
+            /** Rules */
+            readonly rules: readonly components["schemas"]["PolicyRuleData"][];
+        };
+        /**
+         * PolicyDraftReplaceRequest
+         * @description The strict full-list draft replacement body (spec 16.1).
+         */
+        readonly PolicyDraftReplaceRequest: {
+            /** Expected Draft Version */
+            readonly expected_draft_version: number;
+            /** Rules */
+            readonly rules: readonly components["schemas"]["PolicyDraftRuleRequest"][];
+        };
+        /**
+         * PolicyDraftRuleRequest
+         * @description One desired draft rule in the shared signed-payload member grammar.
+         */
+        readonly PolicyDraftRuleRequest: {
+            /** Extension */
+            readonly extension?: string | null;
+            /** Folder Prefix */
+            readonly folder_prefix?: string | null;
+            /** Maximum Size Bytes */
+            readonly maximum_size_bytes?: number | null;
+            /** Media Type */
+            readonly media_type?: string | null;
+            /** Path Glob */
+            readonly path_glob?: string | null;
+            /**
+             * Rule Id
+             * Format: uuid
+             */
+            readonly rule_id: string;
+            readonly rule_kind: components["schemas"]["RuleKind"];
+            /** Source Id */
+            readonly source_id?: string | null;
+            /** Source Type */
+            readonly source_type?: string | null;
+        };
+        /**
+         * PolicyKeysetEnvelopeData
+         * @description One persisted keyset envelope: payload, digest and cross-signatures.
+         */
+        readonly PolicyKeysetEnvelopeData: {
+            readonly payload: components["schemas"]["PolicyKeysetPayloadData"];
+            /** Payload Sha256 */
+            readonly payload_sha256: string;
+            /** Signatures */
+            readonly signatures: readonly components["schemas"]["PolicyKeysetSignatureData"][];
+        };
+        /**
+         * PolicyKeysetKeyData
+         * @description One trust-anchor entry of a canonical keyset payload (spec 13).
+         */
+        readonly PolicyKeysetKeyData: {
+            /**
+             * Algorithm
+             * @constant
+             */
+            readonly algorithm: "Ed25519";
+            /** Key Id */
+            readonly key_id: string;
+            /** Public Key */
+            readonly public_key: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            readonly state: "current" | "staged" | "retired";
+        };
+        /**
+         * PolicyKeysetPageData
+         * @description One bounded, ordered keyset chain page with its continuation flag.
+         */
+        readonly PolicyKeysetPageData: {
+            /** Has More */
+            readonly has_more: boolean;
+            /** Keysets */
+            readonly keysets: readonly components["schemas"]["PolicyKeysetEnvelopeData"][];
+        };
+        /**
+         * PolicyKeysetPayloadData
+         * @description The re-validated canonical keyset payload of spec 13.
+         */
+        readonly PolicyKeysetPayloadData: {
+            /**
+             * Contract
+             * @constant
+             */
+            readonly contract: "exclusion_policy_keyset/v1";
+            /** Created At */
+            readonly created_at: string;
+            /** Keys */
+            readonly keys: readonly components["schemas"]["PolicyKeysetKeyData"][];
+            /** Keyset Revision */
+            readonly keyset_revision: number;
+            /** Parent Keyset Revision */
+            readonly parent_keyset_revision: number | null;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            readonly workspace_id: string;
+        };
+        /**
+         * PolicyKeysetSignatureData
+         * @description One cross-signature over the canonical keyset payload (spec 13).
+         */
+        readonly PolicyKeysetSignatureData: {
+            /**
+             * Algorithm
+             * @constant
+             */
+            readonly algorithm: "Ed25519";
+            /** Key Id */
+            readonly key_id: string;
+            /** Value */
+            readonly value: string;
+        };
+        /**
+         * PolicyPreviewCountersData
+         * @description The five closed impact counters of one preview (spec 10).
+         */
+        readonly PolicyPreviewCountersData: {
+            /** Indeterminate Count */
+            readonly indeterminate_count: number;
+            /** Newly Allowed Count */
+            readonly newly_allowed_count: number;
+            /** Newly Excluded Count */
+            readonly newly_excluded_count: number;
+            /** Still Allowed Count */
+            readonly still_allowed_count: number;
+            /** Still Excluded Count */
+            readonly still_excluded_count: number;
+        };
+        /**
+         * PolicyPreviewCursorData
+         * @description The stable ``(impact_class, source_id)`` continuation cursor.
+         */
+        readonly PolicyPreviewCursorData: {
+            /**
+             * Impact Class
+             * @enum {string}
+             */
+            readonly impact_class: "newly_excluded" | "still_excluded" | "newly_allowed" | "still_allowed" | "indeterminate";
+            /**
+             * Source Id
+             * Format: uuid
+             */
+            readonly source_id: string;
+        };
+        /**
+         * PolicyPreviewData
+         * @description One preview lifecycle read; ``results`` render only once ready.
+         */
+        readonly PolicyPreviewData: {
+            /** Base Policy Revision Id */
+            readonly base_policy_revision_id: string | null;
+            /** Consumed At */
+            readonly consumed_at: string | null;
+            readonly counters: components["schemas"]["PolicyPreviewCountersData"];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            readonly created_at: string;
+            /** Draft Sha256 */
+            readonly draft_sha256: string;
+            /** Draft Version */
+            readonly draft_version: number;
+            /** Expires At */
+            readonly expires_at: string | null;
+            /** Impact Digest */
+            readonly impact_digest: string | null;
+            readonly next_cursor?: components["schemas"]["PolicyPreviewCursorData"] | null;
+            /**
+             * Policy Draft Id
+             * Format: uuid
+             */
+            readonly policy_draft_id: string;
+            /**
+             * Policy Preview Id
+             * Format: uuid
+             */
+            readonly policy_preview_id: string;
+            /** Ready At */
+            readonly ready_at: string | null;
+            /** Results */
+            readonly results?: readonly components["schemas"]["PolicyPreviewResultRowData"][] | null;
+            /** Safe Error Code */
+            readonly safe_error_code: string | null;
+            /** Source Checkpoint Event Sequence */
+            readonly source_checkpoint_event_sequence: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            readonly status: "pending" | "leased" | "running" | "ready" | "failed" | "expired" | "consumed";
+        };
+        /**
+         * PolicyPreviewResultRowData
+         * @description One preview result row: opaque IDs and closed states only (spec 10).
+         */
+        readonly PolicyPreviewResultRowData: {
+            /**
+             * Impact Class
+             * @enum {string}
+             */
+            readonly impact_class: "newly_excluded" | "still_excluded" | "newly_allowed" | "still_allowed" | "indeterminate";
+            /** Matched Rule Ids */
+            readonly matched_rule_ids: readonly string[];
+            /** Missing Fields */
+            readonly missing_fields: readonly string[];
+            /** Previous Enforced Decision */
+            readonly previous_enforced_decision: string;
+            /** Previous Raw Decision */
+            readonly previous_raw_decision: string;
+            /** Proposed Enforced Decision */
+            readonly proposed_enforced_decision: string;
+            /** Proposed Match State */
+            readonly proposed_match_state: string;
+            /** Proposed Raw Decision */
+            readonly proposed_raw_decision: string;
+            /**
+             * Source Id
+             * Format: uuid
+             */
+            readonly source_id: string;
+        };
+        /**
+         * PolicyPublicationData
+         * @description The durable publication outcome; never payload or signature bytes.
+         */
+        readonly PolicyPublicationData: {
+            /** Is Replay */
+            readonly is_replay: boolean;
+            /** Parent Policy Revision Id */
+            readonly parent_policy_revision_id: string | null;
+            /** Payload Sha256 */
+            readonly payload_sha256: string;
+            /**
+             * Policy Revision Id
+             * Format: uuid
+             */
+            readonly policy_revision_id: string;
+            /**
+             * Published At
+             * Format: date-time
+             */
+            readonly published_at: string;
+            /** Reconciliation Status */
+            readonly reconciliation_status: string;
+            /** Revision Number */
+            readonly revision_number: number;
+            /** Rule Count */
+            readonly rule_count: number;
+            /** Signing Key Id */
+            readonly signing_key_id: string;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            readonly workspace_id: string;
+        };
+        /**
+         * PolicyPublicationRequest
+         * @description The exact expected publication binding (spec 11/16.1).
+         *
+         *     Carries the ready preview identity, the expected draft identity, version
+         *     and semantic digest, the preview impact digest, the expected active
+         *     revision and the exact confirmation phrase — never a client-supplied
+         *     signature, revision allocation or workspace selector. The opaque
+         *     idempotency key travels in its dedicated header.
+         */
+        readonly PolicyPublicationRequest: {
+            /** Confirmation */
+            readonly confirmation: string;
+            /** Expected Active Policy Revision Id */
+            readonly expected_active_policy_revision_id?: string | null;
+            /** Expected Active Revision Number */
+            readonly expected_active_revision_number: number;
+            /** Expected Draft Sha256 */
+            readonly expected_draft_sha256: string;
+            /** Expected Draft Version */
+            readonly expected_draft_version: number;
+            /**
+             * Policy Draft Id
+             * Format: uuid
+             */
+            readonly policy_draft_id: string;
+            /**
+             * Policy Preview Id
+             * Format: uuid
+             */
+            readonly policy_preview_id: string;
+            /** Preview Impact Digest */
+            readonly preview_impact_digest: string;
+        };
+        /**
+         * PolicyReconciliationSummaryData
+         * @description The closed reconciliation summary of the active revision (spec 15).
+         */
+        readonly PolicyReconciliationSummaryData: {
+            /**
+             * Policy Revision Id
+             * Format: uuid
+             */
+            readonly policy_revision_id: string;
+            /** State */
+            readonly state: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            readonly updated_at: string;
+        };
+        /**
+         * PolicyRuleData
+         * @description One rendered draft rule: identity, kind, fingerprint and one operand.
+         *
+         *     Exactly one operand member is populated at construction and the policy
+         *     responses render with ``exclude_unset``, so the emitted rule carries the
+         *     same one-named-operand grammar as the signed payloads of spec 12.
+         */
+        readonly PolicyRuleData: {
+            /** Extension */
+            readonly extension?: string | null;
+            /** Folder Prefix */
+            readonly folder_prefix?: string | null;
+            /** Maximum Size Bytes */
+            readonly maximum_size_bytes?: number | null;
+            /** Media Type */
+            readonly media_type?: string | null;
+            /** Path Glob */
+            readonly path_glob?: string | null;
+            /**
+             * Rule Id
+             * Format: uuid
+             */
+            readonly rule_id: string;
+            readonly rule_kind: components["schemas"]["RuleKind"];
+            /** Semantic Fingerprint */
+            readonly semantic_fingerprint: string;
+            /** Source Id */
+            readonly source_id?: string | null;
+            /** Source Type */
+            readonly source_type?: string | null;
+        };
+        /**
+         * PolicySnapshotPayloadData
+         * @description The re-validated canonical snapshot payload of spec 12.
+         */
+        readonly PolicySnapshotPayloadData: {
+            /**
+             * Contract
+             * @constant
+             */
+            readonly contract: "exclusion_policy_snapshot/v1";
+            /**
+             * Default Decision
+             * @constant
+             */
+            readonly default_decision: "allowed";
+            /** Evaluator Contract Sha256 */
+            readonly evaluator_contract_sha256: string;
+            /** Parent Policy Revision Id */
+            readonly parent_policy_revision_id: string | null;
+            /**
+             * Policy Revision Id
+             * Format: uuid
+             */
+            readonly policy_revision_id: string;
+            /** Published At */
+            readonly published_at: string;
+            /** Revision Number */
+            readonly revision_number: number;
+            /** Rules */
+            readonly rules: readonly components["schemas"]["PolicySnapshotRuleData"][];
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            readonly workspace_id: string;
+        };
+        /**
+         * PolicySnapshotRuleData
+         * @description One rule of a signed snapshot payload (spec 12): no fingerprint.
+         *
+         *     Exactly one operand member is populated at construction and the policy
+         *     responses render with ``exclude_unset``, so the emitted payload mirrors
+         *     the persisted canonical member set.
+         */
+        readonly PolicySnapshotRuleData: {
+            /** Extension */
+            readonly extension?: string | null;
+            /** Folder Prefix */
+            readonly folder_prefix?: string | null;
+            /** Maximum Size Bytes */
+            readonly maximum_size_bytes?: number | null;
+            /** Media Type */
+            readonly media_type?: string | null;
+            /** Path Glob */
+            readonly path_glob?: string | null;
+            /**
+             * Rule Id
+             * Format: uuid
+             */
+            readonly rule_id: string;
+            readonly rule_kind: components["schemas"]["RuleKind"];
+            /** Source Id */
+            readonly source_id?: string | null;
+            /** Source Type */
+            readonly source_type?: string | null;
+        };
+        /**
+         * PolicySnapshotSignatureData
+         * @description The detached Ed25519 signature member of the spec 12 envelope.
+         */
+        readonly PolicySnapshotSignatureData: {
+            /**
+             * Algorithm
+             * @constant
+             */
+            readonly algorithm: "Ed25519";
+            /** Key Id */
+            readonly key_id: string;
+            /** Value */
+            readonly value: string;
         };
         /**
          * ReadinessChecks
@@ -1146,6 +1831,12 @@ export type components = {
             readonly token_family_id: string;
         };
         /**
+         * RuleKind
+         * @description Closed vocabulary of the seven deny-only rule kinds (spec 6.2).
+         * @enum {string}
+         */
+        readonly RuleKind: "exact_source_id" | "folder_prefix" | "path_glob" | "extension" | "media_type" | "maximum_size" | "source_type";
+        /**
          * SessionData
          * @description The public view of one Web session (spec 9.2).
          *
@@ -1171,6 +1862,16 @@ export type components = {
             /** Scopes */
             readonly scopes: readonly components["schemas"]["WebScope"][];
             readonly state: components["schemas"]["WebSessionState"];
+        };
+        /**
+         * SignedPolicySnapshotData
+         * @description The exact persisted signed-snapshot envelope as typed JSON.
+         */
+        readonly SignedPolicySnapshotData: {
+            readonly payload: components["schemas"]["PolicySnapshotPayloadData"];
+            /** Payload Sha256 */
+            readonly payload_sha256: string;
+            readonly signature: components["schemas"]["PolicySnapshotSignatureData"];
         };
         /**
          * TotpCodeRequest
@@ -1315,6 +2016,139 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["ApiEnvelope_AdminDeviceRevokeData_"];
+                };
+            };
+        };
+    };
+    readonly getExclusionPolicyStatus: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_ExclusionPolicyStatusData_"];
+                };
+            };
+        };
+    };
+    readonly replaceExclusionPolicyDraft: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["PolicyDraftReplaceRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_PolicyDraftData_"];
+                };
+            };
+        };
+    };
+    readonly createExclusionPolicyPreview: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 202: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_PolicyPreviewData_"];
+                };
+            };
+        };
+    };
+    readonly getExclusionPolicyPreview: {
+        readonly parameters: {
+            readonly query?: {
+                readonly cursor_impact_class?: string | null;
+                readonly cursor_source_id?: string | null;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly policy_preview_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description The preview is ready; the payload carries the first result page */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_PolicyPreviewData_"];
+                };
+            };
+            /** @description Successful Response */
+            readonly 202: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_PolicyPreviewData_"];
+                };
+            };
+        };
+    };
+    readonly publishExclusionPolicy: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header: {
+                readonly "X-Idempotency-Key": string;
+            };
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["PolicyPublicationRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description The exact replay of an already committed publication */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_PolicyPublicationData_"];
+                };
+            };
+            /** @description Successful Response */
+            readonly 201: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_PolicyPublicationData_"];
                 };
             };
         };
@@ -1772,6 +2606,55 @@ export interface operations {
                 content: {
                     readonly "application/json": components["schemas"]["ApiEnvelope_ReadinessData_"];
                 };
+            };
+        };
+    };
+    readonly listExclusionPolicyKeysets: {
+        readonly parameters: {
+            readonly query?: {
+                readonly after_keyset_revision?: number;
+            };
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_PolicyKeysetPageData_"];
+                };
+            };
+        };
+    };
+    readonly getExclusionPolicySnapshot: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_SignedPolicySnapshotData_"];
+                };
+            };
+            /** @description The presented entity tag is current */
+            readonly 304: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

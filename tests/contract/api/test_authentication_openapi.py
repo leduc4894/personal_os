@@ -29,11 +29,14 @@ DEVICE_BEARER_SCHEMES: Final[frozenset[str]] = frozenset(
     {"PollingCredential", "AccessCredential", "RefreshCredential"}
 )
 
-#: Route-to-scheme bindings of the credential-authenticated device routes.
+#: Route-to-scheme bindings of the credential-authenticated device and
+#: plugin policy routes.
 CREDENTIAL_ROUTE_SECURITY: Final[dict[str, str]] = {
     "/api/auth/device-authorizations/{grant_id}/poll": "PollingCredential",
     "/api/auth/device-tokens/refresh": "RefreshCredential",
     "/api/auth/device-tokens/revoke-current": "RefreshCredential",
+    "/api/sync/exclusion-policy/keysets": "AccessCredential",
+    "/api/sync/exclusion-policy/snapshot": "AccessCredential",
 }
 
 
@@ -72,7 +75,7 @@ def test_every_device_bearer_scheme_is_a_distinct_http_bearer_scheme(
 
 def test_credential_routes_bind_exactly_their_dedicated_scheme(schema: dict[str, Any]) -> None:
     for path, scheme_name in CREDENTIAL_ROUTE_SECURITY.items():
-        operation = schema["paths"][path]["post"]
+        operation = schema["paths"][path]["post" if "exclusion-policy" not in path else "get"]
         assert operation["security"] == [{scheme_name: []}], path
 
 

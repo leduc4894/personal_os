@@ -48,6 +48,15 @@ ROUTE_OPERATION_IDS: dict[str, dict[str, str]] = {
     "/api/auth/device-tokens/revoke-current": {"post": "revokeCurrentDeviceToken"},
     "/api/admin/devices": {"get": "listAdminDevices"},
     "/api/admin/devices/{device_id}/revoke": {"post": "revokeAdminDevice"},
+    "/api/admin/exclusion-policy": {"get": "getExclusionPolicyStatus"},
+    "/api/admin/exclusion-policy/draft": {"put": "replaceExclusionPolicyDraft"},
+    "/api/admin/exclusion-policy/previews": {"post": "createExclusionPolicyPreview"},
+    "/api/admin/exclusion-policy/previews/{policy_preview_id}": {
+        "get": "getExclusionPolicyPreview"
+    },
+    "/api/admin/exclusion-policy/publications": {"post": "publishExclusionPolicy"},
+    "/api/sync/exclusion-policy/keysets": {"get": "listExclusionPolicyKeysets"},
+    "/api/sync/exclusion-policy/snapshot": {"get": "getExclusionPolicySnapshot"},
 }
 
 #: Component schema names emitted for every frozen ``extra="forbid"`` model.
@@ -85,6 +94,27 @@ STRICT_MODEL_SCHEMA_NAMES: tuple[str, ...] = (
     "AdminDeviceListData",
     "AdminDeviceRevokeRequest",
     "AdminDeviceRevokeData",
+    "ExclusionPolicyStatusData",
+    "PolicyDraftData",
+    "PolicyDraftReplaceRequest",
+    "PolicyDraftRuleRequest",
+    "PolicyKeysetEnvelopeData",
+    "PolicyKeysetKeyData",
+    "PolicyKeysetPageData",
+    "PolicyKeysetPayloadData",
+    "PolicyKeysetSignatureData",
+    "PolicyPreviewCountersData",
+    "PolicyPreviewCursorData",
+    "PolicyPreviewData",
+    "PolicyPreviewResultRowData",
+    "PolicyPublicationData",
+    "PolicyPublicationRequest",
+    "PolicyReconciliationSummaryData",
+    "PolicyRuleData",
+    "PolicySnapshotPayloadData",
+    "PolicySnapshotRuleData",
+    "PolicySnapshotSignatureData",
+    "SignedPolicySnapshotData",
 )
 
 _URL_PATTERN = re.compile(r"\w+://")
@@ -157,6 +187,11 @@ def test_every_response_references_a_named_component_schema(
                 method,
             )
             for status, response in operation["responses"].items():
+                if status == "304":
+                    # The snapshot's not-modified response carries headers
+                    # only: the entity tag replaces the body (spec 16.2).
+                    assert "content" not in response, (path, method, status)
+                    continue
                 schema = response["content"]["application/json"]["schema"]
                 assert set(schema) == {"$ref"}, (path, method, status)
                 reference = schema["$ref"]

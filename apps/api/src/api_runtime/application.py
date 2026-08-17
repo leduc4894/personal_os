@@ -57,14 +57,24 @@ from api_runtime.device_authorization_routes import (
     POLLING_BEARER_SCHEME,
     create_device_authorization_route_endpoints,
 )
+from api_runtime.exclusion_policy_composition import ExclusionPolicyRuntime
+from api_runtime.exclusion_policy_models import (
+    ExclusionPolicyStatusData,
+    PolicyDraftData,
+    PolicyKeysetPageData,
+    PolicyPreviewData,
+    PolicyPublicationData,
+    SignedPolicySnapshotData,
+)
+from api_runtime.exclusion_policy_routes import create_exclusion_policy_route_endpoints
 from api_runtime.request_context import ASGIApp as CorrelationApp
 from api_runtime.request_context import RequestContextMiddleware
 from api_runtime.session_routes import create_session_route_endpoints
 from api_runtime.totp_routes import create_totp_route_endpoints
 from api_runtime.web_security import WebSecurityHeadersMiddleware
 from personal_os.api_contracts import (
-    AUTHENTICATION_ROUTE_TEMPLATE_VALUES,
     HTTP_ERROR_STATUSES,
+    NO_STORE_ROUTE_TEMPLATE_VALUES,
     ApiEnvelope,
     ApiRouteTemplate,
     ApiTransportError,
@@ -72,7 +82,7 @@ from personal_os.api_contracts import (
     LivenessData,
     ReadinessData,
     error_envelope,
-    is_authentication_route_template,
+    is_no_store_route_template,
 )
 from personal_os.diagnostics.context import current_diagnostic_context
 from personal_os.diagnostics.events import DiagnosticEventSink, SafeToken
@@ -136,10 +146,18 @@ def create_api_application(
     environment: RuntimeEnvironment,
     readiness_probe: CanonicalDatabaseReadinessProbe,
     web_authentication: WebAuthenticationRuntime,
+    exclusion_policy: ExclusionPolicyRuntime | None = None,
     event_sink: DiagnosticEventSink | None = None,
     lifespan: Lifespan[FastAPI] | None = None,
 ) -> FastAPI:
-    """Compose the runnable API application for one runtime environment."""
+    """Compose the runnable API application for one runtime environment.
+
+    The exclusion-policy runtime is optional only so the authentication-only
+    contract compositions of the earlier children stay constructible; the
+    serve graph and the full contract document always compose it, and the
+    policy routes register only when the runtime is present — never through
+    router auto-discovery.
+    """
     app = FastAPI(
         title="Personal Knowledge API",
         version=distribution_version(),
@@ -173,6 +191,8 @@ def create_api_application(
     _register_totp_routes(app, web_authentication)
     _register_device_authorization_routes(app, web_authentication)
     _register_device_admin_routes(app, web_authentication)
+    if exclusion_policy is not None:
+        _register_exclusion_policy_routes(app, web_authentication, exclusion_policy)
     _classify_openapi_route(app)
     _suppress_framework_validation_error_document(app)
     # The pure-ASGI correlation middleware declares read-only ``Mapping``
@@ -391,6 +411,103 @@ def _register_device_admin_routes(
     )
 
 
+def _register_exclusion_policy_routes(
+    app: FastAPI,
+    web_authentication: WebAuthenticationRuntime,
+    exclusion_policy: ExclusionPolicyRuntime,
+) -> None:
+    """Register the closed exclusion-policy route set (spec 16.1/16.2).
+
+    Each route carries its manually assigned semantic operation id, its
+    envelope response model and its primary success status; the session/
+    CSRF/recent-auth dependencies of the Admin routes and the access Bearer
+    dependency of the plugin routes live in the endpoint factory. The
+    preview poll documents its ready ``200`` beside the pending ``202``, the
+    publication its exact-replay ``200`` beside the committed ``201``, and
+    the snapshot its bodyless ``304``.
+    """
+    endpoints = create_exclusion_policy_route_endpoints(
+        web_authentication=web_authentication, exclusion_policy=exclusion_policy
+    )
+    app.add_api_route(
+        "/api/admin/exclusion-policy",
+        endpoints.get_policy_status,
+        methods=["GET"],
+        operation_id="getExclusionPolicyStatus",
+        response_model=ApiEnvelope[ExclusionPolicyStatusData],
+    )
+    app.add_api_route(
+        "/api/admin/exclusion-policy/draft",
+        endpoints.replace_draft,
+        methods=["PUT"],
+        operation_id="replaceExclusionPolicyDraft",
+        response_model=ApiEnvelope[PolicyDraftData],
+    )
+    app.add_api_route(
+        "/api/admin/exclusion-policy/previews",
+        endpoints.create_preview,
+        methods=["POST"],
+        operation_id="createExclusionPolicyPreview",
+        response_model=ApiEnvelope[PolicyPreviewData],
+        status_code=202,
+    )
+    app.add_api_route(
+        "/api/admin/exclusion-policy/previews/{policy_preview_id}",
+        endpoints.get_preview,
+        methods=["GET"],
+        operation_id="getExclusionPolicyPreview",
+        response_model=ApiEnvelope[PolicyPreviewData],
+        status_code=202,
+        responses={
+            "200": {
+                "description": "The preview is ready; the payload carries the first result page",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": "#/components/schemas/ApiEnvelope_PolicyPreviewData_"
+                        }
+                    }
+                },
+            }
+        },
+    )
+    app.add_api_route(
+        "/api/admin/exclusion-policy/publications",
+        endpoints.publish,
+        methods=["POST"],
+        operation_id="publishExclusionPolicy",
+        response_model=ApiEnvelope[PolicyPublicationData],
+        status_code=201,
+        responses={
+            "200": {
+                "description": "The exact replay of an already committed publication",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": "#/components/schemas/ApiEnvelope_PolicyPublicationData_"
+                        }
+                    }
+                },
+            }
+        },
+    )
+    app.add_api_route(
+        "/api/sync/exclusion-policy/keysets",
+        endpoints.list_keysets,
+        methods=["GET"],
+        operation_id="listExclusionPolicyKeysets",
+        response_model=ApiEnvelope[PolicyKeysetPageData],
+    )
+    app.add_api_route(
+        "/api/sync/exclusion-policy/snapshot",
+        endpoints.get_snapshot,
+        methods=["GET"],
+        operation_id="getExclusionPolicySnapshot",
+        response_model=ApiEnvelope[SignedPolicySnapshotData],
+        responses={"304": {"description": "The presented entity tag is current"}},
+    )
+
+
 def _as_http_handler(
     handler: Callable[[Request, Any], Awaitable[JSONResponse]],
 ) -> ExceptionHandler:
@@ -558,15 +675,22 @@ def _error_response(request: Request, error: ApplicationError) -> JSONResponse:
 
 
 def _authentication_error_headers(request: Request) -> Mapping[str, str]:
-    """Return the no-store headers when the rejected route is an auth route."""
+    """Return the no-store headers when the rejected route carries the posture.
+
+    Every authentication-bound and exclusion-policy route answers failures
+    with ``Cache-Control: no-store`` (spec 16); the route is classified
+    through the assigned route template or, when a dependency rejected the
+    request before the endpoint published it, through the matched route path
+    mapped against the same closed template vocabulary.
+    """
     template = request.scope.get("route_template")
     if not isinstance(template, ApiRouteTemplate):
         matched_path = getattr(request.scope.get("route"), "path", None)
-        if isinstance(matched_path, str) and matched_path in AUTHENTICATION_ROUTE_TEMPLATE_VALUES:
+        if isinstance(matched_path, str) and matched_path in NO_STORE_ROUTE_TEMPLATE_VALUES:
             template = ApiRouteTemplate(matched_path)
         else:
             template = None
-    if isinstance(template, ApiRouteTemplate) and is_authentication_route_template(template):
+    if isinstance(template, ApiRouteTemplate) and is_no_store_route_template(template):
         return _NO_STORE_HEADERS
     return {}
 

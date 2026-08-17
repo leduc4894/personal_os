@@ -78,6 +78,21 @@ def test_http_status_map_is_closed_for_the_api_surface() -> None:
         ErrorCode.DEVICE_REVOKED: 401,
         ErrorCode.DEVICE_TOKEN_REUSE_DETECTED: 401,
         ErrorCode.PLUGIN_VERSION_UNSUPPORTED: 426,
+        # The exclusion-policy status column of the design error contract
+        # (spec 19), wired when the policy routes landed.
+        ErrorCode.EXCLUSION_POLICY_INPUT_INVALID: 422,
+        ErrorCode.EXCLUSION_POLICY_NOT_INITIALIZED: 409,
+        ErrorCode.EXCLUSION_POLICY_DRAFT_CONFLICT: 409,
+        ErrorCode.EXCLUSION_POLICY_PREVIEW_PENDING: 409,
+        ErrorCode.EXCLUSION_POLICY_PREVIEW_FAILED: 409,
+        ErrorCode.EXCLUSION_POLICY_PREVIEW_EXPIRED: 410,
+        ErrorCode.EXCLUSION_POLICY_PREVIEW_STALE: 409,
+        ErrorCode.EXCLUSION_POLICY_CONFIRMATION_INVALID: 409,
+        ErrorCode.EXCLUSION_POLICY_DENIED: 403,
+        ErrorCode.EXCLUSION_POLICY_INDETERMINATE: 403,
+        ErrorCode.EXCLUSION_POLICY_SNAPSHOT_OUTDATED: 409,
+        ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE: 503,
+        ErrorCode.EXCLUSION_POLICY_COMMIT_OUTCOME_UNKNOWN: 503,
     }
 
 

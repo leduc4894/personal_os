@@ -43,6 +43,13 @@ class ApiRouteTemplate(StrEnum):
     AUTH_DEVICE_TOKENS_REVOKE_CURRENT = "/api/auth/device-tokens/revoke-current"
     ADMIN_DEVICES = "/api/admin/devices"
     ADMIN_DEVICE_REVOKE = "/api/admin/devices/{device_id}/revoke"
+    ADMIN_EXCLUSION_POLICY = "/api/admin/exclusion-policy"
+    ADMIN_EXCLUSION_POLICY_DRAFT = "/api/admin/exclusion-policy/draft"
+    ADMIN_EXCLUSION_POLICY_PREVIEWS = "/api/admin/exclusion-policy/previews"
+    ADMIN_EXCLUSION_POLICY_PREVIEW = "/api/admin/exclusion-policy/previews/{policy_preview_id}"
+    ADMIN_EXCLUSION_POLICY_PUBLICATIONS = "/api/admin/exclusion-policy/publications"
+    SYNC_EXCLUSION_POLICY_KEYSETS = "/api/sync/exclusion-policy/keysets"
+    SYNC_EXCLUSION_POLICY_SNAPSHOT = "/api/sync/exclusion-policy/snapshot"
     OPENAPI_DOCUMENT = "/api/openapi.json"
     UNMATCHED = "unmatched"
 
@@ -88,3 +95,39 @@ AUTHENTICATION_ROUTE_TEMPLATE_VALUES: Final[frozenset[str]] = frozenset(
 def is_authentication_route_template(template: ApiRouteTemplate) -> bool:
     """Return whether one route template belongs to the authentication set."""
     return template in AUTHENTICATION_ROUTE_TEMPLATES
+
+
+#: The closed exclusion-policy route set of spec 16.1/16.2 — the Admin policy
+#: control surface behind the Web session contract and the plugin keyset/
+#: snapshot reads behind the access Bearer credential.
+EXCLUSION_POLICY_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset(
+    {
+        ApiRouteTemplate.ADMIN_EXCLUSION_POLICY,
+        ApiRouteTemplate.ADMIN_EXCLUSION_POLICY_DRAFT,
+        ApiRouteTemplate.ADMIN_EXCLUSION_POLICY_PREVIEWS,
+        ApiRouteTemplate.ADMIN_EXCLUSION_POLICY_PREVIEW,
+        ApiRouteTemplate.ADMIN_EXCLUSION_POLICY_PUBLICATIONS,
+        ApiRouteTemplate.SYNC_EXCLUSION_POLICY_KEYSETS,
+        ApiRouteTemplate.SYNC_EXCLUSION_POLICY_SNAPSHOT,
+    }
+)
+
+#: Every route whose responses — success, service rejection and dependency
+#: failure alike — carry ``Cache-Control: no-store`` (spec 16): the
+#: authentication-bound sets plus the exclusion-policy routes, whose payloads
+#: are per-request policy state and signed envelopes that must never come
+#: from a shared cache.
+NO_STORE_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = (
+    AUTHENTICATION_ROUTE_TEMPLATES | EXCLUSION_POLICY_ROUTE_TEMPLATES
+)
+
+#: Immutable view of the no-store template values, for classifying a raw
+#: matched route path without retaining it.
+NO_STORE_ROUTE_TEMPLATE_VALUES: Final[frozenset[str]] = frozenset(
+    template.value for template in NO_STORE_ROUTE_TEMPLATES
+)
+
+
+def is_no_store_route_template(template: ApiRouteTemplate) -> bool:
+    """Return whether one route template carries the no-store posture."""
+    return template in NO_STORE_ROUTE_TEMPLATES

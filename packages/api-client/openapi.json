@@ -488,6 +488,51 @@
         "title": "ApiEnvelope[DeviceSelfRevokeData]",
         "type": "object"
       },
+      "ApiEnvelope_ExclusionPolicyStatusData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExclusionPolicyStatusData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[ExclusionPolicyStatusData]",
+        "type": "object"
+      },
       "ApiEnvelope_LivenessData_": {
         "additionalProperties": false,
         "properties": {
@@ -531,6 +576,186 @@
           "error"
         ],
         "title": "ApiEnvelope[LivenessData]",
+        "type": "object"
+      },
+      "ApiEnvelope_PolicyDraftData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PolicyDraftData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[PolicyDraftData]",
+        "type": "object"
+      },
+      "ApiEnvelope_PolicyKeysetPageData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PolicyKeysetPageData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[PolicyKeysetPageData]",
+        "type": "object"
+      },
+      "ApiEnvelope_PolicyPreviewData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PolicyPreviewData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[PolicyPreviewData]",
+        "type": "object"
+      },
+      "ApiEnvelope_PolicyPublicationData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PolicyPublicationData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[PolicyPublicationData]",
         "type": "object"
       },
       "ApiEnvelope_ReadinessData_": {
@@ -756,6 +981,51 @@
           "error"
         ],
         "title": "ApiEnvelope[SessionData]",
+        "type": "object"
+      },
+      "ApiEnvelope_SignedPolicySnapshotData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SignedPolicySnapshotData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[SignedPolicySnapshotData]",
         "type": "object"
       },
       "ApiEnvelope_TotpEnrollmentData_": {
@@ -1262,10 +1532,66 @@
           "device_credential_invalid",
           "device_revoked",
           "device_token_reuse_detected",
-          "plugin_version_unsupported"
+          "plugin_version_unsupported",
+          "exclusion_policy_input_invalid",
+          "exclusion_policy_not_initialized",
+          "exclusion_policy_draft_conflict",
+          "exclusion_policy_preview_pending",
+          "exclusion_policy_preview_failed",
+          "exclusion_policy_preview_expired",
+          "exclusion_policy_preview_stale",
+          "exclusion_policy_confirmation_invalid",
+          "exclusion_policy_denied",
+          "exclusion_policy_indeterminate",
+          "exclusion_policy_snapshot_outdated",
+          "exclusion_policy_signing_unavailable",
+          "exclusion_policy_commit_outcome_unknown"
         ],
         "title": "ErrorCode",
         "type": "string"
+      },
+      "ExclusionPolicyStatusData": {
+        "additionalProperties": false,
+        "description": "The Admin status read: revision metadata, draft and reconciliation.",
+        "properties": {
+          "active_policy_revision_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Policy Revision Id"
+          },
+          "active_revision_number": {
+            "title": "Active Revision Number",
+            "type": "integer"
+          },
+          "draft": {
+            "$ref": "#/components/schemas/PolicyDraftData"
+          },
+          "reconciliation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PolicyReconciliationSummaryData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "active_policy_revision_id",
+          "active_revision_number",
+          "draft",
+          "reconciliation"
+        ],
+        "title": "ExclusionPolicyStatusData",
+        "type": "object"
       },
       "LivenessData": {
         "additionalProperties": false,
@@ -1325,6 +1651,1108 @@
           "new_password"
         ],
         "title": "PasswordChangeRequest",
+        "type": "object"
+      },
+      "PolicyDraftData": {
+        "additionalProperties": false,
+        "description": "The working draft with its exact version (spec 16.1).",
+        "properties": {
+          "base_policy_revision_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Policy Revision Id"
+          },
+          "draft_id": {
+            "format": "uuid",
+            "title": "Draft Id",
+            "type": "string"
+          },
+          "draft_version": {
+            "title": "Draft Version",
+            "type": "integer"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/PolicyRuleData"
+            },
+            "title": "Rules",
+            "type": "array"
+          }
+        },
+        "required": [
+          "draft_id",
+          "draft_version",
+          "base_policy_revision_id",
+          "rules"
+        ],
+        "title": "PolicyDraftData",
+        "type": "object"
+      },
+      "PolicyDraftReplaceRequest": {
+        "additionalProperties": false,
+        "description": "The strict full-list draft replacement body (spec 16.1).",
+        "properties": {
+          "expected_draft_version": {
+            "minimum": 1.0,
+            "title": "Expected Draft Version",
+            "type": "integer"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/PolicyDraftRuleRequest"
+            },
+            "maxItems": 256,
+            "title": "Rules",
+            "type": "array"
+          }
+        },
+        "required": [
+          "expected_draft_version",
+          "rules"
+        ],
+        "title": "PolicyDraftReplaceRequest",
+        "type": "object"
+      },
+      "PolicyDraftRuleRequest": {
+        "additionalProperties": false,
+        "description": "One desired draft rule in the shared signed-payload member grammar.",
+        "properties": {
+          "extension": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extension"
+          },
+          "folder_prefix": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder Prefix"
+          },
+          "maximum_size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Maximum Size Bytes"
+          },
+          "media_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Media Type"
+          },
+          "path_glob": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path Glob"
+          },
+          "rule_id": {
+            "format": "uuid",
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "rule_kind": {
+            "$ref": "#/components/schemas/RuleKind"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Id"
+          },
+          "source_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Type"
+          }
+        },
+        "required": [
+          "rule_id",
+          "rule_kind"
+        ],
+        "title": "PolicyDraftRuleRequest",
+        "type": "object"
+      },
+      "PolicyKeysetEnvelopeData": {
+        "additionalProperties": false,
+        "description": "One persisted keyset envelope: payload, digest and cross-signatures.",
+        "properties": {
+          "payload": {
+            "$ref": "#/components/schemas/PolicyKeysetPayloadData"
+          },
+          "payload_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Payload Sha256",
+            "type": "string"
+          },
+          "signatures": {
+            "items": {
+              "$ref": "#/components/schemas/PolicyKeysetSignatureData"
+            },
+            "title": "Signatures",
+            "type": "array"
+          }
+        },
+        "required": [
+          "payload",
+          "payload_sha256",
+          "signatures"
+        ],
+        "title": "PolicyKeysetEnvelopeData",
+        "type": "object"
+      },
+      "PolicyKeysetKeyData": {
+        "additionalProperties": false,
+        "description": "One trust-anchor entry of a canonical keyset payload (spec 13).",
+        "properties": {
+          "algorithm": {
+            "const": "Ed25519",
+            "title": "Algorithm",
+            "type": "string"
+          },
+          "key_id": {
+            "pattern": "^ed25519-sha256-[A-Za-z0-9_-]{43}$",
+            "title": "Key Id",
+            "type": "string"
+          },
+          "public_key": {
+            "maxLength": 43,
+            "minLength": 43,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Public Key",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "current",
+              "staged",
+              "retired"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "algorithm",
+          "key_id",
+          "public_key",
+          "state"
+        ],
+        "title": "PolicyKeysetKeyData",
+        "type": "object"
+      },
+      "PolicyKeysetPageData": {
+        "additionalProperties": false,
+        "description": "One bounded, ordered keyset chain page with its continuation flag.",
+        "properties": {
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "keysets": {
+            "items": {
+              "$ref": "#/components/schemas/PolicyKeysetEnvelopeData"
+            },
+            "title": "Keysets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "keysets",
+          "has_more"
+        ],
+        "title": "PolicyKeysetPageData",
+        "type": "object"
+      },
+      "PolicyKeysetPayloadData": {
+        "additionalProperties": false,
+        "description": "The re-validated canonical keyset payload of spec 13.",
+        "properties": {
+          "contract": {
+            "const": "exclusion_policy_keyset/v1",
+            "title": "Contract",
+            "type": "string"
+          },
+          "created_at": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{6}Z$",
+            "title": "Created At",
+            "type": "string"
+          },
+          "keys": {
+            "items": {
+              "$ref": "#/components/schemas/PolicyKeysetKeyData"
+            },
+            "title": "Keys",
+            "type": "array"
+          },
+          "keyset_revision": {
+            "minimum": 1.0,
+            "title": "Keyset Revision",
+            "type": "integer"
+          },
+          "parent_keyset_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Keyset Revision"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contract",
+          "workspace_id",
+          "keyset_revision",
+          "parent_keyset_revision",
+          "created_at",
+          "keys"
+        ],
+        "title": "PolicyKeysetPayloadData",
+        "type": "object"
+      },
+      "PolicyKeysetSignatureData": {
+        "additionalProperties": false,
+        "description": "One cross-signature over the canonical keyset payload (spec 13).",
+        "properties": {
+          "algorithm": {
+            "const": "Ed25519",
+            "title": "Algorithm",
+            "type": "string"
+          },
+          "key_id": {
+            "pattern": "^ed25519-sha256-[A-Za-z0-9_-]{43}$",
+            "title": "Key Id",
+            "type": "string"
+          },
+          "value": {
+            "maxLength": 86,
+            "minLength": 86,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "algorithm",
+          "key_id",
+          "value"
+        ],
+        "title": "PolicyKeysetSignatureData",
+        "type": "object"
+      },
+      "PolicyPreviewCountersData": {
+        "additionalProperties": false,
+        "description": "The five closed impact counters of one preview (spec 10).",
+        "properties": {
+          "indeterminate_count": {
+            "title": "Indeterminate Count",
+            "type": "integer"
+          },
+          "newly_allowed_count": {
+            "title": "Newly Allowed Count",
+            "type": "integer"
+          },
+          "newly_excluded_count": {
+            "title": "Newly Excluded Count",
+            "type": "integer"
+          },
+          "still_allowed_count": {
+            "title": "Still Allowed Count",
+            "type": "integer"
+          },
+          "still_excluded_count": {
+            "title": "Still Excluded Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "newly_excluded_count",
+          "still_excluded_count",
+          "newly_allowed_count",
+          "still_allowed_count",
+          "indeterminate_count"
+        ],
+        "title": "PolicyPreviewCountersData",
+        "type": "object"
+      },
+      "PolicyPreviewCursorData": {
+        "additionalProperties": false,
+        "description": "The stable ``(impact_class, source_id)`` continuation cursor.",
+        "properties": {
+          "impact_class": {
+            "enum": [
+              "newly_excluded",
+              "still_excluded",
+              "newly_allowed",
+              "still_allowed",
+              "indeterminate"
+            ],
+            "title": "Impact Class",
+            "type": "string"
+          },
+          "source_id": {
+            "format": "uuid",
+            "title": "Source Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "impact_class",
+          "source_id"
+        ],
+        "title": "PolicyPreviewCursorData",
+        "type": "object"
+      },
+      "PolicyPreviewData": {
+        "additionalProperties": false,
+        "description": "One preview lifecycle read; ``results`` render only once ready.",
+        "properties": {
+          "base_policy_revision_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Policy Revision Id"
+          },
+          "consumed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consumed At"
+          },
+          "counters": {
+            "$ref": "#/components/schemas/PolicyPreviewCountersData"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "draft_sha256": {
+            "title": "Draft Sha256",
+            "type": "string"
+          },
+          "draft_version": {
+            "title": "Draft Version",
+            "type": "integer"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "impact_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Impact Digest"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PolicyPreviewCursorData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "policy_draft_id": {
+            "format": "uuid",
+            "title": "Policy Draft Id",
+            "type": "string"
+          },
+          "policy_preview_id": {
+            "format": "uuid",
+            "title": "Policy Preview Id",
+            "type": "string"
+          },
+          "ready_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ready At"
+          },
+          "results": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PolicyPreviewResultRowData"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Results"
+          },
+          "safe_error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Safe Error Code"
+          },
+          "source_checkpoint_event_sequence": {
+            "title": "Source Checkpoint Event Sequence",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "leased",
+              "running",
+              "ready",
+              "failed",
+              "expired",
+              "consumed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "policy_preview_id",
+          "status",
+          "policy_draft_id",
+          "draft_version",
+          "draft_sha256",
+          "base_policy_revision_id",
+          "source_checkpoint_event_sequence",
+          "created_at",
+          "ready_at",
+          "expires_at",
+          "consumed_at",
+          "impact_digest",
+          "safe_error_code",
+          "counters"
+        ],
+        "title": "PolicyPreviewData",
+        "type": "object"
+      },
+      "PolicyPreviewResultRowData": {
+        "additionalProperties": false,
+        "description": "One preview result row: opaque IDs and closed states only (spec 10).",
+        "properties": {
+          "impact_class": {
+            "enum": [
+              "newly_excluded",
+              "still_excluded",
+              "newly_allowed",
+              "still_allowed",
+              "indeterminate"
+            ],
+            "title": "Impact Class",
+            "type": "string"
+          },
+          "matched_rule_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Matched Rule Ids",
+            "type": "array"
+          },
+          "missing_fields": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Fields",
+            "type": "array"
+          },
+          "previous_enforced_decision": {
+            "title": "Previous Enforced Decision",
+            "type": "string"
+          },
+          "previous_raw_decision": {
+            "title": "Previous Raw Decision",
+            "type": "string"
+          },
+          "proposed_enforced_decision": {
+            "title": "Proposed Enforced Decision",
+            "type": "string"
+          },
+          "proposed_match_state": {
+            "title": "Proposed Match State",
+            "type": "string"
+          },
+          "proposed_raw_decision": {
+            "title": "Proposed Raw Decision",
+            "type": "string"
+          },
+          "source_id": {
+            "format": "uuid",
+            "title": "Source Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_id",
+          "previous_raw_decision",
+          "previous_enforced_decision",
+          "proposed_raw_decision",
+          "proposed_enforced_decision",
+          "proposed_match_state",
+          "impact_class",
+          "matched_rule_ids",
+          "missing_fields"
+        ],
+        "title": "PolicyPreviewResultRowData",
+        "type": "object"
+      },
+      "PolicyPublicationData": {
+        "additionalProperties": false,
+        "description": "The durable publication outcome; never payload or signature bytes.",
+        "properties": {
+          "is_replay": {
+            "title": "Is Replay",
+            "type": "boolean"
+          },
+          "parent_policy_revision_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Policy Revision Id"
+          },
+          "payload_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Payload Sha256",
+            "type": "string"
+          },
+          "policy_revision_id": {
+            "format": "uuid",
+            "title": "Policy Revision Id",
+            "type": "string"
+          },
+          "published_at": {
+            "format": "date-time",
+            "title": "Published At",
+            "type": "string"
+          },
+          "reconciliation_status": {
+            "title": "Reconciliation Status",
+            "type": "string"
+          },
+          "revision_number": {
+            "title": "Revision Number",
+            "type": "integer"
+          },
+          "rule_count": {
+            "title": "Rule Count",
+            "type": "integer"
+          },
+          "signing_key_id": {
+            "pattern": "^ed25519-sha256-[A-Za-z0-9_-]{43}$",
+            "title": "Signing Key Id",
+            "type": "string"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "policy_revision_id",
+          "revision_number",
+          "parent_policy_revision_id",
+          "payload_sha256",
+          "signing_key_id",
+          "published_at",
+          "rule_count",
+          "reconciliation_status",
+          "is_replay"
+        ],
+        "title": "PolicyPublicationData",
+        "type": "object"
+      },
+      "PolicyPublicationRequest": {
+        "additionalProperties": false,
+        "description": "The exact expected publication binding (spec 11/16.1).\n\nCarries the ready preview identity, the expected draft identity, version\nand semantic digest, the preview impact digest, the expected active\nrevision and the exact confirmation phrase — never a client-supplied\nsignature, revision allocation or workspace selector. The opaque\nidempotency key travels in its dedicated header.",
+        "properties": {
+          "confirmation": {
+            "title": "Confirmation",
+            "type": "string"
+          },
+          "expected_active_policy_revision_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Active Policy Revision Id"
+          },
+          "expected_active_revision_number": {
+            "minimum": 0.0,
+            "title": "Expected Active Revision Number",
+            "type": "integer"
+          },
+          "expected_draft_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Expected Draft Sha256",
+            "type": "string"
+          },
+          "expected_draft_version": {
+            "minimum": 1.0,
+            "title": "Expected Draft Version",
+            "type": "integer"
+          },
+          "policy_draft_id": {
+            "format": "uuid",
+            "title": "Policy Draft Id",
+            "type": "string"
+          },
+          "policy_preview_id": {
+            "format": "uuid",
+            "title": "Policy Preview Id",
+            "type": "string"
+          },
+          "preview_impact_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Preview Impact Digest",
+            "type": "string"
+          }
+        },
+        "required": [
+          "policy_preview_id",
+          "policy_draft_id",
+          "expected_draft_version",
+          "expected_draft_sha256",
+          "preview_impact_digest",
+          "expected_active_revision_number",
+          "confirmation"
+        ],
+        "title": "PolicyPublicationRequest",
+        "type": "object"
+      },
+      "PolicyReconciliationSummaryData": {
+        "additionalProperties": false,
+        "description": "The closed reconciliation summary of the active revision (spec 15).",
+        "properties": {
+          "policy_revision_id": {
+            "format": "uuid",
+            "title": "Policy Revision Id",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "policy_revision_id",
+          "state",
+          "updated_at"
+        ],
+        "title": "PolicyReconciliationSummaryData",
+        "type": "object"
+      },
+      "PolicyRuleData": {
+        "additionalProperties": false,
+        "description": "One rendered draft rule: identity, kind, fingerprint and one operand.\n\nExactly one operand member is populated at construction and the policy\nresponses render with ``exclude_unset``, so the emitted rule carries the\nsame one-named-operand grammar as the signed payloads of spec 12.",
+        "properties": {
+          "extension": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extension"
+          },
+          "folder_prefix": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder Prefix"
+          },
+          "maximum_size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Maximum Size Bytes"
+          },
+          "media_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Media Type"
+          },
+          "path_glob": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path Glob"
+          },
+          "rule_id": {
+            "format": "uuid",
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "rule_kind": {
+            "$ref": "#/components/schemas/RuleKind"
+          },
+          "semantic_fingerprint": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Semantic Fingerprint",
+            "type": "string"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Id"
+          },
+          "source_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Type"
+          }
+        },
+        "required": [
+          "rule_id",
+          "rule_kind",
+          "semantic_fingerprint"
+        ],
+        "title": "PolicyRuleData",
+        "type": "object"
+      },
+      "PolicySnapshotPayloadData": {
+        "additionalProperties": false,
+        "description": "The re-validated canonical snapshot payload of spec 12.",
+        "properties": {
+          "contract": {
+            "const": "exclusion_policy_snapshot/v1",
+            "title": "Contract",
+            "type": "string"
+          },
+          "default_decision": {
+            "const": "allowed",
+            "title": "Default Decision",
+            "type": "string"
+          },
+          "evaluator_contract_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Evaluator Contract Sha256",
+            "type": "string"
+          },
+          "parent_policy_revision_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Policy Revision Id"
+          },
+          "policy_revision_id": {
+            "format": "uuid",
+            "title": "Policy Revision Id",
+            "type": "string"
+          },
+          "published_at": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{6}Z$",
+            "title": "Published At",
+            "type": "string"
+          },
+          "revision_number": {
+            "minimum": 1.0,
+            "title": "Revision Number",
+            "type": "integer"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/PolicySnapshotRuleData"
+            },
+            "title": "Rules",
+            "type": "array"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contract",
+          "workspace_id",
+          "policy_revision_id",
+          "revision_number",
+          "parent_policy_revision_id",
+          "published_at",
+          "default_decision",
+          "evaluator_contract_sha256",
+          "rules"
+        ],
+        "title": "PolicySnapshotPayloadData",
+        "type": "object"
+      },
+      "PolicySnapshotRuleData": {
+        "additionalProperties": false,
+        "description": "One rule of a signed snapshot payload (spec 12): no fingerprint.\n\nExactly one operand member is populated at construction and the policy\nresponses render with ``exclude_unset``, so the emitted payload mirrors\nthe persisted canonical member set.",
+        "properties": {
+          "extension": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extension"
+          },
+          "folder_prefix": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder Prefix"
+          },
+          "maximum_size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Maximum Size Bytes"
+          },
+          "media_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Media Type"
+          },
+          "path_glob": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path Glob"
+          },
+          "rule_id": {
+            "format": "uuid",
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "rule_kind": {
+            "$ref": "#/components/schemas/RuleKind"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Id"
+          },
+          "source_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Type"
+          }
+        },
+        "required": [
+          "rule_id",
+          "rule_kind"
+        ],
+        "title": "PolicySnapshotRuleData",
+        "type": "object"
+      },
+      "PolicySnapshotSignatureData": {
+        "additionalProperties": false,
+        "description": "The detached Ed25519 signature member of the spec 12 envelope.",
+        "properties": {
+          "algorithm": {
+            "const": "Ed25519",
+            "title": "Algorithm",
+            "type": "string"
+          },
+          "key_id": {
+            "pattern": "^ed25519-sha256-[A-Za-z0-9_-]{43}$",
+            "title": "Key Id",
+            "type": "string"
+          },
+          "value": {
+            "maxLength": 86,
+            "minLength": 86,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "algorithm",
+          "key_id",
+          "value"
+        ],
+        "title": "PolicySnapshotSignatureData",
         "type": "object"
       },
       "ReadinessChecks": {
@@ -1503,6 +2931,20 @@
         "title": "RefreshedDeviceTokenData",
         "type": "object"
       },
+      "RuleKind": {
+        "description": "Closed vocabulary of the seven deny-only rule kinds (spec 6.2).",
+        "enum": [
+          "exact_source_id",
+          "folder_prefix",
+          "path_glob",
+          "extension",
+          "media_type",
+          "maximum_size",
+          "source_type"
+        ],
+        "title": "RuleKind",
+        "type": "string"
+      },
       "SessionData": {
         "additionalProperties": false,
         "description": "The public view of one Web session (spec 9.2).\n\n``state`` covers the closed session-state vocabulary including ``revoked``\n(the logout response); ``authenticated`` is true only for an ``active``\nsession, and the granted scopes stay empty in every non-active state so a\nclient learns from the login response alone whether a TOTP or recovery\nchallenge remains before any route authorizes.",
@@ -1540,6 +2982,30 @@
           "absolute_expires_at"
         ],
         "title": "SessionData",
+        "type": "object"
+      },
+      "SignedPolicySnapshotData": {
+        "additionalProperties": false,
+        "description": "The exact persisted signed-snapshot envelope as typed JSON.",
+        "properties": {
+          "payload": {
+            "$ref": "#/components/schemas/PolicySnapshotPayloadData"
+          },
+          "payload_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Payload Sha256",
+            "type": "string"
+          },
+          "signature": {
+            "$ref": "#/components/schemas/PolicySnapshotSignatureData"
+          }
+        },
+        "required": [
+          "payload",
+          "payload_sha256",
+          "signature"
+        ],
+        "title": "SignedPolicySnapshotData",
         "type": "object"
       },
       "TotpCodeRequest": {
@@ -1799,6 +3265,198 @@
           }
         },
         "summary": "Revoke Device"
+      }
+    },
+    "/api/admin/exclusion-policy": {
+      "get": {
+        "description": "Return revision metadata, the exact draft and reconciliation.",
+        "operationId": "getExclusionPolicyStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_ExclusionPolicyStatusData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Policy Status"
+      }
+    },
+    "/api/admin/exclusion-policy/draft": {
+      "put": {
+        "description": "Validate and atomically replace the complete desired rule list.",
+        "operationId": "replaceExclusionPolicyDraft",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PolicyDraftReplaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_PolicyDraftData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Replace Draft"
+      }
+    },
+    "/api/admin/exclusion-policy/previews": {
+      "post": {
+        "description": "Bind one asynchronous preview to the workspace's current draft.",
+        "operationId": "createExclusionPolicyPreview",
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_PolicyPreviewData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Create Preview"
+      }
+    },
+    "/api/admin/exclusion-policy/previews/{policy_preview_id}": {
+      "get": {
+        "description": "Answer 202 while pending/running and 200 once ready (spec 16.1).",
+        "operationId": "getExclusionPolicyPreview",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "policy_preview_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Policy Preview Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor_impact_class",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor Impact Class"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor_source_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor Source Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_PolicyPreviewData_"
+                }
+              }
+            },
+            "description": "The preview is ready; the payload carries the first result page"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_PolicyPreviewData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Preview"
+      }
+    },
+    "/api/admin/exclusion-policy/publications": {
+      "post": {
+        "description": "Validate, replay-resolve and atomically publish (spec 11/16.1).",
+        "operationId": "publishExclusionPolicy",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Idempotency-Key",
+            "required": true,
+            "schema": {
+              "pattern": "^[!-~]{1,200}$",
+              "title": "X-Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PolicyPublicationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_PolicyPublicationData_"
+                }
+              }
+            },
+            "description": "The exact replay of an already committed publication"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_PolicyPublicationData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Publish"
       }
     },
     "/api/auth/device-authorizations": {
@@ -2361,6 +4019,70 @@
           }
         },
         "summary": "Readiness Endpoint"
+      }
+    },
+    "/api/sync/exclusion-policy/keysets": {
+      "get": {
+        "description": "Return the next bounded ordered keyset chain page (spec 13.3).",
+        "operationId": "listExclusionPolicyKeysets",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "after_keyset_revision",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "After Keyset Revision",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_PolicyKeysetPageData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "List Keysets"
+      }
+    },
+    "/api/sync/exclusion-policy/snapshot": {
+      "get": {
+        "description": "Serve the active signed envelope with conditional GET (spec 12/16.2).",
+        "operationId": "getExclusionPolicySnapshot",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_SignedPolicySnapshotData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "304": {
+            "description": "The presented entity tag is current"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Get Snapshot"
       }
     }
   }

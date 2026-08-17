@@ -56,6 +56,7 @@ class Ed25519PolicySigner(PolicySigner):
     def __init__(self, private_key: Ed25519PrivateKey) -> None:
         self._private_key = private_key
         public_key_bytes = private_key.public_key().public_bytes_raw()
+        self._public_key_bytes = public_key_bytes
         self._key_id = derive_ed25519_key_id(public_key_bytes)
 
     @classmethod
@@ -69,6 +70,16 @@ class Ed25519PolicySigner(PolicySigner):
     @property
     def key_id(self) -> str:
         return self._key_id
+
+    @property
+    def public_key_bytes(self) -> bytes:
+        """The raw 32 bytes the derived key identifier was computed from.
+
+        Public material only: the composition root binds the in-transaction
+        self-verification verifier to exactly these bytes.
+        """
+
+        return self._public_key_bytes
 
     def sign(self, message: bytes) -> bytes:
         return self._private_key.sign(message)
