@@ -59,6 +59,12 @@ def _reset_web_authentication(arguments: Namespace) -> int:
     return run_reset_web_authentication(arguments)
 
 
+def _run_policy_key_command(arguments: Namespace) -> int:
+    from api_runtime.exclusion_policy_commands import run_policy_key_command
+
+    return run_policy_key_command(arguments)
+
+
 def _configure_serve(parser: ArgumentParser) -> None:
     """Declare the serve surface: bind settings come from the environment."""
 
@@ -88,6 +94,42 @@ def _configure_reset_web_authentication(parser: ArgumentParser) -> None:
     parser.allow_abbrev = False
     parser.add_argument("--username", required=True)
     parser.add_argument("--password-file-name")
+
+
+def _configure_policy_key(parser: ArgumentParser) -> None:
+    """Declare the policy signing-key lifecycle surface.
+
+    The four lifecycle transitions are exclusive inner selections; each names
+    only public identities (workspace UUID, exact relative key-file names or
+    a derived key ID). Private key material is never an argument: files enter
+    only through the configured secret root.
+    """
+    parser.allow_abbrev = False
+    lifecycle = parser.add_subparsers(dest="policy_key_command", required=True)
+    initialize = lifecycle.add_parser(
+        "initialize",
+        help="initialize keyset revision 1 with one self-signed current key",
+    )
+    initialize.add_argument("--workspace-id", required=True)
+    initialize.add_argument("--key-file-name", required=True)
+    stage = lifecycle.add_parser(
+        "stage",
+        help="stage one new key in a cross-signed keyset revision",
+    )
+    stage.add_argument("--workspace-id", required=True)
+    stage.add_argument("--key-file-name", required=True)
+    activate = lifecycle.add_parser(
+        "activate",
+        help="activate the staged key in a cross-signed keyset revision",
+    )
+    activate.add_argument("--workspace-id", required=True)
+    activate.add_argument("--staged-key-file-name", required=True)
+    retire = lifecycle.add_parser(
+        "retire",
+        help="retire one non-current trusted key after the operating overlap",
+    )
+    retire.add_argument("--workspace-id", required=True)
+    retire.add_argument("--key-id", required=True)
 
 
 API_SUBCOMMANDS: Final[tuple[BootstrapSubcommand, ...]] = (
@@ -120,6 +162,12 @@ API_SUBCOMMANDS: Final[tuple[BootstrapSubcommand, ...]] = (
         help="emergency-reset every web authentication surface of one username",
         configure=_configure_reset_web_authentication,
         handler=_reset_web_authentication,
+    ),
+    BootstrapSubcommand(
+        name="policy-key",
+        help="manage the exclusion-policy signing keys through staged rotation",
+        configure=_configure_policy_key,
+        handler=_run_policy_key_command,
     ),
 )
 

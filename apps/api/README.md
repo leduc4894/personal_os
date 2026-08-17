@@ -66,6 +66,41 @@ exit codes:
 | `70` | Unexpected internal error. |
 | `78` | Configuration or secret error. |
 
+## `policy-key` signing-key lifecycle
+
+```bash
+personal-api policy-key initialize --workspace-id <uuid> --key-file-name policy_signing_a.pem
+personal-api policy-key stage      --workspace-id <uuid> --key-file-name policy_signing_b.pem
+personal-api policy-key activate   --workspace-id <uuid> --staged-key-file-name policy_signing_b.pem
+personal-api policy-key retire     --workspace-id <uuid> --key-id <ed25519-sha256-…>
+```
+
+These are the offline operator commands of the exclusion-policy signing-key
+rotation (spec sections 13.2/13.3). `initialize` generates or imports one
+Ed25519 key into a newly created exact file beneath `KNOWLEDGE_SECRET_ROOT`
+(owner-only permissions, never overwriting existing bytes) and publishes the
+self-signed keyset revision 1 with that key as the one current key. `stage`
+publishes a cross-signed revision adding the new key as staged beside the old
+current key (old-current signature plus proof-of-possession from the new
+key); `activate` publishes the cross-signed revision making the staged key
+current — the API signer configuration
+(`KNOWLEDGE_POLICY_SIGNING_KEY_ID`/`KNOWLEDGE_POLICY_SIGNING_KEY_FILE`)
+switches only after it commits; `retire` publishes the retirement revision
+for the old key after the operating overlap, signed by the current key alone.
+Every revision appends the immutable keyset envelope, the public signing-key
+rows it introduces and its `exclusion_policy.key_*` audit row in exactly one
+transaction; replayed invocations acknowledge the already committed
+transition without appending rows.
+
+Key material stays inside the secret-file boundary: private keys are never
+arguments, database rows, settings values or logs, and the commands print
+only the closed status line — action, public key ID, keyset revision and the
+replay flag. `serve` loads the configured signer through the same boundary
+and refuses to bind its socket unless the derived key ID equals the current
+key of the latest canonical keyset of every initialized workspace. Exit codes
+follow the table above with `2` additionally covering operator-input
+validation and `78` typed lifecycle rejections.
+
 ## Intentionally absent behavior
 
 The following are deliberately absent and belong to later child specs:

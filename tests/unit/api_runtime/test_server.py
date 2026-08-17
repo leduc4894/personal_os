@@ -23,11 +23,19 @@ from typing import Final
 import pytest
 import uvicorn
 from api_runtime.server import run_server
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    NoEncryption,
+    PrivateFormat,
+)
 from fastapi import FastAPI
 
+from personal_os.exclusion_policy.signatures import derive_ed25519_key_id
+
 # One hermetic secret root backing the local environment snapshot, so the
-# password and authentication key reads inside run_server succeed without
-# touching process secrets.
+# password, authentication key and policy signing key reads inside run_server
+# succeed without touching process secrets.
 _SECRET_DIRECTORY = tempfile.TemporaryDirectory(prefix="api-runtime-server-secrets-")
 atexit.register(_SECRET_DIRECTORY.cleanup)
 _SECRET_ROOT = Path(_SECRET_DIRECTORY.name)
@@ -35,6 +43,15 @@ _SECRET_ROOT = Path(_SECRET_DIRECTORY.name)
     "server-test-password\n", encoding="utf-8"
 )
 (_SECRET_ROOT / "authentication_current_key").write_text("00" * 32 + "\n", encoding="utf-8")
+_POLICY_SIGNING_KEY = Ed25519PrivateKey.generate()
+(_SECRET_ROOT / "policy_signing_current.pem").write_bytes(
+    _POLICY_SIGNING_KEY.private_bytes(
+        encoding=Encoding.PEM,
+        format=PrivateFormat.PKCS8,
+        encryption_algorithm=NoEncryption(),
+    )
+)
+_POLICY_SIGNING_KEY_ID = derive_ed25519_key_id(_POLICY_SIGNING_KEY.public_key().public_bytes_raw())
 
 LOCAL_ENVIRONMENT: Final[Mapping[str, str]] = MappingProxyType(
     {
@@ -45,6 +62,8 @@ LOCAL_ENVIRONMENT: Final[Mapping[str, str]] = MappingProxyType(
         "KNOWLEDGE_AUTH_CURRENT_KEY_FILE": "authentication_current_key",
         "KNOWLEDGE_AUTH_MIN_PLUGIN_VERSION": "1.13.1",
         "KNOWLEDGE_AUTH_MAX_PLUGIN_VERSION": "1.20.0",
+        "KNOWLEDGE_POLICY_SIGNING_KEY_ID": _POLICY_SIGNING_KEY_ID,
+        "KNOWLEDGE_POLICY_SIGNING_KEY_FILE": "policy_signing_current.pem",
     }
 )
 

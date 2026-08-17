@@ -105,6 +105,20 @@ AUTHENTICATION_ENVIRONMENT_NAMES: Final[frozenset[str]] = frozenset(
     }
 )
 
+#: Exclusion-policy signing fragment: the versioned policy signer identity and
+#: the exact key file name resolved beneath ``KNOWLEDGE_SECRET_ROOT``. Like the
+#: authentication key fragment, key material itself never appears as an
+#: environment value — only the derived key ID and the exact file name — so no
+#: plaintext private-key variable belongs to this fragment.
+EXCLUSION_POLICY_ENVIRONMENT_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "KNOWLEDGE_ENVIRONMENT",
+        "KNOWLEDGE_SECRET_ROOT",
+        "KNOWLEDGE_POLICY_SIGNING_KEY_ID",
+        "KNOWLEDGE_POLICY_SIGNING_KEY_FILE",
+    }
+)
+
 #: Repository-wide union of every approved ``KNOWLEDGE_*`` name. A loader treats
 #: any prefixed name outside this set as terminal ``configuration_unknown_key``.
 KNOWN_KNOWLEDGE_ENVIRONMENT_NAMES: Final[frozenset[str]] = frozenset(
@@ -115,4 +129,5 @@ KNOWN_KNOWLEDGE_ENVIRONMENT_NAMES: Final[frozenset[str]] = frozenset(
     | CANONICAL_RECOVERY_ENVIRONMENT_NAMES
     | API_SERVER_ENVIRONMENT_NAMES
     | AUTHENTICATION_ENVIRONMENT_NAMES
+    | EXCLUSION_POLICY_ENVIRONMENT_NAMES
 )

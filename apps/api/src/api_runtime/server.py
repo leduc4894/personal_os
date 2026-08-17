@@ -5,11 +5,15 @@ process environment exactly once at entry, loads the runtime, API, database
 and authentication settings plus the secret-file password, loads the
 versioned authentication keyring from its exact secret files (refusing with
 the configuration exit before any socket exists when a key file is missing or
-malformed), configures structured diagnostics, builds the database lifecycle,
-the web-authentication runtime and the FastAPI application (wiring the
-lifecycle into the application lifespan so the engine starts on startup, the
-keyring-reference verification refuses startup when PostgreSQL references a
-key ID the keyring omits, and the engine is disposed on shutdown), then runs
+malformed), loads the exclusion-policy signing settings and their Ed25519
+private key through the same secret-file boundary, configures structured
+diagnostics, builds the database lifecycle, the web-authentication runtime
+and the FastAPI application (wiring the lifecycle into the application
+lifespan so the engine starts on startup, the keyring-reference verification
+refuses startup when PostgreSQL references a key ID the keyring omits, the
+exclusion-policy signer proof refuses startup when the derived key ID is not
+the current key of the latest canonical keyset, and the engine is disposed
+on shutdown), then runs
 Uvicorn in single-process mode with the approved flags: no server header, no
 proxy headers, no access log, no reload and exactly one worker.
 
@@ -41,6 +45,10 @@ from api_runtime.authentication_composition import (
 from api_runtime.authentication_crypto import load_authentication_keyring
 from api_runtime.authentication_settings import load_authentication_settings
 from api_runtime.database_lifecycle import DatabaseRuntimeLifecycle
+from api_runtime.exclusion_policy_settings import (
+    load_exclusion_policy_signer,
+    load_exclusion_policy_signing_settings,
+)
 from api_runtime.server_settings import load_api_server_settings
 from personal_os.diagnostics.context import bind_diagnostic_context, create_diagnostic_context
 from personal_os.diagnostics.logging import (
@@ -94,6 +102,12 @@ def run_server(
             password = read_database_runtime_password(database_settings)
             authentication_settings = load_authentication_settings(environ=environment_snapshot)
             keyring = load_authentication_keyring(authentication_settings)
+            policy_signing_settings = load_exclusion_policy_signing_settings(
+                environ=environment_snapshot
+            )
+            policy_signer = load_exclusion_policy_signer(
+                policy_signing_settings, secret_root=database_settings.secret_root
+            )
         except ApplicationError as error:
             emit_emergency_application_error(ServiceName.API, context, error)
             return _EXIT_CONFIGURATION_FAILURE
@@ -123,9 +137,11 @@ def run_server(
             async def database_lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 # Uvicorn runs the lifespan startup before binding the
                 # listening socket, so the keyring-reference refusal of spec
-                # 20.1 fails startup without ever exposing the socket.
+                # 20.1 and the exclusion-policy signer proof of spec 13.1
+                # fail startup without ever exposing the socket.
                 await lifecycle.start()
                 await verify_keyring_covers_required_key_ids(engine=engine, keyring=keyring)
+                await lifecycle.verify_exclusion_policy_signer(signing_key_id=policy_signer.key_id)
                 try:
                     yield
                 finally:
