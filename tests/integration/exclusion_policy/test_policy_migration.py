@@ -330,7 +330,7 @@ async def test_projection_intent_origin_shapes_and_claim_isolation(
     )
 
     # A source_event row without its event reference violates the origin CHECK.
-    with pytest.raises(sa.exc.IntegrityError):
+    with pytest.raises(sa.exc.IntegrityError) as source_event_outcome:
         async with policy_migration_harness.engine.begin() as connection:
             await connection.execute(
                 sa.text(
@@ -346,25 +346,57 @@ async def test_projection_intent_origin_shapes_and_claim_isolation(
                     "source_id": source_id,
                 },
             )
+    assert source_event_outcome.value.orig.diag.constraint_name == ("ck_projection_intents__origin")
 
-    # A policy_transition row without its revision reference violates it too.
-    with pytest.raises(sa.exc.IntegrityError):
+    # A policy_transition row without its revision reference violates the
+    # origin CHECK's biconditional: the fresh intent carries the closed
+    # policy-transition origin with both references NULL, so the rejection can
+    # only come from the origin CHECK (no other unique index is in play).
+    with pytest.raises(sa.exc.IntegrityError) as policy_transition_outcome:
         async with policy_migration_harness.engine.begin() as connection:
             await connection.execute(
                 sa.text(
                     "INSERT INTO knowledge.projection_intents"
-                    " (projection_intent_id, workspace_id, event_id, policy_revision_id,"
-                    " source_id, projection_kind, operation, status, available_at)"
-                    " VALUES (:projection_intent_id, :workspace_id, :event_id, NULL,"
-                    " :source_id, 'qdrant', 'delete', 'pending', CURRENT_TIMESTAMP)"
+                    " (projection_intent_id, workspace_id, origin_kind, event_id,"
+                    " policy_revision_id, source_id, projection_kind, operation,"
+                    " status, available_at)"
+                    " VALUES (:projection_intent_id, :workspace_id,"
+                    " 'policy_transition', NULL, NULL, :source_id, 'qdrant',"
+                    " 'delete', 'pending', CURRENT_TIMESTAMP)"
                 ),
                 {
                     "projection_intent_id": uuid4(),
                     "workspace_id": stack.workspace_id,
-                    "event_id": stack.seeded_event_id,
                     "source_id": source_id,
                 },
             )
+    assert policy_transition_outcome.value.orig.diag.constraint_name == (
+        "ck_projection_intents__origin"
+    )
+
+    # A row whose origin is outside the closed vocabulary is rejected even
+    # though both references are NULL: the CHECK must close the vocabulary
+    # itself, because the two biconditionals alone hold vacuously for such a
+    # row (``false = false`` on both arms).
+    with pytest.raises(sa.exc.IntegrityError) as garbage_outcome:
+        async with policy_migration_harness.engine.begin() as connection:
+            await connection.execute(
+                sa.text(
+                    "INSERT INTO knowledge.projection_intents"
+                    " (projection_intent_id, workspace_id, origin_kind, event_id,"
+                    " policy_revision_id, source_id, projection_kind, operation,"
+                    " status, available_at)"
+                    " VALUES (:projection_intent_id, :workspace_id, 'garbage', NULL,"
+                    " NULL, :source_id, 'qdrant', 'delete', 'pending',"
+                    " CURRENT_TIMESTAMP)"
+                ),
+                {
+                    "projection_intent_id": uuid4(),
+                    "workspace_id": stack.workspace_id,
+                    "source_id": source_id,
+                },
+            )
+    assert garbage_outcome.value.orig.diag.constraint_name == ("ck_projection_intents__origin")
 
     now = await policy_migration_harness.database_now()
     claimed = await policy_migration_harness.store.claim_batch(now, PROJECTION_CLAIM_BATCH_LIMIT)

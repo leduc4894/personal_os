@@ -15,9 +15,10 @@ indexes for pending/ready lookups and one shared append-only mutation
 rejection trigger over the published artifacts and insert-once evidence.
 ``projection_intents`` gains the ``source_event``/``policy_transition`` origin
 discriminator: ``event_id`` becomes nullable, ``policy_revision_id`` is added,
-exactly one origin reference is populated, existing rows backfill
-``source_event``, and a partial unique index enforces policy-transition
-identity ``(policy_revision_id, source_id, projection_kind)``. The upgrade
+the origin CHECK closes the vocabulary and requires exactly one populated
+origin reference, existing rows backfill ``source_event``, and a partial
+unique index enforces policy-transition identity
+``(policy_revision_id, source_id, projection_kind)``. The upgrade
 seeds one unpublished ``workspace_policy_state`` row and one empty draft per
 existing workspace through parameter-bound inserts with Python-generated
 UUIDv7 identities; it never publishes or signs implicitly.
@@ -1077,7 +1078,8 @@ def upgrade() -> None:
     op.create_check_constraint(
         "ck_projection_intents__origin",
         "projection_intents",
-        "((origin_kind = 'source_event') = (event_id IS NOT NULL)) "
+        "origin_kind IN ('source_event', 'policy_transition') "
+        "AND ((origin_kind = 'source_event') = (event_id IS NOT NULL)) "
         "AND ((origin_kind = 'policy_transition') = (policy_revision_id IS NOT NULL))",
         schema=SCHEMA_NAME,
     )

@@ -333,6 +333,10 @@ def test_projection_intent_origin_check_binds_exactly_one_reference() -> None:
     checks = _check_expressions(recorder.tables["projection_intents"])
     origin_check = checks.get("ck_projection_intents__origin")
     assert origin_check is not None
+    # The vocabulary must be closed inside the CHECK itself: with only the two
+    # biconditionals, a row whose origin_kind is neither legal value and whose
+    # references are both NULL would satisfy both ``false = false`` arms.
+    assert "origin_kind IN ('source_event', 'policy_transition')" in origin_check
     assert "(origin_kind = 'source_event') = (event_id IS NOT NULL)" in origin_check
     assert "(origin_kind = 'policy_transition') = (policy_revision_id IS NOT NULL)" in origin_check
 

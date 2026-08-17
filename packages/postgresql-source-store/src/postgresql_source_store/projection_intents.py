@@ -341,9 +341,11 @@ def projection_kind_token(value: str) -> SafeToken:
 def _claimable_origin_kind(value: str) -> ProjectionIntentOriginKind:
     """Convert a stored origin string into the closed origin discriminator.
 
-    The claim select filters on ``source_event`` and the migration CHECK
-    guarantees the closed vocabulary, so any other value is an impossible row
-    reported as the integrity failure.
+    The claim select filters on ``source_event``; this conversion is the
+    fail-closed runtime guard over the origin vocabulary. The database origin
+    CHECK independently rejects every value outside the two legal kinds, so a
+    different value reaching this boundary is an impossible row reported as
+    the integrity failure rather than dispatched.
     """
     try:
         origin = ProjectionIntentOriginKind(value)
