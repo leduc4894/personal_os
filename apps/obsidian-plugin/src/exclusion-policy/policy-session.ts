@@ -29,6 +29,7 @@ import {
 } from "./contracts";
 import { PolicyVerificationError, policyVerificationError } from "./contracts";
 import { parseClosedJson } from "./strict-json";
+import type { ClosedJsonValue } from "./strict-json";
 import { validateKeysetEnvelope, verifyKeysetChain } from "./keyset";
 import {
   resolveSnapshotMonotonicity,
@@ -57,8 +58,28 @@ export interface PolicySessionDeps {
   readonly onStateChange?: (state: PolicyIntegrityState) => void;
 }
 
-function parseWireEnvelope(bodyText: string, maximumBytes: number): unknown {
-  const parsed = parseClosedJson(bodyText, { maximumBytes });
+/**
+ * Transient failure statuses: rate limiting and server-side faults never
+ * poison the integrity state — they behave exactly like an unreachable
+ * server, preserving the last valid cache and allowing later retries.
+ */
+function isTransientStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+function parseWireEnvelope(
+  response: PolicyHttpResponse,
+  maximumBytes: number,
+): unknown {
+  let parsed: ClosedJsonValue;
+  try {
+    parsed = parseClosedJson(response.bodyText, { maximumBytes });
+  } catch (error) {
+    if (isTransientStatus(response.status)) {
+      throw policyVerificationError("policy_network_unavailable");
+    }
+    throw error;
+  }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw policyVerificationError("policy_envelope_invalid");
   }
@@ -81,6 +102,9 @@ function parseWireEnvelope(bodyText: string, maximumBytes: number): unknown {
     const code = (error as Record<string, unknown>)["code"];
     if (code === "exclusion_policy_not_initialized") {
       throw policyVerificationError("policy_not_initialized_on_server");
+    }
+    if (isTransientStatus(response.status)) {
+      throw policyVerificationError("policy_network_unavailable");
     }
     throw policyVerificationError("policy_envelope_invalid");
   }
@@ -201,11 +225,8 @@ export class PolicySession {
         `/api/sync/exclusion-policy/keysets?after_keyset_revision=${cursor}`,
         {},
       );
-      if (response.status !== 200) {
-        throw policyVerificationError("policy_envelope_invalid");
-      }
       const page = validateKeysetPage(
-        parseWireEnvelope(response.bodyText, KEYSET_PAGE_MAXIMUM_BYTES),
+        parseWireEnvelope(response, KEYSET_PAGE_MAXIMUM_BYTES),
       );
       collected.push(...page.keysets);
       if (!page.has_more) {
@@ -231,24 +252,21 @@ export class PolicySession {
     if (response.status === 304) {
       return { unchanged: true };
     }
-    if (response.status !== 200) {
-      throw policyVerificationError("policy_envelope_invalid");
-    }
     const envelope = validateSnapshotEnvelope(
-      parseWireEnvelope(response.bodyText, SNAPSHOT_RESPONSE_MAXIMUM_BYTES),
+      parseWireEnvelope(response, SNAPSHOT_RESPONSE_MAXIMUM_BYTES),
     );
     return { unchanged: false, envelope };
   }
 
   /**
    * Initial trust: accept the self-signed keyset revision 1 and the active
-   * snapshot ONLY immediately after authenticated device onboarding. Failure
-   * persists nothing and denies.
+   * snapshot ONLY immediately after authenticated device onboarding. A
+   * completed re-onboarding is the one boundary that may REPLACE an existing
+   * anchor (e.g. after disconnecting and pointing at another workspace); the
+   * replacement is fully verified before the single record is rewritten, and
+   * any failure of the new candidate preserves the prior anchor and cache.
    */
   async adoptOnboardingTrust(): Promise<void> {
-    if (this.#accepted !== null) {
-      return;
-    }
     try {
       const envelopes = await this.#fetchKeysetEnvelopes(0);
       const chain = await verifyKeysetChain({

@@ -258,7 +258,9 @@ function validateKeysetPayload(value: unknown): PolicyKeysetPayload {
       nonRetiredCount += 1;
     }
   }
-  if (currentCount > 1) {
+  if (currentCount !== 1) {
+    // Exactly one current key per revision: a keyset without a current key
+    // could never prove activation and would strand the trust chain.
     throw policyVerificationError("policy_keyset_current_invalid");
   }
   if (nonRetiredCount > KEYSET_MAXIMUM_NON_RETIRED_KEYS) {

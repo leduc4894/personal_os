@@ -272,6 +272,27 @@ describe("verifyKeysetChain", () => {
     expect(outcome.acceptedKeyset.payload.keyset_revision).toBe(3);
   });
 
+  it("rejects a rotation keyset that carries no current key", async () => {
+    const currentKey = await deriveTestSigningKey(KEYSET_CURRENT_SEED);
+    const stagedKey = await deriveTestSigningKey(KEYSET_STAGED_SEED);
+    const initial = await initialKeysetOfCurrentKey();
+    const noCurrent = await buildKeysetEnvelope(
+      keysetPayload(
+        [keysetKeyPayload(currentKey, "staged"), keysetKeyPayload(stagedKey, "staged")],
+        { keysetRevision: 2, parentKeysetRevision: 1, createdAt: LATER_CREATED_AT },
+      ),
+      [currentKey],
+    );
+    expect(
+      await chainRejection({
+        envelopes: [noCurrent],
+        trustedKeyset: initial,
+        trustedWorkspaceId: WORKSPACE_ID,
+        allowInitialTrust: false,
+      }),
+    ).toBe("policy_keyset_current_invalid");
+  });
+
   it("stops rotation on an unknown parent gap", async () => {
     const currentKey = await deriveTestSigningKey(KEYSET_CURRENT_SEED);
     const stagedKey = await deriveTestSigningKey(KEYSET_STAGED_SEED);

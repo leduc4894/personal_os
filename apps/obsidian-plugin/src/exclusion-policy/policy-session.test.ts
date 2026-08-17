@@ -10,6 +10,7 @@ import {
   KEYSET_CURRENT_SEED,
   KEYSET_STAGED_SEED,
   LATER_CREATED_AT,
+  OTHER_WORKSPACE_ID,
   LATER_PUBLISHED_AT,
   POLICY_REVISION_ID,
   SECOND_POLICY_REVISION_ID,
@@ -274,6 +275,19 @@ describe("PolicySession refresh", () => {
     expect(precedingSnapshot).toBe(true);
   });
 
+  it("maps a transient keyset-chain fetch failure to a network failure", async () => {
+    const { harness, material } = await onboardedHarness();
+    const recordBefore = harness.cacheStore.record;
+    const rotation = await rotationMaterial(material.signer);
+    harness.served.set(SNAPSHOT_URL, () => jsonResponse(rotation.snapshotBody, '"etag-two"'));
+    harness.served.set(keysetsUrl(1), () => ({ status: 503, bodyText: "", etag: null }));
+    await expect(harness.session.refresh()).rejects.toMatchObject({
+      reason: "policy_network_unavailable",
+    });
+    expect(harness.session.state).toBe("policy_offline_cached");
+    expect(harness.cacheStore.record).toBe(recordBefore);
+  });
+
   it("replays an identical snapshot without rewriting the cache", async () => {
     const { harness, material } = await onboardedHarness();
     const writesBefore = harness.cacheStore.writes;
@@ -377,6 +391,92 @@ describe("PolicySession refresh", () => {
   });
 });
 
+describe("PolicySession re-onboarding", () => {
+  async function foreignWorkspaceMaterial() {
+    const signer = await deriveTestSigningKey(KEYSET_STAGED_SEED);
+    const keyset = await buildKeysetEnvelope(
+      keysetPayload([keysetKeyPayload(signer, "current")], {
+        keysetRevision: 1,
+        parentKeysetRevision: null,
+        createdAt: "2026-08-17T09:00:00.000000Z",
+        workspaceId: OTHER_WORKSPACE_ID,
+      }),
+      [signer],
+    );
+    const snapshot = await buildSnapshotEnvelope(
+      snapshotPayload([...RULES], { revisionNumber: 1, workspaceId: OTHER_WORKSPACE_ID }),
+      signer,
+    );
+    return {
+      keysetsBody: wireBody({ has_more: false, keysets: [keyset] }),
+      snapshotBody: wireBody({
+        payload: snapshot.payload,
+        payload_sha256: snapshot.payload_sha256,
+        signature: snapshot.signature,
+      }),
+    };
+  }
+
+  async function onboardedHarness(): Promise<Harness> {
+    const material = await initialTrustMaterial();
+    const harness = createHarness({});
+    harness.served.set(keysetsUrl(0), () => jsonResponse(material.keysetsBody));
+    harness.served.set(SNAPSHOT_URL, () => jsonResponse(material.snapshotBody, '"etag-one"'));
+    await harness.session.restoreFromCache();
+    await harness.session.adoptOnboardingTrust();
+    return harness;
+  }
+
+  it("replaces the trust anchor when a completed onboarding binds another workspace", async () => {
+    const harness = await onboardedHarness();
+    expect(harness.session.acceptedState?.workspaceId).toBe(WORKSPACE_ID);
+    const foreign = await foreignWorkspaceMaterial();
+    harness.served.set(keysetsUrl(0), () => jsonResponse(foreign.keysetsBody));
+    harness.served.set(SNAPSHOT_URL, () => jsonResponse(foreign.snapshotBody, '"etag-foreign"'));
+    await harness.session.adoptOnboardingTrust();
+    expect(harness.session.state).toBe("policy_ready");
+    expect(harness.session.acceptedState?.workspaceId).toBe(OTHER_WORKSPACE_ID);
+    expect(harness.session.acceptedState?.keysetSequence).toBe(1);
+    expect(harness.cacheStore.writes).toBe(2);
+    const persisted = JSON.stringify(harness.cacheStore.record);
+    expect(persisted).toContain(OTHER_WORKSPACE_ID);
+    expect(persisted).not.toContain(WORKSPACE_ID);
+  });
+
+  it("preserves the prior anchor when re-onboarding verification fails", async () => {
+    const harness = await onboardedHarness();
+    const recordBefore = harness.cacheStore.record;
+    const foreign = await foreignWorkspaceMaterial();
+    const tampered = JSON.parse(foreign.keysetsBody) as {
+      data: { keysets: { payload_sha256: string }[] };
+    };
+    const tamperedEnvelope = tampered.data.keysets[0];
+    if (tamperedEnvelope === undefined) {
+      throw new Error("foreign keyset page must carry one envelope");
+    }
+    tamperedEnvelope.payload_sha256 = "0".repeat(64);
+    harness.served.set(keysetsUrl(0), () => jsonResponse(JSON.stringify(tampered)));
+    await expect(harness.session.adoptOnboardingTrust()).rejects.toMatchObject({
+      reason: "policy_payload_hash_mismatch",
+    });
+    expect(harness.cacheStore.record).toBe(recordBefore);
+    expect(harness.session.acceptedState?.workspaceId).toBe(WORKSPACE_ID);
+    expect(harness.session.state).toBe("policy_integrity_failed");
+  });
+
+  it("preserves the prior anchor when re-onboarding cannot reach the server", async () => {
+    const harness = await onboardedHarness();
+    const recordBefore = harness.cacheStore.record;
+    harness.served.set(keysetsUrl(0), () => new Error("network down"));
+    await expect(harness.session.adoptOnboardingTrust()).rejects.toMatchObject({
+      reason: "policy_network_unavailable",
+    });
+    expect(harness.cacheStore.record).toBe(recordBefore);
+    expect(harness.session.acceptedState?.workspaceId).toBe(WORKSPACE_ID);
+    expect(harness.session.state).toBe("policy_offline_cached");
+  });
+});
+
 describe("PolicySession offline startup", () => {
   it("classifies from the last trusted cache without any network claim", async () => {
     const material = await initialTrustMaterial();
@@ -455,29 +555,55 @@ describe("PolicySession strict response handling", () => {
     expect(emptyEnvelopeHarness.session.state).toBe("policy_integrity_failed");
   });
 
-  it("surfaces the closed server error code for an uninitialized policy", async () => {
+  it("surfaces the closed 409 error code for an uninitialized policy", async () => {
+    // The backend serves exclusion_policy_not_initialized as HTTP 409 with an
+    // error envelope (spec 19); the closed parser must see that body even
+    // though the status is not 200, and a fresh server must never read as
+    // tampering.
     const fresh = createHarness({});
-    fresh.served.set(SNAPSHOT_URL, () =>
-      jsonResponse(
-        JSON.stringify({
-          data: null,
-          error: {
-            code: "exclusion_policy_not_initialized",
-            message: "safe",
-            details: {},
-            retryable: false,
-          },
-          request_id: "018f47a0-7b00-7000-8000-000000000902",
-          warnings: [],
-        }),
-      ),
-    );
+    fresh.served.set(SNAPSHOT_URL, () => ({
+      status: 409,
+      bodyText: JSON.stringify({
+        data: null,
+        error: {
+          code: "exclusion_policy_not_initialized",
+          message: "safe",
+          details: {},
+          retryable: false,
+        },
+        request_id: "018f47a0-7b00-7000-8000-000000000902",
+        warnings: [],
+      }),
+      etag: null,
+    }));
     await fresh.session.restoreFromCache();
     await expect(fresh.session.refresh()).rejects.toMatchObject({
       reason: "policy_not_initialized_on_server",
     });
     expect(fresh.session.state).toBe("policy_not_initialized");
   });
+
+  it("maps transient 5xx and 429 snapshot responses to a network failure without poisoning integrity", async () => {
+    for (const transientStatus of [429, 500, 503]) {
+      const harness = await onboardedHarness();
+      const recordBefore = harness.cacheStore.record;
+      harness.served.set(SNAPSHOT_URL, () => ({
+        status: transientStatus,
+        bodyText: "",
+        etag: null,
+      }));
+      await expect(harness.session.refresh()).rejects.toMatchObject({
+        reason: "policy_network_unavailable",
+      });
+      expect(harness.session.state, `status ${transientStatus}`).toBe("policy_offline_cached");
+      expect(harness.cacheStore.record, `status ${transientStatus}`).toBe(recordBefore);
+      // A transient failure must not lock out later refresh attempts.
+      harness.served.set(SNAPSHOT_URL, () => ({ status: 304, bodyText: "", etag: null }));
+      await harness.session.refresh();
+      expect(harness.session.state, `status ${transientStatus}`).toBe("policy_ready");
+    }
+  });
+
 });
 
 describe("PolicySession keyset page handling", () => {
