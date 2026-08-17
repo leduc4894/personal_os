@@ -115,3 +115,77 @@ def input_invalid(reason: SafeToken, rule_index: int | None = None) -> Exclusion
         ErrorCode.EXCLUSION_POLICY_INPUT_INVALID,
         safe_details={"reason": reason, "rule_index": rule_index},
     )
+
+
+#: Signed-payload contract reason tokens (spec 12 and 13): every canonicalizer
+#: or payload-builder rejection names exactly one of them. They are distinct
+#: from the normalization/evaluation set above because the caller of the
+#: signed-payload contracts is always internal composition code.
+PAYLOAD_VALUE_UNSUPPORTED: SafeToken = SafeToken.parse("payload_value_unsupported")
+PAYLOAD_STRING_NOT_NORMALIZED: SafeToken = SafeToken.parse("payload_string_not_normalized")
+PAYLOAD_STRING_INVALID_UNICODE: SafeToken = SafeToken.parse("payload_string_invalid_unicode")
+PAYLOAD_MEMBER_NAME_INVALID: SafeToken = SafeToken.parse("payload_member_name_invalid")
+PAYLOAD_MEMBER_DUPLICATE: SafeToken = SafeToken.parse("payload_member_duplicate")
+PAYLOAD_INTEGER_OUT_OF_RANGE: SafeToken = SafeToken.parse("payload_integer_out_of_range")
+PAYLOAD_TIMESTAMP_INVALID: SafeToken = SafeToken.parse("payload_timestamp_invalid")
+PAYLOAD_OVERSIZED: SafeToken = SafeToken.parse("payload_oversized")
+PAYLOAD_WORKSPACE_INVALID: SafeToken = SafeToken.parse("payload_workspace_invalid")
+PAYLOAD_BASE64URL_INVALID: SafeToken = SafeToken.parse("payload_base64url_invalid")
+PAYLOAD_SIGNING_DOMAIN_INVALID: SafeToken = SafeToken.parse("payload_signing_domain_invalid")
+PARENT_REVISION_INVALID: SafeToken = SafeToken.parse("parent_revision_invalid")
+SIGNING_KEY_SIZE_INVALID: SafeToken = SafeToken.parse("signing_key_size_invalid")
+SIGNING_KEY_ID_INVALID: SafeToken = SafeToken.parse("signing_key_id_invalid")
+KEYSET_REVISION_INVALID: SafeToken = SafeToken.parse("keyset_revision_invalid")
+KEYSET_KEY_INVALID: SafeToken = SafeToken.parse("keyset_key_invalid")
+KEYSET_KEY_DUPLICATE: SafeToken = SafeToken.parse("keyset_key_duplicate")
+KEYSET_CURRENT_COUNT_INVALID: SafeToken = SafeToken.parse("keyset_current_count_invalid")
+KEYSET_NON_RETIRED_COUNT_INVALID: SafeToken = SafeToken.parse("keyset_non_retired_count_invalid")
+
+#: Closed reason tokens for :class:`PolicyContractError` rejections.
+PAYLOAD_CONTRACT_REASONS: tuple[SafeToken, ...] = (
+    PAYLOAD_VALUE_UNSUPPORTED,
+    PAYLOAD_STRING_NOT_NORMALIZED,
+    PAYLOAD_STRING_INVALID_UNICODE,
+    PAYLOAD_MEMBER_NAME_INVALID,
+    PAYLOAD_MEMBER_DUPLICATE,
+    PAYLOAD_INTEGER_OUT_OF_RANGE,
+    PAYLOAD_TIMESTAMP_INVALID,
+    PAYLOAD_OVERSIZED,
+    PAYLOAD_WORKSPACE_INVALID,
+    PAYLOAD_BASE64URL_INVALID,
+    PAYLOAD_SIGNING_DOMAIN_INVALID,
+    PARENT_REVISION_INVALID,
+    SIGNING_KEY_SIZE_INVALID,
+    SIGNING_KEY_ID_INVALID,
+    KEYSET_REVISION_INVALID,
+    KEYSET_KEY_INVALID,
+    KEYSET_KEY_DUPLICATE,
+    KEYSET_CURRENT_COUNT_INVALID,
+    KEYSET_NON_RETIRED_COUNT_INVALID,
+)
+
+
+class PolicyContractError(ExclusionPolicyError):
+    """Violation of the closed signed-payload value or encoding contracts.
+
+    The canonicalizer, the typed payload builders and the key-identifier
+    helpers raise this when internal composition code hands them a value
+    outside the fixed snapshot/keyset schemas: an unsupported value type, a
+    non-normalized or surrogate-bearing string, a duplicate or non-string
+    member, an out-of-range integer, a naive or non-UTC timestamp, malformed
+    base64url/key material, an invalid keyset chain or an oversized signed
+    snapshot. The error carries exactly one closed ``reason`` token; the
+    offending value, bytes and key material never enter the error or its
+    diagnostics.
+    """
+
+    allowed_codes = frozenset({ErrorCode.EXCLUSION_POLICY_INPUT_INVALID})
+
+
+def payload_contract_error(reason: SafeToken) -> PolicyContractError:
+    """Build the typed signed-payload contract error for one closed reason."""
+
+    return PolicyContractError(
+        ErrorCode.EXCLUSION_POLICY_INPUT_INVALID,
+        safe_details={"reason": reason},
+    )

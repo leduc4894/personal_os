@@ -2,13 +2,20 @@
 
 Closed rule contracts and immutable revision/subject values, shared locator
 and operand normalization with the bounded glob compiler, the pure deny-only
-evaluator, the typed error bound to the closed ``exclusion_policy_*``
-registry codes, and the low-cardinality evaluation metrics contracts. The
-package imports no web framework, database driver, provider SDK or
-composition root; it reuses the canonical ``SourceType`` and
-``CanonicalMediaType`` value semantics.
+evaluator, the closed RFC 8785-compatible canonical JSON encoder, the typed
+signed snapshot/keyset payload builders with their signing ports, the typed
+error bound to the closed ``exclusion_policy_*`` registry codes, and the
+low-cardinality evaluation metrics contracts. The package imports no web
+framework, database driver, provider SDK, cryptography library or composition
+root; it reuses the canonical ``SourceType`` and ``CanonicalMediaType`` value
+semantics.
 """
 
+from personal_os.exclusion_policy.canonical_json import (
+    MAXIMUM_SAFE_INTEGER,
+    CanonicalJsonValue,
+    canonicalize_json_value,
+)
 from personal_os.exclusion_policy.contracts import (
     EVALUATOR_CONTRACT,
     EXTENSION_MAXIMUM_CHARACTERS,
@@ -46,7 +53,10 @@ from personal_os.exclusion_policy.contracts import (
 )
 from personal_os.exclusion_policy.errors import (
     INPUT_REASONS,
+    PAYLOAD_CONTRACT_REASONS,
     ExclusionPolicyError,
+    PolicyContractError,
+    payload_contract_error,
 )
 from personal_os.exclusion_policy.evaluation import (
     PolicyEvaluationOutcome,
@@ -68,8 +78,37 @@ from personal_os.exclusion_policy.normalization import (
     normalize_locator,
     normalize_rule,
 )
+from personal_os.exclusion_policy.signatures import (
+    ED25519_PUBLIC_KEY_BYTES,
+    ED25519_SEED_BYTES,
+    ED25519_SIGNATURE_BYTES,
+    KEY_ID_PREFIX,
+    KEYSET_MAXIMUM_NON_RETIRED_KEYS,
+    KEYSET_PAYLOAD_CONTRACT,
+    KEYSET_SIGNING_DOMAIN,
+    SIGNATURE_ALGORITHM,
+    SIGNED_SNAPSHOT_MAXIMUM_BYTES,
+    SNAPSHOT_PAYLOAD_CONTRACT,
+    SNAPSHOT_SIGNING_DOMAIN,
+    PolicyKeysetKey,
+    PolicyKeysetState,
+    PolicySignatureVerifier,
+    PolicySigner,
+    build_keyset_payload,
+    build_signed_message,
+    build_snapshot_payload,
+    compute_payload_sha256_hex,
+    compute_signed_snapshot_envelope_size,
+    decode_base64url_without_padding,
+    derive_ed25519_key_id,
+    encode_base64url_without_padding,
+    is_wellformed_ed25519_key_id,
+)
 
 __all__ = [
+    "ED25519_PUBLIC_KEY_BYTES",
+    "ED25519_SEED_BYTES",
+    "ED25519_SIGNATURE_BYTES",
     "EVALUATOR_CONTRACT",
     "EXCLUSION_POLICY_METRIC_CONTRACTS",
     "EXTENSION_MAXIMUM_CHARACTERS",
@@ -78,12 +117,23 @@ __all__ = [
     "GLOB_MAXIMUM_SEGMENTS",
     "GLOB_MAXIMUM_WILDCARD_TOKENS",
     "INPUT_REASONS",
+    "KEYSET_MAXIMUM_NON_RETIRED_KEYS",
+    "KEYSET_PAYLOAD_CONTRACT",
+    "KEYSET_SIGNING_DOMAIN",
+    "KEY_ID_PREFIX",
     "LOCATOR_MAXIMUM_BYTES",
     "LOCATOR_MAXIMUM_SEGMENTS",
     "LOCATOR_SEGMENT_MAXIMUM_BYTES",
     "MAXIMUM_RULES_PER_REVISION",
+    "MAXIMUM_SAFE_INTEGER",
     "MAXIMUM_SIZE_BYTES_CEILING",
+    "PAYLOAD_CONTRACT_REASONS",
     "RULE_FINGERPRINT_CONTRACT",
+    "SIGNATURE_ALGORITHM",
+    "SIGNED_SNAPSHOT_MAXIMUM_BYTES",
+    "SNAPSHOT_PAYLOAD_CONTRACT",
+    "SNAPSHOT_SIGNING_DOMAIN",
+    "CanonicalJsonValue",
     "CompiledGlob",
     "EnforcedPolicyDecision",
     "EvaluationMetricOutcome",
@@ -104,7 +154,12 @@ __all__ = [
     "MediaTypeOperand",
     "PathGlobOperand",
     "PolicyBoundary",
+    "PolicyContractError",
     "PolicyEvaluationOutcome",
+    "PolicyKeysetKey",
+    "PolicyKeysetState",
+    "PolicySignatureVerifier",
+    "PolicySigner",
     "PolicySubject",
     "PolicySubjectField",
     "PreviewMatchState",
@@ -112,11 +167,22 @@ __all__ = [
     "RuleKind",
     "RuleOperand",
     "SourceTypeOperand",
+    "build_keyset_payload",
+    "build_signed_message",
+    "build_snapshot_payload",
+    "canonicalize_json_value",
     "compile_glob",
+    "compute_payload_sha256_hex",
+    "compute_signed_snapshot_envelope_size",
+    "decode_base64url_without_padding",
+    "derive_ed25519_key_id",
+    "encode_base64url_without_padding",
     "evaluate_policy",
     "fold_ascii_lowercase",
     "glob_matches",
+    "is_wellformed_ed25519_key_id",
     "normalize_locator",
     "normalize_rule",
+    "payload_contract_error",
     "preview_match_state",
 ]

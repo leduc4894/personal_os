@@ -1,0 +1,11 @@
+{
+  "contract": "exclusion_policy_snapshot_golden/v1",
+  "payload": "{\"contract\":\"exclusion_policy_snapshot/v1\",\"default_decision\":\"allowed\",\"evaluator_contract_sha256\":\"8f174f9aa9a7a1580b377fa469a65c6e76801db66421404703b7aab38f50fbe1\",\"parent_policy_revision_id\":null,\"policy_revision_id\":\"018f47a0-7b00-7000-8000-000000000201\",\"published_at\":\"2026-08-17T09:30:12.123456Z\",\"revision_number\":1,\"rules\":[{\"rule_id\":\"018f47a0-7b00-7000-8000-000000000301\",\"rule_kind\":\"exact_source_id\",\"source_id\":\"018f47a0-7b00-7000-8000-000000000401\"},{\"folder_prefix\":\"archiv/berichte\",\"rule_id\":\"018f47a0-7b00-7000-8000-000000000302\",\"rule_kind\":\"folder_prefix\"},{\"extension\":\".pdf\",\"rule_id\":\"018f47a0-7b00-7000-8000-000000000303\",\"rule_kind\":\"extension\"},{\"path_glob\":\"vault/**/draft-*.md\",\"rule_id\":\"018f47a0-7b00-7000-8000-000000000304\",\"rule_kind\":\"path_glob\"},{\"media_type\":\"application/pdf\",\"rule_id\":\"018f47a0-7b00-7000-8000-000000000305\",\"rule_kind\":\"media_type\"},{\"maximum_size_bytes\":8388608,\"rule_id\":\"018f47a0-7b00-7000-8000-000000000306\",\"rule_kind\":\"maximum_size\"},{\"rule_id\":\"018f47a0-7b00-7000-8000-000000000307\",\"rule_kind\":\"source_type\",\"source_type\":\"youtube\"}],\"workspace_id\":\"018f47a0-7b00-7000-8000-000000000101\"}",
+  "payload_sha256": "23ab1d0c0cc341d2252f85dc36b906faebf0843c04b04b33f5023c245a05113c",
+  "signature": {
+    "algorithm": "Ed25519",
+    "key_id": "ed25519-sha256-Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+    "value": "TfN0QO863D42P_cioo_AZYzgMGLppJl01lcrjysK-zU8-mfLCwgD73IHe1ALwi7dIxjDE2sa_9XoG6kTBKSVCg"
+  },
+  "signing_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg"
+}

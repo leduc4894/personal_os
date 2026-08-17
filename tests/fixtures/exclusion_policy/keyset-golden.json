@@ -1,0 +1,11 @@
+{
+  "contract": "exclusion_policy_keyset_golden/v1",
+  "payload": "{\"contract\":\"exclusion_policy_keyset/v1\",\"created_at\":\"2026-08-17T10:00:00.000000Z\",\"keys\":[{\"algorithm\":\"Ed25519\",\"key_id\":\"ed25519-sha256-AzliGSN_daZPEq6385cjq_QAsWDDZJgKdl2sJK66JGQ\",\"public_key\":\"JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0\",\"state\":\"staged\"},{\"algorithm\":\"Ed25519\",\"key_id\":\"ed25519-sha256-JPbtasv-EAnAMNfKVnwzykgwkRSYI2tVYabIKr7F3ig\",\"public_key\":\"Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc\",\"state\":\"current\"}],\"keyset_revision\":2,\"parent_keyset_revision\":1,\"workspace_id\":\"018f47a0-7b00-7000-8000-000000000101\"}",
+  "payload_sha256": "899c05d9e4717b68eb37d28edc4480ef1e5d3c02940841c41b5d5a210dd529f0",
+  "signature": {
+    "algorithm": "Ed25519",
+    "key_id": "ed25519-sha256-JPbtasv-EAnAMNfKVnwzykgwkRSYI2tVYabIKr7F3ig",
+    "value": "SEFU7Wr3LNhuNLVtjOeAnD5dM6PdS-afORZsI2OitleV_MxEyU1-FJjl6KWI0t6rOWgDQO9WOMUsHZ8wdJSaDA"
+  },
+  "signing_public_key": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc"
+}
