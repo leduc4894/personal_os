@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 import pytest
 from api_runtime.application import create_api_application
@@ -43,12 +43,20 @@ from api_runtime.exclusion_policy_composition import (
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from personal_os.exclusion_policy.contracts import RuleKind
+from personal_os.exclusion_policy.contracts import (
+    EnforcedPolicyDecision,
+    PreviewMatchState,
+    RawPolicyDecision,
+    RuleKind,
+)
 from personal_os.exclusion_policy.normalization import normalize_rule
 from personal_os.exclusion_policy.ports import PolicyKeysetRecord
 from personal_os.exclusion_policy.previews import (
     PREVIEW_READY_EXPIRY_SECONDS,
+    PREVIEW_RESULT_PAGE_MAXIMUM,
     PolicyPreviewRecord,
+    PolicyPreviewResultRow,
+    PreviewImpactClass,
     PreviewStatus,
     compute_impact_digest,
 )
@@ -421,6 +429,118 @@ def test_preview_read_ready_returns_200_with_the_bounded_page(
     assert data["source_checkpoint_event_sequence"] == 0
     assert data["results"] == []
     assert data["next_cursor"] is None
+
+
+_RESULT_NAMESPACE: Final[UUID] = UUID("00000000-0000-7000-8000-00000000feed")
+_RESULT_IMPACT_CLASSES: Final[tuple[PreviewImpactClass, ...]] = tuple(PreviewImpactClass)
+
+
+def _seeded_result_row(index: int) -> PolicyPreviewResultRow:
+    """One deterministic result row cycling every closed impact class."""
+
+    return PolicyPreviewResultRow(
+        source_id=uuid5(_RESULT_NAMESPACE, f"result:{index}"),
+        previous_raw_decision=RawPolicyDecision.ALLOWED,
+        previous_enforced_decision=EnforcedPolicyDecision.ALLOWED,
+        proposed_raw_decision=RawPolicyDecision.EXCLUDED,
+        proposed_enforced_decision=EnforcedPolicyDecision.EXCLUDED,
+        proposed_match_state=PreviewMatchState.MATCHED,
+        impact_class=_RESULT_IMPACT_CLASSES[index % len(_RESULT_IMPACT_CLASSES)],
+        matched_rule_ids=(_RULE_ID,),
+        missing_fields=(),
+        subject_fingerprint="f" * 64,
+    )
+
+
+def _seed_result_rows(
+    harness: PolicyRouteHarness, preview: PolicyPreviewRecord, count: int
+) -> list[PolicyPreviewResultRow]:
+    rows = [_seeded_result_row(index) for index in range(count)]
+    harness.policy_state.preview_result_rows[preview.policy_preview_id] = rows
+    return rows
+
+
+def test_preview_ready_result_page_is_capped_and_continuable(
+    harness: PolicyRouteHarness,
+) -> None:
+    ready = seed_ready_preview(harness)
+    rows = _seed_result_rows(harness, ready, PREVIEW_RESULT_PAGE_MAXIMUM + 5)
+    expected_order = sorted(rows, key=lambda row: (row.impact_class.value, str(row.source_id)))
+    cookies = login(harness.client)
+
+    first = harness.client.get(
+        f"/api/admin/exclusion-policy/previews/{ready.policy_preview_id}",
+        headers=session_headers(cookies, csrf=False),
+    )
+    assert first.status_code == 200, first.text
+    page = first.json()["data"]
+    # (a) the page is capped at the spec 10 bound, in stable cursor order.
+    assert len(page["results"]) == PREVIEW_RESULT_PAGE_MAXIMUM
+    assert [row["source_id"] for row in page["results"]] == [
+        str(row.source_id) for row in expected_order[:PREVIEW_RESULT_PAGE_MAXIMUM]
+    ]
+    # (b) the continuation cursor echoes the last row of the page exactly.
+    boundary = expected_order[PREVIEW_RESULT_PAGE_MAXIMUM - 1]
+    assert page["next_cursor"] == {
+        "impact_class": boundary.impact_class.value,
+        "source_id": str(boundary.source_id),
+    }
+
+    # (c) the continuation serves the remaining rows in the same order.
+    second = harness.client.get(
+        f"/api/admin/exclusion-policy/previews/{ready.policy_preview_id}",
+        headers=session_headers(cookies, csrf=False),
+        params={
+            "cursor_impact_class": boundary.impact_class.value,
+            "cursor_source_id": str(boundary.source_id),
+        },
+    )
+    assert second.status_code == 200, second.text
+    tail = second.json()["data"]
+    assert [row["source_id"] for row in tail["results"]] == [
+        str(row.source_id) for row in expected_order[PREVIEW_RESULT_PAGE_MAXIMUM:]
+    ]
+    assert tail["next_cursor"] is None
+    # The boundary row itself never repeats on the continuation.
+    assert str(boundary.source_id) not in {row["source_id"] for row in tail["results"]}
+
+
+def test_preview_read_rejects_incomplete_or_unknown_cursors(
+    harness: PolicyRouteHarness,
+) -> None:
+    ready = seed_ready_preview(harness)
+    _seed_result_rows(harness, ready, 3)
+    cookies = login(harness.client)
+    path = f"/api/admin/exclusion-policy/previews/{ready.policy_preview_id}"
+
+    half_cursor = harness.client.get(
+        path,
+        headers=session_headers(cookies, csrf=False),
+        params={"cursor_impact_class": "still_excluded"},
+    )
+    assert half_cursor.status_code == 422
+    error = half_cursor.json()["error"]
+    assert error["code"] == "exclusion_policy_input_invalid"
+    assert error["details"] == {"reason": "preview_cursor_invalid"}
+
+    unknown_class = harness.client.get(
+        path,
+        headers=session_headers(cookies, csrf=False),
+        params={"cursor_impact_class": "not-a-class", "cursor_source_id": str(_RULE_ID)},
+    )
+    assert unknown_class.status_code == 422
+    assert unknown_class.json()["error"]["details"] == {"reason": "preview_cursor_invalid"}
+    assert "not-a-class" not in unknown_class.text
+
+    # A complete, well-formed cursor still answers the ready page: a cursor
+    # sorting before every seeded row serves the full remaining page.
+    complete = harness.client.get(
+        path,
+        headers=session_headers(cookies, csrf=False),
+        params={"cursor_impact_class": "indeterminate", "cursor_source_id": str(_RULE_ID)},
+    )
+    assert complete.status_code == 200, complete.text
+    assert len(complete.json()["data"]["results"]) == 3
 
 
 def test_preview_read_failed_and_expired_map_to_the_closed_envelope(
