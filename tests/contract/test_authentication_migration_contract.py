@@ -44,6 +44,7 @@ REVISION_PATH: Path = (
 
 AUTH_REVISION: str = "20260816_01"
 BASELINE_REVISION: str = "20260813_01"
+POLICY_REVISION: str = "20260817_01"
 SCHEMA_NAME: str = "knowledge"
 
 EXPECTED_AUTH_TABLES = {
@@ -720,15 +721,17 @@ def _in_list_values(expression: str) -> frozenset[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_alembic_graph_has_exactly_one_head_at_the_authentication_revision() -> None:
+def test_alembic_graph_has_exactly_one_head_beyond_the_authentication_revision() -> None:
+    # The exclusion policy revision ``20260817_01`` stacks on this revision, so
+    # the single graph head moved past the authentication revision.
     script_directory = _script_directory()
-    assert script_directory.get_heads() == [AUTH_REVISION]
+    assert script_directory.get_heads() == [POLICY_REVISION]
 
 
 def test_authentication_revision_stacks_on_the_canonical_baseline_root() -> None:
     script_directory = _script_directory()
     revisions = list(script_directory.walk_revisions())
-    assert len(revisions) == 2
+    assert len(revisions) == 3
     baseline = script_directory.get_revision(BASELINE_REVISION)
     assert baseline is not None
     assert baseline.down_revision is None
@@ -739,8 +742,10 @@ def test_authentication_revision_stacks_on_the_canonical_baseline_root() -> None
     assert authentication.dependencies is None
 
 
-def test_canonical_revision_constant_is_the_authentication_head() -> None:
-    assert CANONICAL_POSTGRESQL_SCHEMA_REVISION == AUTH_REVISION
+def test_canonical_revision_constant_is_the_current_graph_head() -> None:
+    # The canonical revision authority always pins the current graph head; the
+    # exclusion policy migration ``20260817_01`` is that head now.
+    assert CANONICAL_POSTGRESQL_SCHEMA_REVISION == POLICY_REVISION
 
 
 # ---------------------------------------------------------------------------

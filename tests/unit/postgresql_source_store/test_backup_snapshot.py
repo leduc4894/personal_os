@@ -54,7 +54,7 @@ def _object_row(**overrides: Any) -> dict[str, Any]:
 # --- fixed share-lock order and statements -----------------------------------
 
 
-def test_snapshot_lock_order_is_the_spec_nine_tables() -> None:
+def test_snapshot_lock_order_covers_the_canonical_and_policy_tables() -> None:
     assert SNAPSHOT_LOCK_ORDER == (
         "users",
         "workspaces",
@@ -65,8 +65,26 @@ def test_snapshot_lock_order_is_the_spec_nine_tables() -> None:
         "sync_events",
         "projection_intents",
         "audit_events",
+        "workspace_policy_state",
+        "policy_signing_keys",
+        "policy_keysets",
+        "policy_keyset_signatures",
+        "source_policies",
+        "policy_rules",
+        "policy_drafts",
+        "policy_draft_rules",
+        "policy_evaluations",
+        "policy_reconciliation_intents",
     )
     assert len(SNAPSHOT_LOCK_ORDER) == len(set(SNAPSHOT_LOCK_ORDER))
+
+
+def test_snapshot_lock_order_excludes_ephemeral_preview_tables() -> None:
+    # Preview rows and their results are reconstructible evidence (spec 10/22):
+    # they never join the canonical quiesced snapshot, so a restore cannot
+    # resurrect stale preview state.
+    assert "policy_previews" not in SNAPSHOT_LOCK_ORDER
+    assert "policy_preview_results" not in SNAPSHOT_LOCK_ORDER
 
 
 def test_snapshot_lock_timeout_is_fifteen_seconds() -> None:
@@ -76,7 +94,7 @@ def test_snapshot_lock_timeout_is_fifteen_seconds() -> None:
 def test_share_lock_statements_follow_fixed_spec_order() -> None:
     statements = build_share_lock_statements()
     texts = [str(s.compile(dialect=postgresql.dialect())) for s in statements]
-    assert len(texts) == 9
+    assert len(texts) == 19
     for text, table in zip(texts, SNAPSHOT_LOCK_ORDER, strict=True):
         assert f'{SOURCE_STORE_SCHEMA}."{table}"' in text
         assert "SHARE MODE NOWAIT" in text

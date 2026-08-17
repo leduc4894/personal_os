@@ -52,7 +52,7 @@ _DATABASE_HOST: str = "127.0.0.1"
 _SSL_MODE: str = "disable"
 _APPLICATION_PASSWORD_FILENAME: str = "postgres_application_password"
 _ALEMBIC_APPLICATION_NAME: str = "knowledge-baseline-test"
-_HEAD_REVISION: str = "20260816_01"
+_HEAD_REVISION: str = "20260817_01"
 _PHASE1_REVISION: str = "20260813_01"
 
 _PHASE1_TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
@@ -78,15 +78,74 @@ _AUTHENTICATION_TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
     "authentication_throttle_buckets",
 )
 
+_POLICY_TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
+    "workspace_policy_state",
+    "policy_signing_keys",
+    "policy_keysets",
+    "policy_keyset_signatures",
+    "policy_drafts",
+    "policy_draft_rules",
+    "policy_previews",
+    "source_policies",
+    "policy_rules",
+    "policy_preview_results",
+    "policy_evaluations",
+    "policy_reconciliation_intents",
+)
+
 _TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
     *_PHASE1_TABLES_IN_COUNT_ORDER,
     *_AUTHENTICATION_TABLES_IN_COUNT_ORDER,
+    *_POLICY_TABLES_IN_COUNT_ORDER,
 )
+
+#: Row counts of one valid seeded graph in ``_TABLES_IN_COUNT_ORDER``: the
+#: seeded baseline rows (one workspace inserted after the upgrade), zero
+#: authentication rows and zero policy rows — the graph inserts its workspace
+#: directly rather than through the identity bootstrap, so the policy
+#: migration's per-workspace seeding (which ran on the empty database during
+#: the upgrade) created no rows for it.
+_VALID_GRAPH_ROW_COUNTS: list[int] = [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    2,
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+]
 
 # Exact expected object sets (the migration is the source of truth for names).
 _EXPECTED_TABLES: frozenset[str] = frozenset(_TABLES_IN_COUNT_ORDER)
 _EXPECTED_FUNCTIONS: frozenset[str] = frozenset(
-    {"reject_recovery_code_used_at_change", "reject_immutable_update", "reject_audit_mutation"}
+    {
+        "reject_recovery_code_used_at_change",
+        "reject_immutable_update",
+        "reject_audit_mutation",
+        "reject_policy_history_mutation",
+    }
 )
 _EXPECTED_TRIGGERS: frozenset[str] = frozenset(
     {
@@ -95,6 +154,12 @@ _EXPECTED_TRIGGERS: frozenset[str] = frozenset(
         "trg_source_versions__reject_update",
         "trg_sync_events__reject_update",
         "trg_totp_recovery_codes__reject_used_at_change",
+        "trg_source_policies__reject_mutation",
+        "trg_policy_rules__reject_mutation",
+        "trg_policy_evaluations__reject_mutation",
+        "trg_policy_signing_keys__reject_mutation",
+        "trg_policy_keysets__reject_mutation",
+        "trg_policy_keyset_signatures__reject_mutation",
     }
 )
 _EXPECTED_INDEXES: frozenset[str] = frozenset(
@@ -115,6 +180,13 @@ _EXPECTED_INDEXES: frozenset[str] = frozenset(
         "ix_audit_events__workspace_occurred",
         "ix_audit_events__target_lineage",
         "ix_audit_events__request",
+        "ix_policy_signing_keys__workspace_revision",
+        "ix_policy_previews__workspace_state",
+        "ix_policy_previews__pending_dispatch",
+        "ix_policy_preview_results__impact_cursor",
+        "ix_policy_evaluations__revision_sequence",
+        "ix_policy_reconciliation_intents__pending_dispatch",
+        "uq_projection_intents__policy_transition",
     }
 )
 _CONSTRAINT_NAME_PATTERN = re.compile(r"^(?:pk|fk|uq|ck)_[a-z0-9_]+$")
@@ -2171,23 +2243,17 @@ def test_canonical_postgresql_baseline_upgrade_catalog_and_valid_graph(
 
     # Step 3: valid canonical graph across all nine tables.
     _insert_valid_graph(conn)
-    assert _row_counts(conn) == [1, 1, 1, 1, 1, 1, 1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0], (
-        "valid graph row counts differ"
-    )
+    assert _row_counts(conn) == _VALID_GRAPH_ROW_COUNTS, "valid graph row counts differ"
 
     # Step 3: allowed-behavior cases (each accepted, then rolled back).
     _assert_allowed_behaviors(conn)
-    assert _row_counts(conn) == [1, 1, 1, 1, 1, 1, 1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0], (
-        "allowed cases must not persist rows"
-    )
+    assert _row_counts(conn) == _VALID_GRAPH_ROW_COUNTS, "allowed cases must not persist rows"
 
     # Task 4: every baseline invariant is database-enforced. Each mutation runs
     # in its own savepoint and is rolled back, so the committed valid graph is
     # never mutated.
     _assert_negative_invariants(conn)
-    assert _row_counts(conn) == [1, 1, 1, 1, 1, 1, 1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0], (
-        "negative cases must not persist rows"
-    )
+    assert _row_counts(conn) == _VALID_GRAPH_ROW_COUNTS, "negative cases must not persist rows"
     # The current-version pointer is restored after the lineage/pointer cases.
     with conn.cursor() as _pointer_cursor:
         _pointer_cursor.execute(
@@ -2442,8 +2508,8 @@ def test_two_first_upgrade_processes_leave_exactly_one_head(
 
     # Final state: exactly one head, exact catalog, no duplicate objects.
     assert _current_revision(conn) == _HEAD_REVISION
-    assert _knowledge_table_count(conn) == 17, (
-        "two first-upgrade attempts must leave exactly seventeen tables, no duplicates"
+    assert _knowledge_table_count(conn) == 29, (
+        "two first-upgrade attempts must leave exactly twenty-nine tables, no duplicates"
     )
     _assert_exact_object_set(conn)
 

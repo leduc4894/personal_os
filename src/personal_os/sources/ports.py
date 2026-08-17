@@ -8,7 +8,10 @@ correlation. :data:`AwareUtcClock` is the injectable aware UTC clock seam every
 time-dependent rule (such as the verified-receipt age rule) reads.
 :class:`ProjectionIntentStore` is the leased projection-outbox port (design
 section 11): claim, expired-lease reclaim and the fenced
-acknowledge/retry/terminal transitions over committed intent rows.
+acknowledge/retry/terminal transitions over committed intent rows. Claims are
+origin-isolated: only ``source_event`` intents reach the source dispatcher, so
+a pending ``policy_transition`` intent can never start
+``SourceIngestionWorkflow``.
 """
 
 from __future__ import annotations

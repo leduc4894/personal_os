@@ -60,7 +60,14 @@ from postgresql_source_store.locks import (
     advisory_xact_lock_statement,
     signed_first_sha256_word,
 )
-from postgresql_source_store.tables import audit_events, devices, users, workspaces
+from postgresql_source_store.tables import (
+    audit_events,
+    devices,
+    policy_drafts,
+    users,
+    workspace_policy_state,
+    workspaces,
+)
 
 #: Reserved advisory-lock namespace for identity bootstrap (distinct from
 #: the idempotency and source namespaces; ``"SVCB"`` in the established scheme).
@@ -238,6 +245,48 @@ def build_identity_rejection_audit_values(
     }
 
 
+def build_workspace_policy_state_values(
+    *, workspace_id: UUID, occurred_at: datetime
+) -> dict[str, Any]:
+    """Build the per-workspace unpublished policy state row (spec 8.1).
+
+    The bootstrap never publishes or signs implicitly: the active revision
+    pointer stays null and the active revision number stays zero, with the
+    single transaction timestamp shared by every bootstrap row.
+    """
+    return {
+        "workspace_id": workspace_id,
+        "active_policy_revision_id": None,
+        "active_revision_number": 0,
+        "created_at": occurred_at,
+        "updated_at": occurred_at,
+    }
+
+
+def build_policy_draft_values(
+    *,
+    workspace_id: UUID,
+    policy_draft_id: UUID,
+    occurred_at: datetime,
+) -> dict[str, Any]:
+    """Build the per-workspace empty first draft row (spec 8.2/9).
+
+    The initial draft is empty with a null base and no acting user; the
+    migration seeds the same shape for pre-existing workspaces, so future
+    bootstraps stay byte-compatible with the migrated rows.
+    """
+    return {
+        "policy_draft_id": policy_draft_id,
+        "workspace_id": workspace_id,
+        "draft_version": 1,
+        "base_policy_revision_id": None,
+        "created_by_user_id": None,
+        "updated_by_user_id": None,
+        "created_at": occurred_at,
+        "updated_at": occurred_at,
+    }
+
+
 class _StateConflictAbort(Exception):
     """Carries a drift conflict out of the open transaction to force rollback.
 
@@ -389,6 +438,25 @@ class PostgresqlIdentityBootstrapStore:
                     occurred_at=committed_at,
                     client_request_id=diagnostic_context.client_request_id,
                     trace_id=diagnostic_context.trace.trace_id.value,
+                )
+            )
+        )
+        # The workspace bootstrap extends through the same transaction: one
+        # unpublished policy state row and one empty draft join the identity
+        # graph atomically, so a fault after any insert rolls back everything.
+        await connection.execute(
+            sa.insert(workspace_policy_state).values(
+                **build_workspace_policy_state_values(
+                    workspace_id=workspace_id, occurred_at=committed_at
+                )
+            )
+        )
+        await connection.execute(
+            sa.insert(policy_drafts).values(
+                **build_policy_draft_values(
+                    workspace_id=workspace_id,
+                    policy_draft_id=uuid7(),
+                    occurred_at=committed_at,
                 )
             )
         )

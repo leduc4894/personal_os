@@ -1,13 +1,15 @@
 """DML Core metadata contract against the migration DDL authority.
 
-The Alembic migrations ``20260813_01`` (baseline) and ``20260816_01``
-(authentication schema) are the DDL authority. This test loads both migration
-modules, replays their ``upgrade()`` against a recording stub of ``alembic.op``
-and compares the seventeen schema-qualified tables the migrations create with
-the typed DML metadata in ``postgresql_source_store.tables``: identical table
-names, schema, column names, column types and nullability, with full coverage
-in both directions and no ``create_all()`` path anywhere in the adapter
-package.
+The Alembic migrations ``20260813_01`` (baseline), ``20260816_01``
+(authentication schema) and ``20260817_01`` (exclusion policy schema) are the
+DDL authority. This test loads the migration modules, replays their
+``upgrade()`` against a recording stub of ``alembic.op`` (including the policy
+migration's ``add_column``/``alter_column`` evolution of
+``projection_intents``) and compares the twenty-nine schema-qualified tables
+the migrations create with the typed DML metadata in
+``postgresql_source_store.tables``: identical table names, schema, column
+names, column types and nullability, with full coverage in both directions and
+no ``create_all()`` path anywhere in the adapter package.
 """
 
 from __future__ import annotations
@@ -26,7 +28,11 @@ from postgresql_source_store.tables import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-MIGRATION_GLOBS: tuple[str, ...] = ("20260813_01*.py", "20260816_01*.py")
+MIGRATION_GLOBS: tuple[str, ...] = (
+    "20260813_01*.py",
+    "20260816_01*.py",
+    "20260817_01*.py",
+)
 MIGRATION_DIRECTORY = REPO_ROOT / "migrations" / "versions"
 PACKAGE_SOURCE_ROOT = (
     REPO_ROOT / "packages" / "postgresql-source-store" / "src" / "postgresql_source_store"
@@ -59,7 +65,38 @@ AUTHENTICATION_TABLE_NAMES = frozenset(
     }
 )
 
-EXPECTED_TABLE_NAMES = BASELINE_TABLE_NAMES | AUTHENTICATION_TABLE_NAMES
+POLICY_TABLE_NAMES = frozenset(
+    {
+        "workspace_policy_state",
+        "policy_drafts",
+        "policy_draft_rules",
+        "source_policies",
+        "policy_rules",
+        "policy_previews",
+        "policy_preview_results",
+        "policy_evaluations",
+        "policy_reconciliation_intents",
+        "policy_signing_keys",
+        "policy_keysets",
+        "policy_keyset_signatures",
+    }
+)
+
+EXPECTED_TABLE_NAMES = BASELINE_TABLE_NAMES | AUTHENTICATION_TABLE_NAMES | POLICY_TABLE_NAMES
+
+
+class _ScriptedBindResult:
+    """Minimal bind result facade for the seeded policy migration replay."""
+
+    def fetchall(self) -> list[Any]:
+        return []
+
+
+class _ScriptedBind:
+    """Bind double whose workspace read yields no rows (empty replay database)."""
+
+    def execute(self, statement: object) -> _ScriptedBindResult:
+        return _ScriptedBindResult()
 
 
 class _RecordingAlembicOp:
@@ -67,12 +104,29 @@ class _RecordingAlembicOp:
 
     def __init__(self) -> None:
         self.created_tables: list[sa.Table] = []
+        self._tables_by_name: dict[str, sa.Table] = {}
+        self._bind = _ScriptedBind()
+
+    def _table(self, table_name: str) -> sa.Table:
+        table = self._tables_by_name.get(table_name)
+        assert table is not None, f"operation references unknown table {table_name!r}"
+        return table
 
     def create_table(self, name: str, *args: Any, **kwargs: Any) -> sa.Table:
         schema = kwargs.get("schema")
         table = sa.Table(name, sa.MetaData(), *args, schema=schema)
         self.created_tables.append(table)
+        self._tables_by_name[name] = table
         return table
+
+    def add_column(self, table_name: str, column: sa.Column, **kwargs: Any) -> None:
+        self._table(table_name).append_column(column)
+
+    def alter_column(self, table_name: str, column_name: str, **kwargs: Any) -> None:
+        column = self._table(table_name).columns[column_name]
+        nullable = kwargs.get("nullable")
+        if isinstance(nullable, bool):
+            column.nullable = nullable
 
     def create_index(self, *args: Any, **kwargs: Any) -> None:
         return None
@@ -80,11 +134,17 @@ class _RecordingAlembicOp:
     def create_foreign_key(self, *args: Any, **kwargs: Any) -> None:
         return None
 
+    def create_check_constraint(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
     def execute(self, *args: Any, **kwargs: Any) -> None:
         return None
 
     def get_context(self) -> None:
         return None
+
+    def get_bind(self) -> _ScriptedBind:
+        return self._bind
 
 
 def _load_migrations() -> list[Any]:

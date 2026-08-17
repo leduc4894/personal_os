@@ -35,7 +35,10 @@ from temporalio.service import RPCError
 
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.sources.errors import ProjectionDispatchError
-from personal_os.sources.projection_dispatch import LeasedProjectionIntent
+from personal_os.sources.projection_dispatch import (
+    LeasedProjectionIntent,
+    ProjectionIntentOriginKind,
+)
 
 #: The pinned workflow type name every dispatch starts (design section 11.3).
 PROJECTION_WORKFLOW_TYPE_NAME: Final[str] = "SourceIngestionWorkflow"
@@ -105,8 +108,13 @@ def source_ingestion_reference_for_intent(
 
     An intent without a source version cannot satisfy the closed input
     contract and is the terminal integrity failure, never a workflow start.
+    Only the ``source_event`` origin with its non-null event reference may
+    start ``SourceIngestionWorkflow``: a ``policy_transition`` intent is not
+    a source edit and never reaches this input contract.
     """
     if intent.source_version_id is None:
+        raise ProjectionDispatchError(ErrorCode.PROJECTION_INTENT_CONTRACT_INVALID)
+    if intent.origin_kind is not ProjectionIntentOriginKind.SOURCE_EVENT or intent.event_id is None:
         raise ProjectionDispatchError(ErrorCode.PROJECTION_INTENT_CONTRACT_INVALID)
     return SourceIngestionReference(
         contract=SOURCE_INGESTION_REFERENCE_CONTRACT,

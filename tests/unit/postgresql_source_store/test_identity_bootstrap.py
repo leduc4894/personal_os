@@ -11,6 +11,7 @@ bootstrap actions — all compiled or computed without touching a database.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -40,6 +41,8 @@ from postgresql_source_store.identity_bootstrap import (
     bootstrap_lock_statement,
     build_identity_audit_values,
     build_identity_rejection_audit_values,
+    build_policy_draft_values,
+    build_workspace_policy_state_values,
     hydrate_identity_state,
 )
 from postgresql_source_store.locks import (
@@ -315,6 +318,8 @@ class _ScriptedConnection:
         self._workspace_rows = workspace_rows
         self._device_rows = device_rows
         self._audit_insert_failure = audit_insert_failure
+        self.executed_statements: list[str] = []
+        self.inserted_tables: list[str] = []
 
     async def __aenter__(self) -> _ScriptedConnection:
         return self
@@ -327,6 +332,10 @@ class _ScriptedConnection:
 
     async def execute(self, statement: object) -> _ScriptedResult:
         sql = str(statement)
+        self.executed_statements.append(sql)
+        insert_match = re.match(r"INSERT INTO knowledge\.(\w+)", sql)
+        if insert_match is not None:
+            self.inserted_tables.append(insert_match.group(1))
         if sql.startswith("INSERT") and "audit_events" in sql:
             if self._audit_insert_failure is not None:
                 raise self._audit_insert_failure
@@ -384,3 +393,54 @@ async def test_rejection_audit_database_failure_maps_to_application_error() -> N
     # The database failure replaces the conflict error: the service must
     # never claim an audit row that does not exist.
     assert not isinstance(captured.value, IdentityBootstrapError)
+
+
+# --- policy bootstrap rows in the identity transaction ---------------------------
+
+
+def test_build_workspace_policy_state_values_creates_an_unpublished_state_row() -> None:
+    values = build_workspace_policy_state_values(
+        workspace_id=WORKSPACE_ID, occurred_at=COMMITTED_AT
+    )
+    assert values["workspace_id"] == WORKSPACE_ID
+    assert values["active_policy_revision_id"] is None
+    assert values["active_revision_number"] == 0
+    assert values["created_at"] == COMMITTED_AT
+    assert values["updated_at"] == COMMITTED_AT
+
+
+def test_build_policy_draft_values_creates_an_empty_first_draft() -> None:
+    policy_draft_id = uuid4()
+    values = build_policy_draft_values(
+        workspace_id=WORKSPACE_ID,
+        policy_draft_id=policy_draft_id,
+        occurred_at=COMMITTED_AT,
+    )
+    assert values["policy_draft_id"] == policy_draft_id
+    assert values["workspace_id"] == WORKSPACE_ID
+    assert values["draft_version"] == 1
+    assert values["base_policy_revision_id"] is None
+    assert values["created_by_user_id"] is None
+    assert values["updated_by_user_id"] is None
+    assert values["created_at"] == COMMITTED_AT
+    assert values["updated_at"] == COMMITTED_AT
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_creates_policy_state_and_empty_draft_in_the_same_transaction() -> None:
+    # The empty-state create path must extend the workspace with its policy
+    # state row and empty draft inside the single bootstrap transaction, so a
+    # fault after any insert rolls back everything.
+    connection = _ScriptedConnection(
+        user_rows=[],
+        workspace_rows=[],
+        device_rows=[],
+    )
+    store = PostgresqlIdentityBootstrapStore(_ScriptedEngine(connection))
+    result = await store.bootstrap(_build_command(), _diagnostic_context())
+    assert result.outcome.value == "created"
+    assert "workspace_policy_state" in connection.inserted_tables
+    assert "policy_drafts" in connection.inserted_tables
+    workspace_index = connection.inserted_tables.index("workspaces")
+    assert connection.inserted_tables.index("workspace_policy_state") > workspace_index
+    assert connection.inserted_tables.index("policy_drafts") > workspace_index

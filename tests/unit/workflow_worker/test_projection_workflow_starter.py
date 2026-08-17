@@ -45,7 +45,10 @@ from workflow_worker.projection_workflow_starter import (
 from personal_os.diagnostics.events import SafeToken
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.sources.errors import ProjectionDispatchError
-from personal_os.sources.projection_dispatch import LeasedProjectionIntent
+from personal_os.sources.projection_dispatch import (
+    LeasedProjectionIntent,
+    ProjectionIntentOriginKind,
+)
 
 _LEAKAGE_SENTINELS: tuple[str, ...] = (
     "sentinel-title",
@@ -182,6 +185,32 @@ def test_two_intents_for_one_event_share_workflow_identity_and_input() -> None:
 
 def test_intent_without_source_version_id_is_contract_invalid() -> None:
     intent = _leased_intent(source_version_id=None)
+
+    with pytest.raises(ProjectionDispatchError) as outcome:
+        source_ingestion_reference_for_intent(intent)
+
+    assert outcome.value.error_code is ErrorCode.PROJECTION_INTENT_CONTRACT_INVALID
+    assert outcome.value.is_retryable is False
+
+
+def test_policy_transition_intent_never_builds_a_source_ingestion_reference() -> None:
+    # A pending policy-transition intent must never start
+    # SourceIngestionWorkflow: the source-event workflow input contract
+    # requires the source-event origin with its non-null event reference.
+    intent = LeasedProjectionIntent(
+        projection_intent_id=uuid4(),
+        workspace_id=uuid4(),
+        origin_kind=ProjectionIntentOriginKind.POLICY_TRANSITION,
+        event_id=None,
+        policy_revision_id=uuid4(),
+        source_id=uuid4(),
+        source_version_id=uuid4(),
+        projection_kind=SafeToken.parse("qdrant"),
+        operation=SafeToken.parse("delete"),
+        attempt_count=0,
+        lease_token=uuid4(),
+        leased_until=datetime.now(UTC) + timedelta(seconds=60),
+    )
 
     with pytest.raises(ProjectionDispatchError) as outcome:
         source_ingestion_reference_for_intent(intent)

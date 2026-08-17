@@ -544,9 +544,11 @@ def test_authentication_schema_phase1_stack_upgrade_reflection_and_gated_downgra
     assert _current_revision(conn) == BASELINE_REVISION
     assert _knowledge_tables(conn) == BASELINE_TABLES
 
-    # The authentication upgrade stacks on the Phase 1 head.
-    upgrade = run_alembic(["upgrade", "head"], alembic_env)
-    assert upgrade.returncode == 0, _alembic_failure("upgrade head", upgrade)
+    # The authentication upgrade stacks on the Phase 1 head. The suite pins the
+    # authentication head explicitly: the exclusion policy revision
+    # ``20260817_01`` stacks beyond it and owns its own integration suite.
+    upgrade = run_alembic(["upgrade", AUTH_REVISION], alembic_env)
+    assert upgrade.returncode == 0, _alembic_failure("upgrade auth head", upgrade)
     assert _current_revision(conn) == AUTH_REVISION
     assert _knowledge_tables(conn) == BASELINE_TABLES | AUTH_TABLES
 
@@ -591,8 +593,8 @@ def test_authentication_schema_phase1_stack_upgrade_reflection_and_gated_downgra
     )
 
     # Deterministic downgrade/upgrade cycle: identical reflection.
-    re_upgrade = run_alembic(["upgrade", "head"], alembic_env)
-    assert re_upgrade.returncode == 0, _alembic_failure("re-upgrade head", re_upgrade)
+    re_upgrade = run_alembic(["upgrade", AUTH_REVISION], alembic_env)
+    assert re_upgrade.returncode == 0, _alembic_failure("re-upgrade auth head", re_upgrade)
     assert _current_revision(conn) == AUTH_REVISION
     assert _reflected_authentication_catalog(conn) == fingerprint_after_upgrade, (
         "the authentication catalog must be identical across the gated "
@@ -610,8 +612,8 @@ def test_authentication_schema_upgrade_from_empty_database(
     assert teardown.returncode == 0, _alembic_failure("gated downgrade base", teardown)
     assert not _schema_exists(conn), "downgrade base must remove the knowledge schema"
 
-    upgrade = run_alembic(["upgrade", "head"], alembic_env)
-    assert upgrade.returncode == 0, _alembic_failure("empty upgrade head", upgrade)
+    upgrade = run_alembic(["upgrade", AUTH_REVISION], alembic_env)
+    assert upgrade.returncode == 0, _alembic_failure("empty upgrade auth head", upgrade)
     assert _current_revision(conn) == AUTH_REVISION
     assert _knowledge_tables(conn) == BASELINE_TABLES | AUTH_TABLES
     for table_name in AUTH_TABLES:
@@ -895,8 +897,8 @@ def test_authentication_matrix_checks_reject_inconsistent_rows(
     """Every closed state/timestamp matrix rule rejects at the database boundary."""
     conn = authentication_schema_stack.connection
     alembic_env = authentication_schema_stack.alembic_env
-    upgrade = run_alembic(["upgrade", "head"], alembic_env)
-    assert upgrade.returncode == 0, _alembic_failure("upgrade head", upgrade)
+    upgrade = run_alembic(["upgrade", AUTH_REVISION], alembic_env)
+    assert upgrade.returncode == 0, _alembic_failure("upgrade auth head", upgrade)
 
     _seed_baseline_graph(conn)
 

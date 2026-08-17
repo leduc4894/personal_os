@@ -51,6 +51,7 @@ from personal_os.sources.projection_dispatch import (
     PROJECTION_CLAIM_BATCH_LIMIT,
     PROJECTION_LEASE_SECONDS,
     LeasedProjectionIntent,
+    ProjectionIntentOriginKind,
     lease_reclaimed_diagnostic_fields,
     projection_retry_backoff_seconds,
     stale_lease_diagnostic_fields,
@@ -107,8 +108,11 @@ def claim_available_select_statement(now: datetime, limit: int) -> sa.Select[tup
     """Build the due-intent claim select with the pinned order and row skip.
 
     Only ``pending`` rows whose availability has passed the injected ``now``
-    reading match; the pinned ``(available_at, created_at, projection_intent_id)``
-    order and ``FOR UPDATE SKIP LOCKED`` keep concurrent claimers disjoint.
+    reading match, and only rows whose origin is ``source_event``: a pending
+    policy-transition intent must never reach the source-event dispatcher or
+    start ``SourceIngestionWorkflow``. The pinned
+    ``(available_at, created_at, projection_intent_id)`` order and ``FOR UPDATE
+    SKIP LOCKED`` keep concurrent claimers disjoint.
     """
     _require_aware(now, "now")
     if limit < 1 or limit > PROJECTION_CLAIM_BATCH_LIMIT:
@@ -117,7 +121,9 @@ def claim_available_select_statement(now: datetime, limit: int) -> sa.Select[tup
         sa.select(
             projection_intents.c.projection_intent_id,
             projection_intents.c.workspace_id,
+            projection_intents.c.origin_kind,
             projection_intents.c.event_id,
+            projection_intents.c.policy_revision_id,
             projection_intents.c.source_id,
             projection_intents.c.source_version_id,
             projection_intents.c.projection_kind,
@@ -128,6 +134,7 @@ def claim_available_select_statement(now: datetime, limit: int) -> sa.Select[tup
             projection_intents.c.status == ProjectionIntentStatus.PENDING,
             projection_intents.c.available_at
             <= sa.bindparam("now", now, type_=sa.DateTime(timezone=True)),
+            projection_intents.c.origin_kind == ProjectionIntentOriginKind.SOURCE_EVENT.value,
         )
         .order_by(
             projection_intents.c.available_at,
@@ -331,6 +338,22 @@ def projection_kind_token(value: str) -> SafeToken:
     return token
 
 
+def _claimable_origin_kind(value: str) -> ProjectionIntentOriginKind:
+    """Convert a stored origin string into the closed origin discriminator.
+
+    The claim select filters on ``source_event`` and the migration CHECK
+    guarantees the closed vocabulary, so any other value is an impossible row
+    reported as the integrity failure.
+    """
+    try:
+        origin = ProjectionIntentOriginKind(value)
+    except ValueError as cause:
+        raise ProjectionDispatchError(ErrorCode.PROJECTION_INTENT_CONTRACT_INVALID) from cause
+    if origin is not ProjectionIntentOriginKind.SOURCE_EVENT:
+        raise ProjectionDispatchError(ErrorCode.PROJECTION_INTENT_CONTRACT_INVALID)
+    return origin
+
+
 def map_projection_failure(
     cause: BaseException, *, projection_kind: SafeToken | None = None
 ) -> ApplicationError:
@@ -494,7 +517,9 @@ class PostgresqlProjectionIntentStore:
                     LeasedProjectionIntent(
                         projection_intent_id=row.projection_intent_id,
                         workspace_id=row.workspace_id,
+                        origin_kind=_claimable_origin_kind(str(row.origin_kind)),
                         event_id=row.event_id,
+                        policy_revision_id=row.policy_revision_id,
                         source_id=row.source_id,
                         source_version_id=row.source_version_id,
                         projection_kind=kind,

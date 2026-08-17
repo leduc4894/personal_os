@@ -80,6 +80,22 @@ def test_claim_select_matches_only_due_pending_rows() -> None:
     assert "projection_intents.available_at<=%(" in compact
 
 
+def test_claim_select_claims_only_source_event_origins() -> None:
+    # Pending policy-transition intents must never reach the source-event
+    # dispatcher: the claim itself filters on the origin discriminator.
+    statement = claim_available_select_statement(_NOW, 10)
+    params = _params(statement)
+    compact = _compact(statement)
+    assert "source_event" in params.values()
+    assert "projection_intents.origin_kind=%(" in compact
+
+
+def test_claim_select_returns_the_origin_discriminator_columns() -> None:
+    statement = claim_available_select_statement(_NOW, 10)
+    selected = {column.key for column in statement.exported_columns}
+    assert {"origin_kind", "event_id", "policy_revision_id"} <= selected
+
+
 def test_claim_select_bounds_the_batch_by_the_pinned_limit() -> None:
     statement = claim_available_select_statement(_NOW, 3)
     assert "LIMIT" in _sql(statement)

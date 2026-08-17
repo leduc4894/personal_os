@@ -1,13 +1,14 @@
 """Schema-qualified SQLAlchemy Core table metadata for DML against the baseline.
 
-The Alembic migrations ``20260813_01`` and ``20260816_01`` are the DDL
-authority: they own the schema, columns, constraints, indexes and triggers.
-This module is the typed DML representation of exactly the seventeen migrated
-tables: identical table names, schema (``knowledge``), column names, column
-types, nullability and primary keys, contract-tested against the migration
-sources. There is deliberately no ``create_all()`` path and no constraint
-duplication: check, unique and foreign key constraints stay owned by the
-migrations, while reads and writes address the tables through this metadata.
+The Alembic migrations ``20260813_01``, ``20260816_01`` and ``20260817_01``
+are the DDL authority: they own the schema, columns, constraints, indexes and
+triggers. This module is the typed DML representation of exactly the
+twenty-nine migrated tables: identical table names, schema (``knowledge``),
+column names, column types, nullability and primary keys, contract-tested
+against the migration sources. There is deliberately no ``create_all()`` path
+and no constraint duplication: check, unique and foreign key constraints stay
+owned by the migrations, while reads and writes address the tables through
+this metadata.
 """
 
 from __future__ import annotations
@@ -132,7 +133,9 @@ projection_intents: Final[Table] = Table(
     _SOURCE_STORE_METADATA,
     Column("projection_intent_id", sa.Uuid(), nullable=False),
     Column("workspace_id", sa.Uuid(), nullable=False),
-    Column("event_id", sa.Uuid(), nullable=False),
+    Column("origin_kind", sa.Text(), nullable=False),
+    Column("event_id", sa.Uuid(), nullable=True),
+    Column("policy_revision_id", sa.Uuid(), nullable=True),
     Column("source_id", sa.Uuid(), nullable=False),
     Column("source_version_id", sa.Uuid(), nullable=True),
     Column("projection_kind", sa.Text(), nullable=False),
@@ -325,11 +328,206 @@ authentication_throttle_buckets: Final[Table] = Table(
     sa.PrimaryKeyConstraint("throttle_bucket_id", name="pk_authentication_throttle_buckets"),
 )
 
+workspace_policy_state: Final[Table] = Table(
+    "workspace_policy_state",
+    _SOURCE_STORE_METADATA,
+    Column("workspace_id", sa.Uuid(), nullable=False),
+    Column("active_policy_revision_id", sa.Uuid(), nullable=True),
+    Column("active_revision_number", sa.BigInteger(), nullable=False),
+    Column("created_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("updated_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    sa.PrimaryKeyConstraint("workspace_id", name="pk_workspace_policy_state"),
+)
+
+policy_drafts: Final[Table] = Table(
+    "policy_drafts",
+    _SOURCE_STORE_METADATA,
+    Column("policy_draft_id", sa.Uuid(), nullable=False),
+    Column("workspace_id", sa.Uuid(), nullable=False),
+    Column("draft_version", sa.BigInteger(), nullable=False),
+    Column("base_policy_revision_id", sa.Uuid(), nullable=True),
+    Column("created_by_user_id", sa.Uuid(), nullable=True),
+    Column("updated_by_user_id", sa.Uuid(), nullable=True),
+    Column("created_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("updated_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    sa.PrimaryKeyConstraint("policy_draft_id", name="pk_policy_drafts"),
+)
+
+policy_draft_rules: Final[Table] = Table(
+    "policy_draft_rules",
+    _SOURCE_STORE_METADATA,
+    Column("policy_draft_id", sa.Uuid(), nullable=False),
+    Column("rule_id", sa.Uuid(), nullable=False),
+    Column("rule_kind", sa.Text(), nullable=False),
+    Column("source_id_operand", sa.Uuid(), nullable=True),
+    Column("text_operand", sa.String(length=4096), nullable=True),
+    Column("size_bytes_operand", sa.BigInteger(), nullable=True),
+    Column("semantic_fingerprint", sa.String(length=64), nullable=False),
+    sa.PrimaryKeyConstraint("policy_draft_id", "rule_id", name="pk_policy_draft_rules"),
+)
+
+source_policies: Final[Table] = Table(
+    "source_policies",
+    _SOURCE_STORE_METADATA,
+    Column("policy_revision_id", sa.Uuid(), nullable=False),
+    Column("workspace_id", sa.Uuid(), nullable=False),
+    Column("revision_number", sa.BigInteger(), nullable=False),
+    Column("parent_policy_revision_id", sa.Uuid(), nullable=True),
+    Column("default_decision", sa.Text(), nullable=False),
+    Column("source_checkpoint_event_sequence", sa.BigInteger(), nullable=False),
+    Column("policy_preview_id", sa.Uuid(), nullable=False),
+    Column("publication_idempotency_key", sa.String(length=200), nullable=False),
+    Column("request_fingerprint", sa.String(length=64), nullable=False),
+    Column("snapshot_contract", sa.String(length=100), nullable=False),
+    Column("snapshot_payload_bytes", sa.LargeBinary(), nullable=False),
+    Column("snapshot_payload_sha256", sa.String(length=64), nullable=False),
+    Column("signing_key_id", sa.Uuid(), nullable=False),
+    Column("signature_bytes", sa.LargeBinary(), nullable=False),
+    Column("published_by_user_id", sa.Uuid(), nullable=False),
+    Column("published_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    sa.PrimaryKeyConstraint("policy_revision_id", name="pk_source_policies"),
+)
+
+policy_rules: Final[Table] = Table(
+    "policy_rules",
+    _SOURCE_STORE_METADATA,
+    Column("policy_revision_id", sa.Uuid(), nullable=False),
+    Column("rule_id", sa.Uuid(), nullable=False),
+    Column("rule_kind", sa.Text(), nullable=False),
+    Column("source_id_operand", sa.Uuid(), nullable=True),
+    Column("text_operand", sa.String(length=4096), nullable=True),
+    Column("size_bytes_operand", sa.BigInteger(), nullable=True),
+    Column("semantic_fingerprint", sa.String(length=64), nullable=False),
+    sa.PrimaryKeyConstraint("policy_revision_id", "rule_id", name="pk_policy_rules"),
+)
+
+policy_previews: Final[Table] = Table(
+    "policy_previews",
+    _SOURCE_STORE_METADATA,
+    Column("policy_preview_id", sa.Uuid(), nullable=False),
+    Column("workspace_id", sa.Uuid(), nullable=False),
+    Column("policy_draft_id", sa.Uuid(), nullable=False),
+    Column("draft_version", sa.BigInteger(), nullable=False),
+    Column("draft_sha256", sa.String(length=64), nullable=False),
+    Column("base_policy_revision_id", sa.Uuid(), nullable=True),
+    Column("source_checkpoint_event_sequence", sa.BigInteger(), nullable=False),
+    Column("state", sa.Text(), nullable=False),
+    Column("newly_excluded_count", sa.Integer(), nullable=False),
+    Column("still_excluded_count", sa.Integer(), nullable=False),
+    Column("newly_allowed_count", sa.Integer(), nullable=False),
+    Column("still_allowed_count", sa.Integer(), nullable=False),
+    Column("indeterminate_count", sa.Integer(), nullable=False),
+    Column("impact_digest", sa.String(length=64), nullable=True),
+    Column("attempt_count", sa.Integer(), nullable=False),
+    Column("available_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("lease_token", sa.Uuid(), nullable=True),
+    Column("leased_until", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("safe_error_code", sa.String(length=100), nullable=True),
+    Column("created_by_user_id", sa.Uuid(), nullable=False),
+    Column("created_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("ready_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("expires_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("consumed_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    sa.PrimaryKeyConstraint("policy_preview_id", name="pk_policy_previews"),
+)
+
+policy_preview_results: Final[Table] = Table(
+    "policy_preview_results",
+    _SOURCE_STORE_METADATA,
+    Column("policy_preview_id", sa.Uuid(), nullable=False),
+    Column("source_id", sa.Uuid(), nullable=False),
+    Column("previous_raw_decision", sa.Text(), nullable=False),
+    Column("previous_enforced_decision", sa.Text(), nullable=False),
+    Column("proposed_raw_decision", sa.Text(), nullable=False),
+    Column("proposed_enforced_decision", sa.Text(), nullable=False),
+    Column("proposed_match_state", sa.Text(), nullable=False),
+    Column("impact_class", sa.Text(), nullable=False),
+    Column("matched_rule_ids", sa.Text(), nullable=False),
+    Column("missing_fields", sa.Text(), nullable=False),
+    Column("subject_fingerprint", sa.String(length=64), nullable=False),
+    sa.PrimaryKeyConstraint("policy_preview_id", "source_id", name="pk_policy_preview_results"),
+)
+
+policy_evaluations: Final[Table] = Table(
+    "policy_evaluations",
+    _SOURCE_STORE_METADATA,
+    Column("policy_evaluation_id", sa.Uuid(), nullable=False),
+    Column("policy_revision_id", sa.Uuid(), nullable=False),
+    Column("source_id", sa.Uuid(), nullable=False),
+    Column("subject_event_sequence", sa.BigInteger(), nullable=False),
+    Column("raw_decision", sa.Text(), nullable=False),
+    Column("enforced_decision", sa.Text(), nullable=False),
+    Column("matched_rule_ids", sa.Text(), nullable=False),
+    Column("missing_fields", sa.Text(), nullable=False),
+    Column("subject_fingerprint", sa.String(length=64), nullable=False),
+    Column("evaluated_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    sa.PrimaryKeyConstraint("policy_evaluation_id", name="pk_policy_evaluations"),
+)
+
+policy_reconciliation_intents: Final[Table] = Table(
+    "policy_reconciliation_intents",
+    _SOURCE_STORE_METADATA,
+    Column("policy_reconciliation_intent_id", sa.Uuid(), nullable=False),
+    Column("workspace_id", sa.Uuid(), nullable=False),
+    Column("policy_revision_id", sa.Uuid(), nullable=False),
+    Column("workflow_id", sa.String(length=200), nullable=False),
+    Column("state", sa.Text(), nullable=False),
+    Column("attempt_count", sa.Integer(), nullable=False),
+    Column("available_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("lease_token", sa.Uuid(), nullable=True),
+    Column("leased_until", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("dispatched_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("safe_error_code", sa.String(length=100), nullable=True),
+    Column("created_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("updated_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    sa.PrimaryKeyConstraint(
+        "policy_reconciliation_intent_id", name="pk_policy_reconciliation_intents"
+    ),
+)
+
+policy_signing_keys: Final[Table] = Table(
+    "policy_signing_keys",
+    _SOURCE_STORE_METADATA,
+    Column("signing_key_id", sa.Uuid(), nullable=False),
+    Column("workspace_id", sa.Uuid(), nullable=False),
+    Column("algorithm", sa.Text(), nullable=False),
+    Column("public_key_bytes", sa.LargeBinary(), nullable=False),
+    Column("introduced_keyset_revision", sa.BigInteger(), nullable=False),
+    Column("created_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    sa.PrimaryKeyConstraint("signing_key_id", name="pk_policy_signing_keys"),
+)
+
+policy_keysets: Final[Table] = Table(
+    "policy_keysets",
+    _SOURCE_STORE_METADATA,
+    Column("policy_keyset_id", sa.Uuid(), nullable=False),
+    Column("workspace_id", sa.Uuid(), nullable=False),
+    Column("keyset_revision", sa.BigInteger(), nullable=False),
+    Column("parent_keyset_revision", sa.BigInteger(), nullable=True),
+    Column("canonical_payload_bytes", sa.LargeBinary(), nullable=False),
+    Column("payload_sha256", sa.String(length=64), nullable=False),
+    Column("created_by_user_id", sa.Uuid(), nullable=True),
+    Column("created_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    sa.PrimaryKeyConstraint("policy_keyset_id", name="pk_policy_keysets"),
+)
+
+policy_keyset_signatures: Final[Table] = Table(
+    "policy_keyset_signatures",
+    _SOURCE_STORE_METADATA,
+    Column("policy_keyset_id", sa.Uuid(), nullable=False),
+    Column("signing_key_id", sa.Uuid(), nullable=False),
+    Column("signature_bytes", sa.LargeBinary(), nullable=False),
+    sa.PrimaryKeyConstraint(
+        "policy_keyset_id", "signing_key_id", name="pk_policy_keyset_signatures"
+    ),
+)
+
 #: Single frozen metadata collection owning every DML table.
 SOURCE_STORE_METADATA: Final[MetaData] = _SOURCE_STORE_METADATA
 
-#: Immutable name-indexed view of the seventeen migrated tables, keyed by their
-#: unqualified table names (``metadata.tables`` itself is schema-qualified).
+#: Immutable name-indexed view of the twenty-nine migrated tables, keyed by
+#: their unqualified table names (``metadata.tables`` itself is
+#: schema-qualified).
 SOURCE_STORE_TABLES: Final[Mapping[str, Table]] = MappingProxyType(
     {
         table.name: table
@@ -351,6 +549,18 @@ SOURCE_STORE_TABLES: Final[Mapping[str, Table]] = MappingProxyType(
             device_tokens,
             device_authorization_grants,
             authentication_throttle_buckets,
+            workspace_policy_state,
+            policy_drafts,
+            policy_draft_rules,
+            source_policies,
+            policy_rules,
+            policy_previews,
+            policy_preview_results,
+            policy_evaluations,
+            policy_reconciliation_intents,
+            policy_signing_keys,
+            policy_keysets,
+            policy_keyset_signatures,
         )
     }
 )

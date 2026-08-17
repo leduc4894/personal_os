@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import StrEnum
 from typing import Final
 from uuid import UUID
 
@@ -51,6 +52,20 @@ PROJECTION_OPERATIONS: Final[frozenset[SafeToken]] = frozenset(
 )
 
 _KNOWN_PROJECTION_KINDS: Final[frozenset[SafeToken]] = frozenset(PROJECTION_KINDS)
+
+
+class ProjectionIntentOriginKind(StrEnum):
+    """The closed origin discriminator of one projection intent (spec 8.5).
+
+    A ``source_event`` intent fabricates no event: it always carries the
+    non-null ``event_id`` of the canonical source event that produced it. A
+    ``policy_transition`` intent carries the non-null ``policy_revision_id``
+    of the published revision whose effective-decision change produced it and
+    is invisible to the source-event dispatcher.
+    """
+
+    SOURCE_EVENT = "source_event"
+    POLICY_TRANSITION = "policy_transition"
 
 
 def projection_retry_backoff_seconds(prior_attempt_count: int) -> int:
@@ -91,11 +106,15 @@ class LeasedProjectionIntent:
     transition, and ``leased_until`` is the database-time expiry computed by
     the claiming transaction. The view is immutable and validates its closed
     vocabulary so an out-of-contract row can never cross the boundary.
+
+    The origin discriminator carries exactly one populated reference: a
+    ``source_event`` intent names its canonical ``event_id``, a
+    ``policy_transition`` intent names its ``policy_revision_id``; the source
+    dispatcher claims only ``source_event`` rows.
     """
 
     projection_intent_id: UUID
     workspace_id: UUID
-    event_id: UUID
     source_id: UUID
     source_version_id: UUID | None
     projection_kind: SafeToken
@@ -103,6 +122,9 @@ class LeasedProjectionIntent:
     attempt_count: int
     lease_token: UUID
     leased_until: datetime
+    origin_kind: ProjectionIntentOriginKind = ProjectionIntentOriginKind.SOURCE_EVENT
+    event_id: UUID | None = None
+    policy_revision_id: UUID | None = None
 
     def __post_init__(self) -> None:
         if self.projection_kind not in _KNOWN_PROJECTION_KINDS:
@@ -113,6 +135,14 @@ class LeasedProjectionIntent:
             raise ValueError("attempt_count must be non-negative")
         if self.leased_until.tzinfo is None:
             raise ValueError("leased_until must be timezone-aware")
+        if self.origin_kind is ProjectionIntentOriginKind.SOURCE_EVENT:
+            if self.event_id is None or self.policy_revision_id is not None:
+                raise ValueError("source_event origin requires exactly the event reference")
+        elif self.origin_kind is ProjectionIntentOriginKind.POLICY_TRANSITION:
+            if self.policy_revision_id is None or self.event_id is not None:
+                raise ValueError("policy_transition origin requires exactly the revision")
+        else:
+            raise ValueError("origin_kind is not a registered projection intent origin")
 
 
 def lease_reclaimed_diagnostic_fields(
