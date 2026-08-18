@@ -33,6 +33,8 @@ import {
 } from "./authentication/secret-storage-record";
 import { DeviceAuthenticationSettingTab } from "./authentication/settings-tab";
 import { DeviceTokenSession, resolveStartupAction } from "./authentication/token-session";
+import { createVaultPluginJournalStore } from "./journal/persistence";
+import type { JournalFileStore } from "./journal/persistence";
 import { PolicySession } from "./exclusion-policy/policy-session";
 import type { PolicyCacheAdapter } from "./exclusion-policy/policy-cache";
 import type { PolicyIntegrityState } from "./exclusion-policy/contracts";
@@ -293,6 +295,17 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     // cache record survives settings persistence (spec 18 storage adapter).
     const loaded = (await this.loadData()) as Record<string, unknown> | null;
     await this.saveData({ ...(loaded ?? {}), ...this.#settings });
+  }
+
+  /**
+   * The narrow journal binary store of the journal design (6.1): journal
+   * generations resolve through the Vault's configured plugin directory
+   * (`Vault.configDir` + the manifest id) and the adapter's binary methods —
+   * never a hard-coded config-directory name. Composition only; the journal
+   * persistence layer itself is injected and tested in `./journal`.
+   */
+  createJournalFileStore(): JournalFileStore {
+    return createVaultPluginJournalStore(this.app, this.manifest.id);
   }
 
   /**
