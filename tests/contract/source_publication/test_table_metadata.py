@@ -1,15 +1,16 @@
 """DML Core metadata contract against the migration DDL authority.
 
 The Alembic migrations ``20260813_01`` (baseline), ``20260816_01``
-(authentication schema) and ``20260817_01`` (exclusion policy schema) are the
-DDL authority. This test loads the migration modules, replays their
-``upgrade()`` against a recording stub of ``alembic.op`` (including the policy
-migration's ``add_column``/``alter_column`` evolution of
-``projection_intents``) and compares the twenty-nine schema-qualified tables
-the migrations create with the typed DML metadata in
-``postgresql_source_store.tables``: identical table names, schema, column
-names, column types and nullability, with full coverage in both directions and
-no ``create_all()`` path anywhere in the adapter package.
+(authentication schema), ``20260817_01`` (exclusion policy schema) and
+``20260818_01`` (small-file sync operations) are the DDL authority. This test
+loads the migration modules, replays their ``upgrade()`` against a recording
+stub of ``alembic.op`` (including the policy migration's
+``add_column``/``alter_column`` evolution of ``projection_intents``) and
+compares the thirty schema-qualified tables the migrations create with the
+typed DML metadata in ``postgresql_source_store.tables``: identical table
+names, schema, column names, column types and nullability, with full coverage
+in both directions and no ``create_all()`` path anywhere in the adapter
+package.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ MIGRATION_GLOBS: tuple[str, ...] = (
     "20260813_01*.py",
     "20260816_01*.py",
     "20260817_01*.py",
+    "20260818_01*.py",
 )
 MIGRATION_DIRECTORY = REPO_ROOT / "migrations" / "versions"
 PACKAGE_SOURCE_ROOT = (
@@ -82,7 +84,11 @@ POLICY_TABLE_NAMES = frozenset(
     }
 )
 
-EXPECTED_TABLE_NAMES = BASELINE_TABLE_NAMES | AUTHENTICATION_TABLE_NAMES | POLICY_TABLE_NAMES
+SMALL_FILE_TABLE_NAMES = frozenset({"small_file_upload_operations"})
+
+EXPECTED_TABLE_NAMES = (
+    BASELINE_TABLE_NAMES | AUTHENTICATION_TABLE_NAMES | POLICY_TABLE_NAMES | SMALL_FILE_TABLE_NAMES
+)
 
 
 class _ScriptedBindResult:

@@ -1,14 +1,14 @@
 """Schema-qualified SQLAlchemy Core table metadata for DML against the baseline.
 
-The Alembic migrations ``20260813_01``, ``20260816_01`` and ``20260817_01``
-are the DDL authority: they own the schema, columns, constraints, indexes and
-triggers. This module is the typed DML representation of exactly the
-twenty-nine migrated tables: identical table names, schema (``knowledge``),
-column names, column types, nullability and primary keys, contract-tested
-against the migration sources. There is deliberately no ``create_all()`` path
-and no constraint duplication: check, unique and foreign key constraints stay
-owned by the migrations, while reads and writes address the tables through
-this metadata.
+The Alembic migrations ``20260813_01``, ``20260816_01``, ``20260817_01`` and
+``20260818_01`` are the DDL authority: they own the schema, columns,
+constraints, indexes and triggers. This module is the typed DML representation
+of exactly the thirty migrated tables: identical table names, schema
+(``knowledge``), column names, column types, nullability and primary keys,
+contract-tested against the migration sources. There is deliberately no
+``create_all()`` path and no constraint duplication: check, unique and foreign
+key constraints stay owned by the migrations, while reads and writes address
+the tables through this metadata.
 """
 
 from __future__ import annotations
@@ -522,10 +522,40 @@ policy_keyset_signatures: Final[Table] = Table(
     ),
 )
 
+small_file_upload_operations: Final[Table] = Table(
+    "small_file_upload_operations",
+    _SOURCE_STORE_METADATA,
+    Column("operation_id", sa.Uuid(), nullable=False),
+    Column("operation_token_hash", sa.String(length=64), nullable=False),
+    Column("workspace_id", sa.Uuid(), nullable=False),
+    Column("device_id", sa.Uuid(), nullable=False),
+    Column("event_id", sa.Uuid(), nullable=False),
+    Column("idempotency_key", sa.String(length=36), nullable=False),
+    Column("operation_kind", sa.Text(), nullable=False),
+    Column("declared_sha256", sa.String(length=64), nullable=False),
+    Column("declared_size_bytes", sa.BigInteger(), nullable=False),
+    Column("declared_media_type", sa.String(length=255), nullable=False),
+    Column("policy_revision_number", sa.BigInteger(), nullable=False),
+    Column("reserved_source_id", sa.Uuid(), nullable=True),
+    Column("update_source_id", sa.Uuid(), nullable=True),
+    Column("update_base_version_id", sa.Uuid(), nullable=True),
+    Column("state", sa.Text(), nullable=False),
+    Column("safe_error_code", sa.String(length=100), nullable=True),
+    Column("result_kind", sa.Text(), nullable=True),
+    Column("result_source_id", sa.Uuid(), nullable=True),
+    Column("result_source_version_id", sa.Uuid(), nullable=True),
+    Column("result_content_version", sa.BigInteger(), nullable=True),
+    Column("result_committed_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("expires_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("created_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("updated_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    sa.PrimaryKeyConstraint("operation_id", name="pk_small_file_upload_operations"),
+)
+
 #: Single frozen metadata collection owning every DML table.
 SOURCE_STORE_METADATA: Final[MetaData] = _SOURCE_STORE_METADATA
 
-#: Immutable name-indexed view of the twenty-nine migrated tables, keyed by
+#: Immutable name-indexed view of the thirty migrated tables, keyed by
 #: their unqualified table names (``metadata.tables`` itself is
 #: schema-qualified).
 SOURCE_STORE_TABLES: Final[Mapping[str, Table]] = MappingProxyType(
@@ -561,6 +591,7 @@ SOURCE_STORE_TABLES: Final[Mapping[str, Table]] = MappingProxyType(
             policy_signing_keys,
             policy_keysets,
             policy_keyset_signatures,
+            small_file_upload_operations,
         )
     }
 )

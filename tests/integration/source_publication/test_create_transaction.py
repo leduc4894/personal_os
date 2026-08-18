@@ -265,6 +265,7 @@ def _assert_only_one_rejection_audit_was_added(counts_before: dict, counts_after
         "policy_keysets": 0,
         "policy_keyset_signatures": 0,
         "policy_reconciliation_intents": 0,
+        "small_file_upload_operations": 0,
     }
 
 
@@ -334,6 +335,7 @@ async def test_create_commits_exact_canonical_graph(
         "policy_keysets": 0,
         "policy_keyset_signatures": 0,
         "policy_reconciliation_intents": 0,
+        "small_file_upload_operations": 0,
     }
 
     source_row = await _fetch_source_row(inspection_engine, command.source_id)

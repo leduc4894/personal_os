@@ -168,7 +168,7 @@ def _iter_surface_documents() -> list[Path]:
 
 def test_alembic_heads_and_migration_files_are_pinned() -> None:
     script_directory = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert script_directory.get_heads() == ["20260817_01"]
+    assert script_directory.get_heads() == ["20260818_01"]
     migration_files = [
         path for path in MIGRATIONS_VERSIONS.glob("*.py") if not path.name.startswith("__")
     ]
@@ -176,6 +176,7 @@ def test_alembic_heads_and_migration_files_are_pinned() -> None:
         "20260813_01_create_canonical_postgresql_baseline.py",
         "20260816_01_add_web_authentication_and_device_tokens.py",
         "20260817_01_add_exclusion_policy_publication.py",
+        "20260818_01_add_small_file_sync_operations.py",
     ], "the migrations directory must stay exactly at the pinned revisions"
 
 

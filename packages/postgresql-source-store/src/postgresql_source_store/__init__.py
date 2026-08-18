@@ -43,11 +43,16 @@ from postgresql_source_store.publication_store import (
     classify_replay,
 )
 from postgresql_source_store.readiness import PostgresqlReadinessProbe
+from postgresql_source_store.small_file_sync_operations import (
+    UPLOAD_OPERATION_EXPIRY_SECONDS,
+    PostgresqlSmallFileUploadOperationStore,
+)
 from postgresql_source_store.tables import SOURCE_STORE_TABLES
 
 __all__ = [
     "ACCEPTED_READ_SOURCE_STATES",
     "SOURCE_STORE_TABLES",
+    "UPLOAD_OPERATION_EXPIRY_SECONDS",
     "DatabaseRetryPolicy",
     "PostgresqlBackupSnapshotStore",
     "PostgresqlCanonicalSourceReadStore",
@@ -57,6 +62,7 @@ __all__ = [
     "PostgresqlProjectionIntentStore",
     "PostgresqlReadinessProbe",
     "PostgresqlRestoreTarget",
+    "PostgresqlSmallFileUploadOperationStore",
     "PostgresqlSourcePublicationStore",
     "ProjectionDiagnosticSink",
     "ProjectionIntentStatus",

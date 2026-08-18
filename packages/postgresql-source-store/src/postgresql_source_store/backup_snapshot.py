@@ -3,9 +3,9 @@
 :class:`PostgresqlBackupSnapshotStore` implements the provider-neutral
 :class:`~personal_os.recovery.ports.CanonicalBackupSnapshotStore` port over the
 canonical baseline (spec 9.2): a ``REPEATABLE READ`` transaction begun before
-its first query, nineteen ``LOCK TABLE ... IN SHARE MODE NOWAIT`` statements in
+its first query, twenty ``LOCK TABLE ... IN SHARE MODE NOWAIT`` statements in
 the fixed order, the ``pg_export_snapshot()`` token, the server version, the
-Alembic head, the nineteen table counts and the referenced content objects —
+Alembic head, the twenty table counts and the referenced content objects —
 all read from the same snapshot, with no mutation, and a rollback on context
 exit that releases every lock. The canonical policy tables (state, immutable
 revisions/rules, key history and durable intents) join the snapshot; the
@@ -15,7 +15,7 @@ flows only to the dump process inside the composition call; this module never
 logs, prints or embeds it in an error.
 
 :class:`PostgresqlRestoreTarget` provides the pre/post-restore probes of
-spec 11.1: application emptiness, the nineteen canonical counts, the schema head
+spec 11.1: application emptiness, the twenty canonical counts, the schema head
 and the current-pointer resolution count expected to be zero after a restore.
 
 Every driver failure crosses the boundary as a closed-token
@@ -65,11 +65,13 @@ from postgresql_source_store.tables import (
     sources,
 )
 
-#: The binding fixed order of the nineteen quiescing share locks. The
+#: The binding fixed order of the twenty quiescing share locks. The
 #: canonical baseline tables are followed by the canonical policy tables in
 #: foreign-key dependency order (publication locks workspace_policy_state
-#: before drafts and revisions); the reconstructible preview tables stay out
-#: of the canonical snapshot by design.
+#: before drafts and revisions), then the durable small-file upload-operation
+#: table (its workspace/device containment references baseline tables only);
+#: the reconstructible preview tables stay out of the canonical snapshot by
+#: design.
 SNAPSHOT_LOCK_ORDER: Final[tuple[str, ...]] = (
     "users",
     "workspaces",
@@ -90,6 +92,7 @@ SNAPSHOT_LOCK_ORDER: Final[tuple[str, ...]] = (
     "policy_draft_rules",
     "policy_evaluations",
     "policy_reconciliation_intents",
+    "small_file_upload_operations",
 )
 
 #: The snapshot transaction waits at most this long for each share lock.
@@ -147,7 +150,7 @@ def _map_snapshot_failure(cause: BaseException) -> RecoveryError:
 
 
 def build_share_lock_statements() -> tuple[sa.TextClause, ...]:
-    """Build the nineteen quiescing share locks in the binding fixed order.
+    """Build the twenty quiescing share locks in the binding fixed order.
 
     Each statement is a schema-qualified, fully quoted
     ``LOCK TABLE knowledge."<table>" IN SHARE MODE NOWAIT``; the order is the
@@ -162,7 +165,7 @@ def build_share_lock_statements() -> tuple[sa.TextClause, ...]:
 def pending_writer_count_statement() -> sa.TextClause:
     """Build the parameter-bound count of ungranted relation locks.
 
-    Counts lock requests on the nineteen canonical tables that PostgreSQL has not
+    Counts lock requests on the twenty canonical tables that PostgreSQL has not
     granted (blocked writers waiting on the quiescing share locks); the table
     names travel only as the bound ``:tables`` array parameter.
     """
@@ -291,7 +294,7 @@ def hydrate_referenced_objects(rows: Iterable[Mapping[str, Any]]) -> tuple[Expec
 
 
 async def _read_table_counts(connection: AsyncConnection) -> Mapping[str, int]:
-    """Read the nineteen canonical table counts over the given connection."""
+    """Read the twenty canonical table counts over the given connection."""
     counts: dict[str, int] = {}
     for table_name in SNAPSHOT_LOCK_ORDER:
         count = (
@@ -305,7 +308,7 @@ class PostgresqlBackupSnapshotStore:
     """Quiesced exported-snapshot store over the canonical PostgreSQL baseline.
 
     Takes the composition-owned :class:`AsyncEngine` and opens no connection at
-    construction. ``open_quiesced_snapshot`` mutates nothing: it takes the nineteen
+    construction. ``open_quiesced_snapshot`` mutates nothing: it takes the twenty
     share locks, exports the snapshot token, reads every piece of evidence from
     that one snapshot and rolls back on exit, success or failure, releasing the
     locks.
@@ -325,7 +328,7 @@ class PostgresqlBackupSnapshotStore:
                 yield await self._read_quiesced_snapshot(connection)
             finally:
                 # Rollback on success and failure alike: nothing mutated, and
-                # the rollback is what releases the nineteen share locks.
+                # the rollback is what releases the twenty share locks.
                 await transaction.rollback()
 
     async def _read_quiesced_snapshot(self, connection: AsyncConnection) -> CanonicalBackupSnapshot:
@@ -357,7 +360,7 @@ class PostgresqlBackupSnapshotStore:
         )
 
     async def observe_pending_writers(self) -> int:
-        """Count writers still waiting for a lock on the nineteen canonical tables.
+        """Count writers still waiting for a lock on the twenty canonical tables.
 
         A non-zero count means a writer was blocked by the quiescing share
         locks at observation time; the caller aborts finalization (spec 9.2).
@@ -432,7 +435,7 @@ class PostgresqlRestoreTarget:
         return int(relation_count) == 0 and int(alembic_count) == 0
 
     async def read_canonical_counts(self) -> Mapping[str, int]:
-        """Read the nineteen canonical table counts for post-restore verification."""
+        """Read the twenty canonical table counts for post-restore verification."""
         try:
             async with self._bounded_probe() as connection:
                 return await _read_table_counts(connection)

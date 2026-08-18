@@ -227,6 +227,7 @@ async def test_hundred_exact_concurrent_replays_commit_one_event(
         "policy_keysets": 0,
         "policy_keyset_signatures": 0,
         "policy_reconciliation_intents": 0,
+        "small_file_upload_operations": 0,
     }
     assert (
         await _count_rows(
@@ -331,6 +332,7 @@ async def test_two_updates_from_one_base_yield_one_publish_and_one_conflict(
         "policy_keysets": 0,
         "policy_keyset_signatures": 0,
         "policy_reconciliation_intents": 0,
+        "small_file_upload_operations": 0,
     }
     rejection_audits = await preflight_harness.rejection_audit_rows(
         workspace_id=workspace.workspace_id
@@ -446,6 +448,7 @@ async def test_two_concurrent_creates_for_one_source_yield_one_source_and_one_re
         "policy_keysets": 0,
         "policy_keyset_signatures": 0,
         "policy_reconciliation_intents": 0,
+        "small_file_upload_operations": 0,
     }
     rejection_audits = await preflight_harness.rejection_audit_rows(
         workspace_id=workspace.workspace_id

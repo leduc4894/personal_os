@@ -278,6 +278,7 @@ def _assert_only_one_rejection_audit_was_added(counts_before: dict, counts_after
         "policy_keysets": 0,
         "policy_keyset_signatures": 0,
         "policy_reconciliation_intents": 0,
+        "small_file_upload_operations": 0,
     }
 
 
@@ -353,6 +354,7 @@ async def test_changed_update_commits_next_ordinal_graph(preflight_harness, upda
         "policy_keysets": 0,
         "policy_keyset_signatures": 0,
         "policy_reconciliation_intents": 0,
+        "small_file_upload_operations": 0,
     }
 
     source_row = await _fetch_source_row(update_engine, first.source_id)
@@ -500,6 +502,7 @@ async def test_no_change_update_writes_only_event_and_audit(
         "policy_keysets": 0,
         "policy_keyset_signatures": 0,
         "policy_reconciliation_intents": 0,
+        "small_file_upload_operations": 0,
     }
     assert await preflight_harness.fetch_source_updated_at(first.source_id) == updated_at_before
     source_row = await _fetch_source_row(update_engine, first.source_id)

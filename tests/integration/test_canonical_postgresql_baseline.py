@@ -52,7 +52,7 @@ _DATABASE_HOST: str = "127.0.0.1"
 _SSL_MODE: str = "disable"
 _APPLICATION_PASSWORD_FILENAME: str = "postgres_application_password"
 _ALEMBIC_APPLICATION_NAME: str = "knowledge-baseline-test"
-_HEAD_REVISION: str = "20260817_01"
+_HEAD_REVISION: str = "20260818_01"
 _PHASE1_REVISION: str = "20260813_01"
 
 _PHASE1_TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
@@ -93,18 +93,23 @@ _POLICY_TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
     "policy_reconciliation_intents",
 )
 
+_SMALL_FILE_TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
+    "small_file_upload_operations",
+)
+
 _TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
     *_PHASE1_TABLES_IN_COUNT_ORDER,
     *_AUTHENTICATION_TABLES_IN_COUNT_ORDER,
     *_POLICY_TABLES_IN_COUNT_ORDER,
+    *_SMALL_FILE_TABLES_IN_COUNT_ORDER,
 )
 
 #: Row counts of one valid seeded graph in ``_TABLES_IN_COUNT_ORDER``: the
 #: seeded baseline rows (one workspace inserted after the upgrade), zero
-#: authentication rows and zero policy rows — the graph inserts its workspace
-#: directly rather than through the identity bootstrap, so the policy
-#: migration's per-workspace seeding (which ran on the empty database during
-#: the upgrade) created no rows for it.
+#: authentication, policy and small-file operation rows — the graph inserts
+#: its workspace directly rather than through the identity bootstrap, so the
+#: policy migration's per-workspace seeding (which ran on the empty database
+#: during the upgrade) created no rows for it.
 _VALID_GRAPH_ROW_COUNTS: list[int] = [
     1,
     1,
@@ -115,6 +120,7 @@ _VALID_GRAPH_ROW_COUNTS: list[int] = [
     1,
     2,
     1,
+    0,
     0,
     0,
     0,
@@ -187,6 +193,7 @@ _EXPECTED_INDEXES: frozenset[str] = frozenset(
         "ix_policy_evaluations__revision_sequence",
         "ix_policy_reconciliation_intents__pending_dispatch",
         "uq_projection_intents__policy_transition",
+        "ix_small_file_upload_operations__nonterminal_expiry",
     }
 )
 _CONSTRAINT_NAME_PATTERN = re.compile(r"^(?:pk|fk|uq|ck)_[a-z0-9_]+$")
@@ -2508,8 +2515,8 @@ def test_two_first_upgrade_processes_leave_exactly_one_head(
 
     # Final state: exactly one head, exact catalog, no duplicate objects.
     assert _current_revision(conn) == _HEAD_REVISION
-    assert _knowledge_table_count(conn) == 29, (
-        "two first-upgrade attempts must leave exactly twenty-nine tables, no duplicates"
+    assert _knowledge_table_count(conn) == 30, (
+        "two first-upgrade attempts must leave exactly thirty tables, no duplicates"
     )
     _assert_exact_object_set(conn)
 

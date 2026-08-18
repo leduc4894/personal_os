@@ -348,6 +348,7 @@ async def test_returned_invariant_rejection_after_writes_rolls_back_whole_graph(
         "policy_keysets": 0,
         "policy_keyset_signatures": 0,
         "policy_reconciliation_intents": 0,
+        "small_file_upload_operations": 0,
     }
     assert not await _source_exists(fault_engine, command.source_id)
     rejection_audits = await preflight_harness.rejection_audit_rows(

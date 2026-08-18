@@ -163,13 +163,15 @@ def _script_directory() -> ScriptDirectory:
 
 
 def test_alembic_graph_has_exactly_one_head_at_the_policy_revision() -> None:
-    assert _script_directory().get_heads() == [POLICY_REVISION]
+    # The small-file sync revision ``20260818_01`` stacks on this revision, so
+    # the single graph head moved past the policy revision.
+    assert _script_directory().get_heads() == ["20260818_01"]
 
 
 def test_policy_revision_stacks_on_the_child_2_head() -> None:
     script_directory = _script_directory()
     revisions = list(script_directory.walk_revisions())
-    assert len(revisions) == 3
+    assert len(revisions) == 4
     policy = script_directory.get_revision(POLICY_REVISION)
     assert policy is not None
     assert policy.down_revision == CHILD_2_HEAD_REVISION
