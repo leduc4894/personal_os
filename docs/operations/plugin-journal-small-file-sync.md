@@ -173,3 +173,37 @@ disposable local stack — never a personal Vault):
 Deferred item (operator): the child-4 reference-device evidence rows are
 not yet recorded; the automated scenarios and this procedure exist and are
 verified by the task-11 suites.
+
+## Acceptance gates
+
+The automated half of this child's acceptance re-runs with these commands
+(the offline default test selection deselects `local_stack`, `r2_live` and
+`device_records` markers; every count below is from the final verification
+run of the implementing plan, on the single acceptance commit):
+
+```bash
+# Python domain, API runtime, contract and migration suites in one run.
+uv run pytest tests/unit tests/contract -q
+
+# Cross-boundary integration suite (offline doubles only — disposable,
+# guarded infrastructure, never a personal stack).
+uv run pytest tests/integration -q
+
+# Lint and type gates (Python).
+uv run poe python-lint && uv run poe python-type-check
+
+# Plugin unit suites and the production bundle build
+# (dist/ ships exactly main.js, manifest.json and sql-wasm.wasm).
+pnpm --filter @workspace/obsidian-plugin test && pnpm --filter @workspace/obsidian-plugin build
+
+# Lint and type gates (every TypeScript workspace).
+pnpm --recursive run lint && pnpm --recursive run type-check
+
+# Deterministic OpenAPI snapshot + generated-client drift check.
+uv run poe api-contract-check
+```
+
+The reference-device half of acceptance is the operator evidence procedure
+above; it fails — never skips — while the device rows are absent, and no
+automated gate substitutes for it.
+

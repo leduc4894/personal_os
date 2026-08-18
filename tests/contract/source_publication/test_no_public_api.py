@@ -37,6 +37,12 @@ TYPESCRIPT_ROOTS: Final[tuple[Path, ...]] = (
     REPO_ROOT / "apps" / "web" / "src",
     REPO_ROOT / "apps" / "obsidian-plugin" / "src",
 )
+#: The plugin journal client directory — the Obsidian-side surface of the
+#: sanctioned small-file sync design, whose wire shapes legitimately name
+#: canonical source and version identity (see ``_is_sanctioned_policy_surface``).
+SANCTIONED_PLUGIN_JOURNAL_ROOT: Final[Path] = (
+    REPO_ROOT / "apps" / "obsidian-plugin" / "src" / "journal"
+)
 MIGRATIONS_VERSIONS = REPO_ROOT / "migrations" / "versions"
 BASELINE_REVISION: Final[str] = "20260813_01"
 
@@ -102,14 +108,20 @@ def _is_sanctioned_policy_surface(path: Path) -> bool:
     named ``small_file_sync*`` are the sanctioned small-file sync surface of
     the plugin journal design (spec 10), whose preflight/content routes and
     terminal receipts legitimately name canonical source and version
-    identity. Both are separately designed contract surfaces of their own
-    specs; every other file is scanned in full with only the marker lines
-    masked, and the OpenAPI endpoint scan below still proves no raw
-    source-publication endpoint reaches any document.
+    identity. The plugin journal client directory is the same sanctioned
+    surface on the Obsidian side: its hand-mirrored wire shapes and receipt
+    records carry ``source_version_id`` identity, and its generation
+    persistence speaks of publishing verified journal manifests — none of it
+    declares a source-publication endpoint. Both are separately designed
+    contract surfaces of their own specs; every other file is scanned in full
+    with only the marker lines masked, and the OpenAPI endpoint scan below
+    still proves no raw source-publication endpoint reaches any document.
     """
     if path.name.startswith(("exclusion_policy", "exclusion-policy")):
         return True
     if path.name.startswith(("small_file_sync", "small-file-sync")):
+        return True
+    if SANCTIONED_PLUGIN_JOURNAL_ROOT in path.parents:
         return True
     return any(part == "exclusion-policy" for part in path.parts)
 

@@ -70,3 +70,4 @@ here — link them at most.
 | 2026-08-17 | exclusion-policy | Mutation testing of the exclusion-policy suites stays deferred exactly as the spec's testing strategy mandates | [handoff §5.1](2026-08-17-exclusion-policy-publication.md) |
 | 2026-08-17 | exclusion-policy | Spec 17 mandates TanStack Query but the plan pins `@noble/ed25519` as the only new dependency — plan owner amends the spec or schedules the dependency | [handoff §5.2](2026-08-17-exclusion-policy-publication.md) |
 | 2026-08-17 | exclusion-policy | First real-runner execution of `.github/workflows/exclusion-policy-acceptance.yml` never observed — watch the initial PR run | [handoff §5.3](2026-08-17-exclusion-policy-publication.md) |
+| 2026-08-18 | small-file-sync | Child-4 reference-device evidence (Desktop + Mobile Obsidian) PENDING — operator records sanitized rows per the documented procedure; automated gates cannot substitute | [handoff §5](2026-08-18-plugin-journal-small-file-sync.md) |
