@@ -201,6 +201,19 @@ def test_worker_has_exact_publication_dependencies() -> None:
     ]
 
 
+def test_api_runtime_has_exact_serve_dependencies() -> None:
+    manifest = tomllib.loads((REPO_ROOT / "apps/api/pyproject.toml").read_text("utf-8"))
+    assert manifest["project"]["dependencies"] == [
+        "argon2-cffi==25.1.0",
+        "cryptography==49.0.0",
+        "fastapi==0.139.2",
+        "knowledge-core==0.1.0",
+        "postgresql-source-store==0.1.0",
+        "r2-object-storage==0.1.0",
+        "uvicorn==0.51.0",
+    ]
+
+
 def test_root_dev_group_pins_pytest_asyncio() -> None:
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert "pytest-asyncio==1.4.0" in data["dependency-groups"]["dev"]

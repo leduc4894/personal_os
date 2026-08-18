@@ -16,6 +16,7 @@ exposes a receipt, object key or provider detail. Every response carries
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -663,14 +664,69 @@ async def test_content_limiter_rejects_a_stream_over_the_ceiling() -> None:
 
 @pytest.mark.asyncio
 async def test_content_limiter_rejects_a_stalled_stream_past_the_deadline() -> None:
+    """A stream that stops yielding without erroring cannot block the read.
+
+    The stall is a genuine never-resolving await after the first chunk — the
+    deadline must bound the await itself, not only the moments a chunk
+    happens to arrive, or a silent client would hold the handler forever.
+    """
+
+    import asyncio
+
     from personal_os.error_contracts.codes import ErrorCode
     from personal_os.small_file_sync.errors import SmallFileSyncError
 
+    class _StalledStream:
+        """Delivers one chunk, then awaits an event that is never set."""
+
+        def __init__(self) -> None:
+            self._first = True
+            self._never = asyncio.Event()
+
+        def __aiter__(self) -> AsyncIterator[bytes]:
+            return self
+
+        async def __anext__(self) -> bytes:
+            if self._first:
+                self._first = False
+                return b"1234"
+            await self._never.wait()
+            raise AssertionError("the stalled read must never resolve")
+
     stream = bounded_content_stream(
-        _ChunkedStream([b"1234", b"5678"]),
+        _StalledStream(),
         maximum_bytes=8,
-        deadline_seconds=10.0,
-        monotonic_clock=_AdvancingMonotonicClock(6.0),
+        deadline_seconds=0.1,
+        monotonic_clock=time.monotonic,
+    )
+    content, error = await _consume(stream)
+    assert isinstance(error, SmallFileSyncError)
+    assert error.error_code is ErrorCode.SMALL_FILE_CONTENT_INTEGRITY_FAILED
+    assert content == b"1234"
+
+
+@pytest.mark.asyncio
+async def test_content_limiter_rejects_a_stream_that_never_yields() -> None:
+    """Even a stream that stalls before its first byte stays bounded."""
+
+    import asyncio
+
+    from personal_os.error_contracts.codes import ErrorCode
+    from personal_os.small_file_sync.errors import SmallFileSyncError
+
+    class _SilentStream:
+        def __aiter__(self) -> AsyncIterator[bytes]:
+            return self
+
+        async def __anext__(self) -> bytes:
+            await asyncio.Event().wait()
+            raise AssertionError("the stalled read must never resolve")
+
+    stream = bounded_content_stream(
+        _SilentStream(),
+        maximum_bytes=8,
+        deadline_seconds=0.1,
+        monotonic_clock=time.monotonic,
     )
     _, error = await _consume(stream)
     assert isinstance(error, SmallFileSyncError)

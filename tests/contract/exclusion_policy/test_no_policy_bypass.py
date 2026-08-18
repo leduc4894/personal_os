@@ -6,7 +6,8 @@ The only approved path to canonical source bytes is the guarded adapter pair
 :func:`compose_policy_enforcement` so the guard runs before any object-store
 access (proven call-by-call by ``test_enforcement_boundaries``). This gate
 proves the negative space (spec 14.2/23.4): no API, MCP or worker module
-imports the R2 adapter or a cloud SDK, no module outside the approved
+outside the sanctioned API serve composition imports the R2 adapter, no
+runtime module ever imports a cloud SDK, no module outside the approved
 guarded set calls the object-store port members, nothing outside the
 guarded services touches the canonical-read store, and every composition
 that constructs a canonical content service binds the policy guard in the
@@ -29,9 +30,26 @@ RUNTIME_COMPOSITION_ROOTS: Final[tuple[Path, ...]] = (
     REPO_ROOT / "apps" / "worker" / "src" / "workflow_worker",
 )
 
-#: Import roots the runtime compositions must never reach.
+#: Import roots the runtime compositions must never reach. The cloud SDK
+#: roots stay forbidden for every API, MCP and worker module including the
+#: sanctioned provider compositions below; the provider package itself is
+#: the only SDK consumer anywhere.
 FORBIDDEN_RUNTIME_IMPORT_ROOTS: Final[frozenset[str]] = frozenset(
     {"r2_object_storage", "boto3", "botocore", "aiobotocore"}
+)
+
+#: The sanctioned API serve compositions of the plugin journal design (spec
+#: 5/10): the API process sits in the serving path and its small-file sync
+#: runtime binds the real R2 object store behind the guarded services. These
+#: files may import the provider package only — they never call an
+#: object-store port member (the member-call gate below enforces that
+#: mechanically), and the cloud SDK roots stay forbidden for them as for
+#: every other runtime module.
+APPROVED_PROVIDER_COMPOSITIONS: Final[frozenset[Path]] = frozenset(
+    {
+        REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "small_file_sync_composition.py",
+        REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "server.py",
+    }
 )
 
 #: The object-store port members: every call site must live in the approved
@@ -75,6 +93,10 @@ CANONICAL_READ_STORE_PATH: Final[Path] = (
 APPROVED_CANONICAL_READ_IMPORTERS: Final[frozenset[Path]] = frozenset(
     {
         REPO_ROOT / "tools" / "canonical_core_operations.py",
+        # The API serve composition of the plugin journal design (spec 10.1):
+        # preflight resolves update bases through the guarded read store,
+        # which re-evaluates the active policy inside its own transaction.
+        REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "small_file_sync_composition.py",
     }
 )
 
@@ -156,7 +178,12 @@ def test_scanner_detects_a_violating_module() -> None:
 def test_runtime_compositions_import_no_object_store_adapter_or_cloud_sdk() -> None:
     offenders: dict[str, set[str]] = {}
     for path in _python_files(*RUNTIME_COMPOSITION_ROOTS):
-        violating = FORBIDDEN_RUNTIME_IMPORT_ROOTS & _import_roots(_module_tree(path))
+        forbidden = FORBIDDEN_RUNTIME_IMPORT_ROOTS
+        if path in APPROVED_PROVIDER_COMPOSITIONS:
+            # The sanctioned serve composition may import the provider
+            # package; the cloud SDK roots above stay forbidden for it.
+            forbidden = frozenset({"boto3", "botocore", "aiobotocore"})
+        violating = forbidden & _import_roots(_module_tree(path))
         if violating:
             offenders[str(path)] = violating
     assert not offenders, (

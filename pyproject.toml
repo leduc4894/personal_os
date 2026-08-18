@@ -42,6 +42,7 @@ members = [
 [tool.uv.sources]
 knowledge-core = { workspace = true }
 postgresql-source-store = { workspace = true }
+r2-object-storage = { workspace = true }
 
 [tool.uv.build-backend]
 module-name = "personal_os"

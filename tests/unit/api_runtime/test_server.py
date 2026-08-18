@@ -53,6 +53,13 @@ _POLICY_SIGNING_KEY = Ed25519PrivateKey.generate()
     )
 )
 _POLICY_SIGNING_KEY_ID = derive_ed25519_key_id(_POLICY_SIGNING_KEY.public_key().public_bytes_raw())
+(_SECRET_ROOT / "r2_access_key_id").write_text("test-access-key-id" + chr(10), encoding="utf-8")
+(_SECRET_ROOT / "r2_secret_access_key").write_text(
+    "test-secret-access-key" + chr(10), encoding="utf-8"
+)
+_SPOOL_DIRECTORY = tempfile.TemporaryDirectory(prefix="api-runtime-server-spool-")
+atexit.register(_SPOOL_DIRECTORY.cleanup)
+_SPOOL_ROOT = Path(_SPOOL_DIRECTORY.name)
 
 LOCAL_ENVIRONMENT: Final[Mapping[str, str]] = MappingProxyType(
     {
@@ -65,6 +72,11 @@ LOCAL_ENVIRONMENT: Final[Mapping[str, str]] = MappingProxyType(
         "KNOWLEDGE_AUTH_MAX_PLUGIN_VERSION": "1.20.0",
         "KNOWLEDGE_POLICY_SIGNING_KEY_ID": _POLICY_SIGNING_KEY_ID,
         "KNOWLEDGE_POLICY_SIGNING_KEY_FILE": "policy_signing_current.pem",
+        "KNOWLEDGE_R2_ENDPOINT": f"https://{'0' * 32}.r2.cloudflarestorage.com",
+        "KNOWLEDGE_R2_BUCKET_NAME": "personal-knowledge-objects",
+        "KNOWLEDGE_R2_ACCESS_KEY_ID_FILE": "r2_access_key_id",
+        "KNOWLEDGE_R2_SECRET_ACCESS_KEY_FILE": "r2_secret_access_key",
+        "KNOWLEDGE_OBJECT_STORAGE_SPOOL_ROOT": str(_SPOOL_ROOT),
     }
 )
 
@@ -216,6 +228,40 @@ def test_server_malformed_authentication_key_material_exits_seventy_eight(
     captured = capsys.readouterr()
     assert "configuration_secret_invalid" in captured.err
     assert "not-hexadecimal-key-material" not in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_server_serves_the_small_file_sync_routes() -> None:
+    """The serve composition binds the real small-file sync runtime.
+
+    The built application must carry the two sync routes of spec 10 — a serve
+    process that 404s them would leave the authenticated upload path
+    undelivered — and the bound runtime must be the real adapter graph, not
+    the offline double.
+    """
+
+    captured = RecordingServerFactory()
+    assert run_server(environ=LOCAL_ENVIRONMENT, server_factory=captured) == 0
+    application = captured.config.app
+    assert isinstance(application, FastAPI)
+    paths = {route.path for route in application.routes}
+    assert "/api/sync/journal-events/preflight" in paths
+    assert "/api/uploads/{operation_id}/content" in paths
+
+
+def test_server_missing_object_storage_configuration_exits_seventy_eight(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    environment = {
+        key: value
+        for key, value in LOCAL_ENVIRONMENT.items()
+        if "R2_" not in key and key != "KNOWLEDGE_OBJECT_STORAGE_SPOOL_ROOT"
+    }
+    result = run_server(environ=environment, server_factory=RecordingServerFactory())
+    assert result == 78
+    captured = capsys.readouterr()
+    assert "runtime_configuration_failed" in captured.err or "internal_error" in captured.err
+    assert "r2" not in captured.err.lower()
     assert "Traceback" not in captured.err
 
 

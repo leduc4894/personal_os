@@ -8,6 +8,7 @@ dependencies = [
   "fastapi==0.139.2",
   "knowledge-core==0.1.0",
   "postgresql-source-store==0.1.0",
+  "r2-object-storage==0.1.0",
   "uvicorn==0.51.0",
 ]
 

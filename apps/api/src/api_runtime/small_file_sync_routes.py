@@ -19,6 +19,7 @@ provider detail.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
@@ -91,18 +92,29 @@ async def bounded_content_stream(
 
     The running byte count is checked against ``maximum_bytes`` — equality
     passes, one byte more closes with the registered size-limit rejection —
-    and every chunk must arrive before the read window opened at first
-    iteration expires, or the stream closes with the safe integrity failure
-    of the broken-stream contract (spec 10.2). Both failures abort the
-    iteration before the consumer can hand any further byte to the spool
-    path, so an over-size or stalled body can never publish.
+    and every per-chunk read is itself wrapped in a bounded wait for the
+    remaining read-window time, so a client that streams partial bytes and
+    then goes silent without closing the connection is cut off by the
+    deadline rather than holding the handler forever: the stalled await
+    closes with the safe integrity failure of the broken-stream contract
+    (spec 10.2). Both failures abort the iteration before the consumer can
+    hand any further byte to the spool path, so an over-size or stalled body
+    can never publish.
     """
 
     deadline_at = monotonic_clock() + deadline_seconds
     total_bytes = 0
-    async for chunk in chunks:
-        if monotonic_clock() > deadline_at:
+    while True:
+        remaining_seconds = deadline_at - monotonic_clock()
+        if remaining_seconds <= 0:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_CONTENT_INTEGRITY_FAILED)
+        try:
+            async with asyncio.timeout(remaining_seconds):
+                chunk = await chunks.__anext__()
+        except TimeoutError:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_CONTENT_INTEGRITY_FAILED) from None
+        except StopAsyncIteration:
+            return
         total_bytes += len(chunk)
         if total_bytes > maximum_bytes:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_SIZE_LIMIT_EXCEEDED)

@@ -1,7 +1,17 @@
-"""Composition of the small-file sync runtime: the service graph and its offline double.
+"""Composition of the small-file sync runtime: the serve graph and its offline double.
 
-:func:`compose_offline_small_file_sync` builds the deterministic offline graph
-used by the OpenAPI export and by route tests: identity-keyed in-memory
+:func:`compose_small_file_sync` builds the real serve graph the API process
+runs: the durable PostgreSQL upload-operation store, the real R2
+content-addressable object store behind a lazy per-process client (no
+connection opens at composition — the first store call does), the real
+:class:`~personal_os.exclusion_policy.enforcement.PolicyEnforcementService`
+behind the locator-aware :class:`PolicyEnforcementSmallFileGuard` and as the
+publication service's own guard, the durable source-publication store and
+the canonical read store over the shared engine, and the in-memory low
+cardinality metrics sinks.
+
+:func:`compose_offline_small_file_sync` builds the deterministic offline
+graph used by the OpenAPI export and by route tests: identity-keyed in-memory
 operation rows mirroring the durable adapter semantics (token rotation on
 re-preflight, payload-fingerprint matching, expiry that ends continuation but
 never terminal evidence, an idempotent guarded terminal transition), an
@@ -16,30 +26,36 @@ client, so the offline contract document stays byte-deterministic while
 route tests seed behavior through the public knobs of
 :class:`OfflineSmallFileSyncState` (policy denial, the current update base,
 the frozen clock) and observe safety through its public counters.
-
-The serve composition of the later integration children binds the same
-service over the PostgreSQL operation store, the R2 object store and the
-locator-aware policy guard; until then :class:`SmallFileSyncRuntime` is an
-optional application input exactly like the exclusion-policy runtime of the
-earlier children.
 """
 
 from __future__ import annotations
 
 import hashlib
 import secrets
-from collections.abc import AsyncIterable, AsyncIterator
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Final, cast
 from uuid import UUID, uuid4
 
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from api_runtime.exclusion_policy_crypto import Ed25519PolicySigner, Ed25519PolicyVerifier
 from personal_os.diagnostics.context import DiagnosticContext
+from personal_os.diagnostics.logging import DiagnosticLogger
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.exclusion_policy.contracts import PolicySubject
+from personal_os.exclusion_policy.enforcement import (
+    KeyedTrustAnchorVerifier,
+    PolicyEnforcementService,
+    default_utc_clock,
+)
 from personal_os.exclusion_policy.errors import ExclusionPolicyError
+from personal_os.exclusion_policy.metrics import PolicyBoundary
 from personal_os.object_storage import (
     CanonicalMediaType,
+    CanonicalObjectKey,
     ContentDigest,
     ExpectedObject,
     VerificationMethod,
@@ -74,6 +90,23 @@ from personal_os.sources.reading import (
     ReadCurrentSourceCommand,
 )
 from personal_os.sources.results import PublicationOutcome, SourceVersionPublicationResult
+from postgresql_source_store.canonical_read import PostgresqlCanonicalSourceReadStore
+from postgresql_source_store.policy_enforcement import compose_policy_enforcement
+from postgresql_source_store.publication_store import PostgresqlSourcePublicationStore
+from postgresql_source_store.small_file_sync_operations import (
+    PostgresqlSmallFileUploadOperationStore,
+)
+from r2_object_storage.adapter import R2S3ObjectStore
+from r2_object_storage.client import (
+    GetObjectResult,
+    HeadObjectResult,
+    PutObjectRequest,
+    R2ClientManager,
+)
+from r2_object_storage.error_mapping import RetryPolicy
+from r2_object_storage.metrics import InMemoryObjectStorageMetrics
+from r2_object_storage.settings import LoadedR2Credentials, ObjectStorageSettings
+from r2_object_storage.spool import SpoolManager
 
 #: Server-owned operation lifetime of the offline rows, mirroring the durable
 #: adapter's fifteen-minute reservation window.
@@ -85,9 +118,127 @@ _COMMITTED_STATE: Final[str] = "committed"
 
 @dataclass(frozen=True, slots=True)
 class SmallFileSyncRuntime:
-    """One composed small-file sync runtime the sync routes consume."""
+    """One composed small-file sync runtime the sync routes consume.
+
+    ``aclose`` is the serve graph's disposal hook — closing the R2 client and
+    its spool reservations on shutdown; the offline graph owns no resource
+    and leaves it unset.
+    """
 
     service: SmallFileSyncService
+    aclose: Callable[[], Awaitable[None]] | None = None
+
+
+class PolicyEnforcementSmallFileGuard:
+    """Locator-aware small-file policy guard over the real enforcement service.
+
+    Builds the capture-shaped subject the plugin gates locally (workspace,
+    the update's canonical source identity when one exists, the normalized
+    locator, the declared media type and size) and evaluates it through
+    ``authorize_preflight`` at the single-part-upload boundary. A definite
+    exclusion, an indeterminate outcome or any fail-closed policy failure
+    propagates as the typed exclusion denial; only an allowed decision
+    returns. The internal decision evidence stays inside the service.
+    """
+
+    def __init__(self, *, enforcement: PolicyEnforcementService) -> None:
+        self.enforcement = enforcement
+
+    async def authorize_small_file(
+        self,
+        preflight: SmallFilePreflight,
+        device_context: SmallFileDeviceContext,
+        diagnostic_context: DiagnosticContext,
+    ) -> None:
+        subject = PolicySubject(
+            workspace_id=device_context.workspace_id,
+            source_id=preflight.source_id,
+            normalized_locator=preflight.normalized_locator.value,
+            media_type=preflight.media_type,
+            size_bytes=preflight.size_bytes,
+        )
+        await self.enforcement.authorize_preflight(
+            subject=subject,
+            boundary=PolicyBoundary.SINGLE_PART_UPLOAD,
+            context=diagnostic_context,
+        )
+
+
+class LazyR2ClientSource:
+    """Synchronous R2 client facade over the lazy per-process client manager.
+
+    The serve composition runs before any event loop exists, while the R2
+    client is created asynchronously; every member resolves the manager's
+    cached client first — one bounded lock check after the first call — so
+    the store never opens a connection at composition time and always talks
+    to the one client owned by the serving loop.
+    """
+
+    def __init__(self, manager: R2ClientManager) -> None:
+        self._manager = manager
+
+    async def head_object(self, object_key: CanonicalObjectKey) -> HeadObjectResult | None:
+        return await (await self._manager.get_client()).head_object(object_key)
+
+    async def put_object(self, request: PutObjectRequest) -> None:
+        await (await self._manager.get_client()).put_object(request)
+
+    async def get_object(self, object_key: CanonicalObjectKey, *, if_match: str) -> GetObjectResult:
+        return await (await self._manager.get_client()).get_object(object_key, if_match=if_match)
+
+    async def head_bucket(self) -> None:
+        await (await self._manager.get_client()).head_bucket()
+
+    async def close(self) -> None:
+        await self._manager.close()
+
+
+def compose_small_file_sync(
+    *,
+    engine: AsyncEngine,
+    signer: Ed25519PolicySigner,
+    object_storage_settings: ObjectStorageSettings,
+    object_storage_credentials: LoadedR2Credentials,
+    logger: DiagnosticLogger,
+) -> SmallFileSyncRuntime:
+    """Build the real serve runtime of one API process.
+
+    Follows the exclusion-policy serve precedent's shape: the shared engine,
+    the signer-derived trust anchor verifier, and provider adapters that open
+    no connection at construction — the PostgreSQL stores connect lazily per
+    transaction and the R2 client opens at the first object-store call inside
+    the serving loop. The graph is therefore composable before the socket
+    exists while every adapter is the production one.
+    """
+
+    verifier = KeyedTrustAnchorVerifier(
+        keyed_verifier=Ed25519PolicyVerifier({signer.key_id: signer.public_key_bytes})
+    )
+    enforcement = compose_policy_enforcement(engine, verifier=verifier)
+    object_store = R2S3ObjectStore(
+        LazyR2ClientSource(R2ClientManager(object_storage_settings, object_storage_credentials)),
+        spools=SpoolManager(object_storage_settings.object_storage_spool_root),
+        retry=RetryPolicy(),
+        metrics=InMemoryObjectStorageMetrics(),
+        logger=logger,
+    )
+    publication_service = SourceVersionPublicationService(
+        store=PostgresqlSourcePublicationStore(engine, policy_verifier=verifier),
+        object_store=object_store,
+        metrics=InMemorySourcePublicationMetrics(),
+        clock=default_utc_clock,
+        policy_guard=enforcement,
+    )
+    service = SmallFileSyncService(
+        operation_store=PostgresqlSmallFileUploadOperationStore(engine, clock=default_utc_clock),
+        policy_guard=PolicyEnforcementSmallFileGuard(enforcement=enforcement),
+        publication_service=publication_service,
+        object_store=object_store,
+        current_sources=PostgresqlCanonicalSourceReadStore(engine, policy_verifier=verifier),
+        metrics=InMemorySmallFileSyncMetrics(),
+        clock=default_utc_clock,
+    )
+    return SmallFileSyncRuntime(service=service, aclose=object_store.close)
 
 
 class OfflineSmallFileClock:
@@ -585,12 +736,15 @@ def compose_offline_small_file_sync(
 
 
 __all__ = [
+    "LazyR2ClientSource",
     "OfflineCanonicalObjectStore",
     "OfflineCurrentSourceStore",
     "OfflineSmallFileClock",
     "OfflineSmallFileSyncState",
     "OfflineSmallFileUploadOperationStore",
     "OfflineSourcePublicationStore",
+    "PolicyEnforcementSmallFileGuard",
     "SmallFileSyncRuntime",
     "compose_offline_small_file_sync",
+    "compose_small_file_sync",
 ]

@@ -6,14 +6,18 @@ and authentication settings plus the secret-file password, loads the
 versioned authentication keyring from its exact secret files (refusing with
 the configuration exit before any socket exists when a key file is missing or
 malformed), loads the exclusion-policy signing settings and their Ed25519
-private key through the same secret-file boundary, configures structured
-diagnostics, builds the database lifecycle, the web-authentication runtime
-and the FastAPI application (wiring the lifecycle into the application
+private key through the same secret-file boundary, loads the R2
+object-storage settings and their two credential files through the same
+boundary, configures structured diagnostics, builds the database lifecycle,
+the web-authentication runtime, the exclusion-policy runtime and the
+small-file sync runtime over the real PostgreSQL and R2 adapters (the R2
+client opens lazily at the first store call inside the serving loop), and
+builds the FastAPI application (wiring the lifecycle into the application
 lifespan so the engine starts on startup, the keyring-reference verification
 refuses startup when PostgreSQL references a key ID the keyring omits, the
 exclusion-policy signer proof refuses startup when the derived key ID is not
-the current key of the latest canonical keyset, and the engine is disposed
-on shutdown), then runs
+the current key of the latest canonical keyset, the R2 client closes on
+shutdown, and the engine is disposed on shutdown), then runs
 Uvicorn in single-process mode with the approved flags: no server header, no
 proxy headers, no access log, no reload and exactly one worker.
 
@@ -52,6 +56,7 @@ from api_runtime.exclusion_policy_settings import (
     load_exclusion_policy_signing_settings,
 )
 from api_runtime.server_settings import load_api_server_settings
+from api_runtime.small_file_sync_composition import compose_small_file_sync
 from personal_os.diagnostics.context import bind_diagnostic_context, create_diagnostic_context
 from personal_os.diagnostics.logging import (
     configure_diagnostics,
@@ -66,6 +71,7 @@ from postgresql_source_store.settings import (
     load_database_runtime_settings,
     read_database_runtime_password,
 )
+from r2_object_storage.settings import load_object_storage_settings
 
 _EXIT_CONFIGURATION_FAILURE: Final[int] = 78
 _EXIT_INTERNAL_FAILURE: Final[int] = 70
@@ -110,6 +116,9 @@ def run_server(
             policy_signer = load_exclusion_policy_signer(
                 policy_signing_settings, secret_root=database_settings.secret_root
             )
+            object_storage_settings, object_storage_credentials = load_object_storage_settings(
+                environ=environment_snapshot
+            )
         except ApplicationError as error:
             emit_emergency_application_error(ServiceName.API, context, error)
             return _EXIT_CONFIGURATION_FAILURE
@@ -135,6 +144,13 @@ def run_server(
                 engine=engine,
             )
             exclusion_policy = compose_exclusion_policy(engine=engine, signer=policy_signer)
+            small_file_sync = compose_small_file_sync(
+                engine=engine,
+                signer=policy_signer,
+                object_storage_settings=object_storage_settings,
+                object_storage_credentials=object_storage_credentials,
+                logger=logger,
+            )
 
             @asynccontextmanager
             async def database_lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -148,6 +164,8 @@ def run_server(
                 try:
                     yield
                 finally:
+                    if small_file_sync.aclose is not None:
+                        await small_file_sync.aclose()
                     await lifecycle.stop()
 
             application = create_api_application(
@@ -155,6 +173,7 @@ def run_server(
                 readiness_probe=lifecycle,
                 web_authentication=web_authentication,
                 exclusion_policy=exclusion_policy,
+                small_file_sync=small_file_sync,
                 event_sink=logger,
                 lifespan=database_lifespan,
             )

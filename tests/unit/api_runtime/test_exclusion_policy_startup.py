@@ -69,6 +69,13 @@ _INITIAL_PEM = _INITIAL_KEY.private_bytes(
 _INITIAL_PUBLIC_KEY = _INITIAL_KEY.public_key().public_bytes_raw()
 _INITIAL_KEY_ID = derive_ed25519_key_id(_INITIAL_PUBLIC_KEY)
 (_SECRET_ROOT / "policy_signing_current.pem").write_bytes(_INITIAL_PEM)
+(_SECRET_ROOT / "r2_access_key_id").write_text("test-access-key-id" + chr(10), encoding="utf-8")
+(_SECRET_ROOT / "r2_secret_access_key").write_text(
+    "test-secret-access-key" + chr(10), encoding="utf-8"
+)
+_SPOOL_DIRECTORY = tempfile.TemporaryDirectory(prefix="api-runtime-policy-spool-")
+atexit.register(_SPOOL_DIRECTORY.cleanup)
+_SPOOL_ROOT = Path(_SPOOL_DIRECTORY.name)
 
 CREATED_AT = datetime(2026, 8, 17, tzinfo=UTC)
 
@@ -83,6 +90,11 @@ LOCAL_ENVIRONMENT: Mapping[str, str] = MappingProxyType(
         "KNOWLEDGE_AUTH_MAX_PLUGIN_VERSION": "1.20.0",
         "KNOWLEDGE_POLICY_SIGNING_KEY_ID": _INITIAL_KEY_ID,
         "KNOWLEDGE_POLICY_SIGNING_KEY_FILE": "policy_signing_current.pem",
+        "KNOWLEDGE_R2_ENDPOINT": f"https://{'0' * 32}.r2.cloudflarestorage.com",
+        "KNOWLEDGE_R2_BUCKET_NAME": "personal-knowledge-objects",
+        "KNOWLEDGE_R2_ACCESS_KEY_ID_FILE": "r2_access_key_id",
+        "KNOWLEDGE_R2_SECRET_ACCESS_KEY_FILE": "r2_secret_access_key",
+        "KNOWLEDGE_OBJECT_STORAGE_SPOOL_ROOT": str(_SPOOL_ROOT),
     }
 )
 

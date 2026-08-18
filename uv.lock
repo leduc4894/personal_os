@@ -172,6 +172,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "knowledge-core" },
     { name = "postgresql-source-store" },
+    { name = "r2-object-storage" },
     { name = "uvicorn" },
 ]
 
@@ -182,6 +183,7 @@ requires-dist = [
     { name = "fastapi", specifier = "==0.139.2" },
     { name = "knowledge-core", editable = "." },
     { name = "postgresql-source-store", editable = "packages/postgresql-source-store" },
+    { name = "r2-object-storage", editable = "packages/r2-object-storage" },
     { name = "uvicorn", specifier = "==0.51.0" },
 ]
 
