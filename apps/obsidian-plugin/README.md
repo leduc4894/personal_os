@@ -94,10 +94,42 @@ dependency, `sql.js` (journal design section 6):
   `better-sqlite3`, `sqlite3`) and no ORM; the boundary contract rejects
   all of them.
 
-`src/journal/contracts.ts` currently freezes only the closed journal
-vocabulary — event states, safe error labels, queue outcomes, recovery
-states, the logical records and the 16 MiB / 10,000-row / 64 MiB / 250 ms
-limits. SQLite is not instantiated yet.
+`src/journal/` implements the portable sync journal of the journal design:
+`contracts.ts` freezes the closed vocabulary (event states, safe error
+labels, queue outcomes, recovery states, logical records and the 16 MiB /
+10,000-row / 64 MiB / 250 ms limits), `sqlite-database.ts` runs SQLite as
+WebAssembly with journal-scoped sessions, `persistence.ts` publishes every
+commit as a digest-verified immutable generation with crash-safe recovery
+and the synchronous unload flush probe, `repository.ts` owns the durable
+records and the redacted status histogram, `capture.ts` turns settled Vault
+observations into journal intent (plus the confirmed `Sync existing files`
+scan), `sync-api.ts` is the hand-mirrored small-file API client and
+`queue-driver.ts` runs the bounded foreground pass. `status.ts` projects the
+closed sync status of the minimal plugin UX (spec 11).
+
+## Minimal plugin UX and operations (spec 11)
+
+The plugin shows a small status-bar item with a pending count and exactly
+one of six closed values — `Ready`, `Syncing`, `Offline — queued`,
+`Login required`, `Policy blocked`, `Reconcile required` — projected from
+the redacted journal histogram, credential existence and the active pass.
+The settings tab repeats the same closed status plus the fixed blocker
+guidance (the 16 MiB/multipart boundary, the authorized-only policy
+refresh, the no-overwrite conflict/lifecycle deferrals, the queue-preserving
+browser login, and the child-6 repair of a `reconcile_required` journal).
+Exactly two commands exist: `Sync now` (one bounded foreground pass of
+currently eligible events) and `Sync existing files` (a snapshot scan that
+queues nothing until the user confirms). A `reconcile_required` journal is
+a hard stop: the status refresh stops the driver and no pass runs until
+child 6 repairs the journal.
+
+Instrumentation is limited to the redacted status counts and closed labels
+above — no path, digest or credential ever reaches the status or its
+telemetry shape, and the UI is never an automatic upload control. On unload
+the driver and listeners stop first, a final synchronous flush probe
+records whether a generation commit is still in flight (an interrupted
+commit recovers from the newest verified generation on the next open), and
+the memory-only access credential is cleared.
 
 ## Build and test
 
@@ -122,15 +154,23 @@ No source maps, test fixtures or secrets are emitted.
 
 ## Intentionally absent behavior
 
-The following are deliberately absent and belong to later specs:
+The following are deliberately absent and belong to later children of the
+journal design:
 
-- any Obsidian command, ribbon icon, status bar item or event listener;
-- any view, markdown post-processor or workspace hook;
-- **Vault** access, file system reads/writes and metadata indexing;
-- sync execution and every background job — only the frozen journal
-  vocabulary in `src/journal/contracts.ts` exists so far, and no SQLite
-  instantiation, capture or queue runs yet;
-- product UI beyond the authentication settings tab.
+- rename/move/delete/restore publication, tombstone lifecycle and
+  lifecycle-safe path rebinding (child 5) — such events only become
+  `deferred_lifecycle` journal evidence;
+- cursor pull, remote apply, offline registration and the repair of a
+  `reconcile_required` journal (child 6);
+- multipart/resumable uploads and files above 16 MiB (child 7);
+- candidate preservation, Conflict Inbox, merge and visible conflict
+  resolution (child 8);
+- any view, markdown post-processor, workspace hook or ribbon icon;
+- any background sync daemon, timer or automatic retry loop — queue work
+  is foreground and bounded, triggered only by plugin load, a Vault event
+  or `Sync now`;
+- any automatic full-Vault upload: no control implies one, and the
+  snapshot scan queues nothing before an explicit confirmation.
 
 No placeholder implementation of the above is provided. Each concern is added
 by a separate, reviewed spec.

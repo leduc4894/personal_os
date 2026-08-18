@@ -819,3 +819,41 @@ describe("JournalRepository queue selection and upload transitions (spec 8)", ()
     ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
   });
 });
+
+describe("JournalRepository status histogram (spec 11)", () => {
+  it("counts events by closed state and closed safe error label only", async () => {
+    const { repository } = createOpenedJournal();
+    expect(repository.readEventStateErrorCounts()).toEqual([]);
+
+    const queued = await captureAllowed(repository, "notes/histogram-queued.md", fingerprintOf("81"));
+    const retrying = await captureAllowed(repository, "notes/histogram-retry.md", fingerprintOf("82"));
+    const conflicted = await captureAllowed(repository, "notes/histogram-conflict.md", fingerprintOf("83"));
+    await repository.recordCapture({
+      normalizedPath: "notes/histogram-excluded.md",
+      fingerprint: fingerprintOf("84"),
+      policyRevisionNumber: 1,
+      admission: "excluded_policy",
+    });
+
+    await repository.markEventPreflightStarted(retrying.event.eventId);
+    await repository.markEventWaitingRetry(retrying.event.eventId, "network_offline", 1);
+    await repository.markEventTerminal(conflicted.event.eventId, "blocked_conflict", "blocked_conflict");
+
+    const histogram = repository.readEventStateErrorCounts().map((row) => ({ ...row }));
+    expect(histogram).toHaveLength(4);
+    expect(histogram).toContainEqual({ state: "queued", safeError: null, eventCount: 1 });
+    expect(histogram).toContainEqual({ state: "waiting_retry", safeError: "network_offline", eventCount: 1 });
+    expect(histogram).toContainEqual({ state: "blocked_conflict", safeError: "blocked_conflict", eventCount: 1 });
+    expect(histogram).toContainEqual({ state: "excluded_policy", safeError: "excluded_policy", eventCount: 1 });
+    expect(queued.event.state).toBe("queued");
+  });
+
+  it("groups coalesced history into one row per state and error label", async () => {
+    const { repository } = createOpenedJournal();
+    for (const digestPrefix of ["91", "92", "93"]) {
+      await captureAllowed(repository, `notes/histogram-${digestPrefix}.md`, fingerprintOf(digestPrefix));
+    }
+    const histogram = repository.readEventStateErrorCounts();
+    expect(histogram).toEqual([{ state: "queued", safeError: null, eventCount: 3 }]);
+  });
+});

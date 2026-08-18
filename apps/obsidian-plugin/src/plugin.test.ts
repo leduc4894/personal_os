@@ -144,26 +144,63 @@ describe("Obsidian plugin composition root", () => {
     // refreshes through the existing device token session.
     expect(pluginSource).toContain("fileBytesReader: vaultReader");
     expect(pluginSource).toContain("refreshAccessToken: () => session.refresh()");
+    // Every pass trigger funnels through the single bounded-pass wrapper so
+    // the status projection sees the active pass and each pass outcome.
+    const triggerCount = pluginSource.match(/void this\.#runBoundedQueuePass\(\)/g)?.length ?? 0;
+    expect(triggerCount).toBe(4); // load, create listener, modify listener, Sync now
+    expect(pluginSource).not.toContain("queueDriver.requestPass()");
+    // The wrapper itself is never awaited by onload, a listener or a command.
+    expect(pluginSource.match(/await this\.#runBoundedQueuePass\(/g)?.length ?? 0).toBe(0);
     // A Vault event triggers one bounded pass alongside capture.
     const createListenerIndex = pluginSource.indexOf('this.app.vault.on("create"');
-    const passIndex = pluginSource.indexOf("void queueDriver.requestPass()");
+    const passIndex = pluginSource.indexOf("void this.#runBoundedQueuePass()");
     expect(passIndex).toBeGreaterThan(createListenerIndex);
     // Plugin load after recovery is the first trigger, fire-and-forget.
     const recoveryIndex = pluginSource.indexOf("await persistence.open()");
     const loadPassIndex = pluginSource.indexOf(
-      "void queueDriver.requestPass();",
+      "void this.#runBoundedQueuePass();",
       pluginSource.indexOf("this.#queueDriver = queueDriver"),
     );
     expect(loadPassIndex).toBeGreaterThan(recoveryIndex);
-    expect(pluginSource).not.toContain("await queueDriver.requestPass()");
-    expect(pluginSource).not.toContain("await queueDriver.runPass()");
   });
 
-  it("stops the queue driver before closing the journal on unload", () => {
+  it("renders the closed sync status on a small status-bar surface", () => {
+    expect(pluginSource).toContain("addStatusBarItem");
+    expect(pluginSource).toContain("#refreshSyncStatus");
+    expect(pluginSource).toContain("projectJournalSyncStatus");
+    expect(pluginSource).toContain("renderJournalSyncStatusText");
+    // The settings snapshot carries the SAME redacted projection (spec 11).
+    expect(pluginSource).toContain("SYNC_STATUS_TEXT");
+    expect(pluginSource).toContain("syncBlockerGuidanceLines");
+  });
+
+  it("stops the driver when the projection says reconcile required", () => {
+    // The carried spec-11 requirement: reconcile_required is a hard stop —
+    // the status refresh itself must stop the driver.
+    const refreshIndex = pluginSource.indexOf("#refreshSyncStatus(): void");
+    const projectionMethodIndex = pluginSource.indexOf(
+      "#projectSyncStatus(): JournalSyncStatusSnapshot | null",
+    );
+    expect(refreshIndex).toBeGreaterThanOrEqual(0);
+    expect(projectionMethodIndex).toBeGreaterThan(refreshIndex);
+    const refreshBody = pluginSource.slice(refreshIndex, projectionMethodIndex);
+    expect(refreshBody).toContain('snapshot.kind === "reconcile_required"');
+    expect(refreshBody).toContain("this.#queueDriver?.stop()");
+  });
+
+  it("stops the queue driver, disposes listeners and attempts the journal flush before closing", () => {
     const stopIndex = pluginSource.indexOf("this.#queueDriver?.stop()");
+    const disposeIndex = pluginSource.indexOf("this.#capture?.dispose()");
+    const flushIndex = pluginSource.indexOf("this.#journalPersistence?.attemptFinalFlush()");
     const closeIndex = pluginSource.indexOf("this.#journalPersistence?.close()");
     expect(stopIndex).toBeGreaterThanOrEqual(0);
-    expect(closeIndex).toBeGreaterThan(stopIndex);
+    expect(disposeIndex).toBeGreaterThan(stopIndex);
+    expect(flushIndex).toBeGreaterThan(disposeIndex);
+    expect(closeIndex).toBeGreaterThan(flushIndex);
+    // Unload never awaits async journal work; the flush attempt stays
+    // synchronous and bounded.
+    expect(pluginSource).not.toContain("await this.#capture");
+    expect(pluginSource).not.toContain("await this.#journalPersistence");
   });
 
   it("touches no forbidden runtime capability at load time", () => {

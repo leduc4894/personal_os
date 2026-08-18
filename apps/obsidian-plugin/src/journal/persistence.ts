@@ -233,6 +233,9 @@ function generationFileName(generationNumber: number): string {
 
 // --- the journal persistence layer ---------------------------------------------------------------
 
+/** The closed outcome of the unload-time final flush attempt (spec 11). */
+export type JournalFinalFlushOutcome = "final_generation_current" | "commit_in_flight";
+
 export interface JournalPersistenceOptions {
   readonly fileStore: JournalFileStore;
   readonly engineModule: SqliteEngineModule;
@@ -252,6 +255,7 @@ export class JournalPersistence {
   #priorVerifiedGeneration: VerifiedJournalGeneration | null = null;
   #isReconcileRequired = false;
   #hasRecoveryBufferOverflowed = false;
+  #inFlightCommitCount = 0;
   readonly #bufferedVaultPaths = new Set<string>();
   #commitTail: Promise<unknown> = Promise.resolve();
 
@@ -365,12 +369,29 @@ export class JournalPersistence {
   async commitGeneration<T>(
     operation: (session: SqliteMutationSession) => T | Promise<T>,
   ): Promise<T> {
+    this.#inFlightCommitCount += 1;
     const execution = this.#commitTail.then(() => this.#executeGenerationCommit(operation));
     this.#commitTail = execution.then(
-      () => undefined,
-      () => undefined,
+      () => this.#finishTrackedCommit(),
+      () => this.#finishTrackedCommit(),
     );
     return execution;
+  }
+
+  #finishTrackedCommit(): void {
+    this.#inFlightCommitCount = Math.max(0, this.#inFlightCommitCount - 1);
+  }
+
+  /**
+   * The synchronous, bounded final-flush attempt of safe unload (spec 11):
+   * every journal mutation already persisted its own verified generation,
+   * so the attempt reports whether the journal sits at its final generation
+   * or a commit is still in flight. It starts no work, awaits nothing, and
+   * never blocks unload on async generation publishing — an interrupted
+   * commit simply recovers from the newest verified generation on reopen.
+   */
+  attemptFinalFlush(): JournalFinalFlushOutcome {
+    return this.#inFlightCommitCount > 0 ? "commit_in_flight" : "final_generation_current";
   }
 
   close(): void {

@@ -101,6 +101,17 @@ export interface JournalAttemptInput {
   readonly requestCorrelationId: string;
 }
 
+/**
+ * One redacted histogram row of the status projection (spec 11): a closed
+ * event state, the closed safe error label its rows carry (null for none)
+ * and how many events fall in that group — counts and closed labels only.
+ */
+export interface JournalEventStateErrorCount {
+  readonly state: JournalEventState;
+  readonly safeError: JournalSafeErrorLabel | null;
+  readonly eventCount: number;
+}
+
 export interface JournalRepositoryOptions {
   readonly database: JournalRepositoryDatabase;
   /** Identity mint; defaults to the platform `crypto.randomUUID`. */
@@ -846,6 +857,36 @@ export class JournalRepository {
     );
     const count = row?.[0];
     return typeof count === "number" ? count : 0;
+  }
+
+  /**
+   * The redacted event histogram of the status projection (spec 11): counts
+   * grouped by closed event state and closed safe error label — never a
+   * path, digest, credential or any other row detail.
+   */
+  readEventStateErrorCounts(): readonly JournalEventStateErrorCount[] {
+    const result = this.#database.readAll(
+      "select state, safe_error, count(*) from journal_events group by state, safe_error;",
+    );
+    return (result[0]?.values ?? []).map((row) => {
+      const [state, safeError, eventCount] = row;
+      if (
+        typeof state !== "string" ||
+        !isClosedToken(state, JOURNAL_EVENT_STATES) ||
+        !isNullableText(safeError) ||
+        (safeError !== null && !isClosedToken(safeError, JOURNAL_SAFE_ERROR_LABELS)) ||
+        typeof eventCount !== "number" ||
+        !Number.isInteger(eventCount) ||
+        eventCount < 0
+      ) {
+        throw journalStoreError("journal_image_invalid");
+      }
+      return {
+        state: state as JournalEventState,
+        safeError: safeError as JournalSafeErrorLabel | null,
+        eventCount,
+      };
+    });
   }
 
   // --- internals ------------------------------------------------------------------------------------

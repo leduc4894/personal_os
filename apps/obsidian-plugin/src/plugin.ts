@@ -36,10 +36,18 @@ import { DeviceTokenSession, resolveStartupAction } from "./authentication/token
 import { JournalCapture } from "./journal/capture";
 import type { CaptureVaultReader } from "./journal/capture";
 import { JournalQueueDriver } from "./journal/queue-driver";
+import type { QueuePassOutcome, QueuePassSummary } from "./journal/queue-driver";
 import { createVaultPluginJournalStore, JournalPersistence } from "./journal/persistence";
 import type { JournalFileStore } from "./journal/persistence";
 import { JournalRepository } from "./journal/repository";
-import type { JournalRepositoryDatabase } from "./journal/repository";
+import type { JournalEventStateErrorCount, JournalRepositoryDatabase } from "./journal/repository";
+import {
+  projectJournalSyncStatus,
+  renderJournalSyncStatusText,
+  syncBlockerGuidanceLines,
+  SYNC_STATUS_TEXT,
+} from "./journal/status";
+import type { JournalSyncStatusSnapshot } from "./journal/status";
 import { loadVendoredSqliteEngine } from "./journal/sqlite-database";
 import { createJournalSyncApi } from "./journal/sync-api";
 import { PolicySession } from "./exclusion-policy/policy-session";
@@ -172,6 +180,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   #journalPersistence: JournalPersistence | null = null;
   #capture: JournalCapture | null = null;
   #queueDriver: JournalQueueDriver | null = null;
+  #queueRepository: JournalRepository | null = null;
+  #isQueuePassActive = false;
+  #lastQueuePassOutcome: QueuePassOutcome | null = null;
+  #syncStatusBarItem: HTMLElement | null = null;
 
   override async onload(): Promise<void> {
     this.#settings = normalizeSettings(await this.loadData());
@@ -244,14 +256,21 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     this.#policySession = policySession;
 
     this.#settingTab = new DeviceAuthenticationSettingTab(this.app, this, {
-      getSnapshot: () => ({
-        connectionState: this.#connectionState,
-        statusDetail: this.#statusDetail,
-        serverOrigin: this.#settings.server_origin,
-        deviceName: this.#settings.device_name,
-        hasPendingGrant: this.#settings.pending_grant !== null,
-        hasActiveCredential: this.#resolveHasActiveCredential(secretStore),
-      }),
+      getSnapshot: () => {
+        const syncStatus = this.#projectSyncStatus();
+        return {
+          connectionState: this.#connectionState,
+          statusDetail: this.#statusDetail,
+          serverOrigin: this.#settings.server_origin,
+          deviceName: this.#settings.device_name,
+          hasPendingGrant: this.#settings.pending_grant !== null,
+          hasActiveCredential: this.#resolveHasActiveCredential(secretStore),
+          syncStatusText:
+            syncStatus === null ? null : SYNC_STATUS_TEXT[syncStatus.kind],
+          syncBlockerGuidance:
+            syncStatus === null ? [] : [...syncBlockerGuidanceLines(syncStatus)],
+        };
+      },
       setServerOrigin: (origin) => {
         this.#settings.server_origin = origin;
         void this.#persistSettings();
@@ -302,8 +321,16 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     this.#queueDriver = null;
     this.#capture?.dispose();
     this.#capture = null;
+    // Safe unload (spec 11): every journal mutation already persisted its
+    // own verified generation, so the final flush attempt is synchronous
+    // and bounded — it records whether a commit is still in flight and
+    // never blocks unload on async generation publishing. An interrupted
+    // commit recovers from the newest verified generation on the next open.
+    this.#journalPersistence?.attemptFinalFlush();
     this.#journalPersistence?.close();
     this.#journalPersistence = null;
+    this.#queueRepository = null;
+    this.#syncStatusBarItem = null;
     this.#controller?.stop();
     this.#session?.clearMemoryAccess();
   }
@@ -319,6 +346,9 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     this.#connectionState = state;
     this.#statusDetail = detail;
     this.#settingTab?.display();
+    // A credential arriving or leaving changes the login-required verdict of
+    // the sync status projection (spec 11).
+    this.#refreshSyncStatus();
   }
 
   async #persistSettings(): Promise<void> {
@@ -392,13 +422,13 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       this.registerEvent(
         this.app.vault.on("create", (file) => {
           capture.notifyPathChanged(file.path);
-          void queueDriver.requestPass();
+          void this.#runBoundedQueuePass();
         }),
       );
       this.registerEvent(
         this.app.vault.on("modify", (file) => {
           capture.notifyPathChanged(file.path);
-          void queueDriver.requestPass();
+          void this.#runBoundedQueuePass();
         }),
       );
       this.registerEvent(
@@ -415,7 +445,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         id: "sync-now",
         name: "Sync now",
         callback: () => {
-          void queueDriver.requestPass();
+          void this.#runBoundedQueuePass();
         },
       });
       this.addCommand({
@@ -428,9 +458,12 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       this.#journalPersistence = persistence;
       this.#capture = capture;
       this.#queueDriver = queueDriver;
+      this.#queueRepository = repository;
       // Plugin load after safe recovery is the first bounded foreground
-      // trigger (spec 8): fire-and-forget, never awaited in onload.
-      void queueDriver.requestPass();
+      // trigger (spec 8): fire-and-forget, never awaited in onload. A
+      // reconcile-required journal stops the driver inside the status
+      // refresh before this pass can start (spec 11).
+      void this.#runBoundedQueuePass();
     } catch {
       // Engine or recovery failure is fail-closed: no capture surface is
       // registered and Vault editing is never touched.
@@ -446,6 +479,86 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     await capture
       .runExistingFilesScan({ confirm: () => this.#confirmExistingFilesScan() })
       .catch(() => undefined);
+    this.#refreshSyncStatus();
+  }
+
+  /**
+   * The single foreground pass trigger (spec 8, 11): plugin load, a Vault
+   * event and `Sync now` all funnel through here, so the status projection
+   * sees the active pass and every finished pass outcome. The trigger
+   * itself is never awaited — onload, the Vault listeners and the command
+   * callbacks stay synchronous and fire-and-forget.
+   */
+  async #runBoundedQueuePass(): Promise<void> {
+    const driver = this.#queueDriver;
+    if (driver === null) {
+      return;
+    }
+    this.#isQueuePassActive = true;
+    this.#refreshSyncStatus();
+    let summary: QueuePassSummary;
+    try {
+      summary = await driver.requestPass();
+    } catch {
+      // The driver never lets a trigger crash; a local failure still ends
+      // this wrapper's view of the pass.
+      summary = { outcome: "completed", processedEventCount: 0 };
+    }
+    if (summary.outcome !== "pass_already_running") {
+      // Only the invocation that actually ran the pass clears the active
+      // flag; a trigger that found a running pass leaves it untouched.
+      this.#isQueuePassActive = false;
+      this.#lastQueuePassOutcome = summary.outcome;
+    }
+    this.#refreshSyncStatus();
+  }
+
+  /**
+   * Project and render the closed sync status (spec 11): the journal
+   * histogram, credential existence and pass facts in; one of the six
+   * closed values with counts out — the small status-bar surface and the
+   * settings snapshot. A reconcile-required journal is a hard stop: the
+   * driver is stopped here and the child-6 guidance explains why nothing
+   * syncs until repair.
+   */
+  #refreshSyncStatus(): void {
+    const snapshot = this.#projectSyncStatus();
+    if (snapshot === null) {
+      return;
+    }
+    if (snapshot.kind === "reconcile_required") {
+      this.#queueDriver?.stop();
+    }
+    const statusBarItem = this.#syncStatusBarItem ?? this.addStatusBarItem();
+    this.#syncStatusBarItem = statusBarItem;
+    statusBarItem.setText(renderJournalSyncStatusText(snapshot));
+  }
+
+  /**
+   * The closed projection input, or null while no journal runs: the
+   * composition reads the redacted repository histogram plus the sticky
+   * journal reconcile flag, the live credential fact and the pass facts.
+   */
+  #projectSyncStatus(): JournalSyncStatusSnapshot | null {
+    const repository = this.#queueRepository;
+    if (repository === null) {
+      return null;
+    }
+    let eventStateErrorCounts: readonly JournalEventStateErrorCount[];
+    try {
+      eventStateErrorCounts = repository.readEventStateErrorCounts();
+    } catch {
+      // The journal store is closed or unreadable: render no status rather
+      // than a wrong one (the fail-closed rule of the journal design).
+      return null;
+    }
+    return projectJournalSyncStatus({
+      isReconcileRequired: this.#journalPersistence?.isReconcileRequired ?? false,
+      eventStateErrorCounts,
+      hasAccessCredential: this.#session?.accessCredential != null,
+      isQueuePassActive: this.#isQueuePassActive,
+      lastQueuePassOutcome: this.#lastQueuePassOutcome,
+    });
   }
 
   /**

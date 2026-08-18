@@ -63,6 +63,18 @@ describe("DeviceAuthenticationSettingTab source contract", () => {
     expect(tabSource).toContain("ConnectionState");
   });
 
+  it("shows the closed sync status and its blocker guidance (spec 11)", () => {
+    expect(tabSource).toContain("Sync status");
+    expect(tabSource).toContain("syncStatusText");
+    expect(tabSource).toContain("syncBlockerGuidance");
+  });
+
+  it("offers no control implying automatic full-Vault upload", () => {
+    for (const forbiddenLabel of ["Sync all", "Upload all", "Sync everything", "Upload everything"]) {
+      expect(tabSource).not.toContain(forbiddenLabel);
+    }
+  });
+
   it("touches no forbidden runtime capability", () => {
     for (const forbiddenText of [
       "node:",

@@ -18,6 +18,13 @@ export interface DeviceAuthenticationSnapshot {
   readonly deviceName: string;
   readonly hasPendingGrant: boolean;
   readonly hasActiveCredential: boolean;
+  /**
+   * The closed sync status text of spec 11, or null when no journal runs.
+   * Already redacted: a status value and counts only.
+   */
+  readonly syncStatusText: string | null;
+  /** The spec-11 blocker guidance lines, already redacted and closed. */
+  readonly syncBlockerGuidance: readonly string[];
 }
 
 export interface DeviceAuthenticationTabView {
@@ -55,6 +62,13 @@ export class DeviceAuthenticationSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Connection status")
       .setDesc(statusDescription);
+
+    // The small sync status of spec 11: one of the six closed values with
+    // counts plus the fixed blocker guidance — display only, never an
+    // automatic upload control, and never a full-Vault upload affordance.
+    new Setting(containerEl)
+      .setName("Sync status")
+      .setDesc(syncStatusDescription(snapshot));
 
     new Setting(containerEl)
       .setName("Server origin")
@@ -118,4 +132,17 @@ export class DeviceAuthenticationSettingTab extends PluginSettingTab {
       () => this.display(),
     );
   }
+}
+
+/** The status line plus each blocker guidance line, joined in closed order. */
+function syncStatusDescription(snapshot: DeviceAuthenticationSnapshot): string {
+  const lines: string[] = [];
+  if (snapshot.syncStatusText !== null) {
+    lines.push(snapshot.syncStatusText);
+  }
+  lines.push(...snapshot.syncBlockerGuidance);
+  if (lines.length === 0) {
+    return "Journal not running on this device";
+  }
+  return lines.join(" ");
 }

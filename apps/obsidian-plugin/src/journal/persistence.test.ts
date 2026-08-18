@@ -497,3 +497,44 @@ describe("JournalPersistence reconcile flag merge across generation commits (spe
     reopened.close();
   });
 });
+
+describe("JournalPersistence unload flush attempt (spec 11)", () => {
+  it("reports the current final generation while no commit is in flight", async () => {
+    const store = new InMemoryJournalFileStore();
+    const journal = await openedPersistence(store);
+    expect(journal.attemptFinalFlush()).toBe("final_generation_current");
+
+    // A settled commit leaves the journal at its final generation again.
+    await journal.commitGeneration(() => undefined);
+    expect(journal.attemptFinalFlush()).toBe("final_generation_current");
+    journal.close();
+  });
+
+  it("reports an in-flight commit without blocking on async publishing", async () => {
+    const store = new InMemoryJournalFileStore();
+    const journal = await openedPersistence(store);
+
+    const gate: { releaseOperation: (() => void) | null } = { releaseOperation: null };
+    const commit = journal.commitGeneration(
+      () =>
+        new Promise<void>((resolve) => {
+          gate.releaseOperation = resolve;
+        }),
+    );
+    await new Promise<void>((resolve) => {
+      const poll = setInterval(() => {
+        if (gate.releaseOperation !== null) {
+          clearInterval(poll);
+          resolve();
+        }
+      }, 5);
+    });
+    // The attempt is synchronous and bounded: it only reports the in-flight
+    // commit and never starts or waits for any work.
+    expect(journal.attemptFinalFlush()).toBe("commit_in_flight");
+    gate.releaseOperation?.();
+    await commit;
+    expect(journal.attemptFinalFlush()).toBe("final_generation_current");
+    journal.close();
+  });
+});
