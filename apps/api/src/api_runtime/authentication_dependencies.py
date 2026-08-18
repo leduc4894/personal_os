@@ -51,6 +51,10 @@ from personal_os.runtime_configuration.models import RuntimeEnvironment
 SESSION_COOKIE_NAME: Final[str] = "__Host-admin_session"
 CSRF_COOKIE_NAME: Final[str] = "__Host-admin_csrf"
 
+#: Safe read methods where a missing Origin header is a same-origin request:
+#: browsers never attach Origin to same-origin GET/HEAD fetches (Fetch spec).
+_ORIGIN_OPTIONAL_SAFE_METHODS: Final[frozenset[str]] = frozenset({"GET", "HEAD"})
+
 #: Explicit loopback local-development names without the Secure attribute.
 LOCAL_SESSION_COOKIE_NAME: Final[str] = "admin_session_local"
 LOCAL_CSRF_COOKIE_NAME: Final[str] = "admin_csrf_local"
@@ -302,9 +306,20 @@ def create_session_route_dependencies(
         and header values are latin-1-decoded strings that may carry
         non-ASCII bytes, which a digest comparison would reject with a
         ``TypeError`` instead of the closed CSRF failure.
+
+        A missing ``Origin`` is only acceptable on the safe read methods:
+        browsers omit the header on same-origin GET/HEAD fetches (Fetch
+        spec), while the exact-origin mandate of the authentication design
+        (spec 9.3) covers state-changing requests and the unauthenticated
+        login and device-grant endpoints. A present ``Origin`` must always
+        match exactly, whatever the method.
         """
         origin = request.headers.get("origin")
-        if origin is None or origin != runtime.allowed_origin:
+        if origin is None:
+            if request.method in _ORIGIN_OPTIONAL_SAFE_METHODS:
+                return
+            raise AuthenticationError(ErrorCode.CSRF_VALIDATION_FAILED)
+        if origin != runtime.allowed_origin:
             raise AuthenticationError(ErrorCode.CSRF_VALIDATION_FAILED)
 
     async def _resolve_session(

@@ -189,17 +189,20 @@ def revoke_device(
 
 
 def test_device_list_requires_an_authenticated_session(harness: AdminRouteHarness) -> None:
-    # The exact-origin gate closes the request before any session material
-    # is read, exactly like every other session-bound GET (spec 9.3).
-    missing_origin = harness.client.get("/api/admin/devices")
-    assert missing_origin.status_code == 403
-    assert missing_origin.json()["error"]["code"] == "csrf_validation_failed"
-    assert missing_origin.headers["cache-control"] == "no-store"
-
-    missing_session = harness.client.get("/api/admin/devices", headers={"Origin": ORIGIN})
+    # A same-origin browser GET carries no Origin header (Fetch spec): the
+    # guard admits the safe read and the session requirement answers 401,
+    # exactly like every other session-bound GET (spec 9.3).
+    missing_session = harness.client.get("/api/admin/devices")
     assert missing_session.status_code == 401
     assert missing_session.json()["error"]["code"] == "authentication_required"
     assert missing_session.headers["cache-control"] == "no-store"
+
+    missing_session_with_origin = harness.client.get(
+        "/api/admin/devices", headers={"Origin": ORIGIN}
+    )
+    assert missing_session_with_origin.status_code == 401
+    assert missing_session_with_origin.json()["error"]["code"] == "authentication_required"
+    assert missing_session_with_origin.headers["cache-control"] == "no-store"
 
     wrong_origin = harness.client.get(
         "/api/admin/devices", headers={"Origin": "https://attacker.example"}
@@ -364,11 +367,15 @@ def test_admin_revoke_disables_the_device_and_its_credentials(
 def test_admin_routes_reject_device_credentials(harness: AdminRouteHarness) -> None:
     cookies = login(harness.client)
     device = register_device(harness, cookies)
-    # A device credential is never a Web authority: without the session
-    # cookie the request never passes the origin gate's session resolution.
+    # A device credential is never a Web authority: the safe read passes the
+    # origin guard without a header, but session resolution still requires
+    # the Web session cookie, so the Bearer credential answers 401. The
+    # harness client drops its session jar first so only the Bearer header
+    # identifies the caller.
+    harness.client.cookies.clear()
     listed_with_bearer = harness.client.get(
         "/api/admin/devices",
         headers={"Authorization": f"Bearer {device.refresh_credential}"},
     )
-    assert listed_with_bearer.status_code == 403
-    assert listed_with_bearer.json()["error"]["code"] == "csrf_validation_failed"
+    assert listed_with_bearer.status_code == 401
+    assert listed_with_bearer.json()["error"]["code"] == "authentication_required"

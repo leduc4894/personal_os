@@ -59,12 +59,13 @@ def build_request(
     headers: Mapping[str, str],
     path: str = "/api/auth/password",
     client: tuple[str, int] | None = ("192.0.2.10", 41000),
+    method: str = "POST",
 ) -> Request:
     """Build one HTTP request scope carrying exactly the given headers."""
     scope: dict[str, Any] = {
         "type": "http",
         "http_version": "1.1",
-        "method": "POST",
+        "method": method,
         "scheme": "https",
         "path": path,
         "raw_path": path.encode("ascii"),
@@ -197,6 +198,40 @@ async def test_origin_guard_rejects_every_non_exact_origin(origin_value: str | N
     dependencies = create_session_route_dependencies(compose_offline_web_authentication())
     with pytest.raises(AuthenticationError) as rejection:
         await dependencies.require_allowed_origin(build_request(headers=headers))
+    assert rejection.value.error_code is ErrorCode.CSRF_VALIDATION_FAILED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("safe_method", ["GET", "HEAD"])
+async def test_origin_guard_accepts_missing_origin_on_safe_read_methods(
+    safe_method: str,
+) -> None:
+    """Browsers omit Origin on same-origin safe-method fetches (Fetch spec).
+
+    Session reads (GET admin pages, policy status) arrive without an Origin
+    header from the real Web client; the exact-origin mandate of spec 9.3
+    covers state-changing requests and the unauthenticated login/grant
+    endpoints, so a missing Origin on GET/HEAD is a same-origin read and
+    must pass the guard.
+    """
+    dependencies = create_session_route_dependencies(compose_offline_web_authentication())
+    result = await dependencies.require_allowed_origin(
+        build_request(headers={}, method=safe_method)
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("safe_method", ["GET", "HEAD"])
+async def test_origin_guard_still_rejects_a_present_wrong_origin_on_safe_methods(
+    safe_method: str,
+) -> None:
+    """A present Origin always identifies the caller: cross-origin reads fail."""
+    dependencies = create_session_route_dependencies(compose_offline_web_authentication())
+    with pytest.raises(AuthenticationError) as rejection:
+        await dependencies.require_allowed_origin(
+            build_request(headers={"origin": "https://attacker.example"}, method=safe_method)
+        )
     assert rejection.value.error_code is ErrorCode.CSRF_VALIDATION_FAILED
 
 
