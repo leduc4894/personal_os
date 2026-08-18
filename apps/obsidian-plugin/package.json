@@ -12,7 +12,8 @@
   },
   "dependencies": {
     "@noble/ed25519": "3.1.0",
-    "@workspace/api-client": "workspace:*"
+    "@workspace/api-client": "workspace:*",
+    "sql.js": "1.14.2"
   },
   "devDependencies": {
     "@types/node": "24.13.3",

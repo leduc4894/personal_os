@@ -8,7 +8,8 @@ workspace and of `apps/web`: it imports nothing from either.
 the minimum artifacts the Obsidian loader requires (`dist/main.js` plus the
 manifest). `src/plugin.ts` only wires real adapters — Obsidian `requestUrl`,
 `Platform`, the app `SecretStorage`, plugin data persistence and `window.open`;
-every behavior lives in the tested modules under `src/authentication/`.
+every behavior lives in the tested modules under `src/authentication/`,
+`src/exclusion-policy/` and `src/journal/`.
 
 ## API transport
 
@@ -69,6 +70,35 @@ The Python bundle-boundary contract
 and fails the gate on any Electron/Node built-in/`FileSystemAdapter` usage,
 credential sentinels or source-map leakage in the emitted bundle.
 
+## Portable journal dependency
+
+The sync journal runs SQLite as WebAssembly through one pinned production
+dependency, `sql.js` (journal design section 6):
+
+- **Version:** `1.14.2`, pinned exactly (no range) in `dependencies`.
+- **License:** MIT (sql.js authors); the bundled SQLite engine itself is
+  public-domain SQLite compiled to WebAssembly.
+- **WASM asset and bundling behavior:** the package's `exports` browser
+  condition resolves the bundled module to `dist/sql-wasm-browser.js`, which
+  esbuild inlines like every other dependency for `platform: "browser"`.
+  The engine bytes ship as a separate WebAssembly asset
+  (`dist/sql-wasm.wasm`) that must be loaded as bytes — never through a
+  Node `fs` read; journal persistence loads and stores everything through
+  Obsidian `DataAdapter.readBinary`/`writeBinary`. The bundle-boundary
+  contract excises exactly sql.js's esbuild module segment before scanning,
+  so the library's inert emscripten Node-detection text never widens the
+  gate for plugin-authored code.
+- **No native runtime requirement:** SQLite executes as WebAssembly inside
+  the same Web engine on Desktop and Mobile. The plugin imports no Node
+  built-in, no Electron API, no native SQLite driver (`node:sqlite`,
+  `better-sqlite3`, `sqlite3`) and no ORM; the boundary contract rejects
+  all of them.
+
+`src/journal/contracts.ts` currently freezes only the closed journal
+vocabulary — event states, safe error labels, queue outcomes, recovery
+states, the logical records and the 16 MiB / 10,000-row / 64 MiB / 250 ms
+limits. SQLite is not instantiated yet.
+
 ## Build and test
 
 This member is built and tested through the root pnpm scripts, which the
@@ -97,7 +127,9 @@ The following are deliberately absent and belong to later specs:
 - any Obsidian command, ribbon icon, status bar item or event listener;
 - any view, markdown post-processor or workspace hook;
 - **Vault** access, file system reads/writes and metadata indexing;
-- sync and every background job (later children own them);
+- sync execution and every background job — only the frozen journal
+  vocabulary in `src/journal/contracts.ts` exists so far, and no SQLite
+  instantiation, capture or queue runs yet;
 - product UI beyond the authentication settings tab.
 
 No placeholder implementation of the above is provided. Each concern is added
