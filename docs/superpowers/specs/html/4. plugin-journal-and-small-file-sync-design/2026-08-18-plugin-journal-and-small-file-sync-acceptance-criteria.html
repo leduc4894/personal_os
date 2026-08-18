@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Plugin journal — Acceptance criteria</title>
+  <style>
+    body { font-family: Inter, system-ui, sans-serif; max-width: 1040px; margin: 40px auto; padding: 0 24px; color: #172033; background: #f7f9fc; }
+    h1 { margin-bottom: 4px; } .subtitle { color: #5c687d; line-height: 1.55; }
+    section { margin-top: 18px; padding: 18px 22px; border: 1px solid #ccd5e2; border-radius: 12px; background: #fff; box-shadow: 0 3px 12px #17203312; }
+    table { width: 100%; border-collapse: collapse; } th, td { padding: 11px; text-align: left; vertical-align: top; border-bottom: 1px solid #e1e6ee; line-height: 1.45; } th { color: #526176; width: 26%; }
+    code { background: #edf2f8; padding: 2px 4px; border-radius: 4px; } .later { color: #8a4f00; }
+  </style>
+</head>
+<body>
+  <h1>Phần 7 — Acceptance criteria và test matrix</h1>
+  <p class="subtitle">Mỗi behavior phải có test thất bại trước khi implementation thay đổi nó.</p>
+  <section>
+    <table><thead><tr><th>Nhóm</th><th>Điều kiện hoàn thành</th></tr></thead><tbody>
+      <tr><th>Portable persistence</th><td>Desktop/mobile cùng SQLite WASM + DataAdapter; hỏng lúc ghi manifest phục hồi generation đã xác minh trước, không mất queue.</td></tr>
+      <tr><th>Journal</th><td>Save liên tiếp trước preflight coalesce; save sau fingerprint freeze tạo successor; ngưỡng 10.000 event / 64 MiB đặt <code>reconcile_required</code> mà không chặn Vault.</td></tr>
+      <tr><th>Giới hạn file</th><td><code>≤ 16 × 1024 × 1024</code> bytes dùng single-part; lớn hơn một byte thành <code>blocked_size</code>, không retry mạng.</td></tr>
+      <tr><th>API integrity</th><td>Chỉ commit source/version sau full size/SHA-256 verification; stale base thành <code>blocked_conflict</code>; bytes thay đổi trong upload không commit fingerprint cũ.</td></tr>
+      <tr><th>Idempotency</th><td>Mất response rồi replay cùng event/idempotency trả receipt gốc <code>committed_replay</code>, không tạo source/version thứ hai.</td></tr>
+      <tr><th>Offline/auth</th><td>Offline, timeout, 429, 5xx giữ queue và chỉ retry foreground; refresh tối đa một lần/lượt; logout/revoke không xóa queue.</td></tr>
+      <tr><th>Policy/privacy</th><td><code>excluded</code>/<code>indeterminate</code> không rời thiết bị; server deny cũng chặn; log/metrics không có content, path, hash, token hay policy rule.</td></tr>
+      <tr><th>Lifecycle boundary</th><td>Rename/move/delete/restore chỉ <code>deferred_lifecycle</code>, không network mutation. Watcher loss/SQLite recovery failure đặt <code>reconcile_required</code>.</td></tr>
+    </tbody></table>
+  </section>
+  <section><h2>Để child sau</h2><p class="later">Child 5: locator/tombstone lifecycle và conflict UI. Child 6: manifest cursor/reconciliation thật sự. Sau đó: multipart/resumable, R2 Worker, provider fallback/dual-write và client-side encryption/CMK.</p></section>
+</body>
+</html>

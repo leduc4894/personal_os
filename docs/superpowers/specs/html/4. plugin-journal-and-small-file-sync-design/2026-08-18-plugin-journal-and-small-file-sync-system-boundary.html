@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Plugin journal — boundaries</title><style>body{font-family:system-ui,sans-serif;background:#101827;color:#e5eefb;max-width:1100px;margin:0 auto;padding:32px;line-height:1.5}h1{margin:0 0 6px}h2{color:#8bd5ff}.sub{color:#aabbd0;margin:0 0 24px}.grid{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:14px}.split{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:20px}.card{background:#172235;border:1px solid #2b405e;border-radius:12px;padding:16px}.card h3{color:#8bd5ff;margin-top:0}.flow{text-align:center;margin:18px 0;font-weight:600;color:#a9e5bd}code{background:#22324b;padding:2px 4px;border-radius:4px}@media(max-width:750px){.grid,.split{grid-template-columns:1fr}}</style></head>
+<body>
+<h1>Phần 1 — Boundaries và ownership</h1>
+<p class="sub">Child 4 chỉ đẩy create/update ≤16 MiB. Canonical authority không rời PostgreSQL/R2.</p>
+<section class="grid">
+<article class="card"><h3>Vault</h3><p>Raw bytes, editor changes, create/modify watcher events.</p><p><strong>Owner:</strong> Obsidian</p></article>
+<article class="card"><h3>Plugin journal</h3><p>SQLite WASM: mapping, fingerprint, intent, retry state.</p><p><strong>Not:</strong> canonical bytes/tokens</p></article>
+<article class="card"><h3>Sync API</h3><p>Preflight + single-part receive; policy/device/base/idempotency checks.</p><p><strong>Owner:</strong> FastAPI/domain</p></article>
+<article class="card"><h3>Canonical state</h3><p>PostgreSQL source/version/event; R2 immutable bytes.</p><p><strong>Owner:</strong> backend</p></article>
+</section>
+<p class="flow">Vault → journal → preflight → stream → verified receipt → canonical commit</p>
+<section class="split">
+<article class="card"><h2>Included now</h2><ul><li>Watcher + explicit Sync existing files.</li><li>Create/update for policy-allowed regular files ≤16 MiB.</li><li>Offline durable queue, retry, exact replay.</li><li>Policy/device/token enforcement.</li><li>Blocked size/policy/conflict/lifecycle states.</li></ul></article>
+<article class="card"><h2>Explicitly later</h2><ul><li>Rename/move/delete/restore + locator/tombstone (child 5).</li><li>Cursor pull, remote apply, manifest repair (child 6).</li><li>Multipart above 16 MiB (child 7).</li><li>Conflict UI/resolution (conflict child).</li></ul></article>
+</section>
+</body></html>

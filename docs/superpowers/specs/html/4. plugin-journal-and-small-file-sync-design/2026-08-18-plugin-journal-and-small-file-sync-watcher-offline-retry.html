@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Plugin journal — Watcher và offline retry</title>
+  <style>
+    body { font-family: Inter, system-ui, sans-serif; max-width: 960px; margin: 40px auto; padding: 0 24px; color: #172033; background: #f7f9fc; }
+    h1 { margin-bottom: 4px; } .subtitle { color: #5c687d; line-height: 1.55; }
+    .mockup { margin-top: 18px; border: 1px solid #ccd5e2; border-radius: 12px; overflow: hidden; background: #fff; box-shadow: 0 3px 12px #17203312; }
+    .mockup-header { padding: 11px 16px; font-weight: 700; color: #fff; background: #2d5b98; }
+    .mockup-body { padding: 8px 18px 16px; line-height: 1.55; }
+    .split { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }
+    .card { flex: 1; min-width: 170px; padding: 12px; border: 1px solid #d8e0ea; border-radius: 8px; background: #f8fbff; }
+    h3 { margin: 0 0 4px; font-size: 1rem; } .card p { margin: 0; }
+    code { background: #edf2f8; padding: 2px 4px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Phần 4 — Watcher, initial scan và offline retry</h1>
+  <p class="subtitle">Không background daemon; editor và nội dung Vault luôn được ưu tiên hơn queue.</p>
+
+  <section class="mockup">
+    <div class="mockup-header">Local capture</div>
+    <div class="mockup-body"><ol>
+      <li>Plugin đăng ký event <code>create</code>/<code>modify</code> khi load; buffer path có giới hạn giữ event trong lúc SQLite recovery mở database.</li>
+      <li>Mỗi file chờ ổn định 250 ms, sau đó đọc lại bytes, SHA-256, size, media type và local policy evaluation.</li>
+      <li>File được phép và không quá 16 MiB tạo journal create/update. Cùng file chỉ coalesce trước preflight; intent đã freeze nhận successor.</li>
+      <li><strong>Sync existing files</strong> là command rõ ràng: quét snapshot file hiện có theo batch, không chạy tự động khi enable hoặc restart.</li>
+    </ol></div>
+  </section>
+
+  <section class="mockup">
+    <div class="mockup-header">Foreground queue driver</div>
+    <div class="mockup-body" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <div class="card"><h3>Trigger</h3><p>plugin load<br>Vault event<br>Sync now</p></div><span>→</span>
+      <div class="card"><h3>One bounded run</h3><p>oldest eligible event first<br>one active stream<br>deadline + AbortController</p></div><span>→</span>
+      <div class="card"><h3>Outcome</h3><p>success / terminal blocker<br>or backoff 1 s → 5 min + jitter</p></div>
+    </div>
+    <p class="subtitle">Offline, timeout, 429 và 5xx giữ queue. Device refresh chỉ xảy ra một lần khi cần. Revoke/reuse giữ queue và yêu cầu đăng nhập lại. Suspend/cancel ghi trạng thái có thể tiếp tục, không phải lỗi terminal.</p>
+  </section>
+
+  <div class="split">
+    <section class="mockup"><div class="mockup-header">Không làm</div><div class="mockup-body"><ul><li>Không tự upload toàn Vault.</li><li>Không quét đệ quy định kỳ trong child 4.</li><li>Không khóa editor, xóa local file hoặc làm hết hạn thay đổi chưa sync.</li><li>Không retry loop sau plugin unload hoặc mobile suspend.</li></ul></div></section>
+    <section class="mockup"><div class="mockup-header">Correctness repair về sau</div><div class="mockup-body"><p>Watcher drop, SQLite loss, queue-cap recovery hoặc remote divergence đặt <code>reconcile_required</code>. Child 6 sở hữu manifest reconciliation và cursor repair.</p></div></section>
+  </div>
+</body>
+</html>

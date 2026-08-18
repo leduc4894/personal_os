@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Plugin journal — UX và vận hành tối thiểu</title>
+  <style>
+    body { font-family: Inter, system-ui, sans-serif; max-width: 960px; margin: 40px auto; padding: 0 24px; color: #172033; background: #f7f9fc; }
+    h1 { margin-bottom: 4px; } .subtitle { color: #5c687d; line-height: 1.55; }
+    .panel { margin-top: 18px; padding: 18px 22px; border: 1px solid #ccd5e2; border-radius: 12px; background: #fff; box-shadow: 0 3px 12px #17203312; }
+    .status { display: flex; flex-wrap: wrap; gap: 10px; } .pill { padding: 7px 10px; border-radius: 18px; background: #eaf1fb; color: #254d80; font-weight: 650; }
+    table { width: 100%; border-collapse: collapse; } th, td { padding: 10px; text-align: left; vertical-align: top; border-bottom: 1px solid #e1e6ee; } th { color: #526176; }
+    code { background: #edf2f8; padding: 2px 4px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Phần 6 — UX tối thiểu và vận hành</h1>
+  <p class="subtitle">Queue minh bạch, không có thao tác upload toàn Vault ngầm.</p>
+
+  <section class="panel"><h2>Status</h2><div class="status"><span class="pill">Ready</span><span class="pill">Syncing</span><span class="pill">Offline — queued</span><span class="pill">Login required</span><span class="pill">Policy blocked</span><span class="pill">Reconcile required</span></div><p>Plugin hiển thị số event theo queue; UI local có thể hiển thị file người dùng thao tác, nhưng telemetry/log không chứa path, content, token hoặc hash.</p></section>
+  <section class="panel"><h2>Commands</h2><ul><li><strong>Sync now</strong>: chạy một foreground queue pass cho event đủ điều kiện.</li><li><strong>Sync existing files</strong>: yêu cầu xác nhận, rồi quét snapshot theo batch.</li></ul><p>Không có auto scan hoặc nút “sync everything” ngầm.</p></section>
+  <section class="panel"><h2>Blocker và hành động</h2><table><thead><tr><th>State</th><th>Thông báo / hành động</th></tr></thead><tbody><tr><td><code>blocked_size</code></td><td>Giải thích giới hạn 16 MiB; chờ multipart child sau.</td></tr><tr><td><code>excluded_policy</code></td><td>Chỉ hiển thị lý do an toàn; làm mới policy khi có quyền.</td></tr><tr><td><code>blocked_conflict</code> / <code>deferred_lifecycle</code></td><td>Báo chờ lifecycle/conflict flow; tuyệt đối không ghi đè.</td></tr><tr><td>Login required</td><td>Mở web login; queue giữ nguyên.</td></tr><tr><td><code>reconcile_required</code></td><td>Tạm dừng queue driver và hướng dẫn reconciliation khi child 6 sẵn sàng.</td></tr></tbody></table></section>
+  <section class="panel"><h2>Redacted instrumentation</h2><p>Chỉ đếm enqueue, coalesce, preflight/upload outcome, retry, blocker và persistence recovery; không gửi raw payload.</p></section>
+</body>
+</html>

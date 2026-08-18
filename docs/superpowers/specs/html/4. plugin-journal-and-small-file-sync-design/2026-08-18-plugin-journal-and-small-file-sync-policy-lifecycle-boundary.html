@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Plugin journal — Policy và lifecycle boundary</title>
+  <style>
+    body { font-family: Inter, system-ui, sans-serif; max-width: 960px; margin: 40px auto; padding: 0 24px; color: #172033; background: #f7f9fc; }
+    h1 { margin-bottom: 4px; } .subtitle { color: #5c687d; line-height: 1.55; }
+    .lane { display: grid; grid-template-columns: 190px 1fr; margin-top: 18px; border: 1px solid #ccd5e2; border-radius: 12px; overflow: hidden; background: #fff; box-shadow: 0 3px 12px #17203312; }
+    .label { padding: 18px; font-weight: 700; color: #fff; background: #2d5b98; } .content { padding: 10px 20px; line-height: 1.55; }
+    .safe { color: #146c43; font-weight: 700; } .later { color: #8a4f00; font-weight: 700; }
+    code { background: #edf2f8; padding: 2px 4px; border-radius: 4px; }
+    @media (max-width: 640px) { .lane { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <h1>Phần 5 — Policy, privacy và lifecycle boundary</h1>
+  <p class="subtitle">Policy fail-closed bảo vệ Vault; lifecycle mutation chưa thuộc child 4.</p>
+
+  <section class="lane">
+    <div class="label">Policy gate</div>
+    <div class="content"><p>Capture và preflight đều evaluate snapshot cục bộ. <code>excluded</code> hoặc <code>indeterminate</code> chuyển event sang <code>excluded_policy</code>, không upload và không retry.</p><p>Preflight mang verified policy revision; server kiểm tra lại. Server trả <code>excluded</code> cũng là terminal safe state. Chỉ snapshot hợp lệ mới cho phép re-evaluate event.</p></div>
+  </section>
+  <section class="lane">
+    <div class="label">Privacy</div>
+    <div class="content"><p>SQLite giữ local path và metadata cần cho sync, không giữ file bytes, access/refresh token, raw policy rule hay telemetry nhạy cảm. Log/metrics không chứa path, hash, payload hoặc token.</p></div>
+  </section>
+  <section class="lane">
+    <div class="label">Identity</div>
+    <div class="content"><p><code>local_file_id</code> chỉ ổn định trong plugin. Tạo source mới chỉ commit <code>source</code>/<code>source_version</code> sau khi server nhận và xác minh bytes; receipt mới trả <code>source_id</code> và version. Client không mint canonical ID.</p></div>
+  </section>
+  <section class="lane">
+    <div class="label">Deferred work</div>
+    <div class="content"><p><span class="safe">Child 4:</span> phát hiện file mất, rename, move, delete hoặc restore thì đánh dấu <code>deferred_lifecycle</code> và ngừng network mutation cho thực thể đó.</p><p><span class="later">Child 5:</span> locator, tombstone và lifecycle mutation. Child 4 không tự coi path mới là create, không rebind path, không tombstone và không xóa local file.</p><p><span class="later">Conflict UI:</span> <code>blocked_conflict</code> không retry, overwrite hoặc tự tạo bản sao; giữ metadata để xử lý sau.</p></div>
+  </section>
+</body>
+</html>
