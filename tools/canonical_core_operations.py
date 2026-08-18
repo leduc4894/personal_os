@@ -1503,7 +1503,12 @@ def main(
 
     resolution = create_diagnostic_context()
     try:
-        payload = asyncio.run(
+        payload = asyncio.Runner(
+            # psycopg async refuses the Windows Proactor loop that a bare
+            # ``asyncio.run`` selects on win32; the database-touching
+            # operations below require a selector-backed loop on every host.
+            loop_factory=asyncio.SelectorEventLoop,
+        ).run(
             _dispatch(
                 arguments,
                 environ=os.environ if environ is None else environ,

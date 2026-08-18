@@ -100,7 +100,7 @@ class RecordingServerFactory:
             def __init__(self, prepared: Any) -> None:
                 self.config = prepared
 
-            def run(self) -> None:
+            async def serve(self) -> None:
                 return None
 
         return _Server(config)

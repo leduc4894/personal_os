@@ -660,3 +660,36 @@ def test_runbook_documents_the_canonical_core_operations_command() -> None:
         "canonical-core phase-one-acceptance command that seeds the signed "
         "empty policy"
     )
+
+
+def test_bootstrap_identity_runs_on_a_selector_event_loop(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Operations must execute on a psycopg-async compatible loop.
+
+    psycopg async refuses the Windows Proactor loop that a bare
+    ``asyncio.run`` selects on win32, so every database-touching operation
+    of this tool must run through a SelectorEventLoop runner (the same
+    contract the API CLI commands follow). On Unix the default loop is
+    already selector-backed, so the assertion holds everywhere.
+    """
+
+    observed: dict[str, asyncio.AbstractEventLoop] = {}
+
+    class _LoopRecordingComposition:
+        async def run(self) -> Mapping[str, object]:
+            observed["loop"] = asyncio.get_running_loop()
+            return {"result_code": "identity_bootstrap_created"}
+
+    def _compose(invocation: object, environ: Mapping[str, str]) -> object:
+        del invocation, environ
+        return _LoopRecordingComposition()
+
+    exit_code = main(
+        list(_BOOTSTRAP_ARGUMENTS),
+        environ=_LOCAL_ENVIRONMENT,
+        compose_bootstrap_identity=_compose,  # type: ignore[arg-type]
+    )
+
+    assert exit_code == int(CanonicalCoreExitCode.OK)
+    assert isinstance(observed["loop"], asyncio.SelectorEventLoop)

@@ -1,11 +1,26 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Coroutine, Sequence
 from typing import NoReturn
 
 from personal_os.command_shell import CommandIdentity, run_bootstrap_command
 
 IDENTITY = CommandIdentity("personal-worker", "Temporal worker process shell")
+
+
+def _run_worker_process(coroutine: Coroutine[None, None, None]) -> None:
+    """Run one worker process coroutine on a psycopg-compatible loop.
+
+    psycopg async refuses the Windows Proactor loop that a bare
+    ``asyncio.run`` selects on win32, and every worker process opens
+    PostgreSQL connections inside its Temporal activities, so the process
+    loop must be selector-backed on every host. The import stays lazy: the
+    shell-only paths of this module must not import asyncio at module load.
+    """
+    import asyncio
+
+    asyncio.Runner(loop_factory=asyncio.SelectorEventLoop).run(coroutine)
+
 
 #: The exact process-shell argument selecting the projection dispatcher loop.
 DISPATCH_PROJECTIONS_ARGUMENT = "dispatch-projections"
@@ -27,13 +42,11 @@ def _check_runtime() -> int:
 
 
 def _dispatch_projections() -> int:
-    import asyncio
-
     from personal_os.error_contracts.exceptions import ApplicationError
     from workflow_worker.projection_dispatch_runtime import run_projection_dispatcher_process
 
     try:
-        asyncio.run(run_projection_dispatcher_process())
+        _run_worker_process(run_projection_dispatcher_process())
     except ApplicationError as error:
         print(f"projection_dispatcher_failed {error.error_code.value}")
         return 78
@@ -41,13 +54,11 @@ def _dispatch_projections() -> int:
 
 
 def _run_policy_previews() -> int:
-    import asyncio
-
     from personal_os.error_contracts.exceptions import ApplicationError
     from workflow_worker.policy_workflow_runtime import run_policy_preview_process
 
     try:
-        asyncio.run(run_policy_preview_process())
+        _run_worker_process(run_policy_preview_process())
     except ApplicationError as error:
         print(f"policy_preview_worker_failed {error.error_code.value}")
         return 78
@@ -55,13 +66,11 @@ def _run_policy_previews() -> int:
 
 
 def _run_policy_reconciliations() -> int:
-    import asyncio
-
     from personal_os.error_contracts.exceptions import ApplicationError
     from workflow_worker.policy_workflow_runtime import run_policy_reconciliation_process
 
     try:
-        asyncio.run(run_policy_reconciliation_process())
+        _run_worker_process(run_policy_reconciliation_process())
     except ApplicationError as error:
         print(f"policy_reconciliation_worker_failed {error.error_code.value}")
         return 78

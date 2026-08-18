@@ -12,6 +12,7 @@ secret paths never reach the output.
 
 from __future__ import annotations
 
+import asyncio
 import atexit
 import logging
 import tempfile
@@ -85,9 +86,11 @@ class RecordingServer:
 
     def __init__(self, config: uvicorn.Config) -> None:
         self.config = config
+        self.observed_loop: asyncio.AbstractEventLoop | None = None
 
-    def run(self) -> None:
+    async def serve(self) -> None:
         """Simulate an immediately clean shutdown without binding a socket."""
+        self.observed_loop = asyncio.get_running_loop()
         return None
 
 
@@ -96,11 +99,14 @@ class RecordingServerFactory:
 
     def __init__(self) -> None:
         self.config: uvicorn.Config | None = None
+        self.last_server: RecordingServer | None = None
 
     def __call__(self, config: uvicorn.Config) -> RecordingServer:
         assert self.config is None, "run_server must prepare exactly one server"
         self.config = config
-        return RecordingServer(config)
+        server = RecordingServer(config)
+        self.last_server = server
+        return server
 
 
 class ExplodingServerFactory:
@@ -112,13 +118,13 @@ class ExplodingServerFactory:
 
 
 class ExitingServer(RecordingServer):
-    """Server whose run raises ``SystemExit`` like Uvicorn on bind failure."""
+    """Server whose serve raises ``SystemExit`` like Uvicorn on bind failure."""
 
     def __init__(self, exit_code: int | None, config: uvicorn.Config) -> None:
         super().__init__(config)
         self.exit_code = exit_code
 
-    def run(self) -> None:
+    async def serve(self) -> None:
         raise SystemExit(self.exit_code)
 
 
@@ -143,6 +149,25 @@ def test_server_disables_version_and_proxy_headers() -> None:
     assert captured.config.reload is False
     assert captured.config.workers == 1
     assert captured.config.access_log is False
+
+
+def test_server_serves_on_a_selector_event_loop() -> None:
+    """The serving loop must be psycopg-async compatible.
+
+    psycopg async connections refuse the Windows Proactor loop, and
+    Uvicorn's own loop factory selects ProactorEventLoop on win32; the
+    runner therefore must serve the application on a SelectorEventLoop
+    itself instead of delegating to ``Server.run``.
+    """
+
+    captured = RecordingServerFactory()
+    result = run_server(environ=LOCAL_ENVIRONMENT, server_factory=captured)
+
+    assert result == 0
+    assert captured.config is not None
+    server = captured.last_server
+    assert server is not None
+    assert isinstance(server.observed_loop, asyncio.SelectorEventLoop)
 
 
 def test_server_builds_local_application_with_openapi_route() -> None:

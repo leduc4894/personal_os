@@ -29,6 +29,7 @@ invocations never load FastAPI or Uvicorn.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -77,7 +78,7 @@ class RunnableUvicornServer(Protocol):
     @property
     def config(self) -> uvicorn.Config: ...
 
-    def run(self) -> None: ...
+    async def serve(self) -> None: ...
 
 
 class ServerFactory(Protocol):
@@ -168,7 +169,12 @@ def run_server(
                 workers=1,
             )
             server = server_factory(server_config)
-            server.run()
+            # psycopg async refuses the Windows Proactor loop, and Uvicorn's
+            # own loop factory selects ProactorEventLoop on win32, so the
+            # application (whose lifespan opens PostgreSQL connections) must
+            # be served on an explicitly selected SelectorEventLoop instead
+            # of through ``Server.run``.
+            asyncio.Runner(loop_factory=asyncio.SelectorEventLoop).run(server.serve())
         except SystemExit as exit_request:
             # Uvicorn aborts low-level startup (for example a bind failure)
             # through ``sys.exit``; translate it into the documented exits
