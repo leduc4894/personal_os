@@ -18,6 +18,7 @@ statements under test.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -459,3 +460,138 @@ def test_transition_counter_labels_stay_closed() -> None:
     assert frozenset(transition.value for transition in ReconciliationTransition) == frozenset(
         {"to_excluded", "to_allowed", "unchanged"}
     )
+
+
+# --- batch flow over a fake engine ----------------------------------------------------
+
+
+@dataclass
+class _FakeResult:
+    """Minimal async result surface the batch flow consumes."""
+
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    scalar: Any = None
+
+    def mappings(self) -> _FakeResult:
+        return self
+
+    def all(self) -> list[dict[str, Any]]:
+        return list(self.rows)
+
+    def first(self) -> dict[str, Any] | None:
+        return self.rows[0] if self.rows else None
+
+    def one_or_none(self) -> dict[str, Any] | None:
+        return self.rows[0] if self.rows else None
+
+    def scalar_one_or_none(self) -> Any:
+        return self.scalar
+
+
+class _FakeConnection:
+    """One transaction's scripted statements over an in-memory page."""
+
+    def __init__(self, script: dict[str, _FakeResult]) -> None:
+        self._script = script
+        self.executed: list[str] = []
+
+    async def execute(self, statement: Any) -> _FakeResult:
+        if isinstance(statement, sa.TextClause):
+            self.executed.append(str(statement))
+            return _FakeResult()
+        compiled = str(statement.compile(dialect=postgresql.dialect()))
+        self.executed.append(compiled)
+        for discriminator, result in self._script.items():
+            if discriminator in compiled:
+                return result
+        raise AssertionError(f"unexpected statement: {compiled[:120]}")
+
+    def begin(self) -> _FakeConnection:
+        return self
+
+    async def __aenter__(self) -> _FakeConnection:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+
+class _FakeEngine:
+    """Engine stub handing the store one scripted connection."""
+
+    def __init__(self, connection: _FakeConnection) -> None:
+        self._connection = connection
+
+    def connect(self) -> _FakeConnection:
+        return self._connection
+
+
+def _eventless_page_script(active_id: UUID) -> dict[str, _FakeResult]:
+    """Script the batch flow over one page whose sources have no events."""
+
+    revision_row = {
+        "policy_revision_id": POLICY_REVISION_ID,
+        "revision_number": 1,
+        "parent_policy_revision_id": None,
+        "published_at": NOW,
+    }
+    eventless_page = [
+        {
+            "source_id": SOURCE_ID,
+            "source_type": "markdown",
+            "current_version_id": None,
+            "media_type": None,
+            "byte_size": None,
+            "subject_event_sequence": None,
+        }
+    ]
+    return {
+        "workspace_policy_state": _FakeResult(scalar=active_id),
+        "parent_policy_revision_id": _FakeResult(rows=[revision_row]),
+        "policy_rules": _FakeResult(rows=[]),
+        "FROM knowledge.sources": _FakeResult(rows=eventless_page),
+    }
+
+
+@pytest.mark.asyncio
+async def test_all_eventless_page_completes_the_batch_without_writes() -> None:
+    """A page whose sources all lack canonical events still completes.
+
+    The page read tolerates sources without any canonical event (there is no
+    subject state to evaluate), so a whole page of them must commit as an
+    empty batch — cursor advanced, zero evaluations, zero intents — instead
+    of crashing the pre-write recheck's empty-source statement builder and
+    leaving the reconciliation in a non-converging retry loop.
+    """
+
+    from personal_os.exclusion_policy.reconciliation import ReconciliationProgress
+    from postgresql_source_store.policy_drafts import PolicyDatabaseRetryPolicy
+    from postgresql_source_store.policy_reconciliation import (
+        PostgresqlPolicyReconciliationStore,
+    )
+
+    connection = _FakeConnection(_eventless_page_script(POLICY_REVISION_ID))
+    store = PostgresqlPolicyReconciliationStore(
+        _FakeEngine(connection),  # type: ignore[arg-type]
+        retry=PolicyDatabaseRetryPolicy(maximum_attempts=1),
+    )
+    heartbeats: list[ReconciliationProgress] = []
+
+    async def heartbeat(progress: ReconciliationProgress) -> None:
+        heartbeats.append(progress)
+
+    outcome = await store.run_reconciliation_batch(
+        WORKSPACE_ID, POLICY_REVISION_ID, 0, None, heartbeat
+    )
+
+    assert outcome.superseded is False
+    assert outcome.has_more is False
+    assert outcome.last_source_id == SOURCE_ID
+    assert outcome.evaluated_sources == 0
+    assert outcome.to_excluded_sources == 0
+    assert outcome.to_allowed_sources == 0
+    assert outcome.unchanged_sources == 0
+    # The one committed batch heartbeats its (empty) progress, and no write
+    # statement ever executed: neither evaluations nor intents exist.
+    assert heartbeats == [ReconciliationProgress(evaluated_sources=0, batch_count=1)]
+    assert all("INSERT" not in compiled for compiled in connection.executed)

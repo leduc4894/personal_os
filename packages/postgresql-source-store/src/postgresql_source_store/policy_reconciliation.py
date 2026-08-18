@@ -1114,27 +1114,31 @@ class PostgresqlPolicyReconciliationStore:
             )
             # The pre-write recheck: the pointer must still name the target
             # revision and every planned subject sequence must still match,
-            # otherwise nothing is written and the retry replans.
+            # otherwise nothing is written and the retry replans. A page with
+            # no evaluable source (every sequence absent) plans nothing, so
+            # the sequence recheck is skipped exactly like the writes below —
+            # its statement builder rejects an empty source set.
             if not await self._revision_still_active(connection, workspace_id, policy_revision_id):
                 return self._superseded_outcome()
-            recheck_rows = (
-                (
-                    await connection.execute(
-                        batch_sequences_select_statement(
-                            workspace_id, [item.evaluation.source_id for item in planned]
+            if planned:
+                recheck_rows = (
+                    (
+                        await connection.execute(
+                            batch_sequences_select_statement(
+                                workspace_id, [item.evaluation.source_id for item in planned]
+                            )
                         )
                     )
+                    .mappings()
+                    .all()
                 )
-                .mappings()
-                .all()
-            )
-            verify_planned_batch_sequences(
-                {
-                    item.evaluation.source_id: item.evaluation.subject_event_sequence
-                    for item in planned
-                },
-                list(recheck_rows),
-            )
+                verify_planned_batch_sequences(
+                    {
+                        item.evaluation.source_id: item.evaluation.subject_event_sequence
+                        for item in planned
+                    },
+                    list(recheck_rows),
+                )
             await self._write_evaluations(connection, workspace_id, policy_revision_id, planned)
             await self._write_transition_intents(
                 connection, workspace_id, policy_revision_id, planned
