@@ -29,6 +29,13 @@ export const MAX_JOURNAL_SIZE_BYTES = 64 * 1024 * 1024;
 /** Per-file watcher settle delay before fingerprinting: 250 ms (spec 7.1). */
 export const FILE_SETTLE_DELAY_MS = 250;
 
+/**
+ * Most recent attempts retained per event in the bounded `journal_attempts`
+ * ring (spec 6.3): older rows are pruned inside the same transaction, so the
+ * audit trail stays closed and bounded.
+ */
+export const MAX_EVENT_ATTEMPT_HISTORY = 10;
+
 // --- closed event states (spec 7.2) ----------------------------------------------------
 
 /**
@@ -51,6 +58,31 @@ export const JOURNAL_EVENT_STATES = [
 ] as const;
 
 export type JournalEventState = (typeof JOURNAL_EVENT_STATES)[number];
+
+/**
+ * The states that count toward the 10,000 pending-event soft limit (spec 6.4):
+ * every state that still owes work, as opposed to the closed terminal states.
+ */
+export const JOURNAL_PENDING_EVENT_STATES = [
+  "queued",
+  "preflight",
+  "uploading",
+  "waiting_retry",
+] as const satisfies readonly JournalEventState[];
+
+export type JournalPendingEventState = (typeof JOURNAL_PENDING_EVENT_STATES)[number];
+
+/**
+ * The states in which an unsent same-file event may still be replaced by a
+ * later current fingerprint (spec 7.2): `queued` or `waiting_retry` with a
+ * preflight that has not started yet.
+ */
+export const JOURNAL_COALESCABLE_EVENT_STATES = [
+  "queued",
+  "waiting_retry",
+] as const satisfies readonly JournalEventState[];
+
+export type JournalCoalescableEventState = (typeof JOURNAL_COALESCABLE_EVENT_STATES)[number];
 
 /** The five terminal states that never receive automatic retry (spec 7.2). */
 export const JOURNAL_NON_RETRY_EVENT_STATES = [
@@ -127,6 +159,20 @@ export type JournalRecoveryState = (typeof JOURNAL_RECOVERY_STATES)[number];
 
 // --- logical records (spec 6.3) ----------------------------------------------------------------
 
+/**
+ * The closed capture admission outcomes of spec 7.1: a successful current
+ * policy decision for a regular allowed file, or the two fail-closed blocks
+ * (`blocked_size` above 16 MiB, `excluded_policy` for excluded/indeterminate
+ * policy) that record a born-terminal event and never retry.
+ */
+export const JOURNAL_CAPTURE_ADMISSIONS = [
+  "policy_allowed",
+  "blocked_size",
+  "excluded_policy",
+] as const;
+
+export type JournalCaptureAdmission = (typeof JOURNAL_CAPTURE_ADMISSIONS)[number];
+
 /** The supported journal operations of this child; lifecycle is child 5. */
 export type JournalOperation = "create" | "update";
 
@@ -174,6 +220,19 @@ export interface JournalEvent {
   readonly nextEligibleRetryEpochMs: number | null;
   readonly safeError: JournalSafeErrorLabel | null;
   readonly operationId: string | null;
+}
+
+/**
+ * One bounded attempt-audit row of `journal_attempts` (spec 6.3): a
+ * timestamp, one closed safe error label and an opaque request correlation
+ * ID — and nothing else. Paths, digests and provider detail never enter this
+ * record, so the attempted-event history is redacted by construction.
+ */
+export interface JournalAttempt {
+  readonly eventId: string;
+  readonly attemptedAtEpochMs: number;
+  readonly outcomeLabel: JournalSafeErrorLabel;
+  readonly requestCorrelationId: string;
 }
 
 /**

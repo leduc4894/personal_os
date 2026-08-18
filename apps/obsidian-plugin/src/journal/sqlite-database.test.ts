@@ -98,6 +98,24 @@ describe("SqliteDatabase schema migration bookkeeping (spec 6.3)", () => {
     );
   });
 
+  it("rejects an older schema version as unsupported, distinct from a non-journal image", async () => {
+    const database = SqliteDatabase.createEmpty(engineModule, createJournalMeta());
+    const rawOlderEngine = new engineModule.Database(database.exportImage());
+    rawOlderEngine.exec(`pragma user_version = ${JOURNAL_SCHEMA_VERSION - 1}`);
+    const olderImage = rawOlderEngine.export();
+    rawOlderEngine.close();
+    database.close();
+
+    // An older journal lineage is a schema problem, never conflated with
+    // bytes that are not a journal image at all.
+    expect(() => SqliteDatabase.openFromImage(engineModule, olderImage)).toThrow(
+      JournalStoreError,
+    );
+    expect(() => SqliteDatabase.openFromImage(engineModule, olderImage)).toThrowError(
+      expect.objectContaining({ reason: "journal_schema_unsupported" }),
+    );
+  });
+
   it("rejects bytes that are not a SQLite journal image", () => {
     const garbage = new TextEncoder().encode("definitely not a sqlite image");
     expect(() => SqliteDatabase.openFromImage(engineModule, garbage)).toThrowError(

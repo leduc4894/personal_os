@@ -5,10 +5,11 @@
  * The journal opens SQLite only through the vendored sql.js WebAssembly
  * package — never a Node built-in, Electron API, native SQLite driver or an
  * ORM — and every database mutation flows through ONE serialized async queue
- * wrapped in an explicit transaction. This module owns the logical
- * `journal_meta` record of spec 6.3 and its `user_version` migration
- * bookkeeping; later journal modules add the remaining records on top of the
- * same serialized writer.
+ * wrapped in an explicit transaction. This module owns the full logical
+ * schema of spec 6.3 (`journal_meta`, `local_files`, `journal_events` and
+ * the bounded `journal_attempts`) and its `user_version` migration
+ * bookkeeping; the repository builds records on top of the same serialized
+ * writer.
  *
  * Privacy (spec 9): every failure surfaces as a closed reason token on
  * {@link JournalStoreError}. Library exceptions, SQL text, paths and digests
@@ -22,8 +23,12 @@ import type { JournalMeta, JournalRecoveryState } from "./contracts";
 
 // --- closed schema bookkeeping (spec 6.3) ----------------------------------------------
 
-/** The journal logical schema version this build writes and understands. */
-export const JOURNAL_SCHEMA_VERSION = 1;
+/**
+ * The journal logical schema version this build writes and understands.
+ * Version 2 added the `local_files`, `journal_events` and `journal_attempts`
+ * records of spec 6.3 on top of the version-1 `journal_meta` skeleton.
+ */
+export const JOURNAL_SCHEMA_VERSION = 2;
 
 // --- closed failure reasons ---------------------------------------------------------------
 
@@ -102,7 +107,7 @@ export type SqliteEngineLoader = (options?: SqliteEngineLoadOptions) => Promise<
  */
 export const loadVendoredSqliteEngine: SqliteEngineLoader = (options) => initSqlJs(options);
 
-// --- journal_meta schema (spec 6.3) ----------------------------------------------------------
+// --- journal schema (spec 6.3) ------------------------------------------------------------------
 
 const JOURNAL_META_DDL = `
 create table if not exists journal_meta (
@@ -114,6 +119,79 @@ create table if not exists journal_meta (
   recovery_state text not null
 );
 `;
+
+/**
+ * The per-file source-mapping record of spec 6.3: a random plugin-local
+ * identity (never a canonical locator), the normalized current path, the
+ * nullable server `source_id`, the observed fingerprint, the last committed
+ * base version and the policy revision of the observation.
+ */
+const LOCAL_FILES_DDL = `
+create table if not exists local_files (
+  local_file_id text primary key,
+  normalized_path text not null unique,
+  source_id text,
+  observed_sha256 text not null,
+  observed_size_bytes integer not null check (observed_size_bytes >= 0),
+  observed_media_type text not null,
+  base_version_id text,
+  policy_revision integer not null check (policy_revision >= 0)
+);
+`;
+
+/**
+ * The durable create/update intent of spec 6.3/7.2, including the freeze
+ * marker that makes the fingerprint immutable from the moment preflight
+ * starts — a later save then needs a successor event, never an update.
+ */
+const JOURNAL_EVENTS_DDL = `
+create table if not exists journal_events (
+  event_id text primary key,
+  local_file_id text not null references local_files (local_file_id),
+  idempotency_key text not null unique,
+  operation text not null check (operation in ('create', 'update')),
+  sha256 text not null,
+  size_bytes integer not null check (size_bytes >= 0),
+  media_type text not null,
+  state text not null check (state in ('queued', 'preflight', 'uploading', 'committed',
+    'no_change', 'waiting_retry', 'excluded_policy', 'blocked_size', 'blocked_conflict',
+    'deferred_lifecycle', 'integrity_failed')),
+  is_fingerprint_frozen integer not null check (is_fingerprint_frozen in (0, 1)),
+  attempt_count integer not null check (attempt_count >= 0),
+  next_eligible_retry_epoch_ms integer,
+  safe_error text,
+  operation_id text,
+  created_at_epoch_ms integer not null check (created_at_epoch_ms >= 0)
+);
+create index if not exists journal_events_file_created_idx
+  on journal_events (local_file_id, created_at_epoch_ms);
+create index if not exists journal_events_state_idx on journal_events (state);
+`;
+
+/**
+ * The bounded attempt-audit ring of spec 6.3: timestamp, closed outcome
+ * label and opaque request correlation ID only. The repository prunes to the
+ * most recent `MAX_EVENT_ATTEMPT_HISTORY` rows per event inside the same
+ * transaction as every insert.
+ */
+const JOURNAL_ATTEMPTS_DDL = `
+create table if not exists journal_attempts (
+  attempt_ordinal integer primary key autoincrement,
+  event_id text not null references journal_events (event_id),
+  attempted_at_epoch_ms integer not null check (attempted_at_epoch_ms >= 0),
+  outcome_label text not null,
+  request_correlation_id text not null
+);
+create index if not exists journal_attempts_event_idx
+  on journal_attempts (event_id, attempt_ordinal);
+`;
+
+const JOURNAL_SCHEMA_DDL = [
+  JOURNAL_META_DDL,
+  LOCAL_FILES_DDL,
+  JOURNAL_EVENTS_DDL,
+  JOURNAL_ATTEMPTS_DDL,
+].join("");
 
 function isJournalRecoveryState(value: unknown): value is JournalRecoveryState {
   return (
@@ -179,6 +257,8 @@ function parseJournalMetaRow(row: readonly unknown[]): JournalMeta {
 export interface SqliteMutationSession {
   /** Run SQL inside the open transaction (validated, journal-scoped use only). */
   exec(sql: string): void;
+  /** Run a read-only query inside the open transaction and read its rows. */
+  readRows(sql: string): SqliteQueryResult[];
   readJournalMeta(): JournalMeta;
   writeJournalMeta(meta: JournalMeta): void;
 }
@@ -207,7 +287,7 @@ export class SqliteDatabase {
     validateJournalMeta(initialMeta);
     const database = new SqliteDatabase(new engineModule.Database());
     try {
-      database.#engine.exec(JOURNAL_META_DDL);
+      database.#engine.exec(JOURNAL_SCHEMA_DDL);
       database.#engine.exec(
         [
           "insert into journal_meta (singleton_key, schema_version, dirty_generation,",
@@ -227,8 +307,11 @@ export class SqliteDatabase {
 
   /**
    * Open a persisted journal image. The image must carry exactly the schema
-   * version this build understands; anything older, newer or not a journal
-   * image at all fails closed without executing any of its statements.
+   * version this build understands: an older or newer journal lineage fails
+   * closed as `journal_schema_unsupported` (a migration problem, never
+   * conflated with a non-journal image), while bytes that are not a journal
+   * image at all fail as `journal_image_invalid` — in both cases without
+   * executing any of the image's statements.
    */
   static openFromImage(
     engineModule: SqliteEngineModule,
@@ -239,11 +322,7 @@ export class SqliteDatabase {
       engine = new engineModule.Database(image);
       const schemaVersion = SqliteDatabase.#readSchemaVersionOf(engine);
       if (schemaVersion !== JOURNAL_SCHEMA_VERSION) {
-        throw journalStoreError(
-          schemaVersion > JOURNAL_SCHEMA_VERSION
-            ? "journal_schema_unsupported"
-            : "journal_image_invalid",
-        );
+        throw journalStoreError("journal_schema_unsupported");
       }
       const database = new SqliteDatabase(engine);
       // Reading the meta row proves the journal schema is really present.
@@ -341,6 +420,13 @@ export class SqliteDatabase {
       const session: SqliteMutationSession = {
         exec: (sql: string): void => {
           this.#engine.exec(sql);
+        },
+        readRows: (sql: string): SqliteQueryResult[] => {
+          try {
+            return this.#engine.exec(sql);
+          } catch {
+            throw journalStoreError("journal_query_failed");
+          }
         },
         readJournalMeta: (): JournalMeta => this.readJournalMeta(),
         writeJournalMeta: (meta: JournalMeta): void => {
