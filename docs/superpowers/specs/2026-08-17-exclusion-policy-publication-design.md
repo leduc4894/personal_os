@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-17
 
-**Status:** Implemented (2026-08-17); runtime contract in force — implementation record: `docs/handoff/2026-08-17-exclusion-policy-publication.md`, operator runbook: `docs/operations/exclusion-policy-publication.md`. Reference-device verification records (spec 23.5/25) remain outstanding and block final completion.
+**Status:** Implemented (2026-08-17); runtime contract in force — implementation record: `docs/handoff/2026-08-17-exclusion-policy-publication.md`, operator runbook: `docs/operations/exclusion-policy-publication.md`. Reference-device verification records (spec 23.5/25) are complete: `docs/operations/exclusion-policy-device-verification.md` (Desktop + Mobile, 2026-08-18; the verification journey itself surfaced and fixed four cross-surface defects — commits `5c6670f`, `050387c`, the gate's missing `re.MULTILINE`, and the single-origin deployment alignment).
 
 **Owning program:** Phase 2 — Obsidian sync, child 3
 

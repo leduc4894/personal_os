@@ -45,7 +45,9 @@ REQUIRED_RECORD_LABELS: Final[tuple[str, ...]] = (
 _SECTION_HEADING_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^## (?P<title>Desktop|Mobile) reference device$", re.MULTILINE
 )
-_RECORD_PATTERN: Final[re.Pattern[str]] = re.compile(r"^- (?P<label>[^:]+): (?P<outcome>.+)$")
+_RECORD_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^- (?P<label>[^:]+): (?P<outcome>.+)$", re.MULTILINE
+)
 _DATED_OPERATOR_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^Recorded by .+ on (?P<date>\d{4}-\d{2}-\d{2})\.$", re.MULTILINE
 )
