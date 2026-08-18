@@ -279,6 +279,88 @@ OBJECT_STORAGE_EXIT_CODE_MEANINGS = (
 
 OBJECT_STORAGE_OPERATIONS_GUIDE = REPO_ROOT / "docs" / "operations" / "object-storage.md"
 
+# --- Exclusion-policy publication operator contract --------------------------
+# The exclusion-policy publication child (Phase 2, child 3) is operated through
+# a living runbook plus status records in the canonical docs. These constants
+# pin that surface the same way the object-storage guide is pinned above: the
+# exact gate commands, key-lifecycle commands, approved environment names,
+# workflow identities, recovery limits, lock order and safety warnings must
+# all exist verbatim so a silent docs regression fails CI.
+
+EXCLUSION_POLICY_OPERATIONS_GUIDE = (
+    REPO_ROOT / "docs" / "operations" / "exclusion-policy-publication.md"
+)
+EXCLUSION_POLICY_SPEC = (
+    REPO_ROOT
+    / "docs"
+    / "superpowers"
+    / "specs"
+    / "2026-08-17-exclusion-policy-publication-design.md"
+)
+EXCLUSION_POLICY_HANDOFF = (
+    REPO_ROOT / "docs" / "handoff" / "2026-08-17-exclusion-policy-publication.md"
+)
+SECURITY_POLICY_DOC = REPO_ROOT / "docs" / "14-SECURITY_PRIVACY_AND_POLICY.md"
+TESTING_EVALUATION_DOC = REPO_ROOT / "docs" / "16-TESTING_AND_EVALUATION.md"
+IMPLEMENTATION_PLAN_DOC = REPO_ROOT / "docs" / "20-IMPLEMENTATION_PLAN.md"
+
+# Every acceptance gate name the child defines; the runbook must document all
+# of them, including the device-verification gate that stays blocking while
+# the reference-device records are absent.
+EXCLUSION_POLICY_GATE_COMMANDS = (
+    "uv run poe exclusion-policy-test",
+    "pnpm run test:e2e:exclusion-policy",
+    "uv run pytest tests/performance/test_exclusion_policy_performance.py -m local_stack -q",
+    "uv run poe verify",
+    "uv run poe exclusion-policy-device-verification",
+)
+
+# The four offline signing-key lifecycle commands (spec 13.2/13.3), verbatim
+# with their placeholder arguments — copy-paste-safe, no real key material.
+EXCLUSION_POLICY_KEY_LIFECYCLE_COMMANDS = (
+    "personal-api policy-key initialize --workspace-id <uuid> --key-file-name policy_signing_a.pem",
+    "personal-api policy-key stage --workspace-id <uuid> --key-file-name policy_signing_b.pem",
+    "personal-api policy-key activate"
+    " --workspace-id <uuid> --staged-key-file-name policy_signing_b.pem",
+    "personal-api policy-key retire --workspace-id <uuid> --key-id <ed25519-sha256-…>",
+)
+
+# The policy-signer fragment of the approved environment names: identity and
+# exact secret-file name only — no plaintext private-key variable exists.
+EXCLUSION_POLICY_ENVIRONMENT_NAMES = (
+    "KNOWLEDGE_POLICY_SIGNING_KEY_ID",
+    "KNOWLEDGE_POLICY_SIGNING_KEY_FILE",
+)
+
+# Deterministic Temporal workflow identities (spec 10/15).
+EXCLUSION_POLICY_WORKFLOW_IDS = (
+    "exclusion-policy-preview/{workspace_id}/{policy_preview_id}",
+    "exclusion-policy-reconciliation/{workspace_id}/{policy_revision_id}",
+)
+
+# Recovery limits paired value-with-context so a bare digit cannot satisfy the
+# contract: preview expiry, scan/batch size, result page size, keyset page
+# size, rule cap and signed-envelope byte cap.
+EXCLUSION_POLICY_RECOVERY_LIMITS = (
+    ("15 minutes", "preview"),
+    ("500", "batch"),
+    ("200", "page"),
+    ("16", "keyset"),
+    ("256", "rules"),
+    ("256 KiB", "envelope"),
+)
+
+# Degraded states the runbook must cover with detection and recovery.
+EXCLUSION_POLICY_DEGRADED_STATES = (
+    "invalid signer",
+    "PostgreSQL unavailable",
+    "Temporal unavailable",
+    "stale preview",
+    "integrity failure",
+    "reconciliation lag",
+    "without the private key",
+)
+
 # Operator guarantees the operations guide must state verbatim (case-insensitive
 # for prose anchors): offline startup validation, liveness/readiness never call
 # R2, only the explicit command performs HeadBucket, credential rotation needs a
@@ -660,4 +742,196 @@ def test_operations_guide_states_the_r2_runtime_contract() -> None:
         "explicit command performs HeadBucket, rotation needs a process restart, "
         "encrypted/ephemeral spool storage, and production/test buckets and "
         f"credentials never cross; missing: {offenders}"
+    )
+
+
+def test_exclusion_policy_runbook_documents_every_acceptance_gate_command() -> None:
+    content = _read(EXCLUSION_POLICY_OPERATIONS_GUIDE)
+    missing = [command for command in EXCLUSION_POLICY_GATE_COMMANDS if command not in content]
+    assert not missing, (
+        "docs/operations/exclusion-policy-publication.md must document all "
+        f"exclusion-policy acceptance gate commands; missing: {missing}"
+    )
+
+
+def test_exclusion_policy_runbook_documents_key_lifecycle_commands() -> None:
+    content = _read(EXCLUSION_POLICY_OPERATIONS_GUIDE)
+    missing = [
+        command for command in EXCLUSION_POLICY_KEY_LIFECYCLE_COMMANDS if command not in content
+    ]
+    assert not missing, (
+        "docs/operations/exclusion-policy-publication.md must document the four "
+        f"policy-key lifecycle commands with placeholder arguments; missing: {missing}"
+    )
+
+
+def test_exclusion_policy_runbook_documents_signer_environment_names() -> None:
+    content = _read(EXCLUSION_POLICY_OPERATIONS_GUIDE)
+    missing = [name for name in EXCLUSION_POLICY_ENVIRONMENT_NAMES if name not in content]
+    assert not missing, (
+        "docs/operations/exclusion-policy-publication.md must document the two "
+        f"policy-signer environment names; missing: {missing}"
+    )
+
+
+def test_exclusion_policy_runbook_documents_both_workflow_identities() -> None:
+    content = _read(EXCLUSION_POLICY_OPERATIONS_GUIDE)
+    missing = [
+        workflow_id for workflow_id in EXCLUSION_POLICY_WORKFLOW_IDS if workflow_id not in content
+    ]
+    assert not missing, (
+        "docs/operations/exclusion-policy-publication.md must document both "
+        f"deterministic exclusion-policy workflow identities; missing: {missing}"
+    )
+
+
+def test_exclusion_policy_runbook_documents_recovery_limits() -> None:
+    content = _read(EXCLUSION_POLICY_OPERATIONS_GUIDE)
+    lower = content.lower()
+    offenders: list[str] = []
+    for value, context in EXCLUSION_POLICY_RECOVERY_LIMITS:
+        if value not in content or context not in lower:
+            offenders.append(f"recovery limit '{value}' (context '{context}')")
+    assert not offenders, (
+        "docs/operations/exclusion-policy-publication.md must document the "
+        "closed recovery limits: 15-minute preview expiry, 500-row batches, "
+        "200-row pages, 16-envelope keyset pages, 256 rules, 256 KiB envelope; "
+        f"missing: {offenders}"
+    )
+
+
+def test_exclusion_policy_runbook_states_the_frozen_lock_order() -> None:
+    content = _read(EXCLUSION_POLICY_OPERATIONS_GUIDE)
+    source_chain = "publication idempotency advisory lock → workspace_policy_state row → source row"
+    policy_chain = "policy idempotency advisory lock → workspace_policy_state row"
+    assert source_chain in content, (
+        "the runbook must state the frozen source/enforcement lock order as the "
+        f"contiguous chain: {source_chain}"
+    )
+    assert policy_chain in content, (
+        "the runbook must state the policy-publication lock order as the "
+        f"contiguous chain: {policy_chain}"
+    )
+
+
+def test_exclusion_policy_runbook_warns_private_key_never_enters_backup() -> None:
+    content = _read(EXCLUSION_POLICY_OPERATIONS_GUIDE)
+    assert any(
+        "private key" in line.lower()
+        and ("backup" in line.lower() or "back up" in line.lower())
+        and "separately" in line.lower()
+        for line in content.splitlines()
+    ), (
+        "the runbook must warn that the policy private key is not part of the "
+        "database backup and must be backed up separately"
+    )
+    assert any(
+        "secret file" in line.lower() and "not" in line.lower() and "backup" in line.lower()
+        for line in content.splitlines()
+    ), "the runbook must state the database backup does not include secret files"
+    assert "BEGIN PRIVATE KEY" not in content
+
+
+def test_exclusion_policy_runbook_states_rollback_by_new_revision_semantics() -> None:
+    content = _read(EXCLUSION_POLICY_OPERATIONS_GUIDE)
+    lower = content.lower()
+    for anchor in ("never edited", "never deleted", "new revision"):
+        assert anchor in lower, (
+            f"the runbook must state rollback-by-new-revision semantics (immutable "
+            f"history is never edited or deleted); missing anchor: '{anchor}'"
+        )
+
+
+def test_exclusion_policy_runbook_covers_every_degraded_state() -> None:
+    content = _read(EXCLUSION_POLICY_OPERATIONS_GUIDE)
+    lower = content.lower()
+    missing = [state for state in EXCLUSION_POLICY_DEGRADED_STATES if state.lower() not in lower]
+    assert not missing, (
+        "the runbook must cover detection and recovery for every degraded state: "
+        f"invalid signer, PostgreSQL/Temporal unavailable, stale preview, plugin "
+        f"integrity failure, reconciliation lag and restore without the private "
+        f"key; missing: {missing}"
+    )
+
+
+def test_exclusion_policy_runbook_documents_publication_confirmation_phrase() -> None:
+    content = _read(EXCLUSION_POLICY_OPERATIONS_GUIDE)
+    assert "PUBLISH EXCLUSION POLICY" in content, (
+        "the runbook must document the exact typed publication confirmation phrase"
+    )
+    assert "X-Idempotency-Key" in content, (
+        "the runbook must document the publication idempotency header name"
+    )
+
+
+def test_exclusion_policy_runbook_documents_device_verification_contract() -> None:
+    content = _read(EXCLUSION_POLICY_OPERATIONS_GUIDE)
+    lower = content.lower()
+    assert "docs/operations/exclusion-policy-device-verification.md" in content, (
+        "the runbook must point at the reference-device verification records file"
+    )
+    assert "desktop and mobile" in lower, (
+        "the runbook must require both Desktop and Mobile reference-device records"
+    )
+    assert "uv run poe exclusion-policy-device-verification" in content, (
+        "the runbook must name the device-verification gate command"
+    )
+
+
+def test_exclusion_policy_runbook_documents_canonical_core_empty_policy_seeding() -> None:
+    content = _read(EXCLUSION_POLICY_OPERATIONS_GUIDE)
+    assert "phase-one-acceptance" in content and "signed empty policy" in content, (
+        "the runbook must document that the Phase 1 canonical-core acceptance "
+        "command seeds a signed empty policy before content operations"
+    )
+
+
+def test_exclusion_policy_spec_status_records_implementation() -> None:
+    content = _read(EXCLUSION_POLICY_SPEC)
+    assert "Implemented (2026-08-17)" in content, (
+        "the exclusion-policy design spec must record its implemented status; "
+        "it may no longer describe the child as awaiting review or merely planned"
+    )
+
+
+def test_canonical_docs_no_longer_describe_child_three_as_planned() -> None:
+    plan = _read(IMPLEMENTATION_PLAN_DOC)
+    assert "implementation chưa bắt đầu" not in plan, (
+        "docs/20-IMPLEMENTATION_PLAN.md must no longer describe child 3 as "
+        "not-yet-started after implementation completed"
+    )
+    assert "hoàn thành (2026-08-17)" in plan, (
+        "docs/20-IMPLEMENTATION_PLAN.md must record child 3 completion with its "
+        "completion date, matching the child 1/2 status convention"
+    )
+    for link in (
+        "docs/operations/exclusion-policy-publication.md",
+        "docs/handoff/2026-08-17-exclusion-policy-publication.md",
+        "20260817_01",
+    ):
+        assert link in plan, f"docs/20-IMPLEMENTATION_PLAN.md must cite {link}"
+    security = _read(SECURITY_POLICY_DOC)
+    assert "docs/operations/exclusion-policy-publication.md" in security, (
+        "docs/14-SECURITY_PRIVACY_AND_POLICY.md must link the exclusion-policy operations runbook"
+    )
+    testing = _read(TESTING_EVALUATION_DOC)
+    for gate in ("exclusion-policy-test", "test:e2e:exclusion-policy"):
+        assert gate in testing, (
+            f"docs/16-TESTING_AND_EVALUATION.md must name the {gate} acceptance gate"
+        )
+
+
+def test_exclusion_policy_handoff_is_present_and_bounded() -> None:
+    content = _read(EXCLUSION_POLICY_HANDOFF)
+    line_count = len(content.splitlines())
+    assert line_count <= 400, (
+        f"the exclusion-policy handoff must stay under roughly 400 lines (found {line_count})"
+    )
+    assert "94a8a06" in content, (
+        "the handoff must record the Task 13 implementation head SHA 94a8a06"
+    )
+    lower = content.lower()
+    assert "reference-device" in lower and "blocking" in lower, (
+        "the handoff must present the absent Desktop/Mobile reference-device "
+        "verification records as the blocking deferred item"
     )

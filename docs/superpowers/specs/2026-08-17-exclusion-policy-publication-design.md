@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-17
 
-**Status:** Approved design; awaiting written-spec review
+**Status:** Implemented (2026-08-17); runtime contract in force — implementation record: `docs/handoff/2026-08-17-exclusion-policy-publication.md`, operator runbook: `docs/operations/exclusion-policy-publication.md`. Reference-device verification records (spec 23.5/25) remain outstanding and block final completion.
 
 **Owning program:** Phase 2 — Obsidian sync, child 3
 

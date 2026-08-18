@@ -133,12 +133,26 @@ section 17). Trạng thái từng child:
   `docs/operations/web-authentication-and-device-authorization.md`.
   Deliverable 1 của phase (plugin auth/onboarding và secure token store) đã
   đóng; implementation deliverables 2-7 thuộc các child sau và chưa hoàn tất.
-- Child 3 `exclusion-policy-publication-design.md` — **design đã duyệt,
-  implementation chưa bắt đầu (2026-08-17)**: deny-only rule model, async
-  preview, immutable/idempotent publication, Ed25519 snapshot với cross-signed
-  key rotation, backend fail-closed enforcement và durable reconciliation.
-  Spec:
-  `docs/superpowers/specs/2026-08-17-exclusion-policy-publication-design.md`.
+- Child 3 `exclusion-policy-publication-design.md` —
+  **hoàn thành (2026-08-17)**: deny-only rule model với Python/TypeScript
+  golden parity, async preview, immutable/idempotent publication
+  (advisory-lock ordering, ambiguous-commit evidence lookup), Ed25519 signed
+  snapshot với cross-signed key rotation qua offline `personal-api policy-key`
+  CLI, backend fail-closed enforcement tại mọi canonical boundary, durable
+  reconciliation với pending
+  projection intents, Admin API + `/admin/policy` + plugin acquisition/
+  verification, và acceptance gates (feature, browser E2E, performance,
+  device-verification). Alembic head `20260817_01` (single head); feature
+  gates `poe exclusion-policy-test` (1383 passed), `pnpm run
+  test:e2e:exclusion-policy`, performance budgets pass; implementation commit
+  range `7d9a470..94a8a06` (design `1e7f270`). Spec:
+  `docs/superpowers/specs/2026-08-17-exclusion-policy-publication-design.md`;
+  runbook:
+  `docs/operations/exclusion-policy-publication.md`; handoff:
+  `docs/handoff/2026-08-17-exclusion-policy-publication.md`. Reference-device
+  verification records (Desktop + Mobile) còn blocking — xem handoff. Deliverable
+  6 đóng; các deliverable Vault-sync (2–5, 7) và projection consumers của
+  policy-transition intents thuộc child sau.
 
 Deliverables:
 

@@ -35,6 +35,8 @@ Admin Dashboard là authority cho exclusion rules. Backend re-evaluate mọi upl
 
 Phase 2 exclusion là deny-only với default allow. Missing active revision, missing required evidence hoặc evaluation failure tạo `indeterminate` và được enforce như deny. Plugin snapshot Ed25519 không phải authorization capability; snapshot không hết hạn nhưng phải qua exact hash/signature, monotonic revision và authenticated cross-signed keyset checks. Policy state nằm ngoài source lifecycle state.
 
+Child 3 (exclusion-policy publication, 2026-08-17) đã triển khai: publication là immutable revision duy nhất thay đổi policy — không có in-place edit/delete, rollback là publish một revision mới; signing key Ed25519 nằm trong secret-file boundary và không thuộc database backup. Operator contract (initial trust, preview/publish, key rotation, degraded states, recovery limits): `docs/operations/exclusion-policy-publication.md`.
+
 ## 6. Prompt injection defense
 
 - Source text luôn được đóng khung là untrusted data.

@@ -91,3 +91,13 @@ secret/content leak scanners
 ```
 
 Integration/live/performance gates chạy theo pipeline riêng với dependency manifest rõ ràng. Không đánh dấu milestone hoàn thành khi acceptance bắt buộc chưa chạy.
+
+Exclusion-policy child (2026-08-17) đóng bộ feature gates riêng: `uv run poe
+exclusion-policy-test` (unit/contract/API/disposable-stack integration),
+`pnpm run test:e2e:exclusion-policy` (browser journey),
+`uv run pytest tests/performance/test_exclusion_policy_performance.py -m
+local_stack -q` (evaluator/verify/preview/reconciliation budgets) và
+`uv run poe exclusion-policy-device-verification` (recorded Desktop/Mobile
+reference-device evidence; fail khi records còn thiếu). CI workflow
+`.github/workflows/exclusion-policy-acceptance.yml` chạy cùng các gates này
+trên disposable stack.

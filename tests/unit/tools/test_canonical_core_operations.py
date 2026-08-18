@@ -637,3 +637,26 @@ def test_composers_receive_environment_snapshot() -> None:
 
 def test_exit_code_enum_values_are_stable() -> None:
     assert [int(code) for code in CanonicalCoreExitCode] == [0, 2, 65, 69, 70, 75, 78]
+
+
+def test_runbook_documents_the_canonical_core_operations_command() -> None:
+    """The exclusion-policy runbook must pin this tool's acceptance command.
+
+    The Phase 1 ``phase-one-acceptance`` step of this CLI seeds the signed
+    empty policy before any canonical content operation (exclusion-policy
+    design spec section 14). The living operations runbook is the operator
+    contract for that behavior, so it must name the exact command.
+    """
+
+    runbook = (
+        Path(__file__).resolve().parents[3]
+        / "docs"
+        / "operations"
+        / "exclusion-policy-publication.md"
+    )
+    content = runbook.read_text(encoding="utf-8")
+    assert "uv run python tools/canonical_core_operations.py phase-one-acceptance" in content, (
+        "docs/operations/exclusion-policy-publication.md must document the "
+        "canonical-core phase-one-acceptance command that seeds the signed "
+        "empty policy"
+    )
