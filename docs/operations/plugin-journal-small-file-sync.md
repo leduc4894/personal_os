@@ -105,8 +105,15 @@ authority). A denied or indeterminate subject answers the terminal
 `excluded` outcome — a born-terminal `excluded_policy` event on the
 plugin, never retried, no automatic re-upload. A policy revision published
 between an accepted preflight and the content stream is caught by the
-publication guard: the upload fails closed (403, nothing published) and
-the plugin's next preflight of the same identity settles on `excluded`.
+publication guard: the upload fails closed (403, nothing published).
+Because the plugin's closed failure table maps every 403 to
+`login_required`, that pass first ends as **Login required** with the whole
+queue retained — a transient status, not a credential failure (the
+credential is untouched and still valid). The next preflight of the same
+identity re-evaluates policy, answers `excluded`, and the event settles
+terminally as `excluded_policy`; no re-login is ever needed. Operators
+seeing Login required here with valid credentials should run one more
+pass (or `Sync now`) and expect the `excluded_policy` settlement.
 Publishing and rotating policies is covered by
 `docs/operations/exclusion-policy-publication.md`; revoking a device is
 covered by `docs/operations/web-authentication-and-device-authorization.md`
@@ -121,7 +128,7 @@ surfaces and its reserved operations can never be continued).
 | Response lost after commit | next pass re-preflights the same identity | `committed_replay` with the frozen result, exactly one publication |
 | File at exactly 16 MiB / one byte over | `blocked_size` at capture when over | accepted at the ceiling; over is rejected before reservation |
 | Denied policy | born-terminal `excluded_policy` | `excluded` outcome, no reservation |
-| Policy changed during upload | next preflight settles `excluded_policy` | 403 at the publication guard, nothing published |
+| Policy changed during upload | pass first ends Login required (transient 403 mapping, queue retained); next preflight settles `excluded_policy` | 403 at the publication guard, nothing published |
 | Stale update base | born-terminal `blocked_conflict` | `conflict` outcome, no upload |
 | Local bytes changed after freeze | frozen event closes `integrity_failed`; successor syncs | digest verification sees only the successor bytes |
 | Torn newest generation | `prior_generation_recovered` | none (local recovery) |
@@ -158,8 +165,10 @@ disposable local stack — never a personal Vault):
 4. Never record: file names, paths, content, digests, operation tokens,
    credentials, request IDs, or any Vault-identifying detail. Evidence is
    sanitized labels and timestamps only.
-5. Store the outcome rows in the handoff record of the completing session
-   (one file, per the handoff convention), not in this living guide.
+5. Store the outcome rows in the living device-verification record
+   (`docs/operations/exclusion-policy-device-verification.md`, child-4
+   section — replacing its pending note), following the child-3 precedent;
+   the session handoff links to that record and never copies the rows.
 
 Deferred item (operator): the child-4 reference-device evidence rows are
 not yet recorded; the automated scenarios and this procedure exist and are
