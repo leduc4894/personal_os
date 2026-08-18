@@ -143,6 +143,11 @@ indexes this line.
 Triaged by the final implementation review; none blocks the contract, none
 got a BACKLOG line by instruction:
 
+- Metrics (spec §21 deviation): `exclusion_policy_snapshot_verification_total{client_class,outcome}`
+  is unimplemented — no recorder or exporter exists in `src/`, `apps/` or
+  `packages/`; a future task/child that owns client-side verification
+  observability must implement it (or amend spec 21). The runbook now lists it
+  as spec-planned, never as a live metric.
 - Evaluator/normalization: `..pdf` (two leading dots) accepted by
   `_normalize_extension`; add rejection + golden error case. Folder-prefix/
   path-glob operands trust normalization by convention; make the grammar

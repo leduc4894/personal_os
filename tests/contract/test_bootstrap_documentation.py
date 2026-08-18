@@ -14,6 +14,7 @@ The local service-stack design now owns the integration layer's first executable
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -934,4 +935,51 @@ def test_exclusion_policy_handoff_is_present_and_bounded() -> None:
     assert "reference-device" in lower and "blocking" in lower, (
         "the handoff must present the absent Desktop/Mobile reference-device "
         "verification records as the blocking deferred item"
+    )
+
+
+def test_exclusion_policy_runbook_metrics_match_the_implemented_vocabulary() -> None:
+    """The runbook's metric set must equal the implemented metric vocabulary.
+
+    Metric-shaped names (``..._total`` / ``..._seconds``) in the runbook are
+    checked against the implemented contracts in
+    ``personal_os.exclusion_policy.metrics`` and the reconciliation metric
+    constants, so a spec-planned-but-unimplemented metric can never again be
+    documented as live. A name outside the implemented vocabulary may appear
+    only in a paragraph that explicitly marks it as planned/not implemented
+    (wrapping can split a name from its framing sentence, so the paragraph —
+    blank-line separated, whitespace-collapsed — is the checked unit).
+    """
+
+    from personal_os.exclusion_policy.metrics import EXCLUSION_POLICY_METRIC_CONTRACTS
+    from personal_os.exclusion_policy.reconciliation import (
+        RECONCILIATION_LAG_METRIC,
+        RECONCILIATION_SOURCES_METRIC,
+    )
+
+    content = _read(EXCLUSION_POLICY_OPERATIONS_GUIDE)
+    implemented = {
+        *EXCLUSION_POLICY_METRIC_CONTRACTS,
+        RECONCILIATION_SOURCES_METRIC,
+        RECONCILIATION_LAG_METRIC,
+    }
+    missing = sorted(name for name in implemented if name not in content)
+    assert not missing, (
+        "docs/operations/exclusion-policy-publication.md must document every "
+        f"implemented exclusion-policy metric; missing: {missing}"
+    )
+    unplanned: list[str] = []
+    paragraphs = [
+        " ".join(paragraph.split())
+        for paragraph in re.split(r"\n\s*\n", content)
+        if paragraph.strip()
+    ]
+    for paragraph in paragraphs:
+        for name in re.findall(r"exclusion_policy_[a-z_]*(?:_total|_seconds)\b", paragraph):
+            if name not in implemented and "planned" not in paragraph.lower():
+                unplanned.append(f"{name}: {paragraph}")
+    assert not unplanned, (
+        "the runbook must not present an unimplemented metric as live; the "
+        "only allowed framing is an explicit planned/not-implemented "
+        f"paragraph; offending: {unplanned}"
     )

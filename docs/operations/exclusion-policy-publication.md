@@ -268,10 +268,17 @@ Audit actions are the closed set `exclusion_policy.draft_replaced`,
 `key_staged`, `key_activated`, `key_retired`, `reconciliation_completed`,
 `reconciliation_failed` — actor, workspace, opaque IDs, request ID, result,
 counts, safe reason and impact digest only. Metrics are the closed
-low-cardinality set (`exclusion_policy_evaluation_total{boundary,decision}`,
-`_preview_total{outcome}`, `_publication_total{outcome}`,
-`_reconciliation_sources_total{transition}`, `_reconciliation_lag_seconds`,
-`_snapshot_verification_total{client_class,outcome}`); workspace, source,
-rule, preview, revision, path, media type and key ID are prohibited labels.
-Nothing logs rule operands, paths, titles, signatures, key bytes or secret-file
-paths.
+low-cardinality implemented set:
+`exclusion_policy_evaluation_total{boundary,decision}` and
+`exclusion_policy_evaluation_duration_seconds{boundary,decision}`,
+`exclusion_policy_preview_total{outcome}` and
+`exclusion_policy_preview_duration_seconds{outcome}`,
+`exclusion_policy_publication_total{outcome}`,
+`exclusion_policy_reconciliation_sources_total{transition}` and
+`exclusion_policy_reconciliation_lag_seconds`. Planned by spec §21 but not
+implemented: `exclusion_policy_snapshot_verification_total{client_class,outcome}`
+(no recorder or exporter emits it today; the plugin's local verification
+outcomes surface through its own diagnostics, not this backend metric set).
+Workspace, source, rule, preview, revision, path, media type and key ID are
+prohibited labels. Nothing logs rule operands, paths, titles, signatures, key
+bytes or secret-file paths.
