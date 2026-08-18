@@ -50,6 +50,22 @@ import type {
 const KEYSET_PAGE_MAXIMUM_BYTES = 1024 * 1024;
 const SNAPSHOT_RESPONSE_MAXIMUM_BYTES = SIGNED_SNAPSHOT_MAXIMUM_BYTES + 1024;
 
+// --- capture seam (journal design 7.1, 9) ------------------------------------------------
+
+/** The subject one journal capture observation evaluates against. */
+export type CapturePolicySubject = Omit<PolicyEvaluationSubject, "workspaceId">;
+
+/**
+ * One capture evaluation: the fail-closed local decision plus the accepted
+ * policy revision number it was taken under (0 when no accepted snapshot
+ * exists). Decision and revision are read from the same synchronous
+ * accepted-state, so the pair is atomic by construction.
+ */
+export interface CapturePolicyEvaluation {
+  readonly decision: LocalPolicyDecision;
+  readonly revisionNumber: number;
+}
+
 export interface PolicySessionDeps {
   readonly http: PolicyHttpTransport;
   readonly resolveOrigin: () => string;
@@ -446,5 +462,19 @@ export class PolicySession {
     } catch {
       return { raw: "indeterminate", enforced: "excluded" };
     }
+  }
+
+  /**
+   * The one narrow capture seam (journal design 7.1, 9): the fail-closed
+   * local decision for an observed file together with the accepted policy
+   * revision the decision was taken under. The plugin journal persists that
+   * revision on its capture rows; the server still re-evaluates policy
+   * itself and never trusts this value.
+   */
+  evaluateForCapture(subject: CapturePolicySubject): CapturePolicyEvaluation {
+    return {
+      decision: this.evaluate(subject),
+      revisionNumber: this.#accepted?.revisionNumber ?? 0,
+    };
   }
 }

@@ -400,6 +400,9 @@ describe("JournalRepository coalescing before preflight (spec 7.2)", () => {
     expect(blocked.event.state).toBe("blocked_size");
     expect(blocked.event.safeError).toBe("blocked_size");
     expect(blocked.event.operation).toBe("create");
+    // The born-terminal safe error label survives the round-trip through the
+    // store, not just the in-memory insert result.
+    expect(repository.readEvent(blocked.event.eventId)).toEqual(blocked.event);
 
     // The queued unsent event keeps its own fingerprint; terminal rows are
     // not pending and never coalesce.

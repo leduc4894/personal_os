@@ -8,7 +8,7 @@
  * background sync loop.
  */
 
-import { Platform, Plugin, requestUrl } from "obsidian";
+import { Modal, Platform, Plugin, requestUrl, Setting, TFile } from "obsidian";
 
 import { createObsidianPolicyHttpTransport } from "./api/obsidian-api-transport";
 import {
@@ -33,8 +33,13 @@ import {
 } from "./authentication/secret-storage-record";
 import { DeviceAuthenticationSettingTab } from "./authentication/settings-tab";
 import { DeviceTokenSession, resolveStartupAction } from "./authentication/token-session";
-import { createVaultPluginJournalStore } from "./journal/persistence";
+import { JournalCapture } from "./journal/capture";
+import type { CaptureVaultReader } from "./journal/capture";
+import { createVaultPluginJournalStore, JournalPersistence } from "./journal/persistence";
 import type { JournalFileStore } from "./journal/persistence";
+import { JournalRepository } from "./journal/repository";
+import type { JournalRepositoryDatabase } from "./journal/repository";
+import { loadVendoredSqliteEngine } from "./journal/sqlite-database";
 import { PolicySession } from "./exclusion-policy/policy-session";
 import type { PolicyCacheAdapter } from "./exclusion-policy/policy-cache";
 import type { PolicyIntegrityState } from "./exclusion-policy/contracts";
@@ -55,6 +60,13 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
  * every persist path merges instead of replacing.
  */
 const POLICY_CACHE_PLUGIN_DATA_KEY = "policy_cache";
+
+/**
+ * The vendored sql.js WebAssembly engine file, deployed next to the plugin
+ * manifest inside the Vault's configured plugin directory (journal design
+ * 6.1: the only permitted database engine, loaded lazily at capture start).
+ */
+const JOURNAL_ENGINE_WASM_FILE_NAME = "sql-wasm.wasm";
 
 function createRequestUrlDeviceHttpTransport(): DeviceHttpTransport {
   return async (request: DeviceHttpRequest): Promise<DeviceHttpResponse> => {
@@ -155,6 +167,8 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   #settingTab: DeviceAuthenticationSettingTab | null = null;
   #policySession: PolicySession | null = null;
   #policyState: PolicyIntegrityState = "policy_not_initialized";
+  #journalPersistence: JournalPersistence | null = null;
+  #capture: JournalCapture | null = null;
 
   override async onload(): Promise<void> {
     this.#settings = normalizeSettings(await this.loadData());
@@ -270,9 +284,18 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           .catch(() => undefined);
       }
     }
+
+    // Journal recovery runs BEFORE any capture listener exists (journal
+    // design 7.1); a failed recovery fails closed — the plugin keeps
+    // editing alive and simply captures nothing.
+    await this.#startJournalCapture();
   }
 
   override onunload(): void {
+    this.#capture?.dispose();
+    this.#capture = null;
+    this.#journalPersistence?.close();
+    this.#journalPersistence = null;
     this.#controller?.stop();
     this.#session?.clearMemoryAccess();
   }
@@ -306,6 +329,149 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
    */
   createJournalFileStore(): JournalFileStore {
     return createVaultPluginJournalStore(this.app, this.manifest.id);
+  }
+
+  /**
+   * Composition-only journal capture wiring (journal design 7.1): load the
+   * vendored engine, run journal recovery, then — and only then — register
+   * the Vault listeners and the one confirmed `Sync existing files`
+   * command. Every behavior lives in the tested `./journal/capture`.
+   */
+  async #startJournalCapture(): Promise<void> {
+    const policySession = this.#policySession;
+    if (policySession === null) {
+      return;
+    }
+    try {
+      const engineModule = await loadVendoredSqliteEngine({
+        wasmBinary: await this.#readJournalEngineWasmBinary(),
+      });
+      const persistence = new JournalPersistence({
+        fileStore: this.createJournalFileStore(),
+        engineModule,
+      });
+      await persistence.open();
+      const journalDatabase: JournalRepositoryDatabase = {
+        runSerializedMutation(operation) {
+          return persistence.commitGeneration(operation);
+        },
+        readAll(sql) {
+          return persistence.readAll(sql);
+        },
+      };
+      const repository = new JournalRepository({ database: journalDatabase });
+      const capture = new JournalCapture({
+        repository,
+        vaultReader: this.#createCaptureVaultReader(),
+        policyGate: policySession,
+      });
+      this.registerEvent(
+        this.app.vault.on("create", (file) => {
+          capture.notifyPathChanged(file.path);
+        }),
+      );
+      this.registerEvent(
+        this.app.vault.on("modify", (file) => {
+          capture.notifyPathChanged(file.path);
+        }),
+      );
+      this.registerEvent(
+        this.app.vault.on("delete", (file) => {
+          void capture.notifyPathDeleted(file.path);
+        }),
+      );
+      this.registerEvent(
+        this.app.vault.on("rename", (file, oldPath) => {
+          void capture.notifyPathRenamed(oldPath, file.path);
+        }),
+      );
+      this.addCommand({
+        id: "sync-existing-files",
+        name: "Sync existing files",
+        callback: () => {
+          void this.#runExistingFilesScan();
+        },
+      });
+      this.#journalPersistence = persistence;
+      this.#capture = capture;
+    } catch {
+      // Engine or recovery failure is fail-closed: no capture surface is
+      // registered and Vault editing is never touched.
+    }
+  }
+
+  /** The one confirmed command callback; the scan itself is task-4 capture. */
+  async #runExistingFilesScan(): Promise<void> {
+    const capture = this.#capture;
+    if (capture === null) {
+      return;
+    }
+    await capture
+      .runExistingFilesScan({ confirm: () => this.#confirmExistingFilesScan() })
+      .catch(() => undefined);
+  }
+
+  /**
+   * The confirmation modal of `Sync existing files` (journal design 7.1):
+   * nothing is queued until the user confirms. The message stays free of
+   * paths and any other Vault detail.
+   */
+  #confirmExistingFilesScan(): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      const modal = new Modal(this.app);
+      modal.titleEl.setText("Sync existing files");
+      modal.contentEl.createEl("p", {
+        text: "Queue the current regular Vault files (each at most 16 MiB) for sync in bounded batches?",
+      });
+      new Setting(modal.contentEl)
+        .addButton((button) =>
+          button
+            .setButtonText("Sync")
+            .setCta()
+            .onClick(() => {
+              modal.close();
+              resolve(true);
+            }),
+        )
+        .addButton((button) =>
+          button
+            .setButtonText("Cancel")
+            .onClick(() => {
+              modal.close();
+              resolve(false);
+            }),
+        );
+      modal.onClose = () => resolve(false);
+      modal.open();
+    });
+  }
+
+  /**
+   * The narrow read-only Vault slice capture needs (journal design 7.1):
+   * regular files only, resolved through the structural Obsidian surface.
+   */
+  #createCaptureVaultReader(): CaptureVaultReader {
+    const vault = this.app.vault;
+    return {
+      readRegularFileBytes: async (normalizedPath) => {
+        const file = vault.getAbstractFileByPath(normalizedPath);
+        if (!(file instanceof TFile)) {
+          return null;
+        }
+        return new Uint8Array(await vault.readBinary(file));
+      },
+      listRegularFilePaths: async () =>
+        vault.getFiles().map((file) => file.path).sort(),
+    };
+  }
+
+  /** Read the vendored engine bytes from the configured plugin directory. */
+  async #readJournalEngineWasmBinary(): Promise<ArrayBuffer> {
+    const { configDir, adapter } = this.app.vault;
+    const pluginDirectory = [configDir, "plugins", this.manifest.id]
+      .filter((segment) => segment.length > 0)
+      .join("/");
+    return adapter.readBinary(`${pluginDirectory}/${JOURNAL_ENGINE_WASM_FILE_NAME}`);
   }
 
   /**

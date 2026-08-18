@@ -699,3 +699,53 @@ describe("PolicySession keyset page handling", () => {
     expect(restoredKeyset.payload.keyset_revision).toBe(1);
   });
 });
+
+describe("PolicySession capture evaluation seam (journal design 7.1, 9)", () => {
+  it("answers with the accepted revision for an onboarded session", async () => {
+    const material = await initialTrustMaterial();
+    const harness = createHarness({});
+    harness.served.set(keysetsUrl(0), () => jsonResponse(material.keysetsBody));
+    harness.served.set(SNAPSHOT_URL, () => jsonResponse(material.snapshotBody, '"etag-capture"'));
+
+    await harness.session.adoptOnboardingTrust();
+    const evaluation = harness.session.evaluateForCapture({
+      sourceId: null,
+      normalizedLocator: "notes/report.md",
+      mediaType: "text/plain",
+      sizeBytes: 128,
+    });
+    expect(evaluation.decision).toEqual({ raw: "allowed", enforced: "allowed" });
+    expect(evaluation.revisionNumber).toBe(1);
+  });
+
+  it("denies a rule-matched subject under the same accepted revision", async () => {
+    const material = await initialTrustMaterial();
+    const harness = createHarness({});
+    harness.served.set(keysetsUrl(0), () => jsonResponse(material.keysetsBody));
+    harness.served.set(SNAPSHOT_URL, () => jsonResponse(material.snapshotBody, '"etag-capture"'));
+
+    await harness.session.adoptOnboardingTrust();
+    const evaluation = harness.session.evaluateForCapture({
+      sourceId: null,
+      normalizedLocator: "docs/brochure.pdf",
+      mediaType: "application/pdf",
+      sizeBytes: 256,
+    });
+    expect(evaluation.decision).toEqual({ raw: "excluded", enforced: "excluded" });
+    expect(evaluation.revisionNumber).toBe(1);
+  });
+
+  it("fails closed with revision 0 when no snapshot is accepted", async () => {
+    const harness = createHarness({});
+    await harness.session.restoreFromCache();
+
+    const evaluation = harness.session.evaluateForCapture({
+      sourceId: null,
+      normalizedLocator: "notes/report.md",
+      mediaType: "text/plain",
+      sizeBytes: 128,
+    });
+    expect(evaluation.decision).toEqual({ raw: "indeterminate", enforced: "excluded" });
+    expect(evaluation.revisionNumber).toBe(0);
+  });
+});

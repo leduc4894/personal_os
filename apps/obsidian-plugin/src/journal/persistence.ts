@@ -30,7 +30,11 @@ import {
   journalStoreError,
   SqliteDatabase,
 } from "./sqlite-database";
-import type { SqliteEngineModule, SqliteMutationSession } from "./sqlite-database";
+import type {
+  SqliteEngineModule,
+  SqliteMutationSession,
+  SqliteQueryResult,
+} from "./sqlite-database";
 
 // --- frozen file vocabulary and buffer bound (spec 6.1, 6.2) --------------------------
 
@@ -308,6 +312,16 @@ export class JournalPersistence {
   /** The current in-memory journal meta of the opened working database. */
   readJournalMeta(): JournalMeta {
     return this.#requireOpenedDatabase().readJournalMeta();
+  }
+
+  /**
+   * One read-only query on the opened working database (journal-scoped SQL
+   * only). This is the narrow read seam a repository composition uses for
+   * its queries: mutations still flow exclusively through
+   * {@link commitGeneration}, so the single-writer invariant is untouched.
+   */
+  readAll(sql: string): SqliteQueryResult[] {
+    return this.#requireOpenedDatabase().readAll(sql);
   }
 
   /**

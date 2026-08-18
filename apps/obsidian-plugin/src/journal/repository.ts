@@ -451,12 +451,14 @@ export class JournalRepository {
         [
           "insert into journal_events (event_id, local_file_id, idempotency_key, operation,",
           "sha256, size_bytes, media_type, state, is_fingerprint_frozen, attempt_count,",
-          "created_at_epoch_ms) values (",
+          "safe_error, created_at_epoch_ms) values (",
           `${sqlText(eventId)}, ${sqlText(localFileId)}, ${sqlText(idempotencyKey)},`,
           `${sqlText(operation)}, ${sqlText(input.fingerprint.sha256)},`,
           `${input.fingerprint.sizeBytes}, ${sqlText(input.fingerprint.mediaType)},`,
           `${sqlText(initialState)},`,
-          `${input.admission === "policy_allowed" ? 0 : 1}, 0, ${this.#nowEpochMs()});`,
+          `${input.admission === "policy_allowed" ? 0 : 1}, 0,`,
+          `${input.admission === "policy_allowed" ? "null" : sqlText(input.admission)},`,
+          `${this.#nowEpochMs()});`,
         ].join(" "),
       );
 

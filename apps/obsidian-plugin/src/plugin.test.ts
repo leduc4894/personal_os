@@ -17,6 +17,8 @@ const ALLOWED_OBSIDIAN_IMPORT_NAMES = new Set([
   "App",
   "PluginSettingTab",
   "Setting",
+  "TFile",
+  "Modal",
 ]);
 
 function extractObsidianImportNames(source: string): string[] {
@@ -109,6 +111,26 @@ describe("Obsidian plugin composition root", () => {
     expect(pluginSource).toContain("ALLOW_LOOPBACK_HTTP_ORIGIN = false");
   });
 
+  it("registers vault capture listeners only after journal recovery", () => {
+    expect(pluginSource).toContain("await persistence.open()");
+    const recoveryIndex = pluginSource.indexOf("await persistence.open()");
+    const listenerIndex = pluginSource.indexOf("registerEvent(");
+    expect(listenerIndex).toBeGreaterThan(recoveryIndex);
+    const listenerCount = pluginSource.match(/registerEvent\(/g)?.length ?? 0;
+    expect(listenerCount).toBe(4);
+  });
+
+  it("registers exactly one command that alone runs the existing-files scan", () => {
+    expect(pluginSource).toContain('id: "sync-existing-files"');
+    expect(pluginSource.match(/addCommand\(/g)?.length ?? 0).toBe(1);
+    // The bounded snapshot scan runs only through the confirmed command.
+    const commandIndex = pluginSource.indexOf("addCommand(");
+    const scanCallbackIndex = pluginSource.indexOf("void this.#runExistingFilesScan()");
+    expect(scanCallbackIndex).toBeGreaterThan(commandIndex);
+    // Startup itself never invokes the scan; only the command callback does.
+    expect(pluginSource.match(/void this\.#runExistingFilesScan\(\)/g)?.length ?? 0).toBe(1);
+  });
+
   it("touches no forbidden runtime capability at load time", () => {
     for (const forbiddenText of [
       "node:",
@@ -118,9 +140,6 @@ describe("Obsidian plugin composition root", () => {
       "process.env",
       "setInterval",
       "registerInterval",
-      "addCommand",
-      "registerEvent",
-      ".vault",
       "qrcode",
       "@workspace/",
     ]) {

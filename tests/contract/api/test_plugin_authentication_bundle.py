@@ -88,12 +88,14 @@ _ESBUILD_MODULE_MARKER_PATTERN = re.compile(r"^// (\S*/\S*)$", re.MULTILINE)
 ALLOWED_OBSIDIAN_IMPORT_NAMES = frozenset(
     {
         "App",
+        "Modal",
         "Platform",
         "Plugin",
         "PluginSettingTab",
         "RequestUrlParam",
         "RequestUrlResponse",
         "Setting",
+        "TFile",
         "requestUrl",
     }
 )

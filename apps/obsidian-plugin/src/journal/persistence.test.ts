@@ -442,3 +442,24 @@ describe("JournalPersistence recovery notification buffer (spec 6.1)", () => {
     reopened.close();
   });
 });
+
+describe("JournalPersistence read-only query seam", () => {
+  it("serves read-only queries on the opened database and fails closed after close", async () => {
+    const { journal } = await openWithTwoGenerations();
+    await journal.commitGeneration((session) => {
+      session.exec("create table capture_probe (value text); insert into capture_probe values ('ok');");
+    });
+
+    const result = journal.readAll("select value from capture_probe;");
+    expect(result[0]?.values).toEqual([["ok"]]);
+
+    journal.close();
+    let thrown: unknown = null;
+    try {
+      journal.readAll("select value from capture_probe;");
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({ reason: "journal_not_open" });
+  });
+});
