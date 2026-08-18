@@ -114,6 +114,19 @@ export interface JournalRepositoryOptions {
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const MAX_REQUEST_CORRELATION_ID_LENGTH = 128;
 
+/**
+ * The opaque upload operation handle grammar mirrored from the server's
+ * `UploadOperationToken`: printable URL-safe base64url of 32 to 128
+ * characters. The token is an implementation handle, never a canonical
+ * identity, so no UUID form is special-cased locally.
+ */
+const OPERATION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,128}$/;
+
+/** Whether one value carries the opaque operation handle grammar. */
+function isOperationTokenShape(value: string): boolean {
+  return typeof value === "string" && OPERATION_TOKEN_PATTERN.test(value);
+}
+
 /** Render one validated string as a SQL text literal (quotes doubled). */
 function sqlText(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
@@ -547,6 +560,36 @@ export class JournalRepository {
   }
 
   /**
+   * Move one prefrozen event into `uploading`, persisting the opaque server
+   * upload operation ID before the content stream may start (spec 7.2, 10.1:
+   * every state transition lands before the next network action). The token
+   * grammar mirrors the server's opaque operation handle: printable
+   * URL-safe base64url of 32 to 128 characters.
+   */
+  async markEventUploading(eventId: string, operationId: string): Promise<void> {
+    if (!isUuid(eventId) || !isOperationTokenShape(operationId)) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    await this.#database.runSerializedMutation((session) => {
+      const event = this.#requireEventRow(
+        (sql) => session.readRows(sql),
+        eventId,
+      );
+      if (event.state !== "preflight" && event.state !== "uploading") {
+        throw journalStoreError("journal_mutation_failed");
+      }
+      session.exec(
+        [
+          "update journal_events set state = 'uploading',",
+          `operation_id = ${sqlText(operationId)},`,
+          "is_fingerprint_frozen = 1",
+          `where event_id = ${sqlText(eventId)};`,
+        ].join(" "),
+      );
+    });
+  }
+
+  /**
    * Close one event in a terminal non-retry state with a closed safe error
    * label. Terminal rows stay queryable forever; they are never deleted and
    * never transition again (spec 6.4, 7.2).
@@ -624,6 +667,44 @@ export class JournalRepository {
   }
 
   /**
+   * Persist the safe no-op receipt of one `no_change` preflight (spec 7.2,
+   * 10.1): the event closes as `no_change` and its file adopts the confirmed
+   * current server base — no bytes were uploaded and nothing retries.
+   */
+  async recordNoChangeReceipt(input: JournalCommittedReceiptInput): Promise<void> {
+    if (
+      !isUuid(input.eventId) ||
+      !isUuid(input.sourceId) ||
+      !isUuid(input.baseVersionId)
+    ) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    await this.#database.runSerializedMutation((session) => {
+      const event = this.#requireEventRow(
+        (sql) => session.readRows(sql),
+        input.eventId,
+      );
+      this.#requireNonTerminalEvent(event);
+      session.exec(
+        [
+          "update journal_events set state = 'no_change',",
+          "next_eligible_retry_epoch_ms = null, safe_error = null,",
+          "is_fingerprint_frozen = 1",
+          `where event_id = ${sqlText(input.eventId)};`,
+        ].join(" "),
+      );
+      session.exec(
+        [
+          "update local_files set",
+          `source_id = ${sqlText(input.sourceId)},`,
+          `base_version_id = ${sqlText(input.baseVersionId)}`,
+          `where local_file_id = ${sqlText(event.localFileId)};`,
+        ].join(" "),
+      );
+    });
+  }
+
+  /**
    * Append one redacted attempt-audit row and prune the per-event ring to
    * the most recent {@link MAX_EVENT_ATTEMPT_HISTORY} entries inside the
    * same transaction (spec 6.3).
@@ -680,6 +761,49 @@ export class JournalRepository {
       ),
     );
     return row === null ? null : toPublicEvent(parseJournalEventRow(row));
+  }
+
+  /**
+   * The oldest event one queue pass may select (spec 8): the earliest
+   * `queued`/`waiting_retry` row whose retry time has passed, where an event
+   * left in `preflight`/`uploading` by an interrupted pass stays eligible
+   * for the exact same-identity replay of spec 10.3.
+   */
+  readOldestEligibleEvent(nowEpochMs: number): JournalEvent | null {
+    if (!isNonNegativeInteger(nowEpochMs)) {
+      throw journalStoreError("journal_query_failed");
+    }
+    const coalescableStateList = JOURNAL_COALESCABLE_EVENT_STATES.map((state) => sqlText(state)).join(", ");
+    const row = firstRow(
+      this.#database.readAll(
+        [
+          `select ${JOURNAL_EVENT_COLUMNS.join(", ")} from journal_events`,
+          `where ((state in (${coalescableStateList})`,
+          "and (next_eligible_retry_epoch_ms is null",
+          `or next_eligible_retry_epoch_ms <= ${nowEpochMs}))`,
+          "or state in ('preflight', 'uploading'))",
+          "order by created_at_epoch_ms asc, rowid asc limit 1;",
+        ].join(" "),
+      ),
+    );
+    return row === null ? null : toPublicEvent(parseJournalEventRow(row));
+  }
+
+  /** One tracked file by its plugin-local identity, or null. */
+  readLocalFileByLocalFileId(localFileId: string): LocalFile | null {
+    if (typeof localFileId !== "string" || localFileId.length === 0) {
+      throw journalStoreError("journal_query_failed");
+    }
+    const row = firstRow(
+      this.#database.readAll(
+        selectColumns(
+          "local_files",
+          LOCAL_FILE_COLUMNS,
+          `where local_file_id = ${sqlText(localFileId)}`,
+        ),
+      ),
+    );
+    return row === null ? null : parseLocalFileRow(row);
   }
 
   /** Every event of one file, oldest first — terminal history included. */

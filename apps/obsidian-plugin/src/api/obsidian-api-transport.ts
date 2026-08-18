@@ -1,8 +1,10 @@
 import { requestUrl } from "obsidian";
 import type { ApiTransport } from "@workspace/api-client";
 import type { PolicyHttpTransport } from "../exclusion-policy/contracts";
+import type { SyncHttpTransport } from "../journal/sync-api";
 import {
   createRequestUrlPolicyHttpTransport,
+  createRequestUrlSyncTransport,
   createRequestUrlTransport,
 } from "./request-url-transport";
 
@@ -18,4 +20,9 @@ export function createObsidianApiTransport(): ApiTransport {
 /** Bind the policy keyset/snapshot GET transport to Obsidian's `requestUrl`. */
 export function createObsidianPolicyHttpTransport(): PolicyHttpTransport {
   return createRequestUrlPolicyHttpTransport(requestUrl);
+}
+
+/** Bind the raw small-file sync transport to Obsidian's `requestUrl`. */
+export function createObsidianSyncHttpTransport(): SyncHttpTransport {
+  return createRequestUrlSyncTransport(requestUrl);
 }

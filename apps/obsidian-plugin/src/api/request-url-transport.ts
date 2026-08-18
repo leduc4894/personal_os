@@ -1,6 +1,7 @@
 import type { RequestUrlParam, RequestUrlResponse } from "obsidian";
 import type { ApiTransport } from "@workspace/api-client";
 import type { PolicyHttpTransport } from "../exclusion-policy/contracts";
+import type { SyncHttpTransport } from "../journal/sync-api";
 
 export type RequestUrlFunction = (
   request: RequestUrlParam,
@@ -52,6 +53,28 @@ export function createRequestUrlTransport(
       status: result.status,
       headers: result.headers,
     });
+  };
+}
+
+/**
+ * The pure raw-body adapter for the small-file sync endpoints (spec 10):
+ * one request with an exact `ArrayBuffer` byte body in, status and response
+ * text out. It adds no automatic retry — the queue driver owns every retry
+ * decision — and re-checks nothing about the bytes it passes through.
+ */
+export function createRequestUrlSyncTransport(
+  requestUrlFunction: RequestUrlFunction,
+): SyncHttpTransport {
+  return async (request) => {
+    const param: RequestUrlParam = {
+      url: request.url,
+      method: request.method,
+      headers: { ...request.headers },
+      throw: false,
+      body: request.body,
+    };
+    const result = await requestUrlFunction(param);
+    return { status: result.status, bodyText: result.text };
   };
 }
 

@@ -463,3 +463,37 @@ describe("JournalPersistence read-only query seam", () => {
     expect(thrown).toMatchObject({ reason: "journal_not_open" });
   });
 });
+
+describe("JournalPersistence reconcile flag merge across generation commits (spec 6.4)", () => {
+  it("keeps a repository-set reconcile flag when a later commit republishes meta", async () => {
+    // The composition wires repository mutations through commitGeneration, so
+    // a repository that durably flags reconcile_required inside its own
+    // transaction must never have that flag clobbered by the meta rewrite of
+    // a later, unrelated generation commit (task-3 review carry-over).
+    const store = new InMemoryJournalFileStore();
+    const journal = await openedPersistence(store);
+
+    await journal.commitGeneration((session) => {
+      session.exec(
+        [
+          "update journal_meta set is_reconcile_required = 1",
+          "where singleton_key = 1;",
+        ].join(" "),
+      );
+    });
+    expect(journal.readJournalMeta().isReconcileRequired).toBe(true);
+
+    // A later unrelated commit must preserve the flag, both in the committed
+    // meta row and in the persistence object's own sticky view.
+    await journal.commitGeneration(() => undefined);
+    expect(journal.readJournalMeta().isReconcileRequired).toBe(true);
+    expect(journal.isReconcileRequired).toBe(true);
+
+    // And the flag survives a full reopen of the newest verified generation.
+    journal.close();
+    const reopened = await openedPersistence(store);
+    expect(reopened.readJournalMeta().isReconcileRequired).toBe(true);
+    expect(reopened.isReconcileRequired).toBe(true);
+    reopened.close();
+  });
+});

@@ -724,3 +724,98 @@ describe("JournalRepository transition validation (spec 7.2)", () => {
     expect(repository.readEvent(event.eventId)?.attemptCount).toBe(1);
   });
 });
+
+describe("JournalRepository queue selection and upload transitions (spec 8)", () => {
+  it("selects the oldest eligible event: retry time gating and interrupted states", async () => {
+    const { repository } = createOpenedJournal();
+    const first = await captureAllowed(repository, "notes/select-first.md", fingerprintOf("71"));
+    const second = await captureAllowed(repository, "notes/select-second.md", fingerprintOf("72"));
+    const third = await captureAllowed(repository, "notes/select-third.md", fingerprintOf("73"));
+
+    const nowEpochMs = 2_000_000_000_000;
+    // Nothing is waiting: the oldest queued event wins.
+    expect(repository.readOldestEligibleEvent(nowEpochMs)?.eventId).toBe(first.event.eventId);
+
+    // The first event fails once and becomes ineligible until its retry time.
+    await repository.markEventPreflightStarted(first.event.eventId);
+    await repository.markEventWaitingRetry(first.event.eventId, "network_offline", nowEpochMs + 5_000);
+    expect(repository.readOldestEligibleEvent(nowEpochMs)?.eventId).toBe(second.event.eventId);
+    expect(repository.readOldestEligibleEvent(nowEpochMs + 5_000)?.eventId).toBe(first.event.eventId);
+
+    // An interrupted pass leaves preflight/uploading rows: both stay eligible
+    // for an exact same-identity replay on the next pass (spec 7.2, 10.3).
+    await repository.markEventPreflightStarted(second.event.eventId);
+    await repository.markEventUploading(second.event.eventId, "op-token-0123456789abcdef0123456789");
+    expect(repository.readOldestEligibleEvent(nowEpochMs)?.eventId).toBe(second.event.eventId);
+    const resumed = repository.readEvent(second.event.eventId);
+    expect(resumed?.state).toBe("uploading");
+    expect(resumed?.operationId).toBe("op-token-0123456789abcdef0123456789");
+
+    // Terminal and future-retry rows are never selected.
+    await repository.markEventTerminal(third.event.eventId, "excluded_policy", "excluded_policy");
+    expect(repository.readOldestEligibleEvent(nowEpochMs + 5_000)?.eventId).toBe(first.event.eventId);
+    expect(repository.readOldestEligibleEvent(Number.MAX_SAFE_INTEGER)?.eventId).toBe(first.event.eventId);
+  });
+
+  it("moves an event into uploading with its operation ID, closed against other states", async () => {
+    const { repository } = createOpenedJournal();
+    const { event } = await captureAllowed(repository, "notes/uploading.md", fingerprintOf("70"));
+
+    // Only a prefrozen event may enter uploading.
+    await expect(
+      repository.markEventUploading(event.eventId, "op-token-0123456789abcdef0123456789"),
+    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+
+    await repository.markEventPreflightStarted(event.eventId);
+    await repository.markEventUploading(event.eventId, "op-token-0123456789abcdef0123456789");
+    const uploading = repository.readEvent(event.eventId);
+    expect(uploading?.state).toBe("uploading");
+    expect(uploading?.operationId).toBe("op-token-0123456789abcdef0123456789");
+
+    // A malformed token never lands.
+    await expect(
+      repository.markEventUploading(event.eventId, "short"),
+    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+    await expect(
+      repository.markEventUploading(event.eventId, `bad chars ${"x".repeat(40)}`),
+    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+    await expect(
+      repository.markEventUploading("00000000-0000-4000-8000-0000000000ff", "op-token-0123456789abcdef0123456789"),
+    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+  });
+
+  it("reads one tracked file by its plugin-local identity", async () => {
+    const { repository } = createOpenedJournal();
+    const { event } = await captureAllowed(repository, "notes/by-id.md", fingerprintOf("69"));
+    const localFile = repository.readLocalFileByLocalFileId(event.localFileId);
+    expect(localFile?.normalizedPath).toBe("notes/by-id.md");
+    expect(repository.readLocalFileByLocalFileId("00000000-0000-4000-8000-0000000000ff")).toBeNull();
+  });
+
+  it("persists the no-op receipt of a no_change close", async () => {
+    const { repository } = createOpenedJournal();
+    const { event } = await captureAllowed(repository, "notes/no-change.md", fingerprintOf("68"));
+
+    await repository.markEventPreflightStarted(event.eventId);
+    await repository.recordNoChangeReceipt({
+      eventId: event.eventId,
+      sourceId: "44444444-4444-4444-8444-444444444444",
+      baseVersionId: "55555555-5555-4555-8555-555555555555",
+    });
+    const stored = repository.readEvent(event.eventId);
+    expect(stored?.state).toBe("no_change");
+    expect(stored?.safeError).toBeNull();
+    const localFile = repository.readLocalFileByLocalFileId(event.localFileId);
+    expect(localFile?.sourceId).toBe("44444444-4444-4444-8444-444444444444");
+    expect(localFile?.baseVersionId).toBe("55555555-5555-4555-8555-555555555555");
+
+    // The closed receipt shape stays validated.
+    await expect(
+      repository.recordNoChangeReceipt({
+        eventId: "00000000-0000-4000-8000-0000000000ff",
+        sourceId: "44444444-4444-4444-8444-444444444444",
+        baseVersionId: "55555555-5555-4555-8555-555555555555",
+      }),
+    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+  });
+});

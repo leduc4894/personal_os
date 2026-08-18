@@ -64,7 +64,11 @@ describe("Obsidian plugin composition root", () => {
     expect(pluginSource).toContain("resumePendingGrant");
     expect(pluginSource).toContain("session.refresh");
     expect(pluginSource).toContain("readDeviceSecretRecord");
-    const startupCalls = pluginSource.match(/resumePendingGrant|session\.refresh/g) ?? [];
+    // The startup block performs exactly its two bounded fire-and-forget
+    // actions; the queue driver's per-pass refresh is a separate seam and
+    // never runs at load time.
+    const startupCalls =
+      pluginSource.match(/void controller\.resumePendingGrant\(\)|void session\.refresh\(\)/g) ?? [];
     expect(startupCalls.length).toBe(2);
   });
 
@@ -120,15 +124,46 @@ describe("Obsidian plugin composition root", () => {
     expect(listenerCount).toBe(4);
   });
 
-  it("registers exactly one command that alone runs the existing-files scan", () => {
+  it("registers exactly the two sync commands and no other", () => {
+    expect(pluginSource).toContain('id: "sync-now"');
     expect(pluginSource).toContain('id: "sync-existing-files"');
-    expect(pluginSource.match(/addCommand\(/g)?.length ?? 0).toBe(1);
+    expect(pluginSource.match(/addCommand\(/g)?.length ?? 0).toBe(2);
     // The bounded snapshot scan runs only through the confirmed command.
     const commandIndex = pluginSource.indexOf("addCommand(");
     const scanCallbackIndex = pluginSource.indexOf("void this.#runExistingFilesScan()");
     expect(scanCallbackIndex).toBeGreaterThan(commandIndex);
     // Startup itself never invokes the scan; only the command callback does.
     expect(pluginSource.match(/void this\.#runExistingFilesScan\(\)/g)?.length ?? 0).toBe(1);
+  });
+
+  it("wires the bounded foreground queue driver behind the sync commands", () => {
+    expect(pluginSource).toContain("new JournalQueueDriver(");
+    expect(pluginSource).toContain("createJournalSyncApi(");
+    expect(pluginSource).toContain("createObsidianSyncHttpTransport");
+    // The driver runs over the SAME read-only vault reader as capture and
+    // refreshes through the existing device token session.
+    expect(pluginSource).toContain("fileBytesReader: vaultReader");
+    expect(pluginSource).toContain("refreshAccessToken: () => session.refresh()");
+    // A Vault event triggers one bounded pass alongside capture.
+    const createListenerIndex = pluginSource.indexOf('this.app.vault.on("create"');
+    const passIndex = pluginSource.indexOf("void queueDriver.requestPass()");
+    expect(passIndex).toBeGreaterThan(createListenerIndex);
+    // Plugin load after recovery is the first trigger, fire-and-forget.
+    const recoveryIndex = pluginSource.indexOf("await persistence.open()");
+    const loadPassIndex = pluginSource.indexOf(
+      "void queueDriver.requestPass();",
+      pluginSource.indexOf("this.#queueDriver = queueDriver"),
+    );
+    expect(loadPassIndex).toBeGreaterThan(recoveryIndex);
+    expect(pluginSource).not.toContain("await queueDriver.requestPass()");
+    expect(pluginSource).not.toContain("await queueDriver.runPass()");
+  });
+
+  it("stops the queue driver before closing the journal on unload", () => {
+    const stopIndex = pluginSource.indexOf("this.#queueDriver?.stop()");
+    const closeIndex = pluginSource.indexOf("this.#journalPersistence?.close()");
+    expect(stopIndex).toBeGreaterThanOrEqual(0);
+    expect(closeIndex).toBeGreaterThan(stopIndex);
   });
 
   it("touches no forbidden runtime capability at load time", () => {

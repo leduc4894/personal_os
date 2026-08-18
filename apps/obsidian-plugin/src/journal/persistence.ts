@@ -531,8 +531,14 @@ export class JournalPersistence {
     const nextGenerationNumber = (this.#verifiedGeneration?.generationNumber ?? 0) + 1;
     const result = await database.runSerializedMutation(async (session) => {
       const operationResult = await operation(session);
+      // Merge, never clobber: a repository that set `reconcile_required`
+      // inside this transaction keeps the flag through the meta rewrite
+      // (spec 6.4), and the sticky in-memory view adopts it for every
+      // later generation.
+      const sessionMeta = session.readJournalMeta();
+      this.#isReconcileRequired ||= sessionMeta.isReconcileRequired;
       session.writeJournalMeta({
-        ...session.readJournalMeta(),
+        ...sessionMeta,
         dirtyGeneration: nextGenerationNumber,
         isReconcileRequired: this.#isReconcileRequired,
       });
@@ -572,12 +578,16 @@ export class JournalPersistence {
     await this.#writeVerifiedManifest(manifest);
     // Verified: switch the chain, refresh the working meta, then retire the
     // generation file that fell out of the retained window (best effort).
+    // The meta rewrite keeps merging the reconcile flag so a repository-set
+    // flag survives every later verified publication (spec 6.4).
     const retiredGeneration = this.#priorVerifiedGeneration;
     this.#priorVerifiedGeneration = this.#verifiedGeneration;
     this.#verifiedGeneration = manifest.current;
     await database.runSerializedMutation((session) => {
+      const meta = session.readJournalMeta();
+      this.#isReconcileRequired ||= meta.isReconcileRequired;
       session.writeJournalMeta({
-        ...session.readJournalMeta(),
+        ...meta,
         dirtyGeneration: generationNumber,
         lastVerifiedGeneration: generationNumber,
         isReconcileRequired: this.#isReconcileRequired,

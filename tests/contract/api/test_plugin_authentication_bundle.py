@@ -262,13 +262,16 @@ def test_bundle_has_no_vault_path_or_full_digest_sentinels(built_bundle: str) ->
 
 
 def test_bundle_emits_no_source_maps() -> None:
+    # The distribution contract: the two load-time artifacts plus exactly one
+    # asset — the vendored sql.js WebAssembly engine the journal loads
+    # lazily from the plugin directory (journal design 6.1).
     emitted = sorted(path.name for path in PLUGIN_DIST_DIRECTORY.iterdir())
-    assert emitted == ["main.js", "manifest.json"], (
-        "the plugin distribution must stay exactly main.js and manifest.json, got: "
-        + ", ".join(emitted)
+    assert emitted == ["main.js", "manifest.json", "sql-wasm.wasm"], (
+        "the plugin distribution must stay exactly main.js, manifest.json and "
+        "the sql-wasm.wasm engine asset, got: " + ", ".join(emitted)
     )
     for path in PLUGIN_DIST_DIRECTORY.iterdir():
-        if path.is_file():
+        if path.suffix in {".js", ".json"}:
             content = path.read_text(encoding="utf-8")
             assert "sourceMappingURL" not in content, f"{path.name} must not reference source maps"
 

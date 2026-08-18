@@ -10,7 +10,7 @@
 
 import { Modal, Platform, Plugin, requestUrl, Setting, TFile } from "obsidian";
 
-import { createObsidianPolicyHttpTransport } from "./api/obsidian-api-transport";
+import { createObsidianPolicyHttpTransport, createObsidianSyncHttpTransport } from "./api/obsidian-api-transport";
 import {
   createDeviceApiTransport,
   parseServerOrigin,
@@ -35,11 +35,13 @@ import { DeviceAuthenticationSettingTab } from "./authentication/settings-tab";
 import { DeviceTokenSession, resolveStartupAction } from "./authentication/token-session";
 import { JournalCapture } from "./journal/capture";
 import type { CaptureVaultReader } from "./journal/capture";
+import { JournalQueueDriver } from "./journal/queue-driver";
 import { createVaultPluginJournalStore, JournalPersistence } from "./journal/persistence";
 import type { JournalFileStore } from "./journal/persistence";
 import { JournalRepository } from "./journal/repository";
 import type { JournalRepositoryDatabase } from "./journal/repository";
 import { loadVendoredSqliteEngine } from "./journal/sqlite-database";
+import { createJournalSyncApi } from "./journal/sync-api";
 import { PolicySession } from "./exclusion-policy/policy-session";
 import type { PolicyCacheAdapter } from "./exclusion-policy/policy-cache";
 import type { PolicyIntegrityState } from "./exclusion-policy/contracts";
@@ -169,6 +171,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   #policyState: PolicyIntegrityState = "policy_not_initialized";
   #journalPersistence: JournalPersistence | null = null;
   #capture: JournalCapture | null = null;
+  #queueDriver: JournalQueueDriver | null = null;
 
   override async onload(): Promise<void> {
     this.#settings = normalizeSettings(await this.loadData());
@@ -292,6 +295,11 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   }
 
   override onunload(): void {
+    // The queue driver stops FIRST (spec 8): no new pass starts and every
+    // late in-flight requestUrl result is discarded before the journal and
+    // the memory credential go away.
+    this.#queueDriver?.stop();
+    this.#queueDriver = null;
     this.#capture?.dispose();
     this.#capture = null;
     this.#journalPersistence?.close();
@@ -332,14 +340,16 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   }
 
   /**
-   * Composition-only journal capture wiring (journal design 7.1): load the
-   * vendored engine, run journal recovery, then — and only then — register
-   * the Vault listeners and the one confirmed `Sync existing files`
-   * command. Every behavior lives in the tested `./journal/capture`.
+   * Composition-only journal capture and queue wiring (journal design 7.1,
+   * 8): load the vendored engine, run journal recovery, then — and only
+   * then — register the Vault listeners, the bounded foreground queue
+   * driver and the two sync commands. Every behavior lives in the tested
+   * `./journal` modules; this method only binds real adapters.
    */
   async #startJournalCapture(): Promise<void> {
     const policySession = this.#policySession;
-    if (policySession === null) {
+    const session = this.#session;
+    if (policySession === null || session === null) {
       return;
     }
     try {
@@ -360,19 +370,35 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         },
       };
       const repository = new JournalRepository({ database: journalDatabase });
+      const vaultReader = this.#createCaptureVaultReader();
       const capture = new JournalCapture({
         repository,
-        vaultReader: this.#createCaptureVaultReader(),
+        vaultReader,
         policyGate: policySession,
+      });
+      const queueDriver = new JournalQueueDriver({
+        repository,
+        syncApi: createJournalSyncApi({
+          transport: createObsidianSyncHttpTransport(),
+          resolveOrigin: () =>
+            parseServerOrigin(this.#settings.server_origin, {
+              allowLoopbackHttp: ALLOW_LOOPBACK_HTTP_ORIGIN,
+            }) ?? "",
+          getAccessToken: () => session.accessCredential,
+        }),
+        fileBytesReader: vaultReader,
+        refreshAccessToken: () => session.refresh(),
       });
       this.registerEvent(
         this.app.vault.on("create", (file) => {
           capture.notifyPathChanged(file.path);
+          void queueDriver.requestPass();
         }),
       );
       this.registerEvent(
         this.app.vault.on("modify", (file) => {
           capture.notifyPathChanged(file.path);
+          void queueDriver.requestPass();
         }),
       );
       this.registerEvent(
@@ -386,6 +412,13 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         }),
       );
       this.addCommand({
+        id: "sync-now",
+        name: "Sync now",
+        callback: () => {
+          void queueDriver.requestPass();
+        },
+      });
+      this.addCommand({
         id: "sync-existing-files",
         name: "Sync existing files",
         callback: () => {
@@ -394,6 +427,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       });
       this.#journalPersistence = persistence;
       this.#capture = capture;
+      this.#queueDriver = queueDriver;
+      // Plugin load after safe recovery is the first bounded foreground
+      // trigger (spec 8): fire-and-forget, never awaited in onload.
+      void queueDriver.requestPass();
     } catch {
       // Engine or recovery failure is fail-closed: no capture surface is
       // registered and Vault editing is never touched.
