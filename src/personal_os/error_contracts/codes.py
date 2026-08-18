@@ -107,6 +107,13 @@ class ErrorCode(StrEnum):
     EXCLUSION_POLICY_SNAPSHOT_OUTDATED = "exclusion_policy_snapshot_outdated"
     EXCLUSION_POLICY_SIGNING_UNAVAILABLE = "exclusion_policy_signing_unavailable"
     EXCLUSION_POLICY_COMMIT_OUTCOME_UNKNOWN = "exclusion_policy_commit_outcome_unknown"
+    SMALL_FILE_PREFLIGHT_INVALID = "small_file_preflight_invalid"
+    SMALL_FILE_OPERATION_NOT_FOUND = "small_file_operation_not_found"
+    SMALL_FILE_OPERATION_EXPIRED = "small_file_operation_expired"
+    SMALL_FILE_OPERATION_IDENTITY_MISMATCH = "small_file_operation_identity_mismatch"
+    SMALL_FILE_SIZE_LIMIT_EXCEEDED = "small_file_size_limit_exceeded"
+    SMALL_FILE_CONTENT_INTEGRITY_FAILED = "small_file_content_integrity_failed"
+    SMALL_FILE_UPLOAD_STATE_INVALID = "small_file_upload_state_invalid"
 
 
 @dataclass(frozen=True, slots=True)
@@ -646,6 +653,54 @@ ERROR_DEFINITIONS: Final[Mapping[ErrorCode, ErrorDefinition]] = MappingProxyType
             category=ErrorCategory.DEPENDENCY,
             is_retryable=True,
             safe_message="The exclusion policy commit outcome could not be determined",
+            allowed_detail_fields=frozenset(),
+        ),
+        # The small-file sync block of the plugin journal design (spec 10/12):
+        # every code is terminal for the triggering request, the closed
+        # outcomes map onto the plugin's non-retrying journal states, and
+        # locators, digests, operation tokens and payload details never enter
+        # safe details. HTTP statuses are wired into the closed api_contracts
+        # status map when the routes land.
+        ErrorCode.SMALL_FILE_PREFLIGHT_INVALID: ErrorDefinition(
+            category=ErrorCategory.VALIDATION,
+            is_retryable=False,
+            safe_message="The small-file preflight request is invalid",
+            allowed_detail_fields=frozenset({"reason"}),
+        ),
+        ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The upload operation does not exist",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.SMALL_FILE_OPERATION_EXPIRED: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The upload operation expired",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The upload operation identity does not match this request",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.SMALL_FILE_SIZE_LIMIT_EXCEEDED: ErrorDefinition(
+            category=ErrorCategory.VALIDATION,
+            is_retryable=False,
+            safe_message="The file exceeds the single-part upload size limit",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.SMALL_FILE_CONTENT_INTEGRITY_FAILED: ErrorDefinition(
+            category=ErrorCategory.INTEGRITY,
+            is_retryable=False,
+            safe_message="Small-file content failed integrity verification",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The upload operation state does not accept this action",
             allowed_detail_fields=frozenset(),
         ),
     }
