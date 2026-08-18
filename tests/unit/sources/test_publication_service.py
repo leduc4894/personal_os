@@ -515,9 +515,7 @@ async def test_preflight_evidence_flows_to_the_commit_as_a_hint() -> None:
     decision = build_policy_decision(workspace_id=command.workspace_id)
     ledger = CallLedger()
     guard = AllowingPolicyGuard(ledger=ledger, decision=decision)
-    store = FakeSourcePublicationStore(
-        ledger=ledger, commit_result=build_committed_result(command)
-    )
+    store = FakeSourcePublicationStore(ledger=ledger, commit_result=build_committed_result(command))
     object_store = FakeCanonicalObjectStore(ledger=ledger, resolve_receipts=[receipt])
     service = SourceVersionPublicationService(
         store=store,

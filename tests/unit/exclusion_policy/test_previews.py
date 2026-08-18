@@ -87,6 +87,7 @@ _TRACE = TraceContext(
 def _context() -> DiagnosticContext:
     return DiagnosticContext(request_id=REQUEST_ID, client_request_id=None, trace=_TRACE)
 
+
 _LEAKAGE_SENTINELS: tuple[str, ...] = (
     "sentinel-title",
     "private/notes/sentinel-locator.md",
@@ -367,9 +368,7 @@ def test_impact_digest_is_order_independent_and_deterministic() -> None:
     assert compute_impact_digest([_outcome(first), _outcome(second)]) == (
         compute_impact_digest([_outcome(second), _outcome(first)])
     )
-    assert compute_impact_digest([_outcome(first)]) != compute_impact_digest(
-        [_outcome(second)]
-    )
+    assert compute_impact_digest([_outcome(first)]) != compute_impact_digest([_outcome(second)])
 
 
 def test_impact_digest_contains_no_operand_or_display_value() -> None:
@@ -466,8 +465,9 @@ def test_failed_record_requires_safe_error_code() -> None:
     with pytest.raises(ValueError):
         _record(status=PreviewStatus.FAILED, safe_error_code=None)
     assert (
-        _record(status=PreviewStatus.FAILED, safe_error_code="preview_execution_failed")
-        .safe_error_code
+        _record(
+            status=PreviewStatus.FAILED, safe_error_code="preview_execution_failed"
+        ).safe_error_code
         == "preview_execution_failed"
     )
 

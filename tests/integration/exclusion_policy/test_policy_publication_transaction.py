@@ -235,8 +235,7 @@ class PublicationHarness:
     async def revision_count(self) -> int:
         return int(
             await self.base.fetch_scalar(
-                "SELECT count(*) FROM knowledge.source_policies"
-                " WHERE workspace_id = :workspace_id",
+                "SELECT count(*) FROM knowledge.source_policies WHERE workspace_id = :workspace_id",
                 {"workspace_id": self.workspace_id},
             )
         )
@@ -382,9 +381,7 @@ async def test_persists_signed_snapshot_rules_intent_audit_and_rebase(
             {"signing_key_id": row[3]},
         )
     )
-    verifier = Ed25519PolicyVerifier(
-        {derive_ed25519_key_id(public_key_bytes): public_key_bytes}
-    )
+    verifier = Ed25519PolicyVerifier({derive_ed25519_key_id(public_key_bytes): public_key_bytes})
     assert verifier.verify(
         derive_ed25519_key_id(public_key_bytes),
         bytes(row[2]),
@@ -392,8 +389,7 @@ async def test_persists_signed_snapshot_rules_intent_audit_and_rebase(
     )
 
     rule_rows = await harness.base.fetch_all(
-        "SELECT rule_id FROM knowledge.policy_rules"
-        " WHERE policy_revision_id = :policy_revision_id",
+        "SELECT rule_id FROM knowledge.policy_rules WHERE policy_revision_id = :policy_revision_id",
         {"policy_revision_id": result.policy_revision_id},
     )
     assert {str(row[0]) for row in rule_rows} == {str(rule.rule_id) for rule in rules}
@@ -506,9 +502,7 @@ async def test_active_revision_advance_rejects_snapshot_outdated(
     with pytest.raises(ExclusionPolicyError) as raised:
         await harness.publish(stale_preview, key="advance-loser-001")
     assert raised.value.error_code is ErrorCode.EXCLUSION_POLICY_SNAPSHOT_OUTDATED
-    assert raised.value.safe_details["current_policy_revision_number"] == (
-        winner.revision_number
-    )
+    assert raised.value.safe_details["current_policy_revision_number"] == (winner.revision_number)
 
 
 @pytest.mark.asyncio

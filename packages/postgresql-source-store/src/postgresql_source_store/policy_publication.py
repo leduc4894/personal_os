@@ -207,9 +207,7 @@ def policy_idempotency_lock_key(workspace_id: UUID, key: IdempotencyKey) -> int:
     return signed_first_sha256_word(material)
 
 
-def policy_idempotency_lock_statement(
-    workspace_id: UUID, key: IdempotencyKey
-) -> sa.TextClause:
+def policy_idempotency_lock_statement(workspace_id: UUID, key: IdempotencyKey) -> sa.TextClause:
     """Build the policy publication idempotency advisory lock statement."""
     return advisory_xact_lock_statement(
         POLICY_IDEMPOTENCY_LOCK_NAMESPACE,
@@ -270,9 +268,7 @@ def preview_lock_statement(
 def workspace_owner_select_statement(workspace_id: UUID) -> sa.Select[tuple[Any, ...]]:
     """Build the workspace owner lookup of the ownership recheck."""
 
-    return sa.select(workspaces.c.owner_user_id).where(
-        workspaces.c.workspace_id == workspace_id
-    )
+    return sa.select(workspaces.c.owner_user_id).where(workspaces.c.workspace_id == workspace_id)
 
 
 def replay_lookup_by_key_statement(
@@ -339,9 +335,7 @@ def signing_key_rows_select_statement(workspace_id: UUID) -> sa.Select[tuple[Any
     )
 
 
-def mark_preview_consumed_statement(
-    policy_preview_id: UUID, consumed_at: datetime
-) -> sa.Update:
+def mark_preview_consumed_statement(policy_preview_id: UUID, consumed_at: datetime) -> sa.Update:
     """Build the fenced ready-to-consumed transition of the published preview."""
 
     return (
@@ -410,8 +404,7 @@ def swap_active_pointer_statement(
             workspace_policy_state.c.workspace_id == workspace_id,
             workspace_policy_state.c.active_policy_revision_id
             == expected_active_policy_revision_id,
-            workspace_policy_state.c.active_revision_number
-            == expected_active_revision_number,
+            workspace_policy_state.c.active_revision_number == expected_active_revision_number,
         )
     )
 
@@ -707,9 +700,7 @@ class PostgresqlPolicyPublicationStore:
                 # Lock order (spec 11.1): policy idempotency advisory lock,
                 # then the serialization row, then the draft and preview rows.
                 await connection.execute(
-                    policy_idempotency_lock_statement(
-                        command.workspace_id, command.idempotency_key
-                    )
+                    policy_idempotency_lock_statement(command.workspace_id, command.idempotency_key)
                 )
                 replay_row = await self._fetch_replay_row(connection, command)
                 if replay_row is not None:
@@ -795,9 +786,7 @@ class PostgresqlPolicyPublicationStore:
             raise PolicyRejectionAbort(
                 _PendingPolicyRejection(
                     reason_code=REASON_CONFIRMATION_INVALID,
-                    error=ExclusionPolicyError(
-                        ErrorCode.EXCLUSION_POLICY_CONFIRMATION_INVALID
-                    ),
+                    error=ExclusionPolicyError(ErrorCode.EXCLUSION_POLICY_CONFIRMATION_INVALID),
                 )
             )
         occurred_at = await self._select_now(connection)
@@ -881,9 +870,7 @@ class PostgresqlPolicyPublicationStore:
         await connection.execute(
             sa.insert(policy_reconciliation_intents).values(
                 **build_reconciliation_intent_values(
-                    policy_reconciliation_intent_id=(
-                        identities.policy_reconciliation_intent_id
-                    ),
+                    policy_reconciliation_intent_id=(identities.policy_reconciliation_intent_id),
                     workspace_id=command.workspace_id,
                     policy_revision_id=identities.policy_revision_id,
                     workflow_id=reconciliation_workflow_id(

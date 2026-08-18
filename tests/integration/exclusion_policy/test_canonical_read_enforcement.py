@@ -183,9 +183,7 @@ async def _seed_unpublished_workspace(harness: EnforcementHarness) -> UUID:
     return workspace_id
 
 
-async def _seed_source_with_version(
-    harness: EnforcementHarness, workspace_id: UUID
-) -> UUID:
+async def _seed_source_with_version(harness: EnforcementHarness, workspace_id: UUID) -> UUID:
     source_id = uuid4()
     content_object_id = uuid4()
     source_version_id = uuid4()

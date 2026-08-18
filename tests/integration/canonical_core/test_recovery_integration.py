@@ -203,7 +203,13 @@ async def test_dump_and_manifest_come_from_same_exported_snapshot(
     harness = canonical_core_harness
     workspace = await harness.seed_workspace()
     await harness.publish_markdown_source(workspace, b"# Snapshot evidence\n", title="Snapshot")
-    counts_at_backup = await harness.table_counts()
+    # The manifest counts the canonical table set; the harness counts every
+    # store table, so the expectation is scoped to the manifest contract.
+    counts_at_backup = {
+        table: count
+        for table, count in (await harness.table_counts()).items()
+        if table in CANONICAL_COUNT_TABLES
+    }
 
     backup = await recovery_service.create_backup(
         BackupCreateCommand(
@@ -279,7 +285,13 @@ async def test_empty_target_restore_is_single_transaction_and_exact(
     workspace = await harness.seed_workspace()
     await harness.publish_markdown_source(workspace, b"# Exact restore one\n", title="One")
     await harness.publish_markdown_source(workspace, b"# Exact restore two\n", title="Two")
-    counts_at_backup = await harness.table_counts()
+    # The manifest counts the canonical table set; the harness counts every
+    # store table, so the expectation is scoped to the manifest contract.
+    counts_at_backup = {
+        table: count
+        for table, count in (await harness.table_counts()).items()
+        if table in CANONICAL_COUNT_TABLES
+    }
     assert counts_at_backup["sources"] >= 2
 
     backup = await recovery_service.create_backup(

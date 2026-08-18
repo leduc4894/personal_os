@@ -130,9 +130,9 @@ def _draft_revision_with(*rules: Any) -> Any:
 def _compile(statement: sa.Executable) -> str:
     return str(statement.compile(dialect=postgresql.dialect()))
 
+
 def _params(statement: sa.Executable) -> dict[str, Any]:
     return dict(statement.compile(dialect=postgresql.dialect()).params)
-
 
 
 def _preview_row(**overrides: Any) -> dict[str, Any]:
@@ -284,9 +284,7 @@ def test_checkpoint_select_reads_the_workspace_maximum_sequence() -> None:
 
 
 def test_result_page_uses_stable_cursor_order_and_api_bound() -> None:
-    cursor = PreviewResultCursor(
-        impact_class=PreviewImpactClass.NEWLY_ALLOWED, source_id=SOURCE_ID
-    )
+    cursor = PreviewResultCursor(impact_class=PreviewImpactClass.NEWLY_ALLOWED, source_id=SOURCE_ID)
     compiled = _compile(
         preview_result_page_select_statement(
             PREVIEW_ID, cursor=cursor, limit=PREVIEW_RESULT_PAGE_MAXIMUM

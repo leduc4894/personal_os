@@ -336,9 +336,7 @@ class PostgresqlPolicyPluginReadStore:
                 .mappings()
                 .all()
             )
-        keys_by_keyset: dict[UUID, list[_MappedRow]] = {
-            keyset_id: [] for keyset_id in keyset_ids
-        }
+        keys_by_keyset: dict[UUID, list[_MappedRow]] = {keyset_id: [] for keyset_id in keyset_ids}
         for key_row in key_rows:
             keys_by_keyset[key_row["policy_keyset_id"]].append(key_row)
         signatures_by_keyset: dict[UUID, list[_MappedRow]] = {
@@ -359,51 +357,55 @@ class PostgresqlPolicyPluginReadStore:
         self, workspace_id: UUID, context: DiagnosticContext
     ) -> ActivePolicySnapshot | None:
         del context
-        return await self._retry.run(
-            lambda _attempt: self._load_active_snapshot_once(workspace_id)
-        )
+        return await self._retry.run(lambda _attempt: self._load_active_snapshot_once(workspace_id))
 
-    async def _load_active_snapshot_once(
-        self, workspace_id: UUID
-    ) -> ActivePolicySnapshot | None:
+    async def _load_active_snapshot_once(self, workspace_id: UUID) -> ActivePolicySnapshot | None:
         async with (
             self._engine.connect() as connection,
             connection.begin(),
         ):
             await apply_transaction_bounds(connection)
             state_row = (
-                await connection.execute(
-                    sa.select(workspace_policy_state.c.active_policy_revision_id).where(
-                        workspace_policy_state.c.workspace_id == workspace_id
+                (
+                    await connection.execute(
+                        sa.select(workspace_policy_state.c.active_policy_revision_id).where(
+                            workspace_policy_state.c.workspace_id == workspace_id
+                        )
                     )
                 )
-            ).mappings().first()
+                .mappings()
+                .first()
+            )
             if state_row is None:
                 raise draft_not_initialized_error()
             active_revision_id = state_row["active_policy_revision_id"]
             if active_revision_id is None:
                 return None
             snapshot_row = (
-                await connection.execute(
-                    sa.select(
-                        source_policies.c.policy_revision_id,
-                        source_policies.c.revision_number,
-                        source_policies.c.parent_policy_revision_id,
-                        source_policies.c.snapshot_payload_bytes,
-                        source_policies.c.snapshot_payload_sha256,
-                        source_policies.c.signature_bytes,
-                        source_policies.c.published_at,
-                        policy_signing_keys.c.public_key_bytes,
+                (
+                    await connection.execute(
+                        sa.select(
+                            source_policies.c.policy_revision_id,
+                            source_policies.c.revision_number,
+                            source_policies.c.parent_policy_revision_id,
+                            source_policies.c.snapshot_payload_bytes,
+                            source_policies.c.snapshot_payload_sha256,
+                            source_policies.c.signature_bytes,
+                            source_policies.c.published_at,
+                            policy_signing_keys.c.public_key_bytes,
+                        )
+                        .select_from(source_policies)
+                        .join(
+                            policy_signing_keys,
+                            policy_signing_keys.c.signing_key_id
+                            == source_policies.c.signing_key_id,
+                        )
+                        .where(source_policies.c.policy_revision_id == active_revision_id)
                     )
-                    .select_from(source_policies)
-                    .join(
-                        policy_signing_keys,
-                        policy_signing_keys.c.signing_key_id
-                        == source_policies.c.signing_key_id,
-                    )
-                    .where(source_policies.c.policy_revision_id == active_revision_id)
                 )
-            ).mappings().first()
+                .mappings()
+                .first()
+            )
         if snapshot_row is None:
             raise ExclusionPolicyError(ErrorCode.EXCLUSION_POLICY_NOT_INITIALIZED)
         return ActivePolicySnapshot(
@@ -434,17 +436,21 @@ class PostgresqlPolicyPluginReadStore:
         ):
             await apply_transaction_bounds(connection)
             row = (
-                await connection.execute(
-                    sa.select(
-                        policy_reconciliation_intents.c.policy_revision_id,
-                        policy_reconciliation_intents.c.state,
-                        policy_reconciliation_intents.c.updated_at,
+                (
+                    await connection.execute(
+                        sa.select(
+                            policy_reconciliation_intents.c.policy_revision_id,
+                            policy_reconciliation_intents.c.state,
+                            policy_reconciliation_intents.c.updated_at,
+                        )
+                        .where(policy_reconciliation_intents.c.workspace_id == workspace_id)
+                        .order_by(policy_reconciliation_intents.c.created_at.desc())
+                        .limit(1)
                     )
-                    .where(policy_reconciliation_intents.c.workspace_id == workspace_id)
-                    .order_by(policy_reconciliation_intents.c.created_at.desc())
-                    .limit(1)
                 )
-            ).mappings().first()
+                .mappings()
+                .first()
+            )
         if row is None:
             return None
         return PolicyReconciliationSummary(
@@ -497,9 +503,7 @@ class OfflineExclusionPolicyState:
 
     def __init__(self) -> None:
         self.workspace_id: UUID = OFFLINE_POLICY_WORKSPACE_ID
-        self.signer: Ed25519PolicySigner = Ed25519PolicySigner.from_seed_bytes(
-            _OFFLINE_SIGNER_SEED
-        )
+        self.signer: Ed25519PolicySigner = Ed25519PolicySigner.from_seed_bytes(_OFFLINE_SIGNER_SEED)
         self.draft: PolicyDraft = PolicyDraft(
             draft_id=_OFFLINE_DRAFT_ID,
             workspace_id=self.workspace_id,
@@ -512,9 +516,7 @@ class OfflineExclusionPolicyState:
         self.checkpoint: int = 0
         self.preview_rows: dict[UUID, PolicyPreviewRecord] = {}
         self.preview_result_rows: dict[UUID, list[PolicyPreviewResultRow]] = {}
-        self.keyset_rows: list[PolicyKeysetRecord] = [
-            self._seeded_keyset_revision_one()
-        ]
+        self.keyset_rows: list[PolicyKeysetRecord] = [self._seeded_keyset_revision_one()]
         self.active_snapshot: ActivePolicySnapshot | None = None
         self.reconciliation_summary: PolicyReconciliationSummary | None = None
         self.publications: dict[
@@ -544,9 +546,7 @@ class OfflineExclusionPolicyState:
                 ),
             ),
         )
-        signing_key_row_id = uuid5(
-            _OFFLINE_IDENTITY_NAMESPACE, f"keyset-key:{self.signer.key_id}"
-        )
+        signing_key_row_id = uuid5(_OFFLINE_IDENTITY_NAMESPACE, f"keyset-key:{self.signer.key_id}")
         signature = self.signer.sign(build_signed_message(KEYSET_SIGNING_DOMAIN, payload))
         return PolicyKeysetRecord(
             policy_keyset_id=uuid5(_OFFLINE_IDENTITY_NAMESPACE, "keyset:1"),
@@ -568,9 +568,7 @@ class OfflinePolicyDraftStore:
     def __init__(self, state: OfflineExclusionPolicyState) -> None:
         self._state = state
 
-    async def load_draft(
-        self, workspace_id: UUID, context: DiagnosticContext
-    ) -> PolicyDraft:
+    async def load_draft(self, workspace_id: UUID, context: DiagnosticContext) -> PolicyDraft:
         del workspace_id, context
         if not self._state.is_policy_initialized:
             raise draft_not_initialized_error()
@@ -609,9 +607,7 @@ class OfflinePolicyDraftStore:
         self._state.draft = replaced
         for preview_id, row in self._state.preview_rows.items():
             if row.status is PreviewStatus.READY and row.draft_version == expected_draft_version:
-                self._state.preview_rows[preview_id] = replace(
-                    row, status=PreviewStatus.EXPIRED
-                )
+                self._state.preview_rows[preview_id] = replace(row, status=PreviewStatus.EXPIRED)
         return replaced
 
 
@@ -714,8 +710,7 @@ class OfflinePolicyPreviewStore:
             PreviewResultCursor(
                 impact_class=page_rows[-1].impact_class, source_id=page_rows[-1].source_id
             )
-            if len(rows) > limit
-            and page_rows
+            if len(rows) > limit and page_rows
             else None
         )
         return PolicyPreviewResultPage(rows=tuple(page_rows), next_cursor=next_cursor)
@@ -742,9 +737,7 @@ class OfflinePolicyPublicationStore:
         context: DiagnosticContext,
     ) -> PublishedPolicyResult | None:
         del context
-        entry = self._state.publications.get(
-            (command.workspace_id, command.idempotency_key.value)
-        )
+        entry = self._state.publications.get((command.workspace_id, command.idempotency_key.value))
         if entry is None:
             return None
         committed_fingerprint, result = entry
@@ -797,14 +790,11 @@ class OfflinePolicyPublicationStore:
             )
         if (
             command.expected_active_revision_number != self._state.active_revision_number
-            or command.expected_active_policy_revision_id
-            != self._state.active_policy_revision_id
+            or command.expected_active_policy_revision_id != self._state.active_policy_revision_id
         ):
             raise ExclusionPolicyError(
                 ErrorCode.EXCLUSION_POLICY_SNAPSHOT_OUTDATED,
-                safe_details={
-                    "current_policy_revision_number": self._state.active_revision_number
-                },
+                safe_details={"current_policy_revision_number": self._state.active_revision_number},
             )
         draft = self._state.draft
         if (
@@ -895,9 +885,7 @@ class OfflinePolicyPluginReadStore:
     ) -> tuple[PolicyKeysetRecord, ...]:
         del workspace_id, context
         ordered = sorted(self._state.keyset_rows, key=lambda row: row.keyset_revision)
-        return tuple(
-            row for row in ordered if row.keyset_revision > after_keyset_revision
-        )[:limit]
+        return tuple(row for row in ordered if row.keyset_revision > after_keyset_revision)[:limit]
 
     async def load_active_snapshot(
         self, workspace_id: UUID, context: DiagnosticContext
@@ -922,9 +910,7 @@ def compose_offline_exclusion_policy(
     plugin_reads: PolicyPluginReadPort = OfflinePolicyPluginReadStore(offline_state)
     return ExclusionPolicyRuntime(
         drafts=PolicyDraftService(draft_store=draft_store, query_store=draft_store),
-        previews=PolicyPreviewService(
-            preview_store=OfflinePolicyPreviewStore(offline_state)
-        ),
+        previews=PolicyPreviewService(preview_store=OfflinePolicyPreviewStore(offline_state)),
         publication=ExclusionPolicyPublicationService(
             store=OfflinePolicyPublicationStore(offline_state),
             signer=offline_state.signer,

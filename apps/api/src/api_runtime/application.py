@@ -463,9 +463,7 @@ def _register_exclusion_policy_routes(
                 "description": "The preview is ready; the payload carries the first result page",
                 "content": {
                     "application/json": {
-                        "schema": {
-                            "$ref": "#/components/schemas/ApiEnvelope_PolicyPreviewData_"
-                        }
+                        "schema": {"$ref": "#/components/schemas/ApiEnvelope_PolicyPreviewData_"}
                     }
                 },
             }

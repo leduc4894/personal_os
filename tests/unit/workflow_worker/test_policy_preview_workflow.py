@@ -349,9 +349,7 @@ class FakeTemporalClient:
         self.started.append({"args": args, "kwargs": kwargs})
         if self.raise_already_started:
             workflow_id = str(kwargs.get("id"))
-            raise WorkflowAlreadyStartedError(
-                POLICY_PREVIEW_WORKFLOW_TYPE_NAME, workflow_id
-            )
+            raise WorkflowAlreadyStartedError(POLICY_PREVIEW_WORKFLOW_TYPE_NAME, workflow_id)
 
 
 @pytest.mark.asyncio
@@ -443,9 +441,7 @@ class FakeStarter:
         return self.outcome
 
 
-def _runtime(
-    store: FakeDispatchStore, starter: FakeStarter
-) -> PolicyPreviewDispatchRuntime:
+def _runtime(store: FakeDispatchStore, starter: FakeStarter) -> PolicyPreviewDispatchRuntime:
     return PolicyPreviewDispatchRuntime(
         preview_store=store,  # type: ignore[arg-type]
         starter=starter,  # type: ignore[arg-type]
@@ -488,9 +484,7 @@ async def test_dispatcher_releases_retryable_start_failures_with_backoff() -> No
 async def test_dispatcher_marks_terminal_start_failures_failed() -> None:
     store = FakeDispatchStore()
     store.claim_result = [_leased_preview()]
-    starter = FakeStarter(
-        error=ExclusionPolicyError(ErrorCode.EXCLUSION_POLICY_INPUT_INVALID)
-    )
+    starter = FakeStarter(error=ExclusionPolicyError(ErrorCode.EXCLUSION_POLICY_INPUT_INVALID))
     runtime = _runtime(store, starter)
 
     claimed = await runtime.dispatch_pending_previews_once()

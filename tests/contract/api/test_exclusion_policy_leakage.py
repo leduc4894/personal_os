@@ -243,8 +243,7 @@ class _LeakJourney:
         return {
             "Origin": ORIGIN,
             "Cookie": (
-                f"{SESSION_COOKIE_NAME}={cookies['session']}; "
-                f"{CSRF_COOKIE_NAME}={cookies['csrf']}"
+                f"{SESSION_COOKIE_NAME}={cookies['session']}; {CSRF_COOKIE_NAME}={cookies['csrf']}"
             ),
             "X-CSRF-Token": cookies["csrf"],
         }

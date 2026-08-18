@@ -97,10 +97,10 @@ APP_README_EXPECTATIONS = {
 # owns no executable test in this bootstrap spec. The end-to-end layer left the
 # reserved set when the web-authentication child landed its first real
 # Playwright spec (tests/end_to_end/authentication/web-security.spec.ts).
-RESERVED_TEST_LAYERS = (
-    "tests/golden/README.md",
-    "tests/performance/README.md",
-)
+# The performance layer left the bootstrap reservation when the
+# exclusion-policy publication spec (section 24) landed its reference
+# performance gates; only the golden layer stays reserved.
+RESERVED_TEST_LAYERS = ("tests/golden/README.md",)
 
 # Each reserved layer README must declare its bootstrap owner and the future
 # spec/later-spec source for its acceptance tests.

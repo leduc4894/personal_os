@@ -38,6 +38,9 @@ POSTGRESQL_SERVER_VERSION: Final[str] = "18.4"
 MAXIMUM_OBJECT_SIZE_BYTES: Final[int] = 104_857_600
 
 #: The exact closed set of canonical tables counted in every manifest.
+#: Mirrors the snapshot lock order: the exclusion-policy publication child
+#: extended the canonical graph with the policy tables, and a manifest whose
+#: counts omit them cannot prove the policy state a restore must preserve.
 CANONICAL_COUNT_TABLES: Final[tuple[str, ...]] = (
     "users",
     "workspaces",
@@ -48,6 +51,16 @@ CANONICAL_COUNT_TABLES: Final[tuple[str, ...]] = (
     "sync_events",
     "projection_intents",
     "audit_events",
+    "workspace_policy_state",
+    "policy_signing_keys",
+    "policy_keysets",
+    "policy_keyset_signatures",
+    "source_policies",
+    "policy_rules",
+    "policy_drafts",
+    "policy_draft_rules",
+    "policy_evaluations",
+    "policy_reconciliation_intents",
 )
 
 #: Maximum number of retained backup records. The recorder is a bounded ring

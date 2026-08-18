@@ -136,21 +136,15 @@ def test_envelope_rejects_wrong_ed25519_geometry() -> None:
     with pytest.raises(ValueError):
         _envelope(
             signatures=(
-                PolicyKeysetSignatureRecord(
-                    signing_key_id=SIGNING_KEY_ID, signature_bytes=b"\x00"
-                ),
+                PolicyKeysetSignatureRecord(signing_key_id=SIGNING_KEY_ID, signature_bytes=b"\x00"),
             )
         )
 
 
 def test_envelope_rejects_duplicate_keys_and_unknown_signature_references() -> None:
     duplicated = (
-        PolicySigningKeyRecord(
-            signing_key_id=SIGNING_KEY_ID, public_key_bytes=_CURRENT_PUBLIC_KEY
-        ),
-        PolicySigningKeyRecord(
-            signing_key_id=SIGNING_KEY_ID, public_key_bytes=_STAGED_PUBLIC_KEY
-        ),
+        PolicySigningKeyRecord(signing_key_id=SIGNING_KEY_ID, public_key_bytes=_CURRENT_PUBLIC_KEY),
+        PolicySigningKeyRecord(signing_key_id=SIGNING_KEY_ID, public_key_bytes=_STAGED_PUBLIC_KEY),
     )
     with pytest.raises(ValueError):
         _envelope(keys=duplicated)
@@ -178,9 +172,7 @@ def test_envelope_rejects_nil_identities() -> None:
 
 def test_build_signing_key_values_derives_hash_free_public_metadata() -> None:
     values = build_signing_key_values(
-        PolicySigningKeyRecord(
-            signing_key_id=SIGNING_KEY_ID, public_key_bytes=_CURRENT_PUBLIC_KEY
-        ),
+        PolicySigningKeyRecord(signing_key_id=SIGNING_KEY_ID, public_key_bytes=_CURRENT_PUBLIC_KEY),
         workspace_id=WORKSPACE_ID,
         introduced_keyset_revision=2,
         occurred_at=OCCURRED_AT,
@@ -209,9 +201,7 @@ def test_build_keyset_values_computes_payload_hash_from_canonical_bytes() -> Non
 
 
 def test_build_keyset_signature_values_maps_identity_pairs() -> None:
-    values = build_keyset_signature_values(
-        POLICY_KEYSET_ID, _signatures()[0]
-    )
+    values = build_keyset_signature_values(POLICY_KEYSET_ID, _signatures()[0])
     assert values == {
         "policy_keyset_id": POLICY_KEYSET_ID,
         "signing_key_id": SIGNING_KEY_ID,
@@ -265,15 +255,11 @@ def test_hydrate_policy_keyset_round_trips_the_persisted_graph() -> None:
         _keyset_row(),
         [
             _key_row(),
-            _key_row(
-                signing_key_id=SECOND_SIGNING_KEY_ID, public_key_bytes=_STAGED_PUBLIC_KEY
-            ),
+            _key_row(signing_key_id=SECOND_SIGNING_KEY_ID, public_key_bytes=_STAGED_PUBLIC_KEY),
         ],
         [
             _signature_row(),
-            _signature_row(
-                signing_key_id=SECOND_SIGNING_KEY_ID, signature_bytes=_STAGED_SIGNATURE
-            ),
+            _signature_row(signing_key_id=SECOND_SIGNING_KEY_ID, signature_bytes=_STAGED_SIGNATURE),
         ],
     )
     assert isinstance(record, PolicyKeysetRecord)

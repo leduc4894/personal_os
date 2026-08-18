@@ -72,9 +72,7 @@ _SIGNATURE = bytes(range(64))
 class AcceptingTrustVerifier:
     """Trust-anchor verification fake accepting exactly the pinned geometry."""
 
-    def verify(
-        self, *, public_key_bytes: bytes, signature_bytes: bytes, message: bytes
-    ) -> bool:
+    def verify(self, *, public_key_bytes: bytes, signature_bytes: bytes, message: bytes) -> bool:
         return (
             len(public_key_bytes) == 32
             and len(signature_bytes) == 64
@@ -85,9 +83,7 @@ class AcceptingTrustVerifier:
 class RejectingTrustVerifier:
     """Trust-anchor verification fake failing every verification."""
 
-    def verify(
-        self, *, public_key_bytes: bytes, signature_bytes: bytes, message: bytes
-    ) -> bool:
+    def verify(self, *, public_key_bytes: bytes, signature_bytes: bytes, message: bytes) -> bool:
         return False
 
 
@@ -128,8 +124,12 @@ def build_material(
 ) -> ActivePolicySnapshotMaterial:
     """One signed snapshot material over the revision, with overridable parts."""
 
-    canonical_payload = payload_bytes if payload_bytes is not None else build_snapshot_payload(
-        revision, parent_policy_revision_id=None, published_at=PUBLISHED_AT
+    canonical_payload = (
+        payload_bytes
+        if payload_bytes is not None
+        else build_snapshot_payload(
+            revision, parent_policy_revision_id=None, published_at=PUBLISHED_AT
+        )
     )
     return ActivePolicySnapshotMaterial(
         workspace_id=revision.workspace_id,
@@ -404,9 +404,10 @@ async def test_authorize_preflight_returns_the_allowing_decision() -> None:
 
     assert decision.raw_decision is RawPolicyDecision.ALLOWED
     assert decision.revision_number == 1
-    assert metrics.evaluation_count(
-        PolicyBoundary.SINGLE_PART_UPLOAD, EvaluationMetricOutcome.ALLOWED
-    ) == 1
+    assert (
+        metrics.evaluation_count(PolicyBoundary.SINGLE_PART_UPLOAD, EvaluationMetricOutcome.ALLOWED)
+        == 1
+    )
 
 
 @pytest.mark.asyncio
@@ -426,9 +427,10 @@ async def test_authorize_preflight_denies_a_definite_match() -> None:
         )
     assert raised.value.error_code is ErrorCode.EXCLUSION_POLICY_DENIED
     assert raised.value.safe_details == {"policy_revision_number": 1}
-    assert metrics.evaluation_count(
-        PolicyBoundary.CANONICAL_READ, EvaluationMetricOutcome.EXCLUDED
-    ) == 1
+    assert (
+        metrics.evaluation_count(PolicyBoundary.CANONICAL_READ, EvaluationMetricOutcome.EXCLUDED)
+        == 1
+    )
 
 
 @pytest.mark.asyncio

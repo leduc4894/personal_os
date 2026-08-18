@@ -99,9 +99,7 @@ def harness() -> Iterator[PolicyRouteHarness]:
     application: FastAPI = create_api_application(
         environment=RuntimeEnvironment.TEST,
         readiness_probe=_ReadyProbe(),
-        web_authentication=compose_offline_web_authentication(
-            clock=clock, state=auth_state
-        ),
+        web_authentication=compose_offline_web_authentication(clock=clock, state=auth_state),
         exclusion_policy=compose_offline_exclusion_policy(state=policy_state),
     )
     with TestClient(application, base_url=ORIGIN) as test_client:
@@ -246,9 +244,7 @@ def publish(
 
 
 def test_admin_routes_require_the_web_session(harness: PolicyRouteHarness) -> None:
-    response = harness.client.get(
-        "/api/admin/exclusion-policy", headers={"Origin": ORIGIN}
-    )
+    response = harness.client.get("/api/admin/exclusion-policy", headers={"Origin": ORIGIN})
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "authentication_required"
     assert response.headers["cache-control"] == "no-store"

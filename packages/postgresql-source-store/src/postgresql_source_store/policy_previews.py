@@ -125,9 +125,7 @@ PREVIEW_BASE_REVISION_STALE_ERROR_CODE: Final[SafeToken] = SafeToken.parse(
 PREVIEW_SOURCE_CHECKPOINT_STALE_ERROR_CODE: Final[SafeToken] = SafeToken.parse(
     "preview_source_checkpoint_stale"
 )
-PREVIEW_EXECUTION_FAILED_ERROR_CODE: Final[SafeToken] = SafeToken.parse(
-    "preview_execution_failed"
-)
+PREVIEW_EXECUTION_FAILED_ERROR_CODE: Final[SafeToken] = SafeToken.parse("preview_execution_failed")
 PREVIEW_EXECUTION_DEADLINE_ERROR_CODE: Final[SafeToken] = SafeToken.parse(
     "preview_execution_deadline"
 )
@@ -499,8 +497,7 @@ def expire_overdue_previews_statements(
         .values(state=PreviewStatus.EXPIRED.value)
         .where(
             policy_previews.c.state == PreviewStatus.READY.value,
-            policy_previews.c.expires_at
-            <= sa.bindparam("now", type_=sa.DateTime(timezone=True)),
+            policy_previews.c.expires_at <= sa.bindparam("now", type_=sa.DateTime(timezone=True)),
         )
     )
     return execution_deadline, ready_expiry
@@ -626,9 +623,9 @@ def source_checkpoint_select_statement(workspace_id: UUID) -> sa.Select[tuple[An
     workspace's ``sync_events`` rows — zero before the first source event.
     """
 
-    return sa.select(
-        sa.func.coalesce(sa.func.max(sync_events.c.event_sequence), 0)
-    ).where(sync_events.c.workspace_id == workspace_id)
+    return sa.select(sa.func.coalesce(sa.func.max(sync_events.c.event_sequence), 0)).where(
+        sync_events.c.workspace_id == workspace_id
+    )
 
 
 def source_page_select_statement(
@@ -817,13 +814,9 @@ def hydrate_preview_result_row(row: _MappedRow) -> PolicyPreviewResultRow:
         return PolicyPreviewResultRow(
             source_id=row["source_id"],
             previous_raw_decision=RawPolicyDecision(row["previous_raw_decision"]),
-            previous_enforced_decision=EnforcedPolicyDecision(
-                row["previous_enforced_decision"]
-            ),
+            previous_enforced_decision=EnforcedPolicyDecision(row["previous_enforced_decision"]),
             proposed_raw_decision=RawPolicyDecision(row["proposed_raw_decision"]),
-            proposed_enforced_decision=EnforcedPolicyDecision(
-                row["proposed_enforced_decision"]
-            ),
+            proposed_enforced_decision=EnforcedPolicyDecision(row["proposed_enforced_decision"]),
             proposed_match_state=PreviewMatchState(row["proposed_match_state"]),
             impact_class=PreviewImpactClass(row["impact_class"]),
             matched_rule_ids=tuple(
@@ -1112,10 +1105,7 @@ class PostgresqlPolicyPreviewStore:
                             evaluated_subjects=evaluated_subjects, batch_count=batch_count
                         )
                     )
-                if (
-                    fail_after_subjects is not None
-                    and evaluated_subjects >= fail_after_subjects
-                ):
+                if fail_after_subjects is not None and evaluated_subjects >= fail_after_subjects:
                     raise InjectedPreviewFailure
                 if len(page) < PREVIEW_SCAN_PAGE_SIZE:
                     break
@@ -1333,15 +1323,11 @@ class PostgresqlPolicyPreviewStore:
 
     # --- leased outbox --------------------------------------------------------------
 
-    async def claim_pending_previews(
-        self, now: datetime, limit: int
-    ) -> list[LeasedPolicyPreview]:
+    async def claim_pending_previews(self, now: datetime, limit: int) -> list[LeasedPolicyPreview]:
         """Claim due pending previews behind the pinned batch limit."""
 
         _require_aware(now, "now")
-        return await self._retry.run(
-            lambda _attempt: self._claim_pending_previews_once(now, limit)
-        )
+        return await self._retry.run(lambda _attempt: self._claim_pending_previews_once(now, limit))
 
     async def _claim_pending_previews_once(
         self, now: datetime, limit: int
@@ -1390,18 +1376,14 @@ class PostgresqlPolicyPreviewStore:
             connection.begin(),
         ):
             await apply_transaction_bounds(connection)
-            result = await connection.execute(
-                reclaim_lease_update_statement(now=now), {"now": now}
-            )
+            result = await connection.execute(reclaim_lease_update_statement(now=now), {"now": now})
             return int(result.rowcount)
 
     async def expire_overdue_previews(self, now: datetime) -> PolicyPreviewSweepResult:
         """Sweep the execution deadline and the ready expiry (spec 10)."""
 
         _require_aware(now, "now")
-        return await self._retry.run(
-            lambda _attempt: self._expire_overdue_previews_once(now)
-        )
+        return await self._retry.run(lambda _attempt: self._expire_overdue_previews_once(now))
 
     async def _expire_overdue_previews_once(self, now: datetime) -> PolicyPreviewSweepResult:
         deadline_statement, ready_statement = expire_overdue_previews_statements(now)
@@ -1435,17 +1417,13 @@ class PostgresqlPolicyPreviewStore:
             self._record_preview_metric(PreviewMetricOutcome.FAILED, started_monotonic)
         return affected
 
-    async def _mark_preview_failed_once(
-        self, preview_id: UUID, error_code: SafeToken
-    ) -> bool:
+    async def _mark_preview_failed_once(self, preview_id: UUID, error_code: SafeToken) -> bool:
         async with (
             self._engine.connect() as connection,
             connection.begin(),
         ):
             await apply_transaction_bounds(connection)
-            result = await connection.execute(
-                fail_preview_update_statement(preview_id, error_code)
-            )
+            result = await connection.execute(fail_preview_update_statement(preview_id, error_code))
             return result.rowcount == 1
 
     async def release_retry(
@@ -1546,9 +1524,7 @@ class PostgresqlPolicyPreviewStore:
         return result.mappings().first()
 
     @staticmethod
-    async def _select_source_checkpoint(
-        connection: AsyncConnection, workspace_id: UUID
-    ) -> int:
+    async def _select_source_checkpoint(connection: AsyncConnection, workspace_id: UUID) -> int:
         result = await connection.execute(source_checkpoint_select_statement(workspace_id))
         return int(result.scalar_one())
 

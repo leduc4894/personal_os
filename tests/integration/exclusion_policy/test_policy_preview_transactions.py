@@ -119,9 +119,7 @@ class PreviewHarness:
                 )
             )
 
-    async def seed_sources(
-        self, count: int, *, source_type: str = "markdown"
-    ) -> list[UUID]:
+    async def seed_sources(self, count: int, *, source_type: str = "markdown") -> list[UUID]:
         source_ids = [uuid4() for _ in range(count)]
         async with self.engine.begin() as connection:
             await connection.execute(
@@ -200,9 +198,9 @@ class PreviewHarness:
     async def replace_draft(self, *rules: tuple[RuleKind, dict[str, Any]]) -> int:
         async with self.engine.connect() as connection:
             draft_row = await connection.execute(
-                sa.select(
-                    policy_drafts.c.policy_draft_id, policy_drafts.c.draft_version
-                ).where(policy_drafts.c.workspace_id == self.base.stack.workspace_id)
+                sa.select(policy_drafts.c.policy_draft_id, policy_drafts.c.draft_version).where(
+                    policy_drafts.c.workspace_id == self.base.stack.workspace_id
+                )
             )
             draft = draft_row.one()
         normalized = tuple(
@@ -284,9 +282,7 @@ async def test_request_captures_binding_audit_and_pending_row(
     record = await preview_harness.request()
 
     assert record.status is PreviewStatus.PENDING
-    assert record.source_checkpoint_event_sequence == (
-        await preview_harness.current_checkpoint()
-    )
+    assert record.source_checkpoint_event_sequence == (await preview_harness.current_checkpoint())
     assert record.base_policy_revision_id is None
     assert record.draft_version >= 1
     assert len(record.draft_sha256) == 64
@@ -334,18 +330,14 @@ async def test_activity_streams_pages_heartbeats_and_writes_atomic_evidence(
 
     assert ready.status is PreviewStatus.READY
     assert ready.ready_at is not None and ready.expires_at is not None
-    assert (ready.expires_at - ready.ready_at).total_seconds() == (
-        PREVIEW_READY_EXPIRY_SECONDS
-    )
+    assert (ready.expires_at - ready.ready_at).total_seconds() == (PREVIEW_READY_EXPIRY_SECONDS)
     # Every pdf source definitely matches the source-type rule; every other
     # source lacks locator evidence for the extension rule and stays
     # indeterminate — both over a previous enforced deny (no active policy).
     assert ready.still_excluded_count == counts.get("pdf", 0)
     assert ready.indeterminate_count == markdown_total
     assert len(ready.impact_digest or "") == 64
-    assert await preview_harness.store.count_results(record.policy_preview_id) == (
-        total_sources
-    )
+    assert await preview_harness.store.count_results(record.policy_preview_id) == (total_sources)
     assert [progress.batch_count for progress in heartbeats] == [1, 2]
     assert heartbeats[-1].evaluated_subjects == total_sources
     assert preview_harness.metrics.preview_count(PreviewMetricOutcome.READY) == 1
@@ -392,13 +384,9 @@ async def test_preview_activity_rolls_back_every_result_after_midstream_failure(
     # The retry restarts from the same captured inputs and completes over the
     # draft rules an earlier test installed (pdf match plus a locator rule):
     # markdown sources end indeterminate, none newly allowed.
-    ready = await preview_harness.store.run_preview_activity(
-        record.policy_preview_id, _context()
-    )
+    ready = await preview_harness.store.run_preview_activity(record.policy_preview_id, _context())
     assert ready.status is PreviewStatus.READY
-    assert await preview_harness.store.count_results(record.policy_preview_id) == (
-        expected_total
-    )
+    assert await preview_harness.store.count_results(record.policy_preview_id) == (expected_total)
     counts = await preview_harness.source_type_counts()
     assert ready.indeterminate_count == expected_total - counts.get("pdf", 0)
     assert ready.still_excluded_count == counts.get("pdf", 0)
@@ -420,9 +408,7 @@ async def test_source_mutation_during_execution_never_merges_snapshots(
     async def heartbeat(progress: PreviewProgress) -> None:
         if progress.batch_count == 1 and not late_source_ids:
             # A concurrent writer commits a new pdf source between two pages.
-            late_source_ids.extend(
-                await preview_harness.seed_sources(1, source_type="pdf")
-            )
+            late_source_ids.extend(await preview_harness.seed_sources(1, source_type="pdf"))
 
     ready = await preview_harness.store.run_preview_activity(
         record.policy_preview_id, _context(), heartbeat
@@ -431,9 +417,7 @@ async def test_source_mutation_during_execution_never_merges_snapshots(
     # The open repeatable-read snapshot never admitted the late source.
     assert ready.still_excluded_count == counts.get("pdf", 0)
     assert ready.indeterminate_count == expected_total - counts.get("pdf", 0)
-    assert await preview_harness.store.count_results(record.policy_preview_id) == (
-        expected_total
-    )
+    assert await preview_harness.store.count_results(record.policy_preview_id) == (expected_total)
     page = await preview_harness.store.list_preview_results(
         record.policy_preview_id, _context(), limit=PREVIEW_RESULT_PAGE_MAXIMUM
     )
@@ -456,13 +440,9 @@ async def test_stale_checkpoint_rejects_execution_and_result_reads(
     await preview_harness.seed_sync_event()
 
     with pytest.raises(ExclusionPolicyError) as rejected:
-        await preview_harness.store.run_preview_activity(
-            stale_record.policy_preview_id, _context()
-        )
+        await preview_harness.store.run_preview_activity(stale_record.policy_preview_id, _context())
     assert rejected.value.error_code is ErrorCode.EXCLUSION_POLICY_PREVIEW_STALE
-    assert rejected.value.safe_details["reason"].value == (
-        "preview_source_checkpoint_stale"
-    )
+    assert rejected.value.safe_details["reason"].value == ("preview_source_checkpoint_stale")
     assert (
         await preview_harness.store.get_preview(stale_record.policy_preview_id, _context())
     ).status is PreviewStatus.PENDING
@@ -470,9 +450,7 @@ async def test_stale_checkpoint_rejects_execution_and_result_reads(
     # A preview bound after the advance completes and serves its pages; the
     # next source event makes every later result read stale.
     fresh = await preview_harness.request()
-    ready = await preview_harness.store.run_preview_activity(
-        fresh.policy_preview_id, _context()
-    )
+    ready = await preview_harness.store.run_preview_activity(fresh.policy_preview_id, _context())
     assert ready.status is PreviewStatus.READY
     await preview_harness.store.list_preview_results(fresh.policy_preview_id, _context())
     await preview_harness.seed_sync_event()
@@ -504,15 +482,11 @@ async def test_no_active_policy_previews_valid_sources_as_newly_allowed(
     expected_total = sum((await preview_harness.source_type_counts()).values())
     record = await preview_harness.request()
 
-    ready = await preview_harness.store.run_preview_activity(
-        record.policy_preview_id, _context()
-    )
+    ready = await preview_harness.store.run_preview_activity(record.policy_preview_id, _context())
 
     assert ready.status is PreviewStatus.READY
     assert ready.newly_allowed_count == expected_total
-    page = await preview_harness.store.list_preview_results(
-        record.policy_preview_id, _context()
-    )
+    page = await preview_harness.store.list_preview_results(record.policy_preview_id, _context())
     assert len(page.rows) == expected_total
     for row in page.rows:
         assert row.previous_raw_decision.value == "indeterminate"
@@ -613,7 +587,5 @@ async def test_leased_outbox_claims_releases_and_reclaims(
     assert row["state"] == "pending"
     assert row["safe_error_code"] == PREVIEW_LEASE_EXPIRED_ERROR_CODE.value
 
-    ready = await preview_harness.store.run_preview_activity(
-        record.policy_preview_id, _context()
-    )
+    ready = await preview_harness.store.run_preview_activity(record.policy_preview_id, _context())
     assert ready.status is PreviewStatus.READY

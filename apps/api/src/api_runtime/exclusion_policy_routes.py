@@ -235,9 +235,7 @@ def create_exclusion_policy_route_endpoints(
         context = _bound_diagnostic_context()
         workspace_id = authentication.context.workspace_id
         status = await exclusion_policy.queries.get_policy_status(workspace_id, context)
-        summary = await exclusion_policy.queries.get_reconciliation_summary(
-            workspace_id, context
-        )
+        summary = await exclusion_policy.queries.get_reconciliation_summary(workspace_id, context)
         return _success_json(
             ExclusionPolicyStatusData(
                 active_policy_revision_id=status.active_policy_revision_id,
@@ -265,10 +263,7 @@ def create_exclusion_policy_route_endpoints(
         """Validate and atomically replace the complete desired rule list."""
         request.scope["route_template"] = ApiRouteTemplate.ADMIN_EXCLUSION_POLICY_DRAFT
         context = _bound_diagnostic_context()
-        rules = tuple(
-            to_domain_rule(rule, index)
-            for index, rule in enumerate(draft_request.rules)
-        )
+        rules = tuple(to_domain_rule(rule, index) for index, rule in enumerate(draft_request.rules))
         draft = await exclusion_policy.drafts.load_draft(
             authentication.context.workspace_id, context
         )
@@ -326,9 +321,7 @@ def create_exclusion_policy_route_endpoints(
                 raise ExclusionPolicyError(
                     ErrorCode.EXCLUSION_POLICY_PREVIEW_FAILED,
                     safe_details={
-                        "reason": SafeToken.parse(
-                            str(record.safe_error_code or "preview_missing")
-                        )
+                        "reason": SafeToken.parse(str(record.safe_error_code or "preview_missing"))
                     },
                 )
             raise ExclusionPolicyError(ErrorCode.EXCLUSION_POLICY_PREVIEW_EXPIRED)
@@ -379,9 +372,7 @@ def create_exclusion_policy_route_endpoints(
             )
         except ValueError as cause:
             raise _input_invalid(_PUBLICATION_BINDING_INVALID) from cause
-        result = await exclusion_policy.publication.publish(
-            command, _bound_diagnostic_context()
-        )
+        result = await exclusion_policy.publication.publish(command, _bound_diagnostic_context())
         return _success_json(
             policy_publication_data(result),
             status_code=200 if result.is_replay else 201,
@@ -420,9 +411,7 @@ def create_exclusion_policy_route_endpoints(
         presented = request.headers.get("if-none-match")
         if presented is not None and if_none_match_satisfied(presented, etag):
             return Response(status_code=304, headers={**_NO_STORE_HEADERS, "etag": etag})
-        return _success_json(
-            signed_snapshot_data(snapshot), headers={"etag": etag}
-        )
+        return _success_json(signed_snapshot_data(snapshot), headers={"etag": etag})
 
     return ExclusionPolicyRouteEndpoints(
         get_policy_status=get_policy_status,

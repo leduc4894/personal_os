@@ -87,9 +87,7 @@ def active_policy_snapshot_select_statement(
     )
 
 
-def source_type_select_statement(
-    workspace_id: UUID, source_id: UUID
-) -> sa.Select[tuple[Any, ...]]:
+def source_type_select_statement(workspace_id: UUID, source_id: UUID) -> sa.Select[tuple[Any, ...]]:
     """Build the workspace-bound stored source-type lookup."""
 
     return sa.select(sources.c.source_type).where(
@@ -98,9 +96,7 @@ def source_type_select_statement(
     )
 
 
-def hydrate_active_policy_snapshot(
-    row: Any, workspace_id: UUID
-) -> ActivePolicySnapshotMaterial:
+def hydrate_active_policy_snapshot(row: Any, workspace_id: UUID) -> ActivePolicySnapshotMaterial:
     """Build the snapshot material from one lookup row, failing closed.
 
     A row bound to another workspace or a non-positive revision number is
@@ -244,9 +240,7 @@ class PostgresqlPolicySubjectEvidenceSource:
             connection.begin(),
         ):
             await apply_transaction_bounds(connection)
-            result = await connection.execute(
-                source_type_select_statement(workspace_id, source_id)
-            )
+            result = await connection.execute(source_type_select_statement(workspace_id, source_id))
             source_type_value = result.scalar_one_or_none()
         if source_type_value is None:
             return None

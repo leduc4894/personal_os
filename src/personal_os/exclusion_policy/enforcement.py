@@ -268,9 +268,7 @@ class KeyedTrustAnchorVerifier:
 
     keyed_verifier: PolicySignatureVerifier
 
-    def verify(
-        self, *, public_key_bytes: bytes, signature_bytes: bytes, message: bytes
-    ) -> bool:
+    def verify(self, *, public_key_bytes: bytes, signature_bytes: bytes, message: bytes) -> bool:
         return self.keyed_verifier.verify(
             derive_ed25519_key_id(public_key_bytes), signature_bytes, message
         )
@@ -484,9 +482,7 @@ class PolicyEnforcementService:
         """Verify the active signed policy and evaluate one candidate subject."""
 
         started = time.monotonic()
-        material = await self._snapshot_source.load_active_snapshot(
-            subject.workspace_id, context
-        )
+        material = await self._snapshot_source.load_active_snapshot(subject.workspace_id, context)
         if material is None:
             raise policy_not_initialized_error()
         decision = self._evaluate_material(material, subject, boundary, started)

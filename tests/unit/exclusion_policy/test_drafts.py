@@ -80,9 +80,7 @@ class RecordingDraftStore:
         self.draft = draft
         self.replace_calls: list[tuple[UUID, int, tuple[ExclusionRule, ...], PolicyActor]] = []
 
-    async def load_draft(
-        self, workspace_id: UUID, context: DiagnosticContext
-    ) -> PolicyDraft:
+    async def load_draft(self, workspace_id: UUID, context: DiagnosticContext) -> PolicyDraft:
         assert workspace_id == WORKSPACE_ID
         return self.draft
 
@@ -133,9 +131,7 @@ def _service(store: RecordingDraftStore) -> PolicyDraftService:
 
 
 def test_validate_draft_rules_rejects_more_than_maximum_rules() -> None:
-    rules = tuple(
-        extension_rule(f".ext{index}") for index in range(MAXIMUM_RULES_PER_REVISION + 1)
-    )
+    rules = tuple(extension_rule(f".ext{index}") for index in range(MAXIMUM_RULES_PER_REVISION + 1))
     with pytest.raises(ExclusionPolicyError) as raised:
         validate_draft_rules(rules)
     assert raised.value.error_code is ErrorCode.EXCLUSION_POLICY_INPUT_INVALID
@@ -188,9 +184,7 @@ async def test_service_load_draft_delegates_to_store() -> None:
 async def test_service_replace_draft_rules_validates_before_store_call() -> None:
     store = RecordingDraftStore(_draft(1))
     service = _service(store)
-    rules = tuple(
-        extension_rule(f".ext{index}") for index in range(MAXIMUM_RULES_PER_REVISION + 1)
-    )
+    rules = tuple(extension_rule(f".ext{index}") for index in range(MAXIMUM_RULES_PER_REVISION + 1))
     with pytest.raises(ExclusionPolicyError):
         await service.replace_draft_rules(DRAFT_ID, 1, rules, _actor(), _context())
     assert store.replace_calls == []

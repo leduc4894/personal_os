@@ -1,27 +1,34 @@
-# Reserved: performance tests
+# Performance gates
 
-**Status:** Reserved directory — no executable tests in this bootstrap.
+**Status:** Owned by the exclusion-policy publication spec (section 24,
+`docs/superpowers/specs/2026-08-17-exclusion-policy-publication-design.md`).
+The layer left the bootstrap reservation when that spec landed its reference
+performance gates — the "later spec" this README originally deferred to.
 
-## Owner
+## What runs here
 
-This directory is owned by the Phase One workspace **bootstrap** spec
-(`docs/superpowers/specs/phase-one-workspace-bootstrap-design.md`). It exists
-to preserve the canonical Python test hierarchy
-(`unit`, `contract`, `integration`, `end_to_end`, `golden`, `performance`)
-without populating layers that have no behavior to verify yet.
+`test_exclusion_policy_performance.py` pins the four reference budgets of
+spec 24 against a deterministic 10,000-source fixture seeded into a disposable
+PostgreSQL 18.4 stack (`knowledge-ci-*` project, `CI=true`,
+`LOCAL_STACK_TEST_PROJECT`):
 
-## Future acceptance source
+- one subject against 256 mixed rules — evaluator p95 <= 5 ms
+- one maximum-size signed snapshot verification — p95 <= 50 ms
+- 10,000 subjects against 256 mixed rules — preview ready <= 30 s
+- 10,000-source reconciliation — <= 300 s
 
-Performance benchmarks and regression gates are added by a **later spec** that
-defines a deterministic workload worth measuring (for example: retrieval
-latency under a fixed corpus, or workflow throughput under load). Until that
-spec lands, this directory intentionally contains only this README.
+Every budget records p50/p95/max, the reference-host evidence (platform, CPU,
+RAM, Python/PostgreSQL versions, live capacity settings) prints before any
+assertion, warmup iterations are explicit and excluded, and the module fails —
+never skips — when the stack is unavailable.
 
-## What is forbidden here during bootstrap
+## How to run
 
-- No `test_*.py`, `*.test.ts`, `*.spec.ts` or any other executable test file.
-- No `conftest.py` that autocollects placeholder tests.
-- No fixture that silently passes with zero assertions.
+```bash
+CI=true LOCAL_STACK_TEST_PROJECT="knowledge-ci-exclusion-perf-$$" \
+  uv run pytest tests/performance -m local_stack -q
+```
 
-A later spec is responsible for adding real tests with real assertions; until
-then, pytest collects nothing from this directory.
+Future specs add their own reference workloads here; a budget that regresses
+triggers profiling and an explicit capacity decision (spec 24), never a
+weakening of fail-closed behavior.

@@ -490,9 +490,7 @@ async def test_persist_keyset_is_idempotent_and_load_latest_returns_newest_chain
     current_key_id = uuid4()
     staged_key_id = uuid4()
     first_keys = (
-        PolicySigningKeyRecord(
-            signing_key_id=current_key_id, public_key_bytes=_CURRENT_PUBLIC_KEY
-        ),
+        PolicySigningKeyRecord(signing_key_id=current_key_id, public_key_bytes=_CURRENT_PUBLIC_KEY),
         PolicySigningKeyRecord(signing_key_id=staged_key_id, public_key_bytes=_STAGED_PUBLIC_KEY),
     )
     first_signatures = (
@@ -539,9 +537,7 @@ async def test_persist_keyset_is_idempotent_and_load_latest_returns_newest_chain
     second_payload = b'{"contract":"exclusion_policy_keyset/v1","n":2}'
     second_keys = (
         *first_keys,
-        PolicySigningKeyRecord(
-            signing_key_id=rotated_key_id, public_key_bytes=_ROTATED_PUBLIC_KEY
-        ),
+        PolicySigningKeyRecord(signing_key_id=rotated_key_id, public_key_bytes=_ROTATED_PUBLIC_KEY),
     )
     second_signatures = (
         *first_signatures,

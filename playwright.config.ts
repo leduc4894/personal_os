@@ -1,6 +1,9 @@
 import { defineConfig } from "@playwright/test";
 
-const WEB_PORT = 3100;
+// The web port stays 3100 by default; hosts whose TCP range excludes it
+// (Windows Hyper-V exclusion windows) override it with the environment
+// variable instead of weakening the gate.
+const WEB_PORT = Number(process.env.PLAYWRIGHT_WEB_PORT ?? 3100);
 const WEB_BASE_URL = `http://127.0.0.1:${WEB_PORT}`;
 
 export default defineConfig({
@@ -9,7 +12,14 @@ export default defineConfig({
   expect: { timeout: 15_000 },
   fullyParallel: true,
   retries: process.env.CI ? 2 : 0,
-  reporter: process.env.CI ? "github" : "list",
+  // CI emits a redacted JUnit report (opaque case names and pass/fail
+  // durations only) beside the GitHub reporter; never traces or bodies.
+  reporter: process.env.CI
+    ? [
+        ["github"],
+        ["junit", { outputFile: "test-results/playwright-junit.xml" }],
+      ]
+    : "list",
   use: {
     baseURL: WEB_BASE_URL,
     trace: "retain-on-failure",

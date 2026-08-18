@@ -133,9 +133,7 @@ def run_server(
                 keyring=keyring,
                 engine=engine,
             )
-            exclusion_policy = compose_exclusion_policy(
-                engine=engine, signer=policy_signer
-            )
+            exclusion_policy = compose_exclusion_policy(engine=engine, signer=policy_signer)
 
             @asynccontextmanager
             async def database_lifespan(_app: FastAPI) -> AsyncIterator[None]:

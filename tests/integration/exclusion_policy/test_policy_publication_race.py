@@ -81,7 +81,6 @@ async def _insert_denying_revision_in_transaction(
     guarded pointer swap below therefore cannot race any other writer.
     """
 
-
     workspace_id = harness.workspace_id
     state = (
         await connection.execute(
@@ -126,8 +125,7 @@ async def _insert_denying_revision_in_transaction(
             sa.select(policy_signing_keys.c.signing_key_id)
             .where(
                 policy_signing_keys.c.workspace_id == workspace_id,
-                policy_signing_keys.c.public_key_bytes
-                == harness.signing_key.public_key_bytes,
+                policy_signing_keys.c.public_key_bytes == harness.signing_key.public_key_bytes,
             )
             .limit(1)
         )
@@ -247,9 +245,7 @@ async def test_in_flight_commit_serializes_behind_the_policy_state_row_lock(
                 .where(workspace_policy_state.c.workspace_id == race_harness.workspace_id)
                 .with_for_update()
             )
-            denial_revision = await _insert_denying_revision_in_transaction(
-                race_harness, holder
-            )
+            denial_revision = await _insert_denying_revision_in_transaction(race_harness, holder)
             # The source commit starts while the policy-state row is still
             # locked; it must block at the recheck, not read a torn pointer.
             commit_task = asyncio.create_task(
@@ -286,9 +282,9 @@ async def test_policy_state_lock_outliving_the_timeout_fails_retryable(
     async def hold_policy_state_row() -> None:
         async with race_harness.base.engine.connect() as holder, holder.begin():
             await holder.execute(
-                sa.select(workspace_policy_state.c.workspace_id).where(
-                    workspace_policy_state.c.workspace_id == race_harness.workspace_id
-                ).with_for_update()
+                sa.select(workspace_policy_state.c.workspace_id)
+                .where(workspace_policy_state.c.workspace_id == race_harness.workspace_id)
+                .with_for_update()
             )
             holder_ready.set()
             await release.wait()

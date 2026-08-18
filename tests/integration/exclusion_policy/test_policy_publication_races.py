@@ -113,9 +113,7 @@ class RaceHarness:
         return self.base.stack.workspace_id
 
     def actor(self) -> PolicyActor:
-        return PolicyActor(
-            actor_kind=PolicyActorKind.USER, user_id=self.base.stack.owner_user_id
-        )
+        return PolicyActor(actor_kind=PolicyActorKind.USER, user_id=self.base.stack.owner_user_id)
 
     async def ready_preview(self) -> PolicyPreviewRecord:
         requested = await self.preview_store.request_preview(
@@ -161,8 +159,7 @@ class RaceHarness:
     async def revision_count(self) -> int:
         return int(
             await self.base.fetch_scalar(
-                "SELECT count(*) FROM knowledge.source_policies"
-                " WHERE workspace_id = :workspace_id",
+                "SELECT count(*) FROM knowledge.source_policies WHERE workspace_id = :workspace_id",
                 {"workspace_id": self.workspace_id},
             )
         )
@@ -231,9 +228,7 @@ async def test_two_concurrent_publishers_different_keys_commit_exactly_one(
     assert await harness.revision_count() == revisions_before + 1
     assert counting.calls == 1
     assert (
-        await harness.audit_count(
-            PUBLISH_REJECTED_AUDIT_ACTION, reason_code="snapshot_outdated"
-        )
+        await harness.audit_count(PUBLISH_REJECTED_AUDIT_ACTION, reason_code="snapshot_outdated")
         == 1
     )
     active = await harness.base.fetch_scalar(
@@ -260,9 +255,7 @@ async def test_two_concurrent_publishers_same_key_converge_on_one_revision(
     assert all(not isinstance(outcome, BaseException) for outcome in outcomes)
     revisions = {outcome.policy_revision_id for outcome in outcomes}
     assert len(revisions) == 1
-    assert {outcome.revision_number for outcome in outcomes} == {
-        outcomes[0].revision_number
-    }
+    assert {outcome.revision_number for outcome in outcomes} == {outcomes[0].revision_number}
     assert sum(1 for outcome in outcomes if outcome.is_replay) >= 1
     assert await harness.revision_count() == revisions_before + 1
     assert counting.calls == 1

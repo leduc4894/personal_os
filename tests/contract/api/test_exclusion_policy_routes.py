@@ -148,12 +148,14 @@ def test_request_schemas_are_closed_and_carry_no_workspace_selector(
     application: FastAPI,
 ) -> None:
     document = application.openapi()
-    assert _request_schema(
-        document, "/api/admin/exclusion-policy/draft", "put"
-    ).get("$ref") == "#/components/schemas/PolicyDraftReplaceRequest"
-    assert _request_schema(
-        document, "/api/admin/exclusion-policy/publications", "post"
-    ).get("$ref") == "#/components/schemas/PolicyPublicationRequest"
+    assert (
+        _request_schema(document, "/api/admin/exclusion-policy/draft", "put").get("$ref")
+        == "#/components/schemas/PolicyDraftReplaceRequest"
+    )
+    assert (
+        _request_schema(document, "/api/admin/exclusion-policy/publications", "post").get("$ref")
+        == "#/components/schemas/PolicyPublicationRequest"
+    )
     schemas = document["components"]["schemas"]
     draft_schema = dict(schemas["PolicyDraftReplaceRequest"])
     publication_schema = dict(schemas["PolicyPublicationRequest"])

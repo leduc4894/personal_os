@@ -250,9 +250,7 @@ class PolicyDraftStore(Protocol):
     SQL or driver payloads.
     """
 
-    async def load_draft(
-        self, workspace_id: UUID, context: DiagnosticContext
-    ) -> PolicyDraft: ...
+    async def load_draft(self, workspace_id: UUID, context: DiagnosticContext) -> PolicyDraft: ...
 
     async def replace_rules(
         self,

@@ -168,6 +168,16 @@ class RecordingObjectStore:
                         raise StopAsyncIteration
                     return self.pending.pop(0)
 
+                async def read(self, size_bytes: int = 1_048_576) -> bytes:
+                    """The port's sized-read surface (recovery object copies)."""
+                    buffer = b""
+                    while self.pending and len(buffer) < size_bytes:
+                        buffer += self.pending.pop(0)
+                    if len(buffer) > size_bytes:
+                        self.pending.insert(0, buffer[size_bytes:])
+                        buffer = buffer[:size_bytes]
+                    return buffer
+
             reader = _Reader(list(chunks))
             try:
                 yield reader
@@ -207,17 +217,13 @@ class EnforcementHarness:
             object_store=self.object_store,
             metrics=InMemorySourcePublicationMetrics(),
             clock=lambda: datetime.now(UTC),
-            policy_guard=compose_policy_enforcement(
-                engine, verifier=self.policy_verifier
-            ),
+            policy_guard=compose_policy_enforcement(engine, verifier=self.policy_verifier),
         )
 
     def _keyed_verifier(self) -> Any:
         from api_runtime.exclusion_policy_crypto import Ed25519PolicyVerifier
 
-        return Ed25519PolicyVerifier(
-            {self.signing_key.key_id: self.signing_key.public_key_bytes}
-        )
+        return Ed25519PolicyVerifier({self.signing_key.key_id: self.signing_key.public_key_bytes})
 
     @property
     def workspace_id(self) -> UUID:
@@ -324,8 +330,7 @@ class EnforcementHarness:
         """Workspace-bound row count relative to the migration-seeded baseline."""
         return int(
             await self.base.fetch_scalar(
-                f"SELECT count(*) FROM knowledge.{table}"
-                " WHERE workspace_id = :workspace_id",
+                f"SELECT count(*) FROM knowledge.{table} WHERE workspace_id = :workspace_id",
                 {"workspace_id": self.workspace_id},
             )
         )
@@ -620,5 +625,3 @@ async def _activate_forged_revision(
         )
         assert swapped.rowcount == 1
     return state.active_policy_revision_id, int(state.active_revision_number)
-
-

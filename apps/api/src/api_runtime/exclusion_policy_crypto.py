@@ -115,7 +115,7 @@ class Ed25519PolicyVerifier(PolicySignatureVerifier):
             return False
         try:
             Ed25519PublicKey.from_public_bytes(public_key_bytes).verify(signature, message)
-        except (InvalidSignature, ValueError):
+        except InvalidSignature, ValueError:
             return False
         return True
 
@@ -131,15 +131,13 @@ class TrustAnchorEd25519Verifier:
     verification; it never raises and never echoes key or message material.
     """
 
-    def verify(
-        self, *, public_key_bytes: bytes, signature_bytes: bytes, message: bytes
-    ) -> bool:
+    def verify(self, *, public_key_bytes: bytes, signature_bytes: bytes, message: bytes) -> bool:
         if len(public_key_bytes) != ED25519_PUBLIC_KEY_BYTES:
             return False
         if len(signature_bytes) != ED25519_SIGNATURE_BYTES:
             return False
         try:
             Ed25519PublicKey.from_public_bytes(public_key_bytes).verify(signature_bytes, message)
-        except (InvalidSignature, ValueError):
+        except InvalidSignature, ValueError:
             return False
         return True

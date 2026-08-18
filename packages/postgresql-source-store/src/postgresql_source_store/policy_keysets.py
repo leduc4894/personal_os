@@ -88,9 +88,7 @@ def build_signing_key_values(
     }
 
 
-def build_keyset_values(
-    envelope: PolicyKeysetEnvelope, *, occurred_at: datetime
-) -> dict[str, Any]:
+def build_keyset_values(envelope: PolicyKeysetEnvelope, *, occurred_at: datetime) -> dict[str, Any]:
     """Build one ``policy_keysets`` envelope row's insert values.
 
     ``payload_sha256`` is derived from the canonical payload bytes inside
@@ -252,9 +250,7 @@ class PostgresqlPolicyKeysetStore:
                 connection, envelope.workspace_id, envelope.keyset_revision
             )
             if existing is not None:
-                if not classify_keyset_replay(
-                    existing, envelope.policy_keyset_id, payload_sha256
-                ):
+                if not classify_keyset_replay(existing, envelope.policy_keyset_id, payload_sha256):
                     raise InternalApplicationError(ErrorCode.INTERNAL_ERROR)
                 return PersistedPolicyKeyset(
                     policy_keyset_id=envelope.policy_keyset_id,
@@ -278,9 +274,7 @@ class PostgresqlPolicyKeysetStore:
                 await connection.execute(
                     sa.insert(policy_keyset_signatures).values(
                         [
-                            build_keyset_signature_values(
-                                envelope.policy_keyset_id, signature
-                            )
+                            build_keyset_signature_values(envelope.policy_keyset_id, signature)
                             for signature in envelope.signatures
                         ]
                     )
@@ -431,8 +425,7 @@ class PostgresqlPolicyKeysetStore:
             .select_from(policy_signing_keys)
             .join(
                 policy_keyset_signatures,
-                policy_keyset_signatures.c.signing_key_id
-                == policy_signing_keys.c.signing_key_id,
+                policy_keyset_signatures.c.signing_key_id == policy_signing_keys.c.signing_key_id,
             )
             .where(policy_keyset_signatures.c.policy_keyset_id == policy_keyset_id)
             .order_by(policy_signing_keys.c.signing_key_id)

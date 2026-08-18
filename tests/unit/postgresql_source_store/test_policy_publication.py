@@ -154,9 +154,7 @@ def test_mark_preview_consumed_is_guarded_on_the_ready_state() -> None:
 
 def test_rebase_draft_is_guarded_on_the_exact_version() -> None:
     compiled = _compile(
-        rebase_draft_after_publication_statement(
-            DRAFT_ID, 4, REVISION_ID, USER_ID, OCCURRED_AT
-        )
+        rebase_draft_after_publication_statement(DRAFT_ID, 4, REVISION_ID, USER_ID, OCCURRED_AT)
     )
     assert "knowledge.policy_drafts" in compiled
     assert "draft_version" in compiled
@@ -178,9 +176,7 @@ def test_swap_active_pointer_is_guarded_on_both_expected_members() -> None:
 def test_reconciliation_workflow_identity_is_derived_and_check_grammar_safe() -> None:
     workflow_id = reconciliation_workflow_id(WORKSPACE_ID, REVISION_ID)
     assert workflow_id.startswith(RECONCILIATION_WORKFLOW_ID_PREFIX + "/")
-    assert workflow_id == (
-        f"{RECONCILIATION_WORKFLOW_ID_PREFIX}/{WORKSPACE_ID}/{REVISION_ID}"
-    )
+    assert workflow_id == (f"{RECONCILIATION_WORKFLOW_ID_PREFIX}/{WORKSPACE_ID}/{REVISION_ID}")
     assert 20 <= len(workflow_id) <= 200
     assert all(char.islower() or char.isdigit() or char in "._/-" for char in workflow_id)
 
@@ -257,9 +253,7 @@ def test_published_audit_values_carry_identifiers_and_safe_hash_only() -> None:
     assert values["safe_diff_hash"] == PAYLOAD_SHA256
     assert values["reason_code"] is None
     assert values["occurred_at"] == OCCURRED_AT
-    assert not any(
-        isinstance(value, (bytes, bytearray)) for value in values.values()
-    )
+    assert not any(isinstance(value, (bytes, bytearray)) for value in values.values())
 
 
 def test_publish_rejected_audit_values_carry_closed_reason_and_no_hash() -> None:

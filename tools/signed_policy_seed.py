@@ -141,12 +141,16 @@ async def _insert_bound_preview_row(
     """
 
     draft_id = (
-        await connection.execute(
-            sa.select(policy_drafts.c.policy_draft_id).where(
-                policy_drafts.c.workspace_id == workspace_id
+        (
+            await connection.execute(
+                sa.select(policy_drafts.c.policy_draft_id).where(
+                    policy_drafts.c.workspace_id == workspace_id
+                )
             )
         )
-    ).scalars().first()
+        .scalars()
+        .first()
+    )
     if draft_id is None:
         # Harness-seeded workspaces may carry no draft graph yet; create the
         # minimal empty draft the preview row binds to.
@@ -234,13 +238,17 @@ async def seed_signed_policy(
             signing_key=signing_private_key,
         )
         existing_key_id = (
-            await connection.execute(
-                sa.select(policy_signing_keys.c.signing_key_id).where(
-                    policy_signing_keys.c.workspace_id == workspace_id,
-                    policy_signing_keys.c.public_key_bytes == public_key_bytes,
+            (
+                await connection.execute(
+                    sa.select(policy_signing_keys.c.signing_key_id).where(
+                        policy_signing_keys.c.workspace_id == workspace_id,
+                        policy_signing_keys.c.public_key_bytes == public_key_bytes,
+                    )
                 )
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
         if existing_key_id is None:
             await connection.execute(
                 sa.insert(policy_signing_keys).values(

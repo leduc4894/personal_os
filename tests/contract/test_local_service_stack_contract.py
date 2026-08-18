@@ -29,7 +29,7 @@ LOCAL_STACK_DESIGN_PATH = (
     REPO_ROOT / "docs" / "superpowers" / "specs" / "phase 1" / "local-service-stack-design.md"
 )
 LOCAL_STACK_PLAN_PATH = (
-    REPO_ROOT / "docs" / "superpowers" / "plans" / "2026-08-13-local-service-stack.md"
+    REPO_ROOT / "docs" / "superpowers" / "plans" / "phase 1" / "2026-08-13-local-service-stack.md"
 )
 DOCKER_CONTRACT_ENVIRONMENT = "KNOWLEDGE_LOCAL_DOCKER_CONTRACT"
 DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")

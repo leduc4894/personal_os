@@ -52,13 +52,14 @@ addopts = [
   "--strict-markers",
   "--import-mode=importlib",
   "-m",
-  "not local_stack and not r2_live",
+  "not local_stack and not r2_live and not device_records",
 ]
 testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
   "local_stack: requires a reachable Linux Docker Engine and may create disposable containers and volumes",
   "r2_live: requires dedicated live Cloudflare R2 test credentials and a dedicated private test bucket; fails (never skips) without them",
+  "device_records: requires the recorded Desktop and Mobile Obsidian reference-device verification evidence; fails (never skips) while the records are absent",
 ]
 
 [tool.ruff]
@@ -202,6 +203,25 @@ cmd = "pytest tests/unit/authentication tests/unit/api_runtime tests/unit/postgr
 # than skipping when they are absent.
 [tool.poe.tasks.authentication-e2e]
 shell = "pnpm run test:e2e:authentication"
+
+# Exclusion-policy acceptance feature gate (exclusion-policy-publication plan,
+# Task 13): the policy unit, api-runtime unit, adapter unit, worker unit,
+# exclusion-policy contract, API contract and disposable-stack integration
+# suites. The marker override enables ``local_stack`` — fail, never skip: the
+# integration conftest refuses to run without ``CI=true`` and a unique
+# ``knowledge-ci-*`` project name, the cross-language vector gate executes the
+# plugin's vitest replay of the shared golden corpora, and the sensitive-policy
+# contract gate builds the real Web and plugin production bundles through pnpm.
+[tool.poe.tasks.exclusion-policy-test]
+cmd = "pytest tests/unit/exclusion_policy tests/unit/api_runtime tests/unit/postgresql_source_store tests/unit/workflow_worker tests/contract/exclusion_policy tests/contract/api tests/integration/exclusion_policy -m \"not r2_live\" -q"
+
+# Reference-device verification record gate: validates the recorded Desktop
+# and Mobile Obsidian reference-device evidence file. It stays out of the
+# default marker expression and out of CI because the evidence is gathered on
+# physical devices; absence of either record fails this gate and blocks the
+# final exclusion-policy handoff.
+[tool.poe.tasks.exclusion-policy-device-verification]
+cmd = "pytest tests/contract/exclusion_policy/test_reference_device_records.py -m device_records -q"
 
 [tool.poe.tasks.python-build]
 cmd = "uv build --all-packages --clear"

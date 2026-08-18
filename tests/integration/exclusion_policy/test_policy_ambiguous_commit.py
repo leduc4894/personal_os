@@ -216,9 +216,7 @@ class AmbiguityHarness:
         return self.base.stack.workspace_id
 
     def actor(self) -> PolicyActor:
-        return PolicyActor(
-            actor_kind=PolicyActorKind.USER, user_id=self.base.stack.owner_user_id
-        )
+        return PolicyActor(actor_kind=PolicyActorKind.USER, user_id=self.base.stack.owner_user_id)
 
     async def ready_preview(self) -> PolicyPreviewRecord:
         requested = await self.preview_store.request_preview(
@@ -257,9 +255,7 @@ class AmbiguityHarness:
     def service(
         self, store: PostgresqlPolicyPublicationStore, signer: Any
     ) -> ExclusionPolicyPublicationService:
-        return ExclusionPolicyPublicationService(
-            store=store, signer=signer, verifier=self.verifier
-        )
+        return ExclusionPolicyPublicationService(store=store, signer=signer, verifier=self.verifier)
 
     def plain_store(self) -> PostgresqlPolicyPublicationStore:
         return PostgresqlPolicyPublicationStore(self.engine)
@@ -267,8 +263,7 @@ class AmbiguityHarness:
     async def revision_count(self) -> int:
         return int(
             await self.base.fetch_scalar(
-                "SELECT count(*) FROM knowledge.source_policies"
-                " WHERE workspace_id = :workspace_id",
+                "SELECT count(*) FROM knowledge.source_policies WHERE workspace_id = :workspace_id",
                 {"workspace_id": self.workspace_id},
             )
         )
@@ -305,15 +300,11 @@ async def test_lost_acknowledgement_retry_returns_the_exact_replay(
     preview = await harness.ready_preview()
     command = await harness.build_command(preview, key="lost-ack-replay-001")
     counting = _CountingSigner(harness.signing_key)
-    committed = await harness.service(harness.plain_store(), counting).publish(
-        command, _context()
-    )
+    committed = await harness.service(harness.plain_store(), counting).publish(command, _context())
     assert committed.is_replay is False
     audits_after_commit = await harness.published_audit_count()
     # The retry arrives after the client lost the acknowledgement.
-    replay = await harness.service(harness.plain_store(), counting).publish(
-        command, _context()
-    )
+    replay = await harness.service(harness.plain_store(), counting).publish(command, _context())
     assert replay.is_replay is True
     assert replay.policy_revision_id == committed.policy_revision_id
     assert replay.revision_number == committed.revision_number
@@ -360,9 +351,7 @@ async def test_connection_loss_before_commit_retries_once_and_lands(
     preview = await harness.ready_preview()
     command = await harness.build_command(preview, key="pre-commit-loss-001")
     store = _PreCommitLossStore(harness.engine)
-    result = await harness.service(store, harness.signing_key).publish(
-        command, _context()
-    )
+    result = await harness.service(store, harness.signing_key).publish(command, _context())
     assert store.failed_once is True
     assert result.is_replay is False
     assert await harness.revision_count() == revisions_before + 1

@@ -142,15 +142,11 @@ class PolicyDraftService:
     transformation.
     """
 
-    def __init__(
-        self, *, draft_store: PolicyDraftStore, query_store: PolicyQueryStore
-    ) -> None:
+    def __init__(self, *, draft_store: PolicyDraftStore, query_store: PolicyQueryStore) -> None:
         self._draft_store = draft_store
         self._query_store = query_store
 
-    async def load_draft(
-        self, workspace_id: UUID, context: DiagnosticContext
-    ) -> PolicyDraft:
+    async def load_draft(self, workspace_id: UUID, context: DiagnosticContext) -> PolicyDraft:
         """Return the workspace's working draft with its exact version."""
 
         reject_nil_uuid("workspace_id", workspace_id)

@@ -71,9 +71,7 @@ def test_draft_replace_request_is_strict_and_closed() -> None:
                 "workspace_id": str(WORKSPACE_ID),
             }
         )
-    parsed = PolicyDraftReplaceRequest.model_validate(
-        {"expected_draft_version": 3, "rules": ()}
-    )
+    parsed = PolicyDraftReplaceRequest.model_validate({"expected_draft_version": 3, "rules": ()})
     assert parsed.expected_draft_version == 3
     assert parsed.rules == ()
 
@@ -110,9 +108,7 @@ def test_publication_request_is_strict_and_carries_the_exact_binding() -> None:
         ("source_type", "markdown"),
     ],
 )
-def test_each_rule_kind_converts_through_the_normalization_gate(
-    member: str, value: str
-) -> None:
+def test_each_rule_kind_converts_through_the_normalization_gate(member: str, value: str) -> None:
     request = PolicyDraftRuleRequest.model_validate(
         {"rule_id": str(RULE_ID), "rule_kind": _kind_of(member), member: value}
     )
@@ -180,8 +176,11 @@ def test_invalid_operand_value_maps_to_the_typed_invalid_reason() -> None:
 
 def test_rule_id_nil_is_the_typed_invalid_reason() -> None:
     request = PolicyDraftRuleRequest.model_validate(
-        {"rule_id": "00000000-0000-0000-0000-000000000000", "rule_kind": "extension",
-         "extension": ".md"}
+        {
+            "rule_id": "00000000-0000-0000-0000-000000000000",
+            "rule_kind": "extension",
+            "extension": ".md",
+        }
     )
     with pytest.raises(Exception) as raised:
         to_domain_rule(request, 0)
@@ -236,9 +235,7 @@ def test_publication_data_never_carries_signature_or_payload_bytes() -> None:
         is_replay=False,
     )
     with pytest.raises(ValidationError):
-        PolicyPublicationData.model_validate(
-            {**data.model_dump(), "signature_bytes": "AAEC"}
-        )
+        PolicyPublicationData.model_validate({**data.model_dump(), "signature_bytes": "AAEC"})
 
 
 def _kind_of(member: str) -> str:

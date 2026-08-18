@@ -86,9 +86,7 @@ POLICY_PREVIEW_NON_RETRYABLE_ERROR_TYPES: Final[tuple[str, ...]] = (
 
 #: Closed durable safe error codes the activity writes. They mirror the store
 #: constants without importing the SQLAlchemy-bearing adapter module here.
-PREVIEW_EXECUTION_FAILED_ERROR_CODE: Final[SafeToken] = SafeToken.parse(
-    "preview_execution_failed"
-)
+PREVIEW_EXECUTION_FAILED_ERROR_CODE: Final[SafeToken] = SafeToken.parse("preview_execution_failed")
 PREVIEW_NOT_INITIALIZED_ERROR_CODE: Final[SafeToken] = SafeToken.parse(
     "exclusion_policy_not_initialized"
 )
@@ -253,9 +251,7 @@ class PolicyPreviewActivities:
         )
 
     @activity.defn(name=POLICY_PREVIEW_ACTIVITY_NAME)
-    async def run_policy_preview_activity(
-        self, reference: PolicyPreviewReference
-    ) -> str:
+    async def run_policy_preview_activity(self, reference: PolicyPreviewReference) -> str:
         if reference.contract != POLICY_PREVIEW_REFERENCE_CONTRACT:
             raise TemporalApplicationError("exclusion_policy_input_invalid", non_retryable=True)
 

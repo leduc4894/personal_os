@@ -330,9 +330,7 @@ def evaluate_preview_subject(
 
     if subject.source_id is None:
         raise ValueError("preview subject requires a source_id")
-    proposed: PolicyEvaluationOutcome = evaluate_policy(
-        revision=proposed_revision, subject=subject
-    )
+    proposed: PolicyEvaluationOutcome = evaluate_policy(revision=proposed_revision, subject=subject)
     if previous_revision is None:
         previous_raw = RawPolicyDecision.INDETERMINATE
         previous_enforced = EnforcedPolicyDecision.EXCLUDED
@@ -398,7 +396,7 @@ def compute_impact_digest(outcomes: Sequence[PreviewSubjectOutcome]) -> str:
                 "impact_class": outcome.impact_class.value,
             }
             for outcome in ordered
-        )
+        ),
     }
     return sha256(canonicalize_json_value(payload)).hexdigest()
 

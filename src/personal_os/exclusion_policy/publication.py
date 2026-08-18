@@ -433,9 +433,7 @@ class ExclusionPolicyPublicationService:
         if command.confirmation != CONFIRMATION_PHRASE:
             raise ExclusionPolicyError(ErrorCode.EXCLUSION_POLICY_CONFIRMATION_INVALID)
 
-    def _build_signed_snapshot(
-        self, material: PublicationSnapshotMaterial
-    ) -> SignedPolicySnapshot:
+    def _build_signed_snapshot(self, material: PublicationSnapshotMaterial) -> SignedPolicySnapshot:
         """Build, sign and verify the snapshot for the store's locked row."""
 
         return sign_policy_snapshot(material, signer=self._signer, verifier=self._verifier)

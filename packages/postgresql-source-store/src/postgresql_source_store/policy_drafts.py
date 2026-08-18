@@ -157,9 +157,7 @@ class PolicyDatabaseRetryPolicy:
         raise AssertionError("retry loop exhausted without a result")
 
     @staticmethod
-    async def _resolve_uncertain_outcome[T](
-        recover: Callable[[], Awaitable[T | None]]
-    ) -> T | None:
+    async def _resolve_uncertain_outcome[T](recover: Callable[[], Awaitable[T | None]]) -> T | None:
         """Run the fresh-connection outcome lookup for an ambiguous commit.
 
         A typed application error propagates untouched; any other lookup
@@ -370,12 +368,8 @@ class PostgresqlPolicyDraftStore:
         self._engine = engine
         self._retry = retry if retry is not None else PolicyDatabaseRetryPolicy()
 
-    async def load_draft(
-        self, workspace_id: UUID, context: DiagnosticContext
-    ) -> PolicyDraft:
-        return await self._retry.run(
-            lambda _attempt: self._load_draft_once(workspace_id, context)
-        )
+    async def load_draft(self, workspace_id: UUID, context: DiagnosticContext) -> PolicyDraft:
+        return await self._retry.run(lambda _attempt: self._load_draft_once(workspace_id, context))
 
     async def get_policy_status(
         self, workspace_id: UUID, context: DiagnosticContext
@@ -399,9 +393,7 @@ class PostgresqlPolicyDraftStore:
             recover=lambda: self._recover_replacement(draft_id, expected_draft_version, rules),
         )
 
-    async def _load_draft_once(
-        self, workspace_id: UUID, context: DiagnosticContext
-    ) -> PolicyDraft:
+    async def _load_draft_once(self, workspace_id: UUID, context: DiagnosticContext) -> PolicyDraft:
         async with (
             self._engine.connect() as connection,
             connection.begin(),
@@ -569,9 +561,7 @@ class PostgresqlPolicyDraftStore:
         return result.mappings().first()
 
     @staticmethod
-    async def _select_rule_rows(
-        connection: AsyncConnection, draft_id: UUID
-    ) -> list[_MappedRow]:
+    async def _select_rule_rows(connection: AsyncConnection, draft_id: UUID) -> list[_MappedRow]:
         result = await connection.execute(
             sa.select(
                 policy_draft_rules.c.rule_id,

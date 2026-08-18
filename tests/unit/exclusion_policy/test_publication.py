@@ -284,9 +284,9 @@ def test_fingerprint_is_deterministic_and_wellformed() -> None:
     fingerprint = compute_publication_request_fingerprint(_command())
     assert isinstance(fingerprint, PolicyRequestFingerprint)
     assert len(fingerprint.hexadecimal) == 64
-    assert fingerprint.hexadecimal == compute_publication_request_fingerprint(
-        _command()
-    ).hexadecimal
+    assert (
+        fingerprint.hexadecimal == compute_publication_request_fingerprint(_command()).hexadecimal
+    )
     assert str(fingerprint) == fingerprint.hexadecimal
 
 
@@ -378,9 +378,7 @@ def test_sign_policy_snapshot_rejects_failed_verification() -> None:
 
 def test_sign_policy_snapshot_maps_signer_crash_to_signing_unavailable() -> None:
     with pytest.raises(ExclusionPolicyError) as raised:
-        sign_policy_snapshot(
-            _material(), signer=_FakeSigner(fail=True), verifier=_FakeVerifier()
-        )
+        sign_policy_snapshot(_material(), signer=_FakeSigner(fail=True), verifier=_FakeVerifier())
     assert raised.value.error_code is ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE
     assert raised.value.__cause__ is not None
 
@@ -434,9 +432,7 @@ def test_publish_validates_confirmation_before_any_store_call() -> None:
     store = _RecordingStore()
     with pytest.raises(ExclusionPolicyError) as raised:
         asyncio.run(
-            _service(store).publish(
-                _command(confirmation="publish exclusion policy"), _context()
-            )
+            _service(store).publish(_command(confirmation="publish exclusion policy"), _context())
         )
     assert raised.value.error_code is ErrorCode.EXCLUSION_POLICY_CONFIRMATION_INVALID
     assert store.resolve_calls == 0
@@ -474,9 +470,10 @@ def test_publish_commits_with_canonical_fingerprint_and_builder() -> None:
     result = asyncio.run(_service(store, metrics=metrics).publish(command, _context()))
     assert result is committed
     assert metrics.publication_count(PublicationMetricOutcome.PUBLISHED) == 1
-    assert store.seen_fingerprints == [
-        compute_publication_request_fingerprint(command).hexadecimal
-    ] * 2
+    assert (
+        store.seen_fingerprints
+        == [compute_publication_request_fingerprint(command).hexadecimal] * 2
+    )
     assert len(store.builder_results) == 1
 
 

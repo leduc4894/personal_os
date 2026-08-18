@@ -82,9 +82,7 @@ class TemporalPreviewHarness:
         self.engine = base.engine
         self.process = process
         self.client = client
-        self.store: PostgresqlPolicyPreviewStore = (
-            process.dispatch_runtime._preview_store
-        )
+        self.store: PostgresqlPolicyPreviewStore = process.dispatch_runtime._preview_store
         self.runtime: PolicyPreviewDispatchRuntime = process.dispatch_runtime
 
     async def reset_previews(self) -> None:
@@ -128,9 +126,7 @@ class TemporalPreviewHarness:
     async def request_preview(self) -> UUID:
         record = await self.store.request_preview(
             self.base.stack.workspace_id,
-            PolicyActor(
-                actor_kind=PolicyActorKind.USER, user_id=self.base.stack.owner_user_id
-            ),
+            PolicyActor(actor_kind=PolicyActorKind.USER, user_id=self.base.stack.owner_user_id),
             _context(),
         )
         return record.policy_preview_id
@@ -175,9 +171,7 @@ async def test_dispatched_workflow_executes_the_snapshot_and_reaches_ready(
     assert record.status is PreviewStatus.READY
     assert record.newly_allowed_count == total_sources
     assert await temporal_preview.store.count_results(preview_id) == total_sources
-    workflow_id = policy_preview_workflow_id(
-        temporal_preview.base.stack.workspace_id, preview_id
-    )
+    workflow_id = policy_preview_workflow_id(temporal_preview.base.stack.workspace_id, preview_id)
     description = await temporal_preview.client.get_workflow_handle(workflow_id).describe()
     assert description.status is WorkflowExecutionStatus.COMPLETED
 
@@ -188,9 +182,7 @@ async def test_workflow_input_and_history_stay_closed(
 ) -> None:
     await temporal_preview.seed_sources(2)
     preview_id = await temporal_preview.request_preview()
-    workflow_id = policy_preview_workflow_id(
-        temporal_preview.base.stack.workspace_id, preview_id
-    )
+    workflow_id = policy_preview_workflow_id(temporal_preview.base.stack.workspace_id, preview_id)
 
     await temporal_preview.dispatch_once()
     await temporal_preview.wait_until_ready(preview_id)
@@ -237,9 +229,7 @@ async def test_lost_start_acknowledgement_converges_on_one_execution(
 ) -> None:
     await temporal_preview.seed_sources(1)
     preview_id = await temporal_preview.request_preview()
-    workflow_id = policy_preview_workflow_id(
-        temporal_preview.base.stack.workspace_id, preview_id
-    )
+    workflow_id = policy_preview_workflow_id(temporal_preview.base.stack.workspace_id, preview_id)
 
     assert await temporal_preview.dispatch_once() == 1
     await temporal_preview.wait_until_ready(preview_id)
@@ -261,9 +251,7 @@ async def test_lost_start_acknowledgement_converges_on_one_execution(
 
     executions = [
         execution
-        async for execution in temporal_preview.client.list_workflows(
-            f"WorkflowId='{workflow_id}'"
-        )
+        async for execution in temporal_preview.client.list_workflows(f"WorkflowId='{workflow_id}'")
     ]
     assert len(executions) == 1
     record = await temporal_preview.store.get_preview(preview_id, _context())
