@@ -377,17 +377,21 @@ export class JournalPersistence {
   /**
    * Read the manifest, distinguishing ABSENT from PRESENT-but-unverifiable:
    * a present manifest that fails to parse still proves journal artifacts
-   * exist, which forces the rebuild path with `reconcile_required`.
+   * exist, which forces the rebuild path with `reconcile_required`. An
+   * errored existence probe is neither: recovery fails closed instead of
+   * reporting an absent store it could not actually observe.
    */
   async #readManifestState(): Promise<{
     isManifestPresent: boolean;
     manifest: JournalGenerationManifest | null;
   }> {
+    let isManifestPresent: boolean;
     try {
-      if (!(await this.#fileStore.exists(JOURNAL_MANIFEST_FILE_NAME))) {
-        return { isManifestPresent: false, manifest: null };
-      }
+      isManifestPresent = await this.#fileStore.exists(JOURNAL_MANIFEST_FILE_NAME);
     } catch {
+      throw journalStoreError("journal_store_unavailable");
+    }
+    if (!isManifestPresent) {
       return { isManifestPresent: false, manifest: null };
     }
     try {
@@ -500,7 +504,9 @@ export class JournalPersistence {
     try {
       return await this.#fileStore.exists(generationFileName(1));
     } catch {
-      return false;
+      // A probe error is not an absent generation file: fail closed so a
+      // transient adapter failure can never masquerade as a fresh store.
+      throw journalStoreError("journal_store_unavailable");
     }
   }
 

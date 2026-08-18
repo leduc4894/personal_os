@@ -274,6 +274,62 @@ describe("JournalPersistence generation fallbacks (spec 6.2)", () => {
   });
 });
 
+describe("JournalPersistence probe failure handling (spec 6.2 fail-closed)", () => {
+  /** Open a fresh journal and commit twice so g1 is retired and g2/g3 remain. */
+  async function openWithRetiredFirstGeneration(): Promise<InMemoryJournalFileStore> {
+    const store = new InMemoryJournalFileStore();
+    const journal = await openedPersistence(store);
+    await journal.commitGeneration(() => undefined);
+    await journal.commitGeneration(() => undefined);
+    journal.close();
+    return store;
+  }
+
+  it("rejects open when the manifest existence probe errors", async () => {
+    const store = await openWithRetiredFirstGeneration();
+    const originalExists = store.exists.bind(store);
+    store.exists = async (): Promise<boolean> => {
+      throw new Error("transient adapter failure");
+    };
+
+    // An errored probe is not a verified-empty store: recovery must fail
+    // closed instead of publishing a fresh generation-1 chain.
+    await expect(openedPersistence(store)).rejects.toMatchObject({
+      reason: "journal_store_unavailable",
+    });
+
+    // The verified chain survives the failed attempt untouched.
+    store.exists = originalExists;
+    const reopened = await openedPersistence(store);
+    expect(reopened.recoveryState).toBe("verified_generation_loaded");
+    expect(reopened.verifiedGenerationNumber).toBe(3);
+    expect((await readManifest(store)).current.generationNumber).toBe(3);
+    reopened.close();
+  });
+
+  it("rejects open when the artifact existence probe errors", async () => {
+    const store = await openWithRetiredFirstGeneration();
+    await store.remove(JOURNAL_MANIFEST_FILE_NAME);
+    const originalExists = store.exists.bind(store);
+    store.exists = async (fileName: string): Promise<boolean> => {
+      if (fileName === generationFileName(1)) {
+        throw new Error("transient adapter failure");
+      }
+      return originalExists(fileName);
+    };
+
+    await expect(openedPersistence(store)).rejects.toMatchObject({
+      reason: "journal_store_unavailable",
+    });
+
+    // No fresh journal was published over the orphaned generations.
+    store.exists = originalExists;
+    expect(await store.exists(JOURNAL_MANIFEST_FILE_NAME)).toBe(false);
+    expect(await store.exists(generationFileName(2))).toBe(true);
+    expect(await store.exists(generationFileName(3))).toBe(true);
+  });
+});
+
 describe("JournalPersistence generation protocol and retention (spec 6.2)", () => {
   it("verifies each written generation before publishing its manifest", async () => {
     const store = new InMemoryJournalFileStore();
