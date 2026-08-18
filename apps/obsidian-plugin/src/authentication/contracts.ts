@@ -313,7 +313,13 @@ export function createDeviceApiTransport(
 
   return {
     async createGrant(request) {
-      return (await post("/api/auth/device-authorizations", {}, request)) as DeviceGrantWireData;
+      // The unauthenticated grant-creation endpoint enforces an exact Origin
+      // match (web-authentication design section 8), and Obsidian's
+      // requestUrl adds no Origin header by itself — present the configured
+      // origin explicitly so the gate accepts the plugin's request.
+      return (await post("/api/auth/device-authorizations", {
+        origin: resolveOrigin(),
+      }, request)) as DeviceGrantWireData;
     },
     async pollGrant(grantId, pollingSecret) {
       return (await post(

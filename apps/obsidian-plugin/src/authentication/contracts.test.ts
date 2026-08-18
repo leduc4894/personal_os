@@ -9,7 +9,7 @@ import {
   resolveAuthenticationControls,
   validateDeviceName,
 } from "./contracts";
-import type { DeviceHttpResponse, DeviceHttpTransport } from "./contracts";
+import type { DeviceHttpRequest, DeviceHttpResponse, DeviceHttpTransport } from "./contracts";
 
 function httpResponse(status: number, body: unknown): DeviceHttpResponse {
   return { status, bodyText: typeof body === "string" ? body : JSON.stringify(body) };
@@ -180,7 +180,11 @@ describe("createDeviceApiTransport", () => {
     expect(calls[0]).toEqual({
       url: "https://vault.example.com/api/auth/device-authorizations",
       method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json" },
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+        origin: "https://vault.example.com",
+      },
       body: JSON.stringify({
         client_instance_id: "11111111-1111-4111-8111-111111111111",
         device_name: "Personal vault",
@@ -190,6 +194,32 @@ describe("createDeviceApiTransport", () => {
         requested_scope: "obsidian_sync",
       }),
     });
+  });
+
+  it("sends the configured origin header on grant creation because the server's exact-origin gate requires it", async () => {
+    // The unauthenticated grant-creation endpoint enforces an exact Origin
+    // match against the server's allowed origin (web-authentication design
+    // section 8), and Obsidian's requestUrl never adds an Origin header by
+    // itself — without this header every real-device Login answers 403
+    // csrf_validation_failed and the plugin degrades to the offline state.
+    const calls: unknown[] = [];
+    const http: DeviceHttpTransport = async (request) => {
+      calls.push(request);
+      return successEnvelope(createGrantData());
+    };
+    const transport = createDeviceApiTransport(http, () => "https://vault.example.com");
+
+    await transport.createGrant({
+      client_instance_id: "11111111-1111-4111-8111-111111111111",
+      device_name: "Personal vault",
+      platform_class: "obsidian_desktop",
+      platform_name: "windows",
+      plugin_version: "0.1.0",
+      requested_scope: "obsidian_sync",
+    });
+
+    const request = calls[0] as DeviceHttpRequest;
+    expect(request.headers.origin).toBe("https://vault.example.com");
   });
 
   it("presents the polling secret as the dedicated Bearer credential", async () => {
