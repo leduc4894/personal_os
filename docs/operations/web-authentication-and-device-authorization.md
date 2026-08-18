@@ -67,8 +67,9 @@ Key creation and permissions:
 
 ```bash
 # One 32-byte key per key ID, created with a real random source and never
-# committed to the repository.
-head -c 32 /dev/urandom > "$KNOWLEDGE_SECRET_ROOT/auth-key-2026-08.key"
+# committed to the repository. The keyring loader accepts hex-encoded key
+# material only: 32 random bytes rendered as one 64-character hex line.
+head -c 32 /dev/urandom | xxd -p -c 64 > "$KNOWLEDGE_SECRET_ROOT/auth-key-2026-08.key"
 chmod 600 "$KNOWLEDGE_SECRET_ROOT/auth-key-2026-08.key"
 ```
 
