@@ -135,6 +135,8 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
         "/api/admin/exclusion-policy/publications",
         "/api/sync/exclusion-policy/keysets",
         "/api/sync/exclusion-policy/snapshot",
+        "/api/sync/journal-events/preflight",
+        "/api/uploads/{operation_id}/content",
     }
     assert document["paths"]["/api/health/live"]["get"]["operationId"] == "getApiLiveness"
     assert document["paths"]["/api/health/ready"]["get"]["operationId"] == "getApiReadiness"

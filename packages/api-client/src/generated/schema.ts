@@ -606,6 +606,46 @@ export type paths = {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/sync/journal-events/preflight": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Preflight Journal Event
+         * @description Run one journal-event preflight and render its typed outcome.
+         */
+        readonly post: operations["preflightJournalEventUpload"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/uploads/{operation_id}/content": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        /**
+         * Upload Content
+         * @description Bind one raw content stream to its preflight-bound operation.
+         */
+        readonly put: operations["uploadSmallFileContent"];
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
 };
 export type webhooks = Record<string, never>;
 export type components = {
@@ -967,6 +1007,36 @@ export type components = {
              */
             readonly warnings: readonly components["schemas"]["ApiWarning"][];
         };
+        /** ApiEnvelope[SmallFilePreflightData] */
+        readonly ApiEnvelope_SmallFilePreflightData_: {
+            readonly data: components["schemas"]["SmallFilePreflightData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[SmallFileTerminalResultData] */
+        readonly ApiEnvelope_SmallFileTerminalResultData_: {
+            readonly data: components["schemas"]["SmallFileTerminalResultData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
         /** ApiEnvelope[TotpEnrollmentData] */
         readonly ApiEnvelope_TotpEnrollmentData_: {
             readonly data: components["schemas"]["TotpEnrollmentData"] | null;
@@ -1224,7 +1294,7 @@ export type components = {
          * ErrorCode
          * @enum {string}
          */
-        readonly ErrorCode: "configuration_invalid" | "configuration_unknown_key" | "configuration_secret_invalid" | "secret_file_missing" | "secret_file_outside_root" | "secret_file_invalid_type" | "secret_file_insecure_permissions" | "secret_file_too_large" | "secret_file_invalid_encoding" | "secret_file_empty" | "diagnostic_context_invalid" | "diagnostic_payload_rejected" | "internal_error" | "database_migration_configuration_invalid" | "database_connection_unavailable" | "database_migration_busy" | "database_schema_contract_invalid" | "database_destructive_downgrade_refused" | "object_storage_configuration_invalid" | "object_storage_input_invalid" | "object_storage_busy" | "object_storage_unavailable" | "object_storage_access_denied" | "object_storage_contract_invalid" | "object_storage_object_missing" | "object_storage_integrity_failed" | "object_storage_metadata_conflict" | "source_publish_input_invalid" | "source_not_found" | "source_already_exists" | "source_state_invalid" | "source_version_conflict" | "source_idempotency_mismatch" | "source_event_identity_mismatch" | "source_verified_receipt_stale" | "source_content_object_conflict" | "source_concurrency_busy" | "source_concurrency_invariant_failed" | "source_commit_outcome_unknown" | "projection_dispatch_unavailable" | "projection_intent_contract_invalid" | "identity_bootstrap_input_invalid" | "identity_bootstrap_state_conflict" | "canonical_read_state_invalid" | "canonical_recovery_environment_refused" | "canonical_recovery_configuration_invalid" | "canonical_recovery_snapshot_busy" | "canonical_recovery_bundle_exists" | "canonical_recovery_bundle_invalid" | "canonical_recovery_target_not_empty" | "canonical_recovery_dependency_unavailable" | "canonical_recovery_integrity_failed" | "canonical_recovery_restore_failed" | "api_request_malformed" | "api_request_validation_failed" | "api_route_not_found" | "api_method_not_allowed" | "authentication_required" | "authentication_failed" | "authentication_rate_limited" | "recent_authentication_required" | "csrf_validation_failed" | "authorization_scope_denied" | "totp_enrollment_state_invalid" | "device_authorization_pending" | "device_authorization_slow_down" | "device_authorization_denied" | "device_authorization_expired" | "device_authorization_state_invalid" | "device_revocation_confirmation_invalid" | "device_credential_invalid" | "device_revoked" | "device_token_reuse_detected" | "plugin_version_unsupported" | "exclusion_policy_input_invalid" | "exclusion_policy_not_initialized" | "exclusion_policy_draft_conflict" | "exclusion_policy_preview_pending" | "exclusion_policy_preview_failed" | "exclusion_policy_preview_expired" | "exclusion_policy_preview_stale" | "exclusion_policy_confirmation_invalid" | "exclusion_policy_denied" | "exclusion_policy_indeterminate" | "exclusion_policy_snapshot_outdated" | "exclusion_policy_signing_unavailable" | "exclusion_policy_commit_outcome_unknown";
+        readonly ErrorCode: "configuration_invalid" | "configuration_unknown_key" | "configuration_secret_invalid" | "secret_file_missing" | "secret_file_outside_root" | "secret_file_invalid_type" | "secret_file_insecure_permissions" | "secret_file_too_large" | "secret_file_invalid_encoding" | "secret_file_empty" | "diagnostic_context_invalid" | "diagnostic_payload_rejected" | "internal_error" | "database_migration_configuration_invalid" | "database_connection_unavailable" | "database_migration_busy" | "database_schema_contract_invalid" | "database_destructive_downgrade_refused" | "object_storage_configuration_invalid" | "object_storage_input_invalid" | "object_storage_busy" | "object_storage_unavailable" | "object_storage_access_denied" | "object_storage_contract_invalid" | "object_storage_object_missing" | "object_storage_integrity_failed" | "object_storage_metadata_conflict" | "source_publish_input_invalid" | "source_not_found" | "source_already_exists" | "source_state_invalid" | "source_version_conflict" | "source_idempotency_mismatch" | "source_event_identity_mismatch" | "source_verified_receipt_stale" | "source_content_object_conflict" | "source_concurrency_busy" | "source_concurrency_invariant_failed" | "source_commit_outcome_unknown" | "projection_dispatch_unavailable" | "projection_intent_contract_invalid" | "identity_bootstrap_input_invalid" | "identity_bootstrap_state_conflict" | "canonical_read_state_invalid" | "canonical_recovery_environment_refused" | "canonical_recovery_configuration_invalid" | "canonical_recovery_snapshot_busy" | "canonical_recovery_bundle_exists" | "canonical_recovery_bundle_invalid" | "canonical_recovery_target_not_empty" | "canonical_recovery_dependency_unavailable" | "canonical_recovery_integrity_failed" | "canonical_recovery_restore_failed" | "api_request_malformed" | "api_request_validation_failed" | "api_route_not_found" | "api_method_not_allowed" | "authentication_required" | "authentication_failed" | "authentication_rate_limited" | "recent_authentication_required" | "csrf_validation_failed" | "authorization_scope_denied" | "totp_enrollment_state_invalid" | "device_authorization_pending" | "device_authorization_slow_down" | "device_authorization_denied" | "device_authorization_expired" | "device_authorization_state_invalid" | "device_revocation_confirmation_invalid" | "device_credential_invalid" | "device_revoked" | "device_token_reuse_detected" | "plugin_version_unsupported" | "exclusion_policy_input_invalid" | "exclusion_policy_not_initialized" | "exclusion_policy_draft_conflict" | "exclusion_policy_preview_pending" | "exclusion_policy_preview_failed" | "exclusion_policy_preview_expired" | "exclusion_policy_preview_stale" | "exclusion_policy_confirmation_invalid" | "exclusion_policy_denied" | "exclusion_policy_indeterminate" | "exclusion_policy_snapshot_outdated" | "exclusion_policy_signing_unavailable" | "exclusion_policy_commit_outcome_unknown" | "small_file_preflight_invalid" | "small_file_operation_not_found" | "small_file_operation_expired" | "small_file_operation_identity_mismatch" | "small_file_size_limit_exceeded" | "small_file_content_integrity_failed" | "small_file_upload_state_invalid";
         /**
          * ExclusionPolicyStatusData
          * @description The Admin status read: revision metadata, draft and reconciliation.
@@ -1873,6 +1943,112 @@ export type components = {
             readonly payload_sha256: string;
             readonly signature: components["schemas"]["PolicySnapshotSignatureData"];
         };
+        /**
+         * SmallFilePreflightData
+         * @description One completed preflight: exactly one typed outcome and its safe payload.
+         *
+         *     ``single_part_upload`` carries only the opaque operation token and its
+         *     expiry; ``committed_replay`` and ``no_change`` carry only the frozen
+         *     terminal result; ``excluded`` and ``conflict`` carry no payload member at
+         *     all. Responses render with ``exclude_unset`` so each outcome emits
+         *     exactly its own members.
+         */
+        readonly SmallFilePreflightData: {
+            /** Expires At */
+            readonly expires_at?: string | null;
+            /** Operation Id */
+            readonly operation_id?: string | null;
+            readonly outcome: components["schemas"]["SmallFilePreflightOutcome"];
+            readonly result?: components["schemas"]["SmallFileTerminalResultData"] | null;
+        };
+        /**
+         * SmallFilePreflightOutcome
+         * @description Closed typed outcomes one preflight returns (spec 10.1 table).
+         *
+         *     The four members of :data:`TERMINAL_PREFLIGHT_OUTCOMES` finish the event
+         *     without any upload; ``SINGLE_PART_UPLOAD`` is the only outcome that opens
+         *     the content-stream step.
+         * @enum {string}
+         */
+        readonly SmallFilePreflightOutcome: "committed_replay" | "no_change" | "excluded" | "conflict" | "single_part_upload";
+        /**
+         * SmallFilePreflightRequest
+         * @description The strict journal-event preflight body (spec 10.1).
+         *
+         *     Carries the stable journal event identity, the idempotency key, the
+         *     create/update operation shape, the plugin-local file identity, the
+         *     declared fingerprint (locator context, digest, exact size, media type)
+         *     and the accepted signed policy revision under its wire name — never a
+         *     workspace, device, user, receipt, object-store or provider selector.
+         */
+        readonly SmallFilePreflightRequest: {
+            /** Base Version Id */
+            readonly base_version_id?: string | null;
+            /**
+             * Event Id
+             * Format: uuid
+             */
+            readonly event_id: string;
+            /** Idempotency Key */
+            readonly idempotency_key: string;
+            /**
+             * Local File Id
+             * Format: uuid
+             */
+            readonly local_file_id: string;
+            /** Media Type */
+            readonly media_type: string;
+            /** Normalized Locator */
+            readonly normalized_locator: string;
+            /**
+             * Operation
+             * @enum {string}
+             */
+            readonly operation: "create" | "update";
+            /** Policy Revision */
+            readonly policy_revision: number;
+            /** Sha256 */
+            readonly sha256: string;
+            /** Size Bytes */
+            readonly size_bytes: number;
+            /** Source Id */
+            readonly source_id?: string | null;
+        };
+        /**
+         * SmallFileTerminalResultData
+         * @description The safe canonical terminal result of spec 10.3.
+         *
+         *     The exact receipt an exact replay returns unchanged: the result kind, the
+         *     canonical source and version identity, the content version and the commit
+         *     moment. No digest, object key, storage receipt or provider detail is a
+         *     member, so none can ever render.
+         */
+        readonly SmallFileTerminalResultData: {
+            /**
+             * Committed At
+             * Format: date-time
+             */
+            readonly committed_at: string;
+            /** Content Version */
+            readonly content_version: number;
+            readonly result_kind: components["schemas"]["SmallFileTerminalResultKind"];
+            /**
+             * Source Id
+             * Format: uuid
+             */
+            readonly source_id: string;
+            /**
+             * Source Version Id
+             * Format: uuid
+             */
+            readonly source_version_id: string;
+        };
+        /**
+         * SmallFileTerminalResultKind
+         * @description Closed terminal result kinds retained for exact replay (spec 10.3).
+         * @enum {string}
+         */
+        readonly SmallFileTerminalResultKind: "committed" | "no_change";
         /**
          * TotpCodeRequest
          * @description The six-digit code body of one TOTP challenge verification.
@@ -2655,6 +2831,57 @@ export interface operations {
                     readonly [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    readonly preflightJournalEventUpload: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["SmallFilePreflightRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_SmallFilePreflightData_"];
+                };
+            };
+        };
+    };
+    readonly uploadSmallFileContent: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly operation_id: string;
+            };
+            readonly cookie?: never;
+        };
+        /** @description The exact raw content bytes of the preflight-bound file */
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/octet-stream": string;
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_SmallFileTerminalResultData_"];
+                };
             };
         };
     };

@@ -34,8 +34,8 @@ FIXTURE_DIRECTORY: Final[Path] = REPO_ROOT / "tests" / "fixtures" / "exclusion_p
 #: means changing this registry in the same commit.
 CROSS_LANGUAGE_FIXTURE_SHA256: Final[dict[str, str]] = {
     "evaluator-golden.json": ("0bdf565641f623936398e168a6feee2a5e714da086c74a43cbdfa1f8e7afe38e"),
-    "keyset-golden.json": ("73e8c62d3aaae3a9a4af7926800934d4c414127425767503168723a9a07111e1"),
-    "snapshot-golden.json": ("af7cebb12ad54243ff08e1aea58cbcb4d1bd6cc46d6b649ce3cbc134cff47d74"),
+    "keyset-golden.json": ("704f47ac55ead9c8fd327d1530bef84ff8a8d753e12db64e904b555634d80ef7"),
+    "snapshot-golden.json": ("7f9b2aa05201895a3290b14ccca56db0d39892eae91953ea124e054d742800ca"),
 }
 
 #: The TypeScript replay suites ( beneath the plugin source tree) that must

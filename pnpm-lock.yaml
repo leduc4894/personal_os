@@ -28,7 +28,7 @@ importers:
         specifier: 24.13.3
         version: 24.13.3
       '@types/sql.js':
-        specifier: ^1.4.11
+        specifier: 1.4.11
         version: 1.4.11
       '@vitest/coverage-v8':
         specifier: 4.1.10

@@ -30,14 +30,19 @@ DEVICE_BEARER_SCHEMES: Final[frozenset[str]] = frozenset(
 )
 
 #: Route-to-scheme bindings of the credential-authenticated device and
-#: plugin policy routes.
-CREDENTIAL_ROUTE_SECURITY: Final[dict[str, str]] = {
-    "/api/auth/device-authorizations/{grant_id}/poll": "PollingCredential",
-    "/api/auth/device-tokens/refresh": "RefreshCredential",
-    "/api/auth/device-tokens/revoke-current": "RefreshCredential",
-    "/api/sync/exclusion-policy/keysets": "AccessCredential",
-    "/api/sync/exclusion-policy/snapshot": "AccessCredential",
+#: plugin policy/sync routes, with exactly the method each path serves.
+CREDENTIAL_ROUTE_SECURITY: Final[dict[tuple[str, str], str]] = {
+    ("/api/auth/device-authorizations/{grant_id}/poll", "post"): "PollingCredential",
+    ("/api/auth/device-tokens/refresh", "post"): "RefreshCredential",
+    ("/api/auth/device-tokens/revoke-current", "post"): "RefreshCredential",
+    ("/api/sync/exclusion-policy/keysets", "get"): "AccessCredential",
+    ("/api/sync/exclusion-policy/snapshot", "get"): "AccessCredential",
+    ("/api/sync/journal-events/preflight", "post"): "AccessCredential",
+    ("/api/uploads/{operation_id}/content", "put"): "AccessCredential",
 }
+CREDENTIAL_ROUTE_PATHS: Final[frozenset[str]] = frozenset(
+    path for path, _method in CREDENTIAL_ROUTE_SECURITY
+)
 
 
 @pytest.fixture
@@ -74,8 +79,8 @@ def test_every_device_bearer_scheme_is_a_distinct_http_bearer_scheme(
 
 
 def test_credential_routes_bind_exactly_their_dedicated_scheme(schema: dict[str, Any]) -> None:
-    for path, scheme_name in CREDENTIAL_ROUTE_SECURITY.items():
-        operation = schema["paths"][path]["post" if "exclusion-policy" not in path else "get"]
+    for (path, method), scheme_name in CREDENTIAL_ROUTE_SECURITY.items():
+        operation = schema["paths"][path][method]
         assert operation["security"] == [{scheme_name: []}], path
 
 
@@ -83,7 +88,7 @@ def test_cookie_authenticated_routes_advertise_no_bearer_scheme(schema: dict[str
     # Browser/session routes authenticate through the cookie contract, never a
     # Bearer credential; the plan document advertises no security requirement.
     for path, path_item in schema["paths"].items():
-        if path in CREDENTIAL_ROUTE_SECURITY:
+        if path in CREDENTIAL_ROUTE_PATHS:
             continue
         for method, operation in path_item.items():
             assert isinstance(operation, dict)

@@ -70,6 +70,12 @@ from api_runtime.exclusion_policy_routes import create_exclusion_policy_route_en
 from api_runtime.request_context import ASGIApp as CorrelationApp
 from api_runtime.request_context import RequestContextMiddleware
 from api_runtime.session_routes import create_session_route_endpoints
+from api_runtime.small_file_sync_composition import SmallFileSyncRuntime
+from api_runtime.small_file_sync_models import (
+    SmallFilePreflightData,
+    SmallFileTerminalResultData,
+)
+from api_runtime.small_file_sync_routes import create_small_file_sync_route_endpoints
 from api_runtime.totp_routes import create_totp_route_endpoints
 from api_runtime.web_security import WebSecurityHeadersMiddleware
 from personal_os.api_contracts import (
@@ -147,16 +153,17 @@ def create_api_application(
     readiness_probe: CanonicalDatabaseReadinessProbe,
     web_authentication: WebAuthenticationRuntime,
     exclusion_policy: ExclusionPolicyRuntime | None = None,
+    small_file_sync: SmallFileSyncRuntime | None = None,
     event_sink: DiagnosticEventSink | None = None,
     lifespan: Lifespan[FastAPI] | None = None,
 ) -> FastAPI:
     """Compose the runnable API application for one runtime environment.
 
-    The exclusion-policy runtime is optional only so the authentication-only
-    contract compositions of the earlier children stay constructible; the
-    serve graph and the full contract document always compose it, and the
-    policy routes register only when the runtime is present — never through
-    router auto-discovery.
+    The exclusion-policy and small-file-sync runtimes are optional only so the
+    authentication-only contract compositions of the earlier children stay
+    constructible; the serve graph and the full contract document always
+    compose them, and the routes register only when the runtime is present —
+    never through router auto-discovery.
     """
     app = FastAPI(
         title="Personal Knowledge API",
@@ -193,6 +200,8 @@ def create_api_application(
     _register_device_admin_routes(app, web_authentication)
     if exclusion_policy is not None:
         _register_exclusion_policy_routes(app, web_authentication, exclusion_policy)
+    if small_file_sync is not None:
+        _register_small_file_sync_routes(app, web_authentication, small_file_sync)
     _classify_openapi_route(app)
     _suppress_framework_validation_error_document(app)
     # The pure-ASGI correlation middleware declares read-only ``Mapping``
@@ -503,6 +512,48 @@ def _register_exclusion_policy_routes(
         operation_id="getExclusionPolicySnapshot",
         response_model=ApiEnvelope[SignedPolicySnapshotData],
         responses={"304": {"description": "The presented entity tag is current"}},
+    )
+
+
+def _register_small_file_sync_routes(
+    app: FastAPI,
+    web_authentication: WebAuthenticationRuntime,
+    small_file_sync: SmallFileSyncRuntime,
+) -> None:
+    """Register the closed small-file sync route set (spec 10.1/10.2).
+
+    Each route carries its manually assigned semantic operation id, its
+    envelope response model and the access Bearer dependency of the plugin
+    surface; the preflight converts its strict body through the boundary
+    models and the content route documents its raw body as exactly one
+    ``application/octet-stream`` binary payload — never a form, callback or
+    presigned target.
+    """
+    endpoints = create_small_file_sync_route_endpoints(
+        web_authentication=web_authentication, small_file_sync=small_file_sync
+    )
+    app.add_api_route(
+        "/api/sync/journal-events/preflight",
+        endpoints.preflight_journal_event,
+        methods=["POST"],
+        operation_id="preflightJournalEventUpload",
+        response_model=ApiEnvelope[SmallFilePreflightData],
+    )
+    app.add_api_route(
+        "/api/uploads/{operation_id}/content",
+        endpoints.upload_content,
+        methods=["PUT"],
+        operation_id="uploadSmallFileContent",
+        response_model=ApiEnvelope[SmallFileTerminalResultData],
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "description": ("The exact raw content bytes of the preflight-bound file"),
+                "content": {
+                    "application/octet-stream": {"schema": {"type": "string", "format": "binary"}}
+                },
+            }
+        },
     )
 
 

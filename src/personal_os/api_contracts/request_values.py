@@ -50,6 +50,8 @@ class ApiRouteTemplate(StrEnum):
     ADMIN_EXCLUSION_POLICY_PUBLICATIONS = "/api/admin/exclusion-policy/publications"
     SYNC_EXCLUSION_POLICY_KEYSETS = "/api/sync/exclusion-policy/keysets"
     SYNC_EXCLUSION_POLICY_SNAPSHOT = "/api/sync/exclusion-policy/snapshot"
+    SYNC_JOURNAL_EVENTS_PREFLIGHT = "/api/sync/journal-events/preflight"
+    UPLOAD_CONTENT = "/api/uploads/{operation_id}/content"
     OPENAPI_DOCUMENT = "/api/openapi.json"
     UNMATCHED = "unmatched"
 
@@ -112,13 +114,25 @@ EXCLUSION_POLICY_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset
     }
 )
 
+#: The closed small-file sync route set of the plugin journal design (spec
+#: 10): the journal-event preflight and the operation-bound content stream,
+#: both behind the ``obsidian_sync`` access Bearer credential.
+SMALL_FILE_SYNC_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset(
+    {
+        ApiRouteTemplate.SYNC_JOURNAL_EVENTS_PREFLIGHT,
+        ApiRouteTemplate.UPLOAD_CONTENT,
+    }
+)
+
 #: Every route whose responses — success, service rejection and dependency
 #: failure alike — carry ``Cache-Control: no-store`` (spec 16): the
-#: authentication-bound sets plus the exclusion-policy routes, whose payloads
-#: are per-request policy state and signed envelopes that must never come
-#: from a shared cache.
+#: authentication-bound sets plus the exclusion-policy and small-file sync
+#: routes, whose payloads are per-request policy state, signed envelopes and
+#: device-derived sync results that must never come from a shared cache.
 NO_STORE_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = (
-    AUTHENTICATION_ROUTE_TEMPLATES | EXCLUSION_POLICY_ROUTE_TEMPLATES
+    AUTHENTICATION_ROUTE_TEMPLATES
+    | EXCLUSION_POLICY_ROUTE_TEMPLATES
+    | SMALL_FILE_SYNC_ROUTE_TEMPLATES
 )
 
 #: Immutable view of the no-store template values, for classifying a raw

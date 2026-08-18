@@ -93,6 +93,17 @@ def test_http_status_map_is_closed_for_the_api_surface() -> None:
         ErrorCode.EXCLUSION_POLICY_SNAPSHOT_OUTDATED: 409,
         ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE: 503,
         ErrorCode.EXCLUSION_POLICY_COMMIT_OUTCOME_UNKNOWN: 503,
+        # The small-file sync block of the plugin journal design (spec 10/12),
+        # wired when the sync routes landed: 422 for the validation and
+        # integrity verdicts, 404 for an unknown operation token, 410 for the
+        # expired operation and 409 for the identity and state conflicts.
+        ErrorCode.SMALL_FILE_PREFLIGHT_INVALID: 422,
+        ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND: 404,
+        ErrorCode.SMALL_FILE_OPERATION_EXPIRED: 410,
+        ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH: 409,
+        ErrorCode.SMALL_FILE_SIZE_LIMIT_EXCEEDED: 422,
+        ErrorCode.SMALL_FILE_CONTENT_INTEGRITY_FAILED: 422,
+        ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID: 409,
     }
 
 

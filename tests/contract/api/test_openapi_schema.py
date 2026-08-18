@@ -57,6 +57,8 @@ ROUTE_OPERATION_IDS: dict[str, dict[str, str]] = {
     "/api/admin/exclusion-policy/publications": {"post": "publishExclusionPolicy"},
     "/api/sync/exclusion-policy/keysets": {"get": "listExclusionPolicyKeysets"},
     "/api/sync/exclusion-policy/snapshot": {"get": "getExclusionPolicySnapshot"},
+    "/api/sync/journal-events/preflight": {"post": "preflightJournalEventUpload"},
+    "/api/uploads/{operation_id}/content": {"put": "uploadSmallFileContent"},
 }
 
 #: Component schema names emitted for every frozen ``extra="forbid"`` model.
@@ -115,6 +117,9 @@ STRICT_MODEL_SCHEMA_NAMES: tuple[str, ...] = (
     "PolicySnapshotRuleData",
     "PolicySnapshotSignatureData",
     "SignedPolicySnapshotData",
+    "SmallFilePreflightData",
+    "SmallFilePreflightRequest",
+    "SmallFileTerminalResultData",
 )
 
 _URL_PATTERN = re.compile(r"\w+://")

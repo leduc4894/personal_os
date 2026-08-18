@@ -95,13 +95,21 @@ def _masked_sanctioned_policy_lines(source: str) -> str:
 
 
 def _is_sanctioned_policy_surface(path: Path) -> bool:
-    """True for files of the exclusion-policy domain itself.
+    """True for files of the sanctioned exclusion-policy and sync surfaces.
 
     Python modules named ``exclusion_policy*`` and TypeScript sources under an
-    ``exclusion-policy`` directory are the sanctioned surface; every other
-    file is scanned in full with only marker lines masked.
+    ``exclusion-policy`` directory are the sanctioned policy surface; modules
+    named ``small_file_sync*`` are the sanctioned small-file sync surface of
+    the plugin journal design (spec 10), whose preflight/content routes and
+    terminal receipts legitimately name canonical source and version
+    identity. Both are separately designed contract surfaces of their own
+    specs; every other file is scanned in full with only the marker lines
+    masked, and the OpenAPI endpoint scan below still proves no raw
+    source-publication endpoint reaches any document.
     """
     if path.name.startswith(("exclusion_policy", "exclusion-policy")):
+        return True
+    if path.name.startswith(("small_file_sync", "small-file-sync")):
         return True
     return any(part == "exclusion-policy" for part in path.parts)
 

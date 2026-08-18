@@ -1028,6 +1028,96 @@
         "title": "ApiEnvelope[SignedPolicySnapshotData]",
         "type": "object"
       },
+      "ApiEnvelope_SmallFilePreflightData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SmallFilePreflightData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[SmallFilePreflightData]",
+        "type": "object"
+      },
+      "ApiEnvelope_SmallFileTerminalResultData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SmallFileTerminalResultData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[SmallFileTerminalResultData]",
+        "type": "object"
+      },
       "ApiEnvelope_TotpEnrollmentData_": {
         "additionalProperties": false,
         "properties": {
@@ -1545,7 +1635,14 @@
           "exclusion_policy_indeterminate",
           "exclusion_policy_snapshot_outdated",
           "exclusion_policy_signing_unavailable",
-          "exclusion_policy_commit_outcome_unknown"
+          "exclusion_policy_commit_outcome_unknown",
+          "small_file_preflight_invalid",
+          "small_file_operation_not_found",
+          "small_file_operation_expired",
+          "small_file_operation_identity_mismatch",
+          "small_file_size_limit_exceeded",
+          "small_file_content_integrity_failed",
+          "small_file_upload_state_invalid"
         ],
         "title": "ErrorCode",
         "type": "string"
@@ -3008,6 +3105,198 @@
         "title": "SignedPolicySnapshotData",
         "type": "object"
       },
+      "SmallFilePreflightData": {
+        "additionalProperties": false,
+        "description": "One completed preflight: exactly one typed outcome and its safe payload.\n\n``single_part_upload`` carries only the opaque operation token and its\nexpiry; ``committed_replay`` and ``no_change`` carry only the frozen\nterminal result; ``excluded`` and ``conflict`` carry no payload member at\nall. Responses render with ``exclude_unset`` so each outcome emits\nexactly its own members.",
+        "properties": {
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "operation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation Id"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/SmallFilePreflightOutcome"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SmallFileTerminalResultData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "title": "SmallFilePreflightData",
+        "type": "object"
+      },
+      "SmallFilePreflightOutcome": {
+        "description": "Closed typed outcomes one preflight returns (spec 10.1 table).\n\nThe four members of :data:`TERMINAL_PREFLIGHT_OUTCOMES` finish the event\nwithout any upload; ``SINGLE_PART_UPLOAD`` is the only outcome that opens\nthe content-stream step.",
+        "enum": [
+          "committed_replay",
+          "no_change",
+          "excluded",
+          "conflict",
+          "single_part_upload"
+        ],
+        "title": "SmallFilePreflightOutcome",
+        "type": "string"
+      },
+      "SmallFilePreflightRequest": {
+        "additionalProperties": false,
+        "description": "The strict journal-event preflight body (spec 10.1).\n\nCarries the stable journal event identity, the idempotency key, the\ncreate/update operation shape, the plugin-local file identity, the\ndeclared fingerprint (locator context, digest, exact size, media type)\nand the accepted signed policy revision under its wire name — never a\nworkspace, device, user, receipt, object-store or provider selector.",
+        "properties": {
+          "base_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Version Id"
+          },
+          "event_id": {
+            "format": "uuid",
+            "title": "Event Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "local_file_id": {
+            "format": "uuid",
+            "title": "Local File Id",
+            "type": "string"
+          },
+          "media_type": {
+            "title": "Media Type",
+            "type": "string"
+          },
+          "normalized_locator": {
+            "title": "Normalized Locator",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "create",
+              "update"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "policy_revision": {
+            "title": "Policy Revision",
+            "type": "integer"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Id"
+          }
+        },
+        "required": [
+          "event_id",
+          "idempotency_key",
+          "operation",
+          "local_file_id",
+          "normalized_locator",
+          "sha256",
+          "size_bytes",
+          "media_type",
+          "policy_revision"
+        ],
+        "title": "SmallFilePreflightRequest",
+        "type": "object"
+      },
+      "SmallFileTerminalResultData": {
+        "additionalProperties": false,
+        "description": "The safe canonical terminal result of spec 10.3.\n\nThe exact receipt an exact replay returns unchanged: the result kind, the\ncanonical source and version identity, the content version and the commit\nmoment. No digest, object key, storage receipt or provider detail is a\nmember, so none can ever render.",
+        "properties": {
+          "committed_at": {
+            "format": "date-time",
+            "title": "Committed At",
+            "type": "string"
+          },
+          "content_version": {
+            "title": "Content Version",
+            "type": "integer"
+          },
+          "result_kind": {
+            "$ref": "#/components/schemas/SmallFileTerminalResultKind"
+          },
+          "source_id": {
+            "format": "uuid",
+            "title": "Source Id",
+            "type": "string"
+          },
+          "source_version_id": {
+            "format": "uuid",
+            "title": "Source Version Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result_kind",
+          "source_id",
+          "source_version_id",
+          "content_version",
+          "committed_at"
+        ],
+        "title": "SmallFileTerminalResultData",
+        "type": "object"
+      },
+      "SmallFileTerminalResultKind": {
+        "description": "Closed terminal result kinds retained for exact replay (spec 10.3).",
+        "enum": [
+          "committed",
+          "no_change"
+        ],
+        "title": "SmallFileTerminalResultKind",
+        "type": "string"
+      },
       "TotpCodeRequest": {
         "additionalProperties": false,
         "description": "The six-digit code body of one TOTP challenge verification.",
@@ -4083,6 +4372,88 @@
           }
         ],
         "summary": "Get Snapshot"
+      }
+    },
+    "/api/sync/journal-events/preflight": {
+      "post": {
+        "description": "Run one journal-event preflight and render its typed outcome.",
+        "operationId": "preflightJournalEventUpload",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SmallFilePreflightRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_SmallFilePreflightData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Preflight Journal Event"
+      }
+    },
+    "/api/uploads/{operation_id}/content": {
+      "put": {
+        "description": "Bind one raw content stream to its preflight-bound operation.",
+        "operationId": "uploadSmallFileContent",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{32,128}$",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "description": "The exact raw content bytes of the preflight-bound file",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_SmallFileTerminalResultData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Upload Content"
       }
     }
   }
