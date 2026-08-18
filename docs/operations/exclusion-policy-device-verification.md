@@ -46,3 +46,10 @@ UTC against policy revision 1.
 - Vault preservation: every Vault file on the device was unchanged after the publication, rotation and offline testing — the policy never alters Vault content.
 
 Recorded by Duc on 2026-08-18.
+
+## Pending: child-4 reference-device evidence
+
+The plugin journal and small-file sync child has its own operator evidence
+procedure (same sanitized-labels-only discipline) in
+`docs/operations/plugin-journal-small-file-sync.md`; its Desktop and Mobile
+records are pending and have not been recorded here.

@@ -1,0 +1,111 @@
+{
+  "contract": "small_file_sync_wire_golden/v1",
+  "description": "The shared Python/TypeScript wire contract of the two small-file sync surfaces (spec 10.1-10.3, 12): the canonical envelope of every preflight outcome and terminal result, the closed error envelopes with their registered statuses, and the plugin-side closed mapping each shape must land on. The Python contract suite replays these entries against the real route stack; the Obsidian plugin's vitest suite replays the identical bytes through the hand-mirrored sync client.",
+  "entries": [
+    {
+      "name": "preflight_single_part_upload",
+      "surface": "preflight",
+      "status": 200,
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d01\",\"data\":{\"outcome\":\"single_part_upload\",\"operation_id\":\"AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-Zz\",\"expires_at\":\"2026-08-18T10:00:00Z\"},\"warnings\":[],\"error\":null}",
+      "plugin_expectation": { "kind": "preflight_outcome", "outcome": "single_part_upload" }
+    },
+    {
+      "name": "preflight_committed_replay",
+      "surface": "preflight",
+      "status": 200,
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d02\",\"data\":{\"outcome\":\"committed_replay\",\"result\":{\"result_kind\":\"committed\",\"source_id\":\"11111111-1111-4111-8111-111111111111\",\"source_version_id\":\"22222222-2222-4222-8222-222222222222\",\"content_version\":1,\"committed_at\":\"2026-08-18T00:00:00Z\"}},\"warnings\":[],\"error\":null}",
+      "plugin_expectation": { "kind": "preflight_outcome", "outcome": "committed_replay" }
+    },
+    {
+      "name": "preflight_no_change",
+      "surface": "preflight",
+      "status": 200,
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d03\",\"data\":{\"outcome\":\"no_change\",\"result\":{\"result_kind\":\"no_change\",\"source_id\":\"11111111-1111-4111-8111-111111111111\",\"source_version_id\":\"22222222-2222-4222-8222-222222222222\",\"content_version\":3,\"committed_at\":\"2026-08-18T00:00:00Z\"}},\"warnings\":[],\"error\":null}",
+      "plugin_expectation": { "kind": "preflight_outcome", "outcome": "no_change" }
+    },
+    {
+      "name": "preflight_excluded",
+      "surface": "preflight",
+      "status": 200,
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d04\",\"data\":{\"outcome\":\"excluded\"},\"warnings\":[],\"error\":null}",
+      "plugin_expectation": { "kind": "preflight_outcome", "outcome": "excluded" }
+    },
+    {
+      "name": "preflight_conflict",
+      "surface": "preflight",
+      "status": 200,
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d05\",\"data\":{\"outcome\":\"conflict\"},\"warnings\":[],\"error\":null}",
+      "plugin_expectation": { "kind": "preflight_outcome", "outcome": "conflict" }
+    },
+    {
+      "name": "upload_committed",
+      "surface": "content",
+      "status": 200,
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d06\",\"data\":{\"result_kind\":\"committed\",\"source_id\":\"11111111-1111-4111-8111-111111111111\",\"source_version_id\":\"22222222-2222-4222-8222-222222222222\",\"content_version\":1,\"committed_at\":\"2026-08-18T00:00:00Z\"},\"warnings\":[],\"error\":null}",
+      "plugin_expectation": { "kind": "committed_receipt", "sourceId": "11111111-1111-4111-8111-111111111111", "contentVersion": 1 }
+    },
+    {
+      "name": "error_small_file_size_limit_exceeded",
+      "surface": "preflight",
+      "status": 422,
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d07\",\"data\":null,\"warnings\":[],\"error\":{\"code\":\"small_file_size_limit_exceeded\",\"message\":\"The file exceeds the single-part upload size limit\",\"retryable\":false,\"details\":{}}}",
+      "plugin_expectation": { "kind": "failure", "failureKind": "blocked_size" }
+    },
+    {
+      "name": "error_small_file_content_integrity_failed",
+      "surface": "content",
+      "status": 422,
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d08\",\"data\":null,\"warnings\":[],\"error\":{\"code\":\"small_file_content_integrity_failed\",\"message\":\"Small-file content failed integrity verification\",\"retryable\":false,\"details\":{}}}",
+      "plugin_expectation": { "kind": "failure", "failureKind": "integrity_failed" }
+    },
+    {
+      "name": "error_small_file_operation_not_found",
+      "surface": "content",
+      "status": 404,
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d09\",\"data\":null,\"warnings\":[],\"error\":{\"code\":\"small_file_operation_not_found\",\"message\":\"The upload operation does not exist\",\"retryable\":false,\"details\":{}}}",
+      "plugin_expectation": { "kind": "failure", "failureKind": "operation_retry_required" }
+    },
+    {
+      "name": "error_small_file_operation_expired",
+      "surface": "content",
+      "status": 410,
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d0a\",\"data\":null,\"warnings\":[],\"error\":{\"code\":\"small_file_operation_expired\",\"message\":\"The upload operation expired\",\"retryable\":false,\"details\":{}}}",
+      "plugin_expectation": { "kind": "failure", "failureKind": "operation_retry_required" }
+    },
+    {
+      "name": "error_small_file_operation_identity_mismatch",
+      "surface": "content",
+      "status": 409,
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d0b\",\"data\":null,\"warnings\":[],\"error\":{\"code\":\"small_file_operation_identity_mismatch\",\"message\":\"The upload operation identity does not match this request\",\"retryable\":false,\"details\":{}}}",
+      "plugin_expectation": { "kind": "failure", "failureKind": "integrity_failed" }
+    },
+    {
+      "name": "error_small_file_upload_state_invalid",
+      "surface": "preflight",
+      "status": 409,
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d0c\",\"data\":null,\"warnings\":[],\"error\":{\"code\":\"small_file_upload_state_invalid\",\"message\":\"The upload operation state does not accept this action\",\"retryable\":false,\"details\":{}}}",
+      "plugin_expectation": { "kind": "failure", "failureKind": "operation_retry_required" }
+    },
+    {
+      "name": "error_device_credential_invalid",
+      "surface": "preflight",
+      "status": 401,
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d0d\",\"data\":null,\"warnings\":[],\"error\":{\"code\":\"device_credential_invalid\",\"message\":\"The device credential is invalid\",\"retryable\":false,\"details\":{}}}",
+      "plugin_expectation": { "kind": "failure", "failureKind": "access_expired" }
+    },
+    {
+      "name": "error_device_revoked",
+      "surface": "content",
+      "status": 401,
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d0e\",\"data\":null,\"warnings\":[],\"error\":{\"code\":\"device_revoked\",\"message\":\"The device is revoked\",\"retryable\":false,\"details\":{}}}",
+      "plugin_expectation": { "kind": "failure", "failureKind": "access_expired" }
+    },
+    {
+      "name": "error_exclusion_policy_denied",
+      "surface": "content",
+      "status": 403,
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d0f\",\"data\":null,\"warnings\":[],\"error\":{\"code\":\"exclusion_policy_denied\",\"message\":\"The exclusion policy denied this operation\",\"retryable\":false,\"details\":{\"policy_revision_number\":2}}}",
+      "plugin_expectation": { "kind": "failure", "failureKind": "login_required" }
+    }
+  ]
+}
