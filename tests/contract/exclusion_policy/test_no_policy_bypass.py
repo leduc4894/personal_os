@@ -44,13 +44,18 @@ OBJECT_STORE_MEMBERS: Final[frozenset[str]] = frozenset(
 #: the enforcement-boundary contract proves call the policy guard first),
 #: the offline recovery restore path (operator-driven offline tooling), the
 #: acceptance CLI composition (which binds the same guarded services), the
-#: adapter package itself and the port contract definition.
+#: small-file sync service (spec 10.2: its bounded spool/verification runs
+#: only through a token-bound receive operation whose preflight a
+#: locator-aware policy guard already authorized server-side, and whose
+#: publication still re-resolves and fully re-verifies the receipt before
+#: any commit), the adapter package itself and the port contract definition.
 APPROVED_OBJECT_STORE_MODULES: Final[frozenset[Path]] = frozenset(
     {
         REPO_ROOT / "src" / "personal_os" / "sources" / "publication.py",
         REPO_ROOT / "src" / "personal_os" / "sources" / "reading.py",
         REPO_ROOT / "src" / "personal_os" / "recovery" / "service.py",
         REPO_ROOT / "tools" / "canonical_core_operations.py",
+        REPO_ROOT / "src" / "personal_os" / "small_file_sync" / "service.py",
         REPO_ROOT / "packages" / "r2-object-storage" / "src" / "r2_object_storage" / "adapter.py",
         REPO_ROOT / "src" / "personal_os" / "object_storage" / "contracts.py",
     }

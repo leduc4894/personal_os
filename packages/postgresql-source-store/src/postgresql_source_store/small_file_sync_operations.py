@@ -23,7 +23,15 @@ terminal state as one guarded update inside a single transaction, and exposes
 the same transition as :meth:`record_terminal_result_in_transaction
 <PostgresqlSmallFileUploadOperationStore.record_terminal_result_in_transaction>`
 so the publication service can drive its canonical writes and the terminal
-operation state in one commit. Every statement is schema-qualified and
+operation state in one commit. The receive-side binding
+(:meth:`resolve_bound_operation
+<PostgresqlSmallFileUploadOperationStore.resolve_bound_operation>` and
+:meth:`record_bound_terminal_result
+<PostgresqlSmallFileUploadOperationStore.record_bound_terminal_result>`)
+resolves one row by its one-way token hash — the raw token never exists in
+storage — rechecks the credential-derived identity, state and expiry, and
+applies the same guarded terminal transition over the token-bound view.
+Every statement is schema-qualified and
 parameter-bound; the adapter stores and logs no bytes, locator, token, receipt
 or provider detail, and driver failures cross the boundary only through the
 closed small-file error registry or ``internal_error``.
@@ -48,8 +56,10 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import ApplicationError, InternalApplicationError
+from personal_os.object_storage import CanonicalMediaType, ContentDigest
 from personal_os.small_file_sync.contracts import (
     SmallFileDeviceContext,
+    SmallFileIdempotencyKey,
     SmallFileOperation,
     SmallFilePreflight,
     SmallFileTerminalResult,
@@ -58,6 +68,7 @@ from personal_os.small_file_sync.contracts import (
     UploadOperationToken,
 )
 from personal_os.small_file_sync.errors import SmallFileSyncError
+from personal_os.small_file_sync.ports import SmallFileBoundOperation
 from postgresql_source_store.engine import apply_transaction_bounds
 from postgresql_source_store.error_mapping import (
     RETRY_JITTER_MAXIMUM_SECONDS,
@@ -107,24 +118,41 @@ def upload_operation_token_hash(token: UploadOperationToken) -> str:
     return hashlib.sha256(token.value.encode("ascii")).hexdigest()
 
 
-def upload_operation_lock_key(
-    device_context: SmallFileDeviceContext, preflight: SmallFilePreflight
+def upload_operation_identity_lock_key(
+    workspace_id: UUID,
+    device_id: UUID,
+    event_id: UUID,
+    idempotency_key_value: str,
 ) -> int:
-    """Derive the transaction lock key for one upload-operation identity.
+    """Derive the transaction lock key from one operation identity's parts.
 
     The material is the workspace and device UUID bytes, the journal event UUID
     bytes and the exact idempotency-key bytes, each sealed by a NUL separator
-    that cannot occur inside them.
+    that cannot occur inside them. The receive-side binding carries the same
+    identity as plain fields, so both paths derive one identical key.
     """
     material = b"\x00".join(
         (
-            device_context.workspace_id.bytes,
-            device_context.device_id.bytes,
-            preflight.event_id.bytes,
-            preflight.idempotency_key.value.encode("ascii"),
+            workspace_id.bytes,
+            device_id.bytes,
+            event_id.bytes,
+            idempotency_key_value.encode("ascii"),
         )
     )
     return signed_first_sha256_word(material)
+
+
+def upload_operation_lock_key(
+    device_context: SmallFileDeviceContext, preflight: SmallFilePreflight
+) -> int:
+    """Derive the transaction lock key for one upload-operation identity."""
+
+    return upload_operation_identity_lock_key(
+        device_context.workspace_id,
+        device_context.device_id,
+        preflight.event_id,
+        preflight.idempotency_key.value,
+    )
 
 
 def upload_operation_lock_statement(
@@ -471,6 +499,78 @@ def _frozen_result_matches(
     )
 
 
+def operation_token_lookup_statement(
+    operation_token: UploadOperationToken,
+) -> sa.Select[tuple[Any, ...]]:
+    """Build the schema-qualified lookup of one operation row by token hash.
+
+    The raw token is never stored or emitted: only its one-way SHA-256 hash
+    crosses into the parameter-bound statement.
+    """
+    return _operation_row_select().where(
+        small_file_upload_operations.c.operation_token_hash
+        == upload_operation_token_hash(operation_token)
+    )
+
+
+def _bound_operation_from_row(
+    operation_token: UploadOperationToken, row: SmallFileOperationRow
+) -> SmallFileBoundOperation:
+    """Hydrate the receive-side binding of one operation row.
+
+    The caller's opaque token — the only place the raw token exists — rides
+    along unchanged; every other member comes from the row. A value the row
+    cannot re-parse (grammar drift) fails closed as the closed
+    upload-state-invalid error, never as raw database evidence.
+    """
+    try:
+        idempotency_key = SmallFileIdempotencyKey(row.idempotency_key)
+        operation = SmallFileOperation(row.operation_kind)
+        declared_sha256 = ContentDigest.parse(row.declared_sha256)
+        declared_media_type = CanonicalMediaType.parse(row.declared_media_type)
+    except ValueError:
+        raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID) from None
+    return SmallFileBoundOperation(
+        operation_token=operation_token,
+        workspace_id=row.workspace_id,
+        device_id=row.device_id,
+        event_id=row.event_id,
+        idempotency_key=idempotency_key,
+        operation=operation,
+        declared_sha256=declared_sha256,
+        declared_size_bytes=row.declared_size_bytes,
+        declared_media_type=declared_media_type,
+        policy_revision_number=row.policy_revision_number,
+        reserved_source_id=row.reserved_source_id,
+        update_source_id=row.update_source_id,
+        update_base_version_id=row.update_base_version_id,
+        expires_at=row.expires_at,
+        terminal_result=row.terminal_result(),
+    )
+
+
+def _bound_matches_row(row: SmallFileOperationRow, bound: SmallFileBoundOperation) -> bool:
+    """Compare a stored operation row against one receive-side binding exactly.
+
+    The comparison covers the credential-derived identity and the complete
+    declared fingerprint plus the create's reserved UUID, so a binding that
+    drifted from its row — including any payload substitution — fails.
+    """
+    return (
+        row.workspace_id == bound.workspace_id
+        and row.device_id == bound.device_id
+        and row.event_id == bound.event_id
+        and row.idempotency_key == bound.idempotency_key.value
+        and row.operation_kind == bound.operation.value
+        and row.declared_sha256 == bound.declared_sha256.hexadecimal
+        and int(row.declared_size_bytes) == bound.declared_size_bytes
+        and row.declared_media_type == bound.declared_media_type.value
+        and row.reserved_source_id == bound.reserved_source_id
+        and row.update_source_id == bound.update_source_id
+        and row.update_base_version_id == bound.update_base_version_id
+    )
+
+
 class PostgresqlSmallFileUploadOperationStore:
     """Durable upload-operation store over the canonical PostgreSQL baseline.
 
@@ -546,6 +646,125 @@ class PostgresqlSmallFileUploadOperationStore:
         """
         del diagnostic_context
         await self._apply_terminal_transition(connection, operation, result)
+
+    async def resolve_bound_operation(
+        self,
+        operation_token: UploadOperationToken,
+        device_context: SmallFileDeviceContext,
+        diagnostic_context: DiagnosticContext,
+    ) -> SmallFileBoundOperation:
+        """Bind one receive to the exact operation its opaque token names.
+
+        The lookup is by the one-way token hash only; the credential-derived
+        workspace/device must then match the reserving identity exactly. A
+        committed row carries its frozen terminal result so a response-loss
+        replay returns it unchanged — terminal evidence survives expiry —
+        while a non-terminal row past its deadline fails closed as the closed
+        expired error and a failed row as the closed state-invalid error.
+        """
+        del diagnostic_context
+        return await self._retry.run(
+            lambda _attempt: self._resolve_bound_operation_once(
+                operation_token, device_context
+            )
+        )
+
+    async def record_bound_terminal_result(
+        self,
+        bound: SmallFileBoundOperation,
+        result: SmallFileTerminalResult,
+        diagnostic_context: DiagnosticContext,
+    ) -> None:
+        """Persist the receive-side terminal result behind the identity lock.
+
+        Mirrors :meth:`record_terminal_result` over the token-bound receive
+        view: the operation-identity advisory lock, the guarded terminal
+        update and the identical-result idempotence all apply, so a replayed
+        or concurrent receive converges on the single frozen result.
+        """
+        del diagnostic_context
+        await self._retry.run(
+            lambda _attempt: self._record_bound_terminal_result_once(bound, result)
+        )
+
+    async def _resolve_bound_operation_once(
+        self,
+        operation_token: UploadOperationToken,
+        device_context: SmallFileDeviceContext,
+    ) -> SmallFileBoundOperation:
+        async with (
+            self._engine.connect() as connection,
+            connection.begin(),
+        ):
+            await apply_transaction_bounds(connection)
+            result = await connection.execute(operation_token_lookup_statement(operation_token))
+            row = result.mappings().one_or_none()
+        if row is None:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND)
+        hydrated = SmallFileOperationRow.from_row_mapping(row)
+        if (
+            hydrated.workspace_id != device_context.workspace_id
+            or hydrated.device_id != device_context.device_id
+        ):
+            raise _identity_mismatch()
+        bound = _bound_operation_from_row(operation_token, hydrated)
+        if bound.terminal_result is not None:
+            return bound
+        if hydrated.state == STATE_FAILED:
+            raise _state_invalid()
+        if _is_expired(hydrated.expires_at, self._clock()):
+            raise _operation_expired()
+        return bound
+
+    async def _record_bound_terminal_result_once(
+        self, bound: SmallFileBoundOperation, result: SmallFileTerminalResult
+    ) -> None:
+        async with (
+            self._engine.connect() as connection,
+            connection.begin(),
+        ):
+            await apply_transaction_bounds(connection)
+            await connection.execute(
+                advisory_xact_lock_statement(
+                    UPLOAD_OPERATION_LOCK_NAMESPACE,
+                    upload_operation_identity_lock_key(
+                        bound.workspace_id,
+                        bound.device_id,
+                        bound.event_id,
+                        bound.idempotency_key.value,
+                    ),
+                )
+            )
+            await self._apply_bound_terminal_transition(connection, bound, result)
+
+    async def _apply_bound_terminal_transition(
+        self,
+        connection: AsyncConnection,
+        bound: SmallFileBoundOperation,
+        result: SmallFileTerminalResult,
+    ) -> None:
+        result_set = await connection.execute(
+            operation_token_lookup_statement(bound.operation_token)
+        )
+        row_mapping = result_set.mappings().one_or_none()
+        if row_mapping is None:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND)
+        row = SmallFileOperationRow.from_row_mapping(row_mapping)
+        if not _bound_matches_row(row, bound):
+            raise _identity_mismatch()
+        if row.state == STATE_COMMITTED:
+            if _frozen_result_matches(row, result):
+                return
+            raise _state_invalid()
+        if row.state == STATE_FAILED:
+            raise _state_invalid()
+        if _is_expired(row.expires_at, self._clock()):
+            raise _operation_expired()
+        guarded = await connection.execute(
+            terminal_result_update_statement(operation_id=row.operation_id, result=result)
+        )
+        if guarded.rowcount != 1:
+            raise _state_invalid()
 
     async def _resolve_terminal_result_once(
         self, preflight: SmallFilePreflight, device_context: SmallFileDeviceContext

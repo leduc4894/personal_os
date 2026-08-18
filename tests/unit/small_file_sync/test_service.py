@@ -1,0 +1,694 @@
+"""Small-file sync service orchestration: preflight, receive and publication.
+
+Proves the normative flows of spec 10.1-10.3 against the REAL publication
+service over recording fakes: server-side policy denial before any operation
+store or object-store access, exact preflight replay of a frozen terminal
+result, pending same-identity reservation with token rotation, payload
+substitution rejection, create reservation without a source insert, stale and
+missing update bases as durable conflicts, the frozen no-change receipt,
+content-integrity failures that never publish, response-loss replay on both
+paths, exactly one canonical publication under concurrent receives, expiry
+and the server-owned size ceiling before any spool, and the closed durable
+title/type derivation for creates. Assertions use only ledger strings,
+closed enums, counts and value equality — never locator, digest, token or
+payload sentinels.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import timedelta
+from typing import Final
+from uuid import uuid4
+
+import pytest
+from tests.unit.small_file_sync.fakes import (
+    CURRENT_SOURCES_RESOLVE,
+    OBJECT_STORE_RESOLVE,
+    OBJECT_STORE_STORE_STREAM,
+    PUBLICATION_COMMIT_CREATE,
+    PUBLICATION_COMMIT_UPDATE,
+    PUBLICATION_GUARD,
+    PUBLICATION_RESOLVE_COMMITTED,
+    STORE_RECORD_BOUND_TERMINAL,
+    STORE_RESERVE_OPERATION,
+    STORE_RESOLVE_BOUND,
+    STORE_RESOLVE_TERMINAL,
+    SYNC_CONTENT_BYTES,
+    SYNC_POLICY_GUARD,
+    ProbedByteStream,
+    ServiceHarness,
+    build_create_preflight,
+    build_current_reference,
+    build_device_context,
+    build_diagnostic_context,
+    build_service_harness,
+    build_update_preflight,
+)
+
+from personal_os.error_contracts.codes import ErrorCode
+from personal_os.error_contracts.exceptions import ApplicationError
+from personal_os.exclusion_policy.errors import ExclusionPolicyError
+from personal_os.object_storage import CanonicalMediaType, ContentDigest
+from personal_os.small_file_sync.contracts import (
+    MAX_SINGLE_PART_FILE_SIZE_BYTES,
+    SmallFileDeviceContext,
+    SmallFileIdempotencyKey,
+    SmallFileOperation,
+    SmallFilePreflightOutcome,
+    SmallFileTerminalResultKind,
+)
+from personal_os.small_file_sync.errors import SmallFileSyncError
+from personal_os.small_file_sync.metrics import SmallFileMetricOutcome, SmallFileRejectionReason
+from personal_os.small_file_sync.service import (
+    SmallFilePreflightResult,
+    derive_create_title,
+    derive_source_type,
+)
+from personal_os.sources.results import PublicationOutcome
+
+_EXPIRY_SECONDS: Final[int] = 900
+_ALTERNATE_CONTENT: Final[bytes] = b"different canonical bytes for payload substitution\n"
+
+
+def _error_code(error: ApplicationError) -> ErrorCode:
+    return error.error_code
+
+
+async def _reserve_create_operation(
+    harness: ServiceHarness,
+) -> tuple[SmallFilePreflightResult, SmallFileDeviceContext]:
+    """Run one create preflight and return its result and device context."""
+
+    device_context = build_device_context()
+    harness.operation_store.now_override = harness.clock.moment
+    result = await harness.service.preflight(
+        preflight=build_create_preflight(),
+        device_context=device_context,
+        diagnostic_context=build_diagnostic_context(),
+    )
+    return result, device_context
+
+
+class TestPreflightPolicy:
+    @pytest.mark.asyncio
+    async def test_policy_denial_returns_excluded_before_any_store_or_object_access(
+        self,
+    ) -> None:
+        harness = build_service_harness(denying_policy_guard=True)
+
+        result = await harness.service.preflight(
+            preflight=build_create_preflight(),
+            device_context=build_device_context(),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert result.outcome is SmallFilePreflightOutcome.EXCLUDED
+        assert result.terminal_result is None
+        assert result.operation_token is None
+        assert result.expires_at is None
+        # The denial happens before every other port: the ledger stays empty.
+        assert harness.ledger.entries == []
+        assert (
+            harness.metrics.preflight_count(
+                SmallFileOperation.CREATE, SmallFilePreflightOutcome.EXCLUDED
+            )
+            == 1
+        )
+
+
+class TestPreflightReservation:
+    @pytest.mark.asyncio
+    async def test_create_reserves_operation_without_source_insert(self) -> None:
+        harness = build_service_harness()
+
+        result, _ = await _reserve_create_operation(harness)
+
+        assert result.outcome is SmallFilePreflightOutcome.SINGLE_PART_UPLOAD
+        assert result.operation_token is not None
+        assert result.expires_at == harness.clock.moment + timedelta(
+            seconds=_EXPIRY_SECONDS
+        )
+        record = harness.operation_store.record_for_token(result.operation_token)
+        assert record is not None
+        assert record.reserved_source_id is not None
+        assert harness.publication_store.source_rows == set()
+        assert PUBLICATION_COMMIT_CREATE not in harness.ledger.entries
+        assert harness.ledger.entries == [
+            SYNC_POLICY_GUARD,
+            STORE_RESOLVE_TERMINAL,
+            STORE_RESERVE_OPERATION,
+        ]
+        assert (
+            harness.metrics.preflight_count(
+                SmallFileOperation.CREATE, SmallFilePreflightOutcome.SINGLE_PART_UPLOAD
+            )
+            == 1
+        )
+
+    @pytest.mark.asyncio
+    async def test_preflight_accepts_size_exactly_at_the_server_ceiling(self) -> None:
+        harness = build_service_harness()
+        ceiling_content = b"\x00" * MAX_SINGLE_PART_FILE_SIZE_BYTES
+
+        result = await harness.service.preflight(
+            preflight=build_create_preflight(content=ceiling_content),
+            device_context=build_device_context(),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert result.outcome is SmallFilePreflightOutcome.SINGLE_PART_UPLOAD
+
+    @pytest.mark.asyncio
+    async def test_pending_same_identity_preflight_returns_rotated_operation(self) -> None:
+        harness = build_service_harness()
+        device_context = build_device_context()
+        preflight = build_create_preflight()
+
+        first = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        second = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert first.outcome is SmallFilePreflightOutcome.SINGLE_PART_UPLOAD
+        assert second.outcome is SmallFilePreflightOutcome.SINGLE_PART_UPLOAD
+        assert first.operation_token is not None
+        assert second.operation_token is not None
+        assert first.operation_token.value != second.operation_token.value
+        assert first.expires_at == second.expires_at
+        assert harness.ledger.count(STORE_RESERVE_OPERATION) == 2
+        assert PUBLICATION_COMMIT_CREATE not in harness.ledger.entries
+
+
+class TestPreflightUpdateBase:
+    @pytest.mark.asyncio
+    async def test_stale_base_returns_conflict_without_reservation(self) -> None:
+        preflight = build_update_preflight(source_id=uuid4(), base_version_id=uuid4())
+        reference = build_current_reference(
+            preflight, source_version_id=uuid4(), content_digest=ContentDigest.parse("c" * 64)
+        )
+        harness = build_service_harness(current_reference=reference)
+
+        result = await harness.service.preflight(
+            preflight=preflight,
+            device_context=build_device_context(),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert result.outcome is SmallFilePreflightOutcome.CONFLICT
+        assert result.terminal_result is None
+        assert result.operation_token is None
+        assert STORE_RESERVE_OPERATION not in harness.ledger.entries
+        assert CURRENT_SOURCES_RESOLVE in harness.ledger.entries
+        assert PUBLICATION_COMMIT_UPDATE not in harness.ledger.entries
+        assert (
+            harness.metrics.preflight_count(
+                SmallFileOperation.UPDATE, SmallFilePreflightOutcome.CONFLICT
+            )
+            == 1
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_update_source_returns_conflict(self) -> None:
+        harness = build_service_harness(current_reference=None)
+        preflight = build_update_preflight(source_id=uuid4(), base_version_id=uuid4())
+
+        result = await harness.service.preflight(
+            preflight=preflight,
+            device_context=build_device_context(),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert result.outcome is SmallFilePreflightOutcome.CONFLICT
+        assert STORE_RESERVE_OPERATION not in harness.ledger.entries
+        assert PUBLICATION_COMMIT_UPDATE not in harness.ledger.entries
+
+    @pytest.mark.asyncio
+    async def test_changed_content_over_current_base_opens_upload(self) -> None:
+        preflight = build_update_preflight(source_id=uuid4(), base_version_id=uuid4())
+        reference = build_current_reference(preflight, content_digest=ContentDigest.parse("c" * 64))
+        harness = build_service_harness(current_reference=reference)
+
+        result = await harness.service.preflight(
+            preflight=preflight,
+            device_context=build_device_context(),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert result.outcome is SmallFilePreflightOutcome.SINGLE_PART_UPLOAD
+        assert result.operation_token is not None
+
+
+class TestPreflightNoChange:
+    @pytest.mark.asyncio
+    async def test_declared_base_content_freezes_no_change_receipt_and_replays(self) -> None:
+        device_context = build_device_context()
+        preflight = build_update_preflight(source_id=uuid4(), base_version_id=uuid4())
+        reference = build_current_reference(preflight)
+        harness = build_service_harness(current_reference=reference)
+        harness.operation_store.now_override = harness.clock.moment
+
+        result = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert result.outcome is SmallFilePreflightOutcome.NO_CHANGE
+        terminal = result.terminal_result
+        assert terminal is not None
+        assert terminal.result_kind is SmallFileTerminalResultKind.NO_CHANGE
+        assert terminal.source_id == preflight.source_id
+        assert terminal.source_version_id == preflight.base_version_id
+        assert terminal.content_version == reference.content_version
+        assert terminal.committed_at == reference.committed_at
+        assert PUBLICATION_COMMIT_UPDATE not in harness.ledger.entries
+        assert STORE_RESERVE_OPERATION in harness.ledger.entries
+
+        replayed = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert replayed.outcome is SmallFilePreflightOutcome.NO_CHANGE
+        assert replayed.terminal_result == terminal
+        assert harness.ledger.count(STORE_RESERVE_OPERATION) == 1
+        assert harness.metrics.replay_count(SmallFileOperation.UPDATE) == 1
+
+
+class TestPreflightReplay:
+    @pytest.mark.asyncio
+    async def test_committed_operation_replays_exactly_without_republication(self) -> None:
+        harness = build_service_harness()
+        device_context = build_device_context()
+        preflight = build_create_preflight()
+        harness.operation_store.now_override = harness.clock.moment
+        reserved = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        assert reserved.operation_token is not None
+        committed = await harness.service.receive(
+            operation_token=reserved.operation_token,
+            device_context=device_context,
+            stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        replayed = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert replayed.outcome is SmallFilePreflightOutcome.COMMITTED_REPLAY
+        assert replayed.terminal_result == committed
+        assert replayed.terminal_result is not None
+        assert replayed.terminal_result.result_kind is SmallFileTerminalResultKind.COMMITTED
+        assert harness.ledger.count(STORE_RESERVE_OPERATION) == 1
+        assert harness.ledger.count(PUBLICATION_COMMIT_CREATE) == 1
+        assert harness.metrics.replay_count(SmallFileOperation.CREATE) == 1
+
+    @pytest.mark.asyncio
+    async def test_different_payload_under_same_identity_is_rejected(self) -> None:
+        harness = build_service_harness()
+        device_context = build_device_context()
+        event_id = uuid4()
+        idempotency_key = SmallFileIdempotencyKey(str(uuid4()))
+        original = build_create_preflight(
+            event_id=event_id, idempotency_key=idempotency_key
+        )
+        harness.operation_store.now_override = harness.clock.moment
+        reserved = await harness.service.preflight(
+            preflight=original,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        assert reserved.operation_token is not None
+        await harness.service.receive(
+            operation_token=reserved.operation_token,
+            device_context=device_context,
+            stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+            diagnostic_context=build_diagnostic_context(),
+        )
+        substituted = build_create_preflight(
+            content=_ALTERNATE_CONTENT,
+            event_id=event_id,
+            idempotency_key=idempotency_key,
+        )
+
+        with pytest.raises(SmallFileSyncError) as exc_info:
+            await harness.service.preflight(
+                preflight=substituted,
+                device_context=device_context,
+                diagnostic_context=build_diagnostic_context(),
+            )
+
+        assert _error_code(exc_info.value) is ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH
+        assert harness.ledger.count(STORE_RESERVE_OPERATION) == 1
+        assert (
+            harness.metrics.rejection_count(
+                SmallFileOperation.CREATE,
+                SmallFileRejectionReason.SMALL_FILE_OPERATION_IDENTITY_MISMATCH,
+            )
+            == 1
+        )
+
+
+class TestReceivePublication:
+    @pytest.mark.asyncio
+    async def test_receive_publishes_create_once_and_freezes_terminal_receipt(self) -> None:
+        harness = build_service_harness()
+        device_context = build_device_context()
+        preflight = build_create_preflight()
+        harness.operation_store.now_override = harness.clock.moment
+        reserved = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        assert reserved.operation_token is not None
+        record = harness.operation_store.record_for_token(reserved.operation_token)
+        assert record is not None and record.reserved_source_id is not None
+
+        terminal = await harness.service.receive(
+            operation_token=reserved.operation_token,
+            device_context=device_context,
+            stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert terminal.result_kind is SmallFileTerminalResultKind.COMMITTED
+        assert terminal.source_id == record.reserved_source_id
+        assert harness.publication_store.source_rows == {record.reserved_source_id}
+        assert harness.ledger.entries[-7:] == [
+            STORE_RESOLVE_BOUND,
+            OBJECT_STORE_STORE_STREAM,
+            PUBLICATION_GUARD,
+            PUBLICATION_RESOLVE_COMMITTED,
+            OBJECT_STORE_RESOLVE,
+            PUBLICATION_COMMIT_CREATE,
+            STORE_RECORD_BOUND_TERMINAL,
+        ]
+        assert (
+            harness.metrics.upload_count(
+                SmallFileOperation.CREATE, SmallFileMetricOutcome.COMMITTED
+            )
+            == 1
+        )
+
+    @pytest.mark.asyncio
+    async def test_publication_no_change_maps_to_no_change_terminal(self) -> None:
+        preflight = build_update_preflight(source_id=uuid4(), base_version_id=uuid4())
+        reference = build_current_reference(preflight, content_digest=ContentDigest.parse("c" * 64))
+        harness = build_service_harness(
+            current_reference=reference, update_outcome=PublicationOutcome.NO_CHANGE
+        )
+        device_context = build_device_context()
+        reserved = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        assert reserved.operation_token is not None
+
+        terminal = await harness.service.receive(
+            operation_token=reserved.operation_token,
+            device_context=device_context,
+            stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert terminal.result_kind is SmallFileTerminalResultKind.NO_CHANGE
+        assert terminal.source_id == preflight.source_id
+
+
+class TestReceiveIntegrity:
+    @pytest.mark.parametrize(
+        ("chunks", "subject"),
+        [
+            ([b"x" * len(SYNC_CONTENT_BYTES)], "digest mismatch"),
+            ([b"short"], "size mismatch"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_content_mismatch_never_publishes(
+        self, chunks: list[bytes], subject: str
+    ) -> None:
+        del subject
+        harness = build_service_harness()
+        reserved, device_context = await _reserve_create_operation(harness)
+        assert reserved.operation_token is not None
+
+        with pytest.raises(SmallFileSyncError) as exc_info:
+            await harness.service.receive(
+                operation_token=reserved.operation_token,
+                device_context=device_context,
+                stream=ProbedByteStream(chunks),
+                diagnostic_context=build_diagnostic_context(),
+            )
+
+        assert _error_code(exc_info.value) is ErrorCode.SMALL_FILE_CONTENT_INTEGRITY_FAILED
+        assert harness.publication_store.commit_invocations == 0
+        assert harness.publication_store.source_rows == set()
+        assert STORE_RECORD_BOUND_TERMINAL not in harness.ledger.entries
+        assert (
+            harness.metrics.upload_count(
+                SmallFileOperation.CREATE, SmallFileMetricOutcome.INTEGRITY_FAILED
+            )
+            == 1
+        )
+        assert (
+            harness.metrics.rejection_count(
+                SmallFileOperation.CREATE,
+                SmallFileRejectionReason.SMALL_FILE_CONTENT_INTEGRITY_FAILED,
+            )
+            == 1
+        )
+
+    @pytest.mark.asyncio
+    async def test_policy_denial_during_publication_never_commits(self) -> None:
+        harness = build_service_harness(
+            publication_guard_error=ExclusionPolicyError(ErrorCode.EXCLUSION_POLICY_DENIED)
+        )
+        device_context = build_device_context()
+        preflight = build_create_preflight()
+        harness.operation_store.now_override = harness.clock.moment
+        reserved = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        assert reserved.operation_token is not None
+
+        with pytest.raises(ExclusionPolicyError):
+            await harness.service.receive(
+                operation_token=reserved.operation_token,
+                device_context=device_context,
+                stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+                diagnostic_context=build_diagnostic_context(),
+            )
+
+        assert harness.publication_store.commit_invocations == 0
+        assert STORE_RECORD_BOUND_TERMINAL not in harness.ledger.entries
+        assert (
+            harness.metrics.upload_count(
+                SmallFileOperation.CREATE, SmallFileMetricOutcome.REJECTED
+            )
+            == 1
+        )
+
+
+class TestReceiveGuards:
+    @pytest.mark.asyncio
+    async def test_expired_operation_fails_closed_without_object_access(self) -> None:
+        harness = build_service_harness()
+        device_context = build_device_context()
+        preflight = build_create_preflight()
+        harness.operation_store.now_override = harness.clock.moment
+        reserved = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        assert reserved.operation_token is not None
+        harness.operation_store.now_override = harness.clock.moment + timedelta(
+            seconds=_EXPIRY_SECONDS + 1
+        )
+
+        with pytest.raises(SmallFileSyncError) as exc_info:
+            await harness.service.receive(
+                operation_token=reserved.operation_token,
+                device_context=device_context,
+                stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+                diagnostic_context=build_diagnostic_context(),
+            )
+
+        assert _error_code(exc_info.value) is ErrorCode.SMALL_FILE_OPERATION_EXPIRED
+        assert OBJECT_STORE_STORE_STREAM not in harness.ledger.entries
+        assert harness.publication_store.commit_invocations == 0
+
+    @pytest.mark.asyncio
+    async def test_size_ceiling_enforced_before_any_spool(self) -> None:
+        harness = build_service_harness()
+        device_context = build_device_context()
+        preflight = build_create_preflight()
+        harness.operation_store.now_override = harness.clock.moment
+        reserved = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        assert reserved.operation_token is not None
+        harness.operation_store.declared_size_override_bytes = (
+            MAX_SINGLE_PART_FILE_SIZE_BYTES + 1
+        )
+
+        with pytest.raises(SmallFileSyncError) as exc_info:
+            await harness.service.receive(
+                operation_token=reserved.operation_token,
+                device_context=device_context,
+                stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+                diagnostic_context=build_diagnostic_context(),
+            )
+
+        assert _error_code(exc_info.value) is ErrorCode.SMALL_FILE_SIZE_LIMIT_EXCEEDED
+        assert OBJECT_STORE_STORE_STREAM not in harness.ledger.entries
+        assert harness.publication_store.commit_invocations == 0
+        assert (
+            harness.metrics.rejection_count(
+                SmallFileOperation.CREATE, SmallFileRejectionReason.SMALL_FILE_SIZE_LIMIT_EXCEEDED
+            )
+            == 1
+        )
+
+    @pytest.mark.asyncio
+    async def test_stale_rotated_token_surfaces_operation_not_found(self) -> None:
+        harness = build_service_harness()
+        device_context = build_device_context()
+        preflight = build_create_preflight()
+        harness.operation_store.now_override = harness.clock.moment
+        first = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        second = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        assert first.operation_token is not None
+        assert second.operation_token is not None
+
+        with pytest.raises(SmallFileSyncError) as exc_info:
+            await harness.service.receive(
+                operation_token=first.operation_token,
+                device_context=device_context,
+                stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+                diagnostic_context=build_diagnostic_context(),
+            )
+
+        assert _error_code(exc_info.value) is ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND
+
+
+class TestReceiveReplayAndConcurrency:
+    @pytest.mark.asyncio
+    async def test_response_loss_replays_frozen_terminal_without_second_publication(
+        self,
+    ) -> None:
+        harness = build_service_harness()
+        device_context = build_device_context()
+        preflight = build_create_preflight()
+        harness.operation_store.now_override = harness.clock.moment
+        reserved = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        assert reserved.operation_token is not None
+        committed = await harness.service.receive(
+            operation_token=reserved.operation_token,
+            device_context=device_context,
+            stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        replayed = await harness.service.receive(
+            operation_token=reserved.operation_token,
+            device_context=device_context,
+            stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert replayed == committed
+        assert harness.ledger.count(PUBLICATION_COMMIT_CREATE) == 1
+        assert len(harness.publication_store.source_rows) == 1
+        assert harness.metrics.replay_count(SmallFileOperation.CREATE) == 1
+
+    @pytest.mark.asyncio
+    async def test_concurrent_receives_produce_exactly_one_publication(self) -> None:
+        harness = build_service_harness()
+        device_context = build_device_context()
+        preflight = build_create_preflight()
+        harness.operation_store.now_override = harness.clock.moment
+        reserved = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        assert reserved.operation_token is not None
+
+        first, second = await asyncio.gather(
+            harness.service.receive(
+                operation_token=reserved.operation_token,
+                device_context=device_context,
+                stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+                diagnostic_context=build_diagnostic_context(),
+            ),
+            harness.service.receive(
+                operation_token=reserved.operation_token,
+                device_context=device_context,
+                stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+                diagnostic_context=build_diagnostic_context(),
+            ),
+        )
+
+        assert first == second
+        assert len(harness.publication_store.committed_fingerprints) == 1
+        assert len(harness.publication_store.source_rows) == 1
+        assert first.result_kind is SmallFileTerminalResultKind.COMMITTED
+
+
+class TestCreateDerivation:
+    @pytest.mark.parametrize(
+        ("media_type_value", "expected_type"),
+        [
+            ("text/markdown", "markdown"),
+            ("text/plain", "text"),
+            ("application/pdf", "pdf"),
+            ("image/png", "image"),
+            ("audio/ogg", "audio"),
+            ("application/octet-stream", "text"),
+        ],
+    )
+    def test_source_type_maps_from_the_closed_media_type_vocabulary(
+        self, media_type_value: str, expected_type: str
+    ) -> None:
+        assert derive_source_type(CanonicalMediaType.parse(media_type_value)).value == (
+            expected_type
+        )
+
+    def test_create_title_is_a_stable_valid_label(self) -> None:
+        title = derive_create_title(CanonicalMediaType.parse("text/markdown"))
+
+        assert title.value == "Markdown file"
+        assert derive_create_title(CanonicalMediaType.parse("text/markdown")) == title
