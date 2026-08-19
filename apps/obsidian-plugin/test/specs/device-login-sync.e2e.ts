@@ -134,6 +134,28 @@ async function editFixtureNote(): Promise<void> {
   });
 }
 
+async function logNoteBytes(label: string): Promise<void> {
+  const fingerprint = await browser.execute(async () => {
+    const app = (
+      window as unknown as {
+        app: {
+          vault: {
+            configDir: string;
+            adapter: { read: (path: string) => Promise<string> };
+          };
+        };
+      }
+    ).app;
+    const content = await app.vault.adapter.read("hello.md");
+    let hash = 5381;
+    for (let index = 0; index < content.length; index += 1) {
+      hash = ((hash << 5) + hash + content.charCodeAt(index)) | 0;
+    }
+    return { length: content.length, hash, hasCr: content.includes("\r") };
+  });
+  console.log(`NOTE_BYTES_${label}`, JSON.stringify(fingerprint));
+}
+
 describe("device login and small-file sync (live server)", () => {
   before(function () {
     if (passwordFile === undefined || totpHelper === undefined) {
@@ -224,11 +246,103 @@ describe("device login and small-file sync (live server)", () => {
     await browser.pause(3_000);
     console.log("STATUS_AFTER_LOGIN", await readStatusBarText());
 
+    await logNoteBytes("BEFORE_EDIT");
     await editFixtureNote();
-    await browser.pause(8_000);
-    console.log("STATUS_AFTER_EDIT", await readStatusBarText());
+    await logNoteBytes("AFTER_EDIT");
+    for (let seconds = 0; seconds <= 30; seconds += 2) {
+      await browser.pause(2_000);
+      console.log(`STATUS_T_PLUS_${seconds}`, await readStatusBarText());
+      if (seconds === 10) {
+        await logNoteBytes("AT_T10");
+        await browser.execute(() => {
+          const app = (
+            window as unknown as {
+              app: { commands: { executeCommandById: (id: string) => void } };
+            }
+          ).app;
+          app.commands.executeCommandById("knowledge-workspace:sync-now");
+        });
+        console.log("SYNC_NOW_TRIGGERED");
+      }
+    }
+    await logNoteBytes("FINAL");
 
     const data = await readPluginData();
     console.log("PENDING_GRANT_FINAL", data.pending_grant === null ? "cleared" : "still-pending");
+
+    const journalDump = await browser.execute(
+      async (dataPathSuffix: string) => {
+        const app = (
+          window as unknown as {
+            app: {
+              vault: {
+                configDir: string;
+                adapter: {
+                  list: (path: string) => Promise<{ files: string[] }>;
+                  readBinary: (path: string) => Promise<ArrayBuffer>;
+                };
+              };
+            };
+          }
+        ).app;
+        const pluginDir = `${app.vault.configDir}/plugins/knowledge-workspace`;
+        void dataPathSuffix;
+        const listing = await app.vault.adapter.list(pluginDir);
+        const journalName = listing.files
+          .map((file) => file.split("/").pop() as string)
+          .filter((name) => name.startsWith("journal.sqlite.g"))
+          .sort()
+          .at(-1);
+        if (journalName === undefined) {
+          return { error: "no journal generation", files: listing.files };
+        }
+        const bytes = new Uint8Array(
+          await app.vault.adapter.readBinary(`${pluginDir}/${journalName}`),
+        );
+        let binary = "";
+        for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+          binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+        }
+        return { base64: btoa(binary) };
+      },
+      pluginDataPathSuffix,
+    );
+    if ("error" in journalDump || journalDump.base64 === undefined) {
+      console.log("JOURNAL_DUMP", JSON.stringify(journalDump));
+    } else {
+      const initSqlJs = (await import("sql.js")).default;
+      const engine = await initSqlJs();
+      const database = new engine.Database(Buffer.from(journalDump.base64, "base64"));
+      const events = database.exec(
+        "select state, sha256, size_bytes, media_type, created_at_epoch_ms from journal_events order by created_at_epoch_ms",
+      );
+      const files = database.exec(
+        "select normalized_path, observed_sha256, observed_size_bytes, observed_media_type from local_files",
+      );
+      const currentBytes = await browser.execute(async () => {
+        const app = (
+          window as unknown as {
+            app: {
+              vault: {
+                adapter: { readBinary: (path: string) => Promise<ArrayBuffer> };
+              };
+            };
+          }
+        ).app;
+        return new Uint8Array(await app.vault.adapter.readBinary("hello.md"));
+      });
+      const { createHash } = await import("node:crypto");
+      const currentDigest = createHash("sha256")
+        .update(new Uint8Array(currentBytes))
+        .digest("hex");
+      console.log(
+        "JOURNAL_EVENTS",
+        JSON.stringify(events[0]?.values ?? []),
+        "LOCAL_FILES",
+        JSON.stringify(files[0]?.values ?? []),
+        "CURRENT_DIGEST",
+        JSON.stringify({ digest: currentDigest, sizeBytes: currentBytes.byteLength }),
+      );
+    }
   });
 });
