@@ -12,7 +12,7 @@ adapter's own concerns; only the domain values cross this boundary.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import AsyncIterable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -30,6 +30,8 @@ from personal_os.small_file_sync.contracts import (
     SmallFileUploadOperation,
     UploadOperationToken,
 )
+from personal_os.sources.commands import CreateSourceVersion, UpdateSourceVersion
+from personal_os.sources.results import SourceVersionPublicationResult
 
 #: Injectable clock returning the current aware UTC moment.
 type AwareUtcClock = Callable[[], datetime]
@@ -88,6 +90,33 @@ class SmallFilePolicyGuard(Protocol):
         device_context: SmallFileDeviceContext,
         diagnostic_context: DiagnosticContext,
     ) -> AllowedPolicyRevisionBinding: ...
+
+
+class SmallFilePublicationGateway(Protocol):
+    """Publish one verified small-file operation with bound policy evidence.
+
+    The receive orchestration reconstructs the immutable binding from its
+    durable operation row and passes it explicitly. Implementations must not
+    recover policy state from the plugin request or retain a current binding.
+    """
+
+    async def publish_create(
+        self,
+        *,
+        command: CreateSourceVersion,
+        stream: AsyncIterable[bytes],
+        policy_binding: AllowedPolicyRevisionBinding,
+        diagnostic_context: DiagnosticContext,
+    ) -> SourceVersionPublicationResult: ...
+
+    async def publish_update(
+        self,
+        *,
+        command: UpdateSourceVersion,
+        stream: AsyncIterable[bytes],
+        policy_binding: AllowedPolicyRevisionBinding,
+        diagnostic_context: DiagnosticContext,
+    ) -> SourceVersionPublicationResult: ...
 
 
 class SmallFileUploadOperationStore(Protocol):

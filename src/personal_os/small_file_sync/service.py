@@ -4,7 +4,7 @@
 injected ports only — the durable upload-operation store, the locator-aware
 exclusion-policy guard, the current-source resolver, the canonical object
 store, the existing
-:class:`~personal_os.sources.publication.SourceVersionPublicationService`,
+:class:`~personal_os.small_file_sync.ports.SmallFilePublicationGateway`,
 the closed low-cardinality metrics sink and the aware UTC clock. Preflight
 re-evaluates policy server-side before any store or object-store access,
 replays a frozen terminal result exactly, resolves the update base (stale,
@@ -65,6 +65,7 @@ from personal_os.small_file_sync.ports import (
     AwareUtcClock,
     SmallFileBoundOperation,
     SmallFilePolicyGuard,
+    SmallFilePublicationGateway,
     SmallFileUploadOperationStore,
 )
 from personal_os.sources.actors import ActorKind, SourceActor
@@ -75,7 +76,6 @@ from personal_os.sources.commands import (
     SourceType,
     UpdateSourceVersion,
 )
-from personal_os.sources.publication import SourceVersionPublicationService
 from personal_os.sources.reading import (
     CanonicalReadStateError,
     CanonicalSourceReadStore,
@@ -237,8 +237,8 @@ class SmallFileSyncService:
     :class:`~personal_os.small_file_sync.ports.SmallFilePolicyGuard`, the
     read-only current-source resolver for update-base checks, the canonical
     object store's bounded spool/verification path, the existing
-    :class:`SourceVersionPublicationService` (the only path that turns
-    verified bytes into canonical source versions), the closed metrics sink
+    publication gateway (which invokes the only path that turns verified bytes
+    into canonical source versions), the closed metrics sink
     and the aware UTC clock. Expiry and state transitions of the durable
     operation row are the store's own authority: this service never
     re-derives them and never masks the store's closed errors.
@@ -246,7 +246,7 @@ class SmallFileSyncService:
 
     operation_store: SmallFileUploadOperationStore
     policy_guard: SmallFilePolicyGuard
-    publication_service: SourceVersionPublicationService
+    publication_gateway: SmallFilePublicationGateway
     object_store: CanonicalObjectStore
     current_sources: CanonicalSourceReadStore
     metrics: SmallFileSyncMetrics
@@ -506,7 +506,7 @@ class SmallFileSyncService:
         device_context: SmallFileDeviceContext,
         diagnostic_context: DiagnosticContext,
     ) -> SourceVersionPublicationResult:
-        """Publish through the canonical service over the verified object.
+        """Publish through the bound gateway over the verified object.
 
         The publication command binds the operation's frozen identity: the
         credential-derived workspace and device actor, the journal event and
@@ -525,6 +525,10 @@ class SmallFileSyncService:
             actor_kind=ActorKind.DEVICE, actor_id=device_context.device_id
         )
         idempotency_key = IdempotencyKey(bound.idempotency_key.value)
+        policy_binding = AllowedPolicyRevisionBinding(
+            workspace_id=bound.workspace_id,
+            policy_revision_number=bound.policy_revision_number,
+        )
         if bound.operation is SmallFileOperation.CREATE:
             reserved_source_id = bound.reserved_source_id
             if reserved_source_id is None:
@@ -540,9 +544,15 @@ class SmallFileSyncService:
                 expected_object=expected_object,
                 client_timestamp=None,
             )
-            return await self.publication_service.publish_create(
+            if (
+                create_command.workspace_id != device_context.workspace_id
+                or policy_binding.workspace_id != device_context.workspace_id
+            ):
+                raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+            return await self.publication_gateway.publish_create(
                 command=create_command,
                 stream=_EXHAUSTED_BYTE_STREAM,
+                policy_binding=policy_binding,
                 diagnostic_context=diagnostic_context,
             )
         update_source_id = bound.update_source_id
@@ -559,9 +569,15 @@ class SmallFileSyncService:
             expected_object=expected_object,
             client_timestamp=None,
         )
-        return await self.publication_service.publish_update(
+        if (
+            update_command.workspace_id != device_context.workspace_id
+            or policy_binding.workspace_id != device_context.workspace_id
+        ):
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        return await self.publication_gateway.publish_update(
             command=update_command,
             stream=_EXHAUSTED_BYTE_STREAM,
+            policy_binding=policy_binding,
             diagnostic_context=diagnostic_context,
         )
 

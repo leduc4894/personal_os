@@ -48,6 +48,7 @@ from tests.unit.small_file_sync.fakes import (
 
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import ApplicationError
+from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
 from personal_os.exclusion_policy.errors import ExclusionPolicyError
 from personal_os.object_storage import CanonicalMediaType, ContentDigest
 from personal_os.small_file_sync.contracts import (
@@ -383,6 +384,53 @@ class TestPreflightReplay:
 
 class TestReceivePublication:
     @pytest.mark.asyncio
+    async def test_receive_reconstructs_binding_only_from_the_bound_operation(self) -> None:
+        harness = build_service_harness()
+        device_context = build_device_context()
+        preflight = build_create_preflight(policy_revision_number=7)
+        reserved = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        assert reserved.operation_token is not None
+        record = harness.operation_store.record_for_token(reserved.operation_token)
+        assert record is not None
+        record.policy_revision_number = 12
+
+        await harness.service.receive(
+            operation_token=reserved.operation_token,
+            device_context=device_context,
+            stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert harness.publication_gateway.bindings == [
+            AllowedPolicyRevisionBinding(
+                workspace_id=device_context.workspace_id,
+                policy_revision_number=12,
+            )
+        ]
+
+    @pytest.mark.asyncio
+    async def test_receive_rejects_binding_workspace_mismatch_before_gateway(self) -> None:
+        harness = build_service_harness()
+        reserved, device_context = await _reserve_create_operation(harness)
+        assert reserved.operation_token is not None
+        harness.operation_store.bound_workspace_id_override = uuid4()
+
+        with pytest.raises(SmallFileSyncError) as exc_info:
+            await harness.service.receive(
+                operation_token=reserved.operation_token,
+                device_context=device_context,
+                stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+                diagnostic_context=build_diagnostic_context(),
+            )
+
+        assert _error_code(exc_info.value) is ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID
+        assert harness.publication_gateway.bindings == []
+
+    @pytest.mark.asyncio
     async def test_receive_publishes_create_once_and_freezes_terminal_receipt(self) -> None:
         harness = build_service_harness()
         device_context = build_device_context()
@@ -619,6 +667,71 @@ class TestReceiveGuards:
 
 
 class TestReceiveReplayAndConcurrency:
+    @pytest.mark.asyncio
+    async def test_concurrent_receives_keep_their_policy_bindings_isolated(self) -> None:
+        harness = build_service_harness()
+        device_context = build_device_context()
+        first_reserved = await harness.service.preflight(
+            preflight=build_create_preflight(),
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        second_reserved = await harness.service.preflight(
+            preflight=build_create_preflight(),
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        assert first_reserved.operation_token is not None
+        assert second_reserved.operation_token is not None
+        first_record = harness.operation_store.record_for_token(first_reserved.operation_token)
+        second_record = harness.operation_store.record_for_token(second_reserved.operation_token)
+        assert first_record is not None
+        assert second_record is not None
+        first_record.policy_revision_number = 11
+        second_record.policy_revision_number = 12
+
+        first_entered = asyncio.Event()
+        second_entered = asyncio.Event()
+        first_release = asyncio.Event()
+        second_release = asyncio.Event()
+        harness.publication_gateway.entered_by_revision = {
+            11: first_entered,
+            12: second_entered,
+        }
+        harness.publication_gateway.release_by_revision = {
+            11: first_release,
+            12: second_release,
+        }
+        first_task = asyncio.create_task(
+            harness.service.receive(
+                operation_token=first_reserved.operation_token,
+                device_context=device_context,
+                stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+                diagnostic_context=build_diagnostic_context(),
+            )
+        )
+        second_task = asyncio.create_task(
+            harness.service.receive(
+                operation_token=second_reserved.operation_token,
+                device_context=device_context,
+                stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+                diagnostic_context=build_diagnostic_context(),
+            )
+        )
+        await first_entered.wait()
+        await second_entered.wait()
+
+        second_release.set()
+        second_terminal = await second_task
+        first_release.set()
+        first_terminal = await first_task
+
+        assert {
+            binding.policy_revision_number for binding in harness.publication_gateway.bindings
+        } == {11, 12}
+        assert first_terminal.result_kind is SmallFileTerminalResultKind.COMMITTED
+        assert second_terminal.result_kind is SmallFileTerminalResultKind.COMMITTED
+
     @pytest.mark.asyncio
     async def test_response_loss_replays_frozen_terminal_without_second_publication(
         self,

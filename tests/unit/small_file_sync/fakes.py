@@ -19,9 +19,10 @@ locator, digest, token or payload sentinels in ledgers or assertions.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import secrets
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterable, AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Final
@@ -256,6 +257,7 @@ class FakeSmallFileUploadOperationStore:
     expiry_seconds: int = _EXPIRY_SECONDS
     now_override: datetime | None = None
     declared_size_override_bytes: int | None = None
+    bound_workspace_id_override: UUID | None = None
     records: list[_OperationRecord] = field(default_factory=list)
 
     def _now(self) -> datetime:
@@ -437,7 +439,11 @@ class FakeSmallFileUploadOperationStore:
     def _bound_operation(self, record: _OperationRecord) -> SmallFileBoundOperation:
         return SmallFileBoundOperation(
             operation_token=record.operation_token,
-            workspace_id=record.device_context.workspace_id,
+            workspace_id=(
+                self.bound_workspace_id_override
+                if self.bound_workspace_id_override is not None
+                else record.device_context.workspace_id
+            ),
             device_id=record.device_context.device_id,
             event_id=record.preflight.event_id,
             idempotency_key=record.preflight.idempotency_key,
@@ -614,6 +620,62 @@ class FakePublicationPolicyGuard:
 
 
 @dataclass
+class FakeSmallFilePublicationGateway:
+    """Gateway fake that records each immutable invocation binding.
+
+    The wrapped real publication orchestrator preserves the existing
+    publication-store behavior, while the optional per-revision barriers let
+    concurrency tests prove one receive cannot overwrite another receive's
+    authorization evidence.
+    """
+
+    publication_service: SourceVersionPublicationService
+    bindings: list[AllowedPolicyRevisionBinding] = field(default_factory=list)
+    entered_by_revision: dict[int, asyncio.Event] = field(default_factory=dict)
+    release_by_revision: dict[int, asyncio.Event] = field(default_factory=dict)
+
+    async def publish_create(
+        self,
+        *,
+        command: SourceVersionCommand,
+        stream: AsyncIterable[bytes],
+        policy_binding: AllowedPolicyRevisionBinding,
+        diagnostic_context: DiagnosticContext,
+    ) -> SourceVersionPublicationResult:
+        await self._hold_binding(policy_binding)
+        return await self.publication_service.publish_create(
+            command=command,
+            stream=stream,
+            diagnostic_context=diagnostic_context,
+        )
+
+    async def publish_update(
+        self,
+        *,
+        command: SourceVersionCommand,
+        stream: AsyncIterable[bytes],
+        policy_binding: AllowedPolicyRevisionBinding,
+        diagnostic_context: DiagnosticContext,
+    ) -> SourceVersionPublicationResult:
+        await self._hold_binding(policy_binding)
+        return await self.publication_service.publish_update(
+            command=command,
+            stream=stream,
+            diagnostic_context=diagnostic_context,
+        )
+
+    async def _hold_binding(self, policy_binding: AllowedPolicyRevisionBinding) -> None:
+        self.bindings.append(policy_binding)
+        revision_number = policy_binding.policy_revision_number
+        entered = self.entered_by_revision.get(revision_number)
+        if entered is not None:
+            entered.set()
+        release = self.release_by_revision.get(revision_number)
+        if release is not None:
+            await release.wait()
+
+
+@dataclass
 class FakeSourcePublicationStore:
     """Publication-store fake modelling lock-guarded idempotent commits.
 
@@ -726,6 +788,7 @@ class ServiceHarness:
     operation_store: FakeSmallFileUploadOperationStore
     object_store: FakeCanonicalObjectStore
     publication_store: FakeSourcePublicationStore
+    publication_gateway: FakeSmallFilePublicationGateway
     current_sources: FakeCurrentSourceStore
     policy_guard: SmallFilePolicyGuardFake
     metrics: InMemorySmallFileSyncMetrics
@@ -755,6 +818,9 @@ def build_service_harness(
             ledger=ledger, error=publication_guard_error
         ),
     )
+    publication_gateway = FakeSmallFilePublicationGateway(
+        publication_service=publication_service
+    )
     operation_store = FakeSmallFileUploadOperationStore(ledger=ledger, clock=clock)
     current_sources = FakeCurrentSourceStore(ledger=ledger, reference=current_reference)
     metrics = InMemorySmallFileSyncMetrics()
@@ -766,7 +832,7 @@ def build_service_harness(
     service = SmallFileSyncService(
         operation_store=operation_store,
         policy_guard=policy_guard,
-        publication_service=publication_service,
+        publication_gateway=publication_gateway,
         object_store=object_store,
         current_sources=current_sources,
         metrics=metrics,
@@ -777,6 +843,7 @@ def build_service_harness(
         operation_store=operation_store,
         object_store=object_store,
         publication_store=publication_store,
+        publication_gateway=publication_gateway,
         current_sources=current_sources,
         policy_guard=policy_guard,
         metrics=metrics,

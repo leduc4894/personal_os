@@ -9,7 +9,7 @@ runtime exactly as the route suites do. The real-policy graph upgrades the
 policy seam to the production shape of the serve composition: the real
 :class:`PolicyEnforcementService` behind the locator-aware
 :class:`PolicyEnforcementSmallFileGuard` at preflight and as the publication
-service's own guard at receive, driven by a mutable in-memory active-snapshot
+gateway's invocation-local guard at receive, driven by a mutable in-memory active-snapshot
 source whose revisions carry real Ed25519 signatures over the canonical
 snapshot payload. Device credentials are minted through the real
 device-authorization routes, and revocations run through the real Admin
@@ -42,6 +42,7 @@ from api_runtime.exclusion_policy_crypto import (
     TrustAnchorEd25519Verifier,
 )
 from api_runtime.small_file_sync_composition import (
+    BoundPolicySmallFilePublicationGateway,
     OfflineCanonicalObjectStore,
     OfflineCurrentSourceStore,
     OfflineSmallFileClock,
@@ -77,7 +78,6 @@ from personal_os.runtime_configuration.models import RuntimeEnvironment
 from personal_os.small_file_sync.metrics import InMemorySmallFileSyncMetrics
 from personal_os.small_file_sync.service import SmallFileSyncService
 from personal_os.sources.metrics import InMemorySourcePublicationMetrics
-from personal_os.sources.publication import SourceVersionPublicationService
 
 ORIGIN: Final[str] = OFFLINE_WEB_ALLOWED_ORIGIN
 
@@ -332,7 +332,7 @@ def policy_wire_harness() -> Iterator[SmallFileWireHarness]:
 
     Mirrors :func:`compose_small_file_sync` exactly at the policy seam — the
     real enforcement service stands behind the locator-aware small-file guard
-    and behind the publication service's own guard — while every durable and
+    and behind the publication gateway's invocation-local guard — while every durable and
     remote adapter stays the offline double, so policy denials at preflight
     and at publication time are observed end-to-end over the real routes.
     """
@@ -346,17 +346,17 @@ def policy_wire_harness() -> Iterator[SmallFileWireHarness]:
     sync_state = OfflineSmallFileSyncState()
     clock = OfflineSmallFileClock(sync_state)
     object_store = OfflineCanonicalObjectStore(sync_state, clock)
-    publication_service = SourceVersionPublicationService(
+    publication_gateway = BoundPolicySmallFilePublicationGateway(
         store=OfflineSourcePublicationStore(sync_state, clock),
         object_store=object_store,
         metrics=InMemorySourcePublicationMetrics(),
         clock=clock,
-        policy_guard=enforcement,
+        enforcement=enforcement,
     )
     service = SmallFileSyncService(
         operation_store=OfflineSmallFileUploadOperationStore(sync_state, clock),
         policy_guard=PolicyEnforcementSmallFileGuard(enforcement=enforcement),
-        publication_service=publication_service,
+        publication_gateway=publication_gateway,
         object_store=object_store,
         current_sources=OfflineCurrentSourceStore(sync_state),
         metrics=InMemorySmallFileSyncMetrics(),

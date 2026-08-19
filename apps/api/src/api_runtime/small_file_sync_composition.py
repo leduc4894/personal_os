@@ -5,8 +5,8 @@ runs: the durable PostgreSQL upload-operation store, the real R2
 content-addressable object store behind a lazy per-process client (no
 connection opens at composition — the first store call does), the real
 :class:`~personal_os.exclusion_policy.enforcement.PolicyEnforcementService`
-behind the locator-aware :class:`PolicyEnforcementSmallFileGuard` and as the
-publication service's own guard, the durable source-publication store and
+behind the locator-aware :class:`PolicyEnforcementSmallFileGuard` and as an
+invocation-local publication gateway guard, the durable source-publication store and
 the canonical read store over the shared engine, and the in-memory low
 cardinality metrics sinks.
 
@@ -16,9 +16,8 @@ operation rows mirroring the durable adapter semantics (token rotation on
 re-preflight, payload-fingerprint matching, expiry that ends continuation but
 never terminal evidence, an idempotent guarded terminal transition), an
 object-store double performing the real size/digest verification over the
-streamed bytes, the real
-:class:`~personal_os.sources.publication.SourceVersionPublicationService`
-over an in-memory idempotent publication store, and the real
+streamed bytes, an invocation-local publication gateway over an in-memory
+idempotent publication store, and the real
 :class:`~personal_os.small_file_sync.service.SmallFileSyncService` binding
 them together with the in-memory metrics sink and a state-owned clock. It
 reads no environment value, no secret file, no database and no provider
@@ -58,6 +57,7 @@ from personal_os.exclusion_policy.metrics import PolicyBoundary
 from personal_os.object_storage import (
     CanonicalMediaType,
     CanonicalObjectKey,
+    CanonicalObjectStore,
     ContentDigest,
     ExpectedObject,
     VerificationMethod,
@@ -82,9 +82,11 @@ from personal_os.small_file_sync.ports import (
     SmallFileBoundOperation,
 )
 from personal_os.small_file_sync.service import SmallFileSyncService
+from personal_os.sources.commands import CreateSourceVersion, UpdateSourceVersion
 from personal_os.sources.fingerprint import RequestFingerprint, SourceVersionCommand
-from personal_os.sources.metrics import InMemorySourcePublicationMetrics
-from personal_os.sources.ports import PolicyEnforcementGuard
+from personal_os.sources.metrics import InMemorySourcePublicationMetrics, SourcePublicationMetrics
+from personal_os.sources.ports import AwareUtcClock as SourceAwareUtcClock
+from personal_os.sources.ports import PolicyEnforcementGuard, SourcePublicationStore
 from personal_os.sources.publication import SourceVersionPublicationService
 from personal_os.sources.reading import (
     CanonicalReadStateError,
@@ -170,6 +172,100 @@ class PolicyEnforcementSmallFileGuard:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _BoundPolicyPublicationGuard:
+    """One immutable authorization guard for one gateway invocation."""
+
+    enforcement: PolicyEnforcementService
+    binding: AllowedPolicyRevisionBinding
+
+    async def authorize_publication(
+        self,
+        command: SourceVersionCommand,
+        diagnostic_context: DiagnosticContext,
+    ) -> PublicationPolicyEvidence:
+        return await self.enforcement.authorize_bound_publication(
+            command,
+            self.binding,
+            diagnostic_context,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BoundPolicySmallFilePublicationGateway:
+    """Create a fresh immutable policy guard for every small-file publish."""
+
+    store: SourcePublicationStore
+    object_store: CanonicalObjectStore
+    metrics: SourcePublicationMetrics
+    clock: SourceAwareUtcClock
+    enforcement: PolicyEnforcementService
+
+    async def publish_create(
+        self,
+        *,
+        command: CreateSourceVersion,
+        stream: AsyncIterable[bytes],
+        policy_binding: AllowedPolicyRevisionBinding,
+        diagnostic_context: DiagnosticContext,
+    ) -> SourceVersionPublicationResult:
+        self._validate_workspace(command, policy_binding)
+        publication_service = SourceVersionPublicationService(
+            store=self.store,
+            object_store=self.object_store,
+            metrics=self.metrics,
+            clock=self.clock,
+            policy_guard=cast(
+                "PolicyEnforcementGuard",
+                _BoundPolicyPublicationGuard(
+                    enforcement=self.enforcement,
+                    binding=policy_binding,
+                ),
+            ),
+        )
+        return await publication_service.publish_create(
+            command=command,
+            stream=stream,
+            diagnostic_context=diagnostic_context,
+        )
+
+    async def publish_update(
+        self,
+        *,
+        command: UpdateSourceVersion,
+        stream: AsyncIterable[bytes],
+        policy_binding: AllowedPolicyRevisionBinding,
+        diagnostic_context: DiagnosticContext,
+    ) -> SourceVersionPublicationResult:
+        self._validate_workspace(command, policy_binding)
+        publication_service = SourceVersionPublicationService(
+            store=self.store,
+            object_store=self.object_store,
+            metrics=self.metrics,
+            clock=self.clock,
+            policy_guard=cast(
+                "PolicyEnforcementGuard",
+                _BoundPolicyPublicationGuard(
+                    enforcement=self.enforcement,
+                    binding=policy_binding,
+                ),
+            ),
+        )
+        return await publication_service.publish_update(
+            command=command,
+            stream=stream,
+            diagnostic_context=diagnostic_context,
+        )
+
+    @staticmethod
+    def _validate_workspace(
+        command: SourceVersionCommand,
+        policy_binding: AllowedPolicyRevisionBinding,
+    ) -> None:
+        if command.workspace_id != policy_binding.workspace_id:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+
+
 class LazyR2ClientSource:
     """Synchronous R2 client facade over the lazy per-process client manager.
 
@@ -228,17 +324,17 @@ def compose_small_file_sync(
         metrics=InMemoryObjectStorageMetrics(),
         logger=logger,
     )
-    publication_service = SourceVersionPublicationService(
+    publication_gateway = BoundPolicySmallFilePublicationGateway(
         store=PostgresqlSourcePublicationStore(engine, policy_verifier=verifier),
         object_store=object_store,
         metrics=InMemorySourcePublicationMetrics(),
         clock=default_utc_clock,
-        policy_guard=enforcement,
+        enforcement=enforcement,
     )
     service = SmallFileSyncService(
         operation_store=PostgresqlSmallFileUploadOperationStore(engine, clock=default_utc_clock),
         policy_guard=PolicyEnforcementSmallFileGuard(enforcement=enforcement),
-        publication_service=publication_service,
+        publication_gateway=publication_gateway,
         object_store=object_store,
         current_sources=PostgresqlCanonicalSourceReadStore(engine, policy_verifier=verifier),
         metrics=InMemorySmallFileSyncMetrics(),
@@ -620,35 +716,75 @@ class OfflineCanonicalObjectStore:
         return _reader()
 
 
-class _OfflinePublicationGuard:
-    """Allowing policy-guard stand-in of the offline publication stack.
+@dataclass(frozen=True, slots=True)
+class _OfflineBoundPolicyPublicationGuard:
+    """Deterministically allow one explicitly supplied offline binding."""
 
-    The guard's decision is non-authoritative evidence the offline stores
-    never consume, so the stand-in answers ``None`` exactly like the offline
-    service fakes of the domain suites; the internal evidence value itself
-    never crosses into the API runtime, which is why the stand-in is bound
-    behind a structural cast at composition time.
-    """
+    binding: AllowedPolicyRevisionBinding
 
     async def authorize_publication(
         self,
         command: SourceVersionCommand,
         diagnostic_context: DiagnosticContext,
-    ) -> object:
-        del command, diagnostic_context
-        return None
+    ) -> PublicationPolicyEvidence:
+        del diagnostic_context
+        if command.workspace_id != self.binding.workspace_id:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        return self.binding
 
-    async def authorize_read(
+
+@dataclass(frozen=True, slots=True)
+class _OfflineSmallFilePublicationGateway:
+    """Offline gateway preserving the invocation-local binding contract."""
+
+    store: SourcePublicationStore
+    object_store: CanonicalObjectStore
+    metrics: SourcePublicationMetrics
+    clock: SourceAwareUtcClock
+
+    async def publish_create(
         self,
-        reference: CanonicalSourceReference,
+        *,
+        command: CreateSourceVersion,
+        stream: AsyncIterable[bytes],
+        policy_binding: AllowedPolicyRevisionBinding,
         diagnostic_context: DiagnosticContext,
-    ) -> object:
-        del reference, diagnostic_context
-        return None
+    ) -> SourceVersionPublicationResult:
+        publication_service = self._publication_service(policy_binding)
+        return await publication_service.publish_create(
+            command=command,
+            stream=stream,
+            diagnostic_context=diagnostic_context,
+        )
 
+    async def publish_update(
+        self,
+        *,
+        command: UpdateSourceVersion,
+        stream: AsyncIterable[bytes],
+        policy_binding: AllowedPolicyRevisionBinding,
+        diagnostic_context: DiagnosticContext,
+    ) -> SourceVersionPublicationResult:
+        publication_service = self._publication_service(policy_binding)
+        return await publication_service.publish_update(
+            command=command,
+            stream=stream,
+            diagnostic_context=diagnostic_context,
+        )
 
-def _offline_publication_guard() -> PolicyEnforcementGuard:
-    return cast("PolicyEnforcementGuard", _OfflinePublicationGuard())
+    def _publication_service(
+        self, policy_binding: AllowedPolicyRevisionBinding
+    ) -> SourceVersionPublicationService:
+        return SourceVersionPublicationService(
+            store=self.store,
+            object_store=self.object_store,
+            metrics=self.metrics,
+            clock=self.clock,
+            policy_guard=cast(
+                "PolicyEnforcementGuard",
+                _OfflineBoundPolicyPublicationGuard(binding=policy_binding),
+            ),
+        )
 
 
 class OfflineSourcePublicationStore:
@@ -737,17 +873,16 @@ def compose_offline_small_file_sync(
     clock = OfflineSmallFileClock(offline_state)
     object_store = OfflineCanonicalObjectStore(offline_state, clock)
     publication_store = OfflineSourcePublicationStore(offline_state, clock)
-    publication_service = SourceVersionPublicationService(
+    publication_gateway = _OfflineSmallFilePublicationGateway(
         store=publication_store,
         object_store=object_store,
         metrics=InMemorySourcePublicationMetrics(),
         clock=clock,
-        policy_guard=_offline_publication_guard(),
     )
     service = SmallFileSyncService(
         operation_store=OfflineSmallFileUploadOperationStore(offline_state, clock),
         policy_guard=OfflineSmallFilePolicyGuard(offline_state),
-        publication_service=publication_service,
+        publication_gateway=publication_gateway,
         object_store=object_store,
         current_sources=OfflineCurrentSourceStore(offline_state),
         metrics=metrics if metrics is not None else InMemorySmallFileSyncMetrics(),
@@ -757,6 +892,7 @@ def compose_offline_small_file_sync(
 
 
 __all__ = [
+    "BoundPolicySmallFilePublicationGateway",
     "LazyR2ClientSource",
     "OfflineCanonicalObjectStore",
     "OfflineCurrentSourceStore",
