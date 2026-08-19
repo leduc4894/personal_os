@@ -113,8 +113,7 @@ async def _seed_authentication_rows(engine: AsyncEngine, workspace: SeededWorksp
                 user_id=workspace.owner_user_id,
                 workspace_id=workspace.workspace_id,
                 password_hash=(
-                    "$argon2id$v=19$m=65536,t=3,p=1$"
-                    "canonicalbackup$constraintvalidhash"
+                    "$argon2id$v=19$m=65536,t=3,p=1$canonicalbackup$constraintvalidhash"
                 ),
                 credential_revision=1,
                 password_changed_at=now,

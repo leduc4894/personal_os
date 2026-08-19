@@ -160,10 +160,7 @@ def parse_manifest(raw: bytes) -> RecoveryManifest:
     if not isinstance(payload, dict):
         _reject(RecoveryBundleInvalidReason.CONTRACT_UNSUPPORTED)
     contract_value = payload.get("contract")
-    if (
-        not isinstance(contract_value, str)
-        or contract_value not in _CONTRACT_SCHEMA_REVISIONS
-    ):
+    if not isinstance(contract_value, str) or contract_value not in _CONTRACT_SCHEMA_REVISIONS:
         _reject(RecoveryBundleInvalidReason.CONTRACT_UNSUPPORTED)
     if frozenset(payload) != _MANIFEST_KEYS:
         _reject(RecoveryBundleInvalidReason.FIELD_UNKNOWN)

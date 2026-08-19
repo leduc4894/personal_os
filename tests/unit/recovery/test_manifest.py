@@ -214,18 +214,13 @@ def test_historical_v1_nine_table_manifest_remains_byte_canonical() -> None:
 def test_legacy_v2_twenty_table_manifest_remains_byte_canonical() -> None:
     """The branch-local original v2 shape remains readable after widening."""
 
-    counts = {
-        table: index + 1
-        for index, table in enumerate(_LEGACY_V2_CANONICAL_COUNT_TABLES)
-    }
+    counts = {table: index + 1 for index, table in enumerate(_LEGACY_V2_CANONICAL_COUNT_TABLES)}
     raw = canonical_json(manifest_payload(canonical_counts=counts))
 
     parsed = parse_manifest(raw)
 
     assert parsed.contract == MANIFEST_CONTRACT_V2
-    assert frozenset(parsed.canonical_counts) == frozenset(
-        _LEGACY_V2_CANONICAL_COUNT_TABLES
-    )
+    assert frozenset(parsed.canonical_counts) == frozenset(_LEGACY_V2_CANONICAL_COUNT_TABLES)
     assert encode_manifest(parsed) == raw
 
 
@@ -255,9 +250,7 @@ def test_rejects_non_string_contract_values_through_typed_error_boundary(
 
 
 def test_rejects_crossed_contract_schema_revision_combinations() -> None:
-    historical_counts = {
-        table: index + 1 for index, table in enumerate(V1_CANONICAL_COUNT_TABLES)
-    }
+    historical_counts = {table: index + 1 for index, table in enumerate(V1_CANONICAL_COUNT_TABLES)}
     assert_bundle_invalid(
         canonical_json(
             manifest_payload(

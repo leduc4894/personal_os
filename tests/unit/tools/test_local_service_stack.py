@@ -509,9 +509,7 @@ def test_windows_secret_path_identity_rejects_current_previous_case_variant_coll
     environment = {
         "KNOWLEDGE_AUTH_CURRENT_KEY_ID": "auth-key-current",
         "KNOWLEDGE_AUTH_CURRENT_KEY_FILE": "Authentication/Current.key",
-        "KNOWLEDGE_AUTH_PREVIOUS_KEYS": (
-            "auth-key-previous=authentication/current.KEY"
-        ),
+        "KNOWLEDGE_AUTH_PREVIOUS_KEYS": ("auth-key-previous=authentication/current.KEY"),
     }
     monkeypatch.setattr(sys, "platform", "win32")
 
@@ -529,9 +527,7 @@ def test_windows_secret_path_identity_does_not_casefold_authentication_key_ids(
     environment = {
         "KNOWLEDGE_AUTH_CURRENT_KEY_ID": "Auth-Key-Current",
         "KNOWLEDGE_AUTH_CURRENT_KEY_FILE": "authentication/current.key",
-        "KNOWLEDGE_AUTH_PREVIOUS_KEYS": (
-            "auth-key-current=authentication/previous.key"
-        ),
+        "KNOWLEDGE_AUTH_PREVIOUS_KEYS": ("auth-key-current=authentication/previous.key"),
     }
     monkeypatch.setattr(sys, "platform", "win32")
 

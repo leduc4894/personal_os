@@ -683,8 +683,7 @@ async def test_legacy_v2_restore_verifies_the_manifest_twenty_table_shape(
 
     harness = build_restore_harness(tmp_path, object_count=1)
     legacy_counts = {
-        table_name: index + 1
-        for index, table_name in enumerate(_LEGACY_V2_CANONICAL_COUNT_TABLES)
+        table_name: index + 1 for index, table_name in enumerate(_LEGACY_V2_CANONICAL_COUNT_TABLES)
     }
     harness.bundle.manifest = dataclasses.replace(
         harness.manifest,
@@ -699,9 +698,7 @@ async def test_legacy_v2_restore_verifies_the_manifest_twenty_table_shape(
     )
 
     assert result.table_counts == legacy_counts
-    assert harness.restore_target.requested_count_tables == [
-        _LEGACY_V2_CANONICAL_COUNT_TABLES
-    ]
+    assert harness.restore_target.requested_count_tables == [_LEGACY_V2_CANONICAL_COUNT_TABLES]
 
 
 @pytest.mark.asyncio
