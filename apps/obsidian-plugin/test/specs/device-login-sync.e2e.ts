@@ -1,9 +1,8 @@
 import * as crypto from "node:crypto";
-import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { promisify } from "node:util";
 import { browser } from "@wdio/globals";
+import { runFromE2eRepositoryRoot } from "../support/repository-subprocess";
 
 /**
  * Live-server device login and small-file sync journey. The real grant is
@@ -23,9 +22,18 @@ const webUsername = process.env.E2E_WEB_USERNAME ?? "duc";
 const passwordFile = process.env.E2E_WEB_PASSWORD_FILE;
 const totpHelper = process.env.E2E_TOTP_HELPER;
 const pluginDataPathSuffix = "plugins/knowledge-workspace/data.json";
+const fixtureNonce = crypto.randomUUID();
 const fixtureNotePath = `controlled-live-${crypto.randomUUID()}.md`;
 const policyRaceNotePath = `controlled-policy-race-${crypto.randomUUID()}.md`;
-const repositoryRoot = path.resolve("../..");
+const fixtureNoteContent = `# Test note\n\nUpdated by the live login journey.\n${fixtureNonce}\n`;
+const policyRaceHeader = `# Controlled policy race\n\n${fixtureNonce}\n`;
+const policyRaceNoteContent =
+  policyRaceHeader + "x".repeat(1024 * 1024 - Buffer.byteLength(policyRaceHeader));
+const fixtureDeclaredSha256 = crypto.createHash("sha256").update(fixtureNoteContent).digest("hex");
+const policyRaceDeclaredSha256 = crypto
+  .createHash("sha256")
+  .update(policyRaceNoteContent)
+  .digest("hex");
 const databaseEnvironmentKeys = [
   "KNOWLEDGE_SECRET_ROOT",
   "KNOWLEDGE_DATABASE_HOST",
@@ -37,8 +45,6 @@ const databaseEnvironmentKeys = [
 let adminSessionCookies: string[] | null = null;
 let adminSessionCsrf: string | null = null;
 let journalDirectoryPath: string | null = null;
-
-const runFile = promisify(execFile);
 
 function cookiePairsOf(response: Response): string[] {
   return (response.headers.getSetCookie() ?? []).map((cookie) => cookie.split(";")[0]);
@@ -104,6 +110,7 @@ interface SanitizedJournalEvidence {
 const serverEvidenceScript = String.raw`
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -116,6 +123,11 @@ try:
     ).resolve(strict=True)
     if not password_path.is_relative_to(secret_root):
         raise ValueError
+    controlled_digests = os.environ["SERVER_EVIDENCE_DECLARED_SHA256S"].split(",")
+    if not controlled_digests or any(
+        re.fullmatch(r"[0-9a-f]{64}", digest) is None for digest in controlled_digests
+    ):
+        raise ValueError
     password = password_path.read_text(encoding="ascii").strip()
     with psycopg.connect(
         host=os.environ["KNOWLEDGE_DATABASE_HOST"],
@@ -125,15 +137,26 @@ try:
         password=password,
     ) as connection:
         statement = """
+            with controlled_operations as (
+              select * from knowledge.small_file_upload_operations
+              where declared_sha256 = any(%s)
+            )
             select
-              (select count(*) from knowledge.sources),
-              (select count(*) from knowledge.source_versions),
-              (select count(*) from knowledge.sync_events),
-              (select count(*) from knowledge.small_file_upload_operations),
-              (select count(*) from knowledge.small_file_upload_operations
-                 where state = 'committed'),
+              (select count(distinct source.source_id)
+                 from controlled_operations operation
+                 join knowledge.sources source
+                   on source.source_id = operation.result_source_id),
+              (select count(distinct version.source_version_id)
+                 from controlled_operations operation
+                 join knowledge.source_versions version
+                   on version.source_version_id = operation.result_source_version_id),
+              (select count(distinct event.event_id)
+                 from controlled_operations operation
+                 join knowledge.sync_events event on event.event_id = operation.event_id),
+              (select count(*) from controlled_operations),
+              (select count(*) from controlled_operations where state = 'committed'),
               (select count(*)
-                 from knowledge.small_file_upload_operations operation
+                 from controlled_operations operation
                  join knowledge.sources source
                    on source.source_id = operation.result_source_id
                  join knowledge.source_versions version
@@ -144,20 +167,20 @@ try:
                  and event.source_id = source.source_id
                   and event.committed_version_id = version.source_version_id
                 where operation.state = 'committed'),
-              (select count(*) from knowledge.small_file_upload_operations
+              (select count(*) from controlled_operations
                 where state = 'receiving'
                   and result_kind is null
                   and result_source_id is null
                   and result_source_version_id is null)
             """
-        operation_baseline = os.environ.get("SERVER_EVIDENCE_OPERATION_BASELINE")
+        should_wait_for_operation = os.environ.get("SERVER_EVIDENCE_WAIT_FOR_OPERATION") == "1"
         deadline = time.monotonic() + 30
         while True:
-            row = connection.execute(statement).fetchone()
+            row = connection.execute(statement, (controlled_digests,)).fetchone()
             if (
-                operation_baseline is None
+                not should_wait_for_operation
                 or row is None
-                or int(row[3]) > int(operation_baseline)
+                or int(row[3]) > 0
                 or time.monotonic() >= deadline
             ):
                 break
@@ -281,10 +304,20 @@ async function publishPreparedPolicy(
   return publication.revision_number;
 }
 
-async function readServerPublicationEvidence(): Promise<ServerPublicationEvidence> {
-  const { stdout } = await runFile("uv", ["run", "python", "-c", serverEvidenceScript], {
-    cwd: repositoryRoot,
-  });
+async function readServerPublicationEvidence(
+  controlledDeclaredSha256: string,
+  shouldWaitForOperation = false,
+): Promise<ServerPublicationEvidence> {
+  const { stdout } = await runFromE2eRepositoryRoot(
+    "uv",
+    ["run", "python", "-c", serverEvidenceScript],
+    import.meta.url,
+    {
+      ...process.env,
+      SERVER_EVIDENCE_DECLARED_SHA256S: controlledDeclaredSha256,
+      SERVER_EVIDENCE_WAIT_FOR_OPERATION: shouldWaitForOperation ? "1" : "0",
+    },
+  );
   const parsed = JSON.parse(stdout) as Record<string, unknown>;
   const evidenceKeys = [
     "sourceCount",
@@ -301,23 +334,6 @@ async function readServerPublicationEvidence(): Promise<ServerPublicationEvidenc
     }
   }
   return parsed as unknown as ServerPublicationEvidence;
-}
-
-async function waitForOperationAfter(
-  baseline: ServerPublicationEvidence,
-): Promise<ServerPublicationEvidence> {
-  const { stdout } = await runFile("uv", ["run", "python", "-c", serverEvidenceScript], {
-    cwd: repositoryRoot,
-    env: {
-      ...process.env,
-      SERVER_EVIDENCE_OPERATION_BASELINE: String(baseline.operationCount),
-    },
-  });
-  const evidence = JSON.parse(stdout) as ServerPublicationEvidence;
-  if (evidence.operationCount > baseline.operationCount) {
-    return evidence;
-  }
-  throw new Error("server did not observe the controlled preflight operation");
 }
 
 async function readPluginData(): Promise<Record<string, unknown>> {
@@ -392,7 +408,7 @@ async function injectPendingGrant(grant: CreatedGrant): Promise<void> {
 }
 
 async function editFixtureNote(): Promise<void> {
-  await browser.execute(async (notePath: string) => {
+  await browser.execute(async (notePath: string, content: string) => {
     const app = (
       window as unknown as {
         app: {
@@ -404,18 +420,17 @@ async function editFixtureNote(): Promise<void> {
         };
       }
     ).app;
-    const content = "# Test note\n\nUpdated by the live login journey.\n";
     const file = app.vault.getAbstractFileByPath(notePath);
     if (file === null) {
       await app.vault.create(notePath, content);
       return;
     }
     await app.vault.modify(file, content);
-  }, fixtureNotePath);
+  }, fixtureNotePath, fixtureNoteContent);
 }
 
 async function editFixtureNoteForPolicyRace(): Promise<void> {
-  await browser.execute(async (notePath: string) => {
+  await browser.execute(async (notePath: string, content: string) => {
     const app = (
       window as unknown as {
         app: {
@@ -425,10 +440,8 @@ async function editFixtureNoteForPolicyRace(): Promise<void> {
         };
       }
     ).app;
-    const header = "# Controlled policy race\n\n";
-    const content = header + "x".repeat(1024 * 1024 - header.length);
     await app.vault.create(notePath, content);
-  }, policyRaceNotePath);
+  }, policyRaceNotePath, policyRaceNoteContent);
 }
 
 async function resolveJournalDirectoryPath(): Promise<string> {
@@ -449,7 +462,9 @@ async function resolveJournalDirectoryPath(): Promise<string> {
   });
 }
 
-async function readSanitizedJournalEvidence(): Promise<SanitizedJournalEvidence> {
+async function readSanitizedJournalEvidence(
+  controlledNormalizedPath: string,
+): Promise<SanitizedJournalEvidence> {
   if (journalDirectoryPath === null) {
     throw new Error("sanitized journal evidence was unavailable");
   }
@@ -467,19 +482,35 @@ async function readSanitizedJournalEvidence(): Promise<SanitizedJournalEvidence>
   const engine = await initSqlJs();
   const database = new engine.Database(journalBytes);
   try {
-    const count = (whereClause: string): number => {
-      const result = database.exec(`select count(*) from journal_events where ${whereClause}`);
-      return Number(result[0]?.values[0]?.[0] ?? 0);
+    const scalar = (statementText: string, parameters: readonly string[]): number => {
+      const statement = database.prepare(statementText);
+      try {
+        statement.bind([...parameters]);
+        return statement.step() ? Number(statement.get()[0] ?? 0) : 0;
+      } finally {
+        statement.free();
+      }
     };
-    const mapped = database.exec(
-      "select count(*) from local_files where source_id is not null and base_version_id is not null",
+    const eventCount = (statePredicate: string): number =>
+      scalar(
+        `select count(*) from journal_events event
+          join local_files file on file.local_file_id = event.local_file_id
+          where file.normalized_path = ? and ${statePredicate}`,
+        [controlledNormalizedPath],
+      );
+    const mappedCount = scalar(
+      `select count(*) from local_files
+        where normalized_path = ? and source_id is not null and base_version_id is not null`,
+      [controlledNormalizedPath],
     );
     return {
-      committedCount: count("state = 'committed'"),
-      pendingCount: count("state in ('queued', 'preflight', 'uploading', 'waiting_retry')"),
-      mappedCount: Number(mapped[0]?.values[0]?.[0] ?? 0),
-      excludedPolicyCount: count("state = 'excluded_policy'"),
-      waitingRetryCount: count("state = 'waiting_retry'"),
+      committedCount: eventCount("event.state = 'committed'"),
+      pendingCount: eventCount(
+        "event.state in ('queued', 'preflight', 'uploading', 'waiting_retry')",
+      ),
+      mappedCount,
+      excludedPolicyCount: eventCount("event.state = 'excluded_policy'"),
+      waitingRetryCount: eventCount("event.state = 'waiting_retry'"),
     };
   } finally {
     database.close();
@@ -487,6 +518,7 @@ async function readSanitizedJournalEvidence(): Promise<SanitizedJournalEvidence>
 }
 
 async function waitForJournalEvidence(
+  controlledNormalizedPath: string,
   accepts: (evidence: SanitizedJournalEvidence) => boolean,
   failureMessage: string,
   maximumAttempts = 60,
@@ -494,7 +526,7 @@ async function waitForJournalEvidence(
   let lastEvidence: SanitizedJournalEvidence | null = null;
   for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
     try {
-      const evidence = await readSanitizedJournalEvidence();
+      const evidence = await readSanitizedJournalEvidence(controlledNormalizedPath);
       lastEvidence = evidence;
       if (accepts(evidence)) {
         return evidence;
@@ -602,9 +634,11 @@ describe("device login and small-file sync (live server)", () => {
     const loginCookies = cookiePairsOf(loginResponse);
     const loginCsrf = csrfValueOf(loginCookies);
 
-    const { stdout: totpStdout } = await runFile("uv", ["run", "python", totpHelper], {
-      cwd: "D:/App/personal_os",
-    });
+    const { stdout: totpStdout } = await runFromE2eRepositoryRoot(
+      "uv",
+      ["run", "python", totpHelper],
+      import.meta.url,
+    );
     const verifyResponse = await fetch(`${serverOrigin}/api/auth/totp/verify`, {
       method: "POST",
       headers: {
@@ -667,36 +701,32 @@ describe("device login and small-file sync (live server)", () => {
     console.log("STATUS_AFTER_LOGIN", await readStatusBarText());
     journalDirectoryPath = await resolveJournalDirectoryPath();
 
-    const initialServerEvidence = await readServerPublicationEvidence();
+    const initialServerEvidence = await readServerPublicationEvidence(fixtureDeclaredSha256);
+    if (initialServerEvidence.operationCount !== 0) {
+      throw new Error("controlled publication identity was not unique before capture");
+    }
     await editFixtureNote();
     const initialJournalEvidence = await waitForJournalEvidence(
+      fixtureNotePath,
       (evidence) =>
         evidence.committedCount === 1 &&
         evidence.pendingCount === 0 &&
         evidence.mappedCount === 1,
       "journal did not converge to exactly one committed mapped publication",
     );
-    const publishedServerEvidence = await readServerPublicationEvidence();
-    const publicationDelta = {
-      sourceCount: publishedServerEvidence.sourceCount - initialServerEvidence.sourceCount,
-      sourceVersionCount:
-        publishedServerEvidence.sourceVersionCount - initialServerEvidence.sourceVersionCount,
-      syncEventCount:
-        publishedServerEvidence.syncEventCount - initialServerEvidence.syncEventCount,
-      committedOperationCount:
-        publishedServerEvidence.committedOperationCount -
-        initialServerEvidence.committedOperationCount,
-      exactOperationPublicationCount:
-        publishedServerEvidence.exactOperationPublicationCount -
-        initialServerEvidence.exactOperationPublicationCount,
-    };
-    console.log("SANITIZED_SERVER_PUBLICATION_EVIDENCE", JSON.stringify(publicationDelta));
+    const publishedServerEvidence = await readServerPublicationEvidence(fixtureDeclaredSha256);
+    console.log(
+      "SANITIZED_SERVER_PUBLICATION_EVIDENCE",
+      JSON.stringify(publishedServerEvidence),
+    );
     if (
-      publicationDelta.sourceCount !== 1 ||
-      publicationDelta.sourceVersionCount !== 1 ||
-      publicationDelta.syncEventCount !== 1 ||
-      publicationDelta.committedOperationCount !== 1 ||
-      publicationDelta.exactOperationPublicationCount !== 1
+      publishedServerEvidence.sourceCount !== 1 ||
+      publishedServerEvidence.sourceVersionCount !== 1 ||
+      publishedServerEvidence.syncEventCount !== 1 ||
+      publishedServerEvidence.operationCount !== 1 ||
+      publishedServerEvidence.committedOperationCount !== 1 ||
+      publishedServerEvidence.exactOperationPublicationCount !== 1 ||
+      publishedServerEvidence.receivingUnpublishedOperationCount !== 0
     ) {
       throw new Error("server did not commit exactly one canonical publication");
     }
@@ -710,12 +740,18 @@ describe("device login and small-file sync (live server)", () => {
       sessionCsrf ?? "",
       ".md",
     );
-    const policyRaceBaseline = await readServerPublicationEvidence();
-    const operationObservation = waitForOperationAfter(policyRaceBaseline);
+    const policyRaceBaseline = await readServerPublicationEvidence(policyRaceDeclaredSha256);
+    if (policyRaceBaseline.operationCount !== 0) {
+      throw new Error("controlled policy-race identity was not unique before capture");
+    }
+    const operationObservation = readServerPublicationEvidence(policyRaceDeclaredSha256, true);
     await browser.pause(1_000);
     await editFixtureNoteForPolicyRace();
     await triggerSyncNow();
-    await operationObservation;
+    const observedOperation = await operationObservation;
+    if (observedOperation.operationCount !== 1) {
+      throw new Error("server did not observe the controlled preflight operation");
+    }
     const changedPolicyRevision = await publishPreparedPolicy(
       sessionCookies,
       sessionCsrf ?? "",
@@ -723,24 +759,12 @@ describe("device login and small-file sync (live server)", () => {
     );
     console.log("MID_UPLOAD_POLICY_PUBLISHED", changedPolicyRevision > policyRevision);
     await new Promise((resolve) => setTimeout(resolve, 45_000));
-    const retryableJournalEvidence = await readSanitizedJournalEvidence();
+    const retryableJournalEvidence = await readSanitizedJournalEvidence(policyRaceNotePath);
     console.log(
       "SANITIZED_POLICY_DENIAL_JOURNAL_EVIDENCE",
       JSON.stringify(retryableJournalEvidence),
     );
-    const deniedServerEvidence = await readServerPublicationEvidence();
-    const deniedBeforeRecovery = {
-      sourceCount: deniedServerEvidence.sourceCount - policyRaceBaseline.sourceCount,
-      committedOperationCount:
-        deniedServerEvidence.committedOperationCount -
-        policyRaceBaseline.committedOperationCount,
-      exactOperationPublicationCount:
-        deniedServerEvidence.exactOperationPublicationCount -
-        policyRaceBaseline.exactOperationPublicationCount,
-      receivingUnpublishedOperationCount:
-        deniedServerEvidence.receivingUnpublishedOperationCount -
-        policyRaceBaseline.receivingUnpublishedOperationCount,
-    };
+    const deniedBeforeRecovery = await readServerPublicationEvidence(policyRaceDeclaredSha256);
     console.log(
       "SANITIZED_POLICY_DENIAL_SERVER_EVIDENCE",
       JSON.stringify(deniedBeforeRecovery),
@@ -748,6 +772,9 @@ describe("device login and small-file sync (live server)", () => {
     if (
       retryableJournalEvidence.pendingCount !== 1 ||
       deniedBeforeRecovery.sourceCount !== 0 ||
+      deniedBeforeRecovery.sourceVersionCount !== 0 ||
+      deniedBeforeRecovery.syncEventCount !== 0 ||
+      deniedBeforeRecovery.operationCount !== 1 ||
       deniedBeforeRecovery.committedOperationCount !== 0 ||
       deniedBeforeRecovery.exactOperationPublicationCount !== 0 ||
       deniedBeforeRecovery.receivingUnpublishedOperationCount !== 1
@@ -758,37 +785,30 @@ describe("device login and small-file sync (live server)", () => {
     await browser.pause(5_000);
     await triggerSyncNow();
     const recoveredJournalEvidence = await waitForJournalEvidence(
-      (evidence) =>
-        evidence.excludedPolicyCount === initialJournalEvidence.excludedPolicyCount + 1 &&
-        evidence.pendingCount === 0,
+      policyRaceNotePath,
+      (evidence) => evidence.excludedPolicyCount === 1 && evidence.pendingCount === 0,
       "next-preflight recovery did not settle the event as excluded_policy",
     );
-    const policyRaceFinal = await readServerPublicationEvidence();
-    const deniedPublicationDelta = {
-      sourceCount: policyRaceFinal.sourceCount - policyRaceBaseline.sourceCount,
-      sourceVersionCount:
-        policyRaceFinal.sourceVersionCount - policyRaceBaseline.sourceVersionCount,
-      syncEventCount: policyRaceFinal.syncEventCount - policyRaceBaseline.syncEventCount,
-      committedOperationCount:
-        policyRaceFinal.committedOperationCount - policyRaceBaseline.committedOperationCount,
-      exactOperationPublicationCount:
-        policyRaceFinal.exactOperationPublicationCount -
-        policyRaceBaseline.exactOperationPublicationCount,
-      receivingUnpublishedOperationCount:
-        policyRaceFinal.receivingUnpublishedOperationCount -
-        policyRaceBaseline.receivingUnpublishedOperationCount,
-    };
+    const deniedPublicationEvidence = await readServerPublicationEvidence(
+      policyRaceDeclaredSha256,
+    );
+    const preservedPublicationEvidence = await readSanitizedJournalEvidence(fixtureNotePath);
     console.log(
       "SANITIZED_MID_UPLOAD_POLICY_EVIDENCE",
-      JSON.stringify({ ...deniedPublicationDelta, recoveredExcludedPolicyCount: 1 }),
+      JSON.stringify({ ...deniedPublicationEvidence, recoveredExcludedPolicyCount: 1 }),
     );
     if (
-      deniedPublicationDelta.sourceCount !== 0 ||
-      deniedPublicationDelta.committedOperationCount !== 0 ||
-      deniedPublicationDelta.exactOperationPublicationCount !== 0 ||
-      deniedPublicationDelta.receivingUnpublishedOperationCount !== 1 ||
-      recoveredJournalEvidence.committedCount !== 1 ||
-      recoveredJournalEvidence.mappedCount !== 1
+      deniedPublicationEvidence.sourceCount !== 0 ||
+      deniedPublicationEvidence.sourceVersionCount !== 0 ||
+      deniedPublicationEvidence.syncEventCount !== 0 ||
+      deniedPublicationEvidence.operationCount !== 1 ||
+      deniedPublicationEvidence.committedOperationCount !== 0 ||
+      deniedPublicationEvidence.exactOperationPublicationCount !== 0 ||
+      deniedPublicationEvidence.receivingUnpublishedOperationCount !== 1 ||
+      recoveredJournalEvidence.committedCount !== 0 ||
+      recoveredJournalEvidence.mappedCount !== 0 ||
+      preservedPublicationEvidence.committedCount !== 1 ||
+      preservedPublicationEvidence.mappedCount !== 1
     ) {
       throw new Error("mid-upload policy change published canonical state or broke recovery");
     }

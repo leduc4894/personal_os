@@ -390,6 +390,75 @@ def test_complete_stack_secret_set_allows_documented_application_secret_files(
     assert inspect_secret_set(paths) is SecretSetState.COMPLETE
 
 
+@pytest.mark.parametrize(
+    ("environment", "configured_relative_paths"),
+    [
+        (
+            {"KNOWLEDGE_AUTH_CURRENT_KEY_FILE": "auth-key-2026-09.key"},
+            ("auth-key-2026-09.key",),
+        ),
+        (
+            {
+                "KNOWLEDGE_AUTH_PREVIOUS_KEYS": (
+                    "auth-key-2026-07=auth-key-2026-07.key,"
+                    "auth-key-2026-08=authentication/2026-08.key"
+                )
+            },
+            ("auth-key-2026-07.key", "authentication/2026-08.key"),
+        ),
+        (
+            {"KNOWLEDGE_POLICY_SIGNING_KEY_FILE": "policy/rotation-2026_09.pem"},
+            ("policy/rotation-2026_09.pem",),
+        ),
+    ],
+)
+def test_configured_runtime_secret_survives_inspection_reset_and_rebootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    environment: dict[str, str],
+    configured_relative_paths: tuple[str, ...],
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    bootstrap_secret_set(paths, environment=environment)
+    application_secrets = tuple(
+        paths.secret_directory.joinpath(*relative_path.split("/"))
+        for relative_path in configured_relative_paths
+    )
+    for application_secret in application_secrets:
+        application_secret.parent.mkdir(parents=True, exist_ok=True)
+        application_secret.write_text("application-secret", encoding="ascii")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(stack_module, "_is_current_windows_user_owner", lambda path: True)
+
+    assert inspect_secret_set(paths, environment=environment) is SecretSetState.COMPLETE
+    assert remove_secret_set_after_reset(paths, environment=environment) is SecretSetState.MISSING
+    assert all(application_secret.exists() for application_secret in application_secrets)
+    assert bootstrap_secret_set(paths, environment=environment) is SecretSetState.COMPLETE
+    assert all(application_secret.exists() for application_secret in application_secrets)
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {"KNOWLEDGE_AUTH_CURRENT_KEY_FILE": "../outside.key"},
+        {"KNOWLEDGE_AUTH_PREVIOUS_KEYS": "old=authentication/../../outside.key"},
+        {"KNOWLEDGE_POLICY_SIGNING_KEY_FILE": "C:\\outside.pem"},
+    ],
+)
+def test_runtime_secret_allowlist_rejects_unsafe_paths_without_echoing_values(
+    tmp_path: Path, environment: dict[str, str]
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    configured_value = next(iter(environment.values()))
+
+    with pytest.raises(StackFailure) as raised:
+        inspect_secret_set(paths, environment=environment)
+
+    assert raised.value.exit_code is StackExitCode.CONTRACT
+    assert str(raised.value) == "application_secret_configuration_invalid"
+    assert configured_value not in str(raised.value)
+
+
 def test_remove_managed_secret_set_preserves_shared_application_secrets(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1007,7 +1076,8 @@ def test_up_preflight_order_precedes_first_mutating_command(
     def validate_ports(ports: Any) -> None:
         operations.append("validate_ports")
 
-    def validate_secrets(paths: Any, *, list_project_volumes: Any) -> Any:
+    def validate_secrets(paths: Any, *, list_project_volumes: Any, environment: Any = None) -> Any:
+        assert environment == stack_context.environment
         operations.append("validate_secrets")
         return SecretSetState.COMPLETE
 
@@ -2002,7 +2072,9 @@ def test_secret_rotation_preserves_application_files_and_rebootstraps_fresh_mana
         application_path.write_bytes(content)
         application_path.chmod(0o600)
         expected_application_contents[filename] = content
-    original_managed_fingerprint = stack_module._smoke_secret_fingerprint(stack_context.paths)
+    original_managed_fingerprint = stack_module._smoke_secret_fingerprint(
+        stack_context.paths, stack_context.environment
+    )
 
     result = stack_module.reset_stack(
         stack_context,
@@ -2023,6 +2095,7 @@ def test_secret_rotation_preserves_application_files_and_rebootstraps_fresh_mana
         bootstrap_secret_set(
             stack_context.paths,
             random_bytes=lambda size: bytes(range(32, 32 + size)),
+            environment=stack_context.environment,
         )
         is SecretSetState.COMPLETE
     )
@@ -2031,7 +2104,8 @@ def test_secret_rotation_preserves_application_files_and_rebootstraps_fresh_mana
         for filename in application_filenames
     } == expected_application_contents
     assert (
-        stack_module._smoke_secret_fingerprint(stack_context.paths) != original_managed_fingerprint
+        stack_module._smoke_secret_fingerprint(stack_context.paths, stack_context.environment)
+        != original_managed_fingerprint
     )
 
 
