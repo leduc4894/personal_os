@@ -380,7 +380,12 @@ class FakeSmallFileUploadOperationStore:
         record = self._token_record(operation.operation_token)
         if record is None:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND)
-        self._apply_terminal_transition(record, result, operation.device_context)
+        self._apply_terminal_transition(
+            record,
+            result,
+            operation.device_context,
+            require_pending=True,
+        )
 
     async def resolve_bound_operation(
         self,
@@ -431,6 +436,7 @@ class FakeSmallFileUploadOperationStore:
         device_context: SmallFileDeviceContext,
         *,
         require_claimed: bool = False,
+        require_pending: bool = False,
     ) -> None:
         if (
             record.device_context.workspace_id != device_context.workspace_id
@@ -440,6 +446,8 @@ class FakeSmallFileUploadOperationStore:
         if record.state == _COMMITTED_STATE:
             if record.terminal_result == result:
                 return
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        if require_pending and record.state != _PENDING_STATE:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
         if require_claimed and record.state != _RECEIVING_STATE:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)

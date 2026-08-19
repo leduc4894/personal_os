@@ -57,6 +57,7 @@ from personal_os.small_file_sync.contracts import (
     SmallFileIdempotencyKey,
     SmallFileOperation,
     SmallFilePreflightOutcome,
+    SmallFileTerminalResult,
     SmallFileTerminalResultKind,
 )
 from personal_os.small_file_sync.errors import SmallFileSyncError
@@ -667,6 +668,52 @@ class TestReceiveGuards:
 
 
 class TestReceiveReplayAndConcurrency:
+    @pytest.mark.asyncio
+    async def test_unbound_terminal_write_cannot_bypass_a_claimed_receive(self) -> None:
+        harness = build_service_harness()
+        device_context = build_device_context()
+        preflight = build_create_preflight()
+        operation = await harness.operation_store.reserve_operation(
+            preflight,
+            device_context,
+            AllowedPolicyRevisionBinding(
+                workspace_id=device_context.workspace_id,
+                policy_revision_number=7,
+            ),
+            build_diagnostic_context(),
+        )
+        bound = await harness.operation_store.resolve_bound_operation(
+            operation.operation_token,
+            device_context,
+            build_diagnostic_context(),
+        )
+
+        with pytest.raises(SmallFileSyncError) as exc_info:
+            await harness.operation_store.record_terminal_result(
+                operation,
+                SmallFileTerminalResult(
+                    result_kind=SmallFileTerminalResultKind.COMMITTED,
+                    source_id=uuid4(),
+                    source_version_id=uuid4(),
+                    content_version=1,
+                    committed_at=harness.clock.moment,
+                ),
+                build_diagnostic_context(),
+            )
+
+        assert _error_code(exc_info.value) is ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID
+        await harness.operation_store.record_bound_terminal_result(
+            bound,
+            SmallFileTerminalResult(
+                result_kind=SmallFileTerminalResultKind.COMMITTED,
+                source_id=uuid4(),
+                source_version_id=uuid4(),
+                content_version=1,
+                committed_at=harness.clock.moment,
+            ),
+            build_diagnostic_context(),
+        )
+
     @pytest.mark.asyncio
     async def test_receive_claim_blocks_same_identity_repreflight_until_terminal(self) -> None:
         harness = build_service_harness()

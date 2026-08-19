@@ -521,7 +521,7 @@ class OfflineSmallFileUploadOperationStore:
         row = self._token_row(operation.operation_token)
         if row is None:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND)
-        self._apply_terminal_transition(row, result)
+        self._apply_terminal_transition(row, result, require_pending=True)
 
     async def resolve_bound_operation(
         self,
@@ -578,10 +578,13 @@ class OfflineSmallFileUploadOperationStore:
         result: SmallFileTerminalResult,
         *,
         require_claimed: bool = False,
+        require_pending: bool = False,
     ) -> None:
         if row.state == _COMMITTED_STATE:
             if row.terminal_result == result:
                 return
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        if require_pending and row.state != _PENDING_STATE:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
         if require_claimed and row.state != _RECEIVING_STATE:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)

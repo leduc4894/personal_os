@@ -24,7 +24,9 @@ import pytest
 from api_runtime.exclusion_policy_crypto import Ed25519PolicySigner
 from api_runtime.small_file_sync_composition import (
     BoundPolicySmallFilePublicationGateway,
+    OfflineSmallFileClock,
     OfflineSmallFileSyncState,
+    OfflineSmallFileUploadOperationStore,
     PolicyEnforcementSmallFileGuard,
     SmallFileSyncRuntime,
     compose_offline_small_file_sync,
@@ -69,7 +71,10 @@ from personal_os.small_file_sync.contracts import (
     SmallFileIdempotencyKey,
     SmallFileOperation,
     SmallFilePreflight,
+    SmallFileTerminalResult,
+    SmallFileTerminalResultKind,
 )
+from personal_os.small_file_sync.errors import SmallFileSyncError
 from personal_os.sources.actors import ActorKind, SourceActor
 from personal_os.sources.commands import (
     CreateSourceVersion,
@@ -353,6 +358,55 @@ def _build_create_preflight() -> SmallFilePreflight:
         size_bytes=128,
         media_type=CanonicalMediaType.parse("text/markdown"),
         policy_revision_number=7,
+    )
+
+
+@pytest.mark.asyncio
+async def test_offline_store_unbound_terminal_write_cannot_bypass_a_claimed_receive() -> None:
+    state = OfflineSmallFileSyncState(now=datetime(2026, 8, 19, tzinfo=UTC))
+    clock = OfflineSmallFileClock(state)
+    store = OfflineSmallFileUploadOperationStore(state, clock)
+    device_context = SmallFileDeviceContext(device_id=uuid4(), workspace_id=uuid4())
+    preflight = _build_create_preflight()
+    operation = await store.reserve_operation(
+        preflight,
+        device_context,
+        AllowedPolicyRevisionBinding(
+            workspace_id=device_context.workspace_id,
+            policy_revision_number=7,
+        ),
+        create_diagnostic_context().context,
+    )
+    bound = await store.resolve_bound_operation(
+        operation.operation_token,
+        device_context,
+        create_diagnostic_context().context,
+    )
+
+    with pytest.raises(SmallFileSyncError) as raised:
+        await store.record_terminal_result(
+            operation,
+            SmallFileTerminalResult(
+                result_kind=SmallFileTerminalResultKind.COMMITTED,
+                source_id=uuid4(),
+                source_version_id=uuid4(),
+                content_version=1,
+                committed_at=clock(),
+            ),
+            create_diagnostic_context().context,
+        )
+
+    assert raised.value.error_code is ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID
+    await store.record_bound_terminal_result(
+        bound,
+        SmallFileTerminalResult(
+            result_kind=SmallFileTerminalResultKind.COMMITTED,
+            source_id=uuid4(),
+            source_version_id=uuid4(),
+            content_version=1,
+            committed_at=clock(),
+        ),
+        create_diagnostic_context().context,
     )
 
 
