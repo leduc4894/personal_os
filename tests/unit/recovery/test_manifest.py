@@ -286,6 +286,7 @@ def test_rejects_out_of_range_object_size() -> None:
 
 def test_manifest_contract_constant_is_pinned() -> None:
     assert MANIFEST_CONTRACT == "canonical_core_backup/v1"
-    # Nineteen since the exclusion-policy child: the nine canonical tables
-    # plus the ten policy tables the snapshot lock order counts.
-    assert len(CANONICAL_COUNT_TABLES) == 19
+    # Twenty since small-file operations became canonical: the nine baseline
+    # tables, ten policy tables, and the durable upload-operation table.
+    assert len(CANONICAL_COUNT_TABLES) == 20
+    assert CANONICAL_COUNT_TABLES[-1] == "small_file_upload_operations"

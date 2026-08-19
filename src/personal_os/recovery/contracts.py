@@ -61,6 +61,7 @@ CANONICAL_COUNT_TABLES: Final[tuple[str, ...]] = (
     "policy_draft_rules",
     "policy_evaluations",
     "policy_reconciliation_intents",
+    "small_file_upload_operations",
 )
 
 #: Maximum number of retained backup records. The recorder is a bounded ring
