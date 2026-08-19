@@ -46,7 +46,7 @@ import hashlib
 import random
 import secrets
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 from uuid import UUID, uuid7
@@ -310,9 +310,26 @@ def operation_token_rotation_statement(
             operation_token_hash=operation_token_hash,
             expires_at=expires_at,
             policy_revision_number=policy_revision_number,
+            state=STATE_PENDING,
             updated_at=sa.text("CURRENT_TIMESTAMP"),
         )
         .where(small_file_upload_operations.c.operation_id == operation_id)
+    )
+
+
+def receive_claim_statement(*, operation_id: UUID) -> sa.Update:
+    """Build the guarded receive claim from ``pending`` to ``receiving``."""
+
+    return (
+        sa.update(small_file_upload_operations)
+        .values(
+            state=STATE_RECEIVING,
+            updated_at=sa.text("CURRENT_TIMESTAMP"),
+        )
+        .where(
+            small_file_upload_operations.c.operation_id == operation_id,
+            small_file_upload_operations.c.state == STATE_PENDING,
+        )
     )
 
 
@@ -338,7 +355,30 @@ def terminal_result_update_statement(
         )
         .where(
             small_file_upload_operations.c.operation_id == operation_id,
-            small_file_upload_operations.c.state.in_(_NON_TERMINAL_STATES),
+            small_file_upload_operations.c.state == STATE_PENDING,
+        )
+    )
+
+
+def bound_terminal_result_update_statement(
+    *, operation_id: UUID, result: SmallFileTerminalResult
+) -> sa.Update:
+    """Build the guarded terminal transition of one claimed receive row."""
+
+    return (
+        sa.update(small_file_upload_operations)
+        .values(
+            state=STATE_COMMITTED,
+            result_kind=result.result_kind.value,
+            result_source_id=result.source_id,
+            result_source_version_id=result.source_version_id,
+            result_content_version=result.content_version,
+            result_committed_at=result.committed_at,
+            updated_at=sa.text("CURRENT_TIMESTAMP"),
+        )
+        .where(
+            small_file_upload_operations.c.operation_id == operation_id,
+            small_file_upload_operations.c.state == STATE_RECEIVING,
         )
     )
 
@@ -722,24 +762,49 @@ class PostgresqlSmallFileUploadOperationStore:
             connection.begin(),
         ):
             await apply_transaction_bounds(connection)
-            result = await connection.execute(operation_token_lookup_statement(operation_token))
-            row = result.mappings().one_or_none()
-        if row is None:
-            raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND)
-        hydrated = SmallFileOperationRow.from_row_mapping(row)
-        if (
-            hydrated.workspace_id != device_context.workspace_id
-            or hydrated.device_id != device_context.device_id
-        ):
-            raise _identity_mismatch()
-        bound = _bound_operation_from_row(operation_token, hydrated)
-        if bound.terminal_result is not None:
-            return bound
-        if hydrated.state == STATE_FAILED:
-            raise _state_invalid()
-        if _is_expired(hydrated.expires_at, self._clock()):
-            raise _operation_expired()
-        return bound
+            hydrated = await self._fetch_row_by_token(connection, operation_token)
+            if hydrated is None:
+                raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND)
+            if (
+                hydrated.workspace_id != device_context.workspace_id
+                or hydrated.device_id != device_context.device_id
+            ):
+                raise _identity_mismatch()
+            await connection.execute(
+                advisory_xact_lock_statement(
+                    UPLOAD_OPERATION_LOCK_NAMESPACE,
+                    upload_operation_identity_lock_key(
+                        hydrated.workspace_id,
+                        hydrated.device_id,
+                        hydrated.event_id,
+                        hydrated.idempotency_key,
+                    ),
+                )
+            )
+            hydrated = await self._fetch_row_by_token(connection, operation_token)
+            if hydrated is None:
+                raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND)
+            if (
+                hydrated.workspace_id != device_context.workspace_id
+                or hydrated.device_id != device_context.device_id
+            ):
+                raise _identity_mismatch()
+            if hydrated.terminal_result() is not None:
+                return _bound_operation_from_row(operation_token, hydrated)
+            if hydrated.state == STATE_FAILED:
+                raise _state_invalid()
+            if _is_expired(hydrated.expires_at, self._clock()):
+                raise _operation_expired()
+            if hydrated.state == STATE_PENDING:
+                claimed = await connection.execute(
+                    receive_claim_statement(operation_id=hydrated.operation_id)
+                )
+                if claimed.rowcount != 1:
+                    raise _state_invalid()
+                hydrated = replace(hydrated, state=STATE_RECEIVING)
+            elif hydrated.state != STATE_RECEIVING:
+                raise _state_invalid()
+        return _bound_operation_from_row(operation_token, hydrated)
 
     async def _record_bound_terminal_result_once(
         self, bound: SmallFileBoundOperation, result: SmallFileTerminalResult
@@ -783,10 +848,12 @@ class PostgresqlSmallFileUploadOperationStore:
             raise _state_invalid()
         if row.state == STATE_FAILED:
             raise _state_invalid()
+        if row.state != STATE_RECEIVING:
+            raise _state_invalid()
         if _is_expired(row.expires_at, self._clock()):
             raise _operation_expired()
         guarded = await connection.execute(
-            terminal_result_update_statement(operation_id=row.operation_id, result=result)
+            bound_terminal_result_update_statement(operation_id=row.operation_id, result=result)
         )
         if guarded.rowcount != 1:
             raise _state_invalid()
@@ -855,6 +922,8 @@ class PostgresqlSmallFileUploadOperationStore:
             if not operation_fingerprint_matches(asdict(row), preflight, device_context):
                 raise _identity_mismatch()
             if row.state not in _NON_TERMINAL_STATES:
+                raise _state_invalid()
+            if row.state == STATE_RECEIVING and not _is_expired(row.expires_at, self._clock()):
                 raise _state_invalid()
             # An expired non-terminal row re-reserves instead of refusing: no
             # terminal evidence exists for it (exact replay is unaffected —
@@ -937,5 +1006,14 @@ class PostgresqlSmallFileUploadOperationStore:
         preflight: SmallFilePreflight,
     ) -> SmallFileOperationRow | None:
         result = await connection.execute(identity_lookup_statement(device_context, preflight))
+        row = result.mappings().one_or_none()
+        return None if row is None else SmallFileOperationRow.from_row_mapping(row)
+
+    async def _fetch_row_by_token(
+        self,
+        connection: AsyncConnection,
+        operation_token: UploadOperationToken,
+    ) -> SmallFileOperationRow | None:
+        result = await connection.execute(operation_token_lookup_statement(operation_token))
         row = result.mappings().one_or_none()
         return None if row is None else SmallFileOperationRow.from_row_mapping(row)

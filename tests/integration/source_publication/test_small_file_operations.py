@@ -319,6 +319,49 @@ async def test_server_revision_overrides_plugin_claim_in_row_and_receive_binding
 
 
 @pytest.mark.asyncio
+async def test_claimed_receive_refuses_same_identity_repreflight_rotation_until_commit(
+    small_file_harness: SmallFileOperationHarness, seeded_workspace: object
+) -> None:
+    harness = small_file_harness
+    device_context = harness.device_context(seeded_workspace)
+    preflight = harness.preflight()
+
+    operation = await harness.store.reserve_operation(
+        preflight, device_context, harness.policy_binding(device_context, 4), _context()
+    )
+    bound = await harness.store.resolve_bound_operation(
+        operation.operation_token,
+        device_context,
+        _context(),
+    )
+
+    with pytest.raises(SmallFileSyncError) as rejected:
+        await harness.store.reserve_operation(
+            preflight,
+            device_context,
+            harness.policy_binding(device_context, 5),
+            _context(),
+        )
+    assert rejected.value.error_code is ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID
+
+    row = await harness.operation_row(preflight.event_id)
+    assert row is not None
+    assert row["state"] == "receiving"
+    assert row["policy_revision_number"] == 4
+    assert row["operation_token_hash"] == upload_operation_token_hash(operation.operation_token)
+
+    assert operation.reserved_source_id is not None
+    terminal = _terminal_result(source_id=operation.reserved_source_id)
+    await harness.store.record_bound_terminal_result(bound, terminal, _context())
+
+    committed = await harness.operation_row(preflight.event_id)
+    assert committed is not None
+    assert committed["state"] == "committed"
+    assert committed["result_kind"] == SmallFileTerminalResultKind.COMMITTED.value
+    assert committed["result_source_id"] == operation.reserved_source_id
+
+
+@pytest.mark.asyncio
 async def test_concurrent_preflights_yield_exactly_one_operation_row(
     small_file_harness: SmallFileOperationHarness, seeded_workspace: object
 ) -> None:

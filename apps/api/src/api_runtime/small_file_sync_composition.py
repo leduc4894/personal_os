@@ -117,6 +117,7 @@ from r2_object_storage.spool import SpoolManager
 _OFFLINE_EXPIRY_SECONDS: Final[int] = 900
 
 _PENDING_STATE: Final[str] = "pending"
+_RECEIVING_STATE: Final[str] = "receiving"
 _COMMITTED_STATE: Final[str] = "committed"
 
 
@@ -491,6 +492,8 @@ class OfflineSmallFileUploadOperationStore:
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH)
             if row.state == _COMMITTED_STATE:
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+            if row.state == _RECEIVING_STATE and row.expires_at > now:
+                raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
             # Mirroring the durable adapter: an expired non-terminal row
             # re-reserves — fresh token, extended deadline — because nothing
             # was committed for it; receive-time expiry checks keep refusing
@@ -498,6 +501,7 @@ class OfflineSmallFileUploadOperationStore:
             if row.expires_at <= now:
                 row.expires_at = now + timedelta(seconds=_OFFLINE_EXPIRY_SECONDS)
             row.operation_token = UploadOperationToken(secrets.token_urlsafe(32))
+            row.state = _PENDING_STATE
             row.policy_revision_number = policy_binding.policy_revision_number
         return SmallFileUploadOperation(
             operation_token=row.operation_token,
@@ -536,6 +540,8 @@ class OfflineSmallFileUploadOperationStore:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH)
         if row.state != _COMMITTED_STATE and row.expires_at <= self._now():
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_EXPIRED)
+        if row.state == _PENDING_STATE:
+            row.state = _RECEIVING_STATE
         return SmallFileBoundOperation(
             operation_token=row.operation_token,
             workspace_id=row.device_context.workspace_id,
@@ -564,14 +570,20 @@ class OfflineSmallFileUploadOperationStore:
         row = self._token_row(bound.operation_token)
         if row is None:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND)
-        self._apply_terminal_transition(row, result)
+        self._apply_terminal_transition(row, result, require_claimed=True)
 
     def _apply_terminal_transition(
-        self, row: _OfflineOperationRow, result: SmallFileTerminalResult
+        self,
+        row: _OfflineOperationRow,
+        result: SmallFileTerminalResult,
+        *,
+        require_claimed: bool = False,
     ) -> None:
         if row.state == _COMMITTED_STATE:
             if row.terminal_result == result:
                 return
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        if require_claimed and row.state != _RECEIVING_STATE:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
         if row.expires_at <= self._now():
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_EXPIRED)

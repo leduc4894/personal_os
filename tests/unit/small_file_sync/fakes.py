@@ -91,6 +91,7 @@ SYNC_MEDIA_TYPE: Final[CanonicalMediaType] = CanonicalMediaType.parse("text/mark
 _CURRENT_BASE_COMMITTED_AT: Final[datetime] = datetime(2026, 8, 18, 9, 30, 0, tzinfo=UTC)
 
 _PENDING_STATE: Final[str] = "pending"
+_RECEIVING_STATE: Final[str] = "receiving"
 _COMMITTED_STATE: Final[str] = "committed"
 _EXPIRY_SECONDS: Final[int] = 900
 
@@ -246,10 +247,11 @@ class FakeSmallFileUploadOperationStore:
     """Operation-store fake mirroring the durable adapter semantics of task 6.
 
     Rows are keyed by the credential-derived identity quadruple; the payload
-    fingerprint admits no substitution. A re-preflight of a pending row rotates
-    the token exactly like the adapter, so a receive holding the stale token
-    surfaces the closed not-found error. The guarded terminal transition is
-    idempotent for the identical frozen result and refuses every other state.
+    fingerprint admits no substitution. A receive claims its row by flipping
+    it to ``receiving``; a same-identity re-preflight may re-reserve only
+    before that claim or after expiry, never while the claim is active. The
+    guarded terminal transition is idempotent for the identical frozen result
+    and refuses every other state.
     """
 
     ledger: CallLedger
@@ -350,11 +352,14 @@ class FakeSmallFileUploadOperationStore:
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH)
             if record.state == _COMMITTED_STATE:
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+            if record.state == _RECEIVING_STATE and record.expires_at > self._now():
+                raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
             # Mirroring the durable adapter: an expired non-terminal record
             # re-reserves with a fresh token and an extended deadline.
             if record.expires_at <= self._now():
                 record.expires_at = self._now() + timedelta(seconds=self.expiry_seconds)
             record.operation_token = UploadOperationToken(secrets.token_urlsafe(32))
+            record.state = _PENDING_STATE
             record.policy_revision_number = policy_binding.policy_revision_number
         return SmallFileUploadOperation(
             operation_token=record.operation_token,
@@ -395,6 +400,8 @@ class FakeSmallFileUploadOperationStore:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH)
         if record.state != _COMMITTED_STATE and record.expires_at <= self._now():
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_EXPIRED)
+        if record.state == _PENDING_STATE:
+            record.state = _RECEIVING_STATE
         return self._bound_operation(record)
 
     async def record_bound_terminal_result(
@@ -414,6 +421,7 @@ class FakeSmallFileUploadOperationStore:
             SmallFileDeviceContext(
                 device_id=bound.device_id, workspace_id=bound.workspace_id
             ),
+            require_claimed=True,
         )
 
     def _apply_terminal_transition(
@@ -421,6 +429,8 @@ class FakeSmallFileUploadOperationStore:
         record: _OperationRecord,
         result: SmallFileTerminalResult,
         device_context: SmallFileDeviceContext,
+        *,
+        require_claimed: bool = False,
     ) -> None:
         if (
             record.device_context.workspace_id != device_context.workspace_id
@@ -430,6 +440,8 @@ class FakeSmallFileUploadOperationStore:
         if record.state == _COMMITTED_STATE:
             if record.terminal_result == result:
                 return
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        if require_claimed and record.state != _RECEIVING_STATE:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
         if record.expires_at <= self._now():
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_EXPIRED)

@@ -668,6 +668,55 @@ class TestReceiveGuards:
 
 class TestReceiveReplayAndConcurrency:
     @pytest.mark.asyncio
+    async def test_receive_claim_blocks_same_identity_repreflight_until_terminal(self) -> None:
+        harness = build_service_harness()
+        device_context = build_device_context()
+        preflight = build_create_preflight()
+        harness.operation_store.now_override = harness.clock.moment
+        reserved = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        assert reserved.operation_token is not None
+        record = harness.operation_store.record_for_token(reserved.operation_token)
+        assert record is not None
+        claimed_revision = record.policy_revision_number
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        harness.publication_gateway.entered_by_revision = {claimed_revision: entered}
+        harness.publication_gateway.release_by_revision = {claimed_revision: release}
+        receive_task = asyncio.create_task(
+            harness.service.receive(
+                operation_token=reserved.operation_token,
+                device_context=device_context,
+                stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+                diagnostic_context=build_diagnostic_context(),
+            )
+        )
+        await entered.wait()
+
+        assert hasattr(harness.policy_guard, "policy_revision_number")
+        harness.policy_guard.policy_revision_number = claimed_revision + 1
+        with pytest.raises(SmallFileSyncError) as rejected:
+            await harness.service.preflight(
+                preflight=preflight,
+                device_context=device_context,
+                diagnostic_context=build_diagnostic_context(),
+            )
+        assert _error_code(rejected.value) is ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID
+
+        release.set()
+        terminal = await receive_task
+
+        committed = harness.operation_store.record_for_token(reserved.operation_token)
+        assert committed is not None
+        assert committed.state == "committed"
+        assert committed.policy_revision_number == claimed_revision
+        assert terminal.result_kind is SmallFileTerminalResultKind.COMMITTED
+
+    @pytest.mark.asyncio
     async def test_concurrent_receives_keep_their_policy_bindings_isolated(self) -> None:
         harness = build_service_harness()
         device_context = build_device_context()
