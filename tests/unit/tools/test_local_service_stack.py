@@ -459,6 +459,25 @@ def test_runtime_secret_allowlist_rejects_unsafe_paths_without_echoing_values(
     assert configured_value not in str(raised.value)
 
 
+def test_runtime_secret_allowlist_rejects_previous_file_collision_with_current(
+    tmp_path: Path,
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    colliding_filename = "authentication/rotation-2026-09.key"
+    environment = {
+        "KNOWLEDGE_AUTH_CURRENT_KEY_FILE": colliding_filename,
+        "KNOWLEDGE_AUTH_PREVIOUS_KEYS": f"auth-key-previous={colliding_filename}",
+        "KNOWLEDGE_POLICY_SIGNING_KEY_FILE": "policy/rotation-2026-09.pem",
+    }
+
+    with pytest.raises(StackFailure) as raised:
+        inspect_secret_set(paths, environment=environment)
+
+    assert raised.value.exit_code is StackExitCode.CONTRACT
+    assert str(raised.value) == "application_secret_configuration_invalid"
+    assert colliding_filename not in str(raised.value)
+
+
 def test_remove_managed_secret_set_preserves_shared_application_secrets(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

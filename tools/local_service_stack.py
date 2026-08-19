@@ -259,6 +259,7 @@ def _configured_application_secret_relative_paths(
 ) -> frozenset[str]:
     """Return validated runtime-selected application secret paths without reading values."""
     configured_paths: set[str] = set()
+    current_authentication_path = environment.get("KNOWLEDGE_AUTH_CURRENT_KEY_FILE")
     for environment_name in (
         "KNOWLEDGE_AUTH_CURRENT_KEY_FILE",
         "KNOWLEDGE_POLICY_SIGNING_KEY_FILE",
@@ -292,6 +293,8 @@ def _configured_application_secret_relative_paths(
                 )
             key_ids.add(key_id)
             previous_paths.add(relative_path)
+        if current_authentication_path in previous_paths:
+            raise StackFailure(StackExitCode.CONTRACT, "application_secret_configuration_invalid")
         configured_paths.update(previous_paths)
     return frozenset(configured_paths)
 
