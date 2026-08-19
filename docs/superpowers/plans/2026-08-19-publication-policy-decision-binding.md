@@ -852,7 +852,7 @@ add test-only branches to production services.
   uv run poe api-contract-check
   uv run pytest tests/unit/migrations/test_small_file_sync_migration.py tests/contract/small_file_sync tests/contract/api/test_small_file_sync_routes.py tests/contract/api/test_small_file_sync_openapi.py -q
   git diff --exit-code 2035e3a..HEAD -- packages/api-client/openapi.json packages/api-client/src/generated
-  git diff --exit-code 2035e3a..HEAD -- packages/postgresql-source-store/migrations/versions/20260818_01_add_small_file_sync_operations.py packages/postgresql-source-store/src/postgresql_source_store/tables.py
+  git diff --exit-code 2035e3a..HEAD -- migrations/versions/20260818_01_add_small_file_sync_operations.py packages/postgresql-source-store/src/postgresql_source_store/tables.py
   ```
 
 - [x] Run the repo regression gates and read every result before marking this task
@@ -1002,6 +1002,29 @@ wire, schema, fingerprint, or invocation-local binding architecture:
 | No migration/API/client change | 6 | Artifact, migration, contract gates |
 | One successful `.md` publish under locator rule | 6 | Wire + real plugin journeys |
 | Backlog item closed only after evidence | 7 | Gate table and targeted backlog diff |
+
+## Final-blocker completion addendum
+
+- [x] Prove RED for locator-allowed re-preflight followed by an unchanged
+  exact-token PUT that remains indeterminate under the row's old revision.
+- [x] Synchronously reauthorize only a matching `receiving` row under the
+  operation lock, preserving its exact token and every non-policy bound field.
+- [x] Fence claimed source publication with that same operation lock and write
+  canonical publication plus the matching terminal operation result in one
+  PostgreSQL transaction; prove both race orders and exactly-once replay.
+- [x] Reproduce application/database clock skew through the real publication
+  service, remove receipt-time test fudging, and bind the first content-object
+  row's creation/verification timestamps deterministically.
+- [x] Preserve the historical nine-count `canonical_core_backup/v1` reader,
+  emit the twenty-count graph as a documented v2 manifest, and prove a v1
+  empty-target restore plus the required forward-migrate/rebackup path.
+- [x] Document managed versus preserved local secrets, dynamic reference
+  grammar/collisions, and exact reset/bootstrap results in canonical docs.
+- [x] Bound the live evidence subprocess, PostgreSQL connect, statement, lock,
+  and receiving-observer waits without exposing sensitive operands.
+- [x] Run the complete real WDIO final artifact through the existing runbook
+  and tunnel with no HTTP 500, then run focused, regression, strict static,
+  build, artifact, migration, and diff gates on the final commit.
 
 ## Completion Criteria
 

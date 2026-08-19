@@ -2,12 +2,14 @@
 
 ## Final commit
 
-The final implementation commit is `d67d1d6`. The final documentation/evidence
-commit and branch HEAD reviewed for this handoff snapshot is `8bbe12c`; it
-follows the prior runtime-context documentation commit `6858ce2`. Together,
-`d67d1d6` and `8bbe12c` close the claimed-upload resume, live
-receiving-observer, offline terminal-fence, plan-completion, and evidence
-findings without a public wire/schema/fingerprint change.
+The final implementation and canonical-documentation HEAD before this handoff
+snapshot is `c016abf`. Its final-blocker commits are `35f6538` (claimed-upload
+publication fence and deterministic receipt timestamps), `587053e` (versioned
+recovery-manifest compatibility), and `c016abf` (local-stack secret ownership).
+The documentation/evidence commit is the commit containing this handoff; use
+`git rev-parse HEAD` after checkout to identify it without a self-referential
+hash. These commits close all four final blockers without a public HTTP wire,
+database schema, request fingerprint, dependency, or telemetry-label change.
 
 The earlier runtime-secret implementation commit is `efe10a6`, following
 allowlist commits `104ff9a` and `27ac14e`. They follow final-review completion
@@ -30,7 +32,11 @@ without weakening the subprocess environment boundary.
 | Disposable PostgreSQL small-file operation integration | 0 | 17 passed |
 | Real WDIO receiving assertion (RED) | 1 | operation existed but was not yet observed receiving |
 | Real WDIO receiving-race journey (GREEN) | 0 | 1 passed in 1m26s |
-| Later final-build real WDIO reruns | 1 | allowed upload HTTP 500 after successful R2 resolve; race not reached |
+| Final complete real WDIO artifact | 0 | all 3 specs passed; allowed R2 publication and policy race completed |
+| Claimed/recovery focused unit selection | 0 | 229 passed, 4 skipped |
+| Historical v1 real dump/restore | 0 | 1 passed against PostgreSQL/client 18.4 |
+| Full source-publication PostgreSQL regression | 0 | 74 passed |
+| Focused policy-enforcement PostgreSQL integration | 0 | 10 passed |
 | `pnpm --recursive run lint` | 0 | all workspace projects passed |
 | `pnpm --recursive run type-check` | 0 | strict TypeScript passed |
 | `pnpm --recursive run build` | 0 | API client, plugin, and Web passed |
@@ -63,13 +69,14 @@ without weakening the subprocess environment boundary.
   (1 spec, 1m26s): allowed evidence was exactly one joined publication; the
   race evidence was zero canonical publication/commit, one receiving operation,
   and recovery to `excluded_policy` after reload.
-- Later live reruns did not supersede that positive race evidence: three
-  attempts failed earlier on the allowed fixture with sanitized HTTP 500 after
-  successful R2 resolve, leaving the durable event nonterminal. The observer
-  race was not reached. No secret, content, digest, locator, token, or identifier
-  was printed; the live-runtime concern is indexed below.
+- Final live diagnosis reproduced the earlier HTTP 500 as application/R2
+  `verified_at` leading PostgreSQL's default `created_at`, violating
+  `ck_content_objects__verification` after object resolution. The production
+  insert now uses the same receipt verification instant for both immutable
+  fields. The complete final-artifact rerun passed all three real Obsidian
+  specs; the HTTP 500 did not recur.
 - Focused plugin selection: 4 files and 75 tests passed. Complete plugin suite:
-  26 files and 374 tests passed; ESLint, strict TypeScript, and production build
+  26 files and 375 tests passed; ESLint, strict TypeScript, and production build
   passed. The cross-language wire corpus passed without widening its failure
   vocabulary.
 - Offline/API focused unit file: 11 passed. Small-file unit/adapter/integration
@@ -82,8 +89,8 @@ without weakening the subprocess environment boundary.
   directory and verifying both versions as 18.4, the exact three mandatory
   backup/restore cases passed. Aggregate: 1,500 passed, 2 skipped, 1 deselected.
 - `uv run poe canonical-core-test`: 989 passed, 11 skipped.
-- Fresh `uv run poe verify`: exit 0 after 3,026 Python tests passed, 21 skipped,
-  324 deselected; all workspace JavaScript tests passed (plugin 374, Web 139,
+- Fresh final `uv run poe verify`: exit 0 after 3,031 Python tests passed, 21 skipped,
+  329 deselected; all workspace JavaScript tests passed (plugin 375, Web 139,
   API client 1), plus format, lint, strict typing, import boundaries, API
   artifacts, Python packages, plugin, client, and Web production builds.
 - OpenAPI/generated-client and canonical migration/table diffs against
@@ -208,15 +215,36 @@ All server queries and waits are constrained to a unique per-run fixture digest;
 all journal queries use a bound normalized-path parameter. TOTP and observer
 subprocesses derive cwd from the E2E spec module URL rather than a machine path.
 
+A locator-aware re-preflight may update only `policy_revision_number` on the
+matching `receiving` row. It does so synchronously under the operation advisory
+lock, preserves the exact token and every other bound field, commits the fresh
+server authority, and returns the existing claimed-state retry signal. The
+small-file publication transaction takes that same operation lock before the
+source idempotency/policy/source locks, validates the complete bound operation,
+and commits canonical state plus terminal operation state atomically. The two
+PostgreSQL race tests prove that a reauthorization winner fences the old bound
+before mutation and a publication winner exposes only terminal replay.
+
+New recovery manifests use `canonical_core_backup/v2` with the current twenty
+canonical counts. The strict reader retains the original exact nine-count v1
+shape and verifies a restored graph against the manifest's own schema revision
+and count set. A real `20260813_01` dump restored successfully. That v1 target
+is an intermediate recovery state: keep admission disabled, migrate forward,
+then create and verify a v2 backup before serving.
+
+The local-stack lifecycle owns exactly eight managed stack files. Validated
+application-selected authentication and policy-signing files are preserved;
+dynamic relative-path grammar, bounded previous-key entries, collisions,
+unknown files, partial managed sets, reset, rotation, and bootstrap outcomes
+are now explicit in the canonical design and Compose guide.
+
 ## Deferred items and verdicts
 
-All claimed-upload implementation findings are complete. Repeated later live
-runs exposed a separate allowed-fixture HTTP 500 after successful R2 resolve;
-because the successful receiving-race run and all deterministic gates predate
-and survive it, this is a non-blocking live-runtime investigation rather
-than an unverified implementation claim. It is indexed once in
-`docs/handoff/BACKLOG.md`. The pre-existing signing-key verifier-chain item
-remains indexed and was not expanded by this work.
+All claimed-upload, timestamp, recovery-compatibility, live-evidence, and
+local-stack documentation findings are complete. The prior allowed-fixture
+HTTP 500 is root-caused, regression-tested, and closed by the final green live
+artifact; its backlog line is removed. The pre-existing signing-key
+verifier-chain item remains indexed and was not expanded by this work.
 
 ## Canonical documentation links
 
@@ -228,9 +256,9 @@ remains indexed and was not expanded by this work.
 
 ## Next actions
 
-The branch is ready for scoped re-review and integration. Investigate the
-sanitized post-R2-resolve live 500 separately without weakening durable retry
-or fixture scoping. `knowledge-local` is
-stopped with volumes/secrets preserved and ports 8000/38000 have no listeners;
-the existing tunnel remains untouched. Keep the stack stopped when no live test
-is running. Do not manually edit receiving upload rows or their deadlines.
+The branch is ready for scoped re-review and integration. `knowledge-local` is
+stopped with volumes/secrets preserved, ports 8000/38000 have no listeners,
+and the task-started foreground tunnel connector was stopped after the green
+live gate; any separately managed pre-existing `cloudflared` process remains
+untouched. Keep the stack stopped when no live test is running. Do not manually
+edit receiving upload rows, policy revisions, or deadlines.
