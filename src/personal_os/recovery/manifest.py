@@ -30,6 +30,7 @@ from personal_os.recovery.contracts import (
     MANIFEST_CONTRACT_V1,
     MANIFEST_CONTRACT_V2,
     MAXIMUM_OBJECT_SIZE_BYTES,
+    POSTGRESQL_SCHEMA_REVISION,
     V1_CANONICAL_COUNT_TABLES,
     ManifestDumpEntry,
     ManifestObjectEntry,
@@ -62,6 +63,12 @@ _OBJECT_KEYS: Final[frozenset[str]] = frozenset(
     {"content_sha256", "media_type", "object_key", "relative_path", "size_bytes"}
 )
 _HEX_LOWER: Final[frozenset[str]] = frozenset("0123456789abcdef")
+_CONTRACT_SCHEMA_REVISIONS: Final[MappingProxyType[str, str]] = MappingProxyType(
+    {
+        MANIFEST_CONTRACT_V1: "20260813_01",
+        MANIFEST_CONTRACT_V2: POSTGRESQL_SCHEMA_REVISION,
+    }
+)
 
 
 def _reject(reason: RecoveryBundleInvalidReason) -> NoReturn:
@@ -152,7 +159,10 @@ def parse_manifest(raw: bytes) -> RecoveryManifest:
     if not isinstance(payload, dict):
         _reject(RecoveryBundleInvalidReason.CONTRACT_UNSUPPORTED)
     contract_value = payload.get("contract")
-    if contract_value not in {MANIFEST_CONTRACT_V1, MANIFEST_CONTRACT_V2}:
+    if (
+        not isinstance(contract_value, str)
+        or contract_value not in _CONTRACT_SCHEMA_REVISIONS
+    ):
         _reject(RecoveryBundleInvalidReason.CONTRACT_UNSUPPORTED)
     if frozenset(payload) != _MANIFEST_KEYS:
         _reject(RecoveryBundleInvalidReason.FIELD_UNKNOWN)
@@ -189,6 +199,8 @@ def parse_manifest(raw: bytes) -> RecoveryManifest:
     server_version_value = payload["postgresql_server_version"]
     schema_revision_value = payload["postgresql_schema_revision"]
     if not isinstance(server_version_value, str) or not isinstance(schema_revision_value, str):
+        _reject(RecoveryBundleInvalidReason.FIELD_INVALID)
+    if schema_revision_value != _CONTRACT_SCHEMA_REVISIONS[contract_value]:
         _reject(RecoveryBundleInvalidReason.FIELD_INVALID)
 
     dump_value = payload["postgres_dump"]

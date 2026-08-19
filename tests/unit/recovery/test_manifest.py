@@ -19,7 +19,11 @@ from personal_os.error_contracts.codes import ErrorCode
 from personal_os.recovery.contracts import (
     CANONICAL_COUNT_TABLES,
     MANIFEST_CONTRACT,
+    MANIFEST_CONTRACT_V1,
+    MANIFEST_CONTRACT_V2,
     MAXIMUM_OBJECT_SIZE_BYTES,
+    POSTGRESQL_SCHEMA_REVISION,
+    V1_CANONICAL_COUNT_TABLES,
     ManifestDumpEntry,
     ManifestObjectEntry,
     RecoveryEnvironment,
@@ -35,6 +39,7 @@ _CREATED_AT = datetime(2026, 8, 15, 12, 30, 45, 123456)
 _FIRST_DIGEST = "0" * 64
 _SECOND_DIGEST = "1" * 64
 _DUMP_SHA256 = "2" * 64
+_HISTORICAL_SCHEMA_REVISION = "20260813_01"
 
 
 def _object_entry(digest_hexadecimal: str, size_bytes: int) -> dict[str, object]:
@@ -55,9 +60,10 @@ def build_manifest(**overrides: object) -> RecoveryManifest:
     fields: dict[str, object] = {
         "bundle_id": _BUNDLE_ID,
         "created_at": _CREATED_AT,
+        "contract": MANIFEST_CONTRACT,
         "source_environment": RecoveryEnvironment.LOCAL,
         "postgresql_server_version": "18.4",
-        "postgresql_schema_revision": "20260813_01",
+        "postgresql_schema_revision": POSTGRESQL_SCHEMA_REVISION,
         "postgres_dump": {
             "relative_path": "postgres.dump",
             "size_bytes": 4096,
@@ -97,6 +103,7 @@ def build_manifest(**overrides: object) -> RecoveryManifest:
         postgres_dump=postgres_dump_value,  # type: ignore[arg-type]
         canonical_counts=fields["canonical_counts"],  # type: ignore[arg-type]
         objects=objects_value,  # type: ignore[arg-type]
+        contract=fields["contract"],  # type: ignore[arg-type]
     )
 
 
@@ -169,15 +176,15 @@ def test_historical_v1_nine_table_manifest_remains_byte_canonical() -> None:
     )
     raw = canonical_json(
         manifest_payload(
-            contract="canonical_core_backup/v1",
+            contract=MANIFEST_CONTRACT_V1,
             canonical_counts={table: index + 1 for index, table in enumerate(historical_tables)},
-            postgresql_schema_revision="20260813_01",
+            postgresql_schema_revision=_HISTORICAL_SCHEMA_REVISION,
         )
     )
 
     parsed = parse_manifest(raw)
 
-    assert parsed.contract == "canonical_core_backup/v1"
+    assert parsed.contract == MANIFEST_CONTRACT_V1
     assert frozenset(parsed.canonical_counts) == frozenset(historical_tables)
     assert encode_manifest(parsed) == raw
 
@@ -196,6 +203,40 @@ def test_rejects_unsupported_contract_version() -> None:
     unsupported = canonical_json(manifest_payload(contract="canonical_core_backup/v3"))
     assert_bundle_invalid(unsupported, "contract_unsupported")
     assert_bundle_invalid(canonical_json(manifest_payload(contract="")), "contract_unsupported")
+
+
+@pytest.mark.parametrize("contract_value", ([], {}), ids=("array", "object"))
+def test_rejects_non_string_contract_values_through_typed_error_boundary(
+    contract_value: object,
+) -> None:
+    assert_bundle_invalid(
+        canonical_json(manifest_payload(contract=contract_value)), "contract_unsupported"
+    )
+
+
+def test_rejects_crossed_contract_schema_revision_combinations() -> None:
+    historical_counts = {
+        table: index + 1 for index, table in enumerate(V1_CANONICAL_COUNT_TABLES)
+    }
+    assert_bundle_invalid(
+        canonical_json(
+            manifest_payload(
+                contract=MANIFEST_CONTRACT_V1,
+                canonical_counts=historical_counts,
+                postgresql_schema_revision=POSTGRESQL_SCHEMA_REVISION,
+            )
+        ),
+        "field_invalid",
+    )
+    assert_bundle_invalid(
+        canonical_json(
+            manifest_payload(
+                contract=MANIFEST_CONTRACT_V2,
+                postgresql_schema_revision=_HISTORICAL_SCHEMA_REVISION,
+            )
+        ),
+        "field_invalid",
+    )
 
 
 def test_rejects_unknown_top_level_field() -> None:
