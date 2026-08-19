@@ -74,8 +74,9 @@ from personal_os.sources.actors import reject_nil_uuid
 from personal_os.sources.commands import (
     CreateSourceVersion,
     SourceType,
-    UpdateSourceVersion,
 )
+from personal_os.sources.errors import SourcePublicationError
+from personal_os.sources.fingerprint import SourceVersionCommand
 
 if TYPE_CHECKING:
     from personal_os.sources.reading import CanonicalSourceReference
@@ -507,7 +508,7 @@ class PolicyEnforcementService:
 
     async def authorize_publication(
         self,
-        command: CreateSourceVersion | UpdateSourceVersion,
+        command: SourceVersionCommand,
         context: DiagnosticContext,
     ) -> PolicyDecision:
         """Evaluate one publication candidate before any object-store access.
@@ -520,31 +521,49 @@ class PolicyEnforcementService:
         through the normal indeterminate path whenever a rule needs it.
         """
 
-        expected = command.expected_object
-        subject: PolicySubject
-        if isinstance(command, CreateSourceVersion):
-            subject = PolicySubject(
-                workspace_id=command.workspace_id,
-                source_id=command.source_id,
-                source_type=command.source_type,
-                media_type=expected.media_type,
-                size_bytes=expected.size_bytes,
-            )
-        else:
-            stored = await self._evidence_source.load_subject_evidence(
-                command.workspace_id, command.source_id, context
-            )
-            source_type = stored.source_type if stored is not None else None
-            subject = PolicySubject(
-                workspace_id=command.workspace_id,
-                source_id=command.source_id,
-                source_type=source_type,
-                media_type=expected.media_type,
-                size_bytes=expected.size_bytes,
-            )
+        subject = await self._publication_subject(command, context)
         return await self.authorize_preflight(
             subject=subject, boundary=PolicyBoundary.SINGLE_PART_UPLOAD, context=context
         )
+
+    async def authorize_bound_publication(
+        self,
+        command: SourceVersionCommand,
+        binding: AllowedPolicyRevisionBinding,
+        diagnostic_context: DiagnosticContext,
+    ) -> PublicationPolicyEvidence:
+        """Authorize a small-file publication against bound preflight evidence."""
+
+        if binding.workspace_id != command.workspace_id:
+            raise SourcePublicationError(
+                ErrorCode.SOURCE_CONCURRENCY_INVARIANT_FAILED,
+                safe_details={"source_id": command.source_id},
+            )
+        started_monotonic = time.monotonic()
+        material = await self._snapshot_source.load_active_snapshot(
+            command.workspace_id, diagnostic_context
+        )
+        if material is None:
+            raise policy_not_initialized_error()
+        revision = parse_verified_policy_revision(material, verifier=self._verifier)
+        if revision.revision_number == binding.policy_revision_number:
+            if self._metrics is not None:
+                self._metrics.record_evaluation(
+                    boundary=PolicyBoundary.SINGLE_PART_UPLOAD,
+                    decision=EvaluationMetricOutcome.ALLOWED,
+                    duration_seconds=max(time.monotonic() - started_monotonic, 0.0),
+                )
+            return binding
+
+        subject = await self._publication_subject(command, diagnostic_context)
+        decision = self._evaluate_material(
+            material,
+            subject,
+            PolicyBoundary.SINGLE_PART_UPLOAD,
+            started_monotonic,
+        )
+        enforce_policy_decision(decision)
+        return decision
 
     async def authorize_read(
         self, reference: CanonicalSourceReference, context: DiagnosticContext
@@ -563,6 +582,34 @@ class PolicyEnforcementService:
         )
         return await self.authorize_preflight(
             subject=subject, boundary=PolicyBoundary.CANONICAL_READ, context=context
+        )
+
+    async def _publication_subject(
+        self,
+        command: SourceVersionCommand,
+        context: DiagnosticContext,
+    ) -> PolicySubject:
+        """Build the locator-free publication subject from canonical evidence."""
+
+        expected = command.expected_object
+        if isinstance(command, CreateSourceVersion):
+            return PolicySubject(
+                workspace_id=command.workspace_id,
+                source_id=command.source_id,
+                source_type=command.source_type,
+                media_type=expected.media_type,
+                size_bytes=expected.size_bytes,
+            )
+        stored = await self._evidence_source.load_subject_evidence(
+            command.workspace_id, command.source_id, context
+        )
+        source_type = stored.source_type if stored is not None else None
+        return PolicySubject(
+            workspace_id=command.workspace_id,
+            source_id=command.source_id,
+            source_type=source_type,
+            media_type=expected.media_type,
+            size_bytes=expected.size_bytes,
         )
 
     def evaluate_material(

@@ -61,6 +61,7 @@ from personal_os.sources.commands import (
     SourceType,
     UpdateSourceVersion,
 )
+from personal_os.sources.errors import SourcePublicationError
 
 WORKSPACE_ID = UUID("018f47a0-7b00-7000-8000-000000000001")
 POLICY_REVISION_ID = UUID("018f47a0-7b00-7000-8000-0000000000e1")
@@ -552,6 +553,126 @@ async def test_authorize_publication_resolves_update_type_evidence() -> None:
         await service.authorize_publication(update_command, context())
     assert raised.value.error_code is ErrorCode.EXCLUSION_POLICY_DENIED
     assert evidence_source.requested_sources == [source_id]
+
+
+# --- bound publication authorization ---------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bound_publication_returns_binding_without_evaluation_when_revision_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A matching signed revision preserves the preflight allow evidence."""
+
+    service, snapshot_source, _, metrics = build_service(material=build_material(build_revision()))
+    binding = AllowedPolicyRevisionBinding(
+        workspace_id=WORKSPACE_ID, policy_revision_number=1
+    )
+
+    def evaluator_must_not_run(*args: object, **kwargs: object) -> object:
+        raise AssertionError("the equal-revision path must not evaluate")
+
+    monkeypatch.setattr(
+        "personal_os.exclusion_policy.enforcement.evaluate_policy", evaluator_must_not_run
+    )
+
+    evidence = await service.authorize_bound_publication(
+        build_create_command(), binding, context()
+    )
+
+    assert evidence is binding
+    assert snapshot_source.requested_workspaces == [WORKSPACE_ID]
+    assert len(metrics.evaluation_records()) == 1
+    record = metrics.evaluation_records()[0]
+    assert record.boundary is PolicyBoundary.SINGLE_PART_UPLOAD
+    assert record.decision is EvaluationMetricOutcome.ALLOWED
+
+
+@pytest.mark.asyncio
+async def test_bound_publication_evaluates_the_current_revision_when_revision_changed() -> None:
+    """A changed fully decidable policy may allow the publication."""
+
+    current_revision = ExclusionPolicyRevision(
+        policy_revision_id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        revision_number=2,
+        rules=(rule(RuleKind.MEDIA_TYPE, text_operand="application/pdf"),),
+    )
+    service, _, _, _ = build_service(material=build_material(current_revision))
+    binding = AllowedPolicyRevisionBinding(
+        workspace_id=WORKSPACE_ID, policy_revision_number=1
+    )
+
+    evidence = await service.authorize_bound_publication(
+        build_create_command(media_type="text/markdown"), binding, context()
+    )
+
+    assert isinstance(evidence, PolicyDecision)
+    assert evidence.revision_number == 2
+    assert evidence.raw_decision is RawPolicyDecision.ALLOWED
+
+
+@pytest.mark.asyncio
+async def test_bound_publication_denies_changed_locator_rule_as_indeterminate() -> None:
+    """A changed locator-dependent rule fails closed without locator evidence."""
+
+    current_revision = ExclusionPolicyRevision(
+        policy_revision_id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        revision_number=2,
+        rules=(rule(RuleKind.EXTENSION, text_operand=".md"),),
+    )
+    service, _, _, _ = build_service(material=build_material(current_revision))
+
+    with pytest.raises(ExclusionPolicyError) as raised:
+        await service.authorize_bound_publication(
+            build_create_command(),
+            AllowedPolicyRevisionBinding(workspace_id=WORKSPACE_ID, policy_revision_number=1),
+            context(),
+        )
+
+    assert raised.value.error_code is ErrorCode.EXCLUSION_POLICY_INDETERMINATE
+
+
+@pytest.mark.asyncio
+async def test_bound_publication_rejects_foreign_workspace_binding() -> None:
+    """A binding never authorizes a command from another workspace."""
+
+    service, snapshot_source, _, _ = build_service(material=build_material(build_revision()))
+
+    with pytest.raises(SourcePublicationError) as raised:
+        await service.authorize_bound_publication(
+            build_create_command(),
+            AllowedPolicyRevisionBinding(workspace_id=uuid4(), policy_revision_number=1),
+            context(),
+        )
+
+    assert raised.value.error_code is ErrorCode.SOURCE_CONCURRENCY_INVARIANT_FAILED
+    assert snapshot_source.requested_workspaces == []
+
+
+@pytest.mark.asyncio
+async def test_bound_publication_fails_closed_when_active_snapshot_is_missing_or_invalid() -> None:
+    """Missing and corrupt current snapshots deny before any publication subject load."""
+
+    for material, expected_error in (
+        (None, ErrorCode.EXCLUSION_POLICY_NOT_INITIALIZED),
+        (
+            build_material(build_revision(), payload_sha256="0" * 64),
+            ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE,
+        ),
+    ):
+        service, _, evidence_source, _ = build_service(material=material)
+
+        with pytest.raises(ExclusionPolicyError) as raised:
+            await service.authorize_bound_publication(
+                build_create_command(),
+                AllowedPolicyRevisionBinding(workspace_id=WORKSPACE_ID, policy_revision_number=1),
+                context(),
+            )
+
+        assert raised.value.error_code is expected_error
+        assert evidence_source.requested_sources == []
 
 
 @pytest.mark.asyncio
