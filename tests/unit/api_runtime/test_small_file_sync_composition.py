@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
@@ -408,6 +408,51 @@ async def test_offline_store_unbound_terminal_write_cannot_bypass_a_claimed_rece
         ),
         create_diagnostic_context().context,
     )
+
+
+@pytest.mark.asyncio
+async def test_offline_store_bound_terminalization_rejects_policy_revision_drift() -> None:
+    state = OfflineSmallFileSyncState(now=datetime(2026, 8, 19, tzinfo=UTC))
+    clock = OfflineSmallFileClock(state)
+    store = OfflineSmallFileUploadOperationStore(state, clock)
+    device_context = SmallFileDeviceContext(device_id=uuid4(), workspace_id=uuid4())
+    preflight = _build_create_preflight()
+    operation = await store.reserve_operation(
+        preflight,
+        device_context,
+        AllowedPolicyRevisionBinding(
+            workspace_id=device_context.workspace_id,
+            policy_revision_number=7,
+        ),
+        create_diagnostic_context().context,
+    )
+    bound = await store.resolve_bound_operation(
+        operation.operation_token,
+        device_context,
+        create_diagnostic_context().context,
+    )
+    result = SmallFileTerminalResult(
+        result_kind=SmallFileTerminalResultKind.COMMITTED,
+        source_id=uuid4(),
+        source_version_id=uuid4(),
+        content_version=1,
+        committed_at=clock(),
+    )
+
+    with pytest.raises(SmallFileSyncError) as raised:
+        await store.record_bound_terminal_result(
+            replace(bound, policy_revision_number=bound.policy_revision_number + 1),
+            result,
+            create_diagnostic_context().context,
+        )
+
+    assert raised.value.error_code is ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH
+    resumed = await store.resolve_bound_operation(
+        operation.operation_token,
+        device_context,
+        create_diagnostic_context().context,
+    )
+    assert resumed.terminal_result is None
 
 
 @pytest.mark.asyncio

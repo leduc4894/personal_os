@@ -51,6 +51,7 @@ beforeAll(async () => {
 const ORIGIN = "https://sync.example.org";
 const ACCESS_TOKEN = "at1.driver-test-access";
 const OPERATION_ID = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-Zz";
+const OTHER_OPERATION_ID = "ZyXwVuTsRqPoNmLkJiHgFeDcBa9876543210_-Aa";
 const SOURCE_ID = "44444444-4444-4444-8444-444444444444";
 const SOURCE_VERSION_ID = "55555555-5555-4555-8555-555555555555";
 
@@ -603,6 +604,90 @@ describe("queue driver lost-response replay (spec 10.3)", () => {
       event_id: event.eventId,
       idempotency_key: event.idempotencyKey,
     });
+  });
+
+  it("does not resume a stale token when the persisted operation changed during preflight", async () => {
+    const harness = createHarness();
+    const event = await captureBytes(
+      harness,
+      "notes/token-drift.md",
+      new TextEncoder().encode("token drift"),
+    );
+    await harness.repository.markEventPreflightStarted(event.eventId);
+    await harness.repository.markEventUploading(event.eventId, OPERATION_ID);
+    const scripted = harness.installTransport({
+      preflight: async () => {
+        await harness.repository.markEventUploading(event.eventId, OTHER_OPERATION_ID);
+        return {
+          status: 409,
+          bodyText: errorBody("small_file_upload_state_invalid"),
+        };
+      },
+      content: async () => {
+        throw new Error("a drifted operation token must not be resumed");
+      },
+    });
+
+    await runPass(harness.driver);
+
+    expect(harness.repository.readEvent(event.eventId)).toMatchObject({
+      state: "waiting_retry",
+      operationId: OTHER_OPERATION_ID,
+    });
+    expect(scripted.contentRequests).toHaveLength(0);
+  });
+
+  it("does not resume an exact token when the server says the operation is unknown", async () => {
+    const harness = createHarness();
+    const event = await captureBytes(
+      harness,
+      "notes/unknown-operation.md",
+      new TextEncoder().encode("unknown operation"),
+    );
+    await harness.repository.markEventPreflightStarted(event.eventId);
+    await harness.repository.markEventUploading(event.eventId, OPERATION_ID);
+    const scripted = harness.installTransport({
+      preflight: async () => ({
+        status: 404,
+        bodyText: errorBody("small_file_operation_not_found"),
+      }),
+      content: async () => {
+        throw new Error("an unknown operation token must not be resumed");
+      },
+    });
+
+    await runPass(harness.driver);
+
+    expect(harness.repository.readEvent(event.eventId)).toMatchObject({
+      state: "waiting_retry",
+      operationId: OPERATION_ID,
+    });
+    expect(scripted.contentRequests).toHaveLength(0);
+  });
+
+  it("keeps policy-change preflight recovery ahead of a persisted upload token", async () => {
+    const harness = createHarness();
+    const event = await captureBytes(
+      harness,
+      "notes/policy-recovery.md",
+      new TextEncoder().encode("policy recovery"),
+    );
+    await harness.repository.markEventPreflightStarted(event.eventId);
+    await harness.repository.markEventUploading(event.eventId, OPERATION_ID);
+    const scripted = harness.installTransport({
+      preflight: async () => ({
+        status: 200,
+        bodyText: successBody({ outcome: "excluded" }),
+      }),
+      content: async () => {
+        throw new Error("an excluded preflight must not resume content");
+      },
+    });
+
+    await runPass(harness.driver);
+
+    expect(harness.repository.readEvent(event.eventId)?.state).toBe("excluded_policy");
+    expect(scripted.contentRequests).toHaveLength(0);
   });
 });
 

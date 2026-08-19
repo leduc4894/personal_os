@@ -423,6 +423,25 @@ def _fingerprint_matches(row: SmallFilePreflight, candidate: SmallFilePreflight)
     )
 
 
+def _bound_matches_offline_row(row: _OfflineOperationRow, bound: SmallFileBoundOperation) -> bool:
+    """Mirror the PostgreSQL terminal fence over offline row geometry."""
+
+    return (
+        row.device_context.workspace_id == bound.workspace_id
+        and row.device_context.device_id == bound.device_id
+        and row.preflight.event_id == bound.event_id
+        and row.preflight.idempotency_key == bound.idempotency_key
+        and row.preflight.operation is bound.operation
+        and row.preflight.sha256 == bound.declared_sha256
+        and row.preflight.size_bytes == bound.declared_size_bytes
+        and row.preflight.media_type == bound.declared_media_type
+        and row.reserved_source_id == bound.reserved_source_id
+        and row.preflight.source_id == bound.update_source_id
+        and row.preflight.base_version_id == bound.update_base_version_id
+        and row.policy_revision_number == bound.policy_revision_number
+    )
+
+
 class OfflineSmallFileUploadOperationStore:
     """In-memory operation store mirroring the durable adapter semantics."""
 
@@ -569,6 +588,8 @@ class OfflineSmallFileUploadOperationStore:
         row = self._token_row(bound.operation_token)
         if row is None:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND)
+        if not _bound_matches_offline_row(row, bound):
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH)
         self._apply_terminal_transition(row, result, require_claimed=True)
 
     def _apply_terminal_transition(

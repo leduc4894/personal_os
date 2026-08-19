@@ -173,14 +173,14 @@ try:
                   and result_source_id is null
                   and result_source_version_id is null)
             """
-        should_wait_for_operation = os.environ.get("SERVER_EVIDENCE_WAIT_FOR_OPERATION") == "1"
+        should_wait_for_receiving = os.environ.get("SERVER_EVIDENCE_WAIT_FOR_RECEIVING") == "1"
         deadline = time.monotonic() + 30
         while True:
             row = connection.execute(statement, (controlled_digests,)).fetchone()
             if (
-                not should_wait_for_operation
+                not should_wait_for_receiving
                 or row is None
-                or int(row[3]) > 0
+                or int(row[6]) == 1
                 or time.monotonic() >= deadline
             ):
                 break
@@ -306,7 +306,7 @@ async function publishPreparedPolicy(
 
 async function readServerPublicationEvidence(
   controlledDeclaredSha256: string,
-  shouldWaitForOperation = false,
+  shouldWaitForReceiving = false,
 ): Promise<ServerPublicationEvidence> {
   const { stdout } = await runFromE2eRepositoryRoot(
     "uv",
@@ -315,7 +315,7 @@ async function readServerPublicationEvidence(
     {
       ...process.env,
       SERVER_EVIDENCE_DECLARED_SHA256S: controlledDeclaredSha256,
-      SERVER_EVIDENCE_WAIT_FOR_OPERATION: shouldWaitForOperation ? "1" : "0",
+      SERVER_EVIDENCE_WAIT_FOR_RECEIVING: shouldWaitForReceiving ? "1" : "0",
     },
   );
   const parsed = JSON.parse(stdout) as Record<string, unknown>;
@@ -749,8 +749,11 @@ describe("device login and small-file sync (live server)", () => {
     await editFixtureNoteForPolicyRace();
     await triggerSyncNow();
     const observedOperation = await operationObservation;
-    if (observedOperation.operationCount !== 1) {
-      throw new Error("server did not observe the controlled preflight operation");
+    if (
+      observedOperation.operationCount !== 1 ||
+      observedOperation.receivingUnpublishedOperationCount !== 1
+    ) {
+      throw new Error("server did not observe the controlled receiving operation");
     }
     const changedPolicyRevision = await publishPreparedPolicy(
       sessionCookies,
