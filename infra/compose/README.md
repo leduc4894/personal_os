@@ -75,9 +75,25 @@ uv run poe stack-bootstrap
 uv run poe stack-config
 ```
 
-Generated credentials remain only in the owning `.local/stack-secrets/`
-directory, which Git ignores. Bootstrap reuses a complete set byte-for-byte and
-never rotates or overwrites it.
+The lifecycle owns eight files in `.local/stack-secrets/`: seven generated
+stack credentials plus generated `qdrant_config.yaml`. Bootstrap reuses a
+complete managed set byte-for-byte and never rotates or overwrites it. The
+same Git-ignored directory may contain application-owned authentication,
+policy-signing, R2 and Web credential files. Those files are allowlisted but
+never generated, read by value, mounted into Compose, rotated or deleted by
+the stack lifecycle.
+
+Dynamic application-owned authentication and policy paths come from
+`KNOWLEDGE_AUTH_CURRENT_KEY_FILE`, up to four comma-separated
+`key-id=relative/path` entries in `KNOWLEDGE_AUTH_PREVIOUS_KEYS`, and
+`KNOWLEDGE_POLICY_SIGNING_KEY_FILE`. Paths are at most 128 characters and use
+slash-separated `[A-Za-z0-9][A-Za-z0-9._-]*` segments. They cannot be absolute,
+traverse upward or equal a managed stack filename; previous IDs/paths cannot
+duplicate each other or the configured current authentication ID/path. An
+unknown path or a partial managed set is terminal. If only allowlisted
+application files exist, the managed set is `missing` and bootstrap installs
+the eight managed files alongside them without modifying the application
+files.
 
 Start and inspect the stack with:
 
@@ -162,7 +178,7 @@ uv run poe database-upgrade
 uv run poe database-current
 ```
 
-`database-heads` must report exactly one head, `20260816_01`, both before and
+`database-heads` must report exactly one head, `20260818_01`, both before and
 after the upgrade. `database-current` exits non-zero if the applied revision is
 not a head.
 
@@ -253,7 +269,11 @@ uv run poe stack-bootstrap
 ```
 
 If any deletion fails, rotation does not occur. In-place rotation of a
-populated stack is unsupported.
+populated stack is unsupported. `--rotate-secrets` removes only the eight
+managed stack files after all five exact volumes are gone. Preserved
+application files/directories remain; the result field `"secrets":"removed"`
+means the managed set was removed. The next `stack-bootstrap` recreates only
+that managed set alongside the preserved files.
 
 ## Terminal states and recovery
 
