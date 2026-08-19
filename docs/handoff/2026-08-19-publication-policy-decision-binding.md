@@ -2,10 +2,11 @@
 
 ## Final commit
 
-The latest implementation commit is `27ac14e`. It follows final-review
-completion commits `23e1f9e`, `6e4e663`, `d1864a8`, and `cdbac3d`, and the
-original binding commits through `d6a4b73`. The merge-review portability wave
-closes the runtime-secret allowlist, WDIO cwd, and fixture-scoping findings.
+The latest implementation commit is `104ff9a`, following portability commit
+`27ac14e`. They follow final-review completion commits `23e1f9e`, `6e4e663`,
+`d1864a8`, and `cdbac3d`, and the original binding commits through `d6a4b73`.
+The merge-review portability wave and its scoped follow-up close the runtime-
+secret allowlist, WDIO cwd, and fixture-scoping findings.
 
 ## Gate evidence
 
@@ -23,7 +24,10 @@ closes the runtime-secret allowlist, WDIO cwd, and fixture-scoping findings.
   rebootstrap did not accept the runtime environment contract. GREEN: current,
   multiple previous, and policy signing paths (including safe nested/versioned
   paths) survive the complete lifecycle; unsafe paths fail with a redacted
-  closed code. The final local-stack selection passed with 182 passed, 8
+  closed code. A follow-up RED proved a previous-key filename could still
+  collide with the current key; GREEN now rejects that cross-field collision
+  exactly as the runtime loader does while keeping distinct names valid. The
+  final local-stack selection passed with 183 passed, 8
   skipped, and 1 deselected; Ruff, format, and mypy passed.
 - Portable-subprocess RED: the behavioral clone-layout test failed because the
   subprocess searched the fixed checkout. GREEN: the real subprocess found the
@@ -52,7 +56,7 @@ closes the runtime-secret allowlist, WDIO cwd, and fixture-scoping findings.
   counted 0 canonical source/version/event/commit/exact join, 1 operation, and
   1 receiving-unpublished row before and after reload recovery. Only sanitized
   counts were emitted.
-- Obsidian unit suite: 25 files and 368 tests passed. Focused E2E journey unit
+- Obsidian unit suite: 26 files and 369 tests passed. Focused E2E journey unit
   coverage: 8 passed. ESLint, strict TypeScript, and plugin build passed.
 - `uv run poe exclusion-policy-test` plus the three mandatory backup/restore
   cases rerun with repository PostgreSQL clients verified at exactly 18.4:
