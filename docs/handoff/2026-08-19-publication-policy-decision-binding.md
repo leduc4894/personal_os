@@ -2,10 +2,10 @@
 
 ## Final commit
 
-The final implementation commit is `cdbac3d`. The final-review completion
-commits are `23e1f9e`, `6e4e663`, `d1864a8`, and `cdbac3d`. They follow the
-original binding commits through `d6a4b73` and close all four Important
-whole-branch review findings.
+The latest implementation commit is `27ac14e`. It follows final-review
+completion commits `23e1f9e`, `6e4e663`, `d1864a8`, and `cdbac3d`, and the
+original binding commits through `d6a4b73`. The merge-review portability wave
+closes the runtime-secret allowlist, WDIO cwd, and fixture-scoping findings.
 
 ## Gate evidence
 
@@ -19,6 +19,17 @@ whole-branch review findings.
   secret directory. GREEN: both focused tests passed, and the local-stack
   unit/contract/integration selection passed with 176 passed, 8 skipped, and
   1 deselected.
+- Merge-review secret RED: 6 focused cases failed because inspection/reset/
+  rebootstrap did not accept the runtime environment contract. GREEN: current,
+  multiple previous, and policy signing paths (including safe nested/versioned
+  paths) survive the complete lifecycle; unsafe paths fail with a redacted
+  closed code. The final local-stack selection passed with 182 passed, 8
+  skipped, and 1 deselected; Ruff, format, and mypy passed.
+- Portable-subprocess RED: the behavioral clone-layout test failed because the
+  subprocess searched the fixed checkout. GREEN: the real subprocess found the
+  arbitrary repository-root marker through the E2E spec URL. The full Obsidian
+  unit suite now passes 26 files and 369 tests; ESLint, strict TypeScript, and
+  plugin build pass.
 - Focused small-file unit/composition selection: 150 passed. Small-file sync
   integration: 18 passed. Combined source-publication and policy enforcement
   on disposable PostgreSQL: 27 passed.
@@ -33,6 +44,14 @@ whole-branch review findings.
   `receiving` operation with no result. A real plugin unload/reload caused the
   next preflight to settle the one durable nonterminal event as
   `excluded_policy`; final source/version/event/commit deltas remained zero.
+- The merge-review live rerun scoped PostgreSQL evidence to each fixture's
+  per-run content identity and journal evidence to its normalized path. All 3
+  real WDIO specs passed through the existing loader and Cloudflare Tunnel.
+  The allowed fixture alone counted exactly 1 source/version/event/operation/
+  commit/exact join and 0 receiving-unpublished rows. The race fixture alone
+  counted 0 canonical source/version/event/commit/exact join, 1 operation, and
+  1 receiving-unpublished row before and after reload recovery. Only sanitized
+  counts were emitted.
 - Obsidian unit suite: 25 files and 368 tests passed. Focused E2E journey unit
   coverage: 8 passed. ESLint, strict TypeScript, and plugin build passed.
 - `uv run poe exclusion-policy-test` plus the three mandatory backup/restore
@@ -70,10 +89,18 @@ competing rebind.
 preserves allowlisted application files byte-for-byte, removes the managed
 subset, and reboots that subset through the existing staging/rollback path so
 a fresh smoke fingerprint is created without a partial-directory dead end.
+Application allowlisting is the union of the documented application files and
+the validated runtime-selected current authentication key, bounded parsed
+previous keys, and policy signing key. Safe nested relative paths follow the
+runtime grammar; absolute/traversal/backslash paths and managed-name collisions
+fail closed without reading or echoing a secret value.
 
 The live test's database helper is read-only and emits counts only. It reads
 the loader-provided password file internally and never prints paths, IDs,
 locators, content, credentials, tokens, or secret values.
+All server queries and waits are constrained to a unique per-run fixture digest;
+all journal queries use a bound normalized-path parameter. TOTP and observer
+subprocesses derive cwd from the E2E spec module URL rather than a machine path.
 
 ## Deferred items and verdicts
 
@@ -91,7 +118,7 @@ pre-existing signing-key verifier-chain item remains indexed in
 
 ## Next actions
 
-The branch is ready for final review and integration. Keep `knowledge-local`
-stopped when no live test is running; use the existing Cloudflare Tunnel only
-for required HTTPS live journeys. Do not manually edit receiving upload rows
-or their deadlines.
+The branch is ready for scoped re-review and integration. `knowledge-local` is
+stopped with volumes/secrets preserved and ports 8000/38000 have no listeners;
+the existing tunnel remains untouched. Keep the stack stopped when no live test
+is running. Do not manually edit receiving upload rows or their deadlines.
