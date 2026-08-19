@@ -466,9 +466,7 @@ async def test_final_recheck_denies_a_policy_change_during_upload(
 async def test_matching_bound_revision_commits_despite_locator_only_rule(
     enforcement_harness: EnforcementHarness,
 ) -> None:
-    bound_revision = await enforcement_harness.publish_revision(
-        _rule(RuleKind.EXTENSION, ".tmp")
-    )
+    bound_revision = await enforcement_harness.publish_revision(_rule(RuleKind.EXTENSION, ".tmp"))
     command = enforcement_harness.build_create_command(PAYLOAD)
     binding = AllowedPolicyRevisionBinding(
         workspace_id=command.workspace_id,
@@ -499,9 +497,7 @@ async def test_changed_bound_revision_rechecks_and_rolls_back_locator_only_rule(
         workspace_id=enforcement_harness.workspace_id,
         policy_revision_number=bound_revision,
     )
-    active_revision = await enforcement_harness.publish_revision(
-        _rule(RuleKind.EXTENSION, ".tmp")
-    )
+    active_revision = await enforcement_harness.publish_revision(_rule(RuleKind.EXTENSION, ".tmp"))
     assert active_revision != bound_revision
     command = enforcement_harness.build_create_command(PAYLOAD)
     receipt = enforcement_harness.object_store._receipt(PAYLOAD, "text/markdown")

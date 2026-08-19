@@ -434,12 +434,8 @@ class SmallFileSyncService:
             content_version=reference.content_version,
             committed_at=reference.committed_at,
         )
-        await self.operation_store.record_terminal_result(
-            operation, terminal, diagnostic_context
-        )
-        self._record_preflight(
-            preflight.operation, SmallFilePreflightOutcome.NO_CHANGE, started_at
-        )
+        await self.operation_store.record_terminal_result(operation, terminal, diagnostic_context)
+        self._record_preflight(preflight.operation, SmallFilePreflightOutcome.NO_CHANGE, started_at)
         return SmallFilePreflightResult(
             outcome=SmallFilePreflightOutcome.NO_CHANGE, terminal_result=terminal
         )
@@ -473,9 +469,7 @@ class SmallFileSyncService:
             )
         except ObjectStorageError as error:
             if error.error_code in _RECEIVE_INTEGRITY_FAILURE_CODES:
-                raise SmallFileSyncError(
-                    ErrorCode.SMALL_FILE_CONTENT_INTEGRITY_FAILED
-                ) from error
+                raise SmallFileSyncError(ErrorCode.SMALL_FILE_CONTENT_INTEGRITY_FAILED) from error
             raise
         if (
             receipt.content_digest != bound.declared_sha256
@@ -489,9 +483,7 @@ class SmallFileSyncService:
             diagnostic_context=diagnostic_context,
         )
         terminal = terminal_result_from_publication(result)
-        await self.operation_store.record_bound_terminal_result(
-            bound, terminal, diagnostic_context
-        )
+        await self.operation_store.record_bound_terminal_result(bound, terminal, diagnostic_context)
         self.metrics.record_upload(
             operation=bound.operation,
             outcome=SmallFileMetricOutcome.COMMITTED,
@@ -521,9 +513,7 @@ class SmallFileSyncService:
             size_bytes=bound.declared_size_bytes,
             media_type=bound.declared_media_type,
         )
-        actor = SourceActor(
-            actor_kind=ActorKind.DEVICE, actor_id=device_context.device_id
-        )
+        actor = SourceActor(actor_kind=ActorKind.DEVICE, actor_id=device_context.device_id)
         idempotency_key = IdempotencyKey(bound.idempotency_key.value)
         policy_binding = AllowedPolicyRevisionBinding(
             workspace_id=bound.workspace_id,
@@ -593,9 +583,7 @@ class SmallFileSyncService:
             duration_seconds=self._elapsed_seconds_since(started_at),
         )
 
-    def _record_rejection(
-        self, operation: SmallFileOperation, error: SmallFileSyncError
-    ) -> None:
+    def _record_rejection(self, operation: SmallFileOperation, error: SmallFileSyncError) -> None:
         self.metrics.record_rejection(
             operation=operation,
             reason_code=SmallFileRejectionReason(error.error_code.value),

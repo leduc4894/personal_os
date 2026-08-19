@@ -565,9 +565,7 @@ async def test_bound_publication_returns_binding_without_evaluation_when_revisio
     """A matching signed revision preserves the preflight allow evidence."""
 
     service, snapshot_source, _, metrics = build_service(material=build_material(build_revision()))
-    binding = AllowedPolicyRevisionBinding(
-        workspace_id=WORKSPACE_ID, policy_revision_number=1
-    )
+    binding = AllowedPolicyRevisionBinding(workspace_id=WORKSPACE_ID, policy_revision_number=1)
 
     def evaluator_must_not_run(*args: object, **kwargs: object) -> object:
         raise AssertionError("the equal-revision path must not evaluate")
@@ -576,9 +574,7 @@ async def test_bound_publication_returns_binding_without_evaluation_when_revisio
         "personal_os.exclusion_policy.enforcement.evaluate_policy", evaluator_must_not_run
     )
 
-    evidence = await service.authorize_bound_publication(
-        build_create_command(), binding, context()
-    )
+    evidence = await service.authorize_bound_publication(build_create_command(), binding, context())
 
     assert evidence is binding
     assert snapshot_source.requested_workspaces == [WORKSPACE_ID]
@@ -599,9 +595,7 @@ async def test_bound_publication_evaluates_the_current_revision_when_revision_ch
         rules=(rule(RuleKind.MEDIA_TYPE, text_operand="application/pdf"),),
     )
     service, _, _, _ = build_service(material=build_material(current_revision))
-    binding = AllowedPolicyRevisionBinding(
-        workspace_id=WORKSPACE_ID, policy_revision_number=1
-    )
+    binding = AllowedPolicyRevisionBinding(workspace_id=WORKSPACE_ID, policy_revision_number=1)
 
     evidence = await service.authorize_bound_publication(
         build_create_command(media_type="text/markdown"), binding, context()
@@ -633,9 +627,7 @@ async def test_bound_publication_verifies_changed_revision_once() -> None:
         rules=(),
     )
     verifier = CountingTrustVerifier()
-    service, _, _, _ = build_service(
-        material=build_material(current_revision), verifier=verifier
-    )
+    service, _, _, _ = build_service(material=build_material(current_revision), verifier=verifier)
 
     evidence = await service.authorize_bound_publication(
         build_create_command(),

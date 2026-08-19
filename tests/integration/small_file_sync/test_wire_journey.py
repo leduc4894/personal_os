@@ -185,9 +185,7 @@ def test_stale_update_base_answers_conflict_without_a_reservation(
     harness = offline_harness
     body = plugin_update_body(source_id=str(uuid4()), base_version_id=str(uuid4()))
     # The current pointer names a DIFFERENT version than the declared base.
-    harness.sync_state.current_reference = _current_reference(
-        body, source_version_id=uuid4()
-    )
+    harness.sync_state.current_reference = _current_reference(body, source_version_id=uuid4())
 
     response = harness.preflight(body)
     assert response.status_code == 200, response.text
@@ -242,9 +240,7 @@ def test_create_then_update_journey_advances_the_committed_base(
     # The current pointer still names the create's version holding the
     # create's bytes; the declared bytes differ, so the update opens a
     # single-part upload.
-    harness.sync_state.current_reference = _current_reference(
-        update_body, digest=_CONTENT_DIGEST
-    )
+    harness.sync_state.current_reference = _current_reference(update_body, digest=_CONTENT_DIGEST)
     update_data = data_of(harness.preflight(update_body))
     assert update_data["outcome"] == "single_part_upload"
     assert set(update_data) == {"outcome", "operation_id", "expires_at"}

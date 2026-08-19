@@ -221,10 +221,13 @@ async def test_matching_binding_returns_verified_binding_without_evaluation(
     assert result is binding
     assert len(connection.executed_statements) == 2
     assert "FOR UPDATE" in str(connection.executed_statements[0])
-    assert metrics.evaluation_count(
-        PolicyBoundary.SOURCE_CREATE_UPDATE,
-        EvaluationMetricOutcome.ALLOWED,
-    ) == 1
+    assert (
+        metrics.evaluation_count(
+            PolicyBoundary.SOURCE_CREATE_UPDATE,
+            EvaluationMetricOutcome.ALLOWED,
+        )
+        == 1
+    )
 
 
 @pytest.mark.asyncio

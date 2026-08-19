@@ -192,9 +192,7 @@ def test_upgrade_creates_exactly_one_operation_table() -> None:
 def test_upgrade_column_set_is_the_closed_operation_record() -> None:
     recorder = _replay("upgrade")
     table = recorder.tables["small_file_upload_operations"]
-    column_names = {
-        argument.name for argument in table.args if isinstance(argument, sa.Column)
-    }
+    column_names = {argument.name for argument in table.args if isinstance(argument, sa.Column)}
     assert column_names == OPERATION_TABLE_COLUMNS
 
 

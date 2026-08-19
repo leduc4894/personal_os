@@ -296,9 +296,7 @@ def test_endpoint_vocabulary_scan_detects_a_violating_module_outside_sanction() 
     violating_source = 'const endpoint = "/api/source-version";\n'
     masked = _masked_sanctioned_policy_lines(violating_source)
     caught = [token for token in PUBLICATION_ENDPOINT_TOKENS if token in masked]
-    assert caught, (
-        "a source-publication endpoint outside the sanctioned surfaces must be detected"
-    )
+    assert caught, "a source-publication endpoint outside the sanctioned surfaces must be detected"
 
 
 def _rendered_endpoint_surface(parsed: object) -> str:

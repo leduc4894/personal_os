@@ -139,9 +139,7 @@ def _declared_fingerprint_row(
         "device_id": device_context.device_id,
         "event_id": preflight.event_id,
         "idempotency_key": preflight.idempotency_key.value,
-        "operation_kind": (
-            preflight.operation.value if operation_kind is None else operation_kind
-        ),
+        "operation_kind": (preflight.operation.value if operation_kind is None else operation_kind),
         "declared_sha256": (
             preflight.sha256.hexadecimal if declared_sha256 is None else declared_sha256
         ),
@@ -151,9 +149,7 @@ def _declared_fingerprint_row(
         "declared_media_type": (
             preflight.media_type.value if declared_media_type is None else declared_media_type
         ),
-        "update_source_id": (
-            preflight.source_id if update_source_id is None else update_source_id
-        ),
+        "update_source_id": (preflight.source_id if update_source_id is None else update_source_id),
         "update_base_version_id": (
             preflight.base_version_id if update_base_version_id is None else update_base_version_id
         ),
@@ -319,26 +315,45 @@ def test_bound_row_comparison_includes_policy_revision() -> None:
     device_context = _device_context()
     preflight = _preflight()
     row = SmallFileOperationRow(
-        operation_id=uuid4(), operation_token_hash="a" * 64,
-        workspace_id=device_context.workspace_id, device_id=device_context.device_id,
-        event_id=preflight.event_id, idempotency_key=preflight.idempotency_key.value,
-        operation_kind=preflight.operation.value, declared_sha256=preflight.sha256.hexadecimal,
-        declared_size_bytes=preflight.size_bytes, declared_media_type=preflight.media_type.value,
-        policy_revision_number=4, reserved_source_id=uuid4(), update_source_id=None,
-        update_base_version_id=None, state="pending", safe_error_code=None, result_kind=None,
-        result_source_id=None, result_source_version_id=None, result_content_version=None,
-        result_committed_at=None, expires_at=datetime.now(UTC),
+        operation_id=uuid4(),
+        operation_token_hash="a" * 64,
+        workspace_id=device_context.workspace_id,
+        device_id=device_context.device_id,
+        event_id=preflight.event_id,
+        idempotency_key=preflight.idempotency_key.value,
+        operation_kind=preflight.operation.value,
+        declared_sha256=preflight.sha256.hexadecimal,
+        declared_size_bytes=preflight.size_bytes,
+        declared_media_type=preflight.media_type.value,
+        policy_revision_number=4,
+        reserved_source_id=uuid4(),
+        update_source_id=None,
+        update_base_version_id=None,
+        state="pending",
+        safe_error_code=None,
+        result_kind=None,
+        result_source_id=None,
+        result_source_version_id=None,
+        result_content_version=None,
+        result_committed_at=None,
+        expires_at=datetime.now(UTC),
     )
     bound = SmallFileBoundOperation(
-        operation_token=UploadOperationToken("A" * 43), workspace_id=row.workspace_id,
-        device_id=row.device_id, event_id=row.event_id,
-        idempotency_key=preflight.idempotency_key, operation=preflight.operation,
-        declared_sha256=preflight.sha256, declared_size_bytes=preflight.size_bytes,
-        declared_media_type=preflight.media_type, policy_revision_number=5,
+        operation_token=UploadOperationToken("A" * 43),
+        workspace_id=row.workspace_id,
+        device_id=row.device_id,
+        event_id=row.event_id,
+        idempotency_key=preflight.idempotency_key,
+        operation=preflight.operation,
+        declared_sha256=preflight.sha256,
+        declared_size_bytes=preflight.size_bytes,
+        declared_media_type=preflight.media_type,
+        policy_revision_number=5,
         reserved_source_id=row.reserved_source_id,
         update_source_id=None,
         update_base_version_id=None,
-        expires_at=row.expires_at, terminal_result=None,
+        expires_at=row.expires_at,
+        terminal_result=None,
     )
 
     assert not _bound_matches_row(row, bound)
