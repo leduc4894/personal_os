@@ -2,16 +2,19 @@
 
 ## Final commit
 
-The final implementation HEAD is `d67d1d6`, following runtime-secret
-implementation commit `efe10a6` and documentation commit `6858ce2`. It closes
-the claimed-upload resume, live receiving-observer, and offline terminal-fence
-findings without a public wire/schema/fingerprint change. `efe10a6` followed
-runtime-secret
+The final implementation commit is `d67d1d6`. The final documentation/evidence
+commit and branch HEAD reviewed for this handoff snapshot is `8bbe12c`; it
+follows the prior runtime-context documentation commit `6858ce2`. Together,
+`d67d1d6` and `8bbe12c` close the claimed-upload resume, live
+receiving-observer, offline terminal-fence, plan-completion, and evidence
+findings without a public wire/schema/fingerprint change.
+
+The earlier runtime-secret implementation commit is `efe10a6`, following
 allowlist commits `104ff9a` and `27ac14e`. They follow final-review completion
 commits `23e1f9e`, `6e4e663`, `d1864a8`, and `cdbac3d`, and the original binding
-commits through `d6a4b73`. The final runtime-context follow-up closes the
-StackContext propagation and authentication key-ID collision findings without
-weakening the subprocess environment boundary.
+commits through `d6a4b73`. The runtime-context follow-up closes the
+`StackContext` propagation and authentication key-ID collision findings
+without weakening the subprocess environment boundary.
 
 ## Gate evidence
 
