@@ -272,11 +272,25 @@ _APPLICATION_SECRET_FILENAMES: Final = frozenset(
 )
 
 
+def _secret_relative_path_identity(value: str) -> str:
+    """Return filesystem identity without changing identifier semantics.
+
+    The configured grammar already admits only slash-separated ASCII paths.
+    Windows path comparison is case-insensitive, while POSIX keeps exact case;
+    authentication key IDs never pass through this function.
+    """
+
+    return value.casefold() if sys.platform == "win32" else value
+
+
 def _validate_application_secret_relative_path(value: str) -> str:
+    managed_path_identities = {
+        _secret_relative_path_identity(filename) for filename in _SECRET_FILENAMES
+    }
     if (
         len(value) > _MAXIMUM_APPLICATION_SECRET_FILE_NAME_LENGTH
         or _APPLICATION_SECRET_FILE_NAME_PATTERN.fullmatch(value) is None
-        or value in _SECRET_FILENAMES
+        or _secret_relative_path_identity(value) in managed_path_identities
     ):
         raise StackFailure(StackExitCode.CONTRACT, "application_secret_configuration_invalid")
     return value
@@ -318,7 +332,7 @@ def _parse_application_secret_references(
         if len(entries) > _MAXIMUM_PREVIOUS_AUTHENTICATION_KEY_COUNT:
             raise StackFailure(StackExitCode.CONTRACT, "application_secret_configuration_invalid")
         key_ids: set[str] = set()
-        previous_paths: set[str] = set()
+        previous_path_identities: set[str] = set()
         for entry in entries:
             key_id, separator, file_name = entry.partition("=")
             if not separator or "=" in file_name:
@@ -327,17 +341,36 @@ def _parse_application_secret_references(
                 )
             key_id = _validate_application_secret_key_id(key_id)
             relative_path = _validate_application_secret_relative_path(file_name)
-            if key_id in key_ids or relative_path in previous_paths:
+            relative_path_identity = _secret_relative_path_identity(relative_path)
+            if key_id in key_ids or relative_path_identity in previous_path_identities:
                 raise StackFailure(
                     StackExitCode.CONTRACT, "application_secret_configuration_invalid"
                 )
             key_ids.add(key_id)
-            previous_paths.add(relative_path)
+            previous_path_identities.add(relative_path_identity)
             parsed_previous_keys.append((key_id, relative_path))
         if current_authentication_key_id in key_ids:
             raise StackFailure(StackExitCode.CONTRACT, "application_secret_configuration_invalid")
-        if current_authentication_path in previous_paths:
+        if (
+            current_authentication_path is not None
+            and _secret_relative_path_identity(current_authentication_path)
+            in previous_path_identities
+        ):
             raise StackFailure(StackExitCode.CONTRACT, "application_secret_configuration_invalid")
+    authentication_path_identities = {
+        _secret_relative_path_identity(file_name)
+        for _key_id, file_name in parsed_previous_keys
+    }
+    if current_authentication_path is not None:
+        authentication_path_identities.add(
+            _secret_relative_path_identity(current_authentication_path)
+        )
+    if (
+        policy_signing_key_file is not None
+        and _secret_relative_path_identity(policy_signing_key_file)
+        in authentication_path_identities
+    ):
+        raise StackFailure(StackExitCode.CONTRACT, "application_secret_configuration_invalid")
     return _ApplicationSecretReferences(
         current_authentication_key_id=current_authentication_key_id,
         current_authentication_key_file=current_authentication_path,
@@ -615,8 +648,10 @@ def inspect_secret_set(
         application_secret_references=application_secret_references,
     )
     allowed_application_paths = _APPLICATION_SECRET_FILENAMES | references.relative_paths
-    allowed_directory_paths = {
-        "/".join(relative_path.split("/")[:segment_count])
+    allowed_directory_path_identities = {
+        _secret_relative_path_identity(
+            "/".join(relative_path.split("/")[:segment_count])
+        )
         for relative_path in allowed_application_paths
         for segment_count in range(1, len(relative_path.split("/")))
     }
@@ -632,7 +667,7 @@ def inspect_secret_set(
         return SecretSetState.MISSING
     _validate_private_directory(secret_directory, secret_stat)
 
-    found_relative_paths: set[str] = set()
+    found_relative_path_identities: set[str] = set()
     child_stats: list[tuple[Path, os.stat_result]] = []
 
     def inspect_directory(directory: Path, relative_parts: tuple[str, ...]) -> None:
@@ -648,19 +683,25 @@ def inspect_secret_set(
             if stat.S_ISDIR(child_stat.st_mode) and not stat.S_ISLNK(child_stat.st_mode):
                 _validate_private_directory(child, child_stat)
                 child_stats.append((child, child_stat))
-                if relative_path not in allowed_directory_paths:
-                    found_relative_paths.add(relative_path)
+                relative_path_identity = _secret_relative_path_identity(relative_path)
+                if relative_path_identity not in allowed_directory_path_identities:
+                    found_relative_path_identities.add(relative_path_identity)
                     continue
                 inspect_directory(child, (*relative_parts, child.name))
                 continue
             _validate_private_file(child, child_stat)
             child_stats.append((child, child_stat))
-            found_relative_paths.add(relative_path)
+            found_relative_path_identities.add(
+                _secret_relative_path_identity(relative_path)
+            )
 
     inspect_directory(secret_directory, ())
 
-    allowed_relative_paths = _SECRET_FILENAMES | allowed_application_paths
-    if not found_relative_paths <= allowed_relative_paths:
+    allowed_relative_path_identities = {
+        _secret_relative_path_identity(relative_path)
+        for relative_path in _SECRET_FILENAMES | allowed_application_paths
+    }
+    if not found_relative_path_identities <= allowed_relative_path_identities:
         return SecretSetState.PARTIAL
     _validate_private_directory(local_directory, local_stat, require_mode=True)
     _validate_private_directory(secret_directory, secret_stat, require_mode=True)
@@ -669,10 +710,15 @@ def inspect_secret_set(
             _validate_private_directory(child, child_stat, require_mode=True)
         else:
             _validate_private_file(child, child_stat, require_mode=True)
-    managed_filenames = found_relative_paths & _SECRET_FILENAMES
-    if not managed_filenames:
+    managed_path_identities = {
+        _secret_relative_path_identity(filename) for filename in _SECRET_FILENAMES
+    }
+    found_managed_path_identities = (
+        found_relative_path_identities & managed_path_identities
+    )
+    if not found_managed_path_identities:
         return SecretSetState.MISSING
-    if managed_filenames != _SECRET_FILENAMES:
+    if found_managed_path_identities != managed_path_identities:
         return SecretSetState.PARTIAL
     _validate_complete_secret_contents(secret_directory)
     return SecretSetState.COMPLETE

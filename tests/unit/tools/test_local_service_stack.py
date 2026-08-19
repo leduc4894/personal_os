@@ -478,6 +478,101 @@ def test_runtime_secret_allowlist_rejects_previous_file_collision_with_current(
     assert colliding_filename not in str(raised.value)
 
 
+def test_windows_secret_path_identity_rejects_case_variant_of_managed_file_before_lifecycle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Inspection/bootstrap/reset must never alias-delete an application secret."""
+
+    paths = resolve_stack_paths(tmp_path)
+    bootstrap_secret_set(paths, environment={})
+    managed_secret = paths.secret_directory / "postgres_admin_password"
+    original_bytes = managed_secret.read_bytes()
+    environment = {"KNOWLEDGE_AUTH_CURRENT_KEY_FILE": "POSTGRES_ADMIN_PASSWORD"}
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    for lifecycle_operation in (
+        inspect_secret_set,
+        bootstrap_secret_set,
+        remove_secret_set_after_reset,
+    ):
+        with pytest.raises(StackFailure) as raised:
+            lifecycle_operation(paths, environment=environment)
+        assert raised.value.exit_code is StackExitCode.CONTRACT
+        assert str(raised.value) == "application_secret_configuration_invalid"
+        assert managed_secret.read_bytes() == original_bytes
+
+
+def test_windows_secret_path_identity_rejects_current_previous_case_variant_collision(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    environment = {
+        "KNOWLEDGE_AUTH_CURRENT_KEY_ID": "auth-key-current",
+        "KNOWLEDGE_AUTH_CURRENT_KEY_FILE": "Authentication/Current.key",
+        "KNOWLEDGE_AUTH_PREVIOUS_KEYS": (
+            "auth-key-previous=authentication/current.KEY"
+        ),
+    }
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    with pytest.raises(StackFailure) as raised:
+        inspect_secret_set(paths, environment=environment)
+
+    assert raised.value.exit_code is StackExitCode.CONTRACT
+    assert str(raised.value) == "application_secret_configuration_invalid"
+
+
+def test_windows_secret_path_identity_does_not_casefold_authentication_key_ids(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    environment = {
+        "KNOWLEDGE_AUTH_CURRENT_KEY_ID": "Auth-Key-Current",
+        "KNOWLEDGE_AUTH_CURRENT_KEY_FILE": "authentication/current.key",
+        "KNOWLEDGE_AUTH_PREVIOUS_KEYS": (
+            "auth-key-current=authentication/previous.key"
+        ),
+    }
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    with pytest.raises(StackFailure) as raised:
+        inspect_secret_set(paths, environment=environment)
+
+    assert raised.value.exit_code is StackExitCode.CONTRACT
+    assert str(raised.value) == "application_secret_configuration_invalid"
+
+
+@pytest.mark.parametrize(
+    "authentication_environment",
+    [
+        {
+            "KNOWLEDGE_AUTH_CURRENT_KEY_ID": "auth-key-current",
+            "KNOWLEDGE_AUTH_CURRENT_KEY_FILE": "Keys/Shared.key",
+        },
+        {
+            "KNOWLEDGE_AUTH_PREVIOUS_KEYS": "auth-key-previous=Keys/Shared.key",
+        },
+    ],
+)
+def test_windows_secret_path_identity_rejects_policy_authentication_case_variant_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    authentication_environment: dict[str, str],
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    environment = {
+        **authentication_environment,
+        "KNOWLEDGE_POLICY_SIGNING_KEY_FILE": "keys/shared.KEY",
+    }
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    with pytest.raises(StackFailure) as raised:
+        inspect_secret_set(paths, environment=environment)
+
+    assert raised.value.exit_code is StackExitCode.CONTRACT
+    assert str(raised.value) == "application_secret_configuration_invalid"
+
+
 def test_remove_managed_secret_set_preserves_shared_application_secrets(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
