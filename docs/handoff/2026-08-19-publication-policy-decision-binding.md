@@ -6,10 +6,11 @@ The final implementation and canonical-documentation HEAD before this handoff
 snapshot is `c016abf`. Its final-blocker commits are `35f6538` (claimed-upload
 publication fence and deterministic receipt timestamps), `587053e` (versioned
 recovery-manifest compatibility), and `c016abf` (local-stack secret ownership).
-The documentation/evidence commit is the commit containing this handoff; use
-`git rev-parse HEAD` after checkout to identify it without a self-referential
-hash. These commits close all four final blockers without a public HTTP wire,
-database schema, request fingerprint, dependency, or telemetry-label change.
+The final documentation/evidence commit is `030f5f5`. The identity-only commit
+containing this sentence follows it and changes no implementation or gate
+evidence. These commits close all four final blockers without a public HTTP
+wire, database schema, request fingerprint, dependency, or telemetry-label
+change.
 
 The earlier runtime-secret implementation commit is `efe10a6`, following
 allowlist commits `104ff9a` and `27ac14e`. They follow final-review completion
