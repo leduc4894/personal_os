@@ -65,6 +65,12 @@ After a lost response, run `Sync now`; the exact token resumes, canonical
 publication idempotency replays, and the single terminal receipt is frozen.
 Operators do not edit operation rows or extend deadlines manually.
 
+The plugin still preflights every retry so a changed policy can settle the
+event before any content resumes. Only the claimed-state response may reuse the
+unchanged token persisted on that frozen event. Unknown, expired, missing, or
+concurrently replaced tokens remain on bounded retry and are never resumed as
+claimed work.
+
 ## Safe diagnostics
 
 The only diagnostic surfaces are the plugin status bar text and the

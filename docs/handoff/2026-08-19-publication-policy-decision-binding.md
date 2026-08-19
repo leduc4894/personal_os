@@ -2,7 +2,11 @@
 
 ## Final commit
 
-The latest implementation commit is `efe10a6`, following runtime-secret
+The final implementation HEAD is `d67d1d6`, following runtime-secret
+implementation commit `efe10a6` and documentation commit `6858ce2`. It closes
+the claimed-upload resume, live receiving-observer, and offline terminal-fence
+findings without a public wire/schema/fingerprint change. `efe10a6` followed
+runtime-secret
 allowlist commits `104ff9a` and `27ac14e`. They follow final-review completion
 commits `23e1f9e`, `6e4e663`, `d1864a8`, and `cdbac3d`, and the original binding
 commits through `d6a4b73`. The final runtime-context follow-up closes the
@@ -10,6 +14,78 @@ StackContext propagation and authentication key-ID collision findings without
 weakening the subprocess environment boundary.
 
 ## Gate evidence
+
+| Command | Exit | Result |
+| --- | ---: | --- |
+| Focused claimed-resume Vitest (RED) | 1 | durable event stayed `waiting_retry` |
+| Unknown-token resume Vitest (RED) | 1 | one forbidden content request observed |
+| Focused plugin Vitest (final) | 0 | 4 files, 75 passed |
+| `pnpm --filter @workspace/obsidian-plugin test` | 0 | 26 files, 374 passed |
+| Offline revision-drift pytest (RED) | 1 | expected identity mismatch was not raised |
+| `uv run pytest tests/unit/api_runtime/test_small_file_sync_composition.py -q` | 0 | 11 passed |
+| Small-file unit/adapter/integration selection | 0 | 158 passed |
+| Disposable PostgreSQL small-file operation integration | 0 | 17 passed |
+| Real WDIO receiving assertion (RED) | 1 | operation existed but was not yet observed receiving |
+| Real WDIO receiving-race journey (GREEN) | 0 | 1 passed in 1m26s |
+| Later final-build real WDIO reruns | 1 | allowed upload HTTP 500 after successful R2 resolve; race not reached |
+| `pnpm --recursive run lint` | 0 | all workspace projects passed |
+| `pnpm --recursive run type-check` | 0 | strict TypeScript passed |
+| `pnpm --recursive run build` | 0 | API client, plugin, and Web passed |
+| `uv run poe exclusion-policy-test` | 1 | 1,497 passed; 3 prerequisite-only errors from PostgreSQL clients absent on PATH |
+| Pinned PostgreSQL 18.4 backup/restore rerun | 0 | exact 3 cases passed |
+| `uv run poe canonical-core-test` | 0 | 989 passed, 11 skipped |
+| Initial `uv run poe verify` | 1 | cross-language gate rejected widened internal failure vocabulary |
+| Final `uv run poe verify` | 0 | all format/lint/type/boundary/test/build gates passed |
+| OpenAPI/generated-client and migration/table diffs | 0 | empty against `2035e3a` |
+| `git diff --check` | 0 | clean |
+
+- Claimed-resume RED: the durable journey's second pass remained
+  `waiting_retry` after the server had claimed the first content request. GREEN:
+  the next pass re-preflights, recognizes only the claimed-state retry response,
+  reuses the unchanged persisted token, performs two content attempts total,
+  and records one publication/digest/terminal receipt. A supplemental RED
+  proved that collapsing unknown and claimed operation failures would resume an
+  unknown token; GREEN keeps the shared `operation_retry_required` contract but
+  marks only claimed state as internally resumable. Token drift and policy
+  exclusion never resume content.
+- Offline-fence RED: revision drift terminalized instead of raising. GREEN: the
+  offline store compares workspace, device, event, idempotency, operation,
+  digest, size, media type, reserved/update source geometry, update base, and
+  policy revision before the terminal transition; the focused file passed 11
+  tests.
+- Live-observer RED: a real WDIO run failed the tightened assertion because the
+  observer returned when the fixture operation merely existed. GREEN: its
+  digest-scoped read-only query waited for exactly one `receiving` row with no
+  result before publishing the denying revision. The real journey then passed
+  (1 spec, 1m26s): allowed evidence was exactly one joined publication; the
+  race evidence was zero canonical publication/commit, one receiving operation,
+  and recovery to `excluded_policy` after reload.
+- Later live reruns did not supersede that positive race evidence: three
+  attempts failed earlier on the allowed fixture with sanitized HTTP 500 after
+  successful R2 resolve, leaving the durable event nonterminal. The observer
+  race was not reached. No secret, content, digest, locator, token, or identifier
+  was printed; the live-runtime concern is indexed below.
+- Focused plugin selection: 4 files and 75 tests passed. Complete plugin suite:
+  26 files and 374 tests passed; ESLint, strict TypeScript, and production build
+  passed. The cross-language wire corpus passed without widening its failure
+  vocabulary.
+- Offline/API focused unit file: 11 passed. Small-file unit/adapter/integration
+  regression: 158 passed. Real disposable PostgreSQL small-file operation
+  integration: 17 passed after one transient host/container timestamp-skew
+  setup attempt; no operation test had run in the failed setup.
+- `uv run poe exclusion-policy-test` ran 1,497 passing cases, 2 skips, and 1
+  deselection; its only three setup errors were the installed PostgreSQL 18.4
+  clients missing from that shell's PATH. After prepending the pinned client
+  directory and verifying both versions as 18.4, the exact three mandatory
+  backup/restore cases passed. Aggregate: 1,500 passed, 2 skipped, 1 deselected.
+- `uv run poe canonical-core-test`: 989 passed, 11 skipped.
+- Fresh `uv run poe verify`: exit 0 after 3,026 Python tests passed, 21 skipped,
+  324 deselected; all workspace JavaScript tests passed (plugin 374, Web 139,
+  API client 1), plus format, lint, strict typing, import boundaries, API
+  artifacts, Python packages, plugin, client, and Web production builds.
+- OpenAPI/generated-client and canonical migration/table diffs against
+  `2035e3a` were empty. Final `git diff --check` passed; the operator stack was
+  stopped with volumes preserved and the existing tunnel was untouched.
 
 - Claim/expiry RED: the new unit and deterministic PostgreSQL tests both
   failed because same-identity preflight reclaimed an expired `receiving` row.
@@ -131,9 +207,13 @@ subprocesses derive cwd from the E2E spec module URL rather than a machine path.
 
 ## Deferred items and verdicts
 
-All final-review findings are complete; this wave adds no deferred item. The
-pre-existing signing-key verifier-chain item remains indexed in
-`docs/handoff/BACKLOG.md` and was not expanded by this work.
+All claimed-upload implementation findings are complete. Repeated later live
+runs exposed a separate allowed-fixture HTTP 500 after successful R2 resolve;
+because the successful receiving-race run and all deterministic gates predate
+and survive it, this is a non-blocking live-runtime investigation rather
+than an unverified implementation claim. It is indexed once in
+`docs/handoff/BACKLOG.md`. The pre-existing signing-key verifier-chain item
+remains indexed and was not expanded by this work.
 
 ## Canonical documentation links
 
@@ -145,7 +225,9 @@ pre-existing signing-key verifier-chain item remains indexed in
 
 ## Next actions
 
-The branch is ready for scoped re-review and integration. `knowledge-local` is
+The branch is ready for scoped re-review and integration. Investigate the
+sanitized post-R2-resolve live 500 separately without weakening durable retry
+or fixture scoping. `knowledge-local` is
 stopped with volumes/secrets preserved and ports 8000/38000 have no listeners;
 the existing tunnel remains untouched. Keep the stack stopped when no live test
 is running. Do not manually edit receiving upload rows or their deadlines.

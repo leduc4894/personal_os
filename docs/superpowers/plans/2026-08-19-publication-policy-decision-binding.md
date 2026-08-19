@@ -142,11 +142,11 @@ class SmallFilePolicyGuard(Protocol):
         raise NotImplementedError
 ```
 
-- [ ] Add `test_allowed_policy_revision_binding_rejects_nil_workspace_and_non_positive_revision`
+- [x] Add `test_allowed_policy_revision_binding_rejects_nil_workspace_and_non_positive_revision`
   to `tests/unit/exclusion_policy/test_enforcement.py`. Construct one valid value,
   then assert `UUID(int=0)`, revision `0`, and revision `-1` raise `ValueError`.
 
-- [ ] Add `test_locator_guard_returns_the_server_verified_revision_not_the_plugin_claim`
+- [x] Add `test_locator_guard_returns_the_server_verified_revision_not_the_plugin_claim`
   to `tests/unit/api_runtime/test_small_file_sync_composition.py`. Use a preflight
   whose `policy_revision_number` differs from the signed active snapshot, call
   `PolicyEnforcementSmallFileGuard.authorize_small_file`, and assert:
@@ -159,19 +159,19 @@ class SmallFilePolicyGuard(Protocol):
   assert binding.policy_revision_number != preflight.policy_revision_number
   ```
 
-- [ ] Run the two new tests and confirm they fail because the value does not exist
+- [x] Run the two new tests and confirm they fail because the value does not exist
   and the current guard returns `None`:
 
   ```powershell
   uv run pytest tests/unit/exclusion_policy/test_enforcement.py tests/unit/api_runtime/test_small_file_sync_composition.py -q
   ```
 
-- [ ] Implement `AllowedPolicyRevisionBinding` beside `PolicyDecision` and export
+- [x] Implement `AllowedPolicyRevisionBinding` beside `PolicyDecision` and export
   both it and `PublicationPolicyEvidence` from
   `personal_os.exclusion_policy.__init__`. The value must contain exactly the two
   fields shown above.
 
-- [ ] Change `PolicyEnforcementSmallFileGuard.authorize_small_file` to convert only
+- [x] Change `PolicyEnforcementSmallFileGuard.authorize_small_file` to convert only
   the successful server decision:
 
   ```python
@@ -186,13 +186,13 @@ class SmallFilePolicyGuard(Protocol):
   )
   ```
 
-- [ ] Update the protocol docstring and all guard test doubles to return a valid
+- [x] Update the protocol docstring and all guard test doubles to return a valid
   binding. Give `OfflineSmallFileSyncState` an internal
   `active_policy_revision_number: int = 1`; the offline guard returns that
   server-owned state value and never copies `preflight.policy_revision_number`.
   Keep its existing denial knob behavior unchanged.
 
-- [ ] Run the focused tests and then the complete affected unit suites:
+- [x] Run the focused tests and then the complete affected unit suites:
 
   ```powershell
   uv run pytest tests/unit/exclusion_policy tests/unit/api_runtime/test_small_file_sync_composition.py tests/unit/small_file_sync -q
@@ -200,7 +200,7 @@ class SmallFilePolicyGuard(Protocol):
   uv run ruff check src/personal_os/exclusion_policy src/personal_os/small_file_sync apps/api/src/api_runtime/small_file_sync_composition.py tests/unit/exclusion_policy tests/unit/api_runtime/test_small_file_sync_composition.py tests/unit/small_file_sync
   ```
 
-- [ ] Commit:
+- [x] Commit:
 
   ```powershell
   git add src/personal_os/exclusion_policy/enforcement.py src/personal_os/exclusion_policy/__init__.py src/personal_os/small_file_sync/ports.py apps/api/src/api_runtime/small_file_sync_composition.py tests/unit/exclusion_policy/test_enforcement.py tests/unit/api_runtime/test_small_file_sync_composition.py tests/unit/small_file_sync/fakes.py
@@ -240,12 +240,12 @@ The SQL builders receive the primitive `policy_revision_number: int`; the port
 and adapter boundary receives the typed binding and validates its workspace
 before opening a transaction.
 
-- [ ] In `tests/unit/small_file_sync/test_service.py`, add
+- [x] In `tests/unit/small_file_sync/test_service.py`, add
   `test_preflight_reserves_with_the_guard_binding_not_the_plugin_revision`.
   Configure the fake guard to return revision `7`, send plugin revision `2`, and
   assert the fake operation store recorded revision `7`.
 
-- [ ] In `tests/unit/postgresql_source_store/test_small_file_sync_operations.py`,
+- [x] In `tests/unit/postgresql_source_store/test_small_file_sync_operations.py`,
   add three focused tests:
 
   - `test_insert_binds_the_server_policy_revision`
@@ -256,24 +256,24 @@ before opening a transaction.
   passed server revision. Assert `operation_fingerprint_matches` still returns
   true when only the client claim differs.
 
-- [ ] In `tests/integration/source_publication/test_small_file_operations.py`, add
+- [x] In `tests/integration/source_publication/test_small_file_operations.py`, add
   `test_successful_repreflight_rotates_token_and_rebinds_server_revision`.
   Reserve once with binding revision `4`, reserve the same pending identity
   again with binding revision `5` before expiry, and assert one row, a new token,
   unchanged reserved source ID, and row revision `5`.
 
-- [ ] Add `test_reservation_rejects_a_foreign_workspace_binding_before_sql` to the
+- [x] Add `test_reservation_rejects_a_foreign_workspace_binding_before_sql` to the
   adapter unit suite. Instrument the fake engine/connection and assert it was not
   entered when binding and credential-derived workspaces differ.
 
-- [ ] Run the focused unit tests and confirm failures identify the old signature,
+- [x] Run the focused unit tests and confirm failures identify the old signature,
   plugin-owned insert value, rotation omission, and row-comparison omission:
 
   ```powershell
   uv run pytest tests/unit/small_file_sync/test_service.py tests/unit/postgresql_source_store/test_small_file_sync_operations.py -q
   ```
 
-- [ ] Capture the returned binding once in `_preflight_once` and pass it by keyword
+- [x] Capture the returned binding once in `_preflight_once` and pass it by keyword
   to reservation after replay/base/no-change checks:
 
   ```python
@@ -290,7 +290,7 @@ before opening a transaction.
   )
   ```
 
-- [ ] Change every store implementation and fake to the new signature. Validate:
+- [x] Change every store implementation and fake to the new signature. Validate:
 
   ```python
   if policy_binding.workspace_id != device_context.workspace_id:
@@ -301,7 +301,7 @@ before opening a transaction.
   `resolve_bound_operation` never reconstructs authority from the preflight
   request.
 
-- [ ] Extend the PostgreSQL insert and rotation statements so both paths use the
+- [x] Extend the PostgreSQL insert and rotation statements so both paths use the
   server revision:
 
   ```python
@@ -314,13 +314,13 @@ before opening a transaction.
   rotating token, revision, or expiry. Do not add policy revision to
   `operation_fingerprint_matches`.
 
-- [ ] Extend `_bound_matches_row` with:
+- [x] Extend `_bound_matches_row` with:
 
   ```python
   and int(row.policy_revision_number) == bound.policy_revision_number
   ```
 
-- [ ] Update all existing reserve call sites with a test/server binding helper,
+- [x] Update all existing reserve call sites with a test/server binding helper,
   then run the unit and disposable-PostgreSQL gates:
 
   ```powershell
@@ -329,7 +329,7 @@ before opening a transaction.
   uv run mypy src/personal_os/small_file_sync packages/postgresql-source-store/src/postgresql_source_store/small_file_sync_operations.py apps/api/src/api_runtime/small_file_sync_composition.py
   ```
 
-- [ ] Commit:
+- [x] Commit:
 
   ```powershell
   git add src/personal_os/small_file_sync/ports.py src/personal_os/small_file_sync/service.py packages/postgresql-source-store/src/postgresql_source_store/small_file_sync_operations.py apps/api/src/api_runtime/small_file_sync_composition.py tests/unit/small_file_sync/fakes.py tests/unit/small_file_sync/test_service.py tests/unit/postgresql_source_store/test_small_file_sync_operations.py tests/integration/source_publication/test_small_file_operations.py
@@ -357,7 +357,7 @@ async def authorize_bound_publication(
     raise NotImplementedError
 ```
 
-- [ ] Add these tests to `tests/unit/exclusion_policy/test_enforcement.py`:
+- [x] Add these tests to `tests/unit/exclusion_policy/test_enforcement.py`:
 
   - `test_bound_publication_returns_binding_without_evaluation_when_revision_matches`
   - `test_bound_publication_evaluates_the_current_revision_when_revision_changed`
@@ -372,18 +372,18 @@ async def authorize_bound_publication(
   assert the returned current `PolicyDecision` allows publication; revision
   mismatch by itself is not an unconditional denial.
 
-- [ ] Run the new tests and confirm failure because the method does not exist:
+- [x] Run the new tests and confirm failure because the method does not exist:
 
   ```powershell
   uv run pytest tests/unit/exclusion_policy/test_enforcement.py -q
   ```
 
-- [ ] Extract the existing create/update publication-subject construction into a
+- [x] Extract the existing create/update publication-subject construction into a
   private async method used by both authorization paths. Do not change
   `authorize_publication`: it still loads the current snapshot and evaluates it
   unconditionally.
 
-- [ ] Implement the bound method in this order: workspace check, one active
+- [x] Implement the bound method in this order: workspace check, one active
   snapshot load, signed-material verification, revision comparison, then either
   binding return or current evaluation. Its core branch must have this shape:
 
@@ -419,12 +419,12 @@ async def authorize_bound_publication(
   Adapt the duration expression to the existing metrics clock contract; do not
   introduce revision, workspace, locator, or rule identifiers as labels.
 
-- [ ] Map foreign-workspace binding to an existing closed internal invariant
+- [x] Map foreign-workspace binding to an existing closed internal invariant
   error. The small-file gateway will normally reject it earlier; this method is
   a defense-in-depth boundary and must never silently substitute the command
   workspace.
 
-- [ ] Run the full exclusion-policy and source-publication unit suites:
+- [x] Run the full exclusion-policy and source-publication unit suites:
 
   ```powershell
   uv run pytest tests/unit/exclusion_policy tests/unit/sources -q
@@ -432,7 +432,7 @@ async def authorize_bound_publication(
   uv run ruff check src/personal_os/exclusion_policy tests/unit/exclusion_policy
   ```
 
-- [ ] Commit:
+- [x] Commit:
 
   ```powershell
   git add src/personal_os/exclusion_policy/enforcement.py tests/unit/exclusion_policy/test_enforcement.py
@@ -484,12 +484,12 @@ async def authorize_locked_publication_policy(
     raise NotImplementedError
 ```
 
-- [ ] Add a source-service unit test
+- [x] Add a source-service unit test
   `test_bound_policy_evidence_flows_to_the_commit_unchanged`. Configure the fake
   guard to return `AllowedPolicyRevisionBinding`, publish, and assert the fake
   store received the identical object.
 
-- [ ] Add locked-helper/store unit tests proving:
+- [x] Add locked-helper/store unit tests proving:
 
   - matching binding + verified locked revision returns the binding and never
     invokes `evaluate_policy`;
@@ -498,7 +498,7 @@ async def authorize_locked_publication_policy(
   - foreign-workspace binding fails before source mutation;
   - no active snapshot, invalid signature, and connection failure fail closed.
 
-- [ ] Add two real-PostgreSQL tests to
+- [x] Add two real-PostgreSQL tests to
   `tests/integration/exclusion_policy/test_source_publication_enforcement.py`:
 
   - `test_matching_bound_revision_commits_despite_locator_only_rule`
@@ -510,19 +510,19 @@ async def authorize_locked_publication_policy(
   binding and proves `exclusion_policy_indeterminate` plus zero source/version
   mutation. Keep the existing ordinary-decision policy-change test unchanged.
 
-- [ ] Run the new unit tests and confirm they fail on the current
+- [x] Run the new unit tests and confirm they fail on the current
   `PolicyDecision`-only types and unconditional evaluator:
 
   ```powershell
   uv run pytest tests/unit/sources/test_publication_service.py tests/unit/postgresql_source_store/test_policy_enforcement.py tests/unit/postgresql_source_store/test_publication_store.py -q
   ```
 
-- [ ] Widen the source ports, publication-service local evidence type, store
+- [x] Widen the source ports, publication-service local evidence type, store
   signatures, and fakes to `PublicationPolicyEvidence`. Do not change the
   publication service's ordering: policy guard, committed lookup, object
   resolution/store, commit.
 
-- [ ] Implement `authorize_locked_publication_policy` by reusing
+- [x] Implement `authorize_locked_publication_policy` by reusing
   `load_locked_active_policy_snapshot` and `parse_verified_policy_revision`.
   The decision table must be explicit:
 
@@ -568,13 +568,13 @@ async def authorize_locked_publication_policy(
   signatures. A `None` evidence value and ordinary `PolicyDecision` both follow
   the unconditional evaluation branch.
 
-- [ ] Replace the publication store's inline unconditional policy block with the
+- [x] Replace the publication store's inline unconditional policy block with the
   helper only after idempotency locks, workspace/actor checks, and locked replay
   resolution. Keep `workspace_policy_state FOR UPDATE` in the existing global
   lock order and build the authoritative subject from command plus verified
   receipt before calling the helper.
 
-- [ ] Run all affected unit and integration suites:
+- [x] Run all affected unit and integration suites:
 
   ```powershell
   uv run pytest tests/unit/sources tests/unit/postgresql_source_store/test_policy_enforcement.py tests/unit/postgresql_source_store/test_publication_store.py -q
@@ -582,7 +582,7 @@ async def authorize_locked_publication_policy(
   uv run mypy src/personal_os/sources packages/postgresql-source-store/src/postgresql_source_store
   ```
 
-- [ ] Commit:
+- [x] Commit:
 
   ```powershell
   git add src/personal_os/sources/ports.py src/personal_os/sources/publication.py packages/postgresql-source-store/src/postgresql_source_store/policy_enforcement.py packages/postgresql-source-store/src/postgresql_source_store/publication_store.py apps/api/src/api_runtime/small_file_sync_composition.py tests/unit/sources/fakes.py tests/unit/sources/test_publication_service.py tests/unit/postgresql_source_store/test_policy_enforcement.py tests/unit/postgresql_source_store/test_publication_store.py tests/integration/exclusion_policy/test_source_publication_enforcement.py
@@ -638,7 +638,7 @@ class BoundPolicySmallFilePublicationGateway:
     enforcement: PolicyEnforcementService
 ```
 
-- [ ] Replace the fake concrete publication service with a fake
+- [x] Replace the fake concrete publication service with a fake
   `SmallFilePublicationGateway` and add service tests:
 
   - `test_receive_reconstructs_binding_only_from_the_bound_operation`
@@ -650,7 +650,7 @@ class BoundPolicySmallFilePublicationGateway:
   reverse order, and assert each call retained its own revision and produced one
   terminal result.
 
-- [ ] Add composition tests:
+- [x] Add composition tests:
 
   - `test_serve_composition_binds_the_bound_policy_publication_gateway`
   - `test_gateway_builds_a_fresh_immutable_guard_for_each_invocation`
@@ -659,14 +659,14 @@ class BoundPolicySmallFilePublicationGateway:
   Inspect the service graph without relying on private mutable state. Prove two
   simultaneous calls reach the enforcement fake with their respective bindings.
 
-- [ ] Run the focused tests and confirm they fail because
+- [x] Run the focused tests and confirm they fail because
   `SmallFileSyncService` still owns a concrete `SourceVersionPublicationService`:
 
   ```powershell
   uv run pytest tests/unit/small_file_sync/test_service.py tests/unit/api_runtime/test_small_file_sync_composition.py -q
   ```
 
-- [ ] Add `SmallFilePublicationGateway` to `small_file_sync.ports`. Change the
+- [x] Add `SmallFilePublicationGateway` to `small_file_sync.ports`. Change the
   service field from `publication_service` to `publication_gateway`. In
   `_publish`, reconstruct the immutable binding only from the resolved row:
 
@@ -684,7 +684,7 @@ class BoundPolicySmallFilePublicationGateway:
   Pass the binding by keyword to the gateway create/update method. Do not read
   the receive request, plugin revision, or preflight object for authorization.
 
-- [ ] Add a private frozen invocation guard in the composition root:
+- [x] Add a private frozen invocation guard in the composition root:
 
   ```python
   @dataclass(frozen=True, slots=True)
@@ -704,7 +704,7 @@ class BoundPolicySmallFilePublicationGateway:
           )
   ```
 
-- [ ] Implement each gateway method by validating workspace equality, creating a
+- [x] Implement each gateway method by validating workspace equality, creating a
   fresh `_BoundPolicyPublicationGuard`, creating a fresh lightweight
   `SourceVersionPublicationService` over the shared adapters, and immediately
   invoking its matching publish method. There must be no setter and no stored
@@ -728,14 +728,14 @@ class BoundPolicySmallFilePublicationGateway:
   )
   ```
 
-- [ ] Update real, offline, and policy-test compositions to inject a gateway.
+- [x] Update real, offline, and policy-test compositions to inject a gateway.
   The offline gateway may use a deterministic allowing publication guard, but it
   must still accept and forward the invocation's binding and must not derive it
   from the plugin request. Export `BoundPolicySmallFilePublicationGateway` from
   the composition module for the integration harness; keep the invocation guard
   private.
 
-- [ ] Run focused suites plus boundary and strict-type checks:
+- [x] Run focused suites plus boundary and strict-type checks:
 
   ```powershell
   uv run pytest tests/unit/small_file_sync tests/unit/api_runtime/test_small_file_sync_composition.py tests/unit/sources -q
@@ -744,7 +744,7 @@ class BoundPolicySmallFilePublicationGateway:
   uv run ruff check src/personal_os/small_file_sync apps/api/src/api_runtime/small_file_sync_composition.py tests/unit/small_file_sync tests/unit/api_runtime/test_small_file_sync_composition.py
   ```
 
-- [ ] Commit:
+- [x] Commit:
 
   ```powershell
   git add src/personal_os/small_file_sync/ports.py src/personal_os/small_file_sync/service.py apps/api/src/api_runtime/small_file_sync_composition.py tests/unit/small_file_sync/fakes.py tests/unit/small_file_sync/test_service.py tests/unit/api_runtime/test_small_file_sync_composition.py tests/integration/small_file_sync/conftest.py
@@ -786,43 +786,43 @@ add test-only branches to production services.
 6. Exact replay, no-change, size mismatch, media mismatch, expired token, revoked
    device, and ordinary source-publication behavior remain unchanged.
 
-- [ ] First update `policy_wire_harness` to mirror production exactly: real
+- [x] First update `policy_wire_harness` to mirror production exactly: real
   `PolicyEnforcementSmallFileGuard`, real
   `BoundPolicySmallFilePublicationGateway`, mutable signed snapshot source, and
   an in-memory publication-store double that consumes
   `PublicationPolicyEvidence` with the same matching-binding/changed-revision
   decision table. Do not make the harness a shortcut around either guard.
 
-- [ ] Add `excluding_extension_rule(extension: str)` beside the existing folder
+- [x] Add `excluding_extension_rule(extension: str)` beside the existing folder
   and size helpers. Construct it through
   `normalize_rule(uuid4(), RuleKind.EXTENSION, text_operand=extension)` so the
   acceptance test exercises the canonical normalization contract.
 
-- [ ] Replace the current locator-rule regression with
+- [x] Replace the current locator-rule regression with
   `test_matching_preflight_revision_publishes_locator_allowed_markdown_once`.
   Publish a `.tmp` exclusion rule, send a `.md` path, assert upload `200`, one
   publication commit, one source ID, and exact replay without a second commit.
 
-- [ ] Keep and tighten
+- [x] Keep and tighten
   `test_locator_rule_published_during_the_upload_fails_closed_at_publication`:
   assert changed revision, `exclusion_policy_indeterminate`, zero publication,
   and same-identity next preflight `excluded`.
 
-- [ ] Add the plugin-claim disagreement assertion at the PostgreSQL operation
+- [x] Add the plugin-claim disagreement assertion at the PostgreSQL operation
   integration boundary, not only in a fake: query
   `small_file_upload_operations.policy_revision_number` and prove it equals the
   server binding.
 
-- [ ] Add a deterministic concurrent wire/service test with barriers around the
+- [x] Add a deterministic concurrent wire/service test with barriers around the
   active-snapshot load or commit seam. Assert each receive uses its own immutable
   binding and that scheduling order does not change the result.
 
-- [ ] Add outer and locked policy-source failure tests. Use one load failure and
+- [x] Add outer and locked policy-source failure tests. Use one load failure and
   one invalid signature/database error representative; assert existing error
   codes, `Cache-Control: no-store` at HTTP, and zero canonical source/version
   rows. Do not assert raw driver/signature text.
 
-- [ ] Run the focused Python acceptance suites:
+- [x] Run the focused Python acceptance suites:
 
   ```powershell
   uv run pytest tests/unit/small_file_sync tests/unit/exclusion_policy tests/unit/sources tests/unit/postgresql_source_store -q
@@ -830,14 +830,14 @@ add test-only branches to production services.
   uv run pytest tests/integration/source_publication/test_small_file_operations.py tests/integration/exclusion_policy/test_source_publication_enforcement.py -m local_stack -q
   ```
 
-- [ ] Run the real plugin unit journey. Change the TypeScript test only if it
+- [x] Run the real plugin unit journey. Change the TypeScript test only if it
   does not already assert one upload followed by a committed journal state:
 
   ```powershell
   pnpm --filter @workspace/obsidian-plugin exec vitest run src/journal/journal-sync-journey.test.ts
   ```
 
-- [ ] Run the real Obsidian device-login/sync journey in its isolated WebdriverIO
+- [x] Run the real Obsidian device-login/sync journey in its isolated WebdriverIO
   environment. If the environment lacks the Obsidian binary/display prerequisite,
   record the exact external prerequisite in the handoff; do not replace this gate
   with a mock:
@@ -846,7 +846,7 @@ add test-only branches to production services.
   pnpm --filter @workspace/obsidian-plugin exec wdio run ./wdio.conf.mts --spec ./test/specs/device-login-sync.e2e.ts
   ```
 
-- [ ] Prove public artifacts and schema stayed unchanged:
+- [x] Prove public artifacts and schema stayed unchanged:
 
   ```powershell
   uv run poe api-contract-check
@@ -855,7 +855,7 @@ add test-only branches to production services.
   git diff --exit-code 2035e3a..HEAD -- packages/postgresql-source-store/migrations/versions/20260818_01_add_small_file_sync_operations.py packages/postgresql-source-store/src/postgresql_source_store/tables.py
   ```
 
-- [ ] Run the repo regression gates and read every result before marking this task
+- [x] Run the repo regression gates and read every result before marking this task
   complete:
 
   ```powershell
@@ -864,7 +864,7 @@ add test-only branches to production services.
   uv run poe verify
   ```
 
-- [ ] Commit acceptance-test changes only after every available gate passes:
+- [x] Commit acceptance-test changes only after every available gate passes:
 
   ```powershell
   git add tests/integration/small_file_sync/conftest.py tests/integration/small_file_sync/test_policy_and_device_boundaries.py tests/integration/source_publication/test_small_file_operations.py tests/integration/exclusion_policy/test_source_publication_enforcement.py apps/obsidian-plugin/src/journal/journal-sync-journey.test.ts apps/obsidian-plugin/test/specs/device-login-sync.e2e.ts
@@ -884,16 +884,16 @@ add test-only branches to production services.
 **Interfaces:** No code interface changes. This task updates the living operator
 contract, the deferred-work index, and the single required handoff snapshot.
 
-- [ ] Update the runbook's policy flow to state that preflight persists the
+- [x] Update the runbook's policy flow to state that preflight persists the
   server-returned allowed revision, same-revision publication reuses that
   invariant after verifying the signed active snapshot, and changed revisions
   re-evaluate fail-closed. Keep the next-preflight self-healing procedure.
 
-- [ ] Remove exactly the publication locator-gap line from
+- [x] Remove exactly the publication locator-gap line from
   `docs/handoff/BACKLOG.md`. Preserve the separate verifier-chain/signing-key
   rotation item and every unrelated deferred item.
 
-- [ ] Create exactly one handoff snapshot with these sections:
+- [x] Create exactly one handoff snapshot with these sections:
 
   ```markdown
   # Publication Policy Decision Binding Handoff
@@ -911,7 +911,7 @@ contract, the deferred-work index, and the single required handoff snapshot.
   decisions; any unavailable physical/E2E prerequisite; and links to the living
   spec/runbook. Keep it below roughly 400 lines.
 
-- [ ] Verify documentation references, naming, sensitive-token absence, and the
+- [x] Verify documentation references, naming, sensitive-token absence, and the
   one-handoff rule:
 
   ```powershell
@@ -923,7 +923,7 @@ contract, the deferred-work index, and the single required handoff snapshot.
   git diff --check
   ```
 
-- [ ] Inspect the complete implementation diff and confirm no public schema,
+- [x] Inspect the complete implementation diff and confirm no public schema,
   migration, dependency, architecture, or unrelated user file changed:
 
   ```powershell
@@ -932,14 +932,14 @@ contract, the deferred-work index, and the single required handoff snapshot.
   git status --short
   ```
 
-- [ ] Commit the documentation and handoff:
+- [x] Commit the documentation and handoff:
 
   ```powershell
   git add docs/operations/plugin-journal-small-file-sync.md docs/handoff/BACKLOG.md docs/handoff/2026-08-19-publication-policy-decision-binding.md
   git commit -m "docs: hand off publication policy binding"
   ```
 
-- [ ] Re-run `git status --short` and require an empty worktree before branch
+- [x] Re-run `git status --short` and require an empty worktree before branch
   integration or cleanup.
 
 ## Final-review completion addendum
@@ -968,6 +968,22 @@ wire, schema, fingerprint, or invocation-local binding architecture:
   and final status inspection. Record fresh evidence in the existing single
   handoff; do not create another handoff.
 
+## Claimed-upload resume final-review addendum
+
+- [x] Observe the interrupted-after-claim behavior fail with a durable
+  `waiting_retry` event, then prove the next pass resumes exactly the unchanged
+  persisted token and produces one terminal publication.
+- [x] Prove that an unknown operation, a token replaced during preflight, and a
+  successful policy-change exclusion cannot enter claimed-token resume.
+- [x] Make the live database observer wait for the fixture-scoped
+  `receiving`/unpublished row before publishing the policy-race revision, while
+  emitting sanitized counts only.
+- [x] Reject offline terminalization when any bound field differs, including
+  the allowed policy revision, matching the PostgreSQL fence.
+- [x] Run focused and regression unit/integration/contract/static/build gates,
+  the real WDIO journey, artifact/schema diffs, and final diff checks; record
+  both successful evidence and later external live-run concerns honestly.
+
 ## Coverage Matrix
 
 | Spec requirement | Primary task | Proof |
@@ -989,15 +1005,15 @@ wire, schema, fingerprint, or invocation-local binding architecture:
 
 ## Completion Criteria
 
-- [ ] Every task commit exists in order and contains only its named scope.
-- [ ] All focused tests were observed failing before their implementation and
+- [x] Every task commit exists in order and contains only its named scope.
+- [x] All focused tests were observed failing before their implementation and
   passing afterward.
-- [ ] Unit, integration, contract, type, lint, boundary, build, and available
+- [x] Unit, integration, contract, type, lint, boundary, build, and available
   real-client gates have fresh recorded evidence.
-- [ ] `SourceVersionPublicationService` remains the publication orchestrator;
+- [x] `SourceVersionPublicationService` remains the publication orchestrator;
   PostgreSQL remains the canonical transaction-final authority.
-- [ ] No public API, generated client, table, migration, production dependency,
+- [x] No public API, generated client, table, migration, production dependency,
   error code, or telemetry label was added.
-- [ ] Exactly one implementation handoff exists and the publication-gap backlog
+- [x] Exactly one implementation handoff exists and the publication-gap backlog
   line is removed only after all required gates pass.
-- [ ] `git diff --check` passes and the final worktree is clean.
+- [x] `git diff --check` passes and the final worktree is clean.
