@@ -11,10 +11,15 @@ import { runFromE2eRepositoryRoot } from "../support/repository-subprocess";
  * state so a plugin reload resumes the real exchange: poll → credential →
  * onboarding trust → policy acceptance. An edit of the fixture note must
  * then run settle → policy gate → preflight/content against the live API.
+ * The claimed-upload case interrupts a receiving operation with an irrelevant
+ * locator-only policy revision, then proves exact-token resume to one server
+ * publication and one terminal journal receipt.
  *
- * Not part of the default gate: it needs a live server and the operator's
- * web credential, so it runs only when E2E_WEB_PASSWORD_FILE is set. Logs
- * carry closed labels only — never codes, cookies or vault content.
+ * This protected gate is mandatory for release reviews that touch the live
+ * claimed-resume contract. It needs the loader-provided live server and Web
+ * credential, so the offline default remains separate. Logs carry closed
+ * labels and fixture-scoped counts only — never codes, cookies or Vault
+ * content.
  */
 const serverOrigin = process.env.E2E_SERVER_ORIGIN ?? "http://127.0.0.1:8000";
 const allowedOrigin = process.env.E2E_ALLOWED_ORIGIN ?? "https://app.ducinvest.com";
@@ -24,15 +29,17 @@ const totpHelper = process.env.E2E_TOTP_HELPER;
 const pluginDataPathSuffix = "plugins/knowledge-workspace/data.json";
 const fixtureNonce = crypto.randomUUID();
 const fixtureNotePath = `controlled-live-${crypto.randomUUID()}.md`;
-const policyRaceNotePath = `controlled-policy-race-${crypto.randomUUID()}.md`;
+const claimedResumeNotePath = `controlled-claimed-resume-${crypto.randomUUID()}.md`;
+const irrelevantFolderPrefix = `irrelevant-policy-${crypto.randomUUID()}`;
 const fixtureNoteContent = `# Test note\n\nUpdated by the live login journey.\n${fixtureNonce}\n`;
-const policyRaceHeader = `# Controlled policy race\n\n${fixtureNonce}\n`;
-const policyRaceNoteContent =
-  policyRaceHeader + "x".repeat(1024 * 1024 - Buffer.byteLength(policyRaceHeader));
+const claimedResumeHeader = `# Controlled claimed resume\n\n${fixtureNonce}\n`;
+const claimedResumeNoteContent =
+  claimedResumeHeader +
+  "x".repeat(1024 * 1024 - Buffer.byteLength(claimedResumeHeader));
 const fixtureDeclaredSha256 = crypto.createHash("sha256").update(fixtureNoteContent).digest("hex");
-const policyRaceDeclaredSha256 = crypto
+const claimedResumeDeclaredSha256 = crypto
   .createHash("sha256")
-  .update(policyRaceNoteContent)
+  .update(claimedResumeNoteContent)
   .digest("hex");
 const databaseEnvironmentKeys = [
   "KNOWLEDGE_SECRET_ROOT",
@@ -219,10 +226,22 @@ function adminHeaders(cookies: string[], csrf: string): Record<string, string> {
   };
 }
 
-async function prepareExtensionExclusionRule(
+type PreparedRule =
+  | {
+      readonly rule_id: string;
+      readonly rule_kind: "extension";
+      readonly extension: ".md" | ".tmp";
+    }
+  | {
+      readonly rule_id: string;
+      readonly rule_kind: "folder_prefix";
+      readonly folder_prefix: string;
+    };
+
+async function prepareSingleExclusionRule(
   cookies: string[],
   csrf: string,
-  extension: ".md" | ".tmp",
+  rule: PreparedRule,
 ): Promise<PreparedPolicyPublication> {
   const status = await responseData<PolicyStatus>(
     await fetch(`${serverOrigin}/api/admin/exclusion-policy`, {
@@ -236,13 +255,7 @@ async function prepareExtensionExclusionRule(
       headers: adminHeaders(cookies, csrf),
       body: JSON.stringify({
         expected_draft_version: status.draft.draft_version,
-        rules: [
-          {
-            rule_id: crypto.randomUUID(),
-            rule_kind: "extension",
-            extension,
-          },
-        ],
+        rules: [rule],
       }),
     }),
     "policy draft replacement",
@@ -273,6 +286,29 @@ async function prepareExtensionExclusionRule(
     expectedActivePolicyRevisionId: status.active_policy_revision_id,
     expectedActiveRevisionNumber: status.active_revision_number,
   };
+}
+
+async function prepareExtensionExclusionRule(
+  cookies: string[],
+  csrf: string,
+  extension: ".md" | ".tmp",
+): Promise<PreparedPolicyPublication> {
+  return prepareSingleExclusionRule(cookies, csrf, {
+    rule_id: crypto.randomUUID(),
+    rule_kind: "extension",
+    extension,
+  });
+}
+
+async function prepareIrrelevantFolderExclusionRule(
+  cookies: string[],
+  csrf: string,
+): Promise<PreparedPolicyPublication> {
+  return prepareSingleExclusionRule(cookies, csrf, {
+    rule_id: crypto.randomUUID(),
+    rule_kind: "folder_prefix",
+    folder_prefix: irrelevantFolderPrefix,
+  });
 }
 
 async function publishPreparedPolicy(
@@ -432,7 +468,7 @@ async function editFixtureNote(): Promise<void> {
   }, fixtureNotePath, fixtureNoteContent);
 }
 
-async function editFixtureNoteForPolicyRace(): Promise<void> {
+async function editFixtureNoteForClaimedResume(): Promise<void> {
   await browser.execute(async (notePath: string, content: string) => {
     const app = (
       window as unknown as {
@@ -444,7 +480,7 @@ async function editFixtureNoteForPolicyRace(): Promise<void> {
       }
     ).app;
     await app.vault.create(notePath, content);
-  }, policyRaceNotePath, policyRaceNoteContent);
+  }, claimedResumeNotePath, claimedResumeNoteContent);
 }
 
 async function resolveJournalDirectoryPath(): Promise<string> {
@@ -520,6 +556,52 @@ async function readSanitizedJournalEvidence(
   }
 }
 
+async function readOpaqueJournalOperationIdentity(
+  controlledNormalizedPath: string,
+): Promise<string> {
+  if (journalDirectoryPath === null) {
+    throw new Error("opaque journal identity was unavailable");
+  }
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(journalDirectoryPath, "journal.manifest.json"), "utf8"),
+  ) as { current?: { generationNumber?: unknown } };
+  const generationNumber = manifest.current?.generationNumber;
+  if (!Number.isSafeInteger(generationNumber) || Number(generationNumber) < 0) {
+    throw new Error("opaque journal identity was unavailable");
+  }
+  const journalBytes = fs.readFileSync(
+    path.join(journalDirectoryPath, `journal.sqlite.g${generationNumber}`),
+  );
+  const initSqlJs = (await import("sql.js")).default;
+  const engine = await initSqlJs();
+  const database = new engine.Database(journalBytes);
+  try {
+    const statement = database.prepare(
+      `select event.operation_id from journal_events event
+        join local_files file on file.local_file_id = event.local_file_id
+        where file.normalized_path = ? and event.operation_id is not null`,
+    );
+    try {
+      statement.bind([controlledNormalizedPath]);
+      if (!statement.step()) {
+        throw new Error("opaque journal identity was unavailable");
+      }
+      const operationIdentity = statement.get()[0];
+      if (typeof operationIdentity !== "string" || operationIdentity.length === 0) {
+        throw new Error("opaque journal identity was unavailable");
+      }
+      if (statement.step()) {
+        throw new Error("opaque journal identity was not fixture-unique");
+      }
+      return operationIdentity;
+    } finally {
+      statement.free();
+    }
+  } finally {
+    database.close();
+  }
+}
+
 async function waitForJournalEvidence(
   controlledNormalizedPath: string,
   accepts: (evidence: SanitizedJournalEvidence) => boolean,
@@ -554,7 +636,7 @@ async function triggerSyncNow(): Promise<void> {
   });
 }
 
-async function reloadKnowledgeWorkspacePlugin(): Promise<void> {
+async function disableKnowledgeWorkspacePlugin(): Promise<void> {
   await browser.execute(async () => {
     const app = (
       window as unknown as {
@@ -567,8 +649,27 @@ async function reloadKnowledgeWorkspacePlugin(): Promise<void> {
       }
     ).app;
     await app.plugins.disablePlugin("knowledge-workspace");
+  });
+}
+
+async function enableKnowledgeWorkspacePlugin(): Promise<void> {
+  await browser.execute(async () => {
+    const app = (
+      window as unknown as {
+        app: {
+          plugins: {
+            enablePlugin: (pluginId: string) => Promise<void>;
+          };
+        };
+      }
+    ).app;
     await app.plugins.enablePlugin("knowledge-workspace");
   });
+}
+
+async function reloadKnowledgeWorkspacePlugin(): Promise<void> {
+  await disableKnowledgeWorkspacePlugin();
+  await enableKnowledgeWorkspacePlugin();
 }
 
 describe("device login and small-file sync (live server)", () => {
@@ -738,18 +839,22 @@ describe("device login and small-file sync (live server)", () => {
     const data = await readPluginData();
     console.log("PENDING_GRANT_FINAL", data.pending_grant === null ? "cleared" : "still-pending");
 
-    const denyingMarkdownPolicy = await prepareExtensionExclusionRule(
+    const irrelevantLocatorPolicy = await prepareIrrelevantFolderExclusionRule(
       sessionCookies,
       sessionCsrf ?? "",
-      ".md",
     );
-    const policyRaceBaseline = await readServerPublicationEvidence(policyRaceDeclaredSha256);
-    if (policyRaceBaseline.operationCount !== 0) {
-      throw new Error("controlled policy-race identity was not unique before capture");
+    const claimedResumeBaseline = await readServerPublicationEvidence(
+      claimedResumeDeclaredSha256,
+    );
+    if (claimedResumeBaseline.operationCount !== 0) {
+      throw new Error("controlled claimed-resume identity was not unique before capture");
     }
-    const operationObservation = readServerPublicationEvidence(policyRaceDeclaredSha256, true);
+    const operationObservation = readServerPublicationEvidence(
+      claimedResumeDeclaredSha256,
+      true,
+    );
     await browser.pause(1_000);
-    await editFixtureNoteForPolicyRace();
+    await editFixtureNoteForClaimedResume();
     await triggerSyncNow();
     const observedOperation = await operationObservation;
     if (
@@ -761,62 +866,85 @@ describe("device login and small-file sync (live server)", () => {
     const changedPolicyRevision = await publishPreparedPolicy(
       sessionCookies,
       sessionCsrf ?? "",
-      denyingMarkdownPolicy,
+      irrelevantLocatorPolicy,
     );
-    console.log("MID_UPLOAD_POLICY_PUBLISHED", changedPolicyRevision > policyRevision);
-    await new Promise((resolve) => setTimeout(resolve, 45_000));
-    const retryableJournalEvidence = await readSanitizedJournalEvidence(policyRaceNotePath);
+    console.log("IRRELEVANT_LOCATOR_POLICY_PUBLISHED", changedPolicyRevision > policyRevision);
+    await disableKnowledgeWorkspacePlugin();
+    const retryableJournalEvidence = await waitForJournalEvidence(
+      claimedResumeNotePath,
+      (evidence) => evidence.pendingCount === 1,
+      "interrupted claimed upload did not remain durable",
+    );
+    const interruptedOperationIdentity = await readOpaqueJournalOperationIdentity(
+      claimedResumeNotePath,
+    );
     console.log(
-      "SANITIZED_POLICY_DENIAL_JOURNAL_EVIDENCE",
+      "SANITIZED_CLAIMED_INTERRUPTION_JOURNAL_EVIDENCE",
       JSON.stringify(retryableJournalEvidence),
     );
-    const deniedBeforeRecovery = await readServerPublicationEvidence(policyRaceDeclaredSha256);
+    const interruptedServerEvidence = await readServerPublicationEvidence(
+      claimedResumeDeclaredSha256,
+    );
     console.log(
-      "SANITIZED_POLICY_DENIAL_SERVER_EVIDENCE",
-      JSON.stringify(deniedBeforeRecovery),
+      "SANITIZED_CLAIMED_INTERRUPTION_SERVER_EVIDENCE",
+      JSON.stringify(interruptedServerEvidence),
     );
     if (
-      retryableJournalEvidence.pendingCount !== 1 ||
-      deniedBeforeRecovery.sourceCount !== 0 ||
-      deniedBeforeRecovery.sourceVersionCount !== 0 ||
-      deniedBeforeRecovery.syncEventCount !== 0 ||
-      deniedBeforeRecovery.operationCount !== 1 ||
-      deniedBeforeRecovery.committedOperationCount !== 0 ||
-      deniedBeforeRecovery.exactOperationPublicationCount !== 0 ||
-      deniedBeforeRecovery.receivingUnpublishedOperationCount !== 1
+      interruptedServerEvidence.sourceCount !== 0 ||
+      interruptedServerEvidence.sourceVersionCount !== 0 ||
+      interruptedServerEvidence.syncEventCount !== 0 ||
+      interruptedServerEvidence.operationCount !== 1 ||
+      interruptedServerEvidence.committedOperationCount !== 0 ||
+      interruptedServerEvidence.exactOperationPublicationCount !== 0 ||
+      interruptedServerEvidence.receivingUnpublishedOperationCount !== 1
     ) {
-      throw new Error("mid-upload policy change did not fail closed into retryable recovery");
+      throw new Error("irrelevant policy revision did not interrupt the claimed upload safely");
     }
-    await reloadKnowledgeWorkspacePlugin();
+    await enableKnowledgeWorkspacePlugin();
     await browser.pause(5_000);
     await triggerSyncNow();
     const recoveredJournalEvidence = await waitForJournalEvidence(
-      policyRaceNotePath,
-      (evidence) => evidence.excludedPolicyCount === 1 && evidence.pendingCount === 0,
-      "next-preflight recovery did not settle the event as excluded_policy",
+      claimedResumeNotePath,
+      (evidence) =>
+        evidence.committedCount === 1 &&
+        evidence.pendingCount === 0 &&
+        evidence.mappedCount === 1 &&
+        evidence.excludedPolicyCount === 0,
+      "exact-token resume did not settle one committed receipt",
     );
-    const deniedPublicationEvidence = await readServerPublicationEvidence(
-      policyRaceDeclaredSha256,
+    const terminalOperationIdentity = await readOpaqueJournalOperationIdentity(
+      claimedResumeNotePath,
+    );
+    const resumedPublicationEvidence = await readServerPublicationEvidence(
+      claimedResumeDeclaredSha256,
     );
     const preservedPublicationEvidence = await readSanitizedJournalEvidence(fixtureNotePath);
     console.log(
-      "SANITIZED_MID_UPLOAD_POLICY_EVIDENCE",
-      JSON.stringify({ ...deniedPublicationEvidence, recoveredExcludedPolicyCount: 1 }),
+      "SANITIZED_CLAIMED_RESUME_EVIDENCE",
+      JSON.stringify({
+        ...resumedPublicationEvidence,
+        terminalReceiptCount: recoveredJournalEvidence.committedCount,
+      }),
+    );
+    console.log(
+      "EXACT_TOKEN_RESUME_CONFIRMED",
+      interruptedOperationIdentity === terminalOperationIdentity,
     );
     if (
-      deniedPublicationEvidence.sourceCount !== 0 ||
-      deniedPublicationEvidence.sourceVersionCount !== 0 ||
-      deniedPublicationEvidence.syncEventCount !== 0 ||
-      deniedPublicationEvidence.operationCount !== 1 ||
-      deniedPublicationEvidence.committedOperationCount !== 0 ||
-      deniedPublicationEvidence.exactOperationPublicationCount !== 0 ||
-      deniedPublicationEvidence.receivingUnpublishedOperationCount !== 1 ||
-      recoveredJournalEvidence.committedCount !== 0 ||
-      recoveredJournalEvidence.mappedCount !== 0 ||
+      interruptedOperationIdentity !== terminalOperationIdentity ||
+      resumedPublicationEvidence.sourceCount !== 1 ||
+      resumedPublicationEvidence.sourceVersionCount !== 1 ||
+      resumedPublicationEvidence.syncEventCount !== 1 ||
+      resumedPublicationEvidence.operationCount !== 1 ||
+      resumedPublicationEvidence.committedOperationCount !== 1 ||
+      resumedPublicationEvidence.exactOperationPublicationCount !== 1 ||
+      resumedPublicationEvidence.receivingUnpublishedOperationCount !== 0 ||
+      recoveredJournalEvidence.committedCount !== 1 ||
+      recoveredJournalEvidence.mappedCount !== 1 ||
       preservedPublicationEvidence.committedCount !== 1 ||
       preservedPublicationEvidence.mappedCount !== 1
     ) {
-      throw new Error("mid-upload policy change published canonical state or broke recovery");
+      throw new Error("claimed exact-token resume did not commit exactly once");
     }
   });
 });
