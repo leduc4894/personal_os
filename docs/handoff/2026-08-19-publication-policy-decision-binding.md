@@ -2,11 +2,12 @@
 
 ## Final commit
 
-The latest implementation commit is `104ff9a`, following portability commit
-`27ac14e`. They follow final-review completion commits `23e1f9e`, `6e4e663`,
-`d1864a8`, and `cdbac3d`, and the original binding commits through `d6a4b73`.
-The merge-review portability wave and its scoped follow-up close the runtime-
-secret allowlist, WDIO cwd, and fixture-scoping findings.
+The latest implementation commit is `efe10a6`, following runtime-secret
+allowlist commits `104ff9a` and `27ac14e`. They follow final-review completion
+commits `23e1f9e`, `6e4e663`, `d1864a8`, and `cdbac3d`, and the original binding
+commits through `d6a4b73`. The final runtime-context follow-up closes the
+StackContext propagation and authentication key-ID collision findings without
+weakening the subprocess environment boundary.
 
 ## Gate evidence
 
@@ -29,6 +30,19 @@ secret allowlist, WDIO cwd, and fixture-scoping findings.
   exactly as the runtime loader does while keeping distinct names valid. The
   final local-stack selection passed with 183 passed, 8
   skipped, and 1 deselected; Ruff, format, and mypy passed.
+- Runtime-context RED: 5 lifecycle/CLI cases failed while the unchanged
+  sanitizer control passed. `StackContext` discarded the configured reference
+  metadata, reset/bootstrap classified legitimate versioned files as partial,
+  and status reached its runner for an invalid or current/previous-colliding
+  key ID. GREEN: all 6 focused cases passed after retaining a typed immutable
+  snapshot containing only SafeToken-validated key IDs and validated relative
+  filenames. The full local-stack unit suite passed with 168 passed and 3
+  skipped; the combined runtime-loader/unit/contract selection passed with 243
+  passed and 8 skipped; Ruff, format, mypy, CLI help, and diff checks passed.
+- The real disposable local-stack smoke ran under the isolated project
+  `knowledge-ci-runtime-context-0819` and passed 1 test in 195.13 seconds.
+  Exact-label container, network, and volume inventories were empty afterward;
+  the operator `knowledge-local` stack remained absent.
 - Portable-subprocess RED: the behavioral clone-layout test failed because the
   subprocess searched the fixed checkout. GREEN: the real subprocess found the
   arbitrary repository-root marker through the E2E spec URL. The full Obsidian
@@ -98,6 +112,15 @@ the validated runtime-selected current authentication key, bounded parsed
 previous keys, and policy signing key. Safe nested relative paths follow the
 runtime grammar; absolute/traversal/backslash paths and managed-name collisions
 fail closed without reading or echoing a secret value.
+
+`StackContext.environment` remains the subprocess-only allowlisted mapping.
+Before sanitizing it, context construction now parses a separate immutable
+application-secret reference snapshot containing only validated key IDs and
+relative filenames. Status validates this snapshot but never forwards it;
+bootstrap, secret validation, smoke fingerprinting, reset, and rotation consume
+the snapshot directly. Current and previous authentication IDs use the same
+`SafeToken.parse` boundary as the authoritative API runtime loader, including a
+fail-closed current/previous collision check with one fixed redacted code.
 
 The live test's database helper is read-only and emits counts only. It reads
 the loader-provided password file internally and never prints paths, IDs,

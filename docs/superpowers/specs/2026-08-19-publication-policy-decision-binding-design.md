@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-19
 
-**Status:** Approved design; implementation not started
+**Status:** Implemented and verified (2026-08-19); implementation record: `docs/handoff/2026-08-19-publication-policy-decision-binding.md`
 
 **Scope:** Small-file sync publication only
 
