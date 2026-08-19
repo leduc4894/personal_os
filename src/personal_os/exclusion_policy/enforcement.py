@@ -556,8 +556,8 @@ class PolicyEnforcementService:
             return binding
 
         subject = await self._publication_subject(command, diagnostic_context)
-        decision = self._evaluate_material(
-            material,
+        decision = self._evaluate_revision(
+            revision,
             subject,
             PolicyBoundary.SINGLE_PART_UPLOAD,
             started_monotonic,
@@ -631,6 +631,17 @@ class PolicyEnforcementService:
         started_monotonic: float,
     ) -> PolicyDecision:
         revision = parse_verified_policy_revision(material, verifier=self._verifier)
+        return self._evaluate_revision(revision, subject, boundary, started_monotonic)
+
+    def _evaluate_revision(
+        self,
+        revision: ExclusionPolicyRevision,
+        subject: PolicySubject,
+        boundary: PolicyBoundary,
+        started_monotonic: float,
+    ) -> PolicyDecision:
+        """Evaluate an already verified revision and record its closed outcome."""
+
         decision = evaluate_policy_decision(
             revision=revision, subject=subject, evaluated_at=self._clock()
         )

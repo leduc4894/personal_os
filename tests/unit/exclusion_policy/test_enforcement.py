@@ -613,6 +613,41 @@ async def test_bound_publication_evaluates_the_current_revision_when_revision_ch
 
 
 @pytest.mark.asyncio
+async def test_bound_publication_verifies_changed_revision_once() -> None:
+    """A mismatch evaluates the already verified active revision exactly once."""
+
+    class CountingTrustVerifier:
+        def __init__(self) -> None:
+            self.verify_calls = 0
+
+        def verify(
+            self, *, public_key_bytes: bytes, signature_bytes: bytes, message: bytes
+        ) -> bool:
+            self.verify_calls += 1
+            return True
+
+    current_revision = ExclusionPolicyRevision(
+        policy_revision_id=uuid4(),
+        workspace_id=WORKSPACE_ID,
+        revision_number=2,
+        rules=(),
+    )
+    verifier = CountingTrustVerifier()
+    service, _, _, _ = build_service(
+        material=build_material(current_revision), verifier=verifier
+    )
+
+    evidence = await service.authorize_bound_publication(
+        build_create_command(),
+        AllowedPolicyRevisionBinding(workspace_id=WORKSPACE_ID, policy_revision_number=1),
+        context(),
+    )
+
+    assert isinstance(evidence, PolicyDecision)
+    assert verifier.verify_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_bound_publication_denies_changed_locator_rule_as_indeterminate() -> None:
     """A changed locator-dependent rule fails closed without locator evidence."""
 
