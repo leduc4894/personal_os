@@ -15,8 +15,10 @@ token stored only as its one-way SHA-256 hash (a re-preflight rotates the
 hash, so the raw token is never persisted or reused), a create reserves the
 server-generated source UUID on the row without inserting any ``sources``
 row, and an update records its base pair without reserving anything. An
-expired non-terminal row is invalid for continuation: reservation and the
-terminal write both refuse it.
+expired non-terminal row is invalid for continuation — the receive-side
+binding and the terminal write both refuse it — while a same-identity
+re-preflight re-reserves it (fresh token, extended deadline): nothing was
+committed for a non-terminal row, so re-reservation cannot double-publish.
 
 ``record_terminal_result`` persists the publication result and the operation's
 terminal state as one guarded update inside a single transaction, and exposes
@@ -287,12 +289,22 @@ def operation_insert_statement(
 
 
 def operation_token_rotation_statement(
-    *, operation_id: UUID, operation_token_hash: str
+    *, operation_id: UUID, operation_token_hash: str, expires_at: datetime
 ) -> sa.Update:
-    """Build the guarded rotation of the stored token hash for one row."""
+    """Build the guarded rotation of the stored token hash for one row.
+
+    The same update writes the deadline the row now carries: a live row passes
+    its own unchanged ``expires_at`` back, while the re-reservation of an
+    expired non-terminal row passes its freshly computed extended deadline.
+    """
+
     return (
         sa.update(small_file_upload_operations)
-        .values(operation_token_hash=operation_token_hash, updated_at=sa.text("CURRENT_TIMESTAMP"))
+        .values(
+            operation_token_hash=operation_token_hash,
+            expires_at=expires_at,
+            updated_at=sa.text("CURRENT_TIMESTAMP"),
+        )
         .where(small_file_upload_operations.c.operation_id == operation_id)
     )
 
@@ -827,13 +839,22 @@ class PostgresqlSmallFileUploadOperationStore:
                 raise _identity_mismatch()
             if row.state not in _NON_TERMINAL_STATES:
                 raise _state_invalid()
-            if _is_expired(row.expires_at, self._clock()):
-                raise _operation_expired()
+            # An expired non-terminal row re-reserves instead of refusing: no
+            # terminal evidence exists for it (exact replay is unaffected —
+            # terminal results survive expiry and are keyed by identity), and
+            # nothing was committed, so rotating the token and extending the
+            # deadline cannot double-publish. The pre-expiry token dies with
+            # the rotation, and receive-time expiry checks keep refusing the
+            # continuation of any token past its deadline.
+            expires_at = row.expires_at
+            if _is_expired(expires_at, self._clock()):
+                expires_at = compute_upload_operation_expiry(self._clock())
             token = self._token_generator()
             await connection.execute(
                 operation_token_rotation_statement(
                     operation_id=row.operation_id,
                     operation_token_hash=upload_operation_token_hash(token),
+                    expires_at=expires_at,
                 )
             )
             return SmallFileUploadOperation(
@@ -841,7 +862,7 @@ class PostgresqlSmallFileUploadOperationStore:
                 preflight=preflight,
                 device_context=device_context,
                 reserved_source_id=row.reserved_source_id,
-                expires_at=row.expires_at,
+                expires_at=expires_at,
             )
 
     async def _record_terminal_result_once(

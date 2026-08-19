@@ -174,6 +174,26 @@ The operator-facing re-run commands live in
    (exactly that directory — a tightness probe confirmed every non-journal
    path, including a hypothetical web `journal` directory, still scans);
    the OpenAPI document scan keeps full strength. Full suite then green.
+6. **Expired non-terminal operations re-reserve on same-identity re-preflight
+   (2026-08-18 final-review fix wave).** The whole-branch review found that
+   an expired pending operation permanently wedged its journal event: the
+   durable store raised `small_file_operation_expired` on every re-preflight
+   of the same identity, and the plugin would retry that 410 forever under
+   the frozen `server_error` label. Decision: `_reserve_operation_once` now
+   re-reserves an expired non-terminal row — fresh token, extended deadline,
+   same row — exactly like the existing token-rotation branch, because
+   nothing was committed for a non-terminal row so re-reservation cannot
+   double-publish, while terminal results survive expiry and stay keyed by
+   identity for exact replay. Receive-time expiry refusal (continuation of
+   an expired operation) is unchanged; the offline double and unit fake
+   mirror the adapter. Rationale: smallest sound server-side fix — no
+   plugin-side change, no new error vocabulary, no sweep job. The wave also
+   committed the sanction-scope tightness test (decision 5's probe), pinned
+   the 16 MiB ceiling equal across the migration and domain constants, and
+   corrected the stale Task-2 deferral line above. Lands after `7c10d73` as
+   the single commit `fix: re-reserve expired small-file operations` (its
+   SHA cannot name itself; `git log -1 --oneline` on the branch tip is the
+   record).
 
 ## 5. Deferred item — reference-device evidence (operator-owned, BACKLOG-indexed)
 
@@ -197,15 +217,16 @@ handoff §6 precedent).
   comment (anchor to node_modules paths); segment derivation duplicated
   between probe and strip helpers; sql.js exports-map parsing assumes dict
   shape (degrades to main fallback).
-- Task 2: older `user_version` maps to `journal_image_invalid` instead of a
-  migration path (matters on a future schema bump); exported image
-  self-reports `lastVerifiedGeneration` n-1 (reorder or comment); orphaned
-  generations after chain-reset rebuild never swept (bounded residue);
-  `open()` not concurrent-safe (documented await-open-before-commit
-  contract); `open()` failure paths can leak the engine; `@types/sql.js`
-  caret pin vs repo exact-pin convention; transient probe error in
-  `#openVerifiedGeneration` swallowed (fail-open probe — the readBinary
-  variant is fail-closed and sanctioned).
+- Task 2: exported image self-reports `lastVerifiedGeneration` n-1 (reorder
+  or comment); orphaned generations after chain-reset rebuild never swept
+  (bounded residue); `open()` not concurrent-safe (documented
+  await-open-before-commit contract); `open()` failure paths can leak the
+  engine; `@types/sql.js` caret pin vs repo exact-pin convention; transient
+  probe error in `#openVerifiedGeneration` swallowed (fail-open probe — the
+  readBinary variant is fail-closed and sanctioned). (An earlier deferral —
+  older `user_version` mapping to `journal_image_invalid` — was resolved when
+  Task 3 bumped the schema to 2 and `openFromImage` began distinguishing
+  `journal_schema_unsupported`; line removed by the 2026-08-18 fix wave.)
 - Task 3: row parsers validate state/outcome but not safeError label or
   fingerprint shape; SQLite FK references inert under sql.js (pragma off —
   documented); `readEvent`/`readEventsByLocalFileId` interpolate IDs without
@@ -225,9 +246,12 @@ handoff §6 precedent).
   not render the traceback form of a poisoned cause.
 - Task 6: stale-token window after concurrent preflight surfaces NOT_FOUND;
   `expires_at > created_at` CHECK couples app clock to DB clock (bounded
-  900 s); 16 MiB ceiling duplicated in migration `_MAXIMUM_DECLARED_SIZE_BYTES`
-  vs domain constant (no pin test); diagnostic_context dropped by the store
-  adapter; integration harness reaches into `preflight_harness._engine`.
+  900 s); diagnostic_context dropped by the store adapter; integration
+  harness reaches into `preflight_harness._engine`. (The 16 MiB ceiling
+  pin-test deferral was resolved by the 2026-08-18 fix wave: the migration's
+  `_MAXIMUM_DECLARED_SIZE_BYTES` is now pinned equal to
+  `MAX_SINGLE_PART_FILE_SIZE_BYTES` in
+  `tests/unit/migrations/test_small_file_sync_migration.py`.)
 - Task 7: terminal write is a second transaction after the publication
   commit (crash window answers NOT_FOUND and self-heals via replay; task-6
   seam exists to consolidate); locator policy not re-evaluated at receive

@@ -146,6 +146,11 @@ describe("journal operations (spec 6.3)", () => {
 
 describe("frozen journal limits (spec 3.1, 6.4, 7.1)", () => {
   it("freezes the 16 MiB single-part file ceiling", () => {
+    // This mirrors the server's Python pair — MAX_SINGLE_PART_FILE_SIZE_BYTES
+    // (src/personal_os/small_file_sync/contracts.py) and the migration's
+    // _MAXIMUM_DECLARED_SIZE_BYTES — which a Python pin test holds equal.
+    // TypeScript cannot import them, so the value assertion below is the
+    // plugin-side half of the cross-language ceiling pin.
     expect(MAX_FILE_SIZE_BYTES).toBe(16_777_216);
   });
 

@@ -8,8 +8,11 @@ behaviors the plugin depends on: a create commits exactly once and answers
 the lost-response replay with the frozen receipt; the same journal identity
 re-preflight after commit replays exactly without a second publication; a
 stale update base answers the durable ``conflict`` outcome without a
-reservation; and a current base whose digest equals the declared digest
-answers the frozen ``no_change`` receipt.
+reservation; a current base whose digest equals the declared digest
+answers the frozen ``no_change`` receipt; and a device that suspends past
+the operation deadline mid-upload resumes through a same-identity
+re-preflight that re-reserves the expired operation so the event still
+completes with exactly one publication.
 """
 
 from __future__ import annotations
@@ -32,6 +35,12 @@ _EDITED_CONTENT_DIGEST: str = sha256(_EDITED_CONTENT).hexdigest()
 _MEDIA_TYPE: str = "text/markdown"
 _LOCATOR: str = "notes/journey-note.md"
 _CURRENT_BASE_COMMITTED_AT: Final[datetime] = datetime(2026, 8, 18, 9, 30, 0, tzinfo=UTC)
+
+#: Frozen reservation and resume moments of the suspend journey: the device
+#: suspends two hours past the fifteen-minute operation deadline, then the
+#: resume pass re-preflights the same journal identity.
+_SUSPEND_RESERVATION_AT: Final[datetime] = datetime(2026, 8, 18, 10, 0, 0, tzinfo=UTC)
+_SUSPEND_RESUME_AT: Final[datetime] = datetime(2026, 8, 18, 12, 0, 0, tzinfo=UTC)
 
 #: The exact members a terminal receipt may carry on the wire (spec 10.3).
 TERMINAL_RESULT_MEMBERS: Final[frozenset[str]] = frozenset(
@@ -245,3 +254,45 @@ def test_create_then_update_journey_advances_the_committed_base(
     assert updated["content_version"] == 2
     assert updated["source_id"] == committed["source_id"]
     assert harness.sync_state.publication_commits == 2
+
+
+def test_resume_after_expiry_re_reserves_and_publishes_exactly_once(
+    offline_harness: SmallFileWireHarness,
+) -> None:
+    """The suspend journey: an expired pending operation never wedges.
+
+    The preflight succeeds, the device suspends past the fifteen-minute
+    operation deadline before the upload completes (mobile backgrounding,
+    sleep, app close), and the resume pass re-preflights the same journal
+    identity. The old token stays refused at receive time (410 expired),
+    the server re-reserves the same operation row with a fresh token, the
+    resumed upload commits, and exactly one publication exists — the frozen
+    receipt then replays with no second publish.
+    """
+
+    harness = offline_harness
+    harness.sync_state.now = _SUSPEND_RESERVATION_AT
+    body = plugin_create_body()
+    suspended_token = single_part_token(harness, body)
+
+    harness.sync_state.now = _SUSPEND_RESUME_AT
+    expired = harness.upload(suspended_token, _CONTENT)
+    assert expired.status_code == 410, expired.text
+    assert expired.json()["error"]["code"] == "small_file_operation_expired"
+
+    resumed = data_of(harness.preflight(body))
+    assert resumed["outcome"] == "single_part_upload"
+    assert set(resumed) == {"outcome", "operation_id", "expires_at"}
+    resumed_token = str(resumed["operation_id"])
+    assert resumed_token != suspended_token
+
+    committed = data_of(harness.upload(resumed_token, _CONTENT))
+    assert committed["result_kind"] == "committed"
+    assert committed["content_version"] == 1
+    assert harness.sync_state.publication_commits == 1
+    assert harness.sync_state.reservation_count == 1
+
+    replay = data_of(harness.preflight(body))
+    assert replay["outcome"] == "committed_replay"
+    assert replay["result"] == committed
+    assert harness.sync_state.publication_commits == 1

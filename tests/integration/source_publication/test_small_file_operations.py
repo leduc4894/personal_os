@@ -6,8 +6,10 @@ These integration tests prove the durable operation contract of spec 10.1 and
 preflights onto one operation row, rejection of payload substitution under
 the same identity, the server-owned reservation of a create UUID without any
 ``sources`` row, the invalidity of an expired non-terminal operation for
-continuation while terminal results survive expiry, the exact replay of the
-frozen terminal result after a lost response, and the gated downgrade of the
+continuation while terminal results survive expiry and a same-identity
+re-preflight re-reserves the expired row (fresh token, extended deadline,
+still one row and no ``sources`` row), the exact replay of the frozen
+terminal result after a lost response, and the gated downgrade of the
 ``20260818_01`` migration back to the exclusion policy head.
 """
 
@@ -47,6 +49,7 @@ from personal_os.small_file_sync.errors import SmallFileSyncError
 from postgresql_source_store.small_file_sync_operations import (
     UPLOAD_OPERATION_EXPIRY_SECONDS,
     PostgresqlSmallFileUploadOperationStore,
+    upload_operation_token_hash,
 )
 from postgresql_source_store.tables import small_file_upload_operations, sources
 
@@ -390,19 +393,79 @@ async def test_expired_non_terminal_operation_cannot_be_continued(
     result = await harness.store.resolve_terminal_result(preflight, device_context, _context())
     assert result is None
 
-    with pytest.raises(SmallFileSyncError) as replay_refused:
-        await harness.store.reserve_operation(preflight, device_context, _context())
-    assert replay_refused.value.error_code is ErrorCode.SMALL_FILE_OPERATION_EXPIRED
-
+    # Continuation under the reserved token stays refused while the row is
+    # expired: the terminal write must never commit past the deadline.
     with pytest.raises(SmallFileSyncError) as terminal_refused:
         await harness.store.record_terminal_result(
             operation, _terminal_result(source_id=uuid4()), _context()
         )
     assert terminal_refused.value.error_code is ErrorCode.SMALL_FILE_OPERATION_EXPIRED
 
+    with pytest.raises(SmallFileSyncError) as bound_refused:
+        await harness.store.resolve_bound_operation(
+            operation.operation_token, device_context, _context()
+        )
+    assert bound_refused.value.error_code is ErrorCode.SMALL_FILE_OPERATION_EXPIRED
+
     row = await harness.operation_row(preflight.event_id)
     assert row is not None
     assert row["state"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_expired_pending_re_preflight_re_reserves_the_same_row(
+    small_file_harness: SmallFileOperationHarness, seeded_workspace: object
+) -> None:
+    """Resume after expiry: the wedged identity re-reserves instead of 410ing.
+
+    A preflight succeeds, the device suspends past the fifteen-minute
+    deadline before the upload completes, and the resume pass re-preflights
+    the exact same identity: the existing row is re-reserved — a fresh token,
+    an extended deadline, the reserved create UUID unchanged — so the journal
+    event can still complete. Nothing was committed for the non-terminal
+    row, so re-reservation cannot double-publish; the old token stays dead.
+    """
+
+    harness = small_file_harness
+    preflight, expired_operation = await _reserve_created_operation(harness, seeded_workspace)
+    harness.clock.advance(seconds=UPLOAD_OPERATION_EXPIRY_SECONDS + 1)
+    device_context = harness.device_context(seeded_workspace)
+    assert expired_operation.reserved_source_id is not None
+
+    re_reserved = await harness.store.reserve_operation(preflight, device_context, _context())
+
+    assert re_reserved.operation_token.value != expired_operation.operation_token.value
+    assert re_reserved.reserved_source_id == expired_operation.reserved_source_id
+    expected_deadline = harness.clock() + timedelta(seconds=UPLOAD_OPERATION_EXPIRY_SECONDS)
+    assert re_reserved.expires_at == expected_deadline
+    assert re_reserved.expires_at > expired_operation.expires_at
+
+    # One identity still owns exactly one row; the re-reservation rotated the
+    # stored token hash to the fresh token and re-armed the deadline.
+    row = await harness.operation_row(preflight.event_id)
+    assert row is not None
+    assert await harness.operation_row_count(preflight.event_id) == 1
+    assert row["state"] == "pending"
+    assert row["reserved_source_id"] == expired_operation.reserved_source_id
+    assert row["operation_token_hash"] == upload_operation_token_hash(
+        re_reserved.operation_token
+    )
+    assert row["expires_at"] == expected_deadline
+    assert await harness.sources_row_count(expired_operation.reserved_source_id) == 0
+
+    # The pre-expiry token is dead: its hash was rotated away, so neither the
+    # receive binding nor the terminal write can ever continue it again.
+    with pytest.raises(SmallFileSyncError) as bound_dead:
+        await harness.store.resolve_bound_operation(
+            expired_operation.operation_token, device_context, _context()
+        )
+    assert bound_dead.value.error_code is ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND
+
+    with pytest.raises(SmallFileSyncError) as terminal_dead:
+        await harness.store.record_terminal_result(
+            expired_operation, _terminal_result(source_id=uuid4()), _context()
+        )
+    assert terminal_dead.value.error_code is ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND
 
 
 @pytest.mark.asyncio

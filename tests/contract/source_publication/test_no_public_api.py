@@ -248,6 +248,59 @@ def test_generated_typescript_clients_declare_no_source_publication_endpoint() -
     )
 
 
+# --- sanction-scope tightness ---------------------------------------------------------
+
+
+def test_sanction_scope_covers_exactly_the_designed_surfaces() -> None:
+    """Pin the sanctioned-surface map: neither narrower nor wider.
+
+    The designed exemptions — the ``exclusion_policy*``/``exclusion-policy``
+    modules, the ``small_file_sync*``/``small-file-sync`` modules, the plugin
+    journal client directory and ``exclusion-policy`` directories — are the
+    only paths exempt from the endpoint-vocabulary scan. A same-named module
+    anywhere else — a journal directory outside
+    ``apps/obsidian-plugin/src/journal``, a plugin module outside it, a
+    server-side journal module, an MCP tool module — stays scanned in full.
+    """
+    sanctioned = (
+        REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "exclusion_policy_routes.py",
+        REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "small_file_sync_routes.py",
+        REPO_ROOT / "apps" / "obsidian-plugin" / "src" / "journal" / "sync-api.ts",
+        REPO_ROOT / "apps" / "obsidian-plugin" / "src" / "exclusion-policy" / "snapshot.ts",
+    )
+    for path in sanctioned:
+        assert _is_sanctioned_policy_surface(path), (
+            f"designed sanctioned surface must stay exempt: {path}"
+        )
+
+    scanned = (
+        REPO_ROOT / "apps" / "web" / "src" / "journal" / "manifest-publisher.ts",
+        REPO_ROOT / "apps" / "obsidian-plugin" / "src" / "api" / "sync-client.ts",
+        REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "journal_sync_routes.py",
+        REPO_ROOT / "apps" / "mcp" / "src" / "mcp_runtime" / "source_version_tools.py",
+    )
+    for path in scanned:
+        assert not _is_sanctioned_policy_surface(path), (
+            f"unsanctioned surface must stay scanned: {path}"
+        )
+
+
+def test_endpoint_vocabulary_scan_detects_a_violating_module_outside_sanction() -> None:
+    """The masking plus token scan catches a publication endpoint elsewhere.
+
+    Mirrors the provider gate's committed scanner self-check: a synthetic
+    module outside every sanctioned surface that declares a
+    source-publication endpoint must trip the scanned vocabulary, so the
+    exemption above can never grow into a blind spot.
+    """
+    violating_source = 'const endpoint = "/api/source-version";\n'
+    masked = _masked_sanctioned_policy_lines(violating_source)
+    caught = [token for token in PUBLICATION_ENDPOINT_TOKENS if token in masked]
+    assert caught, (
+        "a source-publication endpoint outside the sanctioned surfaces must be detected"
+    )
+
+
 def _rendered_endpoint_surface(parsed: object) -> str:
     """Render every endpoint-declaring subtree of one OpenAPI document.
 

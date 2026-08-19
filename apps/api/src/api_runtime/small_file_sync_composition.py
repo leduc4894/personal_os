@@ -383,8 +383,12 @@ class OfflineSmallFileUploadOperationStore:
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH)
             if row.state == _COMMITTED_STATE:
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+            # Mirroring the durable adapter: an expired non-terminal row
+            # re-reserves — fresh token, extended deadline — because nothing
+            # was committed for it; receive-time expiry checks keep refusing
+            # the continuation of any token past its deadline.
             if row.expires_at <= now:
-                raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_EXPIRED)
+                row.expires_at = now + timedelta(seconds=_OFFLINE_EXPIRY_SECONDS)
             row.operation_token = UploadOperationToken(secrets.token_urlsafe(32))
         return SmallFileUploadOperation(
             operation_token=row.operation_token,

@@ -341,8 +341,10 @@ class FakeSmallFileUploadOperationStore:
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH)
             if record.state == _COMMITTED_STATE:
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+            # Mirroring the durable adapter: an expired non-terminal record
+            # re-reserves with a fresh token and an extended deadline.
             if record.expires_at <= self._now():
-                raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_EXPIRED)
+                record.expires_at = self._now() + timedelta(seconds=self.expiry_seconds)
             record.operation_token = UploadOperationToken(secrets.token_urlsafe(32))
         return SmallFileUploadOperation(
             operation_token=record.operation_token,

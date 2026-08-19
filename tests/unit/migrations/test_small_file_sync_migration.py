@@ -22,6 +22,8 @@ import sqlalchemy as sa
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
+from personal_os.small_file_sync.contracts import MAX_SINGLE_PART_FILE_SIZE_BYTES
+
 REPO_ROOT: Path = Path(__file__).resolve().parents[3]
 ALEMBIC_INI_PATH: Path = REPO_ROOT / "alembic.ini"
 MIGRATION_PATH = (
@@ -208,6 +210,21 @@ def test_upgrade_adds_the_nonterminal_expiry_partial_index() -> None:
     assert "ix_small_file_upload_operations__nonterminal_expiry" in index_events
     source = _migration_source()
     assert "state IN ('pending', 'receiving')" in source
+
+
+def test_declared_size_ceiling_equals_the_domain_constant() -> None:
+    """The migration's DDL ceiling and the domain ceiling are one 16 MiB limit.
+
+    A revision may not import the domain constant (the hygiene rules forbid
+    any ``personal_os`` import), so the single-part ceiling exists twice in
+    Python; this pin fails the suite on any drift between the DDL bound and
+    ``MAX_SINGLE_PART_FILE_SIZE_BYTES``. The plugin's ``MAX_FILE_SIZE_BYTES``
+    mirror carries the same value, pinned by its own contracts test — no
+    cross-language harness by design.
+    """
+    module = _load_module()
+    declared_ceiling = int(module._MAXIMUM_DECLARED_SIZE_BYTES)
+    assert declared_ceiling == MAX_SINGLE_PART_FILE_SIZE_BYTES
 
 
 def test_upgrade_finishes_with_the_final_catalog_assertion() -> None:
