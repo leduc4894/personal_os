@@ -370,6 +370,44 @@ def test_windows_boundary_accepts_regular_non_symlink_secret_files(
     assert inspect_secret_set(paths) is SecretSetState.COMPLETE
 
 
+def test_complete_stack_secret_set_allows_documented_application_secret_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    bootstrap_secret_set(paths)
+    for filename in (
+        "auth-key-2026-08.key",
+        "policy_signing_a.pem",
+        "policy_signing_b.pem",
+        "r2_access_key_id",
+        "r2_secret_access_key",
+        "web-credential-password.key",
+    ):
+        (paths.secret_directory / filename).write_text("application-secret", encoding="ascii")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(stack_module, "_is_current_windows_user_owner", lambda path: True)
+
+    assert inspect_secret_set(paths) is SecretSetState.COMPLETE
+
+
+def test_rotate_refuses_to_partially_remove_shared_application_secrets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    bootstrap_secret_set(paths)
+    application_secret = paths.secret_directory / "r2_access_key_id"
+    application_secret.write_text("application-secret", encoding="ascii")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(stack_module, "_is_current_windows_user_owner", lambda path: True)
+
+    with pytest.raises(StackFailure) as raised:
+        remove_secret_set_after_reset(paths)
+
+    assert str(raised.value) == "secret_set_removal_failed"
+    assert application_secret.exists()
+    assert all((paths.secret_directory / spec.filename).exists() for spec in SECRET_SPECS)
+
+
 def test_remove_secret_set_after_reset_removes_only_complete_set(tmp_path: Path) -> None:
     paths = resolve_stack_paths(tmp_path)
     bootstrap_secret_set(paths)

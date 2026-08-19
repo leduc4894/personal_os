@@ -226,6 +226,17 @@ _SECRET_FILENAMES: Final = frozenset(spec.filename for spec in SECRET_SPECS) | {
     _QDRANT_CONFIG_FILENAME
 }
 
+_APPLICATION_SECRET_FILENAMES: Final = frozenset(
+    {
+        "auth-key-2026-08.key",
+        "policy_signing_a.pem",
+        "policy_signing_b.pem",
+        "r2_access_key_id",
+        "r2_secret_access_key",
+        "web-credential-password.key",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class PortBinding:
@@ -500,7 +511,9 @@ def inspect_secret_set(paths: StackPaths) -> SecretSetState:
         child_stats.append((child, child_stat))
         found_filenames.add(child.name)
 
-    if found_filenames == _SECRET_FILENAMES:
+    if _SECRET_FILENAMES <= found_filenames <= (
+        _SECRET_FILENAMES | _APPLICATION_SECRET_FILENAMES
+    ):
         _validate_private_directory(local_directory, local_stat, require_mode=True)
         _validate_private_directory(secret_directory, secret_stat, require_mode=True)
         for child, child_stat in child_stats:
@@ -592,6 +605,8 @@ def remove_secret_set_after_reset(paths: StackPaths) -> SecretSetState:
         raise StackFailure(StackExitCode.CONTRACT, "partial_secret_set")
 
     secret_directory = _validate_secret_directory_location(paths)
+    if any((secret_directory / filename).exists() for filename in _APPLICATION_SECRET_FILENAMES):
+        raise StackFailure(StackExitCode.CONTRACT, "secret_set_removal_failed")
     try:
         for filename in _SECRET_FILENAMES:
             (secret_directory / filename).unlink()
