@@ -5,9 +5,10 @@ test can assert the full cross-port order (policy preflight, replay lookup,
 reservation, current-base resolution, spool/verification, publication, the
 terminal write) with closed string entries only. The operation-store fake
 mirrors the durable PostgreSQL semantics of task 6: identity-keyed rows,
-token rotation on re-preflight (a stale token surfaces as the closed
-not-found error), payload-fingerprint matching, expiry that ends continuation
-but never terminal evidence, and an idempotent guarded terminal transition.
+token rotation on pending re-preflight (a stale token surfaces as the closed
+not-found error), payload-fingerprint matching, expiry that ends an unclaimed
+reservation but not a claimed receive or terminal evidence, and an idempotent
+guarded terminal transition.
 The object-store fake performs the real size/digest verification over the
 streamed bytes and models content-addressable dedup so the publication
 service's resolve-first path hits. The publication stack runs the REAL
@@ -248,10 +249,10 @@ class FakeSmallFileUploadOperationStore:
 
     Rows are keyed by the credential-derived identity quadruple; the payload
     fingerprint admits no substitution. A receive claims its row by flipping
-    it to ``receiving``; a same-identity re-preflight may re-reserve only
-    before that claim or after expiry, never while the claim is active. The
-    guarded terminal transition is idempotent for the identical frozen result
-    and refuses every other state.
+    it to ``receiving``; a same-identity re-preflight may re-reserve only an
+    expired pending row, never a claimed receive. The receive claim and its
+    guarded terminal transition retain the token/revision fence across the
+    reservation deadline and refuse every other state.
     """
 
     ledger: CallLedger
@@ -290,9 +291,7 @@ class FakeSmallFileUploadOperationStore:
                 return record
         return None
 
-    def _fingerprint_matches(
-        self, record: _OperationRecord, preflight: SmallFilePreflight
-    ) -> bool:
+    def _fingerprint_matches(self, record: _OperationRecord, preflight: SmallFilePreflight) -> bool:
         return (
             record.preflight.operation is preflight.operation
             and record.preflight.sha256 == preflight.sha256
@@ -352,9 +351,9 @@ class FakeSmallFileUploadOperationStore:
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH)
             if record.state == _COMMITTED_STATE:
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
-            if record.state == _RECEIVING_STATE and record.expires_at > self._now():
+            if record.state == _RECEIVING_STATE:
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
-            # Mirroring the durable adapter: an expired non-terminal record
+            # Mirroring the durable adapter: only an expired pending record
             # re-reserves with a fresh token and an extended deadline.
             if record.expires_at <= self._now():
                 record.expires_at = self._now() + timedelta(seconds=self.expiry_seconds)
@@ -403,9 +402,9 @@ class FakeSmallFileUploadOperationStore:
             or record.device_context.device_id != device_context.device_id
         ):
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH)
-        if record.state != _COMMITTED_STATE and record.expires_at <= self._now():
-            raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_EXPIRED)
         if record.state == _PENDING_STATE:
+            if record.expires_at <= self._now():
+                raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_EXPIRED)
             record.state = _RECEIVING_STATE
         return self._bound_operation(record)
 
@@ -423,9 +422,7 @@ class FakeSmallFileUploadOperationStore:
         self._apply_terminal_transition(
             record,
             result,
-            SmallFileDeviceContext(
-                device_id=bound.device_id, workspace_id=bound.workspace_id
-            ),
+            SmallFileDeviceContext(device_id=bound.device_id, workspace_id=bound.workspace_id),
             require_claimed=True,
         )
 
@@ -451,7 +448,7 @@ class FakeSmallFileUploadOperationStore:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
         if require_claimed and record.state != _RECEIVING_STATE:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
-        if record.expires_at <= self._now():
+        if not require_claimed and record.expires_at <= self._now():
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_EXPIRED)
         record.state = _COMMITTED_STATE
         record.terminal_result = result
@@ -715,9 +712,7 @@ class FakeSourcePublicationStore:
     _committed_by_identity: dict[tuple[UUID, UUID, UUID], RequestFingerprint] = field(
         default_factory=dict
     )
-    _results: dict[RequestFingerprint, SourceVersionPublicationResult] = field(
-        default_factory=dict
-    )
+    _results: dict[RequestFingerprint, SourceVersionPublicationResult] = field(default_factory=dict)
 
     def _identity(self, command: SourceVersionCommand) -> tuple[UUID, UUID, UUID]:
         return (command.workspace_id, command.source_id, command.event_id)
@@ -834,13 +829,9 @@ def build_service_harness(
         object_store=object_store,
         metrics=InMemorySourcePublicationMetrics(),
         clock=clock,
-        policy_guard=FakePublicationPolicyGuard(
-            ledger=ledger, error=publication_guard_error
-        ),
+        policy_guard=FakePublicationPolicyGuard(ledger=ledger, error=publication_guard_error),
     )
-    publication_gateway = FakeSmallFilePublicationGateway(
-        publication_service=publication_service
-    )
+    publication_gateway = FakeSmallFilePublicationGateway(publication_service=publication_service)
     operation_store = FakeSmallFileUploadOperationStore(ledger=ledger, clock=clock)
     current_sources = FakeCurrentSourceStore(ledger=ledger, reference=current_reference)
     metrics = InMemorySmallFileSyncMetrics()

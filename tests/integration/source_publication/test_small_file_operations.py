@@ -319,8 +319,10 @@ async def test_server_revision_overrides_plugin_claim_in_row_and_receive_binding
 
 
 @pytest.mark.asyncio
-async def test_claimed_receive_refuses_same_identity_repreflight_rotation_until_commit(
-    small_file_harness: SmallFileOperationHarness, seeded_workspace: object
+async def test_claimed_receive_crossing_expiry_keeps_its_fence_until_terminal_commit(
+    small_file_harness: SmallFileOperationHarness,
+    preflight_harness: PreflightHarness,
+    seeded_workspace: object,
 ) -> None:
     harness = small_file_harness
     device_context = harness.device_context(seeded_workspace)
@@ -333,6 +335,17 @@ async def test_claimed_receive_refuses_same_identity_repreflight_rotation_until_
         operation.operation_token,
         device_context,
         _context(),
+    )
+
+    # Deterministically cross the reservation deadline after the receive has
+    # claimed its row, then model the canonical publication that completes
+    # before the receive writes its frozen terminal result.
+    harness.clock.advance(seconds=UPLOAD_OPERATION_EXPIRY_SECONDS + 1)
+    assert operation.reserved_source_id is not None
+    published = await preflight_harness.seed_active_source_with_version_one(
+        workspace=seeded_workspace,
+        source_id=operation.reserved_source_id,
+        title="Claim expiry fence",
     )
 
     with pytest.raises(SmallFileSyncError) as rejected:
@@ -350,8 +363,20 @@ async def test_claimed_receive_refuses_same_identity_repreflight_rotation_until_
     assert row["policy_revision_number"] == 4
     assert row["operation_token_hash"] == upload_operation_token_hash(operation.operation_token)
 
-    assert operation.reserved_source_id is not None
-    terminal = _terminal_result(source_id=operation.reserved_source_id)
+    resumed = await harness.store.resolve_bound_operation(
+        operation.operation_token,
+        device_context,
+        _context(),
+    )
+    assert resumed.policy_revision_number == bound.policy_revision_number
+
+    terminal = SmallFileTerminalResult(
+        result_kind=SmallFileTerminalResultKind.COMMITTED,
+        source_id=operation.reserved_source_id,
+        source_version_id=published.source_version_id,
+        content_version=published.content_version,
+        committed_at=datetime.now(UTC),
+    )
     await harness.store.record_bound_terminal_result(bound, terminal, _context())
 
     committed = await harness.operation_row(preflight.event_id)
@@ -359,6 +384,7 @@ async def test_claimed_receive_refuses_same_identity_repreflight_rotation_until_
     assert committed["state"] == "committed"
     assert committed["result_kind"] == SmallFileTerminalResultKind.COMMITTED.value
     assert committed["result_source_id"] == operation.reserved_source_id
+    assert await harness.sources_row_count(operation.reserved_source_id) == 1
 
 
 @pytest.mark.asyncio
@@ -398,8 +424,7 @@ async def test_distinct_idempotency_keys_allocate_distinct_operations(
         second_preflight, device_context, harness.policy_binding(device_context), _context()
     )
     assert (
-        await harness.operation_row_count(first_preflight.event_id, second_preflight.event_id)
-        == 2
+        await harness.operation_row_count(first_preflight.event_id, second_preflight.event_id) == 2
     )
 
 
@@ -575,9 +600,7 @@ async def test_expired_pending_re_preflight_re_reserves_the_same_row(
     assert await harness.operation_row_count(preflight.event_id) == 1
     assert row["state"] == "pending"
     assert row["reserved_source_id"] == expired_operation.reserved_source_id
-    assert row["operation_token_hash"] == upload_operation_token_hash(
-        re_reserved.operation_token
-    )
+    assert row["operation_token_hash"] == upload_operation_token_hash(re_reserved.operation_token)
     assert row["expires_at"] == expected_deadline
     assert await harness.sources_row_count(expired_operation.reserved_source_id) == 0
 

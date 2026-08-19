@@ -492,12 +492,11 @@ class OfflineSmallFileUploadOperationStore:
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH)
             if row.state == _COMMITTED_STATE:
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
-            if row.state == _RECEIVING_STATE and row.expires_at > now:
+            if row.state == _RECEIVING_STATE:
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
-            # Mirroring the durable adapter: an expired non-terminal row
-            # re-reserves — fresh token, extended deadline — because nothing
-            # was committed for it; receive-time expiry checks keep refusing
-            # the continuation of any token past its deadline.
+            # Mirroring the durable adapter: only an expired pending row is
+            # reclaimable. A claimed receive keeps its token/revision fence
+            # through guarded terminalization across the original deadline.
             if row.expires_at <= now:
                 row.expires_at = now + timedelta(seconds=_OFFLINE_EXPIRY_SECONDS)
             row.operation_token = UploadOperationToken(secrets.token_urlsafe(32))
@@ -538,9 +537,9 @@ class OfflineSmallFileUploadOperationStore:
             or row.device_context.device_id != device_context.device_id
         ):
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH)
-        if row.state != _COMMITTED_STATE and row.expires_at <= self._now():
-            raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_EXPIRED)
         if row.state == _PENDING_STATE:
+            if row.expires_at <= self._now():
+                raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_EXPIRED)
             row.state = _RECEIVING_STATE
         return SmallFileBoundOperation(
             operation_token=row.operation_token,
@@ -588,7 +587,7 @@ class OfflineSmallFileUploadOperationStore:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
         if require_claimed and row.state != _RECEIVING_STATE:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
-        if row.expires_at <= self._now():
+        if not require_claimed and row.expires_at <= self._now():
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_EXPIRED)
         row.state = _COMMITTED_STATE
         row.terminal_result = result

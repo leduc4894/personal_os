@@ -15,10 +15,12 @@ token stored only as its one-way SHA-256 hash (a re-preflight rotates the
 hash, so the raw token is never persisted or reused), a create reserves the
 server-generated source UUID on the row without inserting any ``sources``
 row, and an update records its base pair without reserving anything. An
-expired non-terminal row is invalid for continuation — the receive-side
-binding and the terminal write both refuse it — while a same-identity
-re-preflight re-reserves it (fresh token, extended deadline): nothing was
-committed for a non-terminal row, so re-reservation cannot double-publish.
+expired pending row is invalid for continuation and may be re-reserved with a
+fresh token and extended deadline. Once a receive claims the row, that
+``receiving`` claim retains its token/revision fence across the reservation
+deadline: exact-token retries may resume it and guarded terminalization may
+finish, while same-identity preflight cannot rotate it underneath canonical
+publication.
 
 ``record_terminal_result`` persists the publication result and the operation's
 terminal state as one guarded update inside a single transaction, and exposes
@@ -31,8 +33,9 @@ operation state in one commit. The receive-side binding
 :meth:`record_bound_terminal_result
 <PostgresqlSmallFileUploadOperationStore.record_bound_terminal_result>`)
 resolves one row by its one-way token hash — the raw token never exists in
-storage — rechecks the credential-derived identity, state and expiry, and
-applies the same guarded terminal transition over the token-bound view.
+storage — rechecks the credential-derived identity and state, applies expiry
+only before a pending receive is claimed, and uses the same guarded terminal
+transition over the token-bound view.
 Every statement is schema-qualified and
 parameter-bound; the adapter stores and logs no bytes, locator, token, receipt
 or provider detail, and driver failures cross the boundary only through the
@@ -546,9 +549,7 @@ def _is_expired(expires_at: datetime, now: datetime) -> bool:
     return expires_at <= now
 
 
-def _frozen_result_matches(
-    row: SmallFileOperationRow, result: SmallFileTerminalResult
-) -> bool:
+def _frozen_result_matches(row: SmallFileOperationRow, result: SmallFileTerminalResult) -> bool:
     return (
         row.result_kind == result.result_kind.value
         and row.result_source_id == result.source_id
@@ -690,9 +691,7 @@ class PostgresqlSmallFileUploadOperationStore:
         diagnostic_context: DiagnosticContext,
     ) -> None:
         del diagnostic_context
-        await self._retry.run(
-            lambda _attempt: self._record_terminal_result_once(operation, result)
-        )
+        await self._retry.run(lambda _attempt: self._record_terminal_result_once(operation, result))
 
     async def record_terminal_result_in_transaction(
         self,
@@ -723,15 +722,14 @@ class PostgresqlSmallFileUploadOperationStore:
         The lookup is by the one-way token hash only; the credential-derived
         workspace/device must then match the reserving identity exactly. A
         committed row carries its frozen terminal result so a response-loss
-        replay returns it unchanged — terminal evidence survives expiry —
-        while a non-terminal row past its deadline fails closed as the closed
-        expired error and a failed row as the closed state-invalid error.
+        replay returns it unchanged — terminal evidence survives expiry. An
+        expired pending row fails closed before it can be claimed; a receive
+        already claimed before the deadline may resume by the exact token, and
+        a failed row returns the closed state-invalid error.
         """
         del diagnostic_context
         return await self._retry.run(
-            lambda _attempt: self._resolve_bound_operation_once(
-                operation_token, device_context
-            )
+            lambda _attempt: self._resolve_bound_operation_once(operation_token, device_context)
         )
 
     async def record_bound_terminal_result(
@@ -745,7 +743,9 @@ class PostgresqlSmallFileUploadOperationStore:
         Mirrors :meth:`record_terminal_result` over the token-bound receive
         view: the operation-identity advisory lock, the guarded terminal
         update and the identical-result idempotence all apply, so a replayed
-        or concurrent receive converges on the single frozen result.
+        or concurrent receive converges on the single frozen result. A valid
+        claim may finish after its reservation deadline because state, token,
+        identity and policy revision — not elapsed wall time — fence it.
         """
         del diagnostic_context
         await self._retry.run(
@@ -793,9 +793,9 @@ class PostgresqlSmallFileUploadOperationStore:
                 return _bound_operation_from_row(operation_token, hydrated)
             if hydrated.state == STATE_FAILED:
                 raise _state_invalid()
-            if _is_expired(hydrated.expires_at, self._clock()):
-                raise _operation_expired()
             if hydrated.state == STATE_PENDING:
+                if _is_expired(hydrated.expires_at, self._clock()):
+                    raise _operation_expired()
                 claimed = await connection.execute(
                     receive_claim_statement(operation_id=hydrated.operation_id)
                 )
@@ -850,8 +850,6 @@ class PostgresqlSmallFileUploadOperationStore:
             raise _state_invalid()
         if row.state != STATE_RECEIVING:
             raise _state_invalid()
-        if _is_expired(row.expires_at, self._clock()):
-            raise _operation_expired()
         guarded = await connection.execute(
             bound_terminal_result_update_statement(operation_id=row.operation_id, result=result)
         )
@@ -923,15 +921,11 @@ class PostgresqlSmallFileUploadOperationStore:
                 raise _identity_mismatch()
             if row.state not in _NON_TERMINAL_STATES:
                 raise _state_invalid()
-            if row.state == STATE_RECEIVING and not _is_expired(row.expires_at, self._clock()):
+            if row.state == STATE_RECEIVING:
                 raise _state_invalid()
-            # An expired non-terminal row re-reserves instead of refusing: no
-            # terminal evidence exists for it (exact replay is unaffected —
-            # terminal results survive expiry and are keyed by identity), and
-            # nothing was committed, so rotating the token and extending the
-            # deadline cannot double-publish. The pre-expiry token dies with
-            # the rotation, and receive-time expiry checks keep refusing the
-            # continuation of any token past its deadline.
+            # Only an expired pending row is reclaimable. A receiving row owns
+            # its token/revision fence through guarded terminalization, even if
+            # its original reservation deadline passes during publication.
             expires_at = row.expires_at
             if _is_expired(expires_at, self._clock()):
                 expires_at = compute_upload_operation_expiry(self._clock())

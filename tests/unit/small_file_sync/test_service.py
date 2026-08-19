@@ -146,9 +146,7 @@ class TestPreflightReservation:
 
         assert result.outcome is SmallFilePreflightOutcome.SINGLE_PART_UPLOAD
         assert result.operation_token is not None
-        assert result.expires_at == harness.clock.moment + timedelta(
-            seconds=_EXPIRY_SECONDS
-        )
+        assert result.expires_at == harness.clock.moment + timedelta(seconds=_EXPIRY_SECONDS)
         record = harness.operation_store.record_for_token(result.operation_token)
         assert record is not None
         assert record.reserved_source_id is not None
@@ -343,9 +341,7 @@ class TestPreflightReplay:
         device_context = build_device_context()
         event_id = uuid4()
         idempotency_key = SmallFileIdempotencyKey(str(uuid4()))
-        original = build_create_preflight(
-            event_id=event_id, idempotency_key=idempotency_key
-        )
+        original = build_create_preflight(event_id=event_id, idempotency_key=idempotency_key)
         harness.operation_store.now_override = harness.clock.moment
         reserved = await harness.service.preflight(
             preflight=original,
@@ -567,9 +563,7 @@ class TestReceiveIntegrity:
         assert harness.publication_store.commit_invocations == 0
         assert STORE_RECORD_BOUND_TERMINAL not in harness.ledger.entries
         assert (
-            harness.metrics.upload_count(
-                SmallFileOperation.CREATE, SmallFileMetricOutcome.REJECTED
-            )
+            harness.metrics.upload_count(SmallFileOperation.CREATE, SmallFileMetricOutcome.REJECTED)
             == 1
         )
 
@@ -615,9 +609,7 @@ class TestReceiveGuards:
             diagnostic_context=build_diagnostic_context(),
         )
         assert reserved.operation_token is not None
-        harness.operation_store.declared_size_override_bytes = (
-            MAX_SINGLE_PART_FILE_SIZE_BYTES + 1
-        )
+        harness.operation_store.declared_size_override_bytes = MAX_SINGLE_PART_FILE_SIZE_BYTES + 1
 
         with pytest.raises(SmallFileSyncError) as exc_info:
             await harness.service.receive(
@@ -715,7 +707,9 @@ class TestReceiveReplayAndConcurrency:
         )
 
     @pytest.mark.asyncio
-    async def test_receive_claim_blocks_same_identity_repreflight_until_terminal(self) -> None:
+    async def test_receive_claim_survives_expiry_and_blocks_repreflight_until_terminal(
+        self,
+    ) -> None:
         harness = build_service_harness()
         device_context = build_device_context()
         preflight = build_create_preflight()
@@ -743,6 +737,11 @@ class TestReceiveReplayAndConcurrency:
             )
         )
         await entered.wait()
+
+        # The reservation deadline may pass after the receive has already
+        # claimed the operation and entered canonical publication. That claim
+        # must retain its token/revision fence until guarded terminalization.
+        harness.operation_store.now_override = record.expires_at + timedelta(seconds=1)
 
         assert hasattr(harness.policy_guard, "policy_revision_number")
         harness.policy_guard.policy_revision_number = claimed_revision + 1
