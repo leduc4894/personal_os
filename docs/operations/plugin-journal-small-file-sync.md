@@ -101,7 +101,11 @@ per file, not an error state of the queue.
 
 Every preflight re-evaluates the active signed policy server-side with the
 locator-aware subject (the plugin's local gate is a filter, never the
-authority). A denied or indeterminate subject answers the terminal
+authority) and persists the server-returned allowed revision on the upload
+operation. At publication, a matching active revision reuses that immutable
+allowed binding after verifying the signed active snapshot; it does not
+re-evaluate a locator-free subject. A changed revision is re-evaluated
+fail-closed using the authoritative subject. A denied or indeterminate subject answers the terminal
 `excluded` outcome — a born-terminal `excluded_policy` event on the
 plugin, never retried, no automatic re-upload. A policy revision published
 between an accepted preflight and the content stream is caught by the
@@ -128,7 +132,7 @@ surfaces and its reserved operations can never be continued).
 | Response lost after commit | next pass re-preflights the same identity | `committed_replay` with the frozen result, exactly one publication |
 | File at exactly 16 MiB / one byte over | `blocked_size` at capture when over | accepted at the ceiling; over is rejected before reservation |
 | Denied policy | born-terminal `excluded_policy` | `excluded` outcome, no reservation |
-| Policy changed during upload | pass first ends Login required (transient 403 mapping, queue retained); next preflight settles `excluded_policy` | 403 at the publication guard, nothing published |
+| Policy changed during upload | pass first ends Login required (transient 403 mapping, queue retained); next preflight settles `excluded_policy` | changed revision is re-evaluated fail-closed at the publication guard; nothing published |
 | Stale update base | born-terminal `blocked_conflict` | `conflict` outcome, no upload |
 | Local bytes changed after freeze | frozen event closes `integrity_failed`; successor syncs | digest verification sees only the successor bytes |
 | Torn newest generation | `prior_generation_recovered` | none (local recovery) |
@@ -206,4 +210,3 @@ uv run poe api-contract-check
 The reference-device half of acceptance is the operator evidence procedure
 above; it fails — never skips — while the device rows are absent, and no
 automated gate substitutes for it.
-
