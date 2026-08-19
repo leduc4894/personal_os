@@ -511,16 +511,20 @@ def inspect_secret_set(paths: StackPaths) -> SecretSetState:
         child_stats.append((child, child_stat))
         found_filenames.add(child.name)
 
-    if _SECRET_FILENAMES <= found_filenames <= (
-        _SECRET_FILENAMES | _APPLICATION_SECRET_FILENAMES
-    ):
-        _validate_private_directory(local_directory, local_stat, require_mode=True)
-        _validate_private_directory(secret_directory, secret_stat, require_mode=True)
-        for child, child_stat in child_stats:
-            _validate_private_file(child, child_stat, require_mode=True)
-        _validate_complete_secret_contents(secret_directory)
-        return SecretSetState.COMPLETE
-    return SecretSetState.PARTIAL
+    allowed_filenames = _SECRET_FILENAMES | _APPLICATION_SECRET_FILENAMES
+    if not found_filenames <= allowed_filenames:
+        return SecretSetState.PARTIAL
+    _validate_private_directory(local_directory, local_stat, require_mode=True)
+    _validate_private_directory(secret_directory, secret_stat, require_mode=True)
+    for child, child_stat in child_stats:
+        _validate_private_file(child, child_stat, require_mode=True)
+    managed_filenames = found_filenames & _SECRET_FILENAMES
+    if not managed_filenames:
+        return SecretSetState.MISSING
+    if managed_filenames != _SECRET_FILENAMES:
+        return SecretSetState.PARTIAL
+    _validate_complete_secret_contents(secret_directory)
+    return SecretSetState.COMPLETE
 
 
 def bootstrap_secret_set(
@@ -538,6 +542,7 @@ def bootstrap_secret_set(
     _create_or_validate_local_directory(local_directory)
     staging_directory: Path | None = None
     created_files: list[Path] = []
+    installed_files: list[Path] = []
     has_renamed_secret_set = False
     try:
         staging_directory = Path(
@@ -555,19 +560,36 @@ def bootstrap_secret_set(
             created_files.append(secret_path)
             _write_private_secret_file(secret_path, content)
         _flush_directory(staging_directory)
-        os.rename(staging_directory, secret_directory)
-        staging_directory = None
-        has_renamed_secret_set = True
+        secret_stat = _lstat_or_failure(secret_directory, "secret_set_creation_failed")
+        if secret_stat is None:
+            os.rename(staging_directory, secret_directory)
+            staging_directory = None
+            has_renamed_secret_set = True
+        else:
+            _validate_private_directory(secret_directory, secret_stat, require_mode=True)
+            for staged_path in created_files:
+                installed_path = secret_directory / staged_path.name
+                os.rename(staged_path, installed_path)
+                installed_files.append(installed_path)
+            staging_directory.rmdir()
+            staging_directory = None
+            _flush_directory(secret_directory)
         _flush_directory(local_directory)
     except StackFailure:
-        if has_renamed_secret_set:
+        if has_renamed_secret_set or installed_files:
             try:
                 if inspect_secret_set(paths) is SecretSetState.COMPLETE:
                     return SecretSetState.COMPLETE
             except StackFailure:
                 pass
+        for installed_file in reversed(installed_files):
+            with suppress(OSError):
+                installed_file.unlink()
         raise
     except OSError, ValueError:
+        for installed_file in reversed(installed_files):
+            with suppress(OSError):
+                installed_file.unlink()
         raise StackFailure(StackExitCode.CONTRACT, "secret_set_creation_failed") from None
     finally:
         if staging_directory is not None:
@@ -597,7 +619,7 @@ def validate_secret_set(
 
 
 def remove_secret_set_after_reset(paths: StackPaths) -> SecretSetState:
-    """Remove only an exact complete set after its project reset has succeeded."""
+    """Remove only managed stack secrets after the project reset succeeds."""
     state = inspect_secret_set(paths)
     if state is SecretSetState.MISSING:
         return state
@@ -605,14 +627,18 @@ def remove_secret_set_after_reset(paths: StackPaths) -> SecretSetState:
         raise StackFailure(StackExitCode.CONTRACT, "partial_secret_set")
 
     secret_directory = _validate_secret_directory_location(paths)
-    if any((secret_directory / filename).exists() for filename in _APPLICATION_SECRET_FILENAMES):
-        raise StackFailure(StackExitCode.CONTRACT, "secret_set_removal_failed")
     try:
         for filename in _SECRET_FILENAMES:
             (secret_directory / filename).unlink()
-        secret_directory.rmdir()
+        if not any(secret_directory.iterdir()):
+            secret_directory.rmdir()
+        else:
+            _flush_directory(secret_directory)
+        _flush_directory(secret_directory.parent)
     except OSError:
         raise StackFailure(StackExitCode.CONTRACT, "secret_set_removal_failed") from None
+    if inspect_secret_set(paths) is not SecretSetState.MISSING:
+        raise StackFailure(StackExitCode.CONTRACT, "secret_set_removal_failed")
     return SecretSetState.MISSING
 
 

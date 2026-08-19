@@ -390,7 +390,7 @@ def test_complete_stack_secret_set_allows_documented_application_secret_files(
     assert inspect_secret_set(paths) is SecretSetState.COMPLETE
 
 
-def test_rotate_refuses_to_partially_remove_shared_application_secrets(
+def test_remove_managed_secret_set_preserves_shared_application_secrets(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     paths = resolve_stack_paths(tmp_path)
@@ -400,12 +400,10 @@ def test_rotate_refuses_to_partially_remove_shared_application_secrets(
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(stack_module, "_is_current_windows_user_owner", lambda path: True)
 
-    with pytest.raises(StackFailure) as raised:
-        remove_secret_set_after_reset(paths)
-
-    assert str(raised.value) == "secret_set_removal_failed"
+    assert remove_secret_set_after_reset(paths) is SecretSetState.MISSING
     assert application_secret.exists()
-    assert all((paths.secret_directory / spec.filename).exists() for spec in SECRET_SPECS)
+    assert all(not (paths.secret_directory / spec.filename).exists() for spec in SECRET_SPECS)
+    assert inspect_secret_set(paths) is SecretSetState.MISSING
 
 
 def test_remove_secret_set_after_reset_removes_only_complete_set(tmp_path: Path) -> None:
@@ -1982,6 +1980,58 @@ def test_secret_rotation_removes_exact_secret_set_after_verified_deletion(
     assert any(
         command[:4] == ("docker", "volume", "ls", "--quiet")
         for command in calls[last_remove_index + 1 :]
+    )
+
+
+def test_secret_rotation_preserves_application_files_and_rebootstraps_fresh_managed_set(
+    stack_context: Any,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    application_filenames = (
+        "auth-key-2026-08.key",
+        "policy_signing_a.pem",
+        "policy_signing_b.pem",
+        "r2_access_key_id",
+        "r2_secret_access_key",
+        "web-credential-password.key",
+    )
+    expected_application_contents: dict[str, bytes] = {}
+    for index, filename in enumerate(application_filenames):
+        content = f"application-secret-{index}".encode("ascii")
+        application_path = stack_context.paths.secret_directory / filename
+        application_path.write_bytes(content)
+        application_path.chmod(0o600)
+        expected_application_contents[filename] = content
+    original_managed_fingerprint = stack_module._smoke_secret_fingerprint(stack_context.paths)
+
+    result = stack_module.reset_stack(
+        stack_context,
+        confirm_project="knowledge-local",
+        rotate_secrets=True,
+        runner=_reset_runner(calls),
+    )
+
+    assert result["secrets"] == "removed"
+    assert stack_context.paths.secret_directory.is_dir()
+    assert inspect_secret_set(stack_context.paths) is SecretSetState.MISSING
+    assert {
+        filename: (stack_context.paths.secret_directory / filename).read_bytes()
+        for filename in application_filenames
+    } == expected_application_contents
+
+    assert (
+        bootstrap_secret_set(
+            stack_context.paths,
+            random_bytes=lambda size: bytes(range(32, 32 + size)),
+        )
+        is SecretSetState.COMPLETE
+    )
+    assert {
+        filename: (stack_context.paths.secret_directory / filename).read_bytes()
+        for filename in application_filenames
+    } == expected_application_contents
+    assert (
+        stack_module._smoke_secret_fingerprint(stack_context.paths) != original_managed_fingerprint
     )
 
 
