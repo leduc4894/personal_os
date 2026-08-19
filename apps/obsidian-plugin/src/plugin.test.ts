@@ -149,6 +149,10 @@ describe("Obsidian plugin composition root", () => {
     const triggerCount = pluginSource.match(/void this\.#runBoundedQueuePass\(\)/g)?.length ?? 0;
     expect(triggerCount).toBe(4); // load, create listener, modify listener, Sync now
     expect(pluginSource).not.toContain("queueDriver.requestPass()");
+    // A Vault event's pass runs only after its own settled admission landed
+    // (the 250 ms settle re-reads bytes); an event-time pass would find the
+    // journal still empty and leave the event pending until the next trigger.
+    expect(pluginSource.match(/notifyPathChanged\(file\.path\)\.then\(/g)?.length ?? 0).toBe(2);
     // The wrapper itself is never awaited by onload, a listener or a command.
     expect(pluginSource.match(/await this\.#runBoundedQueuePass\(/g)?.length ?? 0).toBe(0);
     // A Vault event triggers one bounded pass alongside capture.

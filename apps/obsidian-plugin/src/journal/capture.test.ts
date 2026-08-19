@@ -212,6 +212,59 @@ describe("JournalCapture settle admission (spec 7.1, 9)", () => {
     });
   });
 
+  it("resolves the notify promise only after the settled admission is durable", async () => {
+    useSettleFakeTimers();
+    const harness = createHarness();
+    harness.vault.setFileBytes("notes/gate.md", bytesOf("content"));
+
+    let isResolved = false;
+    const notifyPromise = harness.capture.notifyPathChanged("notes/gate.md");
+    void notifyPromise.then(() => {
+      isResolved = true;
+    });
+    await vi.advanceTimersByTimeAsync(FILE_SETTLE_DELAY_MS - 50);
+    expect(isResolved).toBe(false);
+    expect(harness.repository.readLocalFileByPath("notes/gate.md")).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(FILE_SETTLE_DELAY_MS);
+    await notifyPromise;
+
+    expect(isResolved).toBe(true);
+    expect(harness.repository.readLocalFileByPath("notes/gate.md")).not.toBeNull();
+    expect(soleEventOf(harness, "notes/gate.md").state).toBe("queued");
+  });
+
+  it("resolves every superseded notify promise after the one shared admission", async () => {
+    useSettleFakeTimers();
+    const harness = createHarness();
+    harness.vault.setFileBytes("notes/twice.md", bytesOf("first"));
+    const firstPromise = harness.capture.notifyPathChanged("notes/twice.md");
+    await vi.advanceTimersByTimeAsync(FILE_SETTLE_DELAY_MS - 50);
+    harness.vault.setFileBytes("notes/twice.md", bytesOf("second"));
+    const secondPromise = harness.capture.notifyPathChanged("notes/twice.md");
+
+    await vi.advanceTimersByTimeAsync(FILE_SETTLE_DELAY_MS);
+    await Promise.all([firstPromise, secondPromise]);
+
+    expect(harness.repository.countPendingEvents()).toBe(1);
+    expect(soleEventOf(harness, "notes/twice.md").fingerprint).toEqual(
+      await deriveFrozenFingerprint(bytesOf("second")),
+    );
+  });
+
+  it("resolves pending notify promises on dispose without admitting", async () => {
+    useSettleFakeTimers();
+    const harness = createHarness();
+    harness.vault.setFileBytes("notes/gone.md", bytesOf("content"));
+    const notifyPromise = harness.capture.notifyPathChanged("notes/gone.md");
+    await vi.advanceTimersByTimeAsync(FILE_SETTLE_DELAY_MS - 50);
+
+    harness.capture.dispose();
+    await notifyPromise;
+
+    expect(harness.repository.readLocalFileByPath("notes/gone.md")).toBeNull();
+  });
+
   it("re-reads bytes that changed after a single notification", async () => {
     useSettleFakeTimers();
     const harness = createHarness();

@@ -421,14 +421,18 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       });
       this.registerEvent(
         this.app.vault.on("create", (file) => {
-          capture.notifyPathChanged(file.path);
-          void this.#runBoundedQueuePass();
+          // The pass follows the settled admission (250 ms settle re-reads the
+          // bytes): running it at event time would find an empty journal.
+          void capture.notifyPathChanged(file.path).then(() => {
+            void this.#runBoundedQueuePass();
+          });
         }),
       );
       this.registerEvent(
         this.app.vault.on("modify", (file) => {
-          capture.notifyPathChanged(file.path);
-          void this.#runBoundedQueuePass();
+          void capture.notifyPathChanged(file.path).then(() => {
+            void this.#runBoundedQueuePass();
+          });
         }),
       );
       this.registerEvent(

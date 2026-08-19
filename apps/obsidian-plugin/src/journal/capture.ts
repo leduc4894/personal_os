@@ -126,6 +126,7 @@ export class JournalCapture {
   readonly #scanMaximumFiles: number;
   readonly #scanBatchFiles: number;
   readonly #settleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  readonly #settleWaiters = new Map<string, Set<() => void>>();
   readonly #lifecycleGuardedPaths = new Set<string>();
   #admissionTail: Promise<void> = Promise.resolve();
   #isDisposed = false;
@@ -148,32 +149,55 @@ export class JournalCapture {
    * Queue one create/modify observation (spec 7.1): the path settles alone
    * for the frozen delay — a later observation restarts that one timer —
    * and only the settled read is admitted. Paths already deferred by a
-   * lifecycle guard are never re-captured.
+   * lifecycle guard are never re-captured. The returned promise resolves
+   * once this observation's settled admission is durable (superseded
+   * observations of the same path resolve with the one shared admission),
+   * or immediately when nothing will be admitted — the hook a Vault-event
+   * listener uses to trigger the following queue pass after the event it
+   * caused exists in the journal. Never rejects.
    */
-  notifyPathChanged(path: string): void {
+  notifyPathChanged(path: string): Promise<void> {
     if (this.#isDisposed) {
-      return;
+      return Promise.resolve();
     }
     const normalizedPath = this.#normalizePathOrNull(path);
     if (normalizedPath === null || this.#isLifecycleDeferredPath(normalizedPath)) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      const waiters = this.#settleWaiters.get(normalizedPath) ?? new Set<() => void>();
+      waiters.add(resolve);
+      this.#settleWaiters.set(normalizedPath, waiters);
+      const runningTimer = this.#settleTimers.get(normalizedPath);
+      if (runningTimer !== undefined) {
+        clearTimeout(runningTimer);
+      }
+      this.#settleTimers.set(
+        normalizedPath,
+        setTimeout(() => {
+          this.#settleTimers.delete(normalizedPath);
+          // Settled admissions run serialized on one tail: the outcome is the
+          // same journal the single writer would produce, and unload can await
+          // the tail before closing the store.
+          this.#admissionTail = this.#admissionTail
+            .then(() => this.#admitNormalizedPath(normalizedPath))
+            .then(() => undefined, () => undefined)
+            .then(() => this.#releaseSettleWaiters(normalizedPath));
+        }, FILE_SETTLE_DELAY_MS),
+      );
+    });
+  }
+
+  /** Resolve and drop every pending waiter of one settled path. */
+  #releaseSettleWaiters(normalizedPath: string): void {
+    const waiters = this.#settleWaiters.get(normalizedPath);
+    if (waiters === undefined) {
       return;
     }
-    const runningTimer = this.#settleTimers.get(normalizedPath);
-    if (runningTimer !== undefined) {
-      clearTimeout(runningTimer);
+    this.#settleWaiters.delete(normalizedPath);
+    for (const resolve of waiters) {
+      resolve();
     }
-    this.#settleTimers.set(
-      normalizedPath,
-      setTimeout(() => {
-        this.#settleTimers.delete(normalizedPath);
-        // Settled admissions run serialized on one tail: the outcome is the
-        // same journal the single writer would produce, and unload can await
-        // the tail before closing the store.
-        this.#admissionTail = this.#admissionTail
-          .then(() => this.#admitNormalizedPath(normalizedPath))
-          .then(() => undefined, () => undefined);
-      }, FILE_SETTLE_DELAY_MS),
-    );
   }
 
   /**
@@ -268,6 +292,9 @@ export class JournalCapture {
       clearTimeout(settleTimer);
     }
     this.#settleTimers.clear();
+    for (const normalizedPath of [...this.#settleWaiters.keys()]) {
+      this.#releaseSettleWaiters(normalizedPath);
+    }
     this.#lifecycleGuardedPaths.clear();
   }
 
