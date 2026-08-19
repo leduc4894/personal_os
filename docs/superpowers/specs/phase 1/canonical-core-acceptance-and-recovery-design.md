@@ -350,7 +350,7 @@ postgres_dump.format             custom
 postgres_dump.relative_path      postgres.dump
 postgres_dump.size_bytes         non-negative integer
 postgres_dump.sha256             lowercase SHA-256
-canonical_counts                 closed map of twenty table counts
+canonical_counts                 closed map of 28 table counts
 objects[]
   content_sha256                 lowercase SHA-256
   object_key                     canonical derived key
@@ -369,11 +369,15 @@ Unknown top-level/member fields, duplicate keys/hashes, noncanonical ordering, p
 
 The reader retains exact historical `canonical_core_backup/v1` compatibility:
 v1 admits only its original nine baseline counts and re-encodes to identical v1
-bytes. New backups always emit v2 with the current twenty-table graph. A v1
-restore verifies the schema revision and count set declared by that manifest;
-before the restored target may serve, the operator runs the normal forward
-Alembic migration to the current head and creates a new v2 backup. No reader
-silently treats v1 as the widened policy/small-file graph.
+bytes. It also retains the exact branch-local legacy v2 twenty-table shape.
+New backups always emit v2 with the current 28-table graph, including the eight
+canonical authentication tables. V2 was strengthened in place because its
+introduction had not escaped this branch; no third contract token is needed.
+A restore verifies the schema revision and exact count set declared by its
+validated manifest. Before a v1 target may serve, the operator runs the normal
+forward Alembic migration; before either a v1 or legacy v2 target may serve,
+the operator creates and verifies a current 28-count v2 backup. No reader
+silently widens an older manifest's count witness.
 
 ### 8.3 Filesystem safety
 
@@ -412,13 +416,16 @@ Use one bounded PostgreSQL transaction:
 2. Acquire `SHARE MODE NOWAIT` table locks in the fixed order:
    `users`, `workspaces`, `devices`, `content_objects`, `sources`,
    `source_versions`, `sync_events`, `projection_intents`, `audit_events`,
+   `user_credentials`, `web_sessions`, `totp_credentials`,
+   `totp_recovery_codes`, `device_token_families`, `device_tokens`,
+   `device_authorization_grants`, `authentication_throttle_buckets`,
    `workspace_policy_state`, `policy_signing_keys`, `policy_keysets`,
    `policy_keyset_signatures`, `source_policies`, `policy_rules`,
    `policy_drafts`, `policy_draft_rules`, `policy_evaluations`,
    `policy_reconciliation_intents`, `small_file_upload_operations`.
 3. `SHARE` conflicts with DML `ROW EXCLUSIVE` locks but remains compatible with the `ACCESS SHARE` reads used by `pg_dump`.
 4. Export the snapshot with `pg_export_snapshot()`.
-5. Query the twenty v2 table counts and exact content objects referenced by
+5. Query the 28 current-v2 table counts and exact content objects referenced by
    `source_versions` from the same snapshot.
 6. Launch one `pg_dump --format=custom --snapshot=<snapshot>` for the application database with no owner/privilege replay.
 7. Copy the referenced R2 objects through the verified reader, at most four concurrently.
@@ -530,7 +537,7 @@ Before success:
 - Alembic head is exactly the revision declared by the verified manifest;
 - the normalized migrated catalog matches the baseline contract;
 - the exact versioned table-count set matches the manifest (nine for v1,
-  twenty for v2);
+  twenty for legacy v2, 28 for current v2);
 - bootstrap user/workspace/device IDs and status relationships match;
 - every source current pointer resolves to its own immutable version/object;
 - every referenced object full-verifies from R2;

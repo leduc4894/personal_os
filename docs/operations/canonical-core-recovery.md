@@ -146,9 +146,13 @@ against its entry → totals. Changed-file-during-verification is detected via
 pre/post `fstat` identity, and hard-link aliasing across bundle files is
 rejected. Every failure is the closed `canonical_recovery_bundle_invalid`
 (exit `65`) with a reason token only. The reader accepts exact historical v1
-manifests with their original nine baseline counts and current v2 manifests
-with twenty counts; any other version or any count-set widening under v1 is
-invalid.
+manifests with their original nine baseline counts, the exact branch-local
+legacy v2 shape with twenty counts, and the current v2 shape with 28 counts.
+New writers emit only the 28-count shape, including all eight canonical
+authentication tables. The v2 token was strengthened in place because its
+introduction had not left this branch; retaining the exact legacy shape avoids
+invalidating bundles created during branch verification. Any other count set,
+or any widening under v1, is invalid.
 
 **What the sidecar does and does not prove.** `manifest.sha256` proves that
 `manifest.json` is exactly the bytes the backup wrote — it binds the manifest
@@ -199,9 +203,10 @@ the exact expected bytes.
 An exact v1 restore is an intermediate recovery state, not a current serving
 artifact. After it succeeds, keep admission disabled, configure the restored
 target through the normal migration loader, run `uv run poe database-upgrade`
-and `uv run poe database-current`, then create and verify a new v2 backup.
-Only after the target is at the current pinned head and the v2 rebackup is
-verified may application serving resume.
+and `uv run poe database-current`, then create and verify a new current v2
+backup. A restored legacy 20-count v2 bundle likewise requires an immediate
+current 28-count v2 rebackup and verification before serving. Only after that
+current rebackup is verified may application serving resume.
 
 ## Safety boundary
 

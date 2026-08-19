@@ -312,10 +312,15 @@ empty segments and every managed stack filename are rejected. Previous
 authentication keys use at most four comma-separated `key-id=relative/path`
 entries; key IDs use the safe-token grammar, previous IDs and paths are
 unique, and neither may collide with the configured current authentication ID
-or path. An unallowlisted file or directory makes inspection `partial` and
-blocks bootstrap. R2 credentials remain outside Compose and stack lifecycle
-state even though their application-owned files are preserved in the shared
-local secret directory.
+or path. Filesystem-path collision checks use the host filesystem identity:
+case-insensitive on Windows and exact on POSIX. This applies between managed
+and configured paths and between current, previous, and policy-signing paths,
+so a Windows case variant is rejected before inspection or reset can touch an
+alias. Key IDs are not filesystem paths: they retain the exact `SafeToken`
+grammar and comparison semantics. An unallowlisted file or directory makes
+inspection `partial` and blocks bootstrap. R2 credentials remain outside
+Compose and stack lifecycle state even though their application-owned files
+are preserved in the shared local secret directory.
 
 ### 8.2 Creation behavior
 

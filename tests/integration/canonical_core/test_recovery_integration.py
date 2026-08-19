@@ -8,7 +8,8 @@ the quiescing share locks while a second snapshot fails bounded with
 SNAPSHOT_BUSY; the dump and the manifest describe one exported snapshot even
 when the live database mutates after the backup; offline verification detects
 dump, object and manifest mutation; current v2 restores are exact across the
-twenty-table graph; a real historical nine-table v1 bundle remains restorable;
+28-table graph including authentication; a real historical nine-table v1
+bundle remains restorable;
 a failed single-transaction restore leaves the target database empty; the
 restored graph serves the exact canonical bytes through the real read service;
 and a failed backup leaves no staging files, locks or client processes behind.

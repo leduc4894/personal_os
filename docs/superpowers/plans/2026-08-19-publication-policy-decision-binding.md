@@ -310,8 +310,12 @@ before opening a transaction.
 
   The rotation update must set token hash, expiry, policy revision, and
   `updated_at` in the same statement for every pending re-preflight, expired or
-  not. A `receiving` row is already claimed and must reject re-preflight without
-  rotating token, revision, or expiry. Do not add policy revision to
+  not. A `receiving` row is already claimed and is never reclaimed because of
+  expiry: token and expiry do not rotate. This original no-revision-rebind
+  wording is superseded only by the final-blocker addendum below: a successful
+  locator-aware reauthorization of the same claimed identity may update its
+  policy revision under the operation lock while preserving the exact token
+  and every other bound field. Do not add policy revision to
   `operation_fingerprint_matches`.
 
 - [x] Extend `_bound_matches_row` with:
@@ -948,9 +952,10 @@ The whole-branch review adds four completion gates without changing the public
 wire, schema, fingerprint, or invocation-local binding architecture:
 
 - [x] Prove in a unit seam and real PostgreSQL that `pending -> receiving` is an
-  ownership claim. Advance time beyond `expires_at`, reject same-identity
-  re-preflight without token/revision rotation, allow exact-token resume, and
-  allow the guarded `receiving -> committed` transition after expiry.
+  ownership claim. Advance time beyond `expires_at`, prove expiry alone cannot
+  reclaim or rotate token/expiry, allow successful locator-aware
+  reauthorization to update only the policy revision, allow exact-token resume,
+  and allow the guarded `receiving -> committed` transition after expiry.
 - [x] Change `stack reset --rotate-secrets` to delete and rebootstrap only the
   managed stack-secret filenames. Preserve every allowlisted application file
   byte-for-byte and prove a complete reset, rebootstrap, and changed smoke
@@ -970,14 +975,21 @@ wire, schema, fingerprint, or invocation-local binding architecture:
 
 ## Claimed-upload resume final-review addendum
 
-- [x] Observe the interrupted-after-claim behavior fail with a durable
-  `waiting_retry` event, then prove the next pass resumes exactly the unchanged
-  persisted token and produces one terminal publication.
+- [x] Observe interrupted-after-claim behavior with one durable nonterminal
+  event. The final live proof makes interruption deterministic by disabling the
+  plugin after the revision changes (so it does not depend on whether the row
+  has advanced from `uploading` to `waiting_retry`), then proves the next pass
+  resumes exactly the unchanged persisted token and produces one terminal
+  publication.
 - [x] Prove that an unknown operation, a token replaced during preflight, and a
   successful policy-change exclusion cannot enter claimed-token resume.
 - [x] Make the live database observer wait for the fixture-scoped
   `receiving`/unpublished row before publishing the policy-race revision, while
   emitting sanitized counts only.
+- [x] Extend the mandatory real journey with a deterministic plugin
+  interruption, an irrelevant `folder_prefix` revision, internal equality of
+  the pre/post opaque operation identity (never logged), and fixture-scoped
+  proof of exactly one canonical publication and one terminal receipt.
 - [x] Reject offline terminalization when any bound field differs, including
   the allowed policy revision, matching the PostgreSQL fence.
 - [x] Run focused and regression unit/integration/contract/static/build gates,
@@ -1015,9 +1027,11 @@ wire, schema, fingerprint, or invocation-local binding architecture:
 - [x] Reproduce application/database clock skew through the real publication
   service, remove receipt-time test fudging, and bind the first content-object
   row's creation/verification timestamps deterministically.
-- [x] Preserve the historical nine-count `canonical_core_backup/v1` reader,
-  emit the twenty-count graph as a documented v2 manifest, and prove a v1
-  empty-target restore plus the required forward-migrate/rebackup path.
+- [x] Preserve the historical nine-count `canonical_core_backup/v1` reader and
+  the exact branch-local twenty-count v2 shape, emit the complete 28-count
+  graph as current v2, and prove v1/legacy-v2 restore compatibility plus the
+  required current-v2 rebackup path. V2 is strengthened in place because it
+  never escaped this branch.
 - [x] Document managed versus preserved local secrets, dynamic reference
   grammar/collisions, and exact reset/bootstrap results in canonical docs.
 - [x] Bound the live evidence subprocess, PostgreSQL connect, statement, lock,
