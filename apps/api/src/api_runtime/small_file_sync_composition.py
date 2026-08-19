@@ -50,6 +50,7 @@ from personal_os.exclusion_policy.enforcement import (
     AllowedPolicyRevisionBinding,
     KeyedTrustAnchorVerifier,
     PolicyEnforcementService,
+    PublicationPolicyEvidence,
     default_utc_clock,
 )
 from personal_os.exclusion_policy.errors import ExclusionPolicyError
@@ -680,7 +681,7 @@ class OfflineSourcePublicationStore:
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
         *,
-        preflight_decision: object = None,
+        preflight_decision: PublicationPolicyEvidence | None = None,
     ) -> SourceVersionPublicationResult:
         del receipt, preflight_decision
         return self._commit(command, diagnostic_context, is_create=True)
@@ -692,7 +693,7 @@ class OfflineSourcePublicationStore:
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
         *,
-        preflight_decision: object = None,
+        preflight_decision: PublicationPolicyEvidence | None = None,
     ) -> SourceVersionPublicationResult:
         del receipt, preflight_decision
         return self._commit(command, diagnostic_context, is_create=False)

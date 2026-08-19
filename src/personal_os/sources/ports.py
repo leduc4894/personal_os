@@ -30,7 +30,10 @@ from personal_os.sources.projection_dispatch import LeasedProjectionIntent
 from personal_os.sources.results import SourceVersionPublicationResult
 
 if TYPE_CHECKING:
-    from personal_os.exclusion_policy.enforcement import PolicyDecision
+    from personal_os.exclusion_policy.enforcement import (
+        PolicyDecision,
+        PublicationPolicyEvidence,
+    )
     from personal_os.sources.reading import CanonicalSourceReference
 
 #: Injectable clock returning the current aware UTC moment.
@@ -44,16 +47,17 @@ class PolicyEnforcementGuard(Protocol):
     :class:`~personal_os.exclusion_policy.enforcement.PolicyEnforcementService`
     here. ``authorize_publication`` evaluates the candidate before any
     object-store access; ``authorize_read`` evaluates the resolved reference
-    before any object-store request. Both are non-authoritative hints — the
-    store adapters independently re-evaluate under the policy-state row lock
-    inside the guarded transaction.
+    before any object-store request. Publication evidence is authoritative
+    only after the store verifies the locked active signed revision: an allowed
+    binding is reused only while that revision remains active, and every other
+    case is re-evaluated inside the guarded transaction.
     """
 
     async def authorize_publication(
         self,
         command: SourceVersionCommand,
         diagnostic_context: DiagnosticContext,
-    ) -> PolicyDecision: ...
+    ) -> PublicationPolicyEvidence: ...
 
     async def authorize_read(
         self,
@@ -71,11 +75,12 @@ class SourcePublicationStore(Protocol):
     identity-mismatch error when the key or event was reused by another
     request. The commit methods run the transaction, rechecking idempotency
     under lock, and may internally perform the bounded database retry reusing
-    the one receipt passed in. ``preflight_decision`` is the service's
-    non-authoritative policy evidence: the store independently locks the
-    policy-state row and re-evaluates the active revision before any source
-    mutation, so a policy change during the upload fails closed without
-    publishing the source version.
+    the one receipt passed in. ``preflight_decision`` is the service's policy
+    evidence: the store independently locks the policy-state row and verifies
+    the active signed revision before any source mutation. A matching allowed
+    revision binding may skip only the evaluator; changed revisions, ordinary
+    decisions and missing evidence are re-evaluated, so a policy change during
+    the upload fails closed without publishing the source version.
     """
 
     async def resolve_committed(
@@ -92,7 +97,7 @@ class SourcePublicationStore(Protocol):
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
         *,
-        preflight_decision: PolicyDecision | None = None,
+        preflight_decision: PublicationPolicyEvidence | None = None,
     ) -> SourceVersionPublicationResult: ...
 
     async def commit_update(
@@ -102,7 +107,7 @@ class SourcePublicationStore(Protocol):
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
         *,
-        preflight_decision: PolicyDecision | None = None,
+        preflight_decision: PublicationPolicyEvidence | None = None,
     ) -> SourceVersionPublicationResult: ...
 
 

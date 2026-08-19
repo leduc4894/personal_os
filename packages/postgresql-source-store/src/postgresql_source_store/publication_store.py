@@ -59,7 +59,10 @@ from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.diagnostics.events import SafeToken
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.exclusion_policy.contracts import PolicySubject
-from personal_os.exclusion_policy.enforcement import PolicyDecision, PolicyTrustAnchorVerifier
+from personal_os.exclusion_policy.enforcement import (
+    PolicyTrustAnchorVerifier,
+    PublicationPolicyEvidence,
+)
 from personal_os.exclusion_policy.metrics import ExclusionPolicyMetrics
 from personal_os.object_storage import VerifiedObjectReceipt
 from personal_os.object_storage.keys import ContentDigest
@@ -82,7 +85,7 @@ from postgresql_source_store.engine import apply_transaction_bounds
 from postgresql_source_store.error_mapping import DatabaseRetryPolicy
 from postgresql_source_store.locks import idempotency_lock_statement, source_lock_statement
 from postgresql_source_store.policy_enforcement import (
-    evaluate_locked_policy_decision,
+    authorize_locked_publication_policy,
     source_type_select_statement,
 )
 from postgresql_source_store.tables import (
@@ -504,7 +507,7 @@ class PostgresqlSourcePublicationStore:
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
         *,
-        preflight_decision: PolicyDecision | None = None,
+        preflight_decision: PublicationPolicyEvidence | None = None,
     ) -> SourceVersionPublicationResult:
         identities = SourceCreateIdentities.allocate()
         return await self._retry.run(
@@ -529,7 +532,7 @@ class PostgresqlSourcePublicationStore:
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
         *,
-        preflight_decision: PolicyDecision | None = None,
+        preflight_decision: PublicationPolicyEvidence | None = None,
     ) -> SourceVersionPublicationResult:
         identities = SourceUpdateIdentities.allocate()
         return await self._retry.run(
@@ -554,7 +557,7 @@ class PostgresqlSourcePublicationStore:
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
         identities: SourceCreateIdentities,
-        preflight_decision: PolicyDecision | None,
+        preflight_decision: PublicationPolicyEvidence | None,
     ) -> SourceVersionPublicationResult:
         return await self._run_locked_transition(
             command,
@@ -579,7 +582,7 @@ class PostgresqlSourcePublicationStore:
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
         identities: SourceUpdateIdentities,
-        preflight_decision: PolicyDecision | None,
+        preflight_decision: PublicationPolicyEvidence | None,
     ) -> SourceVersionPublicationResult:
         return await self._run_locked_transition(
             command,
@@ -608,19 +611,20 @@ class PostgresqlSourcePublicationStore:
             Awaitable[tuple[_PendingRejection | None, SourceVersionPublicationResult | None]],
         ],
         *,
-        preflight_decision: PolicyDecision | None = None,
+        preflight_decision: PublicationPolicyEvidence | None = None,
     ) -> SourceVersionPublicationResult:
         """Run the common locked prefix and one command-specific transition.
 
         The prefix follows design section 8.3 plus the spec-14 policy recheck:
         ``SET LOCAL`` bounds, the idempotency advisory lock, the trusted
         workspace/actor revalidation, the replay/mismatch recheck under lock,
-        then the ``workspace_policy_state`` row lock with the authoritative
-        policy re-evaluation, then the source advisory lock. The policy recheck
+        then the ``workspace_policy_state`` row lock with authoritative signed
+        policy verification, then the source advisory lock. The policy check
         runs for the replay-return path too — a replay must not return
-        canonical data until the current policy permits the subject — and any
-        preflight decision is a non-authoritative hint never consulted for the
-        outcome. Every rejection raises out of the ``async with`` block via
+        canonical data until the current policy permits the subject. Matching
+        bound allowed evidence skips only the evaluator after locked snapshot
+        verification; changed revisions and ordinary decisions are evaluated
+        unconditionally. Every rejection raises out of the ``async with`` block via
         :class:`_RejectionAbort` so the transaction always rolls back — a
         rejection found after a canonical write must never commit a partial
         graph — and the standalone rejection audit is written only after the
@@ -670,10 +674,11 @@ class PostgresqlSourcePublicationStore:
                         safe_details={"source_id": command.source_id},
                     )
                 subject = await self._build_authoritative_subject(connection, command, receipt)
-                await evaluate_locked_policy_decision(
-                    connection,
-                    workspace_id=command.workspace_id,
+                await authorize_locked_publication_policy(
+                    connection=connection,
+                    command=command,
                     subject=subject,
+                    policy_evidence=preflight_decision,
                     verifier=self._policy_verifier,
                     metrics=self._policy_metrics,
                 )

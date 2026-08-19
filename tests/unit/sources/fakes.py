@@ -30,7 +30,10 @@ from personal_os.exclusion_policy.contracts import (
     EnforcedPolicyDecision,
     RawPolicyDecision,
 )
-from personal_os.exclusion_policy.enforcement import PolicyDecision
+from personal_os.exclusion_policy.enforcement import (
+    PolicyDecision,
+    PublicationPolicyEvidence,
+)
 from personal_os.object_storage import (
     CanonicalMediaType,
     CanonicalObjectKey,
@@ -276,7 +279,7 @@ class FakeSourcePublicationStore:
     resolve_committed_fingerprints: list[RequestFingerprint] = field(default_factory=list)
     commit_receipt_identities: list[list[int]] = field(default_factory=list)
     commit_fingerprints: list[RequestFingerprint] = field(default_factory=list)
-    commit_policy_decisions: list[PolicyDecision | None] = field(default_factory=list)
+    commit_policy_decisions: list[PublicationPolicyEvidence | None] = field(default_factory=list)
 
     async def resolve_committed(
         self,
@@ -297,7 +300,7 @@ class FakeSourcePublicationStore:
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
         *,
-        preflight_decision: PolicyDecision | None = None,
+        preflight_decision: PublicationPolicyEvidence | None = None,
     ) -> SourceVersionPublicationResult:
         self.ledger.record(STORE_COMMIT_CREATE)
         return self._commit(receipt, request_fingerprint, preflight_decision)
@@ -309,7 +312,7 @@ class FakeSourcePublicationStore:
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
         *,
-        preflight_decision: PolicyDecision | None = None,
+        preflight_decision: PublicationPolicyEvidence | None = None,
     ) -> SourceVersionPublicationResult:
         self.ledger.record(STORE_COMMIT_UPDATE)
         return self._commit(receipt, request_fingerprint, preflight_decision)
@@ -318,7 +321,7 @@ class FakeSourcePublicationStore:
         self,
         receipt: VerifiedObjectReceipt,
         request_fingerprint: RequestFingerprint,
-        preflight_decision: PolicyDecision | None,
+        preflight_decision: PublicationPolicyEvidence | None,
     ) -> SourceVersionPublicationResult:
         attempt_receipt_identities: list[int] = []
         for _ in range(1 + self.internal_retry_attempts):
@@ -363,15 +366,16 @@ class AllowingPolicyGuard:
 
     ledger: CallLedger
     decision: PolicyDecision = field(default_factory=build_policy_decision)
+    publication_evidence: PublicationPolicyEvidence | None = None
     publication_calls: list[UUID] = field(default_factory=list)
     read_calls: list[UUID] = field(default_factory=list)
 
     async def authorize_publication(
         self, command: SourceVersionCommand, diagnostic_context: DiagnosticContext
-    ) -> PolicyDecision:
+    ) -> PublicationPolicyEvidence:
         self.ledger.record(POLICY_GUARD_PUBLICATION)
         self.publication_calls.append(command.source_id)
-        return self.decision
+        return self.decision if self.publication_evidence is None else self.publication_evidence
 
     async def authorize_read(
         self, reference: CanonicalSourceReference, diagnostic_context: DiagnosticContext
@@ -389,7 +393,7 @@ class DenyingPolicyGuard:
 
     async def authorize_publication(
         self, command: SourceVersionCommand, diagnostic_context: DiagnosticContext
-    ) -> PolicyDecision:
+    ) -> PublicationPolicyEvidence:
         raise self.error
 
     async def authorize_read(
