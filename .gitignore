@@ -15,3 +15,5 @@ node_modules/
 apps/obsidian-plugin/dist/
 test-results/
 playwright-report/
+apps/obsidian-plugin/.obsidian-cache/
+apps/obsidian-plugin/test/vaults/simple/.obsidian/
