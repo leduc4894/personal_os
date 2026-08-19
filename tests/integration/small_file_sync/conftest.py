@@ -18,11 +18,12 @@ revoke route, so every scenario crosses the real HTTP route stack.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Final
+from typing import Final, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -56,6 +57,7 @@ from api_runtime.small_file_sync_composition import (
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from httpx import Response
 
 from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.exclusion_policy.contracts import (
@@ -65,7 +67,9 @@ from personal_os.exclusion_policy.contracts import (
 )
 from personal_os.exclusion_policy.enforcement import (
     ActivePolicySnapshotMaterial,
+    AllowedPolicyRevisionBinding,
     PolicyEnforcementService,
+    PublicationPolicyEvidence,
 )
 from personal_os.exclusion_policy.normalization import normalize_rule
 from personal_os.exclusion_policy.signatures import (
@@ -74,10 +78,13 @@ from personal_os.exclusion_policy.signatures import (
     build_snapshot_payload,
     compute_payload_sha256_hex,
 )
+from personal_os.object_storage import VerifiedObjectReceipt
 from personal_os.runtime_configuration.models import RuntimeEnvironment
 from personal_os.small_file_sync.metrics import InMemorySmallFileSyncMetrics
 from personal_os.small_file_sync.service import SmallFileSyncService
+from personal_os.sources.fingerprint import RequestFingerprint, SourceVersionCommand
 from personal_os.sources.metrics import InMemorySourcePublicationMetrics
+from personal_os.sources.results import SourceVersionPublicationResult
 
 ORIGIN: Final[str] = OFFLINE_WEB_ALLOWED_ORIGIN
 
@@ -179,24 +186,29 @@ class SmallFileWireHarness:
     sync_state: OfflineSmallFileSyncState
     device: ExchangeDevice
     snapshot_source: MutableActivePolicySnapshotSource | None = None
+    publication_store: PolicyAwareInMemorySourcePublicationStore | None = None
 
-    def preflight(self, body: dict[str, object], *, credential: str | None = None) -> object:
-        return self.client.post(
-            "/api/sync/journal-events/preflight",
-            headers={
-                "Authorization": f"Bearer {credential or self.device.access_credential}"
-            },
-            json=body,
+    def preflight(self, body: dict[str, object], *, credential: str | None = None) -> Response:
+        return cast(
+            Response,
+            self.client.post(
+                "/api/sync/journal-events/preflight",
+                headers={"Authorization": f"Bearer {credential or self.device.access_credential}"},
+                json=body,
+            ),
         )
 
-    def upload(self, token: str, content: bytes, *, credential: str | None = None) -> object:
-        return self.client.put(
-            f"/api/uploads/{token}/content",
-            headers={
-                "Authorization": f"Bearer {credential or self.device.access_credential}",
-                "Content-Type": "application/octet-stream",
-            },
-            content=content,
+    def upload(self, token: str, content: bytes, *, credential: str | None = None) -> Response:
+        return cast(
+            Response,
+            self.client.put(
+                f"/api/uploads/{token}/content",
+                headers={
+                    "Authorization": f"Bearer {credential or self.device.access_credential}",
+                    "Content-Type": "application/octet-stream",
+                },
+                content=content,
+            ),
         )
 
 
@@ -252,6 +264,12 @@ class MutableActivePolicySnapshotSource:
         self._revision_number = 1
         self._materials: dict[UUID, ActivePolicySnapshotMaterial] = {}
         self._is_dirty = True
+        self._load_count = 0
+        self._load_failures: dict[int, Exception] = {}
+        self._corrupt_signature_loads: set[int] = set()
+        self._load_barrier: asyncio.Barrier | None = None
+        self._load_barrier_delays_seconds: tuple[float, ...] = ()
+        self._load_barrier_arrivals = 0
 
     @property
     def revision_number(self) -> int:
@@ -262,10 +280,42 @@ class MutableActivePolicySnapshotSource:
         self._revision_number += 1
         self._is_dirty = True
 
+    @property
+    def load_count(self) -> int:
+        return self._load_count
+
+    def fail_after_loads(self, loads_until_failure: int, error: Exception) -> None:
+        """Raise ``error`` on one selected future active-snapshot load."""
+
+        if loads_until_failure < 1:
+            raise ValueError("loads_until_failure must be positive")
+        self._load_failures[self._load_count + loads_until_failure] = error
+
+    def corrupt_signature_after_loads(self, loads_until_corruption: int) -> None:
+        """Return invalid signed material on one selected future load."""
+
+        if loads_until_corruption < 1:
+            raise ValueError("loads_until_corruption must be positive")
+        self._corrupt_signature_loads.add(self._load_count + loads_until_corruption)
+
+    def synchronize_next_loads(self, *, delays_seconds: tuple[float, ...]) -> None:
+        """Barrier the next loads, then apply deterministic release delays."""
+
+        if len(delays_seconds) < 2:
+            raise ValueError("at least two snapshot loads are required")
+        self._load_barrier = asyncio.Barrier(len(delays_seconds))
+        self._load_barrier_delays_seconds = delays_seconds
+        self._load_barrier_arrivals = 0
+
     async def load_active_snapshot(
         self, workspace_id: UUID, context: DiagnosticContext
     ) -> ActivePolicySnapshotMaterial:
         del context
+        self._load_count += 1
+        load_number = self._load_count
+        failure = self._load_failures.pop(load_number, None)
+        if failure is not None:
+            raise failure
         if self._is_dirty or workspace_id not in self._materials:
             revision = ExclusionPolicyRevision(
                 policy_revision_id=uuid4(),
@@ -291,7 +341,19 @@ class MutableActivePolicySnapshotSource:
                 public_key_bytes=self._public_key_bytes,
             )
             self._is_dirty = False
-        return self._materials[workspace_id]
+        material = self._materials[workspace_id]
+        if load_number in self._corrupt_signature_loads:
+            self._corrupt_signature_loads.remove(load_number)
+            material = replace(material, signature_bytes=b"x" * 64)
+        barrier = self._load_barrier
+        if barrier is not None:
+            arrival = self._load_barrier_arrivals
+            self._load_barrier_arrivals += 1
+            if self._load_barrier_arrivals == barrier.parties:
+                self._load_barrier = None
+            await barrier.wait()
+            await asyncio.sleep(self._load_barrier_delays_seconds[arrival])
+        return material
 
 
 class _NoEvidenceSource:
@@ -310,12 +372,88 @@ def excluding_folder_rule(folder_prefix: str) -> ExclusionRule:
     return normalize_rule(uuid4(), RuleKind.FOLDER_PREFIX, text_operand=folder_prefix)
 
 
+def excluding_extension_rule(extension: str) -> ExclusionRule:
+    """One extension exclusion rule through the canonical normalizer."""
+
+    return normalize_rule(uuid4(), RuleKind.EXTENSION, text_operand=extension)
+
+
 def maximum_size_rule(maximum_size_bytes: int) -> ExclusionRule:
     """One inclusive maximum-size exclusion rule (spec 6.2)."""
 
-    return normalize_rule(
-        uuid4(), RuleKind.MAXIMUM_SIZE, size_bytes_operand=maximum_size_bytes
-    )
+    return normalize_rule(uuid4(), RuleKind.MAXIMUM_SIZE, size_bytes_operand=maximum_size_bytes)
+
+
+class PolicyAwareInMemorySourcePublicationStore(OfflineSourcePublicationStore):
+    """In-memory transaction-final policy seam matching the durable store table.
+
+    Matching bound evidence skips only locator-free evaluation after a fresh
+    signed-snapshot verification. Changed bindings, ordinary decisions and
+    absent evidence re-run the real publication guard, just as the PostgreSQL
+    store does under its policy-state lock.
+    """
+
+    def __init__(
+        self,
+        state: OfflineSmallFileSyncState,
+        clock: OfflineSmallFileClock,
+        enforcement: PolicyEnforcementService,
+    ) -> None:
+        super().__init__(state, clock)
+        self._enforcement = enforcement
+        self.policy_evidence_by_event_id: dict[UUID, PublicationPolicyEvidence | None] = {}
+
+    async def commit_create(
+        self,
+        command: SourceVersionCommand,
+        request_fingerprint: RequestFingerprint,
+        receipt: VerifiedObjectReceipt,
+        diagnostic_context: DiagnosticContext,
+        *,
+        preflight_decision: PublicationPolicyEvidence | None = None,
+    ) -> SourceVersionPublicationResult:
+        await self._authorize_locked(command, preflight_decision, diagnostic_context)
+        return await super().commit_create(
+            command,
+            request_fingerprint,
+            receipt,
+            diagnostic_context,
+            preflight_decision=preflight_decision,
+        )
+
+    async def commit_update(
+        self,
+        command: SourceVersionCommand,
+        request_fingerprint: RequestFingerprint,
+        receipt: VerifiedObjectReceipt,
+        diagnostic_context: DiagnosticContext,
+        *,
+        preflight_decision: PublicationPolicyEvidence | None = None,
+    ) -> SourceVersionPublicationResult:
+        await self._authorize_locked(command, preflight_decision, diagnostic_context)
+        return await super().commit_update(
+            command,
+            request_fingerprint,
+            receipt,
+            diagnostic_context,
+            preflight_decision=preflight_decision,
+        )
+
+    async def _authorize_locked(
+        self,
+        command: SourceVersionCommand,
+        policy_evidence: PublicationPolicyEvidence | None,
+        diagnostic_context: DiagnosticContext,
+    ) -> None:
+        self.policy_evidence_by_event_id[command.event_id] = policy_evidence
+        if isinstance(policy_evidence, AllowedPolicyRevisionBinding):
+            await self._enforcement.authorize_bound_publication(
+                command,
+                policy_evidence,
+                diagnostic_context,
+            )
+            return
+        await self._enforcement.authorize_publication(command, diagnostic_context)
 
 
 @pytest.fixture
@@ -346,8 +484,13 @@ def policy_wire_harness() -> Iterator[SmallFileWireHarness]:
     sync_state = OfflineSmallFileSyncState()
     clock = OfflineSmallFileClock(sync_state)
     object_store = OfflineCanonicalObjectStore(sync_state, clock)
+    publication_store = PolicyAwareInMemorySourcePublicationStore(
+        sync_state,
+        clock,
+        enforcement,
+    )
     publication_gateway = BoundPolicySmallFilePublicationGateway(
-        store=OfflineSourcePublicationStore(sync_state, clock),
+        store=publication_store,
         object_store=object_store,
         metrics=InMemorySourcePublicationMetrics(),
         clock=clock,
@@ -363,12 +506,17 @@ def policy_wire_harness() -> Iterator[SmallFileWireHarness]:
         clock=clock,
     )
     application = _build_application(SmallFileSyncRuntime(service=service))
-    with TestClient(application, base_url=ORIGIN) as client:
+    with TestClient(
+        application,
+        base_url=ORIGIN,
+        raise_server_exceptions=False,
+    ) as client:
         yield SmallFileWireHarness(
             client=client,
             sync_state=sync_state,
             device=exchange_device_credential(client, device_name="Policy desktop"),
             snapshot_source=snapshot_source,
+            publication_store=publication_store,
         )
 
 
@@ -376,6 +524,7 @@ __all__ = [
     "ExchangeDevice",
     "SmallFileWireHarness",
     "exchange_device_credential",
+    "excluding_extension_rule",
     "excluding_folder_rule",
     "maximum_size_rule",
     "offline_harness",

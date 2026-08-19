@@ -291,6 +291,34 @@ async def test_successful_repreflight_rotates_token_and_rebinds_server_revision(
 
 
 @pytest.mark.asyncio
+async def test_server_revision_overrides_plugin_claim_in_row_and_receive_binding(
+    small_file_harness: SmallFileOperationHarness, seeded_workspace: object
+) -> None:
+    harness = small_file_harness
+    device_context = harness.device_context(seeded_workspace)
+    preflight = harness.preflight()
+    server_revision = preflight.policy_revision_number + 37
+    assert preflight.policy_revision_number != server_revision
+
+    operation = await harness.store.reserve_operation(
+        preflight,
+        device_context,
+        harness.policy_binding(device_context, server_revision),
+        _context(),
+    )
+
+    row = await harness.operation_row(preflight.event_id)
+    assert row is not None
+    assert row["policy_revision_number"] == server_revision
+    bound = await harness.store.resolve_bound_operation(
+        operation.operation_token,
+        device_context,
+        _context(),
+    )
+    assert bound.policy_revision_number == server_revision
+
+
+@pytest.mark.asyncio
 async def test_concurrent_preflights_yield_exactly_one_operation_row(
     small_file_harness: SmallFileOperationHarness, seeded_workspace: object
 ) -> None:

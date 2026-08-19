@@ -46,6 +46,109 @@ interface CreatedGrant {
   readonly poll_interval_seconds: number;
 }
 
+interface PolicyStatus {
+  readonly active_policy_revision_id: string | null;
+  readonly active_revision_number: number;
+  readonly draft: { readonly draft_version: number };
+}
+
+interface PolicyPreview {
+  readonly policy_preview_id: string;
+  readonly status: string;
+  readonly policy_draft_id: string;
+  readonly draft_version: number;
+  readonly draft_sha256: string;
+  readonly base_policy_revision_id: string | null;
+  readonly impact_digest: string | null;
+}
+
+async function responseData<T>(response: Response, operation: string): Promise<T> {
+  if (!response.ok) {
+    throw new Error(`${operation} failed: ${response.status}`);
+  }
+  return ((await response.json()) as { data: T }).data;
+}
+
+function adminHeaders(cookies: string[], csrf: string): Record<string, string> {
+  return {
+    "content-type": "application/json",
+    origin: allowedOrigin,
+    cookie: cookies.join("; "),
+    "x-csrf-token": csrf,
+  };
+}
+
+async function publishTmpExclusionRule(cookies: string[], csrf: string): Promise<number> {
+  const status = await responseData<PolicyStatus>(
+    await fetch(`${serverOrigin}/api/admin/exclusion-policy`, {
+      headers: { origin: allowedOrigin, cookie: cookies.join("; ") },
+    }),
+    "policy status",
+  );
+  await responseData(
+    await fetch(`${serverOrigin}/api/admin/exclusion-policy/draft`, {
+      method: "PUT",
+      headers: adminHeaders(cookies, csrf),
+      body: JSON.stringify({
+        expected_draft_version: status.draft.draft_version,
+        rules: [
+          {
+            rule_id: crypto.randomUUID(),
+            rule_kind: "extension",
+            extension: ".tmp",
+          },
+        ],
+      }),
+    }),
+    "policy draft replacement",
+  );
+  const requested = await responseData<PolicyPreview>(
+    await fetch(`${serverOrigin}/api/admin/exclusion-policy/previews`, {
+      method: "POST",
+      headers: adminHeaders(cookies, csrf),
+    }),
+    "policy preview request",
+  );
+  let preview = requested;
+  for (let attempt = 0; attempt < 60 && preview.status !== "ready"; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    preview = await responseData<PolicyPreview>(
+      await fetch(
+        `${serverOrigin}/api/admin/exclusion-policy/previews/${requested.policy_preview_id}`,
+        { headers: { origin: allowedOrigin, cookie: cookies.join("; ") } },
+      ),
+      "policy preview poll",
+    );
+  }
+  if (preview.status !== "ready" || preview.impact_digest === null) {
+    throw new Error(`policy preview did not become ready: ${preview.status}`);
+  }
+  const publication = await responseData<{ revision_number: number; rule_count: number }>(
+    await fetch(`${serverOrigin}/api/admin/exclusion-policy/publications`, {
+      method: "POST",
+      headers: {
+        ...adminHeaders(cookies, csrf),
+        "X-Idempotency-Key": `obsidian-e2e-${crypto.randomUUID()}`,
+      },
+      body: JSON.stringify({
+        policy_preview_id: preview.policy_preview_id,
+        policy_draft_id: preview.policy_draft_id,
+        expected_draft_version: preview.draft_version,
+        expected_draft_sha256: preview.draft_sha256,
+        preview_impact_digest: preview.impact_digest,
+        expected_active_policy_revision_id: preview.base_policy_revision_id,
+        expected_active_revision_number: status.active_revision_number,
+        confirmation: "PUBLISH EXCLUSION POLICY",
+      }),
+    }),
+    "policy publication",
+  );
+  if (publication.rule_count !== 1) {
+    throw new Error(`policy publication rule count mismatch: ${publication.rule_count}`);
+  }
+  return publication.revision_number;
+}
+
 async function readPluginData(): Promise<Record<string, unknown>> {
   return browser.execute(
     async (dataPathSuffix: string) => {
@@ -134,32 +237,12 @@ async function editFixtureNote(): Promise<void> {
   });
 }
 
-async function logNoteBytes(label: string): Promise<void> {
-  const fingerprint = await browser.execute(async () => {
-    const app = (
-      window as unknown as {
-        app: {
-          vault: {
-            configDir: string;
-            adapter: { read: (path: string) => Promise<string> };
-          };
-        };
-      }
-    ).app;
-    const content = await app.vault.adapter.read("hello.md");
-    let hash = 5381;
-    for (let index = 0; index < content.length; index += 1) {
-      hash = ((hash << 5) + hash + content.charCodeAt(index)) | 0;
-    }
-    return { length: content.length, hash, hasCr: content.includes("\r") };
-  });
-  console.log(`NOTE_BYTES_${label}`, JSON.stringify(fingerprint));
-}
-
 describe("device login and small-file sync (live server)", () => {
-  before(function () {
+  before(() => {
     if (passwordFile === undefined || totpHelper === undefined) {
-      this.skip();
+      throw new Error(
+        "live E2E environment loader did not provide the credential-file and TOTP-helper contracts",
+      );
     }
   });
 
@@ -232,6 +315,9 @@ describe("device login and small-file sync (live server)", () => {
       throw new Error(`grant approval failed: ${approveResponse.status}`);
     }
 
+    const policyRevision = await publishTmpExclusionRule(sessionCookies, sessionCsrf ?? "");
+    console.log("TMP_POLICY_PUBLISHED", policyRevision > 0);
+
     await injectPendingGrant(created);
     await browser.reloadObsidian();
     await browser.pause(5_000);
@@ -246,14 +332,11 @@ describe("device login and small-file sync (live server)", () => {
     await browser.pause(3_000);
     console.log("STATUS_AFTER_LOGIN", await readStatusBarText());
 
-    await logNoteBytes("BEFORE_EDIT");
     await editFixtureNote();
-    await logNoteBytes("AFTER_EDIT");
     for (let seconds = 0; seconds <= 30; seconds += 2) {
       await browser.pause(2_000);
       console.log(`STATUS_T_PLUS_${seconds}`, await readStatusBarText());
       if (seconds === 10) {
-        await logNoteBytes("AT_T10");
         await browser.execute(() => {
           const app = (
             window as unknown as {
@@ -265,7 +348,6 @@ describe("device login and small-file sync (live server)", () => {
         console.log("SYNC_NOW_TRIGGERED");
       }
     }
-    await logNoteBytes("FINAL");
 
     const data = await readPluginData();
     console.log("PENDING_GRANT_FINAL", data.pending_grant === null ? "cleared" : "still-pending");
@@ -288,12 +370,15 @@ describe("device login and small-file sync (live server)", () => {
         const pluginDir = `${app.vault.configDir}/plugins/knowledge-workspace`;
         void dataPathSuffix;
         const listing = await app.vault.adapter.list(pluginDir);
-        const journalName = listing.files
-          .map((file) => file.split("/").pop() as string)
-          .filter((name) => name.startsWith("journal.sqlite.g"))
-          .sort()
-          .at(-1);
-        if (journalName === undefined) {
+        const manifest = JSON.parse(
+          await app.vault.adapter.read(`${pluginDir}/journal.manifest.json`),
+        ) as { current?: { generationNumber?: unknown } };
+        const generationNumber = manifest.current?.generationNumber;
+        if (!Number.isSafeInteger(generationNumber) || generationNumber < 0) {
+          return { error: "invalid journal manifest", files: listing.files };
+        }
+        const journalName = `journal.sqlite.g${generationNumber}`;
+        if (!listing.files.some((file) => file.endsWith(`/${journalName}`))) {
           return { error: "no journal generation", files: listing.files };
         }
         const bytes = new Uint8Array(
@@ -308,41 +393,31 @@ describe("device login and small-file sync (live server)", () => {
       pluginDataPathSuffix,
     );
     if ("error" in journalDump || journalDump.base64 === undefined) {
-      console.log("JOURNAL_DUMP", JSON.stringify(journalDump));
+      console.log("JOURNAL_EVIDENCE_AVAILABLE", false);
+      throw new Error("sanitized journal evidence was unavailable");
     } else {
       const initSqlJs = (await import("sql.js")).default;
       const engine = await initSqlJs();
       const database = new engine.Database(Buffer.from(journalDump.base64, "base64"));
-      const events = database.exec(
-        "select state, sha256, size_bytes, media_type, created_at_epoch_ms from journal_events order by created_at_epoch_ms",
+      const committed = database.exec(
+        "select count(*) from journal_events where state = 'committed'",
       );
-      const files = database.exec(
-        "select normalized_path, observed_sha256, observed_size_bytes, observed_media_type from local_files",
+      const pending = database.exec(
+        "select count(*) from journal_events where state not in ('committed', 'no_change', 'excluded_policy', 'blocked_conflict')",
       );
-      const currentBytes = await browser.execute(async () => {
-        const app = (
-          window as unknown as {
-            app: {
-              vault: {
-                adapter: { readBinary: (path: string) => Promise<ArrayBuffer> };
-              };
-            };
-          }
-        ).app;
-        return new Uint8Array(await app.vault.adapter.readBinary("hello.md"));
-      });
-      const { createHash } = await import("node:crypto");
-      const currentDigest = createHash("sha256")
-        .update(new Uint8Array(currentBytes))
-        .digest("hex");
+      const mapped = database.exec(
+        "select count(*) from local_files where source_id is not null and base_version_id is not null",
+      );
+      const committedCount = Number(committed[0]?.values[0]?.[0] ?? 0);
+      const pendingCount = Number(pending[0]?.values[0]?.[0] ?? 0);
+      const mappedCount = Number(mapped[0]?.values[0]?.[0] ?? 0);
       console.log(
-        "JOURNAL_EVENTS",
-        JSON.stringify(events[0]?.values ?? []),
-        "LOCAL_FILES",
-        JSON.stringify(files[0]?.values ?? []),
-        "CURRENT_DIGEST",
-        JSON.stringify({ digest: currentDigest, sizeBytes: currentBytes.byteLength }),
+        "SANITIZED_JOURNAL_EVIDENCE",
+        JSON.stringify({ committedCount, pendingCount, mappedCount }),
       );
+      if (committedCount !== 1 || pendingCount !== 0 || mappedCount !== 1) {
+        throw new Error("journal did not converge to exactly one committed mapped publication");
+      }
     }
   });
 });

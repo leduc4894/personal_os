@@ -19,7 +19,7 @@ import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -115,7 +115,10 @@ class RecordingObjectStore:
             object_key=derive_canonical_object_key(digest),
             size_bytes=len(payload),
             media_type=CanonicalMediaType.parse(media_type),
-            verified_at=datetime.now(UTC),
+            # The database owns created_at. Keep the receipt safely before it
+            # across host/container clock skew so the canonical CHECK remains
+            # deterministic in the real PostgreSQL gate.
+            verified_at=datetime.now(UTC) - timedelta(seconds=1),
             verification_method=VerificationMethod.UPLOADED_FULL_READ,
         )
 
@@ -561,17 +564,30 @@ async def test_store_rejects_foreign_workspace_preflight_evidence(
 
 
 @pytest.mark.asyncio
-async def test_tampered_signature_material_denies_as_signing_unavailable(
+async def test_locked_bound_tampered_signature_rolls_back_without_canonical_rows(
     enforcement_harness: EnforcementHarness,
 ) -> None:
-    await enforcement_harness.publish_revision()
+    bound_revision = await enforcement_harness.publish_revision()
+    command = enforcement_harness.build_create_command(PAYLOAD + b"other")
+    binding = AllowedPolicyRevisionBinding(
+        workspace_id=command.workspace_id,
+        policy_revision_number=bound_revision,
+    )
+    receipt = enforcement_harness.object_store._receipt(PAYLOAD + b"other", "text/markdown")
     prior_pointer = await _activate_forged_revision(enforcement_harness)
 
     with pytest.raises(ExclusionPolicyError) as raised:
-        await enforcement_harness.publish_source(PAYLOAD + b"other")
+        await enforcement_harness.source_store.commit_create(
+            command,
+            compute_request_fingerprint(command),
+            receipt,
+            _context(),
+            preflight_decision=binding,
+        )
     assert raised.value.error_code is ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE
-    assert enforcement_harness.object_store.calls == []
     assert await enforcement_harness.new_rows("sources") == 0
+    assert await enforcement_harness.new_rows("source_versions") == 0
+    assert await enforcement_harness.new_rows("sync_events") == 0
     del prior_pointer  # The forged revision stays; this test runs last.
 
 

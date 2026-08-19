@@ -16,16 +16,24 @@ while an in-flight operation of that device can never be continued.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from typing import Any, Final
-from uuid import uuid4
+from uuid import UUID, uuid4
 
+import pytest
 from tests.integration.small_file_sync.conftest import (
     SmallFileWireHarness,
     exchange_device_credential,
+    excluding_extension_rule,
     excluding_folder_rule,
     maximum_size_rule,
     revoke_device_through_admin_route,
+)
+
+from personal_os.exclusion_policy.enforcement import (
+    AllowedPolicyRevisionBinding,
+    PolicyDecision,
 )
 
 _CONTENT: Final[bytes] = b"# guarded small-file content\n"
@@ -120,6 +128,113 @@ def test_policy_published_during_the_upload_denies_the_publication(
     assert harness.sync_state.publication_commits == 0
 
 
+def test_matching_preflight_revision_publishes_locator_allowed_markdown_once(
+    policy_harness: SmallFileWireHarness,
+) -> None:
+    harness = policy_harness
+    assert harness.snapshot_source is not None
+    harness.snapshot_source.publish_rules((excluding_extension_rule(".tmp"),))
+    server_revision = harness.snapshot_source.revision_number
+    body = _create_body(_OPEN_LOCATOR)
+    body["policy_revision"] = server_revision + 100
+    token = _single_part_token(harness, body)
+    assert harness.sync_state.rows[0].policy_revision_number == server_revision
+
+    response = harness.upload(token, _CONTENT)
+    assert response.status_code == 200, response.text
+    committed = dict(response.json()["data"])
+    assert committed["result_kind"] == "committed"
+    assert harness.sync_state.publication_commits == 1
+    assert harness.sync_state.published_source_ids == {UUID(str(committed["source_id"]))}
+
+    exact_replay = harness.upload(token, _CONTENT)
+    assert exact_replay.status_code == 200, exact_replay.text
+    assert dict(exact_replay.json()["data"]) == committed
+    assert harness.sync_state.publication_commits == 1
+
+    journal_replay = harness.preflight(body)
+    assert journal_replay.status_code == 200, journal_replay.text
+    replay_data = dict(journal_replay.json()["data"])
+    assert replay_data["outcome"] == "committed_replay"
+    assert replay_data["result"] == committed
+    assert harness.sync_state.publication_commits == 1
+
+
+@pytest.mark.parametrize("release_delays", [(0.02, 0.0), (0.0, 0.02)])
+def test_concurrent_receives_keep_distinct_revision_bindings(
+    policy_harness: SmallFileWireHarness,
+    release_delays: tuple[float, float],
+) -> None:
+    harness = policy_harness
+    assert harness.snapshot_source is not None
+    assert harness.publication_store is not None
+
+    earlier_body = _create_body("notes/earlier.md")
+    earlier_token = _single_part_token(harness, earlier_body)
+    earlier_revision = harness.sync_state.rows[0].policy_revision_number
+    harness.snapshot_source.publish_rules((maximum_size_rule(len(_CONTENT) + 100),))
+    later_body = _create_body("notes/later.md")
+    later_token = _single_part_token(harness, later_body)
+    later_revision = harness.sync_state.rows[1].policy_revision_number
+    assert later_revision > earlier_revision
+
+    harness.snapshot_source.synchronize_next_loads(delays_seconds=release_delays)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        earlier_future = executor.submit(harness.upload, earlier_token, _CONTENT)
+        later_future = executor.submit(harness.upload, later_token, _CONTENT)
+        earlier_response = earlier_future.result(timeout=5)
+        later_response = later_future.result(timeout=5)
+
+    assert earlier_response.status_code == 200, earlier_response.text
+    assert later_response.status_code == 200, later_response.text
+    earlier_evidence = harness.publication_store.policy_evidence_by_event_id[
+        UUID(str(earlier_body["event_id"]))
+    ]
+    later_evidence = harness.publication_store.policy_evidence_by_event_id[
+        UUID(str(later_body["event_id"]))
+    ]
+    assert isinstance(earlier_evidence, PolicyDecision)
+    assert earlier_evidence.revision_number == later_revision
+    assert isinstance(later_evidence, AllowedPolicyRevisionBinding)
+    assert later_evidence.policy_revision_number == later_revision
+    assert harness.sync_state.publication_commits == 2
+    assert len(harness.sync_state.published_source_ids) == 2
+
+
+def test_outer_policy_source_failure_returns_internal_error_without_publication(
+    policy_harness: SmallFileWireHarness,
+) -> None:
+    harness = policy_harness
+    assert harness.snapshot_source is not None
+    body = _create_body(_OPEN_LOCATOR)
+    token = _single_part_token(harness, body)
+    harness.snapshot_source.fail_after_loads(1, RuntimeError("database connection failed"))
+
+    response = harness.upload(token, _CONTENT)
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "internal_error"
+    assert response.headers["cache-control"] == "no-store"
+    assert harness.sync_state.publication_commits == 0
+    assert harness.sync_state.published_source_ids == set()
+
+
+def test_locked_invalid_signature_fails_closed_without_publication(
+    policy_harness: SmallFileWireHarness,
+) -> None:
+    harness = policy_harness
+    assert harness.snapshot_source is not None
+    body = _create_body(_OPEN_LOCATOR)
+    token = _single_part_token(harness, body)
+    harness.snapshot_source.corrupt_signature_after_loads(2)
+
+    response = harness.upload(token, _CONTENT)
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "exclusion_policy_signing_unavailable"
+    assert response.headers["cache-control"] == "no-store"
+    assert harness.sync_state.publication_commits == 0
+    assert harness.sync_state.published_source_ids == set()
+
+
 def test_locator_rule_published_during_the_upload_fails_closed_at_publication(
     policy_harness: SmallFileWireHarness,
 ) -> None:
@@ -136,16 +251,22 @@ def test_locator_rule_published_during_the_upload_fails_closed_at_publication(
     assert harness.snapshot_source is not None
     body = _create_body(_OPEN_LOCATOR)
     token = _single_part_token(harness, body)
+    accepted_revision = harness.sync_state.rows[-1].policy_revision_number
     harness.snapshot_source.publish_rules((excluding_folder_rule("notes"),))
+    changed_revision = harness.snapshot_source.revision_number
+    assert changed_revision > accepted_revision
 
     response = harness.upload(token, _CONTENT)
     assert response.status_code == 403, response.text
     assert response.json()["error"]["code"] == "exclusion_policy_indeterminate"
     assert harness.sync_state.publication_commits == 0
+    assert harness.sync_state.published_source_ids == set()
 
     replay = harness.preflight(body)
     assert replay.status_code == 200, replay.text
     assert dict(replay.json()["data"]) == {"outcome": "excluded"}
+    assert harness.sync_state.publication_commits == 0
+    assert harness.sync_state.published_source_ids == set()
 
 
 def test_revoked_device_cannot_preflight_or_continue_its_operation(
