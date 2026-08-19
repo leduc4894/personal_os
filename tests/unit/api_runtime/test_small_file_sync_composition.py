@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 from uuid import uuid4
@@ -36,8 +37,13 @@ from personal_os.diagnostics.context import (
 )
 from personal_os.diagnostics.logging import DiagnosticLogger
 from personal_os.error_contracts.codes import ErrorCode
-from personal_os.exclusion_policy.contracts import PolicySubject
+from personal_os.exclusion_policy.contracts import (
+    EnforcedPolicyDecision,
+    PolicySubject,
+    RawPolicyDecision,
+)
 from personal_os.exclusion_policy.enforcement import (
+    AllowedPolicyRevisionBinding,
     PolicyBoundary,
     PolicyDecision,
     PolicyEnforcementService,
@@ -156,6 +162,7 @@ class _RecordingEnforcement:
 
     subject: PolicySubject | None = None
     boundary: PolicyBoundary | None = None
+    active_revision_number: int = 1
 
     async def authorize_preflight(
         self,
@@ -163,11 +170,21 @@ class _RecordingEnforcement:
         subject: PolicySubject,
         boundary: PolicyBoundary,
         context: DiagnosticContext,
-    ) -> PolicyDecision | None:
+    ) -> PolicyDecision:
         del context
         self.subject = subject
         self.boundary = boundary
-        return None
+        return PolicyDecision(
+            workspace_id=subject.workspace_id,
+            policy_revision_id=uuid4(),
+            revision_number=self.active_revision_number,
+            subject_fingerprint=bytes(32),
+            raw_decision=RawPolicyDecision.ALLOWED,
+            enforced_decision=EnforcedPolicyDecision.ALLOWED,
+            matched_rule_ids=(),
+            missing_fields=(),
+            evaluated_at=datetime(2026, 8, 19, tzinfo=UTC),
+        )
 
 
 def _build_create_preflight() -> SmallFilePreflight:
@@ -204,6 +221,25 @@ async def test_locator_guard_evaluates_the_capture_subject_at_the_upload_boundar
     assert subject.media_type == CanonicalMediaType.parse("text/markdown")
     assert subject.size_bytes == 128
     assert subject.source_id is None  # a create carries no canonical source yet
+
+
+@pytest.mark.asyncio
+async def test_locator_guard_returns_the_server_verified_revision_not_the_plugin_claim() -> None:
+    active_revision_number = 11
+    enforcement = _RecordingEnforcement(active_revision_number=active_revision_number)
+    guard = PolicyEnforcementSmallFileGuard(enforcement=enforcement)  # type: ignore[arg-type]
+    device_context = SmallFileDeviceContext(device_id=uuid4(), workspace_id=uuid4())
+    preflight = _build_create_preflight()
+
+    binding = await guard.authorize_small_file(
+        preflight, device_context, create_diagnostic_context().context
+    )
+
+    assert binding == AllowedPolicyRevisionBinding(
+        workspace_id=device_context.workspace_id,
+        policy_revision_number=active_revision_number,
+    )
+    assert binding.policy_revision_number != preflight.policy_revision_number
 
 
 @pytest.mark.asyncio

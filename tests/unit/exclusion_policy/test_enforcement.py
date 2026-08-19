@@ -32,6 +32,7 @@ from personal_os.exclusion_policy.contracts import (
 from personal_os.exclusion_policy.enforcement import (
     REASON_REQUIRED_EVIDENCE_MISSING,
     ActivePolicySnapshotMaterial,
+    AllowedPolicyRevisionBinding,
     KeyedTrustAnchorVerifier,
     PolicyDecision,
     PolicyEnforcementService,
@@ -340,6 +341,31 @@ def test_decision_construction_enforces_closed_geometry() -> None:
             matched_rule_ids=(),
             missing_fields=(),
             evaluated_at=datetime(2026, 8, 17, 12, 0, 0),
+        )
+
+
+def test_allowed_policy_revision_binding_rejects_nil_workspace_and_non_positive_revision() -> None:
+    valid = AllowedPolicyRevisionBinding(
+        workspace_id=WORKSPACE_ID,
+        policy_revision_number=1,
+    )
+
+    assert valid.workspace_id == WORKSPACE_ID
+    assert valid.policy_revision_number == 1
+    with pytest.raises(ValueError, match="workspace_id"):
+        _ = AllowedPolicyRevisionBinding(
+            workspace_id=UUID(int=0),
+            policy_revision_number=1,
+        )
+    with pytest.raises(ValueError, match="policy_revision_number"):
+        _ = AllowedPolicyRevisionBinding(
+            workspace_id=WORKSPACE_ID,
+            policy_revision_number=0,
+        )
+    with pytest.raises(ValueError, match="policy_revision_number"):
+        _ = AllowedPolicyRevisionBinding(
+            workspace_id=WORKSPACE_ID,
+            policy_revision_number=-1,
         )
 
 

@@ -191,6 +191,22 @@ class PolicyDecision:
 
 
 @dataclass(frozen=True, slots=True)
+class AllowedPolicyRevisionBinding:
+    """Immutable server-owned evidence that one policy revision allowed a preflight."""
+
+    workspace_id: UUID
+    policy_revision_number: int
+
+    def __post_init__(self) -> None:
+        reject_nil_uuid("workspace_id", self.workspace_id)
+        if self.policy_revision_number < 1:
+            raise ValueError("policy_revision_number must be positive")
+
+
+type PublicationPolicyEvidence = PolicyDecision | AllowedPolicyRevisionBinding
+
+
+@dataclass(frozen=True, slots=True)
 class ActivePolicySnapshotMaterial:
     """The persisted signed members of one active revision plus its trust anchor.
 
@@ -594,12 +610,14 @@ __all__ = [
     "REASON_REQUIRED_EVIDENCE_MISSING",
     "ActivePolicySnapshotMaterial",
     "ActivePolicySnapshotSource",
+    "AllowedPolicyRevisionBinding",
     "AwareUtcClock",
     "KeyedTrustAnchorVerifier",
     "PolicyDecision",
     "PolicyEnforcementService",
     "PolicySubjectEvidenceSource",
     "PolicyTrustAnchorVerifier",
+    "PublicationPolicyEvidence",
     "default_utc_clock",
     "enforce_policy_decision",
     "evaluate_policy_decision",

@@ -53,8 +53,10 @@ from personal_os.exclusion_policy.contracts import (
 )
 from personal_os.exclusion_policy.enforcement import (
     ActivePolicySnapshotMaterial,
+    AllowedPolicyRevisionBinding,
     PolicyDecision,
     PolicyEnforcementService,
+    PublicationPolicyEvidence,
     enforce_policy_decision,
     evaluate_policy_decision,
     parse_verified_policy_revision,
@@ -142,6 +144,7 @@ __all__ = [
     "SNAPSHOT_PAYLOAD_CONTRACT",
     "SNAPSHOT_SIGNING_DOMAIN",
     "ActivePolicySnapshotMaterial",
+    "AllowedPolicyRevisionBinding",
     "CanonicalJsonValue",
     "CompiledGlob",
     "EnforcedPolicyDecision",
@@ -174,6 +177,7 @@ __all__ = [
     "PolicySubject",
     "PolicySubjectField",
     "PreviewMatchState",
+    "PublicationPolicyEvidence",
     "RawPolicyDecision",
     "RuleKind",
     "RuleOperand",

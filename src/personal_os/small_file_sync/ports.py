@@ -19,6 +19,7 @@ from typing import Protocol
 from uuid import UUID
 
 from personal_os.diagnostics.context import DiagnosticContext
+from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
 from personal_os.object_storage import CanonicalMediaType, ContentDigest
 from personal_os.small_file_sync.contracts import (
     SmallFileDeviceContext,
@@ -77,8 +78,8 @@ class SmallFilePolicyGuard(Protocol):
     boundary. A definite exclusion, an indeterminate outcome or any
     fail-closed policy failure raises the typed
     :class:`~personal_os.exclusion_policy.errors.ExclusionPolicyError`; only
-    an allowed decision returns ``None``. The guard runs before any
-    operation-store reservation or object-store access.
+    an allowed decision returns the server-owned revision binding. The guard
+    runs before any operation-store reservation or object-store access.
     """
 
     async def authorize_small_file(
@@ -86,7 +87,7 @@ class SmallFilePolicyGuard(Protocol):
         preflight: SmallFilePreflight,
         device_context: SmallFileDeviceContext,
         diagnostic_context: DiagnosticContext,
-    ) -> None: ...
+    ) -> AllowedPolicyRevisionBinding: ...
 
 
 class SmallFileUploadOperationStore(Protocol):
@@ -140,4 +141,3 @@ class SmallFileUploadOperationStore(Protocol):
         result: SmallFileTerminalResult,
         diagnostic_context: DiagnosticContext,
     ) -> None: ...
-

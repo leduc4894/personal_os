@@ -47,6 +47,7 @@ from personal_os.diagnostics.logging import DiagnosticLogger
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.exclusion_policy.contracts import PolicySubject
 from personal_os.exclusion_policy.enforcement import (
+    AllowedPolicyRevisionBinding,
     KeyedTrustAnchorVerifier,
     PolicyEnforcementService,
     default_utc_clock,
@@ -137,8 +138,8 @@ class PolicyEnforcementSmallFileGuard:
     locator, the declared media type and size) and evaluates it through
     ``authorize_preflight`` at the single-part-upload boundary. A definite
     exclusion, an indeterminate outcome or any fail-closed policy failure
-    propagates as the typed exclusion denial; only an allowed decision
-    returns. The internal decision evidence stays inside the service.
+    propagates as the typed exclusion denial; an allowed decision becomes a
+    server-owned revision binding without retaining the full decision evidence.
     """
 
     def __init__(self, *, enforcement: PolicyEnforcementService) -> None:
@@ -149,7 +150,7 @@ class PolicyEnforcementSmallFileGuard:
         preflight: SmallFilePreflight,
         device_context: SmallFileDeviceContext,
         diagnostic_context: DiagnosticContext,
-    ) -> None:
+    ) -> AllowedPolicyRevisionBinding:
         subject = PolicySubject(
             workspace_id=device_context.workspace_id,
             source_id=preflight.source_id,
@@ -157,10 +158,14 @@ class PolicyEnforcementSmallFileGuard:
             media_type=preflight.media_type,
             size_bytes=preflight.size_bytes,
         )
-        await self.enforcement.authorize_preflight(
+        decision = await self.enforcement.authorize_preflight(
             subject=subject,
             boundary=PolicyBoundary.SINGLE_PART_UPLOAD,
             context=diagnostic_context,
+        )
+        return AllowedPolicyRevisionBinding(
+            workspace_id=decision.workspace_id,
+            policy_revision_number=decision.revision_number,
         )
 
 
@@ -280,6 +285,7 @@ class OfflineSmallFileSyncState:
     """
 
     is_policy_denied: bool = False
+    active_policy_revision_number: int = 1
     current_reference: CanonicalSourceReference | None = None
     now: datetime | None = None
     rows: list[_OfflineOperationRow] = field(default_factory=list)
@@ -481,10 +487,14 @@ class OfflineSmallFilePolicyGuard:
         preflight: SmallFilePreflight,
         device_context: SmallFileDeviceContext,
         diagnostic_context: DiagnosticContext,
-    ) -> None:
-        del preflight, device_context, diagnostic_context
+    ) -> AllowedPolicyRevisionBinding:
+        del preflight, diagnostic_context
         if self._state.is_policy_denied:
             raise ExclusionPolicyError(ErrorCode.EXCLUSION_POLICY_DENIED)
+        return AllowedPolicyRevisionBinding(
+            workspace_id=device_context.workspace_id,
+            policy_revision_number=self._state.active_policy_revision_number,
+        )
 
 
 class OfflineCurrentSourceStore:

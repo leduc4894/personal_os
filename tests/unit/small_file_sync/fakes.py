@@ -29,6 +29,7 @@ from uuid import UUID, uuid4
 
 from personal_os.diagnostics.context import DiagnosticContext, create_diagnostic_context
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
 from personal_os.exclusion_policy.errors import ExclusionPolicyError
 from personal_os.object_storage import (
     CanonicalMediaType,
@@ -552,10 +553,14 @@ class AllowingSmallFilePolicyGuard:
         preflight: SmallFilePreflight,
         device_context: SmallFileDeviceContext,
         diagnostic_context: DiagnosticContext,
-    ) -> None:
-        del device_context, diagnostic_context
+    ) -> AllowedPolicyRevisionBinding:
+        del diagnostic_context
         self.ledger.record(SYNC_POLICY_GUARD)
         self.authorize_calls.append(preflight.event_id)
+        return AllowedPolicyRevisionBinding(
+            workspace_id=device_context.workspace_id,
+            policy_revision_number=1,
+        )
 
 
 @dataclass
@@ -569,7 +574,7 @@ class DenyingSmallFilePolicyGuard:
         preflight: SmallFilePreflight,
         device_context: SmallFileDeviceContext,
         diagnostic_context: DiagnosticContext,
-    ) -> None:
+    ) -> AllowedPolicyRevisionBinding:
         del preflight, device_context, diagnostic_context
         raise self.error
 
