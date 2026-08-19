@@ -108,3 +108,13 @@ Quy ước theo ngôn ngữ và artifact:
 - Dùng `apply_patch` cho chỉnh sửa thủ công; giữ diff nhỏ và có chủ đích.
 - Chỉ hỏi khi thiếu thông tin làm thay đổi đáng kể kết quả; nếu không, chọn giả định an toàn.
 - Trước khi bàn giao, kiểm tra `git diff`, số dòng hai file hướng dẫn và command liên quan.
+
+## Local test secrets and live client gates
+
+- Nguồn cấu hình local-stack chuẩn là `.local/stack-secrets/`. Trước khi kết luận local-stack thiếu secret hoặc không thể bootstrap, phải dùng loader/validation contract của repository với thư mục này.
+- Không đọc, in, log, copy, hoặc commit giá trị secret. Chỉ báo cáo tên contract, trạng thái hiện diện, và error code đã được redaction.
+- `.local/RESTART.md` is the authoritative local-restart runbook. Before starting local services or diagnosing live-test prerequisites, read and follow its order: `uv run poe stack-status`, `.local/serve-local.sh` (with its Windows event-loop helper `.local/run-serve.py`), Web Admin on port 38000, the two policy workers via `.local/run-worker.sh`, then the existing Cloudflare Tunnel `knowledge-api-verify`.
+- Local bootstrap scripts are mandatory contracts, not optional examples: use `.local/serve-local.sh` for API, `.local/run-worker.sh` for workers, `.local/e2e-totp-code.py` for live Obsidian TOTP, and `.local/publish-policy-revision.py` for live policy setup. Do not run `personal-api serve` directly or invent E2E credential variables before reading the runbook and these scripts.
+- If a bootstrap script fails because its shell cannot find a tool (for example `uv` absent from Bash `PATH`), diagnose the shell/tool-path boundary and preserve the runbook's Windows launcher path; do not conclude that runtime configuration or secret files are missing.
+- Live Obsidian journey dùng `wdio-obsidian-service` là gate bắt buộc khi task yêu cầu. Không được tự đánh dấu deferred hoặc thay bằng mock; phải chạy nó với cấu hình/credential test đã được loader chuẩn nạp và báo cáo chính xác prerequisite ngoài workspace nếu vẫn bị chặn.
+- Máy phát triển này có Cloudflare Tunnel (`cloudflared`) phục vụ live test qua domain trỏ tới origin local. Khi live journey cần một HTTPS origin công khai, kiểm tra và dùng tunnel/cấu hình đã có; không tự tạo tunnel mới, sửa DNS, publish service, hoặc in token/credential. Chỉ báo cáo hostname đã được redaction và trạng thái kết nối.
