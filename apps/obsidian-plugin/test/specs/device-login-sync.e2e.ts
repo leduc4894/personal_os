@@ -1,6 +1,7 @@
 import * as crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { promisify } from "node:util";
 import { browser } from "@wdio/globals";
 
@@ -22,6 +23,20 @@ const webUsername = process.env.E2E_WEB_USERNAME ?? "duc";
 const passwordFile = process.env.E2E_WEB_PASSWORD_FILE;
 const totpHelper = process.env.E2E_TOTP_HELPER;
 const pluginDataPathSuffix = "plugins/knowledge-workspace/data.json";
+const fixtureNotePath = `controlled-live-${crypto.randomUUID()}.md`;
+const policyRaceNotePath = `controlled-policy-race-${crypto.randomUUID()}.md`;
+const repositoryRoot = path.resolve("../..");
+const databaseEnvironmentKeys = [
+  "KNOWLEDGE_SECRET_ROOT",
+  "KNOWLEDGE_DATABASE_HOST",
+  "KNOWLEDGE_DATABASE_PORT",
+  "KNOWLEDGE_DATABASE_NAME",
+  "KNOWLEDGE_DATABASE_USER",
+  "KNOWLEDGE_DATABASE_PASSWORD_FILE",
+] as const;
+let adminSessionCookies: string[] | null = null;
+let adminSessionCsrf: string | null = null;
+let journalDirectoryPath: string | null = null;
 
 const runFile = promisify(execFile);
 
@@ -62,6 +77,107 @@ interface PolicyPreview {
   readonly impact_digest: string | null;
 }
 
+interface PreparedPolicyPublication {
+  readonly preview: PolicyPreview;
+  readonly expectedActivePolicyRevisionId: string | null;
+  readonly expectedActiveRevisionNumber: number;
+}
+
+interface ServerPublicationEvidence {
+  readonly sourceCount: number;
+  readonly sourceVersionCount: number;
+  readonly syncEventCount: number;
+  readonly operationCount: number;
+  readonly committedOperationCount: number;
+  readonly exactOperationPublicationCount: number;
+  readonly receivingUnpublishedOperationCount: number;
+}
+
+interface SanitizedJournalEvidence {
+  readonly committedCount: number;
+  readonly pendingCount: number;
+  readonly mappedCount: number;
+  readonly excludedPolicyCount: number;
+  readonly waitingRetryCount: number;
+}
+
+const serverEvidenceScript = String.raw`
+import json
+import os
+import time
+from pathlib import Path
+
+import psycopg
+
+try:
+    secret_root = Path(os.environ["KNOWLEDGE_SECRET_ROOT"]).resolve(strict=True)
+    password_path = (
+        secret_root / os.environ["KNOWLEDGE_DATABASE_PASSWORD_FILE"]
+    ).resolve(strict=True)
+    if not password_path.is_relative_to(secret_root):
+        raise ValueError
+    password = password_path.read_text(encoding="ascii").strip()
+    with psycopg.connect(
+        host=os.environ["KNOWLEDGE_DATABASE_HOST"],
+        port=int(os.environ["KNOWLEDGE_DATABASE_PORT"]),
+        dbname=os.environ["KNOWLEDGE_DATABASE_NAME"],
+        user=os.environ["KNOWLEDGE_DATABASE_USER"],
+        password=password,
+    ) as connection:
+        statement = """
+            select
+              (select count(*) from knowledge.sources),
+              (select count(*) from knowledge.source_versions),
+              (select count(*) from knowledge.sync_events),
+              (select count(*) from knowledge.small_file_upload_operations),
+              (select count(*) from knowledge.small_file_upload_operations
+                 where state = 'committed'),
+              (select count(*)
+                 from knowledge.small_file_upload_operations operation
+                 join knowledge.sources source
+                   on source.source_id = operation.result_source_id
+                 join knowledge.source_versions version
+                   on version.source_version_id = operation.result_source_version_id
+                  and version.source_id = source.source_id
+                 join knowledge.sync_events event
+                   on event.event_id = operation.event_id
+                 and event.source_id = source.source_id
+                  and event.committed_version_id = version.source_version_id
+                where operation.state = 'committed'),
+              (select count(*) from knowledge.small_file_upload_operations
+                where state = 'receiving'
+                  and result_kind is null
+                  and result_source_id is null
+                  and result_source_version_id is null)
+            """
+        operation_baseline = os.environ.get("SERVER_EVIDENCE_OPERATION_BASELINE")
+        deadline = time.monotonic() + 30
+        while True:
+            row = connection.execute(statement).fetchone()
+            if (
+                operation_baseline is None
+                or row is None
+                or int(row[3]) > int(operation_baseline)
+                or time.monotonic() >= deadline
+            ):
+                break
+            time.sleep(0.01)
+    if row is None:
+        raise ValueError
+    print(json.dumps({
+        "sourceCount": int(row[0]),
+        "sourceVersionCount": int(row[1]),
+        "syncEventCount": int(row[2]),
+        "operationCount": int(row[3]),
+        "committedOperationCount": int(row[4]),
+        "exactOperationPublicationCount": int(row[5]),
+        "receivingUnpublishedOperationCount": int(row[6]),
+    }, separators=(",", ":")))
+except BaseException:
+    print(json.dumps({"state": "server_evidence_unavailable"}))
+    raise SystemExit(1)
+`;
+
 async function responseData<T>(response: Response, operation: string): Promise<T> {
   if (!response.ok) {
     throw new Error(`${operation} failed: ${response.status}`);
@@ -78,7 +194,11 @@ function adminHeaders(cookies: string[], csrf: string): Record<string, string> {
   };
 }
 
-async function publishTmpExclusionRule(cookies: string[], csrf: string): Promise<number> {
+async function prepareExtensionExclusionRule(
+  cookies: string[],
+  csrf: string,
+  extension: ".md" | ".tmp",
+): Promise<PreparedPolicyPublication> {
   const status = await responseData<PolicyStatus>(
     await fetch(`${serverOrigin}/api/admin/exclusion-policy`, {
       headers: { origin: allowedOrigin, cookie: cookies.join("; ") },
@@ -95,7 +215,7 @@ async function publishTmpExclusionRule(cookies: string[], csrf: string): Promise
           {
             rule_id: crypto.randomUUID(),
             rule_kind: "extension",
-            extension: ".tmp",
+            extension,
           },
         ],
       }),
@@ -123,6 +243,18 @@ async function publishTmpExclusionRule(cookies: string[], csrf: string): Promise
   if (preview.status !== "ready" || preview.impact_digest === null) {
     throw new Error(`policy preview did not become ready: ${preview.status}`);
   }
+  return {
+    preview,
+    expectedActivePolicyRevisionId: status.active_policy_revision_id,
+    expectedActiveRevisionNumber: status.active_revision_number,
+  };
+}
+
+async function publishPreparedPolicy(
+  cookies: string[],
+  csrf: string,
+  prepared: PreparedPolicyPublication,
+): Promise<number> {
   const publication = await responseData<{ revision_number: number; rule_count: number }>(
     await fetch(`${serverOrigin}/api/admin/exclusion-policy/publications`, {
       method: "POST",
@@ -131,13 +263,13 @@ async function publishTmpExclusionRule(cookies: string[], csrf: string): Promise
         "X-Idempotency-Key": `obsidian-e2e-${crypto.randomUUID()}`,
       },
       body: JSON.stringify({
-        policy_preview_id: preview.policy_preview_id,
-        policy_draft_id: preview.policy_draft_id,
-        expected_draft_version: preview.draft_version,
-        expected_draft_sha256: preview.draft_sha256,
-        preview_impact_digest: preview.impact_digest,
-        expected_active_policy_revision_id: preview.base_policy_revision_id,
-        expected_active_revision_number: status.active_revision_number,
+        policy_preview_id: prepared.preview.policy_preview_id,
+        policy_draft_id: prepared.preview.policy_draft_id,
+        expected_draft_version: prepared.preview.draft_version,
+        expected_draft_sha256: prepared.preview.draft_sha256,
+        preview_impact_digest: prepared.preview.impact_digest,
+        expected_active_policy_revision_id: prepared.expectedActivePolicyRevisionId,
+        expected_active_revision_number: prepared.expectedActiveRevisionNumber,
         confirmation: "PUBLISH EXCLUSION POLICY",
       }),
     }),
@@ -147,6 +279,45 @@ async function publishTmpExclusionRule(cookies: string[], csrf: string): Promise
     throw new Error(`policy publication rule count mismatch: ${publication.rule_count}`);
   }
   return publication.revision_number;
+}
+
+async function readServerPublicationEvidence(): Promise<ServerPublicationEvidence> {
+  const { stdout } = await runFile("uv", ["run", "python", "-c", serverEvidenceScript], {
+    cwd: repositoryRoot,
+  });
+  const parsed = JSON.parse(stdout) as Record<string, unknown>;
+  const evidenceKeys = [
+    "sourceCount",
+    "sourceVersionCount",
+    "syncEventCount",
+    "operationCount",
+    "committedOperationCount",
+    "exactOperationPublicationCount",
+    "receivingUnpublishedOperationCount",
+  ] as const;
+  for (const key of evidenceKeys) {
+    if (!Number.isSafeInteger(parsed[key]) || Number(parsed[key]) < 0) {
+      throw new Error("sanitized server publication evidence was invalid");
+    }
+  }
+  return parsed as unknown as ServerPublicationEvidence;
+}
+
+async function waitForOperationAfter(
+  baseline: ServerPublicationEvidence,
+): Promise<ServerPublicationEvidence> {
+  const { stdout } = await runFile("uv", ["run", "python", "-c", serverEvidenceScript], {
+    cwd: repositoryRoot,
+    env: {
+      ...process.env,
+      SERVER_EVIDENCE_OPERATION_BASELINE: String(baseline.operationCount),
+    },
+  });
+  const evidence = JSON.parse(stdout) as ServerPublicationEvidence;
+  if (evidence.operationCount > baseline.operationCount) {
+    return evidence;
+  }
+  throw new Error("server did not observe the controlled preflight operation");
 }
 
 async function readPluginData(): Promise<Record<string, unknown>> {
@@ -221,19 +392,147 @@ async function injectPendingGrant(grant: CreatedGrant): Promise<void> {
 }
 
 async function editFixtureNote(): Promise<void> {
-  await browser.execute(async () => {
+  await browser.execute(async (notePath: string) => {
     const app = (
       window as unknown as {
         app: {
           vault: {
             getAbstractFileByPath: (path: string) => unknown;
+            create: (path: string, content: string) => Promise<void>;
             modify: (file: unknown, content: string) => Promise<void>;
           };
         };
       }
     ).app;
-    const file = app.vault.getAbstractFileByPath("hello.md");
-    await app.vault.modify(file, "# Test note\n\nUpdated by the live login journey.\n");
+    const content = "# Test note\n\nUpdated by the live login journey.\n";
+    const file = app.vault.getAbstractFileByPath(notePath);
+    if (file === null) {
+      await app.vault.create(notePath, content);
+      return;
+    }
+    await app.vault.modify(file, content);
+  }, fixtureNotePath);
+}
+
+async function editFixtureNoteForPolicyRace(): Promise<void> {
+  await browser.execute(async (notePath: string) => {
+    const app = (
+      window as unknown as {
+        app: {
+          vault: {
+            create: (path: string, content: string) => Promise<void>;
+          };
+        };
+      }
+    ).app;
+    const header = "# Controlled policy race\n\n";
+    const content = header + "x".repeat(1024 * 1024 - header.length);
+    await app.vault.create(notePath, content);
+  }, policyRaceNotePath);
+}
+
+async function resolveJournalDirectoryPath(): Promise<string> {
+  return await browser.execute(() => {
+    const app = (
+      window as unknown as {
+        app: {
+          vault: {
+            configDir: string;
+            adapter: { getFullPath: (path: string) => string };
+          };
+        };
+      }
+    ).app;
+    return app.vault.adapter.getFullPath(
+      `${app.vault.configDir}/plugins/knowledge-workspace`,
+    );
+  });
+}
+
+async function readSanitizedJournalEvidence(): Promise<SanitizedJournalEvidence> {
+  if (journalDirectoryPath === null) {
+    throw new Error("sanitized journal evidence was unavailable");
+  }
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(journalDirectoryPath, "journal.manifest.json"), "utf8"),
+  ) as { current?: { generationNumber?: unknown } };
+  const generationNumber = manifest.current?.generationNumber;
+  if (!Number.isSafeInteger(generationNumber) || Number(generationNumber) < 0) {
+    throw new Error("sanitized journal evidence was unavailable");
+  }
+  const journalBytes = fs.readFileSync(
+    path.join(journalDirectoryPath, `journal.sqlite.g${generationNumber}`),
+  );
+  const initSqlJs = (await import("sql.js")).default;
+  const engine = await initSqlJs();
+  const database = new engine.Database(journalBytes);
+  try {
+    const count = (whereClause: string): number => {
+      const result = database.exec(`select count(*) from journal_events where ${whereClause}`);
+      return Number(result[0]?.values[0]?.[0] ?? 0);
+    };
+    const mapped = database.exec(
+      "select count(*) from local_files where source_id is not null and base_version_id is not null",
+    );
+    return {
+      committedCount: count("state = 'committed'"),
+      pendingCount: count("state in ('queued', 'preflight', 'uploading', 'waiting_retry')"),
+      mappedCount: Number(mapped[0]?.values[0]?.[0] ?? 0),
+      excludedPolicyCount: count("state = 'excluded_policy'"),
+      waitingRetryCount: count("state = 'waiting_retry'"),
+    };
+  } finally {
+    database.close();
+  }
+}
+
+async function waitForJournalEvidence(
+  accepts: (evidence: SanitizedJournalEvidence) => boolean,
+  failureMessage: string,
+  maximumAttempts = 60,
+): Promise<SanitizedJournalEvidence> {
+  let lastEvidence: SanitizedJournalEvidence | null = null;
+  for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+    try {
+      const evidence = await readSanitizedJournalEvidence();
+      lastEvidence = evidence;
+      if (accepts(evidence)) {
+        return evidence;
+      }
+    } catch {
+      // An atomic generation swap may briefly move the manifest ahead of the
+      // file read. Retry without exposing a path or filesystem detail.
+    }
+    await browser.pause(1_000);
+  }
+  throw new Error(`${failureMessage}: ${JSON.stringify(lastEvidence)}`);
+}
+
+async function triggerSyncNow(): Promise<void> {
+  await browser.execute(() => {
+    const app = (
+      window as unknown as {
+        app: { commands: { executeCommandById: (id: string) => void } };
+      }
+    ).app;
+    app.commands.executeCommandById("knowledge-workspace:sync-now");
+  });
+}
+
+async function reloadKnowledgeWorkspacePlugin(): Promise<void> {
+  await browser.execute(async () => {
+    const app = (
+      window as unknown as {
+        app: {
+          plugins: {
+            disablePlugin: (pluginId: string) => Promise<void>;
+            enablePlugin: (pluginId: string) => Promise<void>;
+          };
+        };
+      }
+    ).app;
+    await app.plugins.disablePlugin("knowledge-workspace");
+    await app.plugins.enablePlugin("knowledge-workspace");
   });
 }
 
@@ -244,10 +543,34 @@ describe("device login and small-file sync (live server)", () => {
         "live E2E environment loader did not provide the credential-file and TOTP-helper contracts",
       );
     }
+    const missingDatabaseContracts = databaseEnvironmentKeys.filter(
+      (key) => process.env[key] === undefined,
+    );
+    if (missingDatabaseContracts.length > 0) {
+      throw new Error("live E2E environment loader did not provide server-evidence contracts");
+    }
+  });
+
+  after(async function () {
+    this.timeout(120_000);
+    if (adminSessionCookies === null || adminSessionCsrf === null) {
+      return;
+    }
+    const restored = await prepareExtensionExclusionRule(
+      adminSessionCookies,
+      adminSessionCsrf,
+      ".tmp",
+    );
+    const restoredRevision = await publishPreparedPolicy(
+      adminSessionCookies,
+      adminSessionCsrf,
+      restored,
+    );
+    console.log("TMP_POLICY_RESTORED", restoredRevision > 0);
   });
 
   it("completes the device authorization flow and syncs an edited note", async function () {
-    this.timeout(300_000);
+    this.timeout(480_000);
 
     const createResponse = await fetch(`${serverOrigin}/api/auth/device-authorizations`, {
       method: "POST",
@@ -298,6 +621,8 @@ describe("device login and small-file sync (live server)", () => {
     }
     const sessionCookies = cookiePairsOf(verifyResponse);
     const sessionCsrf = csrfValueOf(sessionCookies);
+    adminSessionCookies = sessionCookies;
+    adminSessionCsrf = sessionCsrf ?? "";
     const approveResponse = await fetch(
       `${serverOrigin}/api/auth/device-authorizations/${created.grant_id}/approve`,
       {
@@ -315,11 +640,20 @@ describe("device login and small-file sync (live server)", () => {
       throw new Error(`grant approval failed: ${approveResponse.status}`);
     }
 
-    const policyRevision = await publishTmpExclusionRule(sessionCookies, sessionCsrf ?? "");
+    const tmpPolicy = await prepareExtensionExclusionRule(
+      sessionCookies,
+      sessionCsrf ?? "",
+      ".tmp",
+    );
+    const policyRevision = await publishPreparedPolicy(
+      sessionCookies,
+      sessionCsrf ?? "",
+      tmpPolicy,
+    );
     console.log("TMP_POLICY_PUBLISHED", policyRevision > 0);
 
     await injectPendingGrant(created);
-    await browser.reloadObsidian();
+    await reloadKnowledgeWorkspacePlugin();
     await browser.pause(5_000);
 
     let pendingGrantCleared = false;
@@ -331,93 +665,132 @@ describe("device login and small-file sync (live server)", () => {
     console.log("PENDING_GRANT_CLEARED", pendingGrantCleared);
     await browser.pause(3_000);
     console.log("STATUS_AFTER_LOGIN", await readStatusBarText());
+    journalDirectoryPath = await resolveJournalDirectoryPath();
 
+    const initialServerEvidence = await readServerPublicationEvidence();
     await editFixtureNote();
-    for (let seconds = 0; seconds <= 30; seconds += 2) {
-      await browser.pause(2_000);
-      console.log(`STATUS_T_PLUS_${seconds}`, await readStatusBarText());
-      if (seconds === 10) {
-        await browser.execute(() => {
-          const app = (
-            window as unknown as {
-              app: { commands: { executeCommandById: (id: string) => void } };
-            }
-          ).app;
-          app.commands.executeCommandById("knowledge-workspace:sync-now");
-        });
-        console.log("SYNC_NOW_TRIGGERED");
-      }
+    const initialJournalEvidence = await waitForJournalEvidence(
+      (evidence) =>
+        evidence.committedCount === 1 &&
+        evidence.pendingCount === 0 &&
+        evidence.mappedCount === 1,
+      "journal did not converge to exactly one committed mapped publication",
+    );
+    const publishedServerEvidence = await readServerPublicationEvidence();
+    const publicationDelta = {
+      sourceCount: publishedServerEvidence.sourceCount - initialServerEvidence.sourceCount,
+      sourceVersionCount:
+        publishedServerEvidence.sourceVersionCount - initialServerEvidence.sourceVersionCount,
+      syncEventCount:
+        publishedServerEvidence.syncEventCount - initialServerEvidence.syncEventCount,
+      committedOperationCount:
+        publishedServerEvidence.committedOperationCount -
+        initialServerEvidence.committedOperationCount,
+      exactOperationPublicationCount:
+        publishedServerEvidence.exactOperationPublicationCount -
+        initialServerEvidence.exactOperationPublicationCount,
+    };
+    console.log("SANITIZED_SERVER_PUBLICATION_EVIDENCE", JSON.stringify(publicationDelta));
+    if (
+      publicationDelta.sourceCount !== 1 ||
+      publicationDelta.sourceVersionCount !== 1 ||
+      publicationDelta.syncEventCount !== 1 ||
+      publicationDelta.committedOperationCount !== 1 ||
+      publicationDelta.exactOperationPublicationCount !== 1
+    ) {
+      throw new Error("server did not commit exactly one canonical publication");
     }
+    console.log("SANITIZED_JOURNAL_EVIDENCE", JSON.stringify(initialJournalEvidence));
 
     const data = await readPluginData();
     console.log("PENDING_GRANT_FINAL", data.pending_grant === null ? "cleared" : "still-pending");
 
-    const journalDump = await browser.execute(
-      async (dataPathSuffix: string) => {
-        const app = (
-          window as unknown as {
-            app: {
-              vault: {
-                configDir: string;
-                adapter: {
-                  list: (path: string) => Promise<{ files: string[] }>;
-                  readBinary: (path: string) => Promise<ArrayBuffer>;
-                };
-              };
-            };
-          }
-        ).app;
-        const pluginDir = `${app.vault.configDir}/plugins/knowledge-workspace`;
-        void dataPathSuffix;
-        const listing = await app.vault.adapter.list(pluginDir);
-        const manifest = JSON.parse(
-          await app.vault.adapter.read(`${pluginDir}/journal.manifest.json`),
-        ) as { current?: { generationNumber?: unknown } };
-        const generationNumber = manifest.current?.generationNumber;
-        if (!Number.isSafeInteger(generationNumber) || generationNumber < 0) {
-          return { error: "invalid journal manifest", files: listing.files };
-        }
-        const journalName = `journal.sqlite.g${generationNumber}`;
-        if (!listing.files.some((file) => file.endsWith(`/${journalName}`))) {
-          return { error: "no journal generation", files: listing.files };
-        }
-        const bytes = new Uint8Array(
-          await app.vault.adapter.readBinary(`${pluginDir}/${journalName}`),
-        );
-        let binary = "";
-        for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-          binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
-        }
-        return { base64: btoa(binary) };
-      },
-      pluginDataPathSuffix,
+    const denyingMarkdownPolicy = await prepareExtensionExclusionRule(
+      sessionCookies,
+      sessionCsrf ?? "",
+      ".md",
     );
-    if ("error" in journalDump || journalDump.base64 === undefined) {
-      console.log("JOURNAL_EVIDENCE_AVAILABLE", false);
-      throw new Error("sanitized journal evidence was unavailable");
-    } else {
-      const initSqlJs = (await import("sql.js")).default;
-      const engine = await initSqlJs();
-      const database = new engine.Database(Buffer.from(journalDump.base64, "base64"));
-      const committed = database.exec(
-        "select count(*) from journal_events where state = 'committed'",
-      );
-      const pending = database.exec(
-        "select count(*) from journal_events where state not in ('committed', 'no_change', 'excluded_policy', 'blocked_conflict')",
-      );
-      const mapped = database.exec(
-        "select count(*) from local_files where source_id is not null and base_version_id is not null",
-      );
-      const committedCount = Number(committed[0]?.values[0]?.[0] ?? 0);
-      const pendingCount = Number(pending[0]?.values[0]?.[0] ?? 0);
-      const mappedCount = Number(mapped[0]?.values[0]?.[0] ?? 0);
-      console.log(
-        "SANITIZED_JOURNAL_EVIDENCE",
-        JSON.stringify({ committedCount, pendingCount, mappedCount }),
-      );
-      if (committedCount !== 1 || pendingCount !== 0 || mappedCount !== 1) {
-        throw new Error("journal did not converge to exactly one committed mapped publication");
-      }
+    const policyRaceBaseline = await readServerPublicationEvidence();
+    const operationObservation = waitForOperationAfter(policyRaceBaseline);
+    await browser.pause(1_000);
+    await editFixtureNoteForPolicyRace();
+    await triggerSyncNow();
+    await operationObservation;
+    const changedPolicyRevision = await publishPreparedPolicy(
+      sessionCookies,
+      sessionCsrf ?? "",
+      denyingMarkdownPolicy,
+    );
+    console.log("MID_UPLOAD_POLICY_PUBLISHED", changedPolicyRevision > policyRevision);
+    await new Promise((resolve) => setTimeout(resolve, 45_000));
+    const retryableJournalEvidence = await readSanitizedJournalEvidence();
+    console.log(
+      "SANITIZED_POLICY_DENIAL_JOURNAL_EVIDENCE",
+      JSON.stringify(retryableJournalEvidence),
+    );
+    const deniedServerEvidence = await readServerPublicationEvidence();
+    const deniedBeforeRecovery = {
+      sourceCount: deniedServerEvidence.sourceCount - policyRaceBaseline.sourceCount,
+      committedOperationCount:
+        deniedServerEvidence.committedOperationCount -
+        policyRaceBaseline.committedOperationCount,
+      exactOperationPublicationCount:
+        deniedServerEvidence.exactOperationPublicationCount -
+        policyRaceBaseline.exactOperationPublicationCount,
+      receivingUnpublishedOperationCount:
+        deniedServerEvidence.receivingUnpublishedOperationCount -
+        policyRaceBaseline.receivingUnpublishedOperationCount,
+    };
+    console.log(
+      "SANITIZED_POLICY_DENIAL_SERVER_EVIDENCE",
+      JSON.stringify(deniedBeforeRecovery),
+    );
+    if (
+      retryableJournalEvidence.pendingCount !== 1 ||
+      deniedBeforeRecovery.sourceCount !== 0 ||
+      deniedBeforeRecovery.committedOperationCount !== 0 ||
+      deniedBeforeRecovery.exactOperationPublicationCount !== 0 ||
+      deniedBeforeRecovery.receivingUnpublishedOperationCount !== 1
+    ) {
+      throw new Error("mid-upload policy change did not fail closed into retryable recovery");
+    }
+    await reloadKnowledgeWorkspacePlugin();
+    await browser.pause(5_000);
+    await triggerSyncNow();
+    const recoveredJournalEvidence = await waitForJournalEvidence(
+      (evidence) =>
+        evidence.excludedPolicyCount === initialJournalEvidence.excludedPolicyCount + 1 &&
+        evidence.pendingCount === 0,
+      "next-preflight recovery did not settle the event as excluded_policy",
+    );
+    const policyRaceFinal = await readServerPublicationEvidence();
+    const deniedPublicationDelta = {
+      sourceCount: policyRaceFinal.sourceCount - policyRaceBaseline.sourceCount,
+      sourceVersionCount:
+        policyRaceFinal.sourceVersionCount - policyRaceBaseline.sourceVersionCount,
+      syncEventCount: policyRaceFinal.syncEventCount - policyRaceBaseline.syncEventCount,
+      committedOperationCount:
+        policyRaceFinal.committedOperationCount - policyRaceBaseline.committedOperationCount,
+      exactOperationPublicationCount:
+        policyRaceFinal.exactOperationPublicationCount -
+        policyRaceBaseline.exactOperationPublicationCount,
+      receivingUnpublishedOperationCount:
+        policyRaceFinal.receivingUnpublishedOperationCount -
+        policyRaceBaseline.receivingUnpublishedOperationCount,
+    };
+    console.log(
+      "SANITIZED_MID_UPLOAD_POLICY_EVIDENCE",
+      JSON.stringify({ ...deniedPublicationDelta, recoveredExcludedPolicyCount: 1 }),
+    );
+    if (
+      deniedPublicationDelta.sourceCount !== 0 ||
+      deniedPublicationDelta.committedOperationCount !== 0 ||
+      deniedPublicationDelta.exactOperationPublicationCount !== 0 ||
+      deniedPublicationDelta.receivingUnpublishedOperationCount !== 1 ||
+      recoveredJournalEvidence.committedCount !== 1 ||
+      recoveredJournalEvidence.mappedCount !== 1
+    ) {
+      throw new Error("mid-upload policy change published canonical state or broke recovery");
     }
   });
 });
