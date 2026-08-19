@@ -40,6 +40,28 @@ _FIRST_DIGEST = "0" * 64
 _SECOND_DIGEST = "1" * 64
 _DUMP_SHA256 = "2" * 64
 _HISTORICAL_SCHEMA_REVISION = "20260813_01"
+_LEGACY_V2_CANONICAL_COUNT_TABLES = (
+    "users",
+    "workspaces",
+    "devices",
+    "content_objects",
+    "sources",
+    "source_versions",
+    "sync_events",
+    "projection_intents",
+    "audit_events",
+    "workspace_policy_state",
+    "policy_signing_keys",
+    "policy_keysets",
+    "policy_keyset_signatures",
+    "source_policies",
+    "policy_rules",
+    "policy_drafts",
+    "policy_draft_rules",
+    "policy_evaluations",
+    "policy_reconciliation_intents",
+    "small_file_upload_operations",
+)
 
 
 def _object_entry(digest_hexadecimal: str, size_bytes: int) -> dict[str, object]:
@@ -186,6 +208,24 @@ def test_historical_v1_nine_table_manifest_remains_byte_canonical() -> None:
 
     assert parsed.contract == MANIFEST_CONTRACT_V1
     assert frozenset(parsed.canonical_counts) == frozenset(historical_tables)
+    assert encode_manifest(parsed) == raw
+
+
+def test_legacy_v2_twenty_table_manifest_remains_byte_canonical() -> None:
+    """The branch-local original v2 shape remains readable after widening."""
+
+    counts = {
+        table: index + 1
+        for index, table in enumerate(_LEGACY_V2_CANONICAL_COUNT_TABLES)
+    }
+    raw = canonical_json(manifest_payload(canonical_counts=counts))
+
+    parsed = parse_manifest(raw)
+
+    assert parsed.contract == MANIFEST_CONTRACT_V2
+    assert frozenset(parsed.canonical_counts) == frozenset(
+        _LEGACY_V2_CANONICAL_COUNT_TABLES
+    )
     assert encode_manifest(parsed) == raw
 
 
@@ -356,7 +396,15 @@ def test_rejects_out_of_range_object_size() -> None:
 
 def test_manifest_contract_constant_is_pinned() -> None:
     assert MANIFEST_CONTRACT == "canonical_core_backup/v2"
-    # Twenty since small-file operations became canonical: the nine baseline
-    # tables, ten policy tables, and the durable upload-operation table.
-    assert len(CANONICAL_COUNT_TABLES) == 20
+    assert len(CANONICAL_COUNT_TABLES) == 28
+    assert CANONICAL_COUNT_TABLES[9:17] == (
+        "user_credentials",
+        "web_sessions",
+        "totp_credentials",
+        "totp_recovery_codes",
+        "device_token_families",
+        "device_tokens",
+        "device_authorization_grants",
+        "authentication_throttle_buckets",
+    )
     assert CANONICAL_COUNT_TABLES[-1] == "small_file_upload_operations"

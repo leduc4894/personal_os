@@ -27,6 +27,7 @@ from personal_os.object_storage.keys import (
 )
 from personal_os.recovery.contracts import (
     CANONICAL_COUNT_TABLES,
+    LEGACY_V2_CANONICAL_COUNT_TABLES,
     MANIFEST_CONTRACT_V1,
     MANIFEST_CONTRACT_V2,
     MAXIMUM_OBJECT_SIZE_BYTES,
@@ -222,13 +223,16 @@ def parse_manifest(raw: bytes) -> RecoveryManifest:
         _reject(RecoveryBundleInvalidReason.FIELD_INVALID)
 
     counts_value = payload["canonical_counts"]
-    expected_count_tables = (
-        V1_CANONICAL_COUNT_TABLES
+    expected_count_table_sets = (
+        (frozenset(V1_CANONICAL_COUNT_TABLES),)
         if contract_value == MANIFEST_CONTRACT_V1
-        else CANONICAL_COUNT_TABLES
+        else (
+            frozenset(LEGACY_V2_CANONICAL_COUNT_TABLES),
+            frozenset(CANONICAL_COUNT_TABLES),
+        )
     )
-    if not isinstance(counts_value, dict) or frozenset(counts_value) != frozenset(
-        expected_count_tables
+    if not isinstance(counts_value, dict) or frozenset(counts_value) not in (
+        expected_count_table_sets
     ):
         _reject(RecoveryBundleInvalidReason.FIELD_INVALID)
     counts: dict[str, int] = {}

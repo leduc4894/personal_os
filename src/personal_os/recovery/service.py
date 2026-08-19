@@ -52,11 +52,8 @@ from personal_os.object_storage import (
     derive_canonical_object_key,
 )
 from personal_os.recovery.contracts import (
-    CANONICAL_COUNT_TABLES,
-    MANIFEST_CONTRACT_V1,
     POSTGRESQL_SCHEMA_REVISION,
     POSTGRESQL_SERVER_VERSION,
-    V1_CANONICAL_COUNT_TABLES,
     CanonicalBackupMetrics,
     ManifestDumpEntry,
     ManifestObjectEntry,
@@ -695,11 +692,7 @@ class RecoveryService:
                 ErrorCode.CANONICAL_RECOVERY_RESTORE_FAILED,
                 safe_details={"component": RecoveryComponent.CANONICAL_GRAPH},
             )
-        count_tables = (
-            V1_CANONICAL_COUNT_TABLES
-            if manifest.contract == MANIFEST_CONTRACT_V1
-            else CANONICAL_COUNT_TABLES
-        )
+        count_tables = tuple(manifest.canonical_counts)
         if dict(await restore_target.read_canonical_counts(count_tables)) != dict(
             manifest.canonical_counts
         ):

@@ -17,13 +17,14 @@ and a failed backup leaves no staging files, locks or client processes behind.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import subprocess
 import sys
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -36,6 +37,7 @@ from tests.integration.canonical_core.conftest import (
     LocalFilesystemObjectStore,
     PostgresqlDumpProcessAdapter,
     RestoreTargetContext,
+    SeededWorkspace,
     _compose_exec_psql,
     recovery_environment,
 )
@@ -67,7 +69,17 @@ from personal_os.recovery.service import (
 from personal_os.sources.reading import ReadCurrentSourceCommand
 from postgresql_source_store.backup_snapshot import PostgresqlBackupSnapshotStore
 from postgresql_source_store.engine import create_source_store_engine, dispose_source_store_engine
-from postgresql_source_store.tables import SOURCE_STORE_TABLES, users
+from postgresql_source_store.tables import (
+    SOURCE_STORE_TABLES,
+    authentication_throttle_buckets,
+    device_authorization_grants,
+    device_token_families,
+    device_tokens,
+    totp_credentials,
+    totp_recovery_codes,
+    user_credentials,
+    web_sessions,
+)
 
 pytestmark = pytest.mark.local_stack
 
@@ -83,16 +95,160 @@ def _utc_clock() -> Callable[[], datetime]:
 # --- shared helpers ---------------------------------------------------------------------
 
 
-async def _blocked_display_rename(engine: AsyncEngine, user_id: UUID) -> None:
-    """A concurrent writer that queues behind the quiescing share locks."""
+async def _seed_authentication_rows(engine: AsyncEngine, workspace: SeededWorkspace) -> None:
+    """Insert one constraint-valid row in every canonical authentication table."""
+
+    now = datetime.now(UTC)
+    totp_credential_id = uuid.uuid4()
+    token_family_id = uuid.uuid4()
+    device_token_id = uuid.uuid4()
+
+    def fixture_digest(label: str) -> str:
+        return hashlib.sha256(label.encode("ascii") + workspace.workspace_id.bytes).hexdigest()
+
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.insert(user_credentials).values(
+                user_id=workspace.owner_user_id,
+                workspace_id=workspace.workspace_id,
+                password_hash=(
+                    "$argon2id$v=19$m=65536,t=3,p=1$"
+                    "canonicalbackup$constraintvalidhash"
+                ),
+                credential_revision=1,
+                password_changed_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(web_sessions).values(
+                web_session_id=uuid.uuid4(),
+                user_id=workspace.owner_user_id,
+                workspace_id=workspace.workspace_id,
+                session_secret_hash=fixture_digest("session"),
+                csrf_secret_hash=fixture_digest("csrf"),
+                state="active",
+                credential_revision=1,
+                authentication_method="password",
+                created_at=now,
+                authenticated_at=now,
+                last_seen_at=now,
+                idle_expires_at=now + timedelta(hours=1),
+                absolute_expires_at=now + timedelta(days=1),
+            )
+        )
+        await connection.execute(
+            sa.insert(totp_credentials).values(
+                totp_credential_id=totp_credential_id,
+                user_id=workspace.owner_user_id,
+                workspace_id=workspace.workspace_id,
+                state="active",
+                secret_ciphertext="canonicalciphertext",
+                secret_nonce="canonicalnonce",
+                key_id="canonical-recovery-key",
+                algorithm="SHA1",
+                digits=6,
+                period_seconds=30,
+                revision=1,
+                created_at=now,
+                activated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(totp_recovery_codes).values(
+                recovery_code_id=uuid.uuid4(),
+                totp_credential_id=totp_credential_id,
+                user_id=workspace.owner_user_id,
+                workspace_id=workspace.workspace_id,
+                revision=1,
+                code_hash=fixture_digest("recovery"),
+                created_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(device_token_families).values(
+                token_family_id=token_family_id,
+                user_id=workspace.owner_user_id,
+                workspace_id=workspace.workspace_id,
+                device_id=workspace.device_id,
+                state="active",
+                current_refresh_generation=1,
+                created_at=now,
+                last_refreshed_at=now,
+                inactivity_expires_at=now + timedelta(days=30),
+                absolute_expires_at=now + timedelta(days=90),
+            )
+        )
+        await connection.execute(
+            sa.insert(device_tokens).values(
+                device_token_id=device_token_id,
+                token_family_id=token_family_id,
+                user_id=workspace.owner_user_id,
+                workspace_id=workspace.workspace_id,
+                device_id=workspace.device_id,
+                token_kind="refresh",
+                generation=1,
+                secret_hash=fixture_digest("refresh"),
+                state="active",
+                derivation_key_id="canonical-recovery-key",
+                issued_at=now,
+                expires_at=now + timedelta(days=30),
+            )
+        )
+        await connection.execute(
+            sa.insert(device_authorization_grants).values(
+                grant_id=uuid.uuid4(),
+                user_code_hash=fixture_digest("user-code"),
+                polling_secret_hash=fixture_digest("polling"),
+                client_instance_id=uuid.uuid4(),
+                device_name="Canonical Recovery Grant",
+                platform_class="obsidian_desktop",
+                platform_name="windows",
+                plugin_version="0.1.0",
+                requested_scope="obsidian_sync",
+                state="pending",
+                created_at=now,
+                expires_at=now + timedelta(minutes=10),
+            )
+        )
+        await connection.execute(
+            sa.insert(authentication_throttle_buckets).values(
+                throttle_bucket_id=uuid.uuid4(),
+                bucket_kind="login_username",
+                bucket_hash=fixture_digest("throttle"),
+                window_started_at=now,
+                failed_attempt_count=1,
+                updated_at=now,
+            )
+        )
+
+
+async def _insert_authentication_throttle_bucket(engine: AsyncEngine) -> None:
+    now = datetime.now(UTC)
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.insert(authentication_throttle_buckets).values(
+                throttle_bucket_id=uuid.uuid4(),
+                bucket_kind="login_source",
+                bucket_hash=hashlib.sha256(uuid.uuid4().bytes).hexdigest(),
+                window_started_at=now,
+                failed_attempt_count=1,
+                updated_at=now,
+            )
+        )
+
+
+async def _blocked_credential_revision_bump(engine: AsyncEngine, user_id: UUID) -> None:
+    """An authentication writer that queues behind the quiescing share lock."""
     async with engine.connect() as connection, connection.begin():
         await connection.execute(
             sa.text(f"SET LOCAL lock_timeout = '{_BLOCKED_WRITER_LOCK_TIMEOUT_SECONDS}s'")
         )
         await connection.execute(
-            sa.update(users)
-            .values(display_name="Blocked Canonical Writer")
-            .where(users.c.user_id == user_id)
+            sa.update(user_credentials)
+            .values(credential_revision=2, updated_at=datetime.now(UTC))
+            .where(user_credentials.c.user_id == user_id)
         )
 
 
@@ -167,6 +323,7 @@ async def test_concurrent_dml_and_snapshot_busy(
 ) -> None:
     harness = canonical_core_harness
     workspace = await harness.seed_workspace()
+    await _seed_authentication_rows(harness.engine, workspace)
     snapshot_store = PostgresqlBackupSnapshotStore(harness.engine)
     clock = _utc_clock()
 
@@ -174,9 +331,22 @@ async def test_concurrent_dml_and_snapshot_busy(
         assert snapshot.schema_head == POSTGRESQL_SCHEMA_REVISION
         assert snapshot.server_version.startswith("18")
         assert dict(snapshot.table_counts)["users"] >= 1
+        assert all(
+            dict(snapshot.table_counts)[table_name] == 1
+            for table_name in (
+                "user_credentials",
+                "web_sessions",
+                "totp_credentials",
+                "totp_recovery_codes",
+                "device_token_families",
+                "device_tokens",
+                "device_authorization_grants",
+                "authentication_throttle_buckets",
+            )
+        )
 
         blocked_writer = asyncio.create_task(
-            _blocked_display_rename(harness.engine, workspace.owner_user_id)
+            _blocked_credential_revision_bump(harness.engine, workspace.owner_user_id)
         )
         try:
             await _await_blocked_writer(snapshot_store)
@@ -191,12 +361,14 @@ async def test_concurrent_dml_and_snapshot_busy(
     assert captured.value.error_code is ErrorCode.CANONICAL_RECOVERY_SNAPSHOT_BUSY
     assert await snapshot_store.observe_pending_writers() == 0
     async with harness.engine.connect() as connection:
-        display_name = (
+        credential_revision = (
             await connection.execute(
-                sa.select(users.c.display_name).where(users.c.user_id == workspace.owner_user_id)
+                sa.select(user_credentials.c.credential_revision).where(
+                    user_credentials.c.user_id == workspace.owner_user_id
+                )
             )
         ).scalar_one()
-    assert display_name == "Canonical Core Owner"
+    assert credential_revision == 1
 
 
 # --- backup / verify / restore ----------------------------------------------------------
@@ -211,6 +383,7 @@ async def test_dump_and_manifest_come_from_same_exported_snapshot(
 ) -> None:
     harness = canonical_core_harness
     workspace = await harness.seed_workspace()
+    await _seed_authentication_rows(harness.engine, workspace)
     await harness.publish_markdown_source(workspace, b"# Snapshot evidence\n", title="Snapshot")
     # The manifest counts the canonical table set; the harness counts every
     # store table, so the expectation is scoped to the manifest contract.
@@ -234,9 +407,14 @@ async def test_dump_and_manifest_come_from_same_exported_snapshot(
 
     # Post-backup mutation of the live database must not leak into the bundle.
     await harness.seed_workspace()
+    await _insert_authentication_throttle_bucket(harness.engine)
     mutated_counts = await harness.table_counts()
     assert mutated_counts["users"] == counts_at_backup["users"] + 1
     assert mutated_counts["workspaces"] == counts_at_backup["workspaces"] + 1
+    assert (
+        mutated_counts["authentication_throttle_buckets"]
+        == counts_at_backup["authentication_throttle_buckets"] + 1
+    )
 
     result = await _restore_bundle(
         recovery_service, restore_target_context, backup.bundle_id, acceptance_probe=None
@@ -382,6 +560,7 @@ async def test_bundle_verify_detects_dump_object_and_manifest_mutation(
 ) -> None:
     harness = canonical_core_harness
     workspace = await harness.seed_workspace()
+    await _seed_authentication_rows(harness.engine, workspace)
     await harness.publish_markdown_source(workspace, b"# Mutation target\n", title="Mutation")
     backup = await recovery_service.create_backup(
         BackupCreateCommand(
@@ -418,6 +597,7 @@ async def test_empty_target_restore_is_single_transaction_and_exact(
 ) -> None:
     harness = canonical_core_harness
     workspace = await harness.seed_workspace()
+    await _seed_authentication_rows(harness.engine, workspace)
     await harness.publish_markdown_source(workspace, b"# Exact restore one\n", title="One")
     await harness.publish_markdown_source(workspace, b"# Exact restore two\n", title="Two")
     # The manifest counts the canonical table set; the harness counts every

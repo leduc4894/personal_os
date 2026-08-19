@@ -52,10 +52,36 @@ V1_CANONICAL_COUNT_TABLES: Final[tuple[str, ...]] = (
     "audit_events",
 )
 
+#: The exact branch-local v2 shape emitted before authentication completeness.
+#: Readers retain this closed shape so already-created v2 bundles remain
+#: verifiable and restorable; writers never emit it after the completeness fix.
+LEGACY_V2_CANONICAL_COUNT_TABLES: Final[tuple[str, ...]] = (
+    "users",
+    "workspaces",
+    "devices",
+    "content_objects",
+    "sources",
+    "source_versions",
+    "sync_events",
+    "projection_intents",
+    "audit_events",
+    "workspace_policy_state",
+    "policy_signing_keys",
+    "policy_keysets",
+    "policy_keyset_signatures",
+    "source_policies",
+    "policy_rules",
+    "policy_drafts",
+    "policy_draft_rules",
+    "policy_evaluations",
+    "policy_reconciliation_intents",
+    "small_file_upload_operations",
+)
+
 #: The exact closed set of canonical tables counted in every new v2 manifest.
-#: Mirrors the snapshot lock order: the exclusion-policy publication child
-#: extended the canonical graph with the policy tables, and a manifest whose
-#: counts omit them cannot prove the policy state a restore must preserve.
+#: Mirrors the snapshot lock order. Authentication rows are PostgreSQL
+#: canonical state just like baseline, policy and durable upload-operation
+#: rows; omitting any of them would leave the restored graph unwitnessed.
 CANONICAL_COUNT_TABLES: Final[tuple[str, ...]] = (
     "users",
     "workspaces",
@@ -66,6 +92,14 @@ CANONICAL_COUNT_TABLES: Final[tuple[str, ...]] = (
     "sync_events",
     "projection_intents",
     "audit_events",
+    "user_credentials",
+    "web_sessions",
+    "totp_credentials",
+    "totp_recovery_codes",
+    "device_token_families",
+    "device_tokens",
+    "device_authorization_grants",
+    "authentication_throttle_buckets",
     "workspace_policy_state",
     "policy_signing_keys",
     "policy_keysets",

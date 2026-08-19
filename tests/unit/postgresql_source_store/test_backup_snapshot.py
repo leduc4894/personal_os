@@ -1,7 +1,7 @@
 """Quiesced exported-snapshot adapter statements and object-set hydration.
 
 These tests pin the pure pieces of the PostgreSQL snapshot adapter (spec 9.2)
-without a database: the fixed twenty-table ``SHARE MODE NOWAIT`` lock order, the
+without a database: the fixed 28-table ``SHARE MODE NOWAIT`` lock order, the
 parameter-bound pending-writer probe, the schema-qualified referenced-objects
 and pointer-resolution reads, and the fail-closed hydration of referenced
 content objects into expected-object requests. The snapshot transaction's
@@ -65,6 +65,14 @@ def test_snapshot_lock_order_covers_the_canonical_policy_and_operation_tables() 
         "sync_events",
         "projection_intents",
         "audit_events",
+        "user_credentials",
+        "web_sessions",
+        "totp_credentials",
+        "totp_recovery_codes",
+        "device_token_families",
+        "device_tokens",
+        "device_authorization_grants",
+        "authentication_throttle_buckets",
         "workspace_policy_state",
         "policy_signing_keys",
         "policy_keysets",
@@ -95,7 +103,7 @@ def test_snapshot_lock_timeout_is_fifteen_seconds() -> None:
 def test_share_lock_statements_follow_fixed_spec_order() -> None:
     statements = build_share_lock_statements()
     texts = [str(s.compile(dialect=postgresql.dialect())) for s in statements]
-    assert len(texts) == 20
+    assert len(texts) == 28
     for text, table in zip(texts, SNAPSHOT_LOCK_ORDER, strict=True):
         assert f'{SOURCE_STORE_SCHEMA}."{table}"' in text
         assert "SHARE MODE NOWAIT" in text
