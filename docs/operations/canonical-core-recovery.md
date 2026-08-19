@@ -114,7 +114,7 @@ must not already exist.
 
 ```text
 <bundle-id>/
-  manifest.json      # canonical JSON, nine keys, contract canonical_core_backup/v1
+  manifest.json      # canonical JSON, nine keys; new bundles use canonical_core_backup/v2
   manifest.sha256    # 64 lowercase hex + newline: the SHA-256 of manifest.json
   postgres.dump      # the pg_dump sidecar from the quiesced exported snapshot
   objects/sha256/…   # one sidecar file per referenced canonical object, content-addressed
@@ -145,7 +145,10 @@ SHA-256 against the manifest entry → every object's size and streaming SHA-256
 against its entry → totals. Changed-file-during-verification is detected via
 pre/post `fstat` identity, and hard-link aliasing across bundle files is
 rejected. Every failure is the closed `canonical_recovery_bundle_invalid`
-(exit `65`) with a reason token only.
+(exit `65`) with a reason token only. The reader accepts exact historical v1
+manifests with their original nine baseline counts and current v2 manifests
+with twenty counts; any other version or any count-set widening under v1 is
+invalid.
 
 **What the sidecar does and does not prove.** `manifest.sha256` proves that
 `manifest.json` is exactly the bytes the backup wrote — it binds the manifest
@@ -185,12 +188,20 @@ failure leaves the target database empty, exits `65`
 (`canonical_recovery_restore_failed`) and requires no partial-state cleanup.
 
 **Post-restore verification list.** Before the safe receipt is returned, the
-restore re-verifies: the schema head equals the pinned revision; every
-canonical table count equals the manifest's `canonical_counts`; current-pointer
+restore re-verifies: the schema head equals the verified manifest's revision;
+every table in that manifest version's exact count set equals
+`canonical_counts`; current-pointer
 resolution resolves every pointer (zero dangling); every manifest object is
 full-verified from object storage **again** (restore-phase receipts are never
 reused); and, when an acceptance probe is supplied, one canonical read returns
 the exact expected bytes.
+
+An exact v1 restore is an intermediate recovery state, not a current serving
+artifact. After it succeeds, keep admission disabled, configure the restored
+target through the normal migration loader, run `uv run poe database-upgrade`
+and `uv run poe database-current`, then create and verify a new v2 backup.
+Only after the target is at the current pinned head and the v2 rebackup is
+verified may application serving resume.
 
 ## Safety boundary
 

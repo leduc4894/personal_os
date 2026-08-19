@@ -293,10 +293,13 @@ def hydrate_referenced_objects(rows: Iterable[Mapping[str, Any]]) -> tuple[Expec
     return tuple(hydrated.values())
 
 
-async def _read_table_counts(connection: AsyncConnection) -> Mapping[str, int]:
-    """Read the twenty canonical table counts over the given connection."""
+async def _read_table_counts(
+    connection: AsyncConnection,
+    table_names: tuple[str, ...] = SNAPSHOT_LOCK_ORDER,
+) -> Mapping[str, int]:
+    """Read the requested closed canonical table counts over one connection."""
     counts: dict[str, int] = {}
-    for table_name in SNAPSHOT_LOCK_ORDER:
+    for table_name in table_names:
         count = (
             await connection.execute(table_count_statement(SOURCE_STORE_TABLES[table_name]))
         ).scalar_one()
@@ -434,11 +437,13 @@ class PostgresqlRestoreTarget:
             raise _map_snapshot_failure(cause) from cause
         return int(relation_count) == 0 and int(alembic_count) == 0
 
-    async def read_canonical_counts(self) -> Mapping[str, int]:
-        """Read the twenty canonical table counts for post-restore verification."""
+    async def read_canonical_counts(
+        self, table_names: tuple[str, ...] = SNAPSHOT_LOCK_ORDER
+    ) -> Mapping[str, int]:
+        """Read the requested manifest-version count set after restore."""
         try:
             async with self._bounded_probe() as connection:
-                return await _read_table_counts(connection)
+                return await _read_table_counts(connection, table_names)
         except ApplicationError:
             raise
         except Exception as cause:

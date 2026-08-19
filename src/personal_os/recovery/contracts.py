@@ -25,8 +25,10 @@ from personal_os.diagnostics.events import SafeToken
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import ApplicationError
 
-#: The only supported manifest contract identifier (spec 8.1); never guessed.
-MANIFEST_CONTRACT: Final[str] = "canonical_core_backup/v1"
+#: Historical and current manifest contract identifiers; never guessed.
+MANIFEST_CONTRACT_V1: Final[str] = "canonical_core_backup/v1"
+MANIFEST_CONTRACT_V2: Final[str] = "canonical_core_backup/v2"
+MANIFEST_CONTRACT: Final[str] = MANIFEST_CONTRACT_V2
 
 #: Compatibility alias: revision authority lives in
 #: :mod:`personal_os.database_schema`; existing recovery imports keep
@@ -37,7 +39,20 @@ POSTGRESQL_SERVER_VERSION: Final[str] = "18.4"
 #: Upper bound for one canonical object admitted into a bundle (100 MiB).
 MAXIMUM_OBJECT_SIZE_BYTES: Final[int] = 104_857_600
 
-#: The exact closed set of canonical tables counted in every manifest.
+#: The exact historical v1 table-count set. This public shape is immutable.
+V1_CANONICAL_COUNT_TABLES: Final[tuple[str, ...]] = (
+    "users",
+    "workspaces",
+    "devices",
+    "content_objects",
+    "sources",
+    "source_versions",
+    "sync_events",
+    "projection_intents",
+    "audit_events",
+)
+
+#: The exact closed set of canonical tables counted in every new v2 manifest.
 #: Mirrors the snapshot lock order: the exclusion-policy publication child
 #: extended the canonical graph with the policy tables, and a manifest whose
 #: counts omit them cannot prove the policy state a restore must preserve.
@@ -211,6 +226,7 @@ class RecoveryManifest:
     postgres_dump: ManifestDumpEntry
     canonical_counts: Mapping[str, int]
     objects: tuple[ManifestObjectEntry, ...]
+    contract: str = MANIFEST_CONTRACT
 
 
 class RecoveryOperation(StrEnum):

@@ -7,11 +7,11 @@ object store standing in for R2. The cases prove: concurrent DML blocks behind
 the quiescing share locks while a second snapshot fails bounded with
 SNAPSHOT_BUSY; the dump and the manifest describe one exported snapshot even
 when the live database mutates after the backup; offline verification detects
-dump, object and manifest mutation; an empty-target restore is exact across
-all nine canonical tables; a failed single-transaction restore leaves the
-target database empty; the restored graph serves the exact canonical bytes
-through the real read service; and a failed backup leaves no staging files,
-locks or client processes behind.
+dump, object and manifest mutation; current v2 restores are exact across the
+twenty-table graph; a real historical nine-table v1 bundle remains restorable;
+a failed single-transaction restore leaves the target database empty; the
+restored graph serves the exact canonical bytes through the real read service;
+and a failed backup leaves no staging files, locks or client processes behind.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import asyncio
 import subprocess
 import sys
 import time
+import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
@@ -35,6 +36,7 @@ from tests.integration.canonical_core.conftest import (
     LocalFilesystemObjectStore,
     PostgresqlDumpProcessAdapter,
     RestoreTargetContext,
+    _compose_exec_psql,
     recovery_environment,
 )
 
@@ -44,11 +46,16 @@ from personal_os.object_storage.errors import ObjectStorageError
 from personal_os.recovery.bundle import FilesystemRecoveryBundleStore
 from personal_os.recovery.contracts import (
     CANONICAL_COUNT_TABLES,
+    MANIFEST_CONTRACT_V1,
     POSTGRESQL_SCHEMA_REVISION,
+    V1_CANONICAL_COUNT_TABLES,
     InMemoryCanonicalBackupMetrics,
+    ManifestDumpEntry,
     RecoveryComponent,
     RecoveryError,
+    RecoveryManifest,
 )
+from personal_os.recovery.ports import PostgresqlConnectionTarget
 from personal_os.recovery.service import (
     AcceptanceSmokeProbe,
     BackupCreateCommand,
@@ -59,12 +66,14 @@ from personal_os.recovery.service import (
 )
 from personal_os.sources.reading import ReadCurrentSourceCommand
 from postgresql_source_store.backup_snapshot import PostgresqlBackupSnapshotStore
+from postgresql_source_store.engine import create_source_store_engine, dispose_source_store_engine
 from postgresql_source_store.tables import SOURCE_STORE_TABLES, users
 
 pytestmark = pytest.mark.local_stack
 
 _BLOCKED_WRITER_DEADLINE_SECONDS: float = 15.0
 _BLOCKED_WRITER_LOCK_TIMEOUT_SECONDS: int = 20
+_HISTORICAL_SCHEMA_REVISION: str = "20260813_01"
 
 
 def _utc_clock() -> Callable[[], datetime]:
@@ -236,6 +245,132 @@ async def test_dump_and_manifest_come_from_same_exported_snapshot(
     assert dict(await restore_target_context.restore_target.read_canonical_counts()) == (
         counts_at_backup
     )
+
+
+@pytest.mark.asyncio
+async def test_historical_v1_baseline_bundle_restores_with_its_original_shape(
+    canonical_core_stack: CanonicalCoreStack,
+    dump_process: PostgresqlDumpProcessAdapter,
+    recovery_service: RecoveryService,
+    restore_target_context: RestoreTargetContext,
+    bundle_root: Path,
+) -> None:
+    """A real baseline dump remains restorable under the immutable v1 contract."""
+
+    database_name = f"knowledge_ci_v1_{uuid.uuid4().hex[:12]}"
+    _compose_exec_psql(
+        canonical_core_stack.project_name,
+        f'CREATE DATABASE "{database_name}" OWNER knowledge_app',
+        "historical_database_created",
+    )
+    environment = dict(canonical_core_stack.environment)
+    environment["KNOWLEDGE_DATABASE_NAME"] = database_name
+    migration = subprocess.run(
+        ["uv", "run", "alembic", "upgrade", _HISTORICAL_SCHEMA_REVISION],
+        cwd=str(Path(__file__).resolve().parents[3]),
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120.0,
+    )
+    assert migration.returncode == 0, "historical baseline migration failed"
+
+    settings = canonical_core_stack.settings.model_copy(update={"database_name": database_name})
+    engine = create_source_store_engine(settings, canonical_core_stack.password)
+    target = PostgresqlConnectionTarget(
+        host=canonical_core_stack.main_target.host,
+        port=canonical_core_stack.main_target.port,
+        database=database_name,
+        user=canonical_core_stack.main_target.user,
+    )
+    bundle_id = uuid.uuid7()
+    bundle_store = FilesystemRecoveryBundleStore(bundle_root)
+    try:
+        async with engine.connect() as connection:
+            await connection.execution_options(isolation_level="REPEATABLE READ")
+            transaction = await connection.begin()
+            try:
+                await connection.execute(sa.text("SET LOCAL lock_timeout = '15000ms'"))
+                await connection.execute(sa.text("SET LOCAL statement_timeout = '15000ms'"))
+                for table_name in V1_CANONICAL_COUNT_TABLES:
+                    await connection.execute(
+                        sa.text(f'LOCK TABLE knowledge."{table_name}" IN SHARE MODE NOWAIT')
+                    )
+                snapshot_token = str(
+                    (await connection.execute(sa.text("SELECT pg_export_snapshot()"))).scalar_one()
+                )
+                server_version = str(
+                    (
+                        await connection.execute(
+                            sa.text("SELECT split_part(current_setting('server_version'), ' ', 1)")
+                        )
+                    ).scalar_one()
+                )
+                counts = {
+                    table_name: int(
+                        (
+                            await connection.execute(
+                                sa.select(sa.func.count()).select_from(
+                                    SOURCE_STORE_TABLES[table_name]
+                                )
+                            )
+                        ).scalar_one()
+                    )
+                    for table_name in V1_CANONICAL_COUNT_TABLES
+                }
+                async with bundle_store.create_staging(bundle_id) as writer:
+                    dump_receipt = await dump_process.create_dump(
+                        snapshot_token,
+                        writer.dump_path,
+                        target,
+                        timeout_seconds=120.0,
+                    )
+                    await writer.finalize(
+                        RecoveryManifest(
+                            bundle_id=bundle_id,
+                            created_at=datetime.now(UTC),
+                            source_environment=recovery_environment().value,
+                            postgresql_server_version=server_version,
+                            postgresql_schema_revision=_HISTORICAL_SCHEMA_REVISION,
+                            postgres_dump=ManifestDumpEntry(
+                                relative_path="postgres.dump",
+                                size_bytes=dump_receipt.size_bytes,
+                                sha256=dump_receipt.sha256,
+                            ),
+                            canonical_counts=counts,
+                            objects=(),
+                            contract=MANIFEST_CONTRACT_V1,
+                        )
+                    )
+            finally:
+                await transaction.rollback()
+
+        verified = await recovery_service.verify_bundle(
+            VerifyBundleCommand(
+                environment=recovery_environment(),
+                bundle_id=bundle_id,
+            )
+        )
+        assert set(verified.table_counts) == set(V1_CANONICAL_COUNT_TABLES)
+
+        result = await _restore_bundle(
+            recovery_service,
+            restore_target_context,
+            bundle_id,
+            acceptance_probe=None,
+        )
+        assert dict(result.table_counts) == counts
+        assert await restore_target_context.restore_target.read_schema_head() == (
+            _HISTORICAL_SCHEMA_REVISION
+        )
+    finally:
+        await dispose_source_store_engine(engine)
+        _compose_exec_psql(
+            canonical_core_stack.project_name,
+            f'DROP DATABASE "{database_name}" WITH (FORCE)',
+            "historical_database_dropped",
+        )
 
 
 @pytest.mark.asyncio

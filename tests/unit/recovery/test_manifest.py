@@ -153,6 +153,35 @@ def test_round_trip_preserves_every_field() -> None:
         parsed.canonical_counts["users"] = 99  # type: ignore[index]
 
 
+def test_historical_v1_nine_table_manifest_remains_byte_canonical() -> None:
+    """The original public v1 shape must remain readable and re-encodable."""
+
+    historical_tables = (
+        "users",
+        "workspaces",
+        "devices",
+        "content_objects",
+        "sources",
+        "source_versions",
+        "sync_events",
+        "projection_intents",
+        "audit_events",
+    )
+    raw = canonical_json(
+        manifest_payload(
+            contract="canonical_core_backup/v1",
+            canonical_counts={table: index + 1 for index, table in enumerate(historical_tables)},
+            postgresql_schema_revision="20260813_01",
+        )
+    )
+
+    parsed = parse_manifest(raw)
+
+    assert parsed.contract == "canonical_core_backup/v1"
+    assert frozenset(parsed.canonical_counts) == frozenset(historical_tables)
+    assert encode_manifest(parsed) == raw
+
+
 def test_round_trip_accepts_boundary_object_sizes() -> None:
     manifest = build_manifest(
         objects=(
@@ -164,7 +193,7 @@ def test_round_trip_accepts_boundary_object_sizes() -> None:
 
 
 def test_rejects_unsupported_contract_version() -> None:
-    unsupported = canonical_json(manifest_payload(contract="canonical_core_backup/v2"))
+    unsupported = canonical_json(manifest_payload(contract="canonical_core_backup/v3"))
     assert_bundle_invalid(unsupported, "contract_unsupported")
     assert_bundle_invalid(canonical_json(manifest_payload(contract="")), "contract_unsupported")
 
@@ -285,7 +314,7 @@ def test_rejects_out_of_range_object_size() -> None:
 
 
 def test_manifest_contract_constant_is_pinned() -> None:
-    assert MANIFEST_CONTRACT == "canonical_core_backup/v1"
+    assert MANIFEST_CONTRACT == "canonical_core_backup/v2"
     # Twenty since small-file operations became canonical: the nine baseline
     # tables, ten policy tables, and the durable upload-operation table.
     assert len(CANONICAL_COUNT_TABLES) == 20
