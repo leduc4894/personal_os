@@ -27,10 +27,10 @@ there is no request-global mutable policy state.
 
 ## Deferred items and verdicts
 
-The locator-free publication gap is closed and its BACKLOG index line is
-removed. The signing-key verifier-chain item remains open. Host PostgreSQL
-client tools 18.4 are an external prerequisite for the backup/restore portion
-of the broad exclusion-policy gate.
+The locator-free publication gap has focused PostgreSQL and live-client proof,
+but its BACKLOG index remains until the broad exclusion-policy gate is green.
+The signing-key verifier-chain item remains open. Host PostgreSQL client tools
+18.4 are an external prerequisite for the backup/restore portion of that gate.
 
 ## Canonical documentation links
 
