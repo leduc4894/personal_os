@@ -35,6 +35,7 @@ from tests.integration.source_publication.conftest import (
 from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.diagnostics.trace_context import SpanId, TraceContext, TraceId
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
 from personal_os.object_storage import CanonicalMediaType, ContentDigest
 from personal_os.small_file_sync.contracts import (
     NormalizedLocator,
@@ -135,6 +136,13 @@ class SmallFileOperationHarness:
             device_id=workspace.device_id, workspace_id=workspace.workspace_id
         )
 
+    def policy_binding(
+        self, device_context: SmallFileDeviceContext, revision: int = _POLICY_REVISION_NUMBER
+    ) -> AllowedPolicyRevisionBinding:
+        return AllowedPolicyRevisionBinding(
+            workspace_id=device_context.workspace_id, policy_revision_number=revision
+        )
+
     async def operation_row(self, event_id: UUID) -> dict[str, object] | None:
         statement = sa.select(
             small_file_upload_operations.c.operation_id,
@@ -220,7 +228,10 @@ async def _reserve_created_operation(
 ) -> tuple[SmallFilePreflight, object]:
     preflight = harness.preflight()
     operation = await harness.store.reserve_operation(
-        preflight, harness.device_context(workspace), _context()
+        preflight,
+        harness.device_context(workspace),
+        harness.policy_binding(harness.device_context(workspace)),
+        _context(),
     )
     return preflight, operation
 
@@ -237,8 +248,12 @@ async def test_same_identity_reservation_converges_on_one_row(
     preflight = harness.preflight()
     context = _context()
 
-    first = await harness.store.reserve_operation(preflight, device_context, context)
-    second = await harness.store.reserve_operation(preflight, device_context, context)
+    first = await harness.store.reserve_operation(
+        preflight, device_context, harness.policy_binding(device_context), context
+    )
+    second = await harness.store.reserve_operation(
+        preflight, device_context, harness.policy_binding(device_context), context
+    )
 
     assert await harness.operation_row_count(preflight.event_id) == 1
     assert first.reserved_source_id == second.reserved_source_id
@@ -248,6 +263,29 @@ async def test_same_identity_reservation_converges_on_one_row(
 
     row = await harness.operation_row(preflight.event_id)
     assert row is not None
+
+
+@pytest.mark.asyncio
+async def test_successful_repreflight_rotates_token_and_rebinds_server_revision(
+    small_file_harness: SmallFileOperationHarness, seeded_workspace: object
+) -> None:
+    harness = small_file_harness
+    device_context = harness.device_context(seeded_workspace)
+    preflight = harness.preflight()
+
+    first = await harness.store.reserve_operation(
+        preflight, device_context, harness.policy_binding(device_context, 4), _context()
+    )
+    second = await harness.store.reserve_operation(
+        preflight, device_context, harness.policy_binding(device_context, 5), _context()
+    )
+
+    assert await harness.operation_row_count(preflight.event_id) == 1
+    assert first.operation_token.value != second.operation_token.value
+    assert first.reserved_source_id == second.reserved_source_id
+    row = await harness.operation_row(preflight.event_id)
+    assert row is not None
+    assert row["policy_revision_number"] == 5
     assert row["state"] == "pending"
     assert row["reserved_source_id"] == first.reserved_source_id
 
@@ -262,8 +300,12 @@ async def test_concurrent_preflights_yield_exactly_one_operation_row(
     context = _context()
 
     first, second = await asyncio.gather(
-        harness.store.reserve_operation(preflight, device_context, context),
-        harness.store.reserve_operation(preflight, device_context, context),
+        harness.store.reserve_operation(
+            preflight, device_context, harness.policy_binding(device_context), context
+        ),
+        harness.store.reserve_operation(
+            preflight, device_context, harness.policy_binding(device_context), context
+        ),
     )
 
     assert await harness.operation_row_count(preflight.event_id) == 1
@@ -278,8 +320,12 @@ async def test_distinct_idempotency_keys_allocate_distinct_operations(
     device_context = harness.device_context(seeded_workspace)
     first_preflight = harness.preflight()
     second_preflight = harness.preflight()
-    await harness.store.reserve_operation(first_preflight, device_context, _context())
-    await harness.store.reserve_operation(second_preflight, device_context, _context())
+    await harness.store.reserve_operation(
+        first_preflight, device_context, harness.policy_binding(device_context), _context()
+    )
+    await harness.store.reserve_operation(
+        second_preflight, device_context, harness.policy_binding(device_context), _context()
+    )
     assert (
         await harness.operation_row_count(first_preflight.event_id, second_preflight.event_id)
         == 2
@@ -293,7 +339,9 @@ async def test_database_rejects_a_duplicate_identity_row(
     harness = small_file_harness
     device_context = harness.device_context(seeded_workspace)
     preflight = harness.preflight()
-    await harness.store.reserve_operation(preflight, device_context, _context())
+    await harness.store.reserve_operation(
+        preflight, device_context, harness.policy_binding(device_context), _context()
+    )
 
     with pytest.raises(sa.exc.IntegrityError) as outcome:
         async with harness.engine.begin() as connection:
@@ -326,7 +374,9 @@ async def test_same_identity_with_a_different_payload_is_rejected(
     harness = small_file_harness
     device_context = harness.device_context(seeded_workspace)
     preflight = harness.preflight()
-    await harness.store.reserve_operation(preflight, device_context, _context())
+    await harness.store.reserve_operation(
+        preflight, device_context, harness.policy_binding(device_context), _context()
+    )
 
     substituted = harness.preflight(
         sha256=_DIGEST_B,
@@ -334,7 +384,9 @@ async def test_same_identity_with_a_different_payload_is_rejected(
         idempotency_key=preflight.idempotency_key,
     )
     with pytest.raises(SmallFileSyncError) as rejected:
-        await harness.store.reserve_operation(substituted, device_context, _context())
+        await harness.store.reserve_operation(
+            substituted, device_context, harness.policy_binding(device_context), _context()
+        )
     assert rejected.value.error_code is ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH
 
     with pytest.raises(SmallFileSyncError) as replay_rejected:
@@ -367,7 +419,10 @@ async def test_update_reservation_records_the_update_base_and_reserves_nothing(
         operation=SmallFileOperation.UPDATE, source_id=source_id, base_version_id=base_version_id
     )
     operation = await harness.store.reserve_operation(
-        preflight, harness.device_context(seeded_workspace), _context()
+        preflight,
+        harness.device_context(seeded_workspace),
+        harness.policy_binding(harness.device_context(seeded_workspace)),
+        _context(),
     )
     assert operation.reserved_source_id is None
 
@@ -432,7 +487,9 @@ async def test_expired_pending_re_preflight_re_reserves_the_same_row(
     device_context = harness.device_context(seeded_workspace)
     assert expired_operation.reserved_source_id is not None
 
-    re_reserved = await harness.store.reserve_operation(preflight, device_context, _context())
+    re_reserved = await harness.store.reserve_operation(
+        preflight, device_context, harness.policy_binding(device_context), _context()
+    )
 
     assert re_reserved.operation_token.value != expired_operation.operation_token.value
     assert re_reserved.reserved_source_id == expired_operation.reserved_source_id
@@ -505,7 +562,9 @@ async def test_replay_after_commit_returns_the_frozen_terminal_result(
 
     # A terminal operation accepts no further reservation or duplicate write.
     with pytest.raises(SmallFileSyncError) as reserved:
-        await harness.store.reserve_operation(preflight, device_context, _context())
+        await harness.store.reserve_operation(
+            preflight, device_context, harness.policy_binding(device_context), _context()
+        )
     assert reserved.value.error_code is ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID
 
     await harness.store.record_terminal_result(operation, result, _context())

@@ -37,6 +37,7 @@ from typing import Final
 from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import ApplicationError
+from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
 from personal_os.exclusion_policy.errors import ExclusionPolicyError
 from personal_os.object_storage import (
     CanonicalMediaType,
@@ -328,7 +329,7 @@ class SmallFileSyncService:
         # replay lookup, reservation or object-store access, so a denied or
         # indeterminate subject never receives canonical data or an upload.
         try:
-            await self.policy_guard.authorize_small_file(
+            policy_binding = await self.policy_guard.authorize_small_file(
                 preflight, device_context, diagnostic_context
             )
         except ExclusionPolicyError:
@@ -355,13 +356,17 @@ class SmallFileSyncService:
             base_result = await self._check_update_base(
                 preflight=preflight,
                 device_context=device_context,
+                policy_binding=policy_binding,
                 diagnostic_context=diagnostic_context,
                 started_at=started_at,
             )
             if base_result is not None:
                 return base_result
         operation = await self.operation_store.reserve_operation(
-            preflight, device_context, diagnostic_context
+            preflight=preflight,
+            device_context=device_context,
+            policy_binding=policy_binding,
+            diagnostic_context=diagnostic_context,
         )
         self._record_preflight(
             preflight.operation, SmallFilePreflightOutcome.SINGLE_PART_UPLOAD, started_at
@@ -377,6 +382,7 @@ class SmallFileSyncService:
         *,
         preflight: SmallFilePreflight,
         device_context: SmallFileDeviceContext,
+        policy_binding: AllowedPolicyRevisionBinding,
         diagnostic_context: DiagnosticContext,
         started_at: datetime,
     ) -> SmallFilePreflightResult | None:
@@ -416,7 +422,10 @@ class SmallFileSyncService:
         if reference.expected_object.content_digest != preflight.sha256:
             return None
         operation = await self.operation_store.reserve_operation(
-            preflight, device_context, diagnostic_context
+            preflight=preflight,
+            device_context=device_context,
+            policy_binding=policy_binding,
+            diagnostic_context=diagnostic_context,
         )
         terminal = SmallFileTerminalResult(
             result_kind=SmallFileTerminalResultKind.NO_CHANGE,

@@ -58,6 +58,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import ApplicationError, InternalApplicationError
+from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
 from personal_os.object_storage import CanonicalMediaType, ContentDigest
 from personal_os.small_file_sync.contracts import (
     SmallFileDeviceContext,
@@ -264,6 +265,7 @@ def operation_insert_statement(
     operation_token_hash: str,
     device_context: SmallFileDeviceContext,
     preflight: SmallFilePreflight,
+    policy_revision_number: int,
     reserved_source_id: UUID | None,
     expires_at: datetime,
 ) -> sa.Insert:
@@ -279,7 +281,7 @@ def operation_insert_statement(
         declared_sha256=preflight.sha256.hexadecimal,
         declared_size_bytes=preflight.size_bytes,
         declared_media_type=preflight.media_type.value,
-        policy_revision_number=preflight.policy_revision_number,
+        policy_revision_number=policy_revision_number,
         reserved_source_id=reserved_source_id,
         update_source_id=preflight.source_id,
         update_base_version_id=preflight.base_version_id,
@@ -289,7 +291,11 @@ def operation_insert_statement(
 
 
 def operation_token_rotation_statement(
-    *, operation_id: UUID, operation_token_hash: str, expires_at: datetime
+    *,
+    operation_id: UUID,
+    operation_token_hash: str,
+    expires_at: datetime,
+    policy_revision_number: int,
 ) -> sa.Update:
     """Build the guarded rotation of the stored token hash for one row.
 
@@ -303,6 +309,7 @@ def operation_token_rotation_statement(
         .values(
             operation_token_hash=operation_token_hash,
             expires_at=expires_at,
+            policy_revision_number=policy_revision_number,
             updated_at=sa.text("CURRENT_TIMESTAMP"),
         )
         .where(small_file_upload_operations.c.operation_id == operation_id)
@@ -580,6 +587,7 @@ def _bound_matches_row(row: SmallFileOperationRow, bound: SmallFileBoundOperatio
         and row.reserved_source_id == bound.reserved_source_id
         and row.update_source_id == bound.update_source_id
         and row.update_base_version_id == bound.update_base_version_id
+        and int(row.policy_revision_number) == bound.policy_revision_number
     )
 
 
@@ -623,11 +631,16 @@ class PostgresqlSmallFileUploadOperationStore:
         self,
         preflight: SmallFilePreflight,
         device_context: SmallFileDeviceContext,
+        policy_binding: AllowedPolicyRevisionBinding,
         diagnostic_context: DiagnosticContext,
     ) -> SmallFileUploadOperation:
         del diagnostic_context
+        if policy_binding.workspace_id != device_context.workspace_id:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
         return await self._retry.run(
-            lambda _attempt: self._reserve_operation_once(preflight, device_context)
+            lambda _attempt: self._reserve_operation_once(
+                preflight, device_context, policy_binding.policy_revision_number
+            )
         )
 
     async def record_terminal_result(
@@ -801,7 +814,10 @@ class PostgresqlSmallFileUploadOperationStore:
         return hydrated.terminal_result()
 
     async def _reserve_operation_once(
-        self, preflight: SmallFilePreflight, device_context: SmallFileDeviceContext
+        self,
+        preflight: SmallFilePreflight,
+        device_context: SmallFileDeviceContext,
+        policy_revision_number: int,
     ) -> SmallFileUploadOperation:
         async with (
             self._engine.connect() as connection,
@@ -824,6 +840,7 @@ class PostgresqlSmallFileUploadOperationStore:
                         operation_token_hash=upload_operation_token_hash(token),
                         device_context=device_context,
                         preflight=preflight,
+                        policy_revision_number=policy_revision_number,
                         reserved_source_id=reserved_source_id,
                         expires_at=expires_at,
                     )
@@ -855,6 +872,7 @@ class PostgresqlSmallFileUploadOperationStore:
                     operation_id=row.operation_id,
                     operation_token_hash=upload_operation_token_hash(token),
                     expires_at=expires_at,
+                    policy_revision_number=policy_revision_number,
                 )
             )
             return SmallFileUploadOperation(

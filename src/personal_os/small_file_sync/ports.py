@@ -118,6 +118,7 @@ class SmallFileUploadOperationStore(Protocol):
         self,
         preflight: SmallFilePreflight,
         device_context: SmallFileDeviceContext,
+        policy_binding: AllowedPolicyRevisionBinding,
         diagnostic_context: DiagnosticContext,
     ) -> SmallFileUploadOperation: ...
 

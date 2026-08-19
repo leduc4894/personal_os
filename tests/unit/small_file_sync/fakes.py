@@ -151,6 +151,7 @@ def build_create_preflight(
     content: bytes = SYNC_CONTENT_BYTES,
     event_id: UUID | None = None,
     idempotency_key: SmallFileIdempotencyKey | None = None,
+    policy_revision_number: int = 7,
 ) -> SmallFilePreflight:
     """A valid create preflight whose declared fingerprint covers ``content``."""
 
@@ -167,7 +168,7 @@ def build_create_preflight(
         sha256=ContentDigest.parse(hashlib.sha256(content).hexdigest()),
         size_bytes=len(content),
         media_type=SYNC_MEDIA_TYPE,
-        policy_revision_number=7,
+        policy_revision_number=policy_revision_number,
     )
 
 
@@ -235,6 +236,7 @@ class _OperationRecord:
     reserved_source_id: UUID | None
     expires_at: datetime
     state: str
+    policy_revision_number: int
     terminal_result: SmallFileTerminalResult | None = None
 
 
@@ -320,10 +322,13 @@ class FakeSmallFileUploadOperationStore:
         self,
         preflight: SmallFilePreflight,
         device_context: SmallFileDeviceContext,
+        policy_binding: AllowedPolicyRevisionBinding,
         diagnostic_context: DiagnosticContext,
     ) -> SmallFileUploadOperation:
         del diagnostic_context
         self.ledger.record(STORE_RESERVE_OPERATION)
+        if policy_binding.workspace_id != device_context.workspace_id:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
         record = self._identity_record(preflight, device_context)
         if record is None:
             record = _OperationRecord(
@@ -335,6 +340,7 @@ class FakeSmallFileUploadOperationStore:
                 ),
                 expires_at=self._now() + timedelta(seconds=self.expiry_seconds),
                 state=_PENDING_STATE,
+                policy_revision_number=policy_binding.policy_revision_number,
             )
             self.records.append(record)
         else:
@@ -347,6 +353,7 @@ class FakeSmallFileUploadOperationStore:
             if record.expires_at <= self._now():
                 record.expires_at = self._now() + timedelta(seconds=self.expiry_seconds)
             record.operation_token = UploadOperationToken(secrets.token_urlsafe(32))
+            record.policy_revision_number = policy_binding.policy_revision_number
         return SmallFileUploadOperation(
             operation_token=record.operation_token,
             preflight=preflight,
@@ -442,7 +449,7 @@ class FakeSmallFileUploadOperationStore:
                 else record.preflight.size_bytes
             ),
             declared_media_type=record.preflight.media_type,
-            policy_revision_number=record.preflight.policy_revision_number,
+            policy_revision_number=record.policy_revision_number,
             reserved_source_id=record.reserved_source_id,
             update_source_id=record.preflight.source_id,
             update_base_version_id=record.preflight.base_version_id,
@@ -546,6 +553,7 @@ class AllowingSmallFilePolicyGuard:
     """Small-file policy-guard fake recording the boundary call and allowing."""
 
     ledger: CallLedger
+    policy_revision_number: int = 1
     authorize_calls: list[UUID] = field(default_factory=list)
 
     async def authorize_small_file(
@@ -559,7 +567,7 @@ class AllowingSmallFilePolicyGuard:
         self.authorize_calls.append(preflight.event_id)
         return AllowedPolicyRevisionBinding(
             workspace_id=device_context.workspace_id,
-            policy_revision_number=1,
+            policy_revision_number=self.policy_revision_number,
         )
 
 

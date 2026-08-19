@@ -268,6 +268,7 @@ class _OfflineOperationRow:
     reserved_source_id: UUID | None
     expires_at: datetime
     state: str
+    policy_revision_number: int
     terminal_result: SmallFileTerminalResult | None = None
 
 
@@ -367,9 +368,12 @@ class OfflineSmallFileUploadOperationStore:
         self,
         preflight: SmallFilePreflight,
         device_context: SmallFileDeviceContext,
+        policy_binding: AllowedPolicyRevisionBinding,
         diagnostic_context: DiagnosticContext,
     ) -> SmallFileUploadOperation:
         del diagnostic_context
+        if policy_binding.workspace_id != device_context.workspace_id:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
         now = self._now()
         row = self._identity_row(preflight, device_context)
         if row is None:
@@ -382,6 +386,7 @@ class OfflineSmallFileUploadOperationStore:
                 ),
                 expires_at=now + timedelta(seconds=_OFFLINE_EXPIRY_SECONDS),
                 state=_PENDING_STATE,
+                policy_revision_number=policy_binding.policy_revision_number,
             )
             self._state.rows.append(row)
         else:
@@ -396,6 +401,7 @@ class OfflineSmallFileUploadOperationStore:
             if row.expires_at <= now:
                 row.expires_at = now + timedelta(seconds=_OFFLINE_EXPIRY_SECONDS)
             row.operation_token = UploadOperationToken(secrets.token_urlsafe(32))
+            row.policy_revision_number = policy_binding.policy_revision_number
         return SmallFileUploadOperation(
             operation_token=row.operation_token,
             preflight=preflight,
@@ -443,7 +449,7 @@ class OfflineSmallFileUploadOperationStore:
             declared_sha256=row.preflight.sha256,
             declared_size_bytes=row.preflight.size_bytes,
             declared_media_type=row.preflight.media_type,
-            policy_revision_number=row.preflight.policy_revision_number,
+            policy_revision_number=row.policy_revision_number,
             reserved_source_id=row.reserved_source_id,
             update_source_id=row.preflight.source_id,
             update_base_version_id=row.preflight.base_version_id,

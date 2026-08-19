@@ -119,6 +119,24 @@ class TestPreflightPolicy:
 
 class TestPreflightReservation:
     @pytest.mark.asyncio
+    async def test_preflight_reserves_with_the_guard_binding_not_the_plugin_revision(self) -> None:
+        harness = build_service_harness()
+        assert hasattr(harness.policy_guard, "policy_revision_number")
+        harness.policy_guard.policy_revision_number = 7
+        preflight = build_create_preflight(policy_revision_number=2)
+
+        result = await harness.service.preflight(
+            preflight=preflight,
+            device_context=build_device_context(),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert result.operation_token is not None
+        record = harness.operation_store.record_for_token(result.operation_token)
+        assert record is not None
+        assert record.policy_revision_number == 7
+
+    @pytest.mark.asyncio
     async def test_create_reserves_operation_without_source_insert(self) -> None:
         harness = build_service_harness()
 
