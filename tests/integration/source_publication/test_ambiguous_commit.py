@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -68,7 +68,7 @@ def _receipt(salt: str) -> VerifiedObjectReceipt:
         object_key=derive_canonical_object_key(digest),
         size_bytes=len(salt),
         media_type=CanonicalMediaType.parse("text/markdown"),
-        verified_at=datetime.now(UTC) - timedelta(seconds=1),
+        verified_at=datetime.now(UTC),
         verification_method=VerificationMethod.UPLOADED_FULL_READ,
     )
 

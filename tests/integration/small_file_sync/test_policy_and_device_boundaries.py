@@ -269,6 +269,46 @@ def test_locator_rule_published_during_the_upload_fails_closed_at_publication(
     assert harness.sync_state.published_source_ids == set()
 
 
+def test_irrelevant_locator_revision_reauthorizes_claimed_exact_token_once(
+    policy_harness: SmallFileWireHarness,
+) -> None:
+    """A locator-aware re-preflight hands the same claimed token fresh authority."""
+
+    harness = policy_harness
+    assert harness.snapshot_source is not None
+    body = _create_body(_OPEN_LOCATOR)
+    token = _single_part_token(harness, body)
+    accepted_revision = harness.sync_state.rows[-1].policy_revision_number
+
+    # The new locator-only rule is irrelevant to this open locator. The first
+    # PUT still fails closed because publication has no locator; re-preflight
+    # can authoritatively decide and synchronously rebind the claimed token.
+    harness.snapshot_source.publish_rules((excluding_folder_rule(_EXCLUDED_FOLDER),))
+    changed_revision = harness.snapshot_source.revision_number
+    assert changed_revision > accepted_revision
+
+    first_upload = harness.upload(token, _CONTENT)
+    assert first_upload.status_code == 403, first_upload.text
+    assert first_upload.json()["error"]["code"] == "exclusion_policy_indeterminate"
+    assert harness.sync_state.publication_commits == 0
+
+    retry_required = harness.preflight(body)
+    assert retry_required.status_code == 409, retry_required.text
+    assert retry_required.json()["error"]["code"] == "small_file_upload_state_invalid"
+    assert harness.sync_state.rows[-1].policy_revision_number == changed_revision
+
+    resumed = harness.upload(token, _CONTENT)
+    assert resumed.status_code == 200, resumed.text
+    committed = dict(resumed.json()["data"])
+    assert committed["result_kind"] == "committed"
+    assert harness.sync_state.publication_commits == 1
+
+    exact_replay = harness.upload(token, _CONTENT)
+    assert exact_replay.status_code == 200, exact_replay.text
+    assert dict(exact_replay.json()["data"]) == committed
+    assert harness.sync_state.publication_commits == 1
+
+
 def test_revoked_device_cannot_preflight_or_continue_its_operation(
     offline_harness: SmallFileWireHarness,
 ) -> None:

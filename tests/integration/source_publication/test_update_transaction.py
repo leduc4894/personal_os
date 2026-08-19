@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -83,7 +83,7 @@ def _receipt(
         object_key=derive_canonical_object_key(digest),
         size_bytes=len(salt) if size_bytes is None else size_bytes,
         media_type=CanonicalMediaType.parse(media_type),
-        verified_at=datetime.now(UTC) - timedelta(seconds=1),
+        verified_at=datetime.now(UTC),
         verification_method=VerificationMethod.UPLOADED_FULL_READ,
     )
 

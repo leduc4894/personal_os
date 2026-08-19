@@ -66,6 +66,11 @@ from personal_os.exclusion_policy.enforcement import (
 from personal_os.exclusion_policy.metrics import ExclusionPolicyMetrics
 from personal_os.object_storage import VerifiedObjectReceipt
 from personal_os.object_storage.keys import ContentDigest
+from personal_os.small_file_sync.contracts import (
+    SmallFileTerminalResult,
+    SmallFileTerminalResultKind,
+)
+from personal_os.small_file_sync.ports import SmallFileBoundOperation
 from personal_os.sources.actors import ActorKind, SourceActor
 from personal_os.sources.commands import (
     CreateSourceVersion,
@@ -87,6 +92,9 @@ from postgresql_source_store.locks import idempotency_lock_statement, source_loc
 from postgresql_source_store.policy_enforcement import (
     authorize_locked_publication_policy,
     source_type_select_statement,
+)
+from postgresql_source_store.small_file_sync_operations import (
+    PostgresqlSmallFileUploadOperationStore,
 )
 from postgresql_source_store.tables import (
     audit_events,
@@ -433,6 +441,7 @@ def content_object_upsert_statement(
         byte_size=receipt.size_bytes,
         media_type=receipt.media_type.value,
         verified_at=receipt.verified_at,
+        created_at=receipt.verified_at,
     )
     return statement.on_conflict_do_nothing(index_elements=[content_objects.c.content_hash])
 
@@ -481,11 +490,33 @@ class PostgresqlSourcePublicationStore:
         retry: DatabaseRetryPolicy | None = None,
         policy_verifier: PolicyTrustAnchorVerifier,
         policy_metrics: ExclusionPolicyMetrics | None = None,
+        small_file_operation_store: PostgresqlSmallFileUploadOperationStore | None = None,
+        small_file_bound_operation: SmallFileBoundOperation | None = None,
     ) -> None:
+        if (small_file_operation_store is None) != (small_file_bound_operation is None):
+            raise ValueError("small-file operation store and binding must be supplied together")
         self._engine = engine
         self._retry = retry if retry is not None else DatabaseRetryPolicy()
         self._policy_verifier = policy_verifier
         self._policy_metrics = policy_metrics
+        self._small_file_operation_store = small_file_operation_store
+        self._small_file_bound_operation = small_file_bound_operation
+
+    def with_small_file_operation_fence(
+        self,
+        operation_store: PostgresqlSmallFileUploadOperationStore,
+        bound: SmallFileBoundOperation,
+    ) -> PostgresqlSourcePublicationStore:
+        """Return an invocation-local store fenced to one claimed upload."""
+
+        return PostgresqlSourcePublicationStore(
+            self._engine,
+            retry=self._retry,
+            policy_verifier=self._policy_verifier,
+            policy_metrics=self._policy_metrics,
+            small_file_operation_store=operation_store,
+            small_file_bound_operation=bound,
+        )
 
     async def resolve_committed(
         self,
@@ -640,6 +671,16 @@ class PostgresqlSourcePublicationStore:
                 connection.begin(),
             ):
                 await apply_transaction_bounds(connection)
+                if (
+                    self._small_file_operation_store is not None
+                    and self._small_file_bound_operation is not None
+                ):
+                    # Global lock order for the small-file path starts with
+                    # operation identity, before source idempotency/policy/source.
+                    operation_store = self._small_file_operation_store
+                    await operation_store.acquire_bound_publication_fence_in_transaction(
+                        connection, self._small_file_bound_operation
+                    )
                 await connection.execute(
                     idempotency_lock_statement(command.workspace_id, command.idempotency_key)
                 )
@@ -687,6 +728,30 @@ class PostgresqlSourcePublicationStore:
                     rejection, result = await transition(connection)
                     if rejection is not None:
                         raise _RejectionAbort(rejection)
+                if (
+                    result is not None
+                    and self._small_file_operation_store is not None
+                    and self._small_file_bound_operation is not None
+                ):
+                    result_kind = (
+                        SmallFileTerminalResultKind.NO_CHANGE
+                        if result.outcome is PublicationOutcome.NO_CHANGE
+                        else SmallFileTerminalResultKind.COMMITTED
+                    )
+                    record_terminal = (
+                        self._small_file_operation_store.record_bound_terminal_result_in_transaction
+                    )
+                    await record_terminal(
+                        connection,
+                        self._small_file_bound_operation,
+                        SmallFileTerminalResult(
+                            result_kind=result_kind,
+                            source_id=result.source_id,
+                            source_version_id=result.source_version_id,
+                            content_version=result.content_version,
+                            committed_at=result.committed_at,
+                        ),
+                    )
         except _RejectionAbort as abort:
             rejection = abort.rejection
         if rejection is not None:

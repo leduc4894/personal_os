@@ -19,7 +19,7 @@ import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -118,7 +118,7 @@ class RecordingObjectStore:
             # The database owns created_at. Keep the receipt safely before it
             # across host/container clock skew so the canonical CHECK remains
             # deterministic in the real PostgreSQL gate.
-            verified_at=datetime.now(UTC) - timedelta(seconds=1),
+            verified_at=datetime.now(UTC),
             verification_method=VerificationMethod.UPLOADED_FULL_READ,
         )
 

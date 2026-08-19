@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -77,7 +78,7 @@ def _receipt(
         object_key=derive_canonical_object_key(digest),
         size_bytes=len(salt) if size_bytes is None else size_bytes,
         media_type=CanonicalMediaType.parse(media_type),
-        verified_at=datetime.now(UTC) - timedelta(seconds=1),
+        verified_at=datetime.now(UTC),
         verification_method=VerificationMethod.UPLOADED_FULL_READ,
     )
 
@@ -225,6 +226,7 @@ async def _fetch_content_object_rows_by_hash(engine: AsyncEngine, content_hash: 
                 content_objects.c.byte_size,
                 content_objects.c.media_type,
                 content_objects.c.verified_at,
+                content_objects.c.created_at,
             ).where(content_objects.c.content_hash == content_hash)
         )
         return list(result.all())
@@ -401,6 +403,36 @@ async def test_create_commits_exact_canonical_graph(
 
 
 # --- content-object deduplication --------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_application_receipt_ahead_of_database_clock_commits_deterministically(
+    preflight_harness, inspection_engine
+) -> None:
+    """The receipt instant owns both timestamps on the first object insert."""
+
+    workspace = await preflight_harness.seed_workspace()
+    command, receipt = _create_command(
+        workspace,
+        f"ahead-of-database-clock-{uuid4()}",
+        idempotency_value="ahead-of-database-clock-1",
+    )
+    future_receipt = replace(receipt, verified_at=datetime.now(UTC) + timedelta(seconds=30))
+
+    result = await preflight_harness.store.commit_create(
+        command,
+        compute_request_fingerprint(command),
+        future_receipt,
+        _diagnostic_context(),
+    )
+
+    assert result.outcome is PublicationOutcome.PUBLISHED
+    object_rows = await _fetch_content_object_rows_by_hash(
+        inspection_engine, future_receipt.content_digest.hexadecimal
+    )
+    assert len(object_rows) == 1
+    assert object_rows[0].verified_at == future_receipt.verified_at
+    assert object_rows[0].created_at == future_receipt.verified_at
 
 
 @pytest.mark.asyncio

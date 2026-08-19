@@ -543,6 +543,7 @@ class SmallFileSyncService:
                 command=create_command,
                 stream=_EXHAUSTED_BYTE_STREAM,
                 policy_binding=policy_binding,
+                bound_operation=bound,
                 diagnostic_context=diagnostic_context,
             )
         update_source_id = bound.update_source_id
@@ -568,6 +569,7 @@ class SmallFileSyncService:
             command=update_command,
             stream=_EXHAUSTED_BYTE_STREAM,
             policy_binding=policy_binding,
+            bound_operation=bound,
             diagnostic_context=diagnostic_context,
         )
 

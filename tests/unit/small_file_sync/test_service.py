@@ -661,6 +661,58 @@ class TestReceiveGuards:
 
 class TestReceiveReplayAndConcurrency:
     @pytest.mark.asyncio
+    async def test_locator_reauthorization_rebinds_claimed_exact_token_before_resume(
+        self,
+    ) -> None:
+        """A crash after claim resumes the same token under fresh locator authority."""
+
+        harness = build_service_harness()
+        device_context = build_device_context()
+        preflight = build_create_preflight()
+        reserved = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        assert reserved.operation_token is not None
+
+        # Model interruption after the PUT claimed the durable row but before
+        # any canonical publication transaction began.
+        claimed = await harness.operation_store.resolve_bound_operation(
+            reserved.operation_token,
+            device_context,
+            build_diagnostic_context(),
+        )
+        next_revision = claimed.policy_revision_number + 1
+        assert hasattr(harness.policy_guard, "policy_revision_number")
+        harness.policy_guard.policy_revision_number = next_revision
+
+        with pytest.raises(SmallFileSyncError) as retry_required:
+            await harness.service.preflight(
+                preflight=preflight,
+                device_context=device_context,
+                diagnostic_context=build_diagnostic_context(),
+            )
+        assert _error_code(retry_required.value) is ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID
+
+        rebound = harness.operation_store.record_for_token(reserved.operation_token)
+        assert rebound is not None
+        assert rebound.state == "receiving"
+        assert rebound.operation_token == reserved.operation_token
+        assert rebound.policy_revision_number == next_revision
+
+        terminal = await harness.service.receive(
+            operation_token=reserved.operation_token,
+            device_context=device_context,
+            stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert terminal.result_kind is SmallFileTerminalResultKind.COMMITTED
+        assert harness.publication_gateway.bindings[-1].policy_revision_number == next_revision
+        assert harness.publication_store.commit_invocations == 1
+
+    @pytest.mark.asyncio
     async def test_unbound_terminal_write_cannot_bypass_a_claimed_receive(self) -> None:
         harness = build_service_harness()
         device_context = build_device_context()
@@ -707,7 +759,7 @@ class TestReceiveReplayAndConcurrency:
         )
 
     @pytest.mark.asyncio
-    async def test_receive_claim_survives_expiry_and_blocks_repreflight_until_terminal(
+    async def test_receive_claim_survives_expiry_until_terminal(
         self,
     ) -> None:
         harness = build_service_harness()
@@ -743,16 +795,6 @@ class TestReceiveReplayAndConcurrency:
         # must retain its token/revision fence until guarded terminalization.
         harness.operation_store.now_override = record.expires_at + timedelta(seconds=1)
 
-        assert hasattr(harness.policy_guard, "policy_revision_number")
-        harness.policy_guard.policy_revision_number = claimed_revision + 1
-        with pytest.raises(SmallFileSyncError) as rejected:
-            await harness.service.preflight(
-                preflight=preflight,
-                device_context=device_context,
-                diagnostic_context=build_diagnostic_context(),
-            )
-        assert _error_code(rejected.value) is ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID
-
         release.set()
         terminal = await receive_task
 
@@ -761,6 +803,13 @@ class TestReceiveReplayAndConcurrency:
         assert committed.state == "committed"
         assert committed.policy_revision_number == claimed_revision
         assert terminal.result_kind is SmallFileTerminalResultKind.COMMITTED
+
+        replay = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        assert replay.outcome is SmallFilePreflightOutcome.COMMITTED_REPLAY
 
     @pytest.mark.asyncio
     async def test_concurrent_receives_keep_their_policy_bindings_isolated(self) -> None:

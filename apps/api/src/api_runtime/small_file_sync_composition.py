@@ -201,6 +201,7 @@ class BoundPolicySmallFilePublicationGateway:
     metrics: SourcePublicationMetrics
     clock: SourceAwareUtcClock
     enforcement: PolicyEnforcementService
+    operation_store: PostgresqlSmallFileUploadOperationStore | None = None
 
     async def publish_create(
         self,
@@ -209,10 +210,12 @@ class BoundPolicySmallFilePublicationGateway:
         stream: AsyncIterable[bytes],
         policy_binding: AllowedPolicyRevisionBinding,
         diagnostic_context: DiagnosticContext,
+        bound_operation: SmallFileBoundOperation | None = None,
     ) -> SourceVersionPublicationResult:
         self._validate_workspace(command, policy_binding)
+        store = self._publication_store(bound_operation)
         publication_service = SourceVersionPublicationService(
-            store=self.store,
+            store=store,
             object_store=self.object_store,
             metrics=self.metrics,
             clock=self.clock,
@@ -237,10 +240,12 @@ class BoundPolicySmallFilePublicationGateway:
         stream: AsyncIterable[bytes],
         policy_binding: AllowedPolicyRevisionBinding,
         diagnostic_context: DiagnosticContext,
+        bound_operation: SmallFileBoundOperation | None = None,
     ) -> SourceVersionPublicationResult:
         self._validate_workspace(command, policy_binding)
+        store = self._publication_store(bound_operation)
         publication_service = SourceVersionPublicationService(
-            store=self.store,
+            store=store,
             object_store=self.object_store,
             metrics=self.metrics,
             clock=self.clock,
@@ -256,6 +261,18 @@ class BoundPolicySmallFilePublicationGateway:
             command=command,
             stream=stream,
             diagnostic_context=diagnostic_context,
+        )
+
+    def _publication_store(
+        self, bound_operation: SmallFileBoundOperation | None
+    ) -> SourcePublicationStore:
+        if bound_operation is None or self.operation_store is None:
+            return self.store
+        if not isinstance(self.store, PostgresqlSourcePublicationStore):
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        return self.store.with_small_file_operation_fence(
+            self.operation_store,
+            bound_operation,
         )
 
     @staticmethod
@@ -325,15 +342,17 @@ def compose_small_file_sync(
         metrics=InMemoryObjectStorageMetrics(),
         logger=logger,
     )
+    operation_store = PostgresqlSmallFileUploadOperationStore(engine, clock=default_utc_clock)
     publication_gateway = BoundPolicySmallFilePublicationGateway(
         store=PostgresqlSourcePublicationStore(engine, policy_verifier=verifier),
         object_store=object_store,
         metrics=InMemorySourcePublicationMetrics(),
         clock=default_utc_clock,
         enforcement=enforcement,
+        operation_store=operation_store,
     )
     service = SmallFileSyncService(
-        operation_store=PostgresqlSmallFileUploadOperationStore(engine, clock=default_utc_clock),
+        operation_store=operation_store,
         policy_guard=PolicyEnforcementSmallFileGuard(enforcement=enforcement),
         publication_gateway=publication_gateway,
         object_store=object_store,
@@ -512,6 +531,7 @@ class OfflineSmallFileUploadOperationStore:
             if row.state == _COMMITTED_STATE:
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
             if row.state == _RECEIVING_STATE:
+                row.policy_revision_number = policy_binding.policy_revision_number
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
             # Mirroring the durable adapter: only an expired pending row is
             # reclaimable. A claimed receive keeps its token/revision fence
@@ -783,8 +803,10 @@ class _OfflineSmallFilePublicationGateway:
         command: CreateSourceVersion,
         stream: AsyncIterable[bytes],
         policy_binding: AllowedPolicyRevisionBinding,
+        bound_operation: SmallFileBoundOperation,
         diagnostic_context: DiagnosticContext,
     ) -> SourceVersionPublicationResult:
+        del bound_operation
         publication_service = self._publication_service(policy_binding)
         return await publication_service.publish_create(
             command=command,
@@ -798,8 +820,10 @@ class _OfflineSmallFilePublicationGateway:
         command: UpdateSourceVersion,
         stream: AsyncIterable[bytes],
         policy_binding: AllowedPolicyRevisionBinding,
+        bound_operation: SmallFileBoundOperation,
         diagnostic_context: DiagnosticContext,
     ) -> SourceVersionPublicationResult:
+        del bound_operation
         publication_service = self._publication_service(policy_binding)
         return await publication_service.publish_update(
             command=command,

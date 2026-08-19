@@ -106,6 +106,7 @@ class SmallFilePublicationGateway(Protocol):
         command: CreateSourceVersion,
         stream: AsyncIterable[bytes],
         policy_binding: AllowedPolicyRevisionBinding,
+        bound_operation: SmallFileBoundOperation,
         diagnostic_context: DiagnosticContext,
     ) -> SourceVersionPublicationResult: ...
 
@@ -115,6 +116,7 @@ class SmallFilePublicationGateway(Protocol):
         command: UpdateSourceVersion,
         stream: AsyncIterable[bytes],
         policy_binding: AllowedPolicyRevisionBinding,
+        bound_operation: SmallFileBoundOperation,
         diagnostic_context: DiagnosticContext,
     ) -> SourceVersionPublicationResult: ...
 

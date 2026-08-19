@@ -40,4 +40,29 @@ describe("repository subprocess contract", () => {
 
     expect(stdout).toBe("portable");
   });
+
+  it("terminates evidence commands at the caller-owned timeout", async () => {
+    const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "repository-timeout-"));
+    temporaryDirectories.push(temporaryDirectory);
+    const specPath = path.join(
+      temporaryDirectory,
+      "portable-checkout",
+      "apps",
+      "obsidian-plugin",
+      "test",
+      "specs",
+      "device-login-sync.e2e.ts",
+    );
+    fs.mkdirSync(path.dirname(specPath), { recursive: true });
+
+    await expect(
+      runFromE2eRepositoryRoot(
+        process.execPath,
+        ["-e", "setInterval(() => undefined, 1000)"],
+        pathToFileURL(specPath).href,
+        process.env,
+        50,
+      ),
+    ).rejects.toMatchObject({ killed: true });
+  });
 });

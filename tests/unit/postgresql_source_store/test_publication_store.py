@@ -77,8 +77,25 @@ class _AcceptingVerifier:
         return True
 
 
+class _RecordingOperationFence:
+    def __init__(self, order: list[str]) -> None:
+        self.order = order
+
+    async def acquire_bound_publication_fence_in_transaction(
+        self, connection: object, bound: object
+    ) -> None:
+        del connection, bound
+        self.order.append("operation_fence")
+
+    async def record_bound_terminal_result_in_transaction(
+        self, connection: object, bound: object, result: object
+    ) -> None:
+        del connection, bound, result
+        self.order.append("operation_terminal")
+
+
 class _ControlledStore(PostgresqlSourcePublicationStore):
-    def __init__(self, command: CreateSourceVersion) -> None:
+    def __init__(self, command: CreateSourceVersion, *, with_operation_fence: bool = False) -> None:
         self.connection = _RecordingConnection()
         self.order: list[str] = []
         self.subject = PolicySubject(
@@ -91,6 +108,10 @@ class _ControlledStore(PostgresqlSourcePublicationStore):
         super().__init__(
             cast(Any, _Engine(self.connection)),
             policy_verifier=_AcceptingVerifier(),
+            small_file_operation_store=(
+                cast(Any, _RecordingOperationFence(self.order)) if with_operation_fence else None
+            ),
+            small_file_bound_operation=cast(Any, object()) if with_operation_fence else None,
         )
 
     async def _select_workspace_is_active(self, connection: object, workspace_id: UUID) -> bool:
@@ -191,6 +212,45 @@ async def test_store_passes_bound_evidence_to_locked_authorization_before_source
     assert helper_evidence == [binding]
     assert helper_evidence[0] is binding
     assert store.order == ["subject", "policy", "transition"]
+
+
+@pytest.mark.asyncio
+async def test_small_file_fence_wraps_canonical_transition_and_terminalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = build_create_command()
+    binding = AllowedPolicyRevisionBinding(command.workspace_id, 7)
+    store = _ControlledStore(command, with_operation_fence=True)
+    committed = build_committed_result(command)
+
+    async def authorize_locked(*args: object, **kwargs: object) -> PublicationPolicyEvidence:
+        del args, kwargs
+        store.order.append("policy")
+        return binding
+
+    async def transition(
+        connection: object,
+    ) -> tuple[None, SourceVersionPublicationResult]:
+        del connection
+        store.order.append("transition")
+        return None, committed
+
+    monkeypatch.setattr(
+        publication_store,
+        "authorize_locked_publication_policy",
+        authorize_locked,
+    )
+
+    result = await _run_transition(store, command, binding, transition)
+
+    assert result is committed
+    assert store.order == [
+        "operation_fence",
+        "subject",
+        "policy",
+        "transition",
+        "operation_terminal",
+    ]
 
 
 @pytest.mark.asyncio

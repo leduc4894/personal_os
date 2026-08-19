@@ -139,6 +139,7 @@ def test_serve_composition_binds_the_bound_policy_publication_gateway(
     assert isinstance(service.current_sources, PostgresqlCanonicalSourceReadStore)
     assert isinstance(service.publication_gateway, BoundPolicySmallFilePublicationGateway)
     assert isinstance(service.publication_gateway.store, PostgresqlSourcePublicationStore)
+    assert service.publication_gateway.operation_store is service.operation_store
     assert isinstance(service.publication_gateway.enforcement, PolicyEnforcementService)
     assert isinstance(service.policy_guard, PolicyEnforcementSmallFileGuard)
     assert isinstance(service.policy_guard.enforcement, PolicyEnforcementService)

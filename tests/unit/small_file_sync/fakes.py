@@ -352,6 +352,7 @@ class FakeSmallFileUploadOperationStore:
             if record.state == _COMMITTED_STATE:
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
             if record.state == _RECEIVING_STATE:
+                record.policy_revision_number = policy_binding.policy_revision_number
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
             # Mirroring the durable adapter: only an expired pending record
             # re-reserves with a fresh token and an extended deadline.
@@ -419,6 +420,8 @@ class FakeSmallFileUploadOperationStore:
         record = self._token_record(bound.operation_token)
         if record is None:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND)
+        if self._bound_operation(record) != bound:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH)
         self._apply_terminal_transition(
             record,
             result,
@@ -657,8 +660,10 @@ class FakeSmallFilePublicationGateway:
         command: SourceVersionCommand,
         stream: AsyncIterable[bytes],
         policy_binding: AllowedPolicyRevisionBinding,
+        bound_operation: SmallFileBoundOperation,
         diagnostic_context: DiagnosticContext,
     ) -> SourceVersionPublicationResult:
+        del bound_operation
         await self._hold_binding(policy_binding)
         return await self.publication_service.publish_create(
             command=command,
@@ -672,8 +677,10 @@ class FakeSmallFilePublicationGateway:
         command: SourceVersionCommand,
         stream: AsyncIterable[bytes],
         policy_binding: AllowedPolicyRevisionBinding,
+        bound_operation: SmallFileBoundOperation,
         diagnostic_context: DiagnosticContext,
     ) -> SourceVersionPublicationResult:
+        del bound_operation
         await self._hold_binding(policy_binding)
         return await self.publication_service.publish_update(
             command=command,

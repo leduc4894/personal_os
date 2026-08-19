@@ -135,6 +135,8 @@ try:
         dbname=os.environ["KNOWLEDGE_DATABASE_NAME"],
         user=os.environ["KNOWLEDGE_DATABASE_USER"],
         password=password,
+        connect_timeout=5,
+        options="-c statement_timeout=5000 -c lock_timeout=1000",
     ) as connection:
         statement = """
             with controlled_operations as (
@@ -317,6 +319,7 @@ async function readServerPublicationEvidence(
       SERVER_EVIDENCE_DECLARED_SHA256S: controlledDeclaredSha256,
       SERVER_EVIDENCE_WAIT_FOR_RECEIVING: shouldWaitForReceiving ? "1" : "0",
     },
+    shouldWaitForReceiving ? 40_000 : 10_000,
   );
   const parsed = JSON.parse(stdout) as Record<string, unknown>;
   const evidenceKeys = [

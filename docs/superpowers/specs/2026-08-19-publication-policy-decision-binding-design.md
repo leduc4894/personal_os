@@ -669,8 +669,9 @@ The following are explicitly outside this design:
 - changing `authorize_publication` semantics for any caller outside the
   explicit small-file gateway;
 - changing canonical-read, query, projection, or AI-provider policy guards; and
-- redesigning source-publication idempotency, operation terminal atomicity, or
-  trust-anchor rotation.
+- redesigning source-publication idempotency or trust-anchor rotation, or
+  changing operation terminal semantics outside the explicit claimed
+  small-file fence in section 11.
 
 The backlog entry for the publication-time locator gap is removed only after
 implementation and all acceptance gates pass. The separate verifier-chain
@@ -679,3 +680,48 @@ entry remains.
 ## 10. Open questions
 
 None. The design choices required for implementation are closed by this spec.
+
+## 11. Claimed-resume completion amendment (2026-08-20)
+
+An interrupted PUT may leave its operation in `receiving`. If a later active
+revision contains a locator-dependent rule that does not match the file, the
+next preflight can allow with its locator-aware subject while the old row
+binding would still make publication indeterminate. Discarding the new
+decision creates an infinite preflight/PUT retry loop.
+
+The locator-aware preflight may therefore synchronously update only the
+claimed row's `policy_revision_number` after its successful server decision.
+It must hold the operation-identity advisory lock, retain `receiving`, retain
+the exact token hash, expiry, identity, source/base geometry, and declared
+content fields, commit the revision update, and then surface the existing
+claimed-state response. The plugin consequently retries only its unchanged
+persisted exact token. A deny or indeterminate preflight never updates the
+row, and a missing, terminal, mismatched, or expired `pending` operation never
+enters this path. Preflight cannot rotate or substitute the row token; a PUT
+with any other token still fails exact lookup. A claimed `receiving` row
+retains its exact-token authority across the reservation deadline as already
+defined by the final-review completion contract.
+
+This update is safe only when canonical publication and operation
+terminalization share the same fence. A claimed small-file publication must:
+
+1. acquire the operation-identity advisory lock before the existing source
+   idempotency, policy-state, and source locks;
+2. validate the exact token, `receiving` or identical terminal state, complete
+   bound geometry, and policy revision before any canonical mutation;
+3. run the existing signed-policy and source-publication transaction; and
+4. write the matching operation terminal result inside that same transaction.
+
+If publication wins the operation fence, its canonical graph and terminal
+receipt commit together, after which re-preflight returns replay. If
+locator-aware reauthorization wins, an already-resolved stale publication
+binding fails before mutation and the unchanged token resolves the new bound
+revision on retry. This is a synchronous fenced handoff, not an asynchronous
+receiving-row rebind. No process-local grant, locator persistence, plugin
+revision trust, public wire member, schema column, or fingerprint change is
+permitted.
+
+Acceptance additionally requires a deterministic PostgreSQL race proving
+both lock orders and an actual plugin journal journey proving that one
+interruption followed by an irrelevant locator-policy revision converges to
+one canonical publication and one terminal operation.
