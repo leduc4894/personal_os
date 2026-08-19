@@ -646,6 +646,33 @@ async def test_content_limiter_passes_a_stream_exactly_at_the_ceiling() -> None:
 
 
 @pytest.mark.asyncio
+async def test_content_limiter_skips_zero_length_wire_chunks() -> None:
+    """A proxied chunked body may carry zero-length data events (spec 10.2).
+
+    The HTTP adapter owns wire normalization: an empty chunk carries no
+    bytes and must never reach the spool path, whose per-chunk contract
+    rejects empty chunks as malformed. Observed live through a Cloudflare
+    tunnel PUT.
+    """
+    collected: list[bytes] = []
+    error: Exception | None = None
+    stream = bounded_content_stream(
+        _ChunkedStream([b"12", b"", b"34", b"", b"5678"]),
+        maximum_bytes=8,
+        deadline_seconds=CONTENT_READ_DEADLINE_SECONDS,
+        monotonic_clock=_AdvancingMonotonicClock(0.0),
+    )
+    try:
+        async for chunk in stream:
+            collected.append(chunk)
+    except Exception as cause:  # asserted below
+        error = cause
+    assert error is None
+    assert b"".join(collected) == b"12345678"
+    assert b"" not in collected
+
+
+@pytest.mark.asyncio
 async def test_content_limiter_rejects_a_stream_over_the_ceiling() -> None:
     from personal_os.error_contracts.codes import ErrorCode
     from personal_os.small_file_sync.errors import SmallFileSyncError

@@ -115,6 +115,11 @@ async def bounded_content_stream(
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_CONTENT_INTEGRITY_FAILED) from None
         except StopAsyncIteration:
             return
+        # Wire normalization (spec 10.2): a proxied chunked body may carry
+        # zero-length data events; they hold no bytes and must never reach
+        # the spool path, whose per-chunk contract rejects empty chunks.
+        if not chunk:
+            continue
         total_bytes += len(chunk)
         if total_bytes > maximum_bytes:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_SIZE_LIMIT_EXCEEDED)
