@@ -45,6 +45,26 @@ below never retry automatically. An interrupted pass needs no operator
 action: the journal is the durable truth and the next trigger resumes
 through ordinary eligibility.
 
+## Server upload-operation claim and expiry
+
+The server reserves a `pending` upload operation with an opaque token, the
+server-authorized policy revision, and a deadline. Content receive atomically
+claims that row as `receiving` before consuming the stream. The deadline has
+two meanings only: an expired `pending` token cannot start receive, and a later
+successful locator-aware preflight may reclaim that pending identity by
+rotating token, deadline, and policy revision together.
+
+A `receiving` row is already owned. It is never reclaimed or rebound merely
+because the reservation deadline passes: same-identity preflight fails closed,
+while the exact token may resume after interruption. Its guarded terminal write
+must still match `receiving`, token hash, workspace/device/event/idempotency
+identity, declared content fields, and the bound policy revision; expiry is not
+part of that terminal fence. Consequently a receive that crossed the deadline
+cannot publish canonical state and then lose terminalization to a rotated row.
+After a lost response, run `Sync now`; the exact token resumes, canonical
+publication idempotency replays, and the single terminal receipt is frozen.
+Operators do not edit operation rows or extend deadlines manually.
+
 ## Safe diagnostics
 
 The only diagnostic surfaces are the plugin status bar text and the

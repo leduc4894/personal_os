@@ -163,21 +163,33 @@ validate request
 ```
 
 For a new operation, insert `policy_revision_number` from the binding. For an
-existing non-terminal operation reached by a new successful preflight, rotate
-the token hash and update `policy_revision_number` to the new server binding in
-the same transaction. This applies whether or not the old operation has
+existing `pending` operation reached by a new successful preflight, rotate the
+token hash and update `policy_revision_number` to the new server binding in the
+same transaction. This applies whether or not the pending reservation has
 expired. The current rotation statement updates only token hash, expiry, and
 timestamp
 (`packages/postgresql-source-store/src/postgresql_source_store/small_file_sync_operations.py:291-309`);
 implementation must extend that statement with the bound revision.
+
+`receiving` is a claimed ownership state, not an expired reservation that a
+second preflight may reclaim. The `pending -> receiving` claim must land before
+the content stream is consumed. Once claimed before the reservation deadline,
+the exact token and bound revision remain the receive's fence across that
+deadline: an exact-token retry may resume, but a same-identity preflight must
+fail closed and may not rotate either value. Only an expired `pending` row is
+reclaimable. This prevents a paused receive from publishing canonical state and
+then losing its terminal write to a later token/revision rotation.
 
 The request fingerprint continues to exclude policy revision so a later
 locator-aware preflight can reauthorize and rebind the same journal identity;
 the existing comparison deliberately follows that rule
 (`packages/postgresql-source-store/src/postgresql_source_store/small_file_sync_operations.py:177-202`).
 
-The receive-side terminal transition must compare the bound revision as part
-of its row-binding check. The current comparison covers identity and declared
+The receive-side terminal transition must compare the claimed token, operation
+state, bound revision, identity, and declared content fields as one guarded
+fence. Its eligibility does not depend on the original reservation deadline:
+expiry prevents a pending claim or enables a pending reclaim, but cannot revoke
+an already claimed receive. The current comparison covers identity and declared
 content fields but omits `policy_revision_number`
 (`packages/postgresql-source-store/src/postgresql_source_store/small_file_sync_operations.py:564-583`).
 
@@ -385,7 +397,9 @@ revision. Cancellation leaves no authorization state to reset.
 
 Operation rebind is protected by the existing operation-identity advisory lock
 and row lock (`packages/postgresql-source-store/src/postgresql_source_store/small_file_sync_operations.py:803-866`).
-Token rotation and revision update must be one SQL update in that transaction.
+Token rotation and revision update must be one SQL update in that transaction,
+and only a `pending` row may enter that update. A `receiving` row retains its
+claim until guarded terminalization even when wall-clock expiry passes.
 
 ## 5. Decisions and rejected alternatives
 
@@ -503,14 +517,18 @@ or driver text.
 6. Loss of database access during either active-revision read fails closed and
    creates no source, source version, current pointer, sync event, projection
    intent, or terminal committed operation result.
-7. Re-preflight of a non-terminal operation under a newly allowed revision
-   updates token hash and policy revision atomically.
-8. Existing callers outside small-file sync retain current
+7. Re-preflight of a `pending` operation under a newly allowed revision updates
+   token hash and policy revision atomically.
+8. A receive claimed before expiry retains its token and revision fence after
+   expiry. Same-identity preflight cannot reclaim its `receiving` row, the exact
+   token may resume, and guarded terminalization can commit once without an
+   expiry-only rejection.
+9. Existing callers outside small-file sync retain current
    `authorize_publication` and locked re-evaluation behavior.
-9. `tests/unit/small_file_sync`, small-file integration tests, and
+10. `tests/unit/small_file_sync`, small-file integration tests, and
    `tests/contract/small_file_sync` pass, along with relevant API route and
    OpenAPI snapshot tests.
-10. Ruff and mypy-strict pass for every affected Python package.
+11. Ruff and mypy-strict pass for every affected Python package.
 
 ## 8. Testing strategy
 
@@ -547,6 +565,8 @@ to prove:
 - token rotation and revision rebind are one parameter-bound update;
 - operation fingerprint still excludes policy revision;
 - receive-side row comparison includes policy revision; and
+- expired `pending` rows rebind, while claimed `receiving` rows cannot be
+  reclaimed and can terminalize after expiry; and
 - no locator, raw token, receipt, decision payload, or provider field is added.
 
 Keep `tests/unit/migrations/test_small_file_sync_migration.py` unchanged and
@@ -594,6 +614,12 @@ expect publication_commits == 1
 repeat same identity
 expect frozen replay + publication_commits == 1
 ```
+
+Add a deterministic PostgreSQL expiry race: reserve, claim, advance the store
+clock past `expires_at`, pause before terminalization, and attempt a successful
+same-identity preflight under a later allowed revision. The preflight must be
+rejected without rotating token or revision; the claimed token must still
+resolve and its bound terminal write must commit exactly once.
 
 Keep and adapt the changed-policy scenarios so they prove zero publication and
 the next preflight's locator-aware self-heal.

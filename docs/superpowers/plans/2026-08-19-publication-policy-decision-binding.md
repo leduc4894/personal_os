@@ -258,7 +258,7 @@ before opening a transaction.
 
 - [ ] In `tests/integration/source_publication/test_small_file_operations.py`, add
   `test_successful_repreflight_rotates_token_and_rebinds_server_revision`.
-  Reserve once with binding revision `4`, reserve the same nonterminal identity
+  Reserve once with binding revision `4`, reserve the same pending identity
   again with binding revision `5` before expiry, and assert one row, a new token,
   unchanged reserved source ID, and row revision `5`.
 
@@ -309,8 +309,10 @@ before opening a transaction.
   ```
 
   The rotation update must set token hash, expiry, policy revision, and
-  `updated_at` in the same statement for every nonterminal re-preflight, expired
-  or not. Do not add policy revision to `operation_fingerprint_matches`.
+  `updated_at` in the same statement for every pending re-preflight, expired or
+  not. A `receiving` row is already claimed and must reject re-preflight without
+  rotating token, revision, or expiry. Do not add policy revision to
+  `operation_fingerprint_matches`.
 
 - [ ] Extend `_bound_matches_row` with:
 
@@ -940,13 +942,40 @@ contract, the deferred-work index, and the single required handoff snapshot.
 - [ ] Re-run `git status --short` and require an empty worktree before branch
   integration or cleanup.
 
+## Final-review completion addendum
+
+The whole-branch review adds four completion gates without changing the public
+wire, schema, fingerprint, or invocation-local binding architecture:
+
+- [x] Prove in a unit seam and real PostgreSQL that `pending -> receiving` is an
+  ownership claim. Advance time beyond `expires_at`, reject same-identity
+  re-preflight without token/revision rotation, allow exact-token resume, and
+  allow the guarded `receiving -> committed` transition after expiry.
+- [x] Change `stack reset --rotate-secrets` to delete and rebootstrap only the
+  managed stack-secret filenames. Preserve every allowlisted application file
+  byte-for-byte and prove a complete reset, rebootstrap, and changed smoke
+  fingerprint with the fake runner.
+- [x] Extend the real Obsidian journey with sanitized PostgreSQL evidence that
+  one operation joins exactly one canonical source version and sync event. Then
+  open a read-only operation observer, publish a locator-dependent denying
+  revision after preflight and during the real content request, prove no
+  terminal operation result, preserve one durable nonterminal journal event,
+  and prove it reaches `excluded_policy` on the next preflight after a real
+  plugin reload.
+- [x] Re-run focused unit/integration/contract/static gates, the real live WDIO
+  journey through the existing Cloudflare Tunnel, `exclusion-policy-test`,
+  `canonical-core-test`, `verify`, artifact/schema diffs, `git diff --check`,
+  and final status inspection. Record fresh evidence in the existing single
+  handoff; do not create another handoff.
+
 ## Coverage Matrix
 
 | Spec requirement | Primary task | Proof |
 |---|---:|---|
 | Immutable allowed binding, no sensitive payload | 1 | Value geometry and export tests |
 | Plugin claim is not authority | 1, 2, 6 | Guard, row, and wire disagreement tests |
-| New insert and every nonterminal re-preflight use server revision | 2 | SQL unit + PostgreSQL row tests |
+| New insert and every pending re-preflight use server revision | 2 | SQL unit + PostgreSQL row tests |
+| Claimed receive retains token/revision and may terminalize after expiry | Final-review addendum | Unit + deterministic PostgreSQL expiry race |
 | Fingerprint remains revision-free | 2 | Existing/new fingerprint regression |
 | Bound terminal transition checks revision | 2 | `_bound_matches_row` unit test |
 | Same verified active revision skips locator-free evaluator | 3, 4 | Outer spy + real locked commit test |
