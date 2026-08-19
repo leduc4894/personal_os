@@ -25,8 +25,8 @@ _VIOLATING_MODULE_SOURCE = '''
 """Synthetic violating module for the scanner self-check."""
 async def _run_locked_transition(self, command, fingerprint, receipt, context, transition):
     await connection.execute(source_lock_statement(command.source_id))
-    await evaluate_locked_policy_decision(
-        connection, workspace_id=command.workspace_id
+    await authorize_locked_publication_policy(
+        connection, command, subject, policy_evidence, verifier, metrics
     )
     await connection.execute(
         idempotency_lock_statement(command.workspace_id, command.idempotency_key)
@@ -114,9 +114,9 @@ def test_scanner_detects_an_inverse_order_module() -> None:
     function = _functions(tree)["_run_locked_transition"]
     names = _ordered_call_names(function)
     assert _index_of(names, "source_lock_statement") < _index_of(
-        names, "evaluate_locked_policy_decision"
+        names, "authorize_locked_publication_policy"
     )
-    assert _index_of(names, "evaluate_locked_policy_decision") < _index_of(
+    assert _index_of(names, "authorize_locked_publication_policy") < _index_of(
         names, "idempotency_lock_statement"
     )
 
@@ -126,7 +126,7 @@ def test_source_commit_locks_idempotency_policy_then_source_in_order() -> None:
     transition = _functions(tree)["_run_locked_transition"]
     names = _ordered_call_names(transition)
     idempotency = _index_of(names, "idempotency_lock_statement")
-    policy = _index_of(names, "evaluate_locked_policy_decision")
+    policy = _index_of(names, "authorize_locked_publication_policy")
     source = _index_of(names, "source_lock_statement")
     assert -1 not in (idempotency, policy, source), (
         "the locked prefix must keep all three serialization points"
@@ -141,7 +141,7 @@ def test_source_commit_subject_rebuild_precedes_the_policy_recheck() -> None:
     transition = _functions(tree)["_run_locked_transition"]
     names = _ordered_call_names(transition)
     subject = _index_of(names, "_build_authoritative_subject")
-    policy = _index_of(names, "evaluate_locked_policy_decision")
+    policy = _index_of(names, "authorize_locked_publication_policy")
     assert subject != -1 and subject < policy, (
         "the authoritative subject must be rebuilt before the locked recheck evaluates it"
     )
