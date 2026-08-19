@@ -2,15 +2,16 @@
 
 ## Final commit
 
-The final implementation and canonical-documentation HEAD before this handoff
-snapshot is `c016abf`. Its final-blocker commits are `35f6538` (claimed-upload
-publication fence and deterministic receipt timestamps), `587053e` (versioned
-recovery-manifest compatibility), and `c016abf` (local-stack secret ownership).
-The final documentation/evidence commit is `030f5f5`. The identity-only commit
-containing this sentence follows it and changes no implementation or gate
-evidence. These commits close all four final blockers without a public HTTP
-wire, database schema, request fingerprint, dependency, or telemetry-label
-change.
+The latest implementation and canonical-documentation HEAD before this
+refreshed handoff snapshot is `7840798`
+(`78407986b9e56eb30eaeee77492958f3d0e1eecf`). Its final-review commits are
+`efebae5` (auth-complete canonical recovery), `c7764c4` (Windows secret-path
+identity), `70290f9` (mandatory claimed exact-token plugin journey), `57d3686`
+(canonical contract and operator wording), and `7840798` (format gate). The
+handoff/report-only commit containing this snapshot follows it and changes no
+implementation or gate evidence. These commits close the final four review
+findings without a public HTTP wire, database schema, request fingerprint,
+dependency, or telemetry-label change.
 
 The earlier runtime-secret implementation commit is `efe10a6`, following
 allowlist commits `104ff9a` and `27ac14e`. They follow final-review completion
@@ -97,6 +98,37 @@ without weakening the subprocess environment boundary.
 - OpenAPI/generated-client and canonical migration/table diffs against
   `2035e3a` were empty. Final `git diff --check` passed; the operator stack was
   stopped with volumes preserved and the existing tunnel was untouched.
+
+- Recovery-completeness RED: the current manifest count and backup lock tests
+  observed 20 tables instead of 28 and no auth locks, while the v1 and legacy
+  v2 controls passed. GREEN: the current v2 count/restore graph includes all
+  eight auth tables; v1/9 and branch-local legacy v2/20 remain readable. The
+  focused final selection passed 297 tests with 7 skips, and the three real
+  PostgreSQL 18.4 auth writer/mutation/exact-restore cases passed in 68.31s.
+- Windows identity RED: managed-name, current/previous, and policy/auth case
+  variants were admitted under simulated Windows behavior. GREEN: configured
+  path collisions now use Windows case-insensitive filesystem identity across
+  inspection, lifecycle, and reset while authentication key IDs retain their
+  exact existing `SafeToken` semantics. The full file passed 172 tests with 3
+  skips; Ruff and strict mypy passed.
+- Mandatory plugin-journey RED: the first tightened live run found the claimed
+  fixture durably `receiving` with one pending journal event, not the
+  timing-dependent `waiting_retry` substate expected by the test. GREEN: the
+  deterministic disable/re-enable journey published an irrelevant
+  locator-only revision and resumed with the unchanged opaque token to exactly
+  one canonical publication and terminal receipt. All 3 real WDIO specs passed
+  in 39s; plugin test/lint/type/build passed with 375 tests.
+- Exact-head `uv run poe canonical-core-test`: 1,002 passed, 11 skipped.
+  `uv run poe exclusion-policy-test`: 1,501 passed, 2 skipped, 1 deselected
+  after isolated-stack admission and repository-pinned PostgreSQL 18.4
+  clients. `uv run poe verify`: 3,041 Python tests passed, 21 skipped, 329
+  deselected; API client 1, plugin 375, and Web 139 tests passed with every
+  format, lint, strict-type, boundary, artifact, and production-build gate.
+- The first exclusion-suite attempts were prerequisite diagnostics rather than
+  product failures: missing isolated-project selection, live-WDIO port use,
+  then PostgreSQL clients absent from that shell's `PATH`. The same full suite
+  passed after correcting those admission conditions. Generated-client,
+  migration, and canonical-table diffs against `2035e3a` remained empty.
 
 - Claim/expiry RED: the new unit and deterministic PostgreSQL tests both
   failed because same-identity preflight reclaimed an expired `receiving` row.
@@ -226,18 +258,23 @@ and commits canonical state plus terminal operation state atomically. The two
 PostgreSQL race tests prove that a reauthorization winner fences the old bound
 before mutation and a publication winner exposes only terminal replay.
 
-New recovery manifests use `canonical_core_backup/v2` with the current twenty
-canonical counts. The strict reader retains the original exact nine-count v1
-shape and verifies a restored graph against the manifest's own schema revision
-and count set. A real `20260813_01` dump restored successfully. That v1 target
-is an intermediate recovery state: keep admission disabled, migrate forward,
-then create and verify a v2 backup before serving.
+New recovery manifests use `canonical_core_backup/v2` with the current 28
+canonical counts, including the eight authentication tables. This is an
+in-place branch contract correction because v2 was introduced on this
+unreleased branch and had no tag or remote release. The strict reader retains
+both the original exact nine-count v1 shape and the branch-local legacy
+20-count v2 shape, and verifies a restored graph against the manifest's own
+admitted count set. A real `20260813_01` dump restored successfully. That v1
+target is an intermediate recovery state: keep admission disabled, migrate
+forward, then create and verify a current v2 backup before serving.
 
 The local-stack lifecycle owns exactly eight managed stack files. Validated
 application-selected authentication and policy-signing files are preserved;
 dynamic relative-path grammar, bounded previous-key entries, collisions,
 unknown files, partial managed sets, reset, rotation, and bootstrap outcomes
-are now explicit in the canonical design and Compose guide.
+are now explicit in the canonical design and Compose guide. Filesystem path
+identity is case-insensitive on Windows and case-sensitive on POSIX; key IDs
+keep their existing exact `SafeToken` semantics.
 
 ## Deferred items and verdicts
 
@@ -259,7 +296,7 @@ verifier-chain item remains indexed and was not expanded by this work.
 
 The branch is ready for scoped re-review and integration. `knowledge-local` is
 stopped with volumes/secrets preserved, ports 8000/38000 have no listeners,
-and the task-started foreground tunnel connector was stopped after the green
-live gate; any separately managed pre-existing `cloudflared` process remains
-untouched. Keep the stack stopped when no live test is running. Do not manually
-edit receiving upload rows, policy revisions, or deadlines.
+and the separately managed pre-existing `cloudflared` process remains
+untouched; this task did not start a new connector. Keep the stack stopped when
+no live test is running. Do not manually edit receiving upload rows, policy
+revisions, or deadlines.
