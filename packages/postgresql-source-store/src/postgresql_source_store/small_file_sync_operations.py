@@ -186,8 +186,8 @@ def operation_fingerprint_matches(
     source/base pair). Any divergence — including the same identity retrying
     with different bytes — fails, so no payload substitution is ever admitted.
     The accepted policy revision is deliberately not part of the fingerprint:
-    the row keeps the revision that authorized the operation, and a later
-    accepted snapshot is re-evaluated by the service, not by mutation.
+    a successful re-preflight rebinds the row to its newly allowed server
+    revision while preserving the declared payload identity.
     """
     return (
         row["workspace_id"] == device_context.workspace_id
