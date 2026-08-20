@@ -43,6 +43,12 @@ hoặc khi cần artifact lâu dài. Không tạo tài liệu quy trình cho ch�
 - Mọi item trì hoãn phải có đúng MỘT dòng index trong `docs/handoff/BACKLOG.md`
   (ngày, domain, mô tả một dòng, trỏ tới handoff nguồn chứa chi tiết và phán quyết).
   Xóa dòng khi hoàn thành. BACKLOG là index sống; handoff vẫn giữ đầy đủ ngữ cảnh.
+- Khi thêm hoặc tách một dòng BACKLOG, phải điền `Implement by` với mốc triển
+  khai cụ thể: `Before Child N`, mốc vận hành (`Before production activation`,
+  `Before multi-worker serve`), mốc bảo trì (`At next <dependency> pin bump`),
+  hoặc điều kiện domain có thể kiểm chứng. Cấm dùng `later`, `TBD`, tên wave
+  không có child/trigger, hoặc mốc mơ hồ. Nếu chưa suy ra được mốc, đọc handoff
+  và contract nguồn để phân loại trước khi ghi row; không tạo deferred vô hạn.
 
 ## Quy tắc đặt tên
 
