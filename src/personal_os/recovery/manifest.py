@@ -158,7 +158,7 @@ def parse_manifest(raw: bytes) -> RecoveryManifest:
     except json.JSONDecodeError:
         _reject(RecoveryBundleInvalidReason.JSON_NONCANONICAL)
     if not isinstance(payload, dict):
-        _reject(RecoveryBundleInvalidReason.CONTRACT_UNSUPPORTED)
+        _reject(RecoveryBundleInvalidReason.JSON_NONCANONICAL)
     contract_value = payload.get("contract")
     if not isinstance(contract_value, str) or contract_value not in _CONTRACT_SCHEMA_REVISIONS:
         _reject(RecoveryBundleInvalidReason.CONTRACT_UNSUPPORTED)

@@ -26,6 +26,7 @@ from personal_os.recovery.contracts import (
     V1_CANONICAL_COUNT_TABLES,
     ManifestDumpEntry,
     ManifestObjectEntry,
+    RecoveryBundleInvalidReason,
     RecoveryEnvironment,
     RecoveryError,
     RecoveryManifest,
@@ -347,6 +348,13 @@ def test_rejects_noncanonical_json_bytes() -> None:
     ).encode("utf-8")
     assert_bundle_invalid(spaced, "json_noncanonical")
     assert_bundle_invalid(b"\xff\xfe not json", "json_noncanonical")
+
+
+def test_rejects_nonobject_json_as_noncanonical() -> None:
+    with pytest.raises(RecoveryError) as raised:
+        parse_manifest(b"[]\n")
+
+    assert raised.value.safe_details["reason"] is RecoveryBundleInvalidReason.JSON_NONCANONICAL
 
 
 def test_rejects_wrong_closed_counts_map() -> None:

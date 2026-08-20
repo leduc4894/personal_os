@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -80,7 +80,7 @@ class CanonicalBackupSnapshot:
     composition call that owns it.
     """
 
-    snapshot_token: str
+    snapshot_token: str = field(repr=False)
     server_version: str
     schema_head: str
     table_counts: Mapping[str, int]

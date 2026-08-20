@@ -27,6 +27,7 @@ from personal_os.recovery.contracts import (
     RecoveryMetricOutcome,
     RecoveryOperation,
 )
+from personal_os.recovery.ports import CanonicalBackupSnapshot
 
 #: The exact spec-15 recovery table: code -> (category, retryable, allowed details).
 RECOVERY_ERROR_TABLE = {
@@ -90,6 +91,18 @@ def test_recovery_error_rejects_codes_outside_the_closed_set() -> None:
 
 def test_recovery_environment_is_closed() -> None:
     assert {member.value for member in RecoveryEnvironment} == {"local", "test"}
+
+
+def test_canonical_backup_snapshot_repr_redacts_snapshot_token() -> None:
+    snapshot = CanonicalBackupSnapshot(
+        snapshot_token="snapshot-token",
+        server_version="18.4",
+        schema_head=POSTGRESQL_SCHEMA_REVISION,
+        table_counts={},
+        referenced_objects=(),
+    )
+
+    assert "snapshot-token" not in repr(snapshot)
 
 
 def test_postgresql_schema_revision_alias_keeps_database_schema_authority() -> None:
