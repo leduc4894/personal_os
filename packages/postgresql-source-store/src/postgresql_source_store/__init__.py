@@ -10,12 +10,6 @@ through :mod:`postgresql_source_store.engine` and constructs
 :class:`PostgresqlIdentityBootstrapStore` directly.
 """
 
-# The diagnostics import below precedes every error-contracts import: the core
-# packages have a module-level re-export cycle (``error_contracts.exceptions``
-# initializes ``personal_os.diagnostics``, whose ``context`` module imports
-# exceptions back), which only resolves when the diagnostics package loads
-# first. The R2 adapter's import graph relies on the same ordering.
-from personal_os.diagnostics.events import SafeToken  # noqa: F401
 from postgresql_source_store.backup_snapshot import (
     PostgresqlBackupSnapshotStore,
     PostgresqlRestoreTarget,

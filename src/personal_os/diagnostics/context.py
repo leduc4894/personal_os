@@ -11,9 +11,6 @@ from uuid import UUID
 
 from personal_os.diagnostics.events import SafeToken
 from personal_os.diagnostics.trace_context import TraceContext, resolve_trace_context
-from personal_os.error_contracts.exceptions import (
-    DiagnosticContextError as DiagnosticContextError,
-)
 
 
 @dataclass(frozen=True, slots=True)
