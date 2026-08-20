@@ -21,6 +21,7 @@ artifact, and the production Web and plugin bundles built by this gate.
 from __future__ import annotations
 
 import base64
+import json
 import re
 import subprocess
 from collections.abc import Mapping
@@ -535,7 +536,9 @@ class LeakJourney:
                 "sessions": session_rows,
                 "totp": totp_rows,
                 "recovery": recovery_rows,
-                "throttle_keys": sorted(self.state.buckets),
+                "throttle_keys": sorted(
+                    self.state.buckets | self.state.login_buckets | self.state.source_buckets
+                ),
                 "audit_actions": self.state.device_grant_audit_actions
                 + self.state.device_exchange_audit_actions
                 + self.state.device_revoke_audit_actions,
@@ -607,6 +610,16 @@ def test_full_credential_journey_leaks_no_sentinel_on_any_surface() -> None:
     assert expected_labels <= labels
     observed_events = {name for name, _ in journey.sink.events}
     assert "api_request_completed" in observed_events
+
+
+def test_rendered_offline_state_includes_login_throttle_maps() -> None:
+    journey = LeakJourney()
+    journey.run()
+
+    rendered = json.loads(journey.rendered_offline_state())
+
+    assert set(journey.state.login_buckets) <= set(rendered["throttle_keys"])
+    assert set(journey.state.source_buckets) <= set(rendered["throttle_keys"])
 
 
 def test_intended_rendering_surfaces_still_render_their_values() -> None:
