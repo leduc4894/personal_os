@@ -1,9 +1,9 @@
 """Schema-qualified SQLAlchemy Core table metadata for DML against the baseline.
 
-The Alembic migrations ``20260813_01``, ``20260816_01``, ``20260817_01`` and
-``20260818_01`` are the DDL authority: they own the schema, columns,
+The Alembic migrations ``20260813_01``, ``20260816_01``, ``20260817_01``,
+``20260818_01`` and ``20260820_01`` are the DDL authority: they own the schema, columns,
 constraints, indexes and triggers. This module is the typed DML representation
-of exactly the thirty migrated tables: identical table names, schema
+of exactly the thirty-two migrated tables: identical table names, schema
 (``knowledge``), column names, column types, nullability and primary keys,
 contract-tested against the migration sources. There is deliberately no
 ``create_all()`` path and no constraint duplication: check, unique and foreign
@@ -150,6 +150,40 @@ projection_intents: Final[Table] = Table(
     Column("created_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
     Column("updated_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
     sa.PrimaryKeyConstraint("projection_intent_id", name="pk_projection_intents"),
+)
+
+source_locators: Final[Table] = Table(
+    "source_locators",
+    _SOURCE_STORE_METADATA,
+    Column("source_locator_id", sa.Uuid(), nullable=False),
+    Column("workspace_id", sa.Uuid(), nullable=False),
+    Column("source_id", sa.Uuid(), nullable=False),
+    Column("normalized_locator", sa.String(length=4096), nullable=False),
+    Column("display_locator", sa.String(length=4096), nullable=False),
+    Column("opened_event_id", sa.Uuid(), nullable=False),
+    Column("opened_sequence", sa.BigInteger(), nullable=False),
+    Column("closed_event_id", sa.Uuid(), nullable=True),
+    Column("closed_sequence", sa.BigInteger(), nullable=True),
+    Column("opened_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("closed_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    sa.PrimaryKeyConstraint("source_locator_id", name="pk_source_locators"),
+)
+
+source_tombstones: Final[Table] = Table(
+    "source_tombstones",
+    _SOURCE_STORE_METADATA,
+    Column("source_tombstone_id", sa.Uuid(), nullable=False),
+    Column("workspace_id", sa.Uuid(), nullable=False),
+    Column("source_id", sa.Uuid(), nullable=False),
+    Column("delete_event_id", sa.Uuid(), nullable=False),
+    Column("retained_version_id", sa.Uuid(), nullable=False),
+    Column("retained_locator", sa.String(length=4096), nullable=False),
+    Column("actor_kind", sa.Text(), nullable=False),
+    Column("actor_id", sa.Uuid(), nullable=False),
+    Column("deleted_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("restore_event_id", sa.Uuid(), nullable=True),
+    Column("restored_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    sa.PrimaryKeyConstraint("source_tombstone_id", name="pk_source_tombstones"),
 )
 
 audit_events: Final[Table] = Table(
@@ -555,7 +589,7 @@ small_file_upload_operations: Final[Table] = Table(
 #: Single frozen metadata collection owning every DML table.
 SOURCE_STORE_METADATA: Final[MetaData] = _SOURCE_STORE_METADATA
 
-#: Immutable name-indexed view of the thirty migrated tables, keyed by
+#: Immutable name-indexed view of the thirty-two migrated tables, keyed by
 #: their unqualified table names (``metadata.tables`` itself is
 #: schema-qualified).
 SOURCE_STORE_TABLES: Final[Mapping[str, Table]] = MappingProxyType(
@@ -570,6 +604,8 @@ SOURCE_STORE_TABLES: Final[Mapping[str, Table]] = MappingProxyType(
             source_versions,
             sync_events,
             projection_intents,
+            source_locators,
+            source_tombstones,
             audit_events,
             user_credentials,
             web_sessions,

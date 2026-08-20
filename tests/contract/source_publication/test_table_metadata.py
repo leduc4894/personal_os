@@ -1,8 +1,9 @@
 """DML Core metadata contract against the migration DDL authority.
 
 The Alembic migrations ``20260813_01`` (baseline), ``20260816_01``
-(authentication schema), ``20260817_01`` (exclusion policy schema) and
-``20260818_01`` (small-file sync operations) are the DDL authority. This test
+(authentication schema), ``20260817_01`` (exclusion policy schema),
+``20260818_01`` (small-file sync operations) and ``20260820_01`` (source
+lifecycle schema) are the DDL authority. This test
 loads the migration modules, replays their ``upgrade()`` against a recording
 stub of ``alembic.op`` (including the policy migration's
 ``add_column``/``alter_column`` evolution of ``projection_intents``) and
@@ -22,6 +23,7 @@ from typing import Any
 
 import sqlalchemy as sa
 
+from personal_os.recovery.contracts import CANONICAL_COUNT_TABLES, MANIFEST_CONTRACT
 from postgresql_source_store.tables import (
     SOURCE_STORE_METADATA,
     SOURCE_STORE_SCHEMA,
@@ -34,6 +36,7 @@ MIGRATION_GLOBS: tuple[str, ...] = (
     "20260816_01*.py",
     "20260817_01*.py",
     "20260818_01*.py",
+    "20260820_01*.py",
 )
 MIGRATION_DIRECTORY = REPO_ROOT / "migrations" / "versions"
 PACKAGE_SOURCE_ROOT = (
@@ -86,8 +89,14 @@ POLICY_TABLE_NAMES = frozenset(
 
 SMALL_FILE_TABLE_NAMES = frozenset({"small_file_upload_operations"})
 
+LIFECYCLE_TABLE_NAMES = frozenset({"source_locators", "source_tombstones"})
+
 EXPECTED_TABLE_NAMES = (
-    BASELINE_TABLE_NAMES | AUTHENTICATION_TABLE_NAMES | POLICY_TABLE_NAMES | SMALL_FILE_TABLE_NAMES
+    BASELINE_TABLE_NAMES
+    | AUTHENTICATION_TABLE_NAMES
+    | POLICY_TABLE_NAMES
+    | SMALL_FILE_TABLE_NAMES
+    | LIFECYCLE_TABLE_NAMES
 )
 
 
@@ -138,6 +147,9 @@ class _RecordingAlembicOp:
         return None
 
     def create_foreign_key(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def drop_constraint(self, *args: Any, **kwargs: Any) -> None:
         return None
 
     def create_check_constraint(self, *args: Any, **kwargs: Any) -> None:
@@ -242,3 +254,8 @@ def test_dml_metadata_declares_no_create_all_path() -> None:
 def test_dml_table_map_is_an_immutable_view_of_the_metadata() -> None:
     assert isinstance(SOURCE_STORE_TABLES, MappingProxyType)
     assert set(SOURCE_STORE_TABLES.values()) == set(SOURCE_STORE_METADATA.tables.values())
+
+
+def test_lifecycle_tables_are_counted_by_the_canonical_v3_backup_manifest() -> None:
+    assert MANIFEST_CONTRACT == "canonical_core_backup/v3"
+    assert {"source_locators", "source_tombstones"} <= set(CANONICAL_COUNT_TABLES)

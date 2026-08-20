@@ -30,9 +30,11 @@ from personal_os.recovery.contracts import (
     LEGACY_V2_CANONICAL_COUNT_TABLES,
     MANIFEST_CONTRACT_V1,
     MANIFEST_CONTRACT_V2,
+    MANIFEST_CONTRACT_V3,
     MAXIMUM_OBJECT_SIZE_BYTES,
     POSTGRESQL_SCHEMA_REVISION,
     V1_CANONICAL_COUNT_TABLES,
+    V2_CANONICAL_COUNT_TABLES,
     ManifestDumpEntry,
     ManifestObjectEntry,
     RecoveryBundleInvalidReason,
@@ -67,7 +69,8 @@ _HEX_LOWER: Final[frozenset[str]] = frozenset("0123456789abcdef")
 _CONTRACT_SCHEMA_REVISIONS: Final[MappingProxyType[str, str]] = MappingProxyType(
     {
         MANIFEST_CONTRACT_V1: "20260813_01",
-        MANIFEST_CONTRACT_V2: POSTGRESQL_SCHEMA_REVISION,
+        MANIFEST_CONTRACT_V2: "20260818_01",
+        MANIFEST_CONTRACT_V3: POSTGRESQL_SCHEMA_REVISION,
     }
 )
 
@@ -224,8 +227,12 @@ def parse_manifest(raw: bytes) -> RecoveryManifest:
         (frozenset(V1_CANONICAL_COUNT_TABLES),)
         if contract_value == MANIFEST_CONTRACT_V1
         else (
-            frozenset(LEGACY_V2_CANONICAL_COUNT_TABLES),
-            frozenset(CANONICAL_COUNT_TABLES),
+            (
+                frozenset(LEGACY_V2_CANONICAL_COUNT_TABLES),
+                frozenset(V2_CANONICAL_COUNT_TABLES),
+            )
+            if contract_value == MANIFEST_CONTRACT_V2
+            else (frozenset(CANONICAL_COUNT_TABLES),)
         )
     )
     if not isinstance(counts_value, dict) or frozenset(counts_value) not in (

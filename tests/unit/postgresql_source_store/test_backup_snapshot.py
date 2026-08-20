@@ -63,6 +63,8 @@ def test_snapshot_lock_order_covers_the_canonical_policy_and_operation_tables() 
         "sources",
         "source_versions",
         "sync_events",
+        "source_locators",
+        "source_tombstones",
         "projection_intents",
         "audit_events",
         "user_credentials",
@@ -103,7 +105,7 @@ def test_snapshot_lock_timeout_is_fifteen_seconds() -> None:
 def test_share_lock_statements_follow_fixed_spec_order() -> None:
     statements = build_share_lock_statements()
     texts = [str(s.compile(dialect=postgresql.dialect())) for s in statements]
-    assert len(texts) == 28
+    assert len(texts) == 30
     for text, table in zip(texts, SNAPSHOT_LOCK_ORDER, strict=True):
         assert f'{SOURCE_STORE_SCHEMA}."{table}"' in text
         assert "SHARE MODE NOWAIT" in text

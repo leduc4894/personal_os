@@ -3,9 +3,9 @@
 :class:`PostgresqlBackupSnapshotStore` implements the provider-neutral
 :class:`~personal_os.recovery.ports.CanonicalBackupSnapshotStore` port over the
 canonical baseline (spec 9.2): a ``REPEATABLE READ`` transaction begun before
-its first query, 28 ``LOCK TABLE ... IN SHARE MODE NOWAIT`` statements in
+its first query, 30 ``LOCK TABLE ... IN SHARE MODE NOWAIT`` statements in
 the fixed order, the ``pg_export_snapshot()`` token, the server version, the
-Alembic head, the 28 table counts and the referenced content objects —
+Alembic head, the 30 table counts and the referenced content objects —
 all read from the same snapshot, with no mutation, and a rollback on context
 exit that releases every lock. The canonical policy tables (state, immutable
 revisions/rules, key history and durable intents) join the snapshot; the
@@ -65,7 +65,7 @@ from postgresql_source_store.tables import (
     sources,
 )
 
-#: The binding fixed order of the 28 quiescing share locks. The canonical
+#: The binding fixed order of the 30 quiescing share locks. The canonical
 #: baseline tables are followed by the authentication tables in migration/FK
 #: order, the canonical policy tables in foreign-key dependency order
 #: (publication locks workspace_policy_state before drafts and revisions), and
@@ -79,6 +79,8 @@ SNAPSHOT_LOCK_ORDER: Final[tuple[str, ...]] = (
     "sources",
     "source_versions",
     "sync_events",
+    "source_locators",
+    "source_tombstones",
     "projection_intents",
     "audit_events",
     "user_credentials",
@@ -172,7 +174,7 @@ def build_share_lock_statements() -> tuple[sa.TextClause, ...]:
 def pending_writer_count_statement() -> sa.TextClause:
     """Build the parameter-bound count of ungranted relation locks.
 
-    Counts lock requests on the 28 canonical tables that PostgreSQL has not
+    Counts lock requests on the 30 canonical tables that PostgreSQL has not
     granted (blocked writers waiting on the quiescing share locks); the table
     names travel only as the bound ``:tables`` array parameter.
     """
@@ -370,7 +372,7 @@ class PostgresqlBackupSnapshotStore:
         )
 
     async def observe_pending_writers(self) -> int:
-        """Count writers still waiting for a lock on the 28 canonical tables.
+        """Count writers still waiting for a lock on the 30 canonical tables.
 
         A non-zero count means a writer was blocked by the quiescing share
         locks at observation time; the caller aborts finalization (spec 9.2).
