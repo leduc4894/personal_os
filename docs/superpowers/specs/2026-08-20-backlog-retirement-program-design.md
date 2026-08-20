@@ -122,9 +122,9 @@ owner. `BACKLOG.md` is the executable dependency map.
    pin bump, key rotation, multi-worker serve, a new stack workflow, or a
    fourth sensitive value object, block that trigger rather than an unrelated
    child.
-5. **Wave 5 hygiene gate:** `Wave 5 hygiene gate` rows are non-load-bearing
-   cleanup. They must close before Phase 2 completion but do not block the next
-   child by default.
+5. **Before Phase 2 closure (after Child 9):** non-load-bearing hygiene rows
+   must close before the final Phase 2 handoff but do not block the next child
+   by default.
 
 ## Decision log and audit trail
 
