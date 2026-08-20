@@ -677,9 +677,51 @@ def test_r2_live_workflow_is_trusted_and_exact_cleanup_only() -> None:
     assert "R2_TEST_ACCESS_KEY_ID" in text
     assert "R2_TEST_SECRET_ACCESS_KEY" in text
     assert "R2_PRODUCTION" not in text
-    assert "--junitxml=.local/test-results/object-storage-live.xml" in text
+    assert '--junitxml="$raw_report"' in text
     assert "ListObjects" not in text and "prefix-delete" not in text
     assert "cancel-in-progress: false" in text
+
+
+def test_r2_live_workflow_uploads_only_postprocessed_junit() -> None:
+    text = R2_LIVE_WORKFLOW.read_text("utf-8")
+    run_step = re.search(
+        r"(?ms)^      - name: Run live R2 contract cases with exact-key cleanup\n"
+        r"(?P<body>.*?)(?=^      - |\Z)",
+        text,
+    )
+    raw_cleanup_step = re.search(
+        r"(?ms)^      - name: Remove unsanitized JUnit staging file\n"
+        r"(?P<body>.*?)(?=^      - |\Z)",
+        text,
+    )
+    upload_step = re.search(
+        r"(?ms)^      - name: Upload sanitized JUnit report\n"
+        r"(?P<body>.*?)(?=^      - |\Z)",
+        text,
+    )
+    assert run_step is not None
+    assert raw_cleanup_step is not None
+    assert upload_step is not None
+
+    run_body = run_step.group("body")
+    raw_cleanup_body = raw_cleanup_step.group("body")
+    upload_body = upload_step.group("body")
+    raw_report = ".local/test-results/object-storage-live-raw.xml"
+    sanitized_report = ".local/test-results/object-storage-live.xml"
+    for required in (
+        raw_report,
+        sanitized_report,
+        "test_status=0",
+        "sanitize_status=0",
+        "sanitize-junit",
+        "--tb=no",
+        "--no-summary",
+    ):
+        assert required in run_body
+    assert "if: always()" in raw_cleanup_body
+    assert raw_report in raw_cleanup_body
+    assert raw_report not in upload_body
+    assert sanitized_report in upload_body
 
 
 # ---------------------------------------------------------------------------

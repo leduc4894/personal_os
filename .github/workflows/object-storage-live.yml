@@ -78,9 +78,28 @@ jobs:
         env:
           R2_TEST_SECRET_ROOT: ${{ runner.temp }}/r2-live-secrets
         run: |
-          set -euo pipefail
+          set -uo pipefail
           mkdir -p .local/test-results
-          uv run pytest tests/integration/r2_object_storage/test_live_r2_adapter.py -m r2_live -q --junitxml=.local/test-results/object-storage-live.xml
+          raw_report=.local/test-results/object-storage-live-raw.xml
+          sanitized_report=.local/test-results/object-storage-live.xml
+          test_status=0
+          sanitize_status=0
+          uv run pytest tests/integration/r2_object_storage/test_live_r2_adapter.py \
+            -m r2_live -q --tb=no --no-summary --junitxml="$raw_report" \
+            || test_status=$?
+          uv run python -m tests.integration.r2_object_storage.conftest \
+            sanitize-junit --source "$raw_report" --destination "$sanitized_report" \
+            || sanitize_status=$?
+          rm -f -- "$raw_report"
+          if (( sanitize_status != 0 )); then
+            rm -f -- "$sanitized_report"
+            exit "$sanitize_status"
+          fi
+          exit "$test_status"
+      - name: Remove unsanitized JUnit staging file
+        if: always()
+        shell: bash
+        run: rm -f -- .local/test-results/object-storage-live-raw.xml
       - name: Remove dedicated test secret files
         if: always()
         shell: bash

@@ -23,13 +23,16 @@ one dedicated private test bucket, plus a per-run
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import logging
 import os
 import shutil
+import sys
 import tempfile
 import uuid
-from collections.abc import AsyncIterator, Mapping
+import xml.etree.ElementTree as ElementTree
+from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
 from typing import Final
 
@@ -96,6 +99,65 @@ _LIVE_REQUIRED_SECRET_FILES: Final[tuple[str, ...]] = (
 )
 
 _PAYLOAD_CHUNK_SIZE_BYTES: Final[int] = 1_048_576
+_SANITIZED_FAILURE_DETAILS: Final[str] = "r2_live_failure_details_redacted"
+
+
+def _xml_local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def sanitize_live_junit_report(raw_report: Path, sanitized_report: Path) -> None:
+    """Write a publishable JUnit report with provider failure details removed.
+
+    Test identity, status counts and durations remain useful as gate evidence.
+    Failure/error messages and tracebacks, captured streams and arbitrary
+    properties are removed because provider exceptions may contain request or
+    endpoint material. The destination is replaced only after a complete XML
+    document is ready, so sanitizer failure cannot publish a partial report.
+    """
+
+    tree = ElementTree.parse(raw_report)
+    root = tree.getroot()
+    for parent in root.iter():
+        for child in list(parent):
+            local_name = _xml_local_name(child.tag)
+            if local_name in {"properties", "system-out", "system-err"}:
+                parent.remove(child)
+            elif local_name in {"failure", "error"}:
+                child.attrib.clear()
+                child.set("message", _SANITIZED_FAILURE_DETAILS)
+                child.text = _SANITIZED_FAILURE_DETAILS
+
+    ElementTree.indent(tree, space="  ")
+    descriptor, staging_name = tempfile.mkstemp(
+        prefix=".r2-live-junit-",
+        suffix=".xml",
+        dir=sanitized_report.parent,
+    )
+    os.close(descriptor)
+    staging_report = Path(staging_name)
+    try:
+        tree.write(staging_report, encoding="utf-8", xml_declaration=True)
+        os.replace(staging_report, sanitized_report)
+    finally:
+        staging_report.unlink(missing_ok=True)
+
+
+def _run_harness_command(arguments: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="r2-live-harness")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    sanitizer = subparsers.add_parser("sanitize-junit")
+    sanitizer.add_argument("--source", required=True, type=Path)
+    sanitizer.add_argument("--destination", required=True, type=Path)
+    parsed = parser.parse_args(arguments)
+    if parsed.command != "sanitize-junit":  # pragma: no cover - argparse owns choices.
+        return 2
+    try:
+        sanitize_live_junit_report(parsed.source, parsed.destination)
+    except Exception:
+        print("object_storage_live_junit_sanitization_failed", file=sys.stderr)
+        return 1
+    return 0
 
 
 async def _payload_stream(payload: bytes, chunk_size_bytes: int) -> AsyncIterator[bytes]:
@@ -368,3 +430,7 @@ async def live_r2_harness() -> AsyncIterator[LiveR2Harness]:
                 await low_level_context.__aexit__(None, None, None)
     finally:
         shutil.rmtree(spool_root, ignore_errors=True)
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised by the workflow contract.
+    raise SystemExit(_run_harness_command())
