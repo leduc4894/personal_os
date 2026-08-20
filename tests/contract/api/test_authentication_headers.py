@@ -395,6 +395,16 @@ def test_every_authentication_route_pins_its_cache_suppression_headers(
             )
 
 
+def test_malformed_login_json_is_not_cacheable(journey: HeaderJourney) -> None:
+    response = journey.client.post(
+        "/api/auth/login",
+        content=b"{",
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 400
+    assert response.headers["cache-control"] == "no-store"
+
+
 def test_provisioning_failures_keep_the_no_store_contract(journey: HeaderJourney) -> None:
     login_response = journey.login()
     assert login_response.status_code == 200
