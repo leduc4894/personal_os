@@ -149,6 +149,50 @@ def test_blocklist_loader_rejects_internal_whitespace_padding() -> None:
         PasswordBlocklist.from_digest_text("a" * 32 + "\t" + "a" * 31)
 
 
+def test_blocklist_loader_accept_iff_canonical_for_random_inputs() -> None:
+    """Random fuzz: loader accepts iff the artifact regex matches.
+
+    Permanent regression net for any future parser loosening or tightening.
+    Generates a fixed-seed random sample across lowercase hex, whitespace,
+    uppercase and non-hex ASCII; asserts the loader's accept/reject
+    decision matches what ``_DIGEST_PATTERN`` (and therefore
+    ``_BLOCKLIST_DIGEST_PATTERN``) says about the input.
+    """
+    import random
+    import string
+
+    charset = (
+        string.ascii_lowercase + string.digits + string.whitespace + string.ascii_uppercase + "!@#"
+    )
+    rng = random.Random(42)
+    for _ in range(2000):
+        text = "".join(rng.choice(charset) for _ in range(rng.randint(0, 80)))
+        accepted = False
+        try:
+            PasswordBlocklist.from_digest_text(text)
+            accepted = True
+        except ValueError:
+            pass
+        is_canonical = bool(_DIGEST_PATTERN.fullmatch(text))
+        assert accepted == is_canonical, (
+            f"loader accepted={accepted} but regex matches={is_canonical}: {text!r}"
+        )
+
+
+def test_blocklist_dataclass_rejects_non_canonical_digests_at_construction() -> None:
+    """``PasswordBlocklist(...)`` enforces the grammar even when constructed directly.
+
+    The loader is the primary trust boundary, but the ``__post_init__``
+    invariant guards the four direct-construction sites (composition
+    composition-root, integration tests, etc.) that pass ``digests=()``
+    today and might one day pass a hand-rolled digest tuple.
+    """
+    with pytest.raises(ValueError, match="blocklist digest lines"):
+        PasswordBlocklist(digests=("a" * 63 + " ",))
+    # Empty tuple trivially passes.
+    PasswordBlocklist(digests=())
+
+
 def test_blocklist_loader_rejects_unsorted_and_duplicate_digests() -> None:
     ascending_first = "0" * 64
     ascending_last = "f" * 64

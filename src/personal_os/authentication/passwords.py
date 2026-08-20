@@ -52,9 +52,6 @@ COMMON_PASSWORD_BLOCKLIST_RESOURCE_NAME: Final[str] = "common-password-sha256-v1
 #: each, leaving 9,913 unique sorted digests.
 COMMON_PASSWORD_BLOCKLIST_DIGEST_COUNT: Final[int] = 9_913
 
-#: One artifact line is exactly a 64-character lowercase hex SHA-256 digest.
-_BLOCKLIST_DIGEST_LENGTH: Final[int] = 64
-
 #: Artifact grammar: anchored, length 64, lowercase hex only. Used by
 #: :meth:`PasswordBlocklist.from_digest_text` to reject any line that is not
 #: exactly the canonical form (no internal whitespace, no uppercase, no
@@ -72,14 +69,27 @@ class PasswordBlocklist:
 
     digests: tuple[str, ...]
 
+    def __post_init__(self) -> None:
+        """Reject any digest that is not the canonical 64-char lowercase hex.
+
+        The loader is the primary trust boundary, but every direct constructor
+        (including the four test/composition sites that pass ``digests=()``)
+        funnels through this check too, so a future caller cannot bypass the
+        grammar by constructing the dataclass directly.
+        """
+        for digest in self.digests:
+            if not _BLOCKLIST_DIGEST_PATTERN.fullmatch(digest):
+                raise ValueError("blocklist digest lines are malformed")
+
     @classmethod
     def from_digest_text(cls, digest_text: str) -> PasswordBlocklist:
         """Parse and validate the committed artifact bytes.
 
-        Rejects any line that is not one 64-character lowercase hex digest,
-        any empty artifact and any unsorted or duplicate ordering, so a
-        replaced or corrupted artifact fails closed at load time. The error
-        message never includes artifact content.
+        Rejects any line that does not match
+        :data:`_BLOCKLIST_DIGEST_PATTERN` (``^[0-9a-f]{64}$``), any empty
+        artifact and any unsorted or duplicate ordering, so a replaced or
+        corrupted artifact fails closed at load time. The error message
+        never includes artifact content.
         """
         lines = digest_text.splitlines()
         if not lines:
