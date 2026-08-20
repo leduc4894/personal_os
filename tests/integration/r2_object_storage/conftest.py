@@ -319,48 +319,52 @@ async def live_r2_harness() -> AsyncIterator[LiveR2Harness]:
 
     _require_live_configuration(os.environ)
     spool_root = Path(tempfile.mkdtemp(prefix="r2-live-spool-"))
-    settings, credentials = _load_live_configuration(os.environ, spool_root)
-    client_manager = R2ClientManager(settings, credentials)
-    low_level_context = get_session().create_client(
-        "s3",
-        region_name="auto",
-        endpoint_url=settings.r2_endpoint,
-        aws_access_key_id=credentials.access_key_id.get_secret_value(),
-        aws_secret_access_key=credentials.secret_access_key.get_secret_value(),
-        config=_low_level_client_config(),
-    )
-    low_level_client = await low_level_context.__aenter__()
     try:
-        manifest = LiveCleanupManifest(
-            bucket_name=settings.r2_bucket_name, run_nonce=uuid.uuid4().hex
+        settings, credentials = _load_live_configuration(os.environ, spool_root)
+        client_manager = R2ClientManager(settings, credentials)
+        low_level_context = get_session().create_client(
+            "s3",
+            region_name="auto",
+            endpoint_url=settings.r2_endpoint,
+            aws_access_key_id=credentials.access_key_id.get_secret_value(),
+            aws_secret_access_key=credentials.secret_access_key.get_secret_value(),
+            config=_low_level_client_config(),
         )
-        client = await client_manager.get_client()
-        store = R2S3ObjectStore(
-            client,
-            spools=SpoolManager(spool_root),
-            retry=RetryPolicy(maximum_attempts=3),
-            metrics=InMemoryObjectStorageMetrics(),
-            logger=DiagnosticLogger({"service": "object-storage-live-test", "environment": "test"}),
-        )
-        harness = LiveR2Harness(
-            store=store,
-            manifest=manifest,
-            low_level_client=low_level_client,
-            bucket_name=settings.r2_bucket_name,
-        )
+        low_level_client = await low_level_context.__aenter__()
         try:
-            yield harness
-        finally:
-            # Exact cleanup always runs — on success and on any test failure —
-            # while both clients are still open. Cleanup failure fails the run.
+            manifest = LiveCleanupManifest(
+                bucket_name=settings.r2_bucket_name, run_nonce=uuid.uuid4().hex
+            )
+            client = await client_manager.get_client()
+            store = R2S3ObjectStore(
+                client,
+                spools=SpoolManager(spool_root),
+                retry=RetryPolicy(maximum_attempts=3),
+                metrics=InMemoryObjectStorageMetrics(),
+                logger=DiagnosticLogger(
+                    {"service": "object-storage-live-test", "environment": "test"}
+                ),
+            )
+            harness = LiveR2Harness(
+                store=store,
+                manifest=manifest,
+                low_level_client=low_level_client,
+                bucket_name=settings.r2_bucket_name,
+            )
             try:
-                await _assert_exact_cleanup(harness)
+                yield harness
             finally:
-                with contextlib.suppress(Exception):
-                    await store.close()
-                with contextlib.suppress(Exception):
-                    await client_manager.close()
+                # Exact cleanup always runs — on success and on any test failure —
+                # while both clients are still open. Cleanup failure fails the run.
+                try:
+                    await _assert_exact_cleanup(harness)
+                finally:
+                    with contextlib.suppress(Exception):
+                        await store.close()
+                    with contextlib.suppress(Exception):
+                        await client_manager.close()
+        finally:
+            with contextlib.suppress(Exception):
+                await low_level_context.__aexit__(None, None, None)
     finally:
-        with contextlib.suppress(Exception):
-            await low_level_context.__aexit__(None, None, None)
         shutil.rmtree(spool_root, ignore_errors=True)

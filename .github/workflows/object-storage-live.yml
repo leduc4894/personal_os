@@ -18,7 +18,9 @@ permissions:
 
 concurrency:
   group: object-storage-live-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A superseded run must retain its exact-key cleanup before another run uses
+  # the same dedicated test bucket.
+  cancel-in-progress: false
 
 jobs:
   ubuntu-live:

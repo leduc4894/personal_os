@@ -679,6 +679,7 @@ def test_r2_live_workflow_is_trusted_and_exact_cleanup_only() -> None:
     assert "R2_PRODUCTION" not in text
     assert "--junitxml=.local/test-results/object-storage-live.xml" in text
     assert "ListObjects" not in text and "prefix-delete" not in text
+    assert "cancel-in-progress: false" in text
 
 
 # ---------------------------------------------------------------------------

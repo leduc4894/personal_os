@@ -12,8 +12,14 @@ the module is intentionally NOT marked ``r2_live``.
 from __future__ import annotations
 
 import hashlib
+import inspect
+import tempfile
+from collections.abc import AsyncIterator, Callable, Mapping
+from pathlib import Path
+from typing import cast
 
 import pytest
+from tests.integration.r2_object_storage import conftest as live_conftest
 from tests.integration.r2_object_storage.cleanup_manifest import (
     REJECTION_BUCKET_MISMATCH,
     REJECTION_NONCANONICAL_KEY,
@@ -182,3 +188,40 @@ def test_recording_the_same_key_twice_keeps_one_entry() -> None:
     manifest = _manifest_with(_record(_D1), _record(_D1))
     assert manifest.recorded_keys() == (_canonical_key(_D1),)
     assert manifest.record_for(_canonical_key(_D1)) == _record(_D1)
+
+
+@pytest.mark.asyncio
+async def test_fixture_removes_temp_spool_when_settings_loader_rejects(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Moving configuration loading outside the fixture guard leaks this root."""
+
+    spool_root = tmp_path / "loader-rejected-spool"
+    spool_root.mkdir()
+
+    monkeypatch.setattr(
+        live_conftest,
+        "_require_live_configuration",
+        lambda _environment: None,
+    )
+    monkeypatch.setattr(
+        tempfile,
+        "mkdtemp",
+        lambda *, prefix: str(spool_root),
+    )
+
+    def _reject_configuration(_environment: Mapping[str, str], _spool_root: Path) -> object:
+        raise RuntimeError("settings loader rejected the composed configuration")
+
+    monkeypatch.setattr(live_conftest, "_load_live_configuration", _reject_configuration)
+
+    fixture_function = cast(
+        "Callable[[], AsyncIterator[live_conftest.LiveR2Harness]]",
+        inspect.unwrap(live_conftest.live_r2_harness),
+    )
+    fixture_iterator = fixture_function()
+    with pytest.raises(RuntimeError, match="settings loader rejected"):
+        await anext(fixture_iterator)
+
+    assert not spool_root.exists()
