@@ -48,6 +48,15 @@ class CanonicalObjectKey:
 
     value: str
 
+    @classmethod
+    def parse(cls, value: str) -> CanonicalObjectKey:
+        """Validate ``value`` against the sole canonical object-key grammar."""
+        digest = ContentDigest.parse(value.rsplit("/", 1)[-1])
+        canonical_key = derive_canonical_object_key(digest)
+        if canonical_key.value != value:
+            raise ValueError("value does not satisfy the canonical object key contract")
+        return cls(value)
+
     def __str__(self) -> str:
         return self.value
 
