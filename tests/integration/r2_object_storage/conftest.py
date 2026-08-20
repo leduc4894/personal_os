@@ -23,13 +23,16 @@ one dedicated private test bucket, plus a per-run
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import logging
 import os
 import shutil
+import sys
 import tempfile
 import uuid
-from collections.abc import AsyncIterator, Mapping
+import xml.etree.ElementTree as ElementTree
+from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
 from typing import Final
 
@@ -96,6 +99,65 @@ _LIVE_REQUIRED_SECRET_FILES: Final[tuple[str, ...]] = (
 )
 
 _PAYLOAD_CHUNK_SIZE_BYTES: Final[int] = 1_048_576
+_SANITIZED_FAILURE_DETAILS: Final[str] = "r2_live_failure_details_redacted"
+
+
+def _xml_local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def sanitize_live_junit_report(raw_report: Path, sanitized_report: Path) -> None:
+    """Write a publishable JUnit report with provider failure details removed.
+
+    Test identity, status counts and durations remain useful as gate evidence.
+    Failure/error messages and tracebacks, captured streams and arbitrary
+    properties are removed because provider exceptions may contain request or
+    endpoint material. The destination is replaced only after a complete XML
+    document is ready, so sanitizer failure cannot publish a partial report.
+    """
+
+    tree = ElementTree.parse(raw_report)
+    root = tree.getroot()
+    for parent in root.iter():
+        for child in list(parent):
+            local_name = _xml_local_name(child.tag)
+            if local_name in {"properties", "system-out", "system-err"}:
+                parent.remove(child)
+            elif local_name in {"failure", "error"}:
+                child.attrib.clear()
+                child.set("message", _SANITIZED_FAILURE_DETAILS)
+                child.text = _SANITIZED_FAILURE_DETAILS
+
+    ElementTree.indent(tree, space="  ")
+    descriptor, staging_name = tempfile.mkstemp(
+        prefix=".r2-live-junit-",
+        suffix=".xml",
+        dir=sanitized_report.parent,
+    )
+    os.close(descriptor)
+    staging_report = Path(staging_name)
+    try:
+        tree.write(staging_report, encoding="utf-8", xml_declaration=True)
+        os.replace(staging_report, sanitized_report)
+    finally:
+        staging_report.unlink(missing_ok=True)
+
+
+def _run_harness_command(arguments: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="r2-live-harness")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    sanitizer = subparsers.add_parser("sanitize-junit")
+    sanitizer.add_argument("--source", required=True, type=Path)
+    sanitizer.add_argument("--destination", required=True, type=Path)
+    parsed = parser.parse_args(arguments)
+    if parsed.command != "sanitize-junit":  # pragma: no cover - argparse owns choices.
+        return 2
+    try:
+        sanitize_live_junit_report(parsed.source, parsed.destination)
+    except Exception:
+        print("object_storage_live_junit_sanitization_failed", file=sys.stderr)
+        return 1
+    return 0
 
 
 async def _payload_stream(payload: bytes, chunk_size_bytes: int) -> AsyncIterator[bytes]:
@@ -319,48 +381,56 @@ async def live_r2_harness() -> AsyncIterator[LiveR2Harness]:
 
     _require_live_configuration(os.environ)
     spool_root = Path(tempfile.mkdtemp(prefix="r2-live-spool-"))
-    settings, credentials = _load_live_configuration(os.environ, spool_root)
-    client_manager = R2ClientManager(settings, credentials)
-    low_level_context = get_session().create_client(
-        "s3",
-        region_name="auto",
-        endpoint_url=settings.r2_endpoint,
-        aws_access_key_id=credentials.access_key_id.get_secret_value(),
-        aws_secret_access_key=credentials.secret_access_key.get_secret_value(),
-        config=_low_level_client_config(),
-    )
-    low_level_client = await low_level_context.__aenter__()
     try:
-        manifest = LiveCleanupManifest(
-            bucket_name=settings.r2_bucket_name, run_nonce=uuid.uuid4().hex
+        settings, credentials = _load_live_configuration(os.environ, spool_root)
+        client_manager = R2ClientManager(settings, credentials)
+        low_level_context = get_session().create_client(
+            "s3",
+            region_name="auto",
+            endpoint_url=settings.r2_endpoint,
+            aws_access_key_id=credentials.access_key_id.get_secret_value(),
+            aws_secret_access_key=credentials.secret_access_key.get_secret_value(),
+            config=_low_level_client_config(),
         )
-        client = await client_manager.get_client()
-        store = R2S3ObjectStore(
-            client,
-            spools=SpoolManager(spool_root),
-            retry=RetryPolicy(maximum_attempts=3),
-            metrics=InMemoryObjectStorageMetrics(),
-            logger=DiagnosticLogger({"service": "object-storage-live-test", "environment": "test"}),
-        )
-        harness = LiveR2Harness(
-            store=store,
-            manifest=manifest,
-            low_level_client=low_level_client,
-            bucket_name=settings.r2_bucket_name,
-        )
+        low_level_client = await low_level_context.__aenter__()
         try:
-            yield harness
-        finally:
-            # Exact cleanup always runs — on success and on any test failure —
-            # while both clients are still open. Cleanup failure fails the run.
+            manifest = LiveCleanupManifest(
+                bucket_name=settings.r2_bucket_name, run_nonce=uuid.uuid4().hex
+            )
+            client = await client_manager.get_client()
+            store = R2S3ObjectStore(
+                client,
+                spools=SpoolManager(spool_root),
+                retry=RetryPolicy(maximum_attempts=3),
+                metrics=InMemoryObjectStorageMetrics(),
+                logger=DiagnosticLogger(
+                    {"service": "object-storage-live-test", "environment": "test"}
+                ),
+            )
+            harness = LiveR2Harness(
+                store=store,
+                manifest=manifest,
+                low_level_client=low_level_client,
+                bucket_name=settings.r2_bucket_name,
+            )
             try:
-                await _assert_exact_cleanup(harness)
+                yield harness
             finally:
-                with contextlib.suppress(Exception):
-                    await store.close()
-                with contextlib.suppress(Exception):
-                    await client_manager.close()
+                # Exact cleanup always runs — on success and on any test failure —
+                # while both clients are still open. Cleanup failure fails the run.
+                try:
+                    await _assert_exact_cleanup(harness)
+                finally:
+                    with contextlib.suppress(Exception):
+                        await store.close()
+                    with contextlib.suppress(Exception):
+                        await client_manager.close()
+        finally:
+            with contextlib.suppress(Exception):
+                await low_level_context.__aexit__(None, None, None)
     finally:
-        with contextlib.suppress(Exception):
-            await low_level_context.__aexit__(None, None, None)
         shutil.rmtree(spool_root, ignore_errors=True)
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised by the workflow contract.
+    raise SystemExit(_run_harness_command())

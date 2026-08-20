@@ -43,10 +43,10 @@ Janitor degradation is a warning, never a probe skip and never an exit-code
 change: a failed cleanup run emits one `object_storage_spool_cleanup_degraded`
 event carrying only safe counts, the `HeadBucket` probe still runs, and the
 exit code reflects only the probe outcome. Stale candidates the janitor could
-not handle are picked up by a later run. Every run emits exactly one
-probe-outcome event — `object_storage_operation_succeeded` on the clean-success
-path, or its failed/degraded counterpart when the probe itself fails or
-degrades; a degraded janitor adds one separate cleanup warning event.
+not handle are picked up by a later run. Every completed probe emits exactly
+one probe-outcome event — `object_storage_operation_succeeded` on success or
+`object_storage_operation_failed` on dependency/access failure; a degraded
+janitor adds one separate cleanup warning event.
 
 | Exit | Meaning |
 | --- | --- |

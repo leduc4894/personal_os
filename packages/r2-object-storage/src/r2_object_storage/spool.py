@@ -123,9 +123,15 @@ class VerificationSpool:
     reservation; it is idempotent and safe on cancellation.
     """
 
-    def __init__(self, manager: SpoolManager, reserved_size_bytes: int) -> None:
+    def __init__(
+        self,
+        manager: SpoolManager,
+        reserved_size_bytes: int,
+        reservation_observer: Callable[[int], None] | None,
+    ) -> None:
         self._manager = manager
         self._reserved_size_bytes = reserved_size_bytes
+        self._reservation_observer = reservation_observer
         self._hashed: HashedSpool | None = None
         self._is_closed = False
 
@@ -181,7 +187,11 @@ class VerificationSpool:
         if hashed is not None:
             await _run_shielded_cleanup(self._manager._remove_spool_file(hashed.path))
         await _run_shielded_cleanup(
-            self._manager._release_admission(self._reserved_size_bytes, consume_permit=False)
+            self._manager._release_admission(
+                self._reserved_size_bytes,
+                consume_permit=False,
+                reservation_observer=self._reservation_observer,
+            )
         )
 
 
@@ -232,7 +242,11 @@ class SpoolManager:
 
     @asynccontextmanager
     async def receive_stream(
-        self, stream: AsyncIterable[bytes], expected_size_bytes: int
+        self,
+        stream: AsyncIterable[bytes],
+        expected_size_bytes: int,
+        *,
+        reservation_observer: Callable[[int], None] | None = None,
     ) -> AsyncIterator[HashedSpool]:
         """Receive ``stream`` into a bounded spool while hashing it.
 
@@ -241,7 +255,11 @@ class SpoolManager:
         """
 
         self._require_declared_size(expected_size_bytes)
-        await self._acquire_admission(expected_size_bytes, consume_permit=True)
+        await self._acquire_admission(
+            expected_size_bytes,
+            consume_permit=True,
+            reservation_observer=reservation_observer,
+        )
         spool_path = self._next_spool_path()
         try:
             file_descriptor = await asyncio.to_thread(self._open_exclusive, spool_path)
@@ -284,15 +302,28 @@ class SpoolManager:
                 await _run_shielded_cleanup(self._remove_spool_file(spool_path))
         finally:
             await _run_shielded_cleanup(
-                self._release_admission(expected_size_bytes, consume_permit=True)
+                self._release_admission(
+                    expected_size_bytes,
+                    consume_permit=True,
+                    reservation_observer=reservation_observer,
+                )
             )
 
-    async def reserve_verification(self, size_bytes: int) -> VerificationSpool:
+    async def reserve_verification(
+        self,
+        size_bytes: int,
+        *,
+        reservation_observer: Callable[[int], None] | None = None,
+    ) -> VerificationSpool:
         """Reserve capacity for one verification spool and wait for admission."""
 
         self._require_declared_size(size_bytes)
-        await self._acquire_admission(size_bytes, consume_permit=False)
-        return VerificationSpool(self, size_bytes)
+        await self._acquire_admission(
+            size_bytes,
+            consume_permit=False,
+            reservation_observer=reservation_observer,
+        )
+        return VerificationSpool(self, size_bytes, reservation_observer)
 
     async def cleanup_stale_spools(self) -> SpoolCleanupSummary:
         """Run the bounded janitor over direct spool-root children.
@@ -355,16 +386,30 @@ class SpoolManager:
             return False
         return self._reserved_size_bytes + size_bytes <= self._limits.maximum_reserved_size_bytes
 
-    def _require_free_space_reserve(self, size_bytes: int) -> None:
-        if self._disk_usage(self._root).free - size_bytes < self._limits.free_space_reserve_bytes:
+    async def _require_free_space_reserve(self, size_bytes: int) -> None:
+        disk_usage = await asyncio.to_thread(self._disk_usage, self._root)
+        if disk_usage.free - size_bytes < self._limits.free_space_reserve_bytes:
             raise ObjectStorageError(ErrorCode.OBJECT_STORAGE_BUSY)
 
-    def _acquire_admission_locked(self, size_bytes: int, consume_permit: bool) -> None:
+    def _acquire_admission_locked(
+        self,
+        size_bytes: int,
+        consume_permit: bool,
+        reservation_observer: Callable[[int], None] | None,
+    ) -> None:
         if consume_permit:
             self._in_flight_count += 1
         self._reserved_size_bytes += size_bytes
+        if reservation_observer is not None:
+            reservation_observer(self._reserved_size_bytes)
 
-    async def _acquire_admission(self, size_bytes: int, *, consume_permit: bool) -> None:
+    async def _acquire_admission(
+        self,
+        size_bytes: int,
+        *,
+        consume_permit: bool,
+        reservation_observer: Callable[[int], None] | None,
+    ) -> None:
         deadline = self._clock() + _RECEIVE_WINDOW_SECONDS
 
         async def acquire_when_available() -> None:
@@ -372,9 +417,13 @@ class SpoolManager:
                 while True:
                     if self._clock() >= deadline:
                         raise _AdmissionWindowExpired()
-                    self._require_free_space_reserve(size_bytes)
+                    await self._require_free_space_reserve(size_bytes)
                     if self._has_capacity_locked(size_bytes, consume_permit):
-                        self._acquire_admission_locked(size_bytes, consume_permit)
+                        self._acquire_admission_locked(
+                            size_bytes,
+                            consume_permit,
+                            reservation_observer,
+                        )
                         return
                     await self._condition.wait()
 
@@ -383,12 +432,20 @@ class SpoolManager:
         except TimeoutError, _AdmissionWindowExpired:
             raise ObjectStorageError(ErrorCode.OBJECT_STORAGE_BUSY) from None
 
-    async def _release_admission(self, size_bytes: int, *, consume_permit: bool) -> None:
+    async def _release_admission(
+        self,
+        size_bytes: int,
+        *,
+        consume_permit: bool,
+        reservation_observer: Callable[[int], None] | None,
+    ) -> None:
         async with self._condition:
             if consume_permit and self._in_flight_count > 0:
                 self._in_flight_count -= 1
             if self._reserved_size_bytes > 0:
                 self._reserved_size_bytes = max(0, self._reserved_size_bytes - size_bytes)
+            if reservation_observer is not None:
+                reservation_observer(self._reserved_size_bytes)
             self._condition.notify_all()
 
     def _next_spool_path(self) -> Path:

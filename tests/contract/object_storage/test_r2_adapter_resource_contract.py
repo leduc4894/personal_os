@@ -21,24 +21,33 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
+import threading
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
+from botocore.exceptions import ClientError
 from tests.contract.object_storage.scripted_s3 import scripted_body
 
 from personal_os.diagnostics import DiagnosticLogger
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.error_contracts.exceptions import InternalApplicationError
 from personal_os.object_storage import VerificationMethod, VerifiedObjectReceipt
-from personal_os.object_storage.errors import ObjectStorageError
+from personal_os.object_storage.errors import STREAM_INVALID, ObjectStorageError
 from personal_os.object_storage.keys import CanonicalObjectKey
+from r2_object_storage import spool as spool_module
 from r2_object_storage.adapter import R2S3ObjectStore
 from r2_object_storage.client import GetObjectResult, HeadObjectResult, PutObjectRequest
 from r2_object_storage.error_mapping import RetryPolicy
-from r2_object_storage.metrics import InMemoryObjectStorageMetrics, ObjectStorageOperation
-from r2_object_storage.spool import SpoolLimits, SpoolManager
+from r2_object_storage.metrics import (
+    InMemoryObjectStorageMetrics,
+    ObjectStorageOperation,
+    ObjectStorageResult,
+)
+from r2_object_storage.spool import SpoolLimits, SpoolManager, VerificationSpool
 
 #: One mebibyte, the spool chunk size and the scaled test object size.
 _ONE_MEBIBYTE = 1_048_576
@@ -134,11 +143,15 @@ class RepeatingStoreClient:
         spools: SpoolManager | None = None,
         *,
         head_gate: asyncio.Event | None = None,
+        head_failure: BaseException | None = None,
+        get_failure: BaseException | None = None,
     ) -> None:
         self._objects: dict[str, bytes] = {}
         self._etags: dict[str, str] = {}
         self._spools = spools
         self._head_gate = head_gate
+        self._head_failure = head_failure
+        self._get_failure = get_failure
         self._bodies = _ConcurrentBodyTracker()
         self.calls: list[str] = []
         self.close_count = 0
@@ -164,6 +177,8 @@ class RepeatingStoreClient:
         if self._head_gate is not None:
             await self._head_gate.wait()
         self._observe_reserved()
+        if self._head_failure is not None:
+            raise self._head_failure
         payload = self._objects.get(str(object_key))
         if payload is None:
             return None
@@ -185,6 +200,8 @@ class RepeatingStoreClient:
     async def get_object(self, object_key: CanonicalObjectKey, *, if_match: str) -> GetObjectResult:
         self.calls.append("get_object")
         self._observe_reserved()
+        if self._get_failure is not None:
+            raise self._get_failure
         key = str(object_key)
         if if_match != self._etags.get(key):
             raise AssertionError("conditional GET did not carry the served ETag")
@@ -197,12 +214,26 @@ class RepeatingStoreClient:
     async def close(self) -> None:
         self.close_count += 1
 
+    def configure_head(
+        self,
+        *,
+        gate: asyncio.Event | None,
+        failure: BaseException | None,
+    ) -> None:
+        """Select the deterministic HEAD behavior for the next flight generation."""
+
+        self._head_gate = gate
+        self._head_failure = failure
+
 
 def build_repeating_store(
     tmp_path: Path,
     *,
     limits: SpoolLimits | None = None,
     head_gate: asyncio.Event | None = None,
+    head_failure: BaseException | None = None,
+    get_failure: BaseException | None = None,
+    metrics: InMemoryObjectStorageMetrics | None = None,
 ) -> tuple[R2S3ObjectStore, RepeatingStoreClient, InMemoryObjectStorageMetrics]:
     """Build a deterministic scripted client/store/metrics fixture.
 
@@ -224,8 +255,13 @@ def build_repeating_store(
         wall_clock=lambda: 0.0,
         disk_usage=lambda _root: SimpleNamespace(free=_FREE_SPACE_BYTES),
     )
-    client = RepeatingStoreClient(spools, head_gate=head_gate)
-    metrics = InMemoryObjectStorageMetrics()
+    client = RepeatingStoreClient(
+        spools,
+        head_gate=head_gate,
+        head_failure=head_failure,
+        get_failure=get_failure,
+    )
+    metrics = metrics if metrics is not None else InMemoryObjectStorageMetrics()
     logger = DiagnosticLogger({"service": "test", "environment": "test"})
     store = R2S3ObjectStore(
         client,
@@ -239,6 +275,28 @@ def build_repeating_store(
         jitter=_zero_jitter,
     )
     return store, client, metrics
+
+
+def _client_error(code: str, status: int) -> ClientError:
+    return ClientError(
+        {
+            "Error": {"Code": code, "Message": "provider-message-must-remain-private"},
+            "ResponseMetadata": {"HTTPStatusCode": status},
+        },
+        "HeadObject",
+    )
+
+
+class _ReservationRecordingMetrics(InMemoryObjectStorageMetrics):
+    """Test sink retaining every gauge emission in arrival order."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reservation_samples: list[int] = []
+
+    def record_reserved_bytes(self, *, operation: ObjectStorageOperation, size_bytes: int) -> None:
+        super().record_reserved_bytes(operation=operation, size_bytes=size_bytes)
+        self.reservation_samples.append(size_bytes)
 
 
 async def run_bounded(
@@ -284,6 +342,89 @@ def _assert_no_residual_state(store: R2S3ObjectStore, tmp_path: Path) -> None:
     assert store.spool_manager.reserved_size_bytes == 0
     assert store.spool_manager.in_flight_count == 0
     assert list(tmp_path.iterdir()) == []
+
+
+# --- Admission and receive backstops --------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_free_space_probe_does_not_block_independent_async_work(tmp_path: Path) -> None:
+    """A blocking filesystem probe yields the event loop while admission is locked."""
+
+    probe_started = threading.Event()
+    independent_task_completed = threading.Event()
+    allow_probe_return = threading.Event()
+    independent_completed_before_probe_return = [False]
+    releaser_failures: list[BaseException] = []
+
+    def blocking_disk_usage(_root: Path) -> SimpleNamespace:
+        probe_started.set()
+        allow_probe_return.wait()
+        return SimpleNamespace(free=_FREE_SPACE_BYTES)
+
+    def release_probe_after_loop_progress() -> None:
+        try:
+            assert probe_started.wait(timeout=1)
+            independent_completed_before_probe_return[0] = independent_task_completed.wait(
+                timeout=1
+            )
+        except BaseException as error:
+            releaser_failures.append(error)
+        finally:
+            allow_probe_return.set()
+
+    releaser = threading.Thread(target=release_probe_after_loop_progress)
+    releaser.start()
+    manager = SpoolManager(tmp_path, disk_usage=blocking_disk_usage)
+
+    async def complete_independent_work() -> None:
+        await asyncio.sleep(0)
+        independent_task_completed.set()
+
+    reservation_task = asyncio.create_task(manager.reserve_verification(1))
+    independent_task = asyncio.create_task(complete_independent_work())
+    try:
+        reservation = await asyncio.wait_for(reservation_task, timeout=2)
+        await asyncio.wait_for(independent_task, timeout=2)
+    finally:
+        await asyncio.to_thread(releaser.join, 1)
+
+    assert not releaser.is_alive()
+    if releaser_failures:
+        raise releaser_failures[0]
+    assert independent_completed_before_probe_return == [True]
+    await reservation.close()
+    assert list(tmp_path.iterdir()) == []
+    assert manager.reserved_size_bytes == 0
+    assert manager.in_flight_count == 0
+
+
+@pytest.mark.asyncio
+async def test_stalled_receive_uses_real_time_backstop_and_cleans_resources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stream stuck inside ``__anext__`` cannot retain admission state indefinitely."""
+
+    monkeypatch.setattr(spool_module, "_RECEIVE_WINDOW_SECONDS", 0.01)
+    manager = SpoolManager(
+        tmp_path,
+        disk_usage=lambda _root: SimpleNamespace(free=_FREE_SPACE_BYTES),
+    )
+    never_resume = asyncio.Event()
+
+    async def stalled_stream() -> AsyncIterator[bytes]:
+        await never_resume.wait()
+        yield b"unreachable"
+
+    with pytest.raises(ObjectStorageError) as raised:
+        async with manager.receive_stream(stalled_stream(), 1):
+            pytest.fail("a stalled stream must not yield a spool")
+
+    assert raised.value.error_code is ErrorCode.OBJECT_STORAGE_INPUT_INVALID
+    assert raised.value.safe_details["reason"] is STREAM_INVALID
+    assert list(tmp_path.iterdir()) == []
+    assert manager.reserved_size_bytes == 0
+    assert manager.in_flight_count == 0
 
 
 # --- Four permits and aggregate reservation -------------------------------
@@ -389,6 +530,242 @@ async def test_same_digest_stores_share_one_r2_sequence(tmp_path: Path) -> None:
     ]
     assert len(store_records) == 2
     assert metrics.maximum_in_flight == 2
+    _assert_no_residual_state(store, tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_same_digest_failure_is_fresh_for_waiter_with_zero_attempts(
+    tmp_path: Path,
+) -> None:
+    """A waiter gets an equivalent typed failure without inheriting owner work."""
+
+    head_gate = asyncio.Event()
+    store, _client, metrics = build_repeating_store(
+        tmp_path,
+        head_gate=head_gate,
+        head_failure=_client_error("AccessDenied", 403),
+    )
+    payload = b"shared single-flight failure"
+    owner = asyncio.create_task(
+        store.store_stream(chunks(payload), len(payload), "application/octet-stream")
+    )
+    await _wait_until(
+        lambda: store.single_flight_entry_count == 1, description="owner joined the table"
+    )
+    waiter = asyncio.create_task(
+        store.store_stream(chunks(payload), len(payload), "application/octet-stream")
+    )
+    await _wait_until(
+        lambda: store.single_flight_waiter_count == 1, description="waiter joined the entry"
+    )
+
+    head_gate.set()
+    owner_failure, waiter_failure = await asyncio.gather(owner, waiter, return_exceptions=True)
+
+    assert isinstance(owner_failure, ObjectStorageError)
+    assert isinstance(waiter_failure, ObjectStorageError)
+    assert owner_failure.error_code is ErrorCode.OBJECT_STORAGE_ACCESS_DENIED
+    assert waiter_failure.to_safe_dict() == owner_failure.to_safe_dict()
+    assert waiter_failure is not owner_failure
+    assert waiter_failure.__context__ is None
+    assert waiter_failure.__cause__ is None
+    failed_records = [
+        record
+        for record in metrics.operations
+        if record.operation is ObjectStorageOperation.STORE
+        and record.result is ObjectStorageResult.FAILED
+    ]
+    assert sorted(record.attempt_count for record in failed_records) == [0, 1]
+    _assert_no_residual_state(store, tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_old_waiter_detach_cannot_cancel_new_generation_waiter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delayed old detach cannot consume the replacement flight's real waiter."""
+
+    first_head_gate = asyncio.Event()
+    store, client, _metrics = build_repeating_store(
+        tmp_path,
+        head_gate=first_head_gate,
+        head_failure=_client_error("AccessDenied", 403),
+    )
+    payload = b"cross-generation single-flight failure"
+    old_detach_started = asyncio.Event()
+    allow_old_detach = asyncio.Event()
+    old_detach_finished = asyncio.Event()
+    detach_call_count = 0
+    original_detach = store._detach_single_flight_waiter
+    call_original_detach = cast("Callable[..., Awaitable[None]]", original_detach)
+
+    async def coordinate_first_detach(*arguments: object) -> None:
+        nonlocal detach_call_count
+        detach_call_count += 1
+        if detach_call_count == 1:
+            old_detach_started.set()
+            await allow_old_detach.wait()
+        await call_original_detach(*arguments)
+        if detach_call_count == 1:
+            old_detach_finished.set()
+
+    monkeypatch.setattr(store, "_detach_single_flight_waiter", coordinate_first_detach)
+
+    first_owner = asyncio.create_task(
+        store.store_stream(chunks(payload), len(payload), "application/octet-stream")
+    )
+    await _wait_until(
+        lambda: store.single_flight_entry_count == 1,
+        description="first owner joined the table",
+    )
+    first_waiter = asyncio.create_task(
+        store.store_stream(chunks(payload), len(payload), "application/octet-stream")
+    )
+    await _wait_until(
+        lambda: store.single_flight_waiter_count == 1,
+        description="first waiter joined the entry",
+    )
+
+    first_head_gate.set()
+    await asyncio.wait_for(old_detach_started.wait(), timeout=2)
+    first_owner_failure = (await asyncio.gather(first_owner, return_exceptions=True))[0]
+    assert isinstance(first_owner_failure, ObjectStorageError)
+    assert first_owner_failure.error_code is ErrorCode.OBJECT_STORAGE_ACCESS_DENIED
+
+    second_head_gate = asyncio.Event()
+    client.configure_head(gate=second_head_gate, failure=None)
+    second_owner = asyncio.create_task(
+        store.store_stream(chunks(payload), len(payload), "application/octet-stream")
+    )
+    await _wait_until(
+        lambda: store.single_flight_entry_count == 1,
+        description="replacement owner joined the table",
+    )
+    second_waiter = asyncio.create_task(
+        store.store_stream(chunks(payload), len(payload), "application/octet-stream")
+    )
+    await _wait_until(
+        lambda: store.single_flight_waiter_count == 1,
+        description="replacement waiter joined the entry",
+    )
+
+    allow_old_detach.set()
+    await asyncio.wait_for(old_detach_finished.wait(), timeout=2)
+    second_owner.cancel()
+    second_owner_failure, second_waiter_failure = await asyncio.gather(
+        second_owner,
+        second_waiter,
+        return_exceptions=True,
+    )
+    first_waiter_failure = (await asyncio.gather(first_waiter, return_exceptions=True))[0]
+
+    assert isinstance(first_waiter_failure, ObjectStorageError)
+    assert first_waiter_failure.error_code is ErrorCode.OBJECT_STORAGE_ACCESS_DENIED
+    assert isinstance(second_owner_failure, asyncio.CancelledError)
+    assert isinstance(second_waiter_failure, ObjectStorageError)
+    assert second_waiter_failure.error_code is ErrorCode.OBJECT_STORAGE_UNAVAILABLE
+    assert second_waiter_failure.__context__ is None
+    assert second_waiter_failure.__cause__ is None
+    _assert_no_residual_state(store, tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_internal_application_error_records_failed_operation(tmp_path: Path) -> None:
+    """Unknown provider-boundary failures still count as failed operations."""
+
+    store, _client, metrics = build_repeating_store(
+        tmp_path,
+        head_failure=RuntimeError("internal-provider-boundary-failure"),
+    )
+    payload = b"internal failure metrics"
+
+    with pytest.raises(InternalApplicationError) as raised:
+        await store.store_stream(chunks(payload), len(payload), "application/octet-stream")
+
+    assert raised.value.error_code is ErrorCode.INTERNAL_ERROR
+    failed_records = [
+        record
+        for record in metrics.operations
+        if record.operation is ObjectStorageOperation.STORE
+        and record.result is ObjectStorageResult.FAILED
+    ]
+    assert len(failed_records) == 1
+    assert failed_records[0].error_code is ErrorCode.INTERNAL_ERROR
+    assert failed_records[0].attempt_count == 1
+    _assert_no_residual_state(store, tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_reservation_gauge_emits_after_failed_verification_mutations(
+    tmp_path: Path,
+) -> None:
+    """Verification acquire/release samples survive a failure between them."""
+
+    metrics = _ReservationRecordingMetrics()
+    store, _client, _ = build_repeating_store(
+        tmp_path,
+        get_failure=_client_error("AccessDenied", 403),
+        metrics=metrics,
+    )
+    payload = b"reservation mutation failure"
+
+    with pytest.raises(ObjectStorageError) as raised:
+        await store.store_stream(chunks(payload), len(payload), "application/octet-stream")
+
+    assert raised.value.error_code is ErrorCode.OBJECT_STORAGE_ACCESS_DENIED
+    assert metrics.reservation_samples == [
+        len(payload),
+        2 * len(payload),
+        len(payload),
+        0,
+    ]
+    _assert_no_residual_state(store, tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_reservation_peak_survives_interleaved_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A release after verification admission cannot erase its true peak sample."""
+
+    metrics = _ReservationRecordingMetrics()
+    store, _client, _ = build_repeating_store(tmp_path, metrics=metrics)
+    payload = b"atomic reservation peak"
+    spools = store.spool_manager
+    existing_reservation = await spools.reserve_verification(len(payload))
+    verification_reserved = asyncio.Event()
+    allow_reservation_return = asyncio.Event()
+    original_reserve = cast(
+        "Callable[..., Awaitable[VerificationSpool]]",
+        spools.reserve_verification,
+    )
+
+    async def pause_after_reservation(
+        *arguments: object,
+        **keywords: object,
+    ) -> VerificationSpool:
+        verification = await original_reserve(*arguments, **keywords)
+        verification_reserved.set()
+        await allow_reservation_return.wait()
+        return verification
+
+    monkeypatch.setattr(spools, "reserve_verification", pause_after_reservation)
+    store_task = asyncio.create_task(
+        store.store_stream(chunks(payload), len(payload), "application/octet-stream")
+    )
+
+    await asyncio.wait_for(verification_reserved.wait(), timeout=2)
+    assert spools.reserved_size_bytes == 3 * len(payload)
+    await existing_reservation.close()
+    assert spools.reserved_size_bytes == 2 * len(payload)
+    allow_reservation_return.set()
+
+    receipt = await asyncio.wait_for(store_task, timeout=2)
+
+    assert receipt.size_bytes == len(payload)
+    assert metrics.maximum_reserved_size_bytes == 3 * len(payload)
     _assert_no_residual_state(store, tmp_path)
 
 

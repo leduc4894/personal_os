@@ -289,9 +289,10 @@ async def run_object_storage_runtime_check(
                     {"operation": janitor_operation, "count": deferred_count},
                 )
 
-            started = monotonic()
+            started: float | None = None
             try:
                 client = await client_source.get_client()
+                started = monotonic()
                 outcome = await _run_bounded_head_bucket(
                     client, started=started, monotonic=monotonic, sleep=sleep
                 )
@@ -300,7 +301,7 @@ async def run_object_storage_runtime_check(
             except ObjectStorageError as error:
                 outcome = HeadBucketProbeOutcome(
                     attempt_count=1,
-                    duration_ms=_duration_ms(started, monotonic),
+                    duration_ms=0 if started is None else _duration_ms(started, monotonic),
                     failure=error,
                 )
             except Exception as error:
