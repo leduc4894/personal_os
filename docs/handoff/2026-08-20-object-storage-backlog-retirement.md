@@ -12,11 +12,13 @@
 | 2 | `3cc9b766f88b95adba891876d25fd0ed195a133c` | `test: harden spool admission coordination` |
 | 3 | `0c8c0ceead6aac1f9e1ba9d55d561325ee070be6` | `fix: detach single-flight waiter error chains` |
 | 4 | `1ec3a01d3126e25645e7e0bf4fab8097a69553a4` | `fix: sanitize object storage live junit` |
+| Final P1 correction | `da52777cb8733cdeac043c249bf10399cbf7a75e` | `fix: close object storage concurrency races` |
 
 The Task 2 and Task 3 SHAs are review-round commits on top of their initial
 implementation commits (`00d5cc8` and `8facfe4` respectively). Task 4's
 runtime/harness implementation began at `dfff3b7` and is finalized by
-`1ec3a01`.
+`1ec3a01`. The final correction commit closes the two concurrency races found
+in whole-wave review without changing a public storage port or typed error.
 
 ## Retired backlog rows
 
@@ -27,10 +29,10 @@ runtime/harness implementation began at `dfff3b7` and is finalized by
 | Duplicate shielded-cleanup helpers | **Expressly ruled.** The two helpers have distinct ownership and only two callers; retain them until a real third caller establishes a shared abstraction. |
 | Event-loop `disk_usage` | **Implemented.** Admission probes via `asyncio.to_thread` while retaining the admission lock; Task 2 proved independent async work can proceed. |
 | Real-time receive backstop | **Implemented.** The stalled-stream test exercises the receive-timeout backstop and verifies the existing typed error plus zero spool, permit, and reservation state. |
-| Reserved-size gauge fidelity | **Implemented.** The gauge is emitted after every reservation acquire/release mutation; Task 3 RED expected four samples and GREEN produced them. |
+| Reserved-size gauge fidelity | **Implemented and concurrency-hardened.** Every adapter-owned acquire/release emits its exact post-mutation value while the `SpoolManager` condition lock is held. The final RED deterministically reduced a true 69-byte peak to 46 through an interleaved release; GREEN retained the 69-byte peak. |
 | Core object-key parser | **Implemented.** `CanonicalObjectKey.parse` enforces the exact lowercase, sharded SHA-256 grammar and byte-for-byte canonical round trip. |
 | Synthetic waiter attempts | **Implemented.** Waiters report `attempt_count == 0`; owner retry counts are unchanged. |
-| Shared waiter exception instance | **Implemented.** Waiters receive a fresh equivalent typed error with no owner/provider exception chain. |
+| Shared waiter exception instance | **Implemented and generation-fenced.** Waiters receive a fresh equivalent typed error with no owner/provider exception chain, and detach identity-checks the exact entry generation. The final cross-generation regression proves an old failed-flight waiter cannot consume a replacement flight's waiter and turn its typed owner-cancellation outcome into bare `CancelledError`. |
 | Runtime probe duration | **Implemented.** `duration_ms` begins immediately before the probe, excluding client composition. |
 | Inaccurate probe-event wording | **Implemented.** The operator guide now names the emitted success and failure probe events only. |
 | Composite single-flight predecessor row | **Narrowed and replaced, not wholly retired.** The defensive unretrieved-future guard is expressly ruled to remain because owner-failure retrieval is tested before registry removal. The theoretical `_run_shielded` cleanup-raises cancellation edge is unresolved and remains in the replacement [ruling backlog row](BACKLOG.md). |
@@ -79,6 +81,23 @@ contract changed.
   — exit 0, 1 passed; `uv run pytest tests/contract/object_storage/test_r2_adapter_resource_contract.py tests/unit/object_storage/test_r2_error_mapping.py -q`
   — exit 0, 71 passed.
 
+### Final P1 correction
+
+- Single-flight RED: `uv run pytest tests/contract/object_storage/test_r2_adapter_resource_contract.py::test_old_waiter_detach_cannot_cancel_new_generation_waiter -q`
+  — exit 1; the replacement generation's real waiter received bare
+  `CancelledError` after the delayed old-generation detach decremented its
+  entry.
+- Single-flight GREEN: `uv run pytest tests/contract/object_storage/test_r2_adapter_resource_contract.py::test_old_waiter_detach_cannot_cancel_new_generation_waiter tests/contract/object_storage/test_r2_adapter_resource_contract.py::test_same_digest_failure_is_fresh_for_waiter_with_zero_attempts tests/contract/object_storage/test_r2_adapter_resource_contract.py::test_waiter_cancellation_keeps_owner_and_other_waiters_running tests/contract/object_storage/test_r2_adapter_resource_contract.py::test_owner_cancellation_cleans_entry_and_fails_waiter_closed -q`
+  — exit 0, 4 passed.
+- Reservation RED: `uv run pytest tests/contract/object_storage/test_r2_adapter_resource_contract.py::test_reservation_peak_survives_interleaved_release -q`
+  — exit 1; the true 69-byte reservation peak was reported as 46 bytes.
+- Reservation GREEN: `uv run pytest tests/contract/object_storage/test_r2_adapter_resource_contract.py::test_reservation_peak_survives_interleaved_release tests/contract/object_storage/test_r2_adapter_resource_contract.py::test_reservation_gauge_emits_after_failed_verification_mutations -q`
+  — exit 0, 2 passed.
+- Targeted GREEN: `uv run pytest tests/contract/object_storage/test_r2_adapter_resource_contract.py tests/unit/object_storage/test_spool_manager.py tests/unit/object_storage/test_r2_error_mapping.py -q`
+  — exit 0, 103 passed, 3 skipped.
+- Expanded GREEN: `uv run pytest tests/contract/object_storage/test_r2_adapter_contract.py tests/contract/object_storage/test_r2_adapter_resource_contract.py tests/unit/object_storage/test_r2_error_mapping.py -q`
+  — exit 0, 118 passed.
+
 ### Task 4
 
 - RED: `uv run pytest tests/unit/object_storage/test_runtime_check.py tests/contract/test_ci_security.py -q`
@@ -120,6 +139,10 @@ claim for that review round.
 4. Keep the pre-existing `infra` circular-import row unchanged. It belongs to
    the separate diagnostics/error-contract slice and is not object-storage
    work.
+5. Do not restore a waiter-generation or reservation-metric row to
+   `BACKLOG.md`: commit `da52777` resolves both whole-wave findings with
+   deterministic RED/GREEN evidence. The three remaining object-storage rows
+   in the living index are unchanged and cover separate unresolved work.
 
 ## Hosted-live prerequisite and next external action
 
@@ -151,6 +174,11 @@ a future separately scoped decision.
   deselected; API client: 1 passed; Obsidian plugin: 375 passed; web: 139
   passed. Formatting, lint, strict typing, import boundaries, API artifact
   checks, package builds, and web/plugin builds also completed.
+- Final correction `uv run poe verify`: exit 0. Python: 3070 passed, 21
+  skipped, 329 deselected; API client: 1 passed; Obsidian plugin: 375 passed;
+  web: 139 passed. Formatting, lint, strict typing, import boundaries, API
+  artifact checks, all package builds, and web/plugin production builds also
+  completed on commit `da52777` plus this handoff update.
 
 The documentation commit SHA is recorded in
 `.superpowers/sdd/2026-08-20-object-storage-backlog-retirement/task-5-report.md`.
