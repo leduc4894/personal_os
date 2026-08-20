@@ -16,7 +16,7 @@
 - PostgreSQL is authoritative for users, sessions, TOTP, grants, device/token state, throttles and audit. Redis is absent from authorization decisions.
 - Domain code under `src/personal_os/authentication/` must not import FastAPI, Starlette, SQLAlchemy, psycopg, Obsidian, React or provider SDKs.
 - Credentials are opaque and stateful. Do not add JWT, an authentication framework, an external identity provider, remote password reputation, remote QR rendering or third-party analytics.
-- Add exactly three production dependency roles: `argon2-cffi==25.1.0` (MIT), `cryptography==49.0.0` (Apache-2.0 OR BSD-3-Clause) and `qrcode-generator==2.0.4` (MIT). `@types/qrcode-generator==1.0.6` is development-only.
+- Add exactly three production dependency roles: `argon2-cffi==25.1.0` (MIT), `cryptography==49.0.0` (Apache-2.0 OR BSD-3-Clause) and `qrcode-generator==2.0.4` (MIT). The `qrcode-generator` package ships its own type definitions, so no companion `@types/qrcode-generator` dev pin is needed.
 - `argon2-cffi` adds `argon2-cffi-bindings`/CFFI through `uv.lock`; `cryptography` uses its CPython 3.14 wheel and bundled native crypto implementation; `qrcode-generator` has no runtime dependency and is bundled only into Web, never the plugin.
 - Pin Argon2id to `memory_cost_kib=65536`, `time_cost=3`, `parallelism=1`, `salt_length_bytes=16`, `hash_length_bytes=32`. Benchmark 20 sequential hashes on the smallest deployment host; the reviewed p95 band is 150–750 ms. Changing the parameters or band requires a spec/operations update.
 - Use AES-256-GCM with a fresh 12-byte nonce for TOTP secrets; HKDF-SHA-256 and HMAC-SHA-256 with explicit domain labels for CSRF, throttles, recovery-code hashes and exact token derivation. Never reuse a nonce/key pair.
