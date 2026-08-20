@@ -819,13 +819,18 @@ class R2S3ObjectStore:
                 is_owner = False
 
         if not is_owner:
+            outcome: _SharedStoreOutcome | None = None
+            waiter_failure: ApplicationError | None = None
             try:
                 try:
                     outcome = await asyncio.shield(entry.future)
                 except ApplicationError as cause:
-                    raise _clone_application_error(cause) from None
+                    waiter_failure = _clone_application_error(cause)
             finally:
                 await _run_shielded(self._detach_single_flight_waiter(digest))
+            if waiter_failure is not None:
+                raise waiter_failure
+            assert outcome is not None, "a successful owner must publish its outcome"
             receipt, method = outcome
             if receipt.media_type != expected.media_type:
                 # The same bytes were shared, but the owner stored a different

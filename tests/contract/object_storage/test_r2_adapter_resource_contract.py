@@ -555,6 +555,8 @@ async def test_same_digest_failure_is_fresh_for_waiter_with_zero_attempts(
     assert owner_failure.error_code is ErrorCode.OBJECT_STORAGE_ACCESS_DENIED
     assert waiter_failure.to_safe_dict() == owner_failure.to_safe_dict()
     assert waiter_failure is not owner_failure
+    assert waiter_failure.__context__ is None
+    assert waiter_failure.__cause__ is None
     failed_records = [
         record
         for record in metrics.operations
