@@ -45,6 +45,7 @@ from typing import IO, Final
 from personal_os.diagnostics import DiagnosticLogger
 from personal_os.diagnostics.events import EventName, SafeToken
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.error_contracts.exceptions import ApplicationError
 from personal_os.object_storage import (
     CanonicalMediaType,
     ContentDigest,
@@ -135,6 +136,13 @@ class _AttemptTracker:
 
     def __init__(self) -> None:
         self.count = 0
+
+
+def _clone_application_error(error: ApplicationError) -> ApplicationError:
+    """Rebuild one typed failure solely from its registered safe surface."""
+
+    error_type: type[ApplicationError] = type(error)
+    return error_type(error.error_code, safe_details=error.safe_details)
 
 
 def require_exact_metadata(head: HeadObjectResult, expected: ExpectedObject) -> None:
@@ -361,7 +369,7 @@ class R2S3ObjectStore:
         try:
             try:
                 verification = await self._verify_to_spool(expected, operation, tracker)
-            except ObjectStorageError as cause:
+            except ApplicationError as cause:
                 if cause.error_code is ErrorCode.OBJECT_STORAGE_OBJECT_MISSING:
                     self._record_succeeded(
                         operation, started=started, size_bytes=0, attempt_count=tracker.count
@@ -375,7 +383,6 @@ class R2S3ObjectStore:
                     attempt_count=tracker.count,
                 )
                 raise
-            self._record_reserved(operation)
             try:
                 receipt = self._build_receipt(
                     verification, expected, VerificationMethod.EXISTING_FULL_READ
@@ -409,7 +416,7 @@ class R2S3ObjectStore:
         try:
             try:
                 verification = await self._verify_to_spool(expected, operation, tracker)
-            except ObjectStorageError as cause:
+            except ApplicationError as cause:
                 self._record_failed(
                     operation,
                     cause,
@@ -418,7 +425,6 @@ class R2S3ObjectStore:
                     attempt_count=tracker.count,
                 )
                 raise
-            self._record_reserved(operation)
             try:
                 receipt = self._build_receipt(
                     verification, expected, VerificationMethod.EXISTING_FULL_READ
@@ -506,7 +512,7 @@ class R2S3ObjectStore:
                 attempt_count=tracker.count,
             )
             return receipt
-        except ObjectStorageError as cause:
+        except ApplicationError as cause:
             self._record_failed(
                 operation,
                 cause,
@@ -541,7 +547,7 @@ class R2S3ObjectStore:
         try:
             try:
                 verification = await self._verify_to_spool(expected, operation, tracker)
-            except ObjectStorageError as cause:
+            except ApplicationError as cause:
                 self._record_failed(
                     operation,
                     cause,
@@ -550,7 +556,6 @@ class R2S3ObjectStore:
                     attempt_count=tracker.count,
                 )
                 raise
-            self._record_reserved(operation)
             hashed = verification.hashed
             assert hashed is not None, "verification spool was not hashed"
             try:
@@ -614,6 +619,7 @@ class R2S3ObjectStore:
         head = await self._head_exact(object_key, operation, tracker)
         require_exact_metadata(head, expected)
         verification = await self._spools.reserve_verification(expected.size_bytes)
+        self._record_reserved(operation)
         try:
             response = await self._get_with_retry(object_key, head.etag, operation, tracker)
             try:
@@ -622,6 +628,7 @@ class R2S3ObjectStore:
                 await _close_streaming_body(response.body)
         except BaseException:
             await verification.close()
+            self._record_reserved(operation)
             raise
         return verification
 
@@ -813,11 +820,13 @@ class R2S3ObjectStore:
 
         if not is_owner:
             try:
-                outcome = await asyncio.shield(entry.future)
+                try:
+                    outcome = await asyncio.shield(entry.future)
+                except ApplicationError as cause:
+                    raise _clone_application_error(cause) from None
             finally:
                 await _run_shielded(self._detach_single_flight_waiter(digest))
             receipt, method = outcome
-            tracker.count = max(tracker.count, 1)
             if receipt.media_type != expected.media_type:
                 # The same bytes were shared, but the owner stored a different
                 # canonical media type than this caller declared; surface the
@@ -828,7 +837,6 @@ class R2S3ObjectStore:
         try:
             method = await self._resolve_store_method(expected, hashed, tracker)
             verification = await self._verify_to_spool(expected, operation, tracker)
-            self._record_reserved(operation)
             try:
                 receipt = self._build_receipt(verification, expected, method)
             finally:
@@ -883,7 +891,7 @@ class R2S3ObjectStore:
                 assert outcome is not None, "a completed owner must carry its outcome"
                 entry.future.set_result(outcome)
             elif entry.waiter_count > 0:
-                if isinstance(cause, ObjectStorageError):
+                if isinstance(cause, ApplicationError):
                     entry.future.set_exception(cause)
                 else:
                     entry.future.set_exception(
@@ -979,7 +987,7 @@ class R2S3ObjectStore:
     def _record_failed(
         self,
         operation: ObjectStorageOperation,
-        error: ObjectStorageError,
+        error: ApplicationError,
         *,
         started: float,
         size_bytes: int,
