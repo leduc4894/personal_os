@@ -113,6 +113,8 @@ class SourceLifecycleCommitResult:
         reject_nil_uuid("event_id", self.event_id)
         if self.event_sequence < 1:
             raise ValueError("event_sequence must be a positive integer")
+        if not isinstance(self.state, LifecycleState):
+            raise ValueError("state must be a closed LifecycleState")
         if self.state is LifecycleState.ACTIVE:
             if self.resulting_locator is None:
                 raise ValueError("active lifecycle result requires resulting_locator")

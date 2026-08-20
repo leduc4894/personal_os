@@ -7,7 +7,11 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from personal_os.source_lifecycle.commands import LifecycleOperation, SourceLifecycleCommand
+from personal_os.source_lifecycle.commands import (
+    LifecycleOperation,
+    SourceLifecycleCommand,
+    SourceLifecycleCommitResult,
+)
 from personal_os.source_locators import NormalizedLocator
 
 _EVENT_ID = UUID("018f47a0-7b00-7000-8000-000000000003")
@@ -75,3 +79,17 @@ def test_lifecycle_command_requires_uuid7_event_and_positive_policy_revision() -
 def test_lifecycle_command_fails_closed_for_unknown_operation() -> None:
     with pytest.raises(ValueError, match="operation"):
         _command(operation="rename")
+
+
+def test_lifecycle_result_fails_closed_for_unknown_state() -> None:
+    with pytest.raises(ValueError, match="state"):
+        SourceLifecycleCommitResult(
+            source_id=uuid4(),
+            source_version_id=uuid4(),
+            event_id=uuid4(),
+            event_sequence=1,
+            state="unknown",  # type: ignore[arg-type]
+            tombstone_id=None,
+            resulting_locator=None,
+            committed_at=datetime(2026, 8, 20, 1, 2, 3),
+        )
