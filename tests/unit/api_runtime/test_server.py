@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import json
 import logging
 import tempfile
 from collections.abc import Iterator, Mapping
@@ -32,6 +33,8 @@ from cryptography.hazmat.primitives.serialization import (
 )
 from fastapi import FastAPI
 
+from personal_os.error_contracts.codes import ErrorCode
+from personal_os.error_contracts.exceptions import ConfigurationError
 from personal_os.exclusion_policy.signatures import derive_ed25519_key_id
 
 # One hermetic secret root backing the local environment snapshot, so the
@@ -148,6 +151,23 @@ class ExitingServerFactory:
 
     def __call__(self, config: uvicorn.Config) -> ExitingServer:
         return ExitingServer(self.exit_code, config)
+
+
+class LifespanExecutingServer(RecordingServer):
+    """Server stand-in that executes application startup without binding."""
+
+    async def serve(self) -> None:
+        application = self.config.app
+        assert isinstance(application, FastAPI)
+        async with application.router.lifespan_context(application):
+            return None
+
+
+class LifespanExecutingServerFactory:
+    """Factory exercising the real FastAPI lifespan boundary."""
+
+    def __call__(self, config: uvicorn.Config) -> LifespanExecutingServer:
+        return LifespanExecutingServer(config)
 
 
 def test_server_disables_version_and_proxy_headers() -> None:
@@ -342,3 +362,38 @@ def test_server_zero_system_exit_is_clean_shutdown(
     captured = capsys.readouterr()
     assert "internal_error" not in captured.err
     assert "Traceback" not in captured.err
+
+
+def test_server_lifespan_configuration_failure_enters_diagnostics_before_framework(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A pre-bind keyring refusal is structured before it reaches the server."""
+
+    async def reject_keyring_coverage(**_: object) -> None:
+        raise ConfigurationError(ErrorCode.CONFIGURATION_SECRET_INVALID)
+
+    monkeypatch.setattr(
+        "api_runtime.server.verify_keyring_covers_required_key_ids",
+        reject_keyring_coverage,
+    )
+
+    result = run_server(
+        environ=LOCAL_ENVIRONMENT,
+        server_factory=LifespanExecutingServerFactory(),
+    )
+
+    records = [
+        json.loads(line)
+        for line in capsys.readouterr().err.splitlines()
+        if line
+    ]
+    emergency_records = [
+        record
+        for record in records
+        if record["event"] in {"runtime_configuration_failed", "internal_error"}
+    ]
+    assert result == 70
+    assert emergency_records[0]["event"] == "runtime_configuration_failed"
+    assert emergency_records[-1]["event"] == "internal_error"
+    assert "Traceback" not in "\n".join(json.dumps(record) for record in emergency_records)

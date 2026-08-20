@@ -418,7 +418,10 @@ def assert_keyring_covers_required_key_ids(
 
 
 async def verify_keyring_covers_required_key_ids(
-    *, engine: AsyncEngine, keyring: AuthenticationKeyring
+    *,
+    engine: AsyncEngine,
+    keyring: AuthenticationKeyring,
+    clock: DatabaseAuthenticationClock,
 ) -> None:
     """Read every referenced key ID and enforce the coverage refusal (spec 20.1).
 
@@ -427,7 +430,7 @@ async def verify_keyring_covers_required_key_ids(
     raised :class:`ConfigurationError` aborts startup.
     """
     required_key_ids = await CredentialStore(engine).required_key_ids(
-        database_now=datetime.now(UTC)
+        database_now=await clock.database_now()
     )
     assert_keyring_covers_required_key_ids(required_key_ids, keyring)
 
@@ -680,6 +683,8 @@ class OfflineAuthenticationState:
         self.password_hash = OfflinePasswordHasher().hash_password(OFFLINE_PASSWORD)
         self.sessions_by_secret_hash: dict[str, StoredWebSession] = {}
         self.buckets: dict[str, ThrottleBucketState] = {}
+        self.login_buckets: dict[str, ThrottleBucketState] = {}
+        self.source_buckets: dict[str, ThrottleBucketState] = {}
         self.totp_prompt_dismissed_at: datetime | None = None
         self.totp_credential_rows: list[OfflineTotpCredentialRow] = []
         self.recovery_code_rows: list[OfflineRecoveryCodeRow] = []
@@ -742,15 +747,15 @@ class OfflineCredentialStore:
             is_trusted_account=is_enrolled_account,
             password_hash=self._state.password_hash if is_enrolled_account else None,
             credential_revision=(self._state.credential_revision if is_enrolled_account else None),
-            username_bucket=self._state.buckets.get(username_bucket_hash),
-            source_bucket=self._state.buckets.get(source_bucket_hash),
+            username_bucket=self._state.login_buckets.get(username_bucket_hash),
+            source_bucket=self._state.source_buckets.get(source_bucket_hash),
         )
 
     async def record_login_failure(
         self, command: RecordLoginFailureCommand
     ) -> RecordedLoginFailure:
         transition = next_login_failure_transition(
-            self._state.buckets.get(command.username_bucket_hash),
+            self._state.login_buckets.get(command.username_bucket_hash),
             database_now=command.database_now,
             policy=_OFFLINE_THROTTLE_POLICY,
         )
@@ -764,8 +769,8 @@ class OfflineCredentialStore:
             failed_attempt_count=transition.failed_attempt_count,
             locked_until=transition.locked_until,
         )
-        self._state.buckets[command.username_bucket_hash] = username_bucket
-        self._state.buckets[command.source_bucket_hash] = source_bucket
+        self._state.login_buckets[command.username_bucket_hash] = username_bucket
+        self._state.source_buckets[command.source_bucket_hash] = source_bucket
         return RecordedLoginFailure(
             username_bucket=username_bucket,
             source_bucket=source_bucket,

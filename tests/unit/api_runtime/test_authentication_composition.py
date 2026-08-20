@@ -11,14 +11,20 @@ accepting explicit CIDRs for tests that exercise trusted forwarding.
 
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, Final, cast
 
+import api_runtime.authentication_composition as authentication_composition
+import pytest
 from api_runtime.authentication_composition import (
+    OfflineAuthenticationState,
     WebAuthenticationRuntime,
     compose_offline_web_authentication,
     compose_web_authentication,
+    verify_keyring_covers_required_key_ids,
 )
 from api_runtime.authentication_crypto import AuthenticationKeyring
 from api_runtime.authentication_dependencies import create_client_address_resolver
@@ -117,3 +123,45 @@ def test_resolver_binds_the_configuration_at_composition_time() -> None:
     mutable_cidrs.append("0.0.0.0/0")
     spoofed = build_request(client=_UNTRUSTED_PEER, forwarded_for=_FORWARDED_CLIENT)
     assert resolver(spoofed) == _UNTRUSTED_PEER[0]
+
+
+def test_keyring_coverage_uses_the_database_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Coverage must classify expiring credentials at the database time."""
+    database_now = datetime(2030, 1, 1, tzinfo=UTC)
+    observed_database_times: list[datetime] = []
+
+    class DatabaseClock:
+        async def database_now(self) -> datetime:
+            return database_now
+
+    class CredentialStoreWithObservedClock:
+        def __init__(self, engine: AsyncEngine) -> None:
+            del engine
+
+        async def required_key_ids(self, *, database_now: datetime) -> frozenset[str]:
+            observed_database_times.append(database_now)
+            return frozenset()
+
+    monkeypatch.setattr(
+        authentication_composition,
+        "CredentialStore",
+        CredentialStoreWithObservedClock,
+    )
+
+    asyncio.run(
+        verify_keyring_covers_required_key_ids(
+            engine=cast("AsyncEngine", SimpleNamespace()),
+            keyring=build_serve_keyring(),
+            clock=DatabaseClock(),
+        )
+    )
+
+    assert observed_database_times == [database_now]
+
+
+def test_offline_authentication_state_keeps_throttle_buckets_independent() -> None:
+    """A username lockout must not mutate the distinct source-bucket map."""
+    offline_state = OfflineAuthenticationState(totp_active=False)
+    assert offline_state.login_buckets is not offline_state.source_buckets

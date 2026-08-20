@@ -44,6 +44,7 @@ from fastapi import FastAPI
 
 from api_runtime.application import create_api_application
 from api_runtime.authentication_composition import (
+    DatabaseAuthenticationClock,
     compose_web_authentication,
     verify_keyring_covers_required_key_ids,
 )
@@ -159,7 +160,15 @@ def run_server(
                 # 20.1 and the exclusion-policy signer proof of spec 13.1
                 # fail startup without ever exposing the socket.
                 await lifecycle.start()
-                await verify_keyring_covers_required_key_ids(engine=engine, keyring=keyring)
+                try:
+                    await verify_keyring_covers_required_key_ids(
+                        engine=engine,
+                        keyring=keyring,
+                        clock=DatabaseAuthenticationClock(engine),
+                    )
+                except ApplicationError as error:
+                    logger.emit_application_error(error)
+                    raise
                 await lifecycle.verify_exclusion_policy_signer(signing_key_id=policy_signer.key_id)
                 try:
                     yield
