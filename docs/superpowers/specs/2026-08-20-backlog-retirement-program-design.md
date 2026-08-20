@@ -26,10 +26,12 @@ states. Rows are removed only after their disposition is committed.
 
 ## Program order
 
-The program is a sequence of bounded waves, not one cross-domain mega-change.
-Each wave gets its own approved spec, implementation plan, branch, tests,
-review and one handoff. No later wave may use a known unretired invariant from
-an earlier wave as an assumption.
+The program is a set of bounded ownership waves, not one cross-domain
+mega-change or a serial barrier for the Phase 2 child-spec sequence. Each wave
+gets its own approved spec, implementation plan, branch, tests, review and one
+handoff. A downstream child may not rely on a known unretired invariant, but
+the hard gate is the item's explicit `Implement by` value in `BACKLOG.md`, not
+completion of every earlier wave.
 
 | Wave | Domain boundary | Required outcome before the next wave |
 | --- | --- | --- |
@@ -100,13 +102,29 @@ future core consumer without a validating boundary:
 - `docs/handoff/BACKLOG.md` loses only Wave 1 rows whose terminal disposition
   is evidenced in the Wave 1 handoff.
 
-## Dependency gates for later waves
+## Child-spec readiness gates
 
-Wave 2 may begin only after Wave 1 acceptance is green. Wave 3 may be planned
-in parallel but may not merge code that depends on unresolved canonical
-diagnostic/redaction semantics. Phase 2 child 5 (locator/tombstone lifecycle)
-does not start until Waves 1–4 have retired their respective load-bearing rows
-or the user explicitly accepts a documented exception.
+The Phase 2 child-spec sequence and backlog-retirement waves are independent
+axes: child specs deliver capability; waves group inherited obligations by
+owner. `BACKLOG.md` is the executable dependency map.
+
+1. **Before Child 5:** every current row whose `Implement by` is `Before
+   Child 5` reaches a terminal disposition. This is the Child 5 readiness
+   batch: small-file sensitive-value redaction, canonical read/recovery
+   correctness and privacy, source-publication durability/diagnostics, and the
+   identified web-auth API hygiene boundary.
+2. **Before Child 7 and production activation:** the hosted R2 sanitized-JUnit
+   gate is recorded through its existing external procedure; no simulated
+   substitute is accepted.
+3. **Before Child 9 acceptance closure:** all rows marked `Before Child 9…`
+   and the real-device/CI acceptance evidence have terminal dispositions.
+4. **Conditional gates:** rows naming a runtime trigger, such as a TypeScript
+   pin bump, key rotation, multi-worker serve, a new stack workflow, or a
+   fourth sensitive value object, block that trigger rather than an unrelated
+   child.
+5. **Wave 5 hygiene gate:** `Wave 5 hygiene gate` rows are non-load-bearing
+   cleanup. They must close before Phase 2 completion but do not block the next
+   child by default.
 
 ## Decision log and audit trail
 
