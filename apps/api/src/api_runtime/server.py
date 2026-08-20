@@ -161,16 +161,18 @@ def run_server(
                 # fail startup without ever exposing the socket.
                 await lifecycle.start()
                 try:
-                    await verify_keyring_covers_required_key_ids(
-                        engine=engine,
-                        keyring=keyring,
-                        clock=DatabaseAuthenticationClock(engine),
+                    try:
+                        await verify_keyring_covers_required_key_ids(
+                            engine=engine,
+                            keyring=keyring,
+                            clock=DatabaseAuthenticationClock(engine),
+                        )
+                    except ApplicationError as error:
+                        logger.emit_application_error(error)
+                        raise
+                    await lifecycle.verify_exclusion_policy_signer(
+                        signing_key_id=policy_signer.key_id
                     )
-                except ApplicationError as error:
-                    logger.emit_application_error(error)
-                    raise
-                await lifecycle.verify_exclusion_policy_signer(signing_key_id=policy_signer.key_id)
-                try:
                     yield
                 finally:
                     if small_file_sync.aclose is not None:

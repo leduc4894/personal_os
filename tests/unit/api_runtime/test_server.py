@@ -369,10 +369,29 @@ def test_server_lifespan_configuration_failure_enters_diagnostics_before_framewo
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A pre-bind keyring refusal is structured before it reaches the server."""
+    lifecycle_events: list[str] = []
+
+    class RecordingLifecycle:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        async def start(self) -> None:
+            lifecycle_events.append("start")
+
+        async def stop(self) -> None:
+            lifecycle_events.append("stop")
+
+        async def check(self) -> None:
+            return None
+
+        async def verify_exclusion_policy_signer(self, *, signing_key_id: str) -> None:
+            del signing_key_id
+            raise AssertionError("keyring rejection must stop before signer validation")
 
     async def reject_keyring_coverage(**_: object) -> None:
         raise ConfigurationError(ErrorCode.CONFIGURATION_SECRET_INVALID)
 
+    monkeypatch.setattr("api_runtime.server.DatabaseRuntimeLifecycle", RecordingLifecycle)
     monkeypatch.setattr(
         "api_runtime.server.verify_keyring_covers_required_key_ids",
         reject_keyring_coverage,
@@ -396,4 +415,5 @@ def test_server_lifespan_configuration_failure_enters_diagnostics_before_framewo
     assert result == 70
     assert emergency_records[0]["event"] == "runtime_configuration_failed"
     assert emergency_records[-1]["event"] == "internal_error"
+    assert lifecycle_events == ["start", "stop"]
     assert "Traceback" not in "\n".join(json.dumps(record) for record in emergency_records)

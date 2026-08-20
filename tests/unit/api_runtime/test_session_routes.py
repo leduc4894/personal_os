@@ -567,8 +567,8 @@ async def test_login_source_bucket_uses_the_forwarded_client_behind_configured_t
     await post_failed_login_behind_transport(
         app, client_address=("192.0.2.10", 443), forwarded_for="198.51.100.7"
     )
-    assert login_source_bucket_hash("198.51.100.7") in state.buckets
-    assert login_source_bucket_hash("192.0.2.10") not in state.buckets
+    assert login_source_bucket_hash("198.51.100.7") in state.source_buckets
+    assert login_source_bucket_hash("192.0.2.10") not in state.source_buckets
 
 
 @pytest.mark.asyncio
@@ -578,5 +578,5 @@ async def test_login_source_bucket_ignores_forwarded_headers_without_configured_
     await post_failed_login_behind_transport(
         app, client_address=("192.0.2.10", 443), forwarded_for="198.51.100.7"
     )
-    assert login_source_bucket_hash("192.0.2.10") in state.buckets
-    assert login_source_bucket_hash("198.51.100.7") not in state.buckets
+    assert login_source_bucket_hash("192.0.2.10") in state.source_buckets
+    assert login_source_bucket_hash("198.51.100.7") not in state.source_buckets

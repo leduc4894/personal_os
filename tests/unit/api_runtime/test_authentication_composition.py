@@ -32,6 +32,7 @@ from api_runtime.authentication_settings import AuthenticationSettings
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from personal_os.diagnostics.context import create_diagnostic_context
 from personal_os.runtime_configuration.models import RuntimeEnvironment
 
 _TRUSTED_PROXY_CIDRS: Final[tuple[str, ...]] = ("192.0.2.0/24",)
@@ -165,3 +166,25 @@ def test_offline_authentication_state_keeps_throttle_buckets_independent() -> No
     """A username lockout must not mutate the distinct source-bucket map."""
     offline_state = OfflineAuthenticationState(totp_active=False)
     assert offline_state.login_buckets is not offline_state.source_buckets
+
+
+def test_offline_source_throttle_accumulates_failures_across_usernames() -> None:
+    """One hostile source must lock independently of each unknown username."""
+    offline_state = OfflineAuthenticationState(totp_active=False)
+    runtime = compose_offline_web_authentication(state=offline_state)
+    diagnostic_context = create_diagnostic_context().context
+
+    async def record_failures() -> None:
+        for username in ("unknown-one", "unknown-two"):
+            outcome = await runtime.login_service.login(
+                username=username,
+                password="wrong-password",
+                source_bucket="198.51.100.8",
+                diagnostic_context=diagnostic_context,
+            )
+            assert outcome.public_error is not None
+
+    asyncio.run(record_failures())
+
+    source_bucket = next(iter(offline_state.source_buckets.values()))
+    assert source_bucket.failed_attempt_count == 2

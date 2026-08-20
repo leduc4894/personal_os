@@ -108,6 +108,7 @@ from personal_os.authentication.passwords import (
 from personal_os.authentication.ports import AuthenticationCryptoPort
 from personal_os.authentication.sessions import (
     PASSWORD_AUTHENTICATION_METHOD,
+    AuthenticationClockPort,
     ChangedPassword,
     ChangePasswordCommand,
     CommitLoginSuccessCommand,
@@ -421,7 +422,7 @@ async def verify_keyring_covers_required_key_ids(
     *,
     engine: AsyncEngine,
     keyring: AuthenticationKeyring,
-    clock: DatabaseAuthenticationClock,
+    clock: AuthenticationClockPort | None = None,
 ) -> None:
     """Read every referenced key ID and enforce the coverage refusal (spec 20.1).
 
@@ -429,8 +430,9 @@ async def verify_keyring_covers_required_key_ids(
     Uvicorn runs the application lifespan startup before binding, so the
     raised :class:`ConfigurationError` aborts startup.
     """
+    database_clock = clock if clock is not None else DatabaseAuthenticationClock(engine)
     required_key_ids = await CredentialStore(engine).required_key_ids(
-        database_now=await clock.database_now()
+        database_now=await database_clock.database_now()
     )
     assert_keyring_covers_required_key_ids(required_key_ids, keyring)
 
@@ -759,15 +761,20 @@ class OfflineCredentialStore:
             database_now=command.database_now,
             policy=_OFFLINE_THROTTLE_POLICY,
         )
+        source_transition = next_login_failure_transition(
+            self._state.source_buckets.get(command.source_bucket_hash),
+            database_now=command.database_now,
+            policy=_OFFLINE_THROTTLE_POLICY,
+        )
         username_bucket = ThrottleBucketState(
             window_started_at=transition.window_started_at,
             failed_attempt_count=transition.failed_attempt_count,
             locked_until=transition.locked_until,
         )
         source_bucket = ThrottleBucketState(
-            window_started_at=transition.window_started_at,
-            failed_attempt_count=transition.failed_attempt_count,
-            locked_until=transition.locked_until,
+            window_started_at=source_transition.window_started_at,
+            failed_attempt_count=source_transition.failed_attempt_count,
+            locked_until=source_transition.locked_until,
         )
         self._state.login_buckets[command.username_bucket_hash] = username_bucket
         self._state.source_buckets[command.source_bucket_hash] = source_bucket
