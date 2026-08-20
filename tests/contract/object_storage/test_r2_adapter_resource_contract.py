@@ -299,6 +299,7 @@ async def test_free_space_probe_does_not_block_independent_async_work(tmp_path: 
     independent_task_completed = threading.Event()
     allow_probe_return = threading.Event()
     independent_completed_before_probe_return = [False]
+    releaser_failures: list[BaseException] = []
 
     def blocking_disk_usage(_root: Path) -> SimpleNamespace:
         probe_started.set()
@@ -306,9 +307,15 @@ async def test_free_space_probe_does_not_block_independent_async_work(tmp_path: 
         return SimpleNamespace(free=_FREE_SPACE_BYTES)
 
     def release_probe_after_loop_progress() -> None:
-        assert probe_started.wait(timeout=1)
-        independent_completed_before_probe_return[0] = independent_task_completed.wait(timeout=1)
-        allow_probe_return.set()
+        try:
+            assert probe_started.wait(timeout=1)
+            independent_completed_before_probe_return[0] = independent_task_completed.wait(
+                timeout=1
+            )
+        except BaseException as error:
+            releaser_failures.append(error)
+        finally:
+            allow_probe_return.set()
 
     releaser = threading.Thread(target=release_probe_after_loop_progress)
     releaser.start()
@@ -320,10 +327,15 @@ async def test_free_space_probe_does_not_block_independent_async_work(tmp_path: 
 
     reservation_task = asyncio.create_task(manager.reserve_verification(1))
     independent_task = asyncio.create_task(complete_independent_work())
-    reservation = await reservation_task
-    await independent_task
-    releaser.join()
+    try:
+        reservation = await asyncio.wait_for(reservation_task, timeout=2)
+        await asyncio.wait_for(independent_task, timeout=2)
+    finally:
+        await asyncio.to_thread(releaser.join, 1)
 
+    assert not releaser.is_alive()
+    if releaser_failures:
+        raise releaser_failures[0]
     assert independent_completed_before_probe_return == [True]
     await reservation.close()
     assert list(tmp_path.iterdir()) == []
