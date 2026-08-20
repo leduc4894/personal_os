@@ -133,6 +133,22 @@ def test_blocklist_loader_rejects_malformed_digest_lines() -> None:
         )
 
 
+def test_blocklist_loader_rejects_internal_whitespace_padding() -> None:
+    """A line that is exactly 64 chars but mixes hex and whitespace must reject.
+
+    The artifact grammar is ``^[0-9a-f]{64}$``: anchored, length 64, lowercase
+    hex only. The previous parser accepted any 64-char lowercase string that
+    ``int(line, 16)`` could parse, which silently tolerated internal ASCII
+    whitespace because ``int()`` strips it.
+    """
+    with pytest.raises(ValueError, match="blocklist digest lines"):
+        # 63 hex chars + 1 space, exactly 64 chars long.
+        PasswordBlocklist.from_digest_text("a" * 63 + " ")
+    with pytest.raises(ValueError, match="blocklist digest lines"):
+        # 64 hex chars total, with an interior tab.
+        PasswordBlocklist.from_digest_text("a" * 32 + "\t" + "a" * 31)
+
+
 def test_blocklist_loader_rejects_unsorted_and_duplicate_digests() -> None:
     ascending_first = "0" * 64
     ascending_last = "f" * 64

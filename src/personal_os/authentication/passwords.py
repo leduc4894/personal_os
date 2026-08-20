@@ -21,6 +21,7 @@ import bisect
 import hashlib
 import hmac
 import importlib.resources
+import re
 from dataclasses import dataclass
 from typing import Final
 
@@ -54,6 +55,12 @@ COMMON_PASSWORD_BLOCKLIST_DIGEST_COUNT: Final[int] = 9_913
 #: One artifact line is exactly a 64-character lowercase hex SHA-256 digest.
 _BLOCKLIST_DIGEST_LENGTH: Final[int] = 64
 
+#: Artifact grammar: anchored, length 64, lowercase hex only. Used by
+#: :meth:`PasswordBlocklist.from_digest_text` to reject any line that is not
+#: exactly the canonical form (no internal whitespace, no uppercase, no
+#: trailing/leading padding). Matches ``test_passwords._DIGEST_PATTERN``.
+_BLOCKLIST_DIGEST_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{64}$")
+
 
 @dataclass(frozen=True, slots=True)
 class PasswordBlocklist:
@@ -78,12 +85,8 @@ class PasswordBlocklist:
         if not lines:
             raise ValueError("blocklist digest lines are empty")
         for line in lines:
-            if len(line) != _BLOCKLIST_DIGEST_LENGTH or line != line.lower():
+            if not _BLOCKLIST_DIGEST_PATTERN.fullmatch(line):
                 raise ValueError("blocklist digest lines are malformed")
-            try:
-                int(line, 16)
-            except ValueError as cause:
-                raise ValueError("blocklist digest lines are malformed") from cause
         if list(lines) != sorted(lines) or len(set(lines)) != len(lines):
             raise ValueError("blocklist digest lines are malformed")
         return cls(digests=tuple(lines))
