@@ -111,22 +111,48 @@ async def run_bounded_child(
     )
     stdout_task = asyncio.create_task(_read_capped_stdout(process.stdout))
     stderr_task = asyncio.create_task(_discard_stream(process.stderr))
+    drain_task = asyncio.create_task(_drain_child_pipes(stdout_task, stderr_task))
     timed_out = False
     try:
-        await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
-    except TimeoutError:
-        timed_out = True
-        process.terminate()
-        with suppress(TimeoutError):
-            await asyncio.wait_for(process.wait(), timeout=CHILD_TERMINATE_GRACE_SECONDS)
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
-    capped_stdout, _ = await asyncio.gather(stdout_task, stderr_task)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
+        except TimeoutError:
+            timed_out = True
+            await _terminate_then_kill_child(process)
+        capped_stdout, _ = await asyncio.shield(drain_task)
+    except asyncio.CancelledError:
+        try:
+            with suppress(Exception):
+                await _terminate_then_kill_child(process)
+        finally:
+            with suppress(Exception):
+                await asyncio.shield(drain_task)
+        raise
     exit_code = process.returncode if process.returncode is not None else -1
     return ProcessRunResult(
         returncode=exit_code, timed_out=timed_out, stdout=capped_stdout
     )
+
+
+async def _terminate_then_kill_child(process: asyncio.subprocess.Process) -> None:
+    """Stop a child and await its exit using the established timeout sequence."""
+    if process.returncode is not None:
+        return
+    with suppress(ProcessLookupError):
+        process.terminate()
+    with suppress(TimeoutError):
+        await asyncio.wait_for(process.wait(), timeout=CHILD_TERMINATE_GRACE_SECONDS)
+    if process.returncode is None:
+        with suppress(ProcessLookupError):
+            process.kill()
+        await process.wait()
+
+
+async def _drain_child_pipes(
+    stdout_task: asyncio.Task[str], stderr_task: asyncio.Task[None]
+) -> tuple[str, None]:
+    """Await both pre-started pipe drains without retaining stderr."""
+    return await asyncio.gather(stdout_task, stderr_task)
 
 
 async def _read_capped_stdout(stream: asyncio.StreamReader | None) -> str:
@@ -210,12 +236,9 @@ def _sanitized_child_environment() -> dict[str, str]:
 
 def _escape_passfile_field(value: str) -> str:
     """Encode one libpq passfile field without allowing delimiter injection."""
-    return (
-        value.replace("\\", "\\\\")
-        .replace(":", "\\:")
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-    )
+    if "\n" in value or "\r" in value:
+        raise ValueError("libpq password-file fields cannot contain line breaks")
+    return value.replace("\\", "\\\\").replace(":", "\\:")
 
 
 def _dependency_unavailable() -> RecoveryError:
@@ -292,7 +315,11 @@ class PostgresqlDumpProcessAdapter:
             target.user,
             target.database,
         ]
-        async with self._ephemeral_passfile(target) as passfile_path:
+        try:
+            passfile_line = self._build_passfile_line(target)
+        except ValueError:
+            raise _integrity_failed() from None
+        async with self._ephemeral_passfile(passfile_line) as passfile_path:
             result = await self._run_bounded(
                 argv,
                 env=self._child_env(passfile_path),
@@ -331,7 +358,11 @@ class PostgresqlDumpProcessAdapter:
             target.database,
             str(input_file),
         ]
-        async with self._ephemeral_passfile(target) as passfile_path:
+        try:
+            passfile_line = self._build_passfile_line(target)
+        except ValueError:
+            raise _restore_failed() from None
+        async with self._ephemeral_passfile(passfile_line) as passfile_path:
             result = await self._run_bounded(
                 argv,
                 env=self._child_env(passfile_path),
@@ -367,8 +398,21 @@ class PostgresqlDumpProcessAdapter:
         environment["PGPASSFILE"] = str(passfile_path)
         return environment
 
+    def _build_passfile_line(self, target: PostgresqlConnectionTarget) -> str:
+        """Build one libpq line, rejecting unrepresentable line-break fields."""
+        return ":".join(
+            _escape_passfile_field(field)
+            for field in (
+                target.host,
+                str(target.port),
+                target.database,
+                target.user,
+                self._password.get_secret_value(),
+            )
+        ) + "\n"
+
     @asynccontextmanager
-    async def _ephemeral_passfile(self, target: PostgresqlConnectionTarget) -> AsyncIterator[Path]:
+    async def _ephemeral_passfile(self, passfile_line: str) -> AsyncIterator[Path]:
         """Ephemeral mode-0600 libpq password file outside the bundle root.
 
         Created in the system temp directory, removed in ``finally`` including
@@ -381,19 +425,7 @@ class PostgresqlDumpProcessAdapter:
         passfile_path = Path(passfile_text)
         try:
             with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
-                handle.write(
-                    ":".join(
-                        _escape_passfile_field(field)
-                        for field in (
-                            target.host,
-                            str(target.port),
-                            target.database,
-                            target.user,
-                            self._password.get_secret_value(),
-                        )
-                    )
-                    + "\n"
-                )
+                handle.write(passfile_line)
             if os.name == "posix":
                 os.chmod(passfile_path, _PASSFILE_MODE_POSIX)
             yield passfile_path

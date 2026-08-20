@@ -236,7 +236,9 @@ async def test_reference_identity_mismatch_fails_closed_with_state_invalid() -> 
 
 
 @pytest.mark.asyncio
-async def test_object_store_missing_error_surfaces_unchanged() -> None:
+async def test_object_store_missing_error_surfaces_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     command = build_read_command()
     store = FakeCanonicalSourceReadStore(build_read_reference(command))
     object_store = LeakCheckingObjectStore(missing=True)
@@ -247,6 +249,16 @@ async def test_object_store_missing_error_surfaces_unchanged() -> None:
         metrics=metrics,
         policy_guard=AllowingPolicyGuard(ledger=CallLedger()),
     )
+    registry_calls: list[tuple[EventName, dict[str, object]]] = []
+    original_registry = reading_module.build_registered_event
+
+    def recording_registry(
+        event_name: EventName, fields: Mapping[str, object]
+    ) -> DiagnosticEvent | RejectedDiagnosticPayload:
+        registry_calls.append((event_name, dict(fields)))
+        return original_registry(event_name, fields)
+
+    monkeypatch.setattr(reading_module, "build_registered_event", recording_registry)
 
     with pytest.raises(ObjectStorageError) as excinfo:
         await service.read_current_source_bytes(command, build_diagnostic_context())
@@ -256,6 +268,16 @@ async def test_object_store_missing_error_surfaces_unchanged() -> None:
     assert type(excinfo.value) is ObjectStorageError
     assert excinfo.value.error_code is ErrorCode.OBJECT_STORAGE_OBJECT_MISSING
     assert metrics.read_count(ReadOutcome.FAILED) == 1
+    assert registry_calls == [
+        (
+            EventName.CANONICAL_SOURCE_READ_FAILED,
+            {
+                "source_id": command.source_id,
+                "workspace_id": command.workspace_id,
+                "error_code": ErrorCode.OBJECT_STORAGE_OBJECT_MISSING,
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,7 @@ from pydantic import SecretStr
 
 sys.path.insert(0, str(Path(__file__).parents[3]))
 
+from tools import postgresql_dump_process as postgresql_dump_process_module
 from tools.postgresql_dump_process import (
     CHILD_TERMINATE_GRACE_SECONDS,
     EXPECTED_POSTGRESQL_CLIENT_VERSION,
@@ -50,6 +51,9 @@ _PASSWORD = "sentinel-password-value"
 _TARGET = PostgresqlConnectionTarget(host=_HOST, port=_PORT, database=_DATABASE, user=_USER)
 #: Sentinel that must never surface in any raised error text.
 _STDERR_SENTINEL = "secret-stderr-detail-must-never-leak"
+_PROBE_OUTPUT_DIGEST = "cc9282bc6e2a067298726aacac0d6c3aba5fe1e74ca5bbdf8f47f24d8b31c272"
+_DEFAULT_PASSFILE_DIGEST = "fa97d2a442f0c239446b62ec331eed57670a366e8b67b1de739e9f6ce3b5a200"
+_ESCAPED_PASSFILE_DIGEST = "8cbbc0c702e508b1a3d6d07ca9fec995712de1ce74cbfc48a53a623998d42a1f"
 
 _EXPECTED_DUMP_ARGUMENTS = [
     "--format=custom",
@@ -92,7 +96,7 @@ class RecordedCall:
     env: dict[str, str]
     timeout_seconds: float
     passfile_exists_at_call: bool | None = None
-    passfile_text_at_call: str | None = None
+    passfile_digest_at_call: str | None = None
     passfile_mode_at_call: int | None = None
 
 
@@ -132,7 +136,11 @@ class ScriptedRunner:
                 env=dict(env),
                 timeout_seconds=timeout_seconds,
                 passfile_exists_at_call=passfile_exists,
-                passfile_text_at_call=passfile_content,
+                passfile_digest_at_call=(
+                    hashlib.sha256(passfile_content.encode("utf-8")).hexdigest()
+                    if passfile_content is not None
+                    else None
+                ),
                 passfile_mode_at_call=passfile_mode,
             )
         )
@@ -154,8 +162,99 @@ def _adapter(runner: ScriptedRunner) -> PostgresqlDumpProcessAdapter:
 
 def _assert_error_is_closed_and_sentinel_free(error: RecoveryError) -> None:
     rendered = repr(error) + str(error) + repr(error.to_safe_dict())
-    assert _STDERR_SENTINEL not in rendered
-    assert _PASSWORD not in rendered
+    if _STDERR_SENTINEL in rendered:
+        pytest.fail("closed recovery error rendered protected child output")
+    if _PASSWORD in rendered:
+        pytest.fail("closed recovery error rendered a protected credential")
+
+
+def _opaque_text_digest(value: str) -> str:
+    """Return a safe assertion value for protected process-boundary fixtures."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _assert_no_protected_rendering(rendered: str, protected_values: tuple[str, ...]) -> None:
+    """Fail without making pytest/JUnit render a protected fixture value."""
+    if any(value in rendered for value in protected_values):
+        pytest.fail("recovery boundary rendered a protected fixture value")
+
+
+class DrainTrackingStream:
+    """Minimal async pipe fake that proves cancellation drains both streams."""
+
+    def __init__(self) -> None:
+        self.read_count = 0
+
+    async def read(self, _limit: int) -> bytes:
+        self.read_count += 1
+        return b""
+
+
+class CancellationCleanupProcess:
+    """Child fake that exits only after terminate-then-kill cleanup."""
+
+    def __init__(self) -> None:
+        self.stdout = DrainTrackingStream()
+        self.stderr = DrainTrackingStream()
+        self.returncode: int | None = None
+        self.wait_started = asyncio.Event()
+        self._exited = asyncio.Event()
+        self.wait_count = 0
+        self.terminate_count = 0
+        self.kill_count = 0
+
+    async def wait(self) -> int:
+        self.wait_count += 1
+        self.wait_started.set()
+        await self._exited.wait()
+        assert self.returncode is not None
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminate_count += 1
+
+    def kill(self) -> None:
+        self.kill_count += 1
+        self.returncode = -9
+        self._exited.set()
+
+
+class BlockingDrainTrackingStream:
+    """Pipe fake that distinguishes a completed drain from cancellation."""
+
+    def __init__(self, release: asyncio.Event) -> None:
+        self._release = release
+        self.read_started = asyncio.Event()
+        self.drain_completed = False
+        self.was_cancelled = False
+
+    async def read(self, _limit: int) -> bytes:
+        self.read_started.set()
+        try:
+            await self._release.wait()
+        except asyncio.CancelledError:
+            self.was_cancelled = True
+            raise
+        self.drain_completed = True
+        return b""
+
+
+class ExitedProcessWithBlockingPipes:
+    """Already-exited child whose pipes still need their EOF drains awaited."""
+
+    def __init__(self) -> None:
+        self.returncode = 0
+        self.wait_started = asyncio.Event()
+        self._release_pipes = asyncio.Event()
+        self.stdout = BlockingDrainTrackingStream(self._release_pipes)
+        self.stderr = BlockingDrainTrackingStream(self._release_pipes)
+
+    async def wait(self) -> int:
+        self.wait_started.set()
+        return self.returncode
+
+    def release_pipes(self) -> None:
+        self._release_pipes.set()
 
 
 @pytest.mark.asyncio
@@ -170,7 +269,9 @@ async def test_create_dump_uses_exact_semantic_argument_vector(tmp_path: Path) -
     assert len(runner.calls) == 1
     call = runner.calls[0]
     expected = ["pg-dump-binary", *_EXPECTED_DUMP_ARGUMENTS]
-    assert list(call.argv) == [argument.format(output=str(output_file)) for argument in expected]
+    assert _opaque_text_digest("\x00".join(call.argv)) == _opaque_text_digest(
+        "\x00".join(argument.format(output=str(output_file)) for argument in expected)
+    )
     assert call.timeout_seconds == 321.0
 
 
@@ -214,14 +315,16 @@ async def test_child_env_sets_only_pgpassfile_and_never_password_env(
 
     await _adapter(runner).create_dump(_SNAPSHOT_TOKEN, output_file, _TARGET)
 
-    env = runner.calls[0].env
-    assert "PGPASSFILE" in env
-    assert "PGPASSWORD" not in env
-    assert "DATABASE_URL" not in env
-    leaked_pg_keys = {key for key in env if key.startswith("PG") and key != "PGPASSFILE"}
+    child_env_keys = frozenset(runner.calls[0].env)
+    assert "PGPASSFILE" in child_env_keys
+    assert "PGPASSWORD" not in child_env_keys
+    assert "DATABASE_URL" not in child_env_keys
+    leaked_pg_keys = {
+        key for key in child_env_keys if key.startswith("PG") and key != "PGPASSFILE"
+    }
     assert leaked_pg_keys == set()
     # Non-PG environment still reaches the child (libpq needs PATH to resolve).
-    assert "PATH" in env
+    assert "PATH" in child_env_keys
 
 
 @pytest.mark.asyncio
@@ -237,7 +340,7 @@ async def test_passfile_is_ephemeral_outside_bundle_and_removed_in_finally(
     call = runner.calls[0]
     passfile_path = Path(call.env["PGPASSFILE"])
     assert call.passfile_exists_at_call is True
-    assert call.passfile_text_at_call == f"{_HOST}:{_PORT}:{_DATABASE}:{_USER}:{_PASSWORD}\n"
+    assert call.passfile_digest_at_call == _DEFAULT_PASSFILE_DIGEST
     assert passfile_path.parent == Path(tempfile.gettempdir())
     if os.name == "posix":
         assert call.passfile_mode_at_call == 0o600
@@ -358,9 +461,8 @@ def test_parse_client_version_rejects_unparseable_output() -> None:
 
 
 def test_process_result_repr_excludes_captured_stdout() -> None:
-    assert "captured-output" not in repr(
-        ProcessRunResult(returncode=0, stdout="captured-output")
-    )
+    rendered = repr(ProcessRunResult(returncode=0, stdout="captured-output"))
+    _assert_no_protected_rendering(rendered, ("captured-output",))
 
 
 @pytest.mark.asyncio
@@ -373,15 +475,69 @@ async def test_passfile_escapes_libpq_delimiters_in_every_field() -> None:
     target = PostgresqlConnectionTarget(
         host="host:name",
         port=5432,
-        database="database\nname",
-        user="user\rname",
+        database="database\\name",
+        user="user:name",
     )
 
-    async with adapter._ephemeral_passfile(target) as passfile:
-        assert (
-            passfile.read_text(encoding="utf-8")
-            == "host\\:name:5432:database\\nname:user\\rname:pass\\\\word\n"
+    async with adapter._ephemeral_passfile(adapter._build_passfile_line(target)) as passfile:
+        passfile_digest = _opaque_text_digest(passfile.read_text(encoding="utf-8"))
+        assert passfile_digest == _ESCAPED_PASSFILE_DIGEST
+
+
+@pytest.mark.asyncio
+async def test_dump_rejects_passfile_line_breaks_before_spawning(tmp_path: Path) -> None:
+    invalid_targets = (
+        PostgresqlConnectionTarget(
+            host=f"host{chr(10)}name", port=5432, database="knowledge", user="knowledge_app"
+        ),
+        PostgresqlConnectionTarget(
+            host="127.0.0.1", port=5432, database=f"knowledge{chr(13)}name", user="knowledge_app"
+        ),
+    )
+    output_file = tmp_path / "postgres.dump"
+    output_file.write_bytes(b"dump-bytes")
+    for target in invalid_targets:
+        runner = ScriptedRunner()
+
+        with pytest.raises(RecoveryError) as raised:
+            await _adapter(runner).create_dump(_SNAPSHOT_TOKEN, output_file, target)
+
+        error = raised.value
+        assert error.error_code is ErrorCode.CANONICAL_RECOVERY_INTEGRITY_FAILED
+        if runner.calls:
+            pytest.fail("dump runner was called for an invalid password-file field")
+        _assert_no_protected_rendering(
+            repr(error) + str(error) + repr(error.to_safe_dict()),
+            (target.host, target.database, target.user, _PASSWORD, _SNAPSHOT_TOKEN),
         )
+
+
+@pytest.mark.asyncio
+async def test_restore_rejects_passfile_line_break_in_password_before_spawning(
+    tmp_path: Path,
+) -> None:
+    input_file = tmp_path / "restore.dump"
+    input_file.write_bytes(b"dump-bytes")
+    invalid_password = f"password{chr(10)}value"
+    runner = ScriptedRunner()
+    adapter = PostgresqlDumpProcessAdapter(
+        dump_binary="pg-dump-binary",
+        restore_binary="pg-restore-binary",
+        password=SecretStr(invalid_password),
+        runner=runner,
+    )
+
+    with pytest.raises(RecoveryError) as raised:
+        await adapter.restore_dump(input_file, _TARGET)
+
+    error = raised.value
+    assert error.error_code is ErrorCode.CANONICAL_RECOVERY_RESTORE_FAILED
+    if runner.calls:
+        pytest.fail("restore runner was called for an invalid password-file field")
+    _assert_no_protected_rendering(
+        repr(error) + str(error) + repr(error.to_safe_dict()),
+        (_TARGET.host, _TARGET.database, _TARGET.user, invalid_password),
+    )
 
 
 @pytest.mark.asyncio
@@ -517,9 +673,12 @@ async def test_no_shell_invocation_anywhere(tmp_path: Path) -> None:
 
     assert runner.calls
     for call in runner.calls:
-        assert not isinstance(call.argv, str)
-        assert isinstance(call.argv, tuple)
-        assert all(isinstance(argument, str) for argument in call.argv)
+        if isinstance(call.argv, str):
+            pytest.fail("child runner received a shell command string")
+        if not isinstance(call.argv, tuple) or not all(
+            isinstance(argument, str) for argument in call.argv
+        ):
+            pytest.fail("child runner received a non-string argument vector")
 
 
 @pytest.mark.asyncio
@@ -545,7 +704,7 @@ async def test_run_bounded_child_returns_drained_capped_stdout() -> None:
     # The capped stdout is the client-version gate's only input, so the
     # bounded runner must return what it drained from the child.
     assert result.returncode == 0
-    assert result.stdout.strip() == "probe-output"
+    assert _opaque_text_digest(result.stdout.strip()) == _PROBE_OUTPUT_DIGEST
 
 
 @pytest.mark.asyncio
@@ -580,3 +739,68 @@ async def test_run_bounded_child_terminates_then_kills_within_grace() -> None:
     assert result.timed_out is True
     assert result.returncode != 0
     assert elapsed_seconds < 0.5 + CHILD_TERMINATE_GRACE_SECONDS + 10.0
+
+
+@pytest.mark.asyncio
+async def test_run_bounded_child_cancellation_terminates_kills_and_drains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = CancellationCleanupProcess()
+
+    async def create_subprocess_exec(
+        *_args: object, **_kwargs: object
+    ) -> CancellationCleanupProcess:
+        return process
+
+    monkeypatch.setattr(
+        postgresql_dump_process_module.asyncio, "create_subprocess_exec", create_subprocess_exec
+    )
+    monkeypatch.setattr(postgresql_dump_process_module, "CHILD_TERMINATE_GRACE_SECONDS", 0.0)
+    running = asyncio.create_task(
+        run_bounded_child(["controlled-child"], env={}, timeout_seconds=60.0)
+    )
+    await asyncio.wait_for(process.wait_started.wait(), timeout=1.0)
+    running.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    assert process.terminate_count == 1
+    assert process.kill_count == 1
+    assert process.wait_count >= 2
+    assert process.stdout.read_count > 0
+    assert process.stderr.read_count > 0
+
+
+@pytest.mark.asyncio
+async def test_run_bounded_child_cancellation_finishes_pipe_drains_after_child_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = ExitedProcessWithBlockingPipes()
+
+    async def create_subprocess_exec(
+        *_args: object, **_kwargs: object
+    ) -> ExitedProcessWithBlockingPipes:
+        return process
+
+    monkeypatch.setattr(
+        postgresql_dump_process_module.asyncio, "create_subprocess_exec", create_subprocess_exec
+    )
+    running = asyncio.create_task(
+        run_bounded_child(["controlled-child"], env={}, timeout_seconds=60.0)
+    )
+    await asyncio.wait_for(process.wait_started.wait(), timeout=1.0)
+    await asyncio.wait_for(
+        asyncio.gather(process.stdout.read_started.wait(), process.stderr.read_started.wait()),
+        timeout=1.0,
+    )
+    running.cancel()
+    asyncio.get_running_loop().call_soon(process.release_pipes)
+
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    assert process.stdout.drain_completed is True
+    assert process.stderr.drain_completed is True
+    if process.stdout.was_cancelled or process.stderr.was_cancelled:
+        pytest.fail("caller cancellation cancelled a child pipe drain")

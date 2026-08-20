@@ -151,11 +151,12 @@ class CanonicalSourceReadService:
         The consumer body is entered only after the store resolved the source
         state transactionally under the active policy, the guard re-authorized
         the resolved reference, and the object store verified the full size,
-        media type and digest; any typed failure — including verification
-        failures raised before the first byte — surfaces the original error
-        unchanged after the failed outcome is recorded. Caller cancellation
-        propagates while the ``async with`` teardown closes the reader and
-        clears the adapter's spool state.
+        media type and digest. Only reader-side application and verification
+        failures — including failures before the first byte — record the
+        failed outcome and surface unchanged. Consumer body errors propagate
+        without read-failure telemetry. Caller cancellation propagates while
+        the ``async with`` teardown closes the reader and clears the adapter's
+        spool state.
         """
         validate_read_current_source_command(command)
         started = time.monotonic()
