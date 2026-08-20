@@ -355,8 +355,9 @@ class SpoolManager:
             return False
         return self._reserved_size_bytes + size_bytes <= self._limits.maximum_reserved_size_bytes
 
-    def _require_free_space_reserve(self, size_bytes: int) -> None:
-        if self._disk_usage(self._root).free - size_bytes < self._limits.free_space_reserve_bytes:
+    async def _require_free_space_reserve(self, size_bytes: int) -> None:
+        disk_usage = await asyncio.to_thread(self._disk_usage, self._root)
+        if disk_usage.free - size_bytes < self._limits.free_space_reserve_bytes:
             raise ObjectStorageError(ErrorCode.OBJECT_STORAGE_BUSY)
 
     def _acquire_admission_locked(self, size_bytes: int, consume_permit: bool) -> None:
@@ -372,7 +373,7 @@ class SpoolManager:
                 while True:
                     if self._clock() >= deadline:
                         raise _AdmissionWindowExpired()
-                    self._require_free_space_reserve(size_bytes)
+                    await self._require_free_space_reserve(size_bytes)
                     if self._has_capacity_locked(size_bytes, consume_permit):
                         self._acquire_admission_locked(size_bytes, consume_permit)
                         return

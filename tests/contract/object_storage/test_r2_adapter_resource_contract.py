@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,8 +33,9 @@ from tests.contract.object_storage.scripted_s3 import scripted_body
 from personal_os.diagnostics import DiagnosticLogger
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.object_storage import VerificationMethod, VerifiedObjectReceipt
-from personal_os.object_storage.errors import ObjectStorageError
+from personal_os.object_storage.errors import STREAM_INVALID, ObjectStorageError
 from personal_os.object_storage.keys import CanonicalObjectKey
+from r2_object_storage import spool as spool_module
 from r2_object_storage.adapter import R2S3ObjectStore
 from r2_object_storage.client import GetObjectResult, HeadObjectResult, PutObjectRequest
 from r2_object_storage.error_mapping import RetryPolicy
@@ -284,6 +286,77 @@ def _assert_no_residual_state(store: R2S3ObjectStore, tmp_path: Path) -> None:
     assert store.spool_manager.reserved_size_bytes == 0
     assert store.spool_manager.in_flight_count == 0
     assert list(tmp_path.iterdir()) == []
+
+
+# --- Admission and receive backstops --------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_free_space_probe_does_not_block_independent_async_work(tmp_path: Path) -> None:
+    """A blocking filesystem probe yields the event loop while admission is locked."""
+
+    probe_started = threading.Event()
+    independent_task_completed = threading.Event()
+    allow_probe_return = threading.Event()
+    independent_completed_before_probe_return = [False]
+
+    def blocking_disk_usage(_root: Path) -> SimpleNamespace:
+        probe_started.set()
+        allow_probe_return.wait()
+        return SimpleNamespace(free=_FREE_SPACE_BYTES)
+
+    def release_probe_after_loop_progress() -> None:
+        assert probe_started.wait(timeout=1)
+        independent_completed_before_probe_return[0] = independent_task_completed.wait(timeout=1)
+        allow_probe_return.set()
+
+    releaser = threading.Thread(target=release_probe_after_loop_progress)
+    releaser.start()
+    manager = SpoolManager(tmp_path, disk_usage=blocking_disk_usage)
+
+    async def complete_independent_work() -> None:
+        await asyncio.sleep(0)
+        independent_task_completed.set()
+
+    reservation_task = asyncio.create_task(manager.reserve_verification(1))
+    independent_task = asyncio.create_task(complete_independent_work())
+    reservation = await reservation_task
+    await independent_task
+    releaser.join()
+
+    assert independent_completed_before_probe_return == [True]
+    await reservation.close()
+    assert list(tmp_path.iterdir()) == []
+    assert manager.reserved_size_bytes == 0
+    assert manager.in_flight_count == 0
+
+
+@pytest.mark.asyncio
+async def test_stalled_receive_uses_real_time_backstop_and_cleans_resources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stream stuck inside ``__anext__`` cannot retain admission state indefinitely."""
+
+    monkeypatch.setattr(spool_module, "_RECEIVE_WINDOW_SECONDS", 0.01)
+    manager = SpoolManager(
+        tmp_path,
+        disk_usage=lambda _root: SimpleNamespace(free=_FREE_SPACE_BYTES),
+    )
+    never_resume = asyncio.Event()
+
+    async def stalled_stream() -> AsyncIterator[bytes]:
+        await never_resume.wait()
+        yield b"unreachable"
+
+    with pytest.raises(ObjectStorageError) as raised:
+        async with manager.receive_stream(stalled_stream(), 1):
+            pytest.fail("a stalled stream must not yield a spool")
+
+    assert raised.value.error_code is ErrorCode.OBJECT_STORAGE_INPUT_INVALID
+    assert raised.value.safe_details["reason"] is STREAM_INVALID
+    assert list(tmp_path.iterdir()) == []
+    assert manager.reserved_size_bytes == 0
+    assert manager.in_flight_count == 0
 
 
 # --- Four permits and aggregate reservation -------------------------------
