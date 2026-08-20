@@ -29,12 +29,6 @@ from pydantic import (
 )
 from sqlalchemy.engine import URL
 
-# Prime a pre-existing circular import inside ``personal_os``: importing
-# ``error_contracts.exceptions`` first would re-enter it before
-# ``DiagnosticContextError`` is defined. Importing the diagnostics package first
-# (``events`` is self-contained) resolves the cycle deterministically for every
-# importer of this module, including the future Alembic ``env.py`` entry point.
-import personal_os.diagnostics.events  # noqa: F401
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import DatabaseMigrationError
 from personal_os.runtime_configuration.environment_names import (
