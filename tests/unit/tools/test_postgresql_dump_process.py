@@ -357,6 +357,33 @@ def test_parse_client_version_rejects_unparseable_output() -> None:
         parse_client_version("some unexpected tool text")
 
 
+def test_process_result_repr_excludes_captured_stdout() -> None:
+    assert "captured-output" not in repr(
+        ProcessRunResult(returncode=0, stdout="captured-output")
+    )
+
+
+@pytest.mark.asyncio
+async def test_passfile_escapes_libpq_delimiters_in_every_field() -> None:
+    adapter = PostgresqlDumpProcessAdapter(
+        dump_binary="pg-dump-binary",
+        restore_binary="pg-restore-binary",
+        password=SecretStr("pass\\word"),
+    )
+    target = PostgresqlConnectionTarget(
+        host="host:name",
+        port=5432,
+        database="database\nname",
+        user="user\rname",
+    )
+
+    async with adapter._ephemeral_passfile(target) as passfile:
+        assert (
+            passfile.read_text(encoding="utf-8")
+            == "host\\:name:5432:database\\nname:user\\rname:pass\\\\word\n"
+        )
+
+
 @pytest.mark.asyncio
 async def test_dump_failure_maps_to_integrity_failed_without_raw_stderr(
     tmp_path: Path,
@@ -440,6 +467,18 @@ async def test_dump_timeout_maps_to_integrity_failed(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_restore_timeout_maps_to_restore_failed(tmp_path: Path) -> None:
+    input_file = tmp_path / "restore.dump"
+    input_file.write_bytes(b"dump-bytes")
+    runner = ScriptedRunner(default_result=ProcessRunResult(returncode=-1, timed_out=True))
+
+    with pytest.raises(RecoveryError) as raised:
+        await _adapter(runner).restore_dump(input_file, _TARGET)
+
+    assert raised.value.error_code is ErrorCode.CANONICAL_RECOVERY_RESTORE_FAILED
+
+
+@pytest.mark.asyncio
 async def test_dump_receipt_hashes_exact_output_file(tmp_path: Path) -> None:
     payload = b"canonical dump payload" * 100_000  # exercises the streaming path
     output_file = tmp_path / "postgres.dump"
@@ -507,6 +546,24 @@ async def test_run_bounded_child_returns_drained_capped_stdout() -> None:
     # bounded runner must return what it drained from the child.
     assert result.returncode == 0
     assert result.stdout.strip() == "probe-output"
+
+
+@pytest.mark.asyncio
+async def test_run_bounded_child_drains_both_pipes_before_child_exit() -> None:
+    result = await run_bounded_child(
+        [
+            sys.executable,
+            "-c",
+            "import sys; "
+            "sys.stdout.write('x' * 131072); sys.stdout.flush(); "
+            "sys.stderr.write('y' * 131072); sys.stderr.flush()",
+        ],
+        env=dict(os.environ),
+        timeout_seconds=5.0,
+    )
+
+    assert result.returncode == 0
+    assert result.timed_out is False
 
 
 @pytest.mark.asyncio

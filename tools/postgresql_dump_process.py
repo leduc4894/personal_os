@@ -30,7 +30,7 @@ import shutil
 import tempfile
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, Protocol
@@ -84,7 +84,7 @@ class ProcessRunResult:
 
     returncode: int
     timed_out: bool = False
-    stdout: str = ""
+    stdout: str = field(default="", repr=False)
 
 
 class BoundedChildRunner(Protocol):
@@ -109,32 +109,43 @@ async def run_bounded_child(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    stdout_task = asyncio.create_task(_read_capped_stdout(process.stdout))
+    stderr_task = asyncio.create_task(_discard_stream(process.stderr))
+    timed_out = False
     try:
         await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
     except TimeoutError:
+        timed_out = True
         process.terminate()
         with suppress(TimeoutError):
             await asyncio.wait_for(process.wait(), timeout=CHILD_TERMINATE_GRACE_SECONDS)
         if process.returncode is None:
             process.kill()
             await process.wait()
-        await _drain(process)
-        exit_code = process.returncode if process.returncode is not None else -1
-        return ProcessRunResult(returncode=exit_code, timed_out=True)
-    capped_stdout = await _drain(process)
+    capped_stdout, _ = await asyncio.gather(stdout_task, stderr_task)
     exit_code = process.returncode if process.returncode is not None else -1
-    return ProcessRunResult(returncode=exit_code, stdout=capped_stdout)
+    return ProcessRunResult(
+        returncode=exit_code, timed_out=timed_out, stdout=capped_stdout
+    )
 
 
-async def _drain(process: asyncio.subprocess.Process) -> str:
-    """Drain both pipes, returning only capped stdout and discarding stderr."""
-    capped_stdout = ""
-    if process.stdout is not None:
-        raw_stdout = await process.stdout.read(_MAX_CAPTURE_BYTES + 1)
-        capped_stdout = raw_stdout[:_MAX_CAPTURE_BYTES].decode("utf-8", errors="replace")
-    if process.stderr is not None:
-        await process.stderr.read()
-    return capped_stdout
+async def _read_capped_stdout(stream: asyncio.StreamReader | None) -> str:
+    """Drain stdout while retaining only the bounded version-probe prefix."""
+    if stream is None:
+        return ""
+    captured = bytearray()
+    while chunk := await stream.read(_MAX_CAPTURE_BYTES + 1):
+        remaining_bytes = _MAX_CAPTURE_BYTES - len(captured)
+        if remaining_bytes > 0:
+            captured.extend(chunk[:remaining_bytes])
+    return bytes(captured).decode("utf-8", errors="replace")
+
+
+async def _discard_stream(stream: asyncio.StreamReader | None) -> None:
+    """Drain a child stream without retaining its raw output."""
+    if stream is not None:
+        while await stream.read(_MAX_CAPTURE_BYTES + 1):
+            pass
 
 
 def parse_client_version(output: str) -> str:
@@ -195,6 +206,16 @@ def _sanitized_child_environment() -> dict[str, str]:
         for key, value in os.environ.items()
         if not key.startswith("PG") and key != "DATABASE_URL"
     }
+
+
+def _escape_passfile_field(value: str) -> str:
+    """Encode one libpq passfile field without allowing delimiter injection."""
+    return (
+        value.replace("\\", "\\\\")
+        .replace(":", "\\:")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
 
 
 def _dependency_unavailable() -> RecoveryError:
@@ -361,8 +382,17 @@ class PostgresqlDumpProcessAdapter:
         try:
             with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
                 handle.write(
-                    f"{target.host}:{target.port}:{target.database}:"
-                    f"{target.user}:{self._password.get_secret_value()}\n"
+                    ":".join(
+                        _escape_passfile_field(field)
+                        for field in (
+                            target.host,
+                            str(target.port),
+                            target.database,
+                            target.user,
+                            self._password.get_secret_value(),
+                        )
+                    )
+                    + "\n"
                 )
             if os.name == "posix":
                 os.chmod(passfile_path, _PASSFILE_MODE_POSIX)
