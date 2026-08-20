@@ -40,14 +40,13 @@ from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from api_runtime.exclusion_policy_crypto import Ed25519PolicySigner, Ed25519PolicyVerifier
+from api_runtime.exclusion_policy_crypto import Ed25519PolicySigner, TrustAnchorEd25519Verifier
 from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.diagnostics.logging import DiagnosticLogger
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.exclusion_policy.contracts import PolicySubject
 from personal_os.exclusion_policy.enforcement import (
     AllowedPolicyRevisionBinding,
-    KeyedTrustAnchorVerifier,
     PolicyEnforcementService,
     PublicationPolicyEvidence,
     default_utc_clock,
@@ -324,16 +323,15 @@ def compose_small_file_sync(
     """Build the real serve runtime of one API process.
 
     Follows the exclusion-policy serve precedent's shape: the shared engine,
-    the signer-derived trust anchor verifier, and provider adapters that open
-    no connection at construction — the PostgreSQL stores connect lazily per
-    transaction and the R2 client opens at the first object-store call inside
-    the serving loop. The graph is therefore composable before the socket
-    exists while every adapter is the production one.
+    a verifier over each canonical snapshot's persisted trust anchor, and
+    provider adapters that open no connection at construction — the PostgreSQL
+    stores connect lazily per transaction and the R2 client opens at the first
+    object-store call inside the serving loop. The graph is therefore
+    composable before the socket exists while every adapter is the production
+    one.
     """
 
-    verifier = KeyedTrustAnchorVerifier(
-        keyed_verifier=Ed25519PolicyVerifier({signer.key_id: signer.public_key_bytes})
-    )
+    verifier = TrustAnchorEd25519Verifier()
     enforcement = compose_policy_enforcement(engine, verifier=verifier)
     object_store = R2S3ObjectStore(
         LazyR2ClientSource(R2ClientManager(object_storage_settings, object_storage_credentials)),
