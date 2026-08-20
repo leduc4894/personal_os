@@ -54,6 +54,7 @@ def test_event_names_are_closed() -> None:
         "source_version_publish_succeeded",
         "source_version_publish_replayed",
         "source_version_publish_rejected",
+        "source_version_publish_failed",
         "projection_intent_dispatched",
         "projection_intent_dispatch_failed",
         "projection_intent_lease_reclaimed",

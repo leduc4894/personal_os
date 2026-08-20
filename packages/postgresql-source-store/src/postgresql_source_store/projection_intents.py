@@ -417,6 +417,8 @@ class _IntentDispatchContext:
     projection_kind: SafeToken
     attempt_count: int
     status: ProjectionIntentStatus
+    leased_until: datetime | None
+    database_now: datetime
 
 
 class PostgresqlProjectionIntentStore:
@@ -588,7 +590,11 @@ class PostgresqlProjectionIntentStore:
                 intent_id=intent_id,
                 attempt_count=context.attempt_count,
             )
-            if context.status is ProjectionIntentStatus.LEASED:
+            if (
+                context.status is ProjectionIntentStatus.LEASED
+                and context.leased_until is not None
+                and context.leased_until > context.database_now
+            ):
                 # An active row rejected the caller's fence token. Reuse the
                 # closed contract-invalid token rather than misreporting an
                 # expiration or expanding the public error vocabulary.
@@ -607,13 +613,23 @@ class PostgresqlProjectionIntentStore:
                 projection_intents.c.projection_kind,
                 projection_intents.c.attempt_count,
                 projection_intents.c.status,
+                projection_intents.c.leased_until,
+                sa.func.current_timestamp().label("database_now"),
             ).where(projection_intents.c.projection_intent_id == intent_id)
         )
         row = result.one_or_none()
         if row is None:
             return None
+        database_now = row.database_now
+        if not isinstance(database_now, datetime) or database_now.tzinfo is None:
+            raise ProjectionDispatchError(ErrorCode.PROJECTION_INTENT_CONTRACT_INVALID)
+        leased_until = row.leased_until
+        if leased_until is not None and not isinstance(leased_until, datetime):
+            raise ProjectionDispatchError(ErrorCode.PROJECTION_INTENT_CONTRACT_INVALID)
         return _IntentDispatchContext(
             projection_kind=projection_kind_token(str(row.projection_kind)),
             attempt_count=int(row.attempt_count),
             status=ProjectionIntentStatus(str(row.status)),
+            leased_until=leased_until,
+            database_now=database_now,
         )

@@ -249,6 +249,35 @@ async def test_stale_token_affects_zero_rows_and_emits_diagnostic(
 
 
 @pytest.mark.asyncio
+async def test_expired_but_unreclaimed_wrong_token_reports_lease_expired(
+    projection_dispatch_harness: ProjectionDispatchHarness,
+) -> None:
+    workspace = await projection_dispatch_harness.seed_workspace()
+    seeded, intent = await _seed_claimed_intent(projection_dispatch_harness, workspace)
+    await projection_dispatch_harness.expire_lease(seeded.projection_intent_id)
+    now = await projection_dispatch_harness.database_now()
+
+    released = await projection_dispatch_harness.store.release_retry(
+        seeded.projection_intent_id,
+        uuid4(),
+        SafeToken.parse("projection_dispatch_unavailable"),
+        now + timedelta(seconds=2),
+        now,
+    )
+
+    assert released is False
+    row = await projection_dispatch_harness.fetch_intent(seeded.projection_intent_id)
+    assert row["status"] == "leased"
+    assert row["lease_token"] == intent.lease_token
+    stale_events = projection_dispatch_harness.diagnostics.of(
+        EventName.PROJECTION_INTENT_DISPATCH_FAILED
+    )
+    assert len(stale_events) == 1
+    assert stale_events[0]["intent_id"] == seeded.projection_intent_id
+    assert stale_events[0]["error_code"] == LEASE_EXPIRED_ERROR_CODE
+
+
+@pytest.mark.asyncio
 async def test_reclaim_expired_increments_attempt_and_applies_backoff(
     projection_dispatch_harness: ProjectionDispatchHarness,
 ) -> None:
