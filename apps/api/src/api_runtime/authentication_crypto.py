@@ -44,6 +44,7 @@ from api_runtime.authentication_settings import (
     AUTHENTICATION_KEY_SIZE_BYTES,
     AuthenticationSettings,
 )
+from personal_os.authentication.crypto import assert_crypto_domain_label
 from personal_os.authentication.passwords import (
     ARGON2ID_HASH_LENGTH_BYTES,
     ARGON2ID_MEMORY_COST_KIB,
@@ -201,6 +202,7 @@ class CryptographyAuthenticationCrypto(AuthenticationCryptoPort):
             _internal_failure(cause)
         if not _DOMAIN_LABEL_MINIMUM_LENGTH <= len(info) <= _DOMAIN_LABEL_MAXIMUM_LENGTH:
             _internal_failure(ValueError("domain label length"))
+        assert_crypto_domain_label(label)
         return HKDF(
             algorithm=hashes.SHA256(),
             length=AUTHENTICATION_KEY_SIZE_BYTES,

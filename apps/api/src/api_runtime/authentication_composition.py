@@ -56,7 +56,10 @@ from personal_os.authentication.contracts import (
     TotpCredentialState,
     WebSessionState,
 )
-from personal_os.authentication.crypto import TOTP_SECRET_AEAD_LABEL
+from personal_os.authentication.crypto import (
+    TOTP_SECRET_AEAD_LABEL,
+    assert_crypto_domain_label,
+)
 from personal_os.authentication.device_authorization import (
     POLL_INTERVAL_SECONDS,
     ApprovedGrant,
@@ -454,6 +457,7 @@ class OfflineAuthenticationCrypto:
     """Deterministic crypto double deriving stable subkeys and stdlib HMAC."""
 
     def derive_subkey(self, *, master_key: bytes, label: str) -> bytes:
+        assert_crypto_domain_label(label)
         return hashlib.sha256(label.encode("ascii") + master_key).digest()
 
     def hmac_sha256(self, *, key: bytes, message: bytes) -> bytes:

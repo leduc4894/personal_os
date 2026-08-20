@@ -26,6 +26,7 @@ from uuid import UUID
 from personal_os.authentication.contracts import DeviceTokenKind, OpaqueCredential
 from personal_os.authentication.errors import AuthenticationError
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.error_contracts.exceptions import InternalApplicationError
 
 #: CSRF token hashing domain (spec 9.3, 20.1).
 CSRF_HASH_LABEL: Final[str] = "auth/csrf/v1"
@@ -93,6 +94,21 @@ _CREDENTIAL_LOOKUP_ID_PATTERN: Final[re.Pattern[str]] = re.compile(
 def _invalid_credential() -> AuthenticationError:
     """Build the credential rejection carrying no trace of the input."""
     return AuthenticationError(ErrorCode.DEVICE_CREDENTIAL_INVALID)
+
+
+def assert_crypto_domain_label(label: str) -> None:
+    """Reject a subkey derivation label outside the closed vocabulary.
+
+    The vocabulary pinned at :data:`CRYPTO_DOMAIN_LABELS` is the contract that
+    prevents domain confusion across the authentication subkeys (spec 20.1).
+    Deriving with an unregistered label would mix subkey domains; the rejection
+    fails closed as the safe ``internal_error`` without echoing the rejected
+    label text.
+    """
+    if label not in CRYPTO_DOMAIN_LABELS:
+        raise InternalApplicationError(ErrorCode.INTERNAL_ERROR) from ValueError(
+            "crypto domain label"
+        )
 
 
 def _parse_opaque_credential(value: str, expected_prefix: str) -> OpaqueCredential:

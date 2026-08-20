@@ -51,7 +51,6 @@ here — link them at most.
 | 2026-08-15 | canonical-core | Acceptance polish: boundary test name overstates DATABASE_URL/PGPASSWORD scope; duration_ms bypasses clock seam | [handoff §14](2026-08-15-canonical-core-acceptance-and-recovery.md) |
 | 2026-08-15 | api-contract | `openapi-typescript@7.13.0` peer-declares `typescript@^5.x` while the workspace pins `6.0.3` (standing install warning; resurface on any pin bump) | [handoff §1](2026-08-15-api-runtime-contract-foundation.md) |
 | 2026-08-16 | web-auth | Drop deprecated `@types/qrcode-generator@1.0.6` dev pin when upstream's own types cover the renderer | [handoff §1](2026-08-16-web-authentication-and-device-authorization.md) |
-| 2026-08-16 | web-auth | `derive_subkey` accepts any ASCII label — add `CRYPTO_DOMAIN_LABELS` membership check | [handoff §2](2026-08-16-web-authentication-and-device-authorization.md) |
 | 2026-08-16 | web-auth | Blocklist digest loader hex parsing looser than the artifact regex — tighten grammar | [handoff §3](2026-08-16-web-authentication-and-device-authorization.md) |
 | 2026-08-16 | web-auth | Lockout transition indistinct in audit (`login_rejected` for all rejections) — decide dedicated reason token | [handoff §4](2026-08-16-web-authentication-and-device-authorization.md) |
 | 2026-08-16 | web-auth | Reset CLI edges: echoed confirmation, EOFError→`internal_error`, untested reset-on-unenrolled / archived-workspace status | [handoff §5](2026-08-16-web-authentication-and-device-authorization.md) |
