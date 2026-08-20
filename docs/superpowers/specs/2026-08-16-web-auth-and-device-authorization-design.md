@@ -1055,6 +1055,12 @@ Missing, duplicate, short, malformed or permission-unsafe key files fail
 `serve` before socket exposure. Offline OpenAPI export injects a deterministic
 non-secret crypto port and reads no runtime secret.
 
+The crypto adapter rejects any subkey derivation whose label is not in the
+closed `CRYPTO_DOMAIN_LABELS` vocabulary, failing closed as `INTERNAL_ERROR`
+without echoing the rejected label. The offline composition enforces the
+same membership check, so a subkey domain cannot be mixed through either
+adapter.
+
 ### 20.2 Web headers
 
 Web responses enforce a nonce-based CSP with at least:

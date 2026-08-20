@@ -292,16 +292,30 @@ def test_derive_subkey_rejects_non_ascii_labels_and_wrong_key_sizes() -> None:
         crypto.derive_subkey(master_key=b"short", label=CSRF_HASH_LABEL)
 
 
-def test_derive_subkey_rejects_label_outside_crypto_domain_vocabulary() -> None:
+@pytest.fixture(params=[CryptographyAuthenticationCrypto, OfflineAuthenticationCrypto])
+def crypto_adapter(request: pytest.FixtureRequest) -> AuthenticationCryptoPort:
+    """Yield each production crypto adapter in turn.
+
+    The fixture covers both :class:`CryptographyAuthenticationCrypto` (real
+    HKDF) and :class:`OfflineAuthenticationCrypto` (deterministic double) so
+    the membership assertions exercise every adapter behind the
+    :class:`AuthenticationCryptoPort` boundary.
+    """
+    adapter_cls = request.param
+    return adapter_cls()
+
+
+def test_derive_subkey_rejects_label_outside_crypto_domain_vocabulary(
+    crypto_adapter: AuthenticationCryptoPort,
+) -> None:
     """A label not in CRYPTO_DOMAIN_LABELS is a contract violation.
 
     The closed vocabulary (spec 20.1) prevents subkey domain confusion. A label
     that passes ASCII + length checks but is not in the vocabulary must fail
     closed as the safe ``internal_error`` without echoing the rejected label.
     """
-    crypto = CryptographyAuthenticationCrypto()
     with pytest.raises(InternalApplicationError) as raised:
-        crypto.derive_subkey(
+        crypto_adapter.derive_subkey(
             master_key=CURRENT_KEY_BYTES,
             label="auth/not-a-real-domain/v1",
         )
@@ -310,39 +324,16 @@ def test_derive_subkey_rejects_label_outside_crypto_domain_vocabulary() -> None:
     assert "auth/not-a-real-domain/v1" not in rendered
 
 
-def test_derive_subkey_accepts_every_registered_domain_label() -> None:
+def test_derive_subkey_accepts_every_registered_domain_label(
+    crypto_adapter: AuthenticationCryptoPort,
+) -> None:
     """Every label in CRYPTO_DOMAIN_LABELS must derive successfully.
 
-    This locks the membership set: any future addition to the vocabulary must
-    come with an updated test so the contract stays closed.
+    Locks the vocabulary membership: any future addition must come with an
+    updated vocabulary, and any accidental emptying would fail this
+    assertion (vacuous loop guard) before the per-label derivation runs.
     """
-    crypto = CryptographyAuthenticationCrypto()
+    assert len(CRYPTO_DOMAIN_LABELS) >= 1, "CRYPTO_DOMAIN_LABELS must be non-empty"
     for label in CRYPTO_DOMAIN_LABELS:
-        subkey = crypto.derive_subkey(master_key=CURRENT_KEY_BYTES, label=label)
-        assert len(subkey) == 32, f"subkey for {label!r} must be 32 bytes"
-
-
-def test_offline_derive_subkey_rejects_label_outside_crypto_domain_vocabulary() -> None:
-    """Offline crypto mirrors the production membership check.
-
-    The offline composition is a deterministic double. It must reject
-    out-of-vocabulary labels so any test wiring that bypasses the production
-    adapter still cannot mix subkey domains.
-    """
-    crypto = OfflineAuthenticationCrypto()
-    with pytest.raises(InternalApplicationError) as raised:
-        crypto.derive_subkey(
-            master_key=CURRENT_KEY_BYTES,
-            label="auth/not-a-real-domain/v1",
-        )
-    assert raised.value.error_code is ErrorCode.INTERNAL_ERROR
-    rendered = f"{raised.value!r} {raised.value}"
-    assert "auth/not-a-real-domain/v1" not in rendered
-
-
-def test_offline_derive_subkey_accepts_every_registered_domain_label() -> None:
-    """Offline crypto accepts every label in CRYPTO_DOMAIN_LABELS."""
-    crypto = OfflineAuthenticationCrypto()
-    for label in CRYPTO_DOMAIN_LABELS:
-        subkey = crypto.derive_subkey(master_key=CURRENT_KEY_BYTES, label=label)
+        subkey = crypto_adapter.derive_subkey(master_key=CURRENT_KEY_BYTES, label=label)
         assert len(subkey) == 32, f"subkey for {label!r} must be 32 bytes"

@@ -454,7 +454,11 @@ class OfflinePasswordHasher:
 
 
 class OfflineAuthenticationCrypto:
-    """Deterministic crypto double deriving stable subkeys and stdlib HMAC."""
+    """Deterministic crypto double deriving stable subkeys and stdlib HMAC.
+
+    Mirrors the production vocabulary check at ``assert_crypto_domain_label``;
+    rejects labels outside ``CRYPTO_DOMAIN_LABELS`` as ``INTERNAL_ERROR``.
+    """
 
     def derive_subkey(self, *, master_key: bytes, label: str) -> bytes:
         assert_crypto_domain_label(label)

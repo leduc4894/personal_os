@@ -103,9 +103,11 @@ def assert_crypto_domain_label(label: str) -> None:
     prevents domain confusion across the authentication subkeys (spec 20.1).
     Deriving with an unregistered label would mix subkey domains; the rejection
     fails closed as the safe ``internal_error`` without echoing the rejected
-    label text.
+    label text. Non-string inputs are rejected through the same path so any
+    future caller that bypasses the adapter sees the canonical error, not a
+    raw ``TypeError`` from ``frozenset.__contains__``.
     """
-    if label not in CRYPTO_DOMAIN_LABELS:
+    if not isinstance(label, str) or label not in CRYPTO_DOMAIN_LABELS:
         raise InternalApplicationError(ErrorCode.INTERNAL_ERROR) from ValueError(
             "crypto domain label"
         )
