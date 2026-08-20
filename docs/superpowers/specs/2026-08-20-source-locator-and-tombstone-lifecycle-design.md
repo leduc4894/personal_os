@@ -139,7 +139,7 @@ A partial unique index on source_id where restore_event_id is null permits one o
 
 ### 7.3 Existing tables and legacy state
 
-The migration extends sync_events.event_type from create and update to also permit rename, move, delete, and restore. It extends source-event projection intent constraints so delete accepts a null source_version_id and upsert requires the current source version. Source-event intent identity remains event_id plus projection_kind.
+The migration extends sync_events.event_type from create and update to also permit rename, move, delete, and restore. Every lifecycle source-event intent, including a delete operation, references the source's retained current version so it satisfies the existing source-ingestion workflow input contract. Source-event intent identity remains event_id plus projection_kind.
 
 The small-file create path receives an internal initial_locator input. In the same successful canonical create transaction, it inserts the source's first locator alongside the existing source, version, create event, audit entry, and normal upsert intents. The child-4 preflight and raw-content wire format does not change.
 
@@ -198,10 +198,10 @@ After replay recheck, the transaction validates source/tombstone state, current 
 | Operation | Source and lifecycle effects | Intent per projection kind |
 |---|---|---|
 | rename or move, policy allowed | close prior locator, open target, write event/audit | upsert with current version |
-| rename or move, denied/indeterminate | same canonical locator effects | delete with null version |
-| delete | close locator, insert tombstone, set deleted state/time, write event/audit | delete with null version |
+| rename or move, denied/indeterminate | same canonical locator effects | delete with current version |
+| delete | close locator, insert tombstone, set deleted state/time, write event/audit | delete with retained current version |
 | restore, policy allowed | close tombstone, open target, clear deleted state/time, write event/audit | upsert with retained current version |
-| restore, denied/indeterminate | same canonical restore effects | delete with null version |
+| restore, denied/indeterminate | same canonical restore effects | delete with retained current version |
 
 Every committed lifecycle event creates exactly one Qdrant and one Neo4j source-event intent. Rejection and exact replay create none. The existing dispatcher, deterministic workflow identity, lease fencing, retry, and Temporal payload privacy contracts are unchanged.
 
