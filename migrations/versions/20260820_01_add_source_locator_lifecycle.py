@@ -10,9 +10,10 @@ revision: legacy sources remain locator-unknown until a later manifest-based
 reconciliation proves their locator.  The lifecycle command implementation
 and the first-locator publication write are owned by later tasks.
 
-Downgrade discards the two new history tables only under the standard explicit
-destructive gate when either contains evidence.  It never cascades and leaves
-existing source rows, versions, sync events and projection intents intact.
+Downgrade discards lifecycle evidence only under the standard explicit
+destructive gate.  It removes lifecycle-only events and their dependent
+projection intents before restoring the predecessor event vocabulary; source
+rows and versions remain intact.
 """
 
 from __future__ import annotations
@@ -41,7 +42,8 @@ _LOCATOR_CHECK: Final[str] = (
 )
 
 _LOCATOR_CLOSURE_CHECK: Final[str] = (
-    "(closed_event_id IS NULL) = (closed_sequence IS NULL AND closed_at IS NULL) "
+    "((closed_event_id IS NULL AND closed_sequence IS NULL AND closed_at IS NULL) "
+    "OR (closed_event_id IS NOT NULL AND closed_sequence IS NOT NULL AND closed_at IS NOT NULL)) "
     "AND (closed_sequence IS NULL OR closed_sequence > opened_sequence) "
     "AND (closed_at IS NULL OR closed_at >= opened_at)"
 )
@@ -54,10 +56,18 @@ _TOMBSTONE_RESTORE_CHECK: Final[str] = (
 _SYNC_EVENT_TYPE_CHECK: Final[str] = (
     "event_type IN ('create', 'update', 'rename', 'move', 'delete', 'restore')"
 )
+_PREDECESSOR_SYNC_EVENT_TYPE_CHECK: Final[str] = "event_type IN ('create', 'update')"
 _SOURCE_SYNC_STATE_CHECK: Final[str] = (
     "sync_state IN ('pending', 'active', 'stored_not_indexed', 'deleted')"
 )
 _SOURCE_DELETION_CHECK: Final[str] = (
+    "(sync_state = 'deleted') = (deleted_at IS NOT NULL) "
+    "AND (deleted_at IS NULL OR deleted_at >= created_at)"
+)
+_PREDECESSOR_SOURCE_SYNC_STATE_CHECK: Final[str] = (
+    "sync_state IN ('pending', 'active', 'stored_not_indexed', 'deleted')"
+)
+_PREDECESSOR_SOURCE_DELETION_CHECK: Final[str] = (
     "(sync_state = 'deleted') = (deleted_at IS NOT NULL) "
     "AND (deleted_at IS NULL OR deleted_at >= created_at)"
 )
@@ -66,6 +76,22 @@ _DOWNGRADE_GATE_COUNT_SQL: Final[str] = """
 SELECT
     (SELECT count(*) FROM knowledge.source_locators)
     + (SELECT count(*) FROM knowledge.source_tombstones)
+    + (
+        SELECT count(*) FROM knowledge.sync_events
+        WHERE event_type IN ('rename', 'move', 'delete', 'restore')
+    )
+"""
+
+_LIFECYCLE_EVENT_CLEANUP_SQL: Final[str] = """
+DELETE FROM knowledge.projection_intents
+WHERE event_id IN (
+    SELECT event_id
+    FROM knowledge.sync_events
+    WHERE event_type IN ('rename', 'move', 'delete', 'restore')
+);
+
+DELETE FROM knowledge.sync_events
+WHERE event_type IN ('rename', 'move', 'delete', 'restore');
 """
 
 _FINAL_CATALOG_ASSERTION_SQL: Final[str] = """
@@ -120,8 +146,8 @@ def upgrade() -> None:
         sa.Column("source_locator_id", sa.Uuid(), nullable=False),
         sa.Column("workspace_id", sa.Uuid(), nullable=False),
         sa.Column("source_id", sa.Uuid(), nullable=False),
-        sa.Column("normalized_locator", sa.String(length=_LOCATOR_MAXIMUM_BYTES), nullable=False),
-        sa.Column("display_locator", sa.String(length=_LOCATOR_MAXIMUM_BYTES), nullable=False),
+        sa.Column("normalized_locator", sa.Text(), nullable=False),
+        sa.Column("display_locator", sa.Text(), nullable=False),
         sa.Column("opened_event_id", sa.Uuid(), nullable=False),
         sa.Column("opened_sequence", sa.BigInteger(), nullable=False),
         sa.Column("closed_event_id", sa.Uuid(), nullable=True),
@@ -185,7 +211,7 @@ def upgrade() -> None:
         sa.Column("source_id", sa.Uuid(), nullable=False),
         sa.Column("delete_event_id", sa.Uuid(), nullable=False),
         sa.Column("retained_version_id", sa.Uuid(), nullable=False),
-        sa.Column("retained_locator", sa.String(length=_LOCATOR_MAXIMUM_BYTES), nullable=False),
+        sa.Column("retained_locator", sa.Text(), nullable=False),
         sa.Column("actor_kind", sa.Text(), nullable=False),
         sa.Column("actor_id", sa.Uuid(), nullable=False),
         sa.Column(
@@ -309,22 +335,9 @@ def upgrade() -> None:
     op.create_check_constraint(
         "ck_projection_intents__operation_version",
         "projection_intents",
-        "origin_kind <> 'source_event' OR source_version_id IS NOT NULL",
+        "(operation <> 'upsert' OR source_version_id IS NOT NULL) "
+        "AND (origin_kind <> 'source_event' OR source_version_id IS NOT NULL)",
         schema=SCHEMA_NAME,
-    )
-    op.drop_constraint(
-        "ck_sync_events__event_type", "sync_events", schema=SCHEMA_NAME, type_="check"
-    )
-    op.create_check_constraint(
-        "ck_sync_events__event_type", "sync_events", _SYNC_EVENT_TYPE_CHECK, schema=SCHEMA_NAME
-    )
-    op.drop_constraint("ck_sources__sync_state", "sources", schema=SCHEMA_NAME, type_="check")
-    op.create_check_constraint(
-        "ck_sources__sync_state", "sources", _SOURCE_SYNC_STATE_CHECK, schema=SCHEMA_NAME
-    )
-    op.drop_constraint("ck_sources__deletion", "sources", schema=SCHEMA_NAME, type_="check")
-    op.create_check_constraint(
-        "ck_sources__deletion", "sources", _SOURCE_DELETION_CHECK, schema=SCHEMA_NAME
     )
     op.execute(sa.text(_FINAL_CATALOG_ASSERTION_SQL))
 
@@ -372,4 +385,28 @@ def downgrade() -> None:
     )
     op.drop_table("source_tombstones", schema=SCHEMA_NAME)
     op.drop_table("source_locators", schema=SCHEMA_NAME)
+    op.execute(sa.text(_LIFECYCLE_EVENT_CLEANUP_SQL))
+    op.drop_constraint(
+        "ck_sync_events__event_type", "sync_events", schema=SCHEMA_NAME, type_="check"
+    )
+    op.create_check_constraint(
+        "ck_sync_events__event_type",
+        "sync_events",
+        _PREDECESSOR_SYNC_EVENT_TYPE_CHECK,
+        schema=SCHEMA_NAME,
+    )
+    op.drop_constraint("ck_sources__sync_state", "sources", schema=SCHEMA_NAME, type_="check")
+    op.create_check_constraint(
+        "ck_sources__sync_state",
+        "sources",
+        _PREDECESSOR_SOURCE_SYNC_STATE_CHECK,
+        schema=SCHEMA_NAME,
+    )
+    op.drop_constraint("ck_sources__deletion", "sources", schema=SCHEMA_NAME, type_="check")
+    op.create_check_constraint(
+        "ck_sources__deletion",
+        "sources",
+        _PREDECESSOR_SOURCE_DELETION_CHECK,
+        schema=SCHEMA_NAME,
+    )
     op.execute(sa.text(_FINAL_DOWNGRADE_ASSERTION_SQL))

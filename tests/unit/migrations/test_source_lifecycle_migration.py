@@ -76,6 +76,8 @@ class _Op:
     def __init__(self, *, protected_rows: int = 0, x_arguments: list[str] | None = None) -> None:
         self.events: list[tuple[str, str]] = []
         self.tables: dict[str, Any] = {}
+        self.check_constraints: dict[str, str] = {}
+        self.indexes: dict[str, tuple[tuple[Any, ...], dict[str, Any]]] = {}
         self.bind = _Bind(protected_rows)
         self.context = SimpleNamespace(
             config=SimpleNamespace(cmd_opts=SimpleNamespace(x=x_arguments or []))
@@ -89,9 +91,11 @@ class _Op:
 
     def create_index(self, name: str, *args: Any, **kwargs: Any) -> None:
         self.events.append(("create_index", name))
+        self.indexes[name] = (args, kwargs)
 
     def create_check_constraint(self, name: str, *args: Any, **kwargs: Any) -> None:
         self.events.append(("create_check_constraint", name))
+        self.check_constraints[name] = str(args[1])
 
     def drop_constraint(self, name: str, *args: Any, **kwargs: Any) -> None:
         self.events.append(("drop_constraint", name))
@@ -155,35 +159,225 @@ def test_upgrade_creates_the_closed_locator_and_tombstone_records() -> None:
     } == TOMBSTONE_COLUMNS
 
 
-def test_upgrade_pins_lifecycle_foreign_keys_checks_and_partial_uniqueness() -> None:
-    source = MIGRATION_PATH.read_text(encoding="utf-8")
-    for identifier in (
-        "fk_source_locators__workspace",
-        "fk_source_locators__source",
-        "fk_source_locators__opened_event",
-        "fk_source_locators__closed_event",
-        "ck_source_locators__normalized_locator",
-        "ck_source_locators__display_locator",
-        "ck_source_locators__closure",
-        "fk_source_tombstones__workspace",
-        "fk_source_tombstones__source",
-        "fk_source_tombstones__delete_event",
-        "fk_source_tombstones__retained_version",
-        "fk_source_tombstones__restore_event",
-        "uq_source_tombstones__delete_event",
-        "ck_source_tombstones__retained_locator",
-        "ck_source_tombstones__actor",
-        "ck_source_tombstones__restore",
-        "uq_source_locators_active_workspace_path",
-        "uq_source_locators_active_source",
-        "uq_source_tombstones_open_source",
+def _named_constraints(table: Any) -> dict[str, Any]:
+    return {constraint.name: constraint for constraint in table.args if constraint.name is not None}
+
+
+def test_upgrade_uses_text_columns_and_exact_lifecycle_constraint_arguments() -> None:
+    recorder = _replay("upgrade")
+    locator_table = recorder.tables["source_locators"]
+    tombstone_table = recorder.tables["source_tombstones"]
+    locator_columns = {
+        column.name: column for column in locator_table.args if isinstance(column, sa.Column)
+    }
+    tombstone_columns = {
+        column.name: column for column in tombstone_table.args if isinstance(column, sa.Column)
+    }
+    assert isinstance(locator_columns["normalized_locator"].type, sa.Text)
+    assert isinstance(locator_columns["display_locator"].type, sa.Text)
+    assert isinstance(tombstone_columns["retained_locator"].type, sa.Text)
+
+    locator_constraints = _named_constraints(locator_table)
+    tombstone_constraints = _named_constraints(tombstone_table)
+    assert str(locator_constraints["ck_source_locators__closure"].sqltext) == (
+        "((closed_event_id IS NULL AND closed_sequence IS NULL AND closed_at IS NULL) "
+        "OR (closed_event_id IS NOT NULL AND closed_sequence IS NOT NULL "
+        "AND closed_at IS NOT NULL)) "
+        "AND (closed_sequence IS NULL OR closed_sequence > opened_sequence) "
+        "AND (closed_at IS NULL OR closed_at >= opened_at)"
+    )
+    assert str(tombstone_constraints["ck_source_tombstones__restore"].sqltext) == (
+        "(restore_event_id IS NULL) = (restored_at IS NULL) "
+        "AND (restored_at IS NULL OR restored_at >= deleted_at)"
+    )
+    assert {
+        name: (
+            tuple(constraint.column_keys),
+            tuple(element.target_fullname for element in constraint.elements),
+            constraint.ondelete,
+        )
+        for name, constraint in locator_constraints.items()
+        if name.startswith("fk_source_locators")
+    } == {
+        "fk_source_locators__workspace": (
+            ("workspace_id",),
+            ("knowledge.workspaces.workspace_id",),
+            "RESTRICT",
+        ),
+        "fk_source_locators__source": (
+            ("workspace_id", "source_id"),
+            ("knowledge.sources.workspace_id", "knowledge.sources.source_id"),
+            "RESTRICT",
+        ),
+        "fk_source_locators__opened_event": (
+            ("workspace_id", "source_id", "opened_event_id"),
+            (
+                "knowledge.sync_events.workspace_id",
+                "knowledge.sync_events.source_id",
+                "knowledge.sync_events.event_id",
+            ),
+            "RESTRICT",
+        ),
+        "fk_source_locators__closed_event": (
+            ("workspace_id", "source_id", "closed_event_id"),
+            (
+                "knowledge.sync_events.workspace_id",
+                "knowledge.sync_events.source_id",
+                "knowledge.sync_events.event_id",
+            ),
+            "RESTRICT",
+        ),
+    }
+    assert {
+        name: (
+            tuple(constraint.column_keys),
+            tuple(element.target_fullname for element in constraint.elements),
+            constraint.ondelete,
+        )
+        for name, constraint in tombstone_constraints.items()
+        if name.startswith("fk_source_tombstones")
+    } == {
+        "fk_source_tombstones__workspace": (
+            ("workspace_id",),
+            ("knowledge.workspaces.workspace_id",),
+            "RESTRICT",
+        ),
+        "fk_source_tombstones__source": (
+            ("workspace_id", "source_id"),
+            ("knowledge.sources.workspace_id", "knowledge.sources.source_id"),
+            "RESTRICT",
+        ),
+        "fk_source_tombstones__delete_event": (
+            ("workspace_id", "source_id", "delete_event_id"),
+            (
+                "knowledge.sync_events.workspace_id",
+                "knowledge.sync_events.source_id",
+                "knowledge.sync_events.event_id",
+            ),
+            "RESTRICT",
+        ),
+        "fk_source_tombstones__retained_version": (
+            ("workspace_id", "source_id", "retained_version_id"),
+            (
+                "knowledge.source_versions.workspace_id",
+                "knowledge.source_versions.source_id",
+                "knowledge.source_versions.source_version_id",
+            ),
+            "RESTRICT",
+        ),
+        "fk_source_tombstones__restore_event": (
+            ("workspace_id", "source_id", "restore_event_id"),
+            (
+                "knowledge.sync_events.workspace_id",
+                "knowledge.sync_events.source_id",
+                "knowledge.sync_events.event_id",
+            ),
+            "RESTRICT",
+        ),
+    }
+
+    for index_name, expected_table, expected_columns, expected_where in (
+        (
+            "uq_source_locators_active_workspace_path",
+            "source_locators",
+            ["workspace_id", "normalized_locator"],
+            "closed_event_id IS NULL",
+        ),
+        (
+            "uq_source_locators_active_source",
+            "source_locators",
+            ["source_id"],
+            "closed_event_id IS NULL",
+        ),
+        (
+            "uq_source_tombstones_open_source",
+            "source_tombstones",
+            ["source_id"],
+            "restore_event_id IS NULL",
+        ),
     ):
-        assert identifier in source
-    assert "closed_event_id IS NULL" in source
-    assert "restore_event_id IS NULL" in source
-    assert "event_type IN ('create', 'update', 'rename', 'move', 'delete', 'restore')" in source
-    assert "origin_kind <> 'source_event' OR source_version_id IS NOT NULL" in source
-    assert "sync_state IN ('pending', 'active', 'stored_not_indexed', 'deleted')" in source
+        arguments, keyword_arguments = recorder.indexes[index_name]
+        assert arguments == (expected_table, expected_columns)
+        assert keyword_arguments["unique"] is True
+        assert keyword_arguments["schema"] == "knowledge"
+        assert str(keyword_arguments["postgresql_where"]) == expected_where
+    assert recorder.check_constraints["ck_sync_events__event_type"] == (
+        "event_type IN ('create', 'update', 'rename', 'move', 'delete', 'restore')"
+    )
+    assert recorder.check_constraints["ck_sources__sync_state"] == (
+        "sync_state IN ('pending', 'active', 'stored_not_indexed', 'deleted')"
+    )
+    assert recorder.check_constraints["ck_sources__deletion"] == (
+        "(sync_state = 'deleted') = (deleted_at IS NOT NULL) "
+        "AND (deleted_at IS NULL OR deleted_at >= created_at)"
+    )
+    for constraint_name in (
+        "ck_sync_events__event_type",
+        "ck_sources__sync_state",
+        "ck_sources__deletion",
+    ):
+        assert (
+            sum(
+                operation == "drop_constraint" and detail == constraint_name
+                for operation, detail in recorder.events
+            )
+            == 1
+        )
+        assert (
+            sum(
+                operation == "create_check_constraint" and detail == constraint_name
+                for operation, detail in recorder.events
+            )
+            == 1
+        )
+
+
+def test_upgrade_composes_lifecycle_intent_rule_with_predecessor_upsert_rule() -> None:
+    recorder = _replay("upgrade")
+    assert recorder.check_constraints["ck_projection_intents__operation_version"] == (
+        "(operation <> 'upsert' OR source_version_id IS NOT NULL) "
+        "AND (origin_kind <> 'source_event' OR source_version_id IS NOT NULL)"
+    )
+    requires_source_version = {
+        (operation, origin_kind): operation == "upsert" or origin_kind == "source_event"
+        for operation in ("upsert", "delete")
+        for origin_kind in ("source_event", "policy_transition")
+    }
+    assert requires_source_version == {
+        ("upsert", "source_event"): True,
+        ("upsert", "policy_transition"): True,
+        ("delete", "source_event"): True,
+        ("delete", "policy_transition"): False,
+    }
+
+
+def test_downgrade_restores_predecessor_checks_after_destructive_lifecycle_rows() -> None:
+    recorder = _replay("downgrade", protected_rows=3, x_arguments=["allow_destructive=true"])
+    assert recorder.check_constraints["ck_projection_intents__operation_version"] == (
+        "operation <> 'upsert' OR source_version_id IS NOT NULL"
+    )
+    assert recorder.check_constraints["ck_sync_events__event_type"] == (
+        "event_type IN ('create', 'update')"
+    )
+    assert recorder.check_constraints["ck_sources__sync_state"] == (
+        "sync_state IN ('pending', 'active', 'stored_not_indexed', 'deleted')"
+    )
+    assert recorder.check_constraints["ck_sources__deletion"] == (
+        "(sync_state = 'deleted') = (deleted_at IS NOT NULL) "
+        "AND (deleted_at IS NULL OR deleted_at >= created_at)"
+    )
+    events = recorder.events
+    lifecycle_event_delete = next(
+        index
+        for index, (operation, detail) in enumerate(events)
+        if operation == "execute" and "DELETE FROM knowledge.sync_events" in detail
+    )
+    restored_event_check = next(
+        index
+        for index, (operation, detail) in enumerate(events)
+        if operation == "create_check_constraint" and detail == "ck_sync_events__event_type"
+    )
+    assert lifecycle_event_delete < restored_event_check
 
 
 def test_downgrade_refuses_to_destroy_lifecycle_history_without_explicit_gate() -> None:

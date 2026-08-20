@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import os
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -31,6 +32,15 @@ pytestmark = pytest.mark.local_stack
 REPO_ROOT = Path(__file__).resolve().parents[3]
 _REVISION = "20260820_01"
 _PREDECESSOR_REVISION = "20260818_01"
+_MIGRATION_COMMAND_TIMEOUT_SECONDS = 60
+
+
+@dataclass(frozen=True)
+class _LifecycleEvidence:
+    workspace_id: UUID
+    active_source_id: UUID
+    active_source_version_id: UUID
+    deleted_source_id: UUID
 
 
 def _migration_environment() -> dict[str, str]:
@@ -62,6 +72,7 @@ def _alembic(*arguments: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         check=False,
+        timeout=_MIGRATION_COMMAND_TIMEOUT_SECONDS,
     )
 
 
@@ -72,7 +83,7 @@ async def _seed_active_source(
     workspace_id: UUID,
     source_id: UUID,
     locator: str,
-) -> tuple[UUID, int]:
+) -> tuple[UUID, UUID, int]:
     content_object_id = uuid4()
     source_version_id = uuid4()
     event_id = uuid4()
@@ -136,10 +147,35 @@ async def _seed_active_source(
             opened_sequence=event_sequence,
         )
     )
-    return event_id, event_sequence
+    return event_id, source_version_id, event_sequence
 
 
-async def _assert_partial_uniqueness(stack: SourcePublicationStack) -> None:
+async def _insert_sync_event(
+    connection: sa.ext.asyncio.AsyncConnection,
+    *,
+    workspace_id: UUID,
+    source_id: UUID,
+    source_version_id: UUID,
+    event_type: str,
+) -> tuple[UUID, int]:
+    event_id = uuid4()
+    event = await connection.execute(
+        sa.insert(sync_events)
+        .values(
+            event_id=event_id,
+            workspace_id=workspace_id,
+            source_id=source_id,
+            committed_version_id=source_version_id,
+            idempotency_key=str(uuid4()),
+            request_fingerprint=hashlib.sha256(event_id.bytes).hexdigest(),
+            event_type=event_type,
+        )
+        .returning(sync_events.c.event_sequence)
+    )
+    return event_id, int(event.scalar_one())
+
+
+async def _assert_partial_uniqueness(stack: SourcePublicationStack) -> _LifecycleEvidence:
     engine = create_source_store_engine(stack.settings, stack.password)
     owner_user_id = uuid4()
     workspace_id = uuid4()
@@ -163,19 +199,47 @@ async def _assert_partial_uniqueness(stack: SourcePublicationStack) -> None:
                     display_name="Lifecycle Workspace",
                 )
             )
-            first_event_id, first_sequence = await _seed_active_source(
+            first_event_id, first_version_id, first_sequence = await _seed_active_source(
                 connection,
                 owner_user_id=owner_user_id,
                 workspace_id=workspace_id,
                 source_id=first_source_id,
                 locator="notes/first.md",
             )
-            second_event_id, second_sequence = await _seed_active_source(
+            second_event_id, second_version_id, second_sequence = await _seed_active_source(
                 connection,
                 owner_user_id=owner_user_id,
                 workspace_id=workspace_id,
                 source_id=second_source_id,
                 locator="notes/second.md",
+            )
+            close_event_id, close_sequence = await _insert_sync_event(
+                connection,
+                workspace_id=workspace_id,
+                source_id=first_source_id,
+                source_version_id=first_version_id,
+                event_type="update",
+            )
+            incomplete_closure_savepoint = await connection.begin_nested()
+            try:
+                with pytest.raises(IntegrityError) as incomplete_closure:
+                    await connection.execute(
+                        sa.insert(source_locators).values(
+                            source_locator_id=uuid4(),
+                            workspace_id=workspace_id,
+                            source_id=first_source_id,
+                            normalized_locator="notes/incomplete-close.md",
+                            display_locator="notes/incomplete-close.md",
+                            opened_event_id=first_event_id,
+                            opened_sequence=first_sequence,
+                            closed_event_id=close_event_id,
+                            closed_sequence=close_sequence,
+                        )
+                    )
+            finally:
+                await incomplete_closure_savepoint.rollback()
+            assert getattr(incomplete_closure.value.orig, "diag", None).constraint_name == (
+                "ck_source_locators__closure"
             )
 
         async with engine.begin() as connection:
@@ -219,6 +283,72 @@ async def _assert_partial_uniqueness(stack: SourcePublicationStack) -> None:
             assert getattr(duplicate_path.value.orig, "diag", None).constraint_name == (
                 "uq_source_locators_active_workspace_path"
             )
+            await connection.execute(
+                sa.update(sources)
+                .where(sources.c.source_id == second_source_id)
+                .values(sync_state="deleted", deleted_at=sa.text("CURRENT_TIMESTAMP"))
+            )
+            await _insert_sync_event(
+                connection,
+                workspace_id=workspace_id,
+                source_id=second_source_id,
+                source_version_id=second_version_id,
+                event_type="delete",
+            )
+        return _LifecycleEvidence(
+            workspace_id=workspace_id,
+            active_source_id=first_source_id,
+            active_source_version_id=first_version_id,
+            deleted_source_id=second_source_id,
+        )
+    finally:
+        await dispose_source_store_engine(engine)
+
+
+async def _assert_predecessor_constraints(
+    stack: SourcePublicationStack, evidence: _LifecycleEvidence
+) -> None:
+    engine = create_source_store_engine(stack.settings, stack.password)
+    try:
+        async with engine.begin() as connection:
+            lifecycle_event_savepoint = await connection.begin_nested()
+            try:
+                with pytest.raises(IntegrityError) as lifecycle_event:
+                    await _insert_sync_event(
+                        connection,
+                        workspace_id=evidence.workspace_id,
+                        source_id=evidence.active_source_id,
+                        source_version_id=evidence.active_source_version_id,
+                        event_type="rename",
+                    )
+            finally:
+                await lifecycle_event_savepoint.rollback()
+            assert getattr(lifecycle_event.value.orig, "diag", None).constraint_name == (
+                "ck_sync_events__event_type"
+            )
+
+            deleted_source = await connection.execute(
+                sa.select(sources.c.sync_state, sources.c.deleted_at).where(
+                    sources.c.source_id == evidence.deleted_source_id
+                )
+            )
+            deleted_sync_state, deleted_at = deleted_source.one()
+            assert deleted_sync_state == "deleted"
+            assert deleted_at is not None
+
+            source_deletion_savepoint = await connection.begin_nested()
+            try:
+                with pytest.raises(IntegrityError) as missing_deleted_at:
+                    await connection.execute(
+                        sa.update(sources)
+                        .where(sources.c.source_id == evidence.deleted_source_id)
+                        .values(deleted_at=None)
+                    )
+            finally:
+                await source_deletion_savepoint.rollback()
+            assert getattr(missing_deleted_at.value.orig, "diag", None).constraint_name == (
+                "ck_sources__deletion"
+            )
     finally:
         await dispose_source_store_engine(engine)
 
@@ -232,11 +362,15 @@ def test_lifecycle_revision_round_trips_active_locator_uniqueness(
     assert downgrade.returncode == 0
     upgrade = _alembic("upgrade", _REVISION)
     assert upgrade.returncode == 0
-    asyncio.run(
+    evidence = asyncio.run(
         _assert_partial_uniqueness(source_publication_stack),
         loop_factory=asyncio.SelectorEventLoop,
     )
     second_downgrade = _alembic("-x", "allow_destructive=true", "downgrade", _PREDECESSOR_REVISION)
     assert second_downgrade.returncode == 0
+    asyncio.run(
+        _assert_predecessor_constraints(source_publication_stack, evidence),
+        loop_factory=asyncio.SelectorEventLoop,
+    )
     second_upgrade = _alembic("upgrade", _REVISION)
     assert second_upgrade.returncode == 0
