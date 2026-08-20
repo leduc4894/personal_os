@@ -63,6 +63,15 @@ class IdempotencyKey:
                 "idempotency key must be printable non-whitespace ASCII without normalization"
             )
 
+    def __repr__(self) -> str:
+        """Return the class name with the value redacted.
+
+        The raw key must never appear in any repr/str rendering so that a
+        future task that formats a command into a log line or traceback
+        cannot leak it. The class name is preserved for debug recognition.
+        """
+        return "IdempotencyKey(<redacted>)"
+
 
 @dataclass(frozen=True, slots=True)
 class SourceTitle:
@@ -82,6 +91,15 @@ class SourceTitle:
             raise ValueError(f"title must be at most {_TITLE_MAX_CODE_POINTS} code points")
         if any(_is_control_character(char) for char in self.value):
             raise ValueError("title must not contain control characters")
+
+    def __repr__(self) -> str:
+        """Return the class name with the value redacted.
+
+        The title text is user-supplied content; the repr must redact it so
+        future logging paths cannot leak it through tracebacks or f-strings.
+        The class name is preserved for debug recognition.
+        """
+        return "SourceTitle(<redacted>)"
 
 
 def _is_control_character(char: str) -> bool:

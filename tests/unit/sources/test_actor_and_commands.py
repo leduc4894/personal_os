@@ -86,6 +86,55 @@ def test_idempotency_key_accepts_printable_ascii_boundaries() -> None:
     assert IdempotencyKey("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~0Az").value.isprintable()
 
 
+def test_idempotency_key_repr_does_not_leak_value() -> None:
+    """The repr must never include the raw idempotency key.
+
+    The key is opaque and workspace-scoped, never logged. If any future task
+    formats a command into a log line or traceback, the repr must not echo
+    the key. The class name is preserved so debug output stays recognisable.
+    """
+    key = IdempotencyKey("super-secret-idempotency-key-do-not-leak")
+    rendered = f"{key!r} {key}"
+    assert "super-secret-idempotency-key-do-not-leak" not in rendered
+    assert "IdempotencyKey" in repr(key)
+
+
+def test_source_title_repr_does_not_leak_value() -> None:
+    """The repr must never include the raw title text.
+
+    The title is exact-trimmed user content; the repr must redact it so
+    future logging paths cannot leak it through tracebacks or f-strings.
+    The class name is preserved so debug output stays recognisable.
+    """
+    title = SourceTitle("A title the operator does not want in any log line")
+    rendered = f"{title!r} {title}"
+    assert "A title the operator does not want in any log line" not in rendered
+    assert "SourceTitle" in repr(title)
+
+
+def test_create_command_repr_does_not_leak_idempotency_key_or_title() -> None:
+    """The composing command's repr must inherit the leaf redactions.
+
+    The default dataclass repr for ``CreateSourceVersion`` calls
+    ``repr(self.idempotency_key)`` and ``repr(self.title)``; both leaves
+    redact, so the parent's repr must not leak either value either.
+    """
+    command = CreateSourceVersion(
+        workspace_id=uuid4(),
+        source_id=uuid4(),
+        event_id=uuid4(),
+        idempotency_key=IdempotencyKey("leak-me-not"),
+        source_type=SourceType.MARKDOWN,
+        title=SourceTitle("Untitled secret"),
+        actor=_user_actor(),
+        expected_object=_expected_object(),
+        client_timestamp=None,
+    )
+    rendered = f"{command!r}"
+    assert "leak-me-not" not in rendered
+    assert "Untitled secret" not in rendered
+
+
 @pytest.mark.parametrize(
     "value",
     [
