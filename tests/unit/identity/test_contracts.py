@@ -1,5 +1,6 @@
 """Grammar and validation tests for the bootstrap identity command."""
 
+from typing import cast
 from uuid import UUID
 
 import pytest
@@ -86,6 +87,26 @@ def test_control_characters_rejected_in_free_text_fields() -> None:
         validate_bootstrap_identity_command(**build_raw_command(user_display_name="a\u0000b"))
     with pytest.raises(IdentityBootstrapError):
         validate_bootstrap_identity_command(**build_raw_command(device_name="a\u0007b"))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_reason"),
+    [
+        ("username", cast(str, 42), "username_invalid"),
+        ("workspace_key", cast(str, 42), "workspace_key_invalid"),
+        ("user_display_name", cast(str, 42), "display_name_invalid"),
+        ("workspace_display_name", cast(str, 42), "display_name_invalid"),
+        ("device_name", cast(str, 42), "device_name_invalid"),
+    ],
+)
+def test_non_string_identity_inputs_fail_closed_with_field_reason(
+    field: str, value: str, expected_reason: str
+) -> None:
+    with pytest.raises(IdentityBootstrapError) as raised:
+        validate_bootstrap_identity_command(**build_raw_command(**{field: value}))
+
+    assert raised.value.error_code is ErrorCode.IDENTITY_BOOTSTRAP_INPUT_INVALID
+    assert raised.value.safe_details == {"reason": expected_reason}
 
 
 def test_unicode_is_not_normalized_or_case_folded() -> None:

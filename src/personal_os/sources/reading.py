@@ -160,13 +160,20 @@ class CanonicalSourceReadService:
         validate_read_current_source_command(command)
         started = time.monotonic()
         reference: CanonicalSourceReference | None = None
+        consumer_error: ApplicationError | None = None
         try:
             reference = await self.store.resolve_current(command, diagnostic_context)
             _validate_reference_matches_command(reference, command)
             await self.policy_guard.authorize_read(reference, diagnostic_context)
             async with self.object_store.open_verified_reader(reference.expected_object) as reader:
-                yield reference, reader
+                try:
+                    yield reference, reader
+                except ApplicationError as error:
+                    consumer_error = error
+                    raise
         except ApplicationError as error:
+            if error is consumer_error:
+                raise
             self.metrics.record_read(
                 outcome=ReadOutcome.FAILED,
                 duration_seconds=max(time.monotonic() - started, 0.0),

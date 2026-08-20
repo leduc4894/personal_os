@@ -259,7 +259,9 @@ async def test_object_store_missing_error_surfaces_unchanged() -> None:
 
 
 @pytest.mark.asyncio
-async def test_corrupt_object_error_surfaces_before_any_byte_reaches_consumer() -> None:
+async def test_corrupt_object_error_surfaces_before_any_byte_reaches_consumer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     command = build_read_command()
     reference = build_read_reference(command)
     store = FakeCanonicalSourceReadStore(reference)
@@ -271,6 +273,16 @@ async def test_corrupt_object_error_surfaces_before_any_byte_reaches_consumer() 
         metrics=metrics,
         policy_guard=AllowingPolicyGuard(ledger=CallLedger()),
     )
+    registry_calls: list[tuple[EventName, dict[str, object]]] = []
+    original_registry = reading_module.build_registered_event
+
+    def recording_registry(
+        event_name: EventName, fields: Mapping[str, object]
+    ) -> DiagnosticEvent | RejectedDiagnosticPayload:
+        registry_calls.append((event_name, dict(fields)))
+        return original_registry(event_name, fields)
+
+    monkeypatch.setattr(reading_module, "build_registered_event", recording_registry)
 
     body_entered = False
     observed_bytes = b""
@@ -286,6 +298,50 @@ async def test_corrupt_object_error_surfaces_before_any_byte_reaches_consumer() 
     assert observed_bytes == b""
     assert excinfo.value.error_code is ErrorCode.OBJECT_STORAGE_INTEGRITY_FAILED
     assert metrics.read_count(ReadOutcome.FAILED) == 1
+    assert metrics.read_count(ReadOutcome.SUCCEEDED) == 0
+    assert registry_calls == [
+        (
+            EventName.CANONICAL_SOURCE_READ_FAILED,
+            {
+                "source_id": command.source_id,
+                "workspace_id": command.workspace_id,
+                "error_code": ErrorCode.OBJECT_STORAGE_INTEGRITY_FAILED,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_consumer_application_error_does_not_record_read_failure_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = build_read_command()
+    store = FakeCanonicalSourceReadStore(build_read_reference(command))
+    object_store = LeakCheckingObjectStore()
+    metrics = InMemoryCanonicalReadMetrics()
+    service = CanonicalSourceReadService(
+        store=store,
+        object_store=object_store,
+        metrics=metrics,
+        policy_guard=AllowingPolicyGuard(ledger=CallLedger()),
+    )
+    registry_calls: list[tuple[EventName, dict[str, object]]] = []
+    original_registry = reading_module.build_registered_event
+
+    def recording_registry(
+        event_name: EventName, fields: Mapping[str, object]
+    ) -> DiagnosticEvent | RejectedDiagnosticPayload:
+        registry_calls.append((event_name, dict(fields)))
+        return original_registry(event_name, fields)
+
+    monkeypatch.setattr(reading_module, "build_registered_event", recording_registry)
+
+    with pytest.raises(InternalApplicationError):
+        async with service.open_current_source(command, build_diagnostic_context()):
+            raise InternalApplicationError(ErrorCode.INTERNAL_ERROR)
+
+    assert metrics.read_records() == []
+    assert registry_calls == []
 
 
 @pytest.mark.asyncio

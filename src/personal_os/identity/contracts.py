@@ -117,12 +117,16 @@ def _has_control_character(value: str) -> bool:
 
 
 def _validate_key(value: str, reason: BootstrapInputReason) -> str:
+    if not isinstance(value, str):
+        _reject(reason)
     if IDENTITY_KEY_PATTERN.fullmatch(value) is None:
         _reject(reason)
     return value
 
 
 def _validate_free_text(value: str, reason: BootstrapInputReason) -> str:
+    if not isinstance(value, str):
+        _reject(reason)
     trimmed = value.strip()
     if not trimmed or len(trimmed) > FREE_TEXT_MAXIMUM_LENGTH:
         _reject(reason)
@@ -141,8 +145,6 @@ def validate_bootstrap_identity_command(
     device_kind: str,
 ) -> BootstrapIdentityCommand:
     """Validate and exact-trim one bootstrap command before any I/O (spec 5.1)."""
-    if not isinstance(username, str) or not isinstance(workspace_key, str):
-        _reject(BootstrapInputReason.USERNAME_INVALID)
     validated_username = _validate_key(username, BootstrapInputReason.USERNAME_INVALID)
     validated_workspace_key = _validate_key(
         workspace_key, BootstrapInputReason.WORKSPACE_KEY_INVALID
