@@ -402,11 +402,7 @@ def test_server_lifespan_configuration_failure_enters_diagnostics_before_framewo
         server_factory=LifespanExecutingServerFactory(),
     )
 
-    records = [
-        json.loads(line)
-        for line in capsys.readouterr().err.splitlines()
-        if line
-    ]
+    records = [json.loads(line) for line in capsys.readouterr().err.splitlines() if line]
     emergency_records = [
         record
         for record in records
