@@ -47,6 +47,8 @@ class IdempotencyKey:
 
     The grammar is printable non-whitespace ASCII ``!`` through ``~`` with no
     normalization. The key is opaque, workspace-scoped and never logged.
+    ``__repr__`` and ``__str__`` redact the value so a future task that
+    formats a command into a log line or traceback cannot leak it.
     """
 
     value: str
@@ -70,7 +72,11 @@ class IdempotencyKey:
         future task that formats a command into a log line or traceback
         cannot leak it. The class name is preserved for debug recognition.
         """
-        return "IdempotencyKey(<redacted>)"
+        return "IdempotencyKey(redacted)"
+
+    def __str__(self) -> str:
+        """Mirror ``__repr__`` so any str() or f-string also redacts."""
+        return self.__repr__()
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +85,9 @@ class SourceTitle:
 
     The value is neither Unicode-normalized nor case-folded; the stored title
     and the fingerprint use the same exact code-point sequence after the trim
-    check. Control characters are rejected.
+    check. Control characters are rejected. ``__repr__`` and ``__str__``
+    redact the value so future logging paths cannot leak the title text
+    through tracebacks or f-strings.
     """
 
     value: str
@@ -99,7 +107,11 @@ class SourceTitle:
         future logging paths cannot leak it through tracebacks or f-strings.
         The class name is preserved for debug recognition.
         """
-        return "SourceTitle(<redacted>)"
+        return "SourceTitle(redacted)"
+
+    def __str__(self) -> str:
+        """Mirror ``__repr__`` so any str() or f-string also redacts."""
+        return self.__repr__()
 
 
 def _is_control_character(char: str) -> bool:

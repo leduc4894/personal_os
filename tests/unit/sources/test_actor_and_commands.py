@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta, timezone
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -92,11 +93,14 @@ def test_idempotency_key_repr_does_not_leak_value() -> None:
     The key is opaque and workspace-scoped, never logged. If any future task
     formats a command into a log line or traceback, the repr must not echo
     the key. The class name is preserved so debug output stays recognisable.
+    The exact repr format matches the in-tree convention used by every other
+    redacted value object in ``src/personal_os/`` (e.g. metrics records).
     """
     key = IdempotencyKey("super-secret-idempotency-key-do-not-leak")
-    rendered = f"{key!r} {key}"
-    assert "super-secret-idempotency-key-do-not-leak" not in rendered
-    assert "IdempotencyKey" in repr(key)
+    assert repr(key) == "IdempotencyKey(redacted)"
+    assert str(key) == "IdempotencyKey(redacted)"
+    assert "super-secret-idempotency-key-do-not-leak" not in repr(key)
+    assert "super-secret-idempotency-key-do-not-leak" not in str(key)
 
 
 def test_source_title_repr_does_not_leak_value() -> None:
@@ -104,26 +108,75 @@ def test_source_title_repr_does_not_leak_value() -> None:
 
     The title is exact-trimmed user content; the repr must redact it so
     future logging paths cannot leak it through tracebacks or f-strings.
-    The class name is preserved so debug output stays recognisable.
+    The class name is preserved so debug output stays recognisable. The
+    exact repr format matches the in-tree convention used by every other
+    redacted value object in ``src/personal_os/``.
     """
     title = SourceTitle("A title the operator does not want in any log line")
-    rendered = f"{title!r} {title}"
-    assert "A title the operator does not want in any log line" not in rendered
-    assert "SourceTitle" in repr(title)
+    assert repr(title) == "SourceTitle(redacted)"
+    assert str(title) == "SourceTitle(redacted)"
+    assert "A title the operator does not want in any log line" not in repr(title)
+    assert "A title the operator does not want in any log line" not in str(title)
 
 
-def test_create_command_repr_does_not_leak_idempotency_key_or_title() -> None:
+@pytest.mark.parametrize(
+    ("command_factory", "label"),
+    [
+        (
+            lambda idempotency_key, expected_object: CreateSourceVersion(
+                workspace_id=uuid4(),
+                source_id=uuid4(),
+                event_id=uuid4(),
+                idempotency_key=idempotency_key,
+                source_type=SourceType.MARKDOWN,
+                title=SourceTitle("Untitled secret"),
+                actor=_user_actor(),
+                expected_object=expected_object,
+                client_timestamp=None,
+            ),
+            "create",
+        ),
+        (
+            lambda idempotency_key, expected_object: UpdateSourceVersion(
+                workspace_id=uuid4(),
+                source_id=uuid4(),
+                event_id=uuid4(),
+                idempotency_key=idempotency_key,
+                base_version_id=uuid4(),
+                actor=_user_actor(),
+                expected_object=expected_object,
+                client_timestamp=None,
+            ),
+            "update",
+        ),
+    ],
+)
+def test_command_repr_does_not_leak_idempotency_key(command_factory: Any, label: str) -> None:
     """The composing command's repr must inherit the leaf redactions.
 
-    The default dataclass repr for ``CreateSourceVersion`` calls
-    ``repr(self.idempotency_key)`` and ``repr(self.title)``; both leaves
-    redact, so the parent's repr must not leak either value either.
+    The default dataclass repr for both ``CreateSourceVersion`` and
+    ``UpdateSourceVersion`` calls ``repr(self.idempotency_key)``; the leaf
+    redacts, so the parent's repr must not leak the key. The title field is
+    only on the create branch, so it is checked separately below.
     """
+    command = command_factory(
+        idempotency_key=IdempotencyKey("leak-me-not"),
+        expected_object=_expected_object(),
+    )
+    rendered = f"{command!r}"
+    assert "leak-me-not" not in rendered, f"idempotency key leaked in {label} command repr"
+    assert "IdempotencyKey(redacted)" in rendered, (
+        f"{label} command repr must use the redacted form"
+    )
+
+
+def test_create_command_repr_does_not_leak_title() -> None:
+    """The create command carries a title; its repr must inherit the leaf redaction."""
     command = CreateSourceVersion(
         workspace_id=uuid4(),
         source_id=uuid4(),
         event_id=uuid4(),
-        idempotency_key=IdempotencyKey("leak-me-not"),
+        idempotency_key=IdempotencyKey("harmless"),
         source_type=SourceType.MARKDOWN,
         title=SourceTitle("Untitled secret"),
         actor=_user_actor(),
@@ -131,8 +184,8 @@ def test_create_command_repr_does_not_leak_idempotency_key_or_title() -> None:
         client_timestamp=None,
     )
     rendered = f"{command!r}"
-    assert "leak-me-not" not in rendered
     assert "Untitled secret" not in rendered
+    assert "SourceTitle(redacted)" in rendered
 
 
 @pytest.mark.parametrize(
