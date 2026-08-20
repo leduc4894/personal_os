@@ -16,7 +16,7 @@ trigger instead. `Wave 5 hygiene gate` is non-load-bearing cleanup and must
 close before Phase 2 completion, not before the next child by default.
 
 | Added | Domain | Item | Implement by | Details |
-|---|---|---|---|
+|---|---|---|---|---|
 | 2026-08-14 | object-storage | `_run_shielded` cancellation could swallow `CancelledError` if its cleanup ever raises; no current cleanup does | Wave 5 hygiene gate | [ruling](2026-08-20-object-storage-backlog-retirement.md#rulings-and-remaining-indexed-work) |
 | 2026-08-14 | object-storage | Test-hygiene batch: root-logger fixture mutation; `run_bounded` failure path abandons tasks; private `_diagnostic_schema_record` read; assert-for-control-flow ×2; redundant `^$` anchors; win32 `/run/secrets` default | Wave 5 hygiene gate | [handoff §11](2026-08-14-content-addressable-object-storage.md) |
 | 2026-08-14 | object-storage | Hosted R2 run covering the sanitized JUnit harness is not yet recorded; `run_nonce` remains decorative | Before Child 7 and production activation | [external prerequisite](2026-08-20-object-storage-backlog-retirement.md#hosted-live-prerequisite-and-next-external-action) |
