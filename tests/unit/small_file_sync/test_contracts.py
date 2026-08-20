@@ -36,6 +36,7 @@ from personal_os.small_file_sync.metrics import (
     SmallFileMetricOutcome,
     SmallFileRejectionReason,
 )
+from personal_os.source_locators import NormalizedLocator as SharedNormalizedLocator
 
 _EVENT_ID = uuid4()
 _LOCAL_FILE_ID = uuid4()
@@ -282,6 +283,10 @@ def test_preflight_rejects_non_positive_policy_revision_number() -> None:
 )
 def test_locator_accepts_canonical_normalized_paths(value: str) -> None:
     assert NormalizedLocator(value).value == value
+
+
+def test_small_file_sync_reexports_the_shared_locator_value() -> None:
+    assert NormalizedLocator is SharedNormalizedLocator
 
 
 @pytest.mark.parametrize(

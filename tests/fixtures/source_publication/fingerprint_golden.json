@@ -29,6 +29,22 @@
     "client_timestamp": "2026-08-14T03:11:12.123456Z",
     "expected_request_fingerprint": "2cd7344d34cac9cd342cd32b9256da2141bb191893c0b793ba877166d7211cba"
   },
+  "create_v2": {
+    "workspace_id": "018f47a0-7b00-7000-8000-000000000001",
+    "source_id": "018f47a0-7b00-7000-8000-000000000002",
+    "event_id": "018f47a0-7b00-7000-8000-000000000003",
+    "base_version_id": null,
+    "actor_kind": "device",
+    "actor_id": "018f47a0-7b00-7000-8000-000000000004",
+    "source_type": "markdown",
+    "title": "Ghi chú",
+    "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "content_size_bytes": 3,
+    "media_type": "text/plain",
+    "client_timestamp": "2026-08-14T03:11:12.123456Z",
+    "initial_locator": "notes/ghi-chú.md",
+    "expected_request_fingerprint": "a040534c08f9babca201e610f1cb5f2f67a3d057cb554a2819d09bd3b5b66892"
+  },
   "safe_diff": {
     "source_id": "018f47a0-7b00-7000-8000-000000000002",
     "base_version_id": "018f47a0-7b00-7000-8000-000000000005",

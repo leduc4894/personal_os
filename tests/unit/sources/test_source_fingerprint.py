@@ -11,6 +11,7 @@ from typing import cast
 from uuid import UUID
 
 from personal_os.object_storage import CanonicalMediaType, ContentDigest, ExpectedObject
+from personal_os.source_locators import NormalizedLocator
 from personal_os.sources import (
     ActorKind,
     CreateSourceVersion,
@@ -63,6 +64,7 @@ def _create_command(
     *,
     idempotency_key: IdempotencyKey = DEFAULT_IDEMPOTENCY_KEY,
     client_timestamp: datetime | None | object = ...,
+    initial_locator: NormalizedLocator | None = None,
 ) -> CreateSourceVersion:
     timestamp = (
         _parse_timestamp(fixture["client_timestamp"])
@@ -79,6 +81,7 @@ def _create_command(
         actor=_actor(fixture),
         expected_object=_expected_object(fixture),
         client_timestamp=timestamp,
+        initial_locator=initial_locator,
     )
 
 
@@ -113,6 +116,21 @@ def test_update_fixture_matches_golden_request_fingerprint() -> None:
     fixture = _load_fixture()["update"]
 
     fingerprint = compute_request_fingerprint(_update_command(fixture))
+
+    assert fingerprint == RequestFingerprint.parse(
+        cast(str, fixture["expected_request_fingerprint"])
+    )
+
+
+def test_create_with_initial_locator_matches_v2_golden_request_fingerprint() -> None:
+    fixture = _load_fixture()["create_v2"]
+
+    fingerprint = compute_request_fingerprint(
+        _create_command(
+            fixture,
+            initial_locator=NormalizedLocator(cast(str, fixture["initial_locator"])),
+        )
+    )
 
     assert fingerprint == RequestFingerprint.parse(
         cast(str, fixture["expected_request_fingerprint"])

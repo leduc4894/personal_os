@@ -18,6 +18,7 @@ from unicodedata import category
 from uuid import UUID
 
 from personal_os.object_storage import ExpectedObject
+from personal_os.source_locators import NormalizedLocator
 from personal_os.sources.actors import SourceActor, reject_nil_uuid
 
 _IDEMPOTENCY_KEY_MIN_LENGTH: Final[int] = 1
@@ -133,7 +134,9 @@ class CreateSourceVersion:
 
     ``source_id`` is backend-issued before the transaction and retained for
     retry. A create carries the source type and title; an update can never
-    mutate them.
+    mutate them. ``initial_locator`` is optional solely for a small-file
+    create transaction to bind its first canonical locator. Its absence keeps
+    the established v1 publication fingerprint byte-for-byte unchanged.
     """
 
     workspace_id: UUID
@@ -145,6 +148,7 @@ class CreateSourceVersion:
     actor: SourceActor
     expected_object: ExpectedObject
     client_timestamp: datetime | None
+    initial_locator: NormalizedLocator | None = None
 
     def __post_init__(self) -> None:
         reject_nil_uuid("workspace_id", self.workspace_id)
