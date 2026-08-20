@@ -54,6 +54,7 @@ FORBIDDEN_IMPORT_ROOTS: Final[frozenset[str]] = frozenset(
         "ssl",
         "http",
         "ftplib",
+        "fastapi",
         "smtplib",
     }
 )
@@ -81,6 +82,9 @@ FORBIDDEN_CALL_NAMES: Final[frozenset[str]] = frozenset(
 _VIOLATING_MODULE_SOURCE: Final[str] = '''
 """Synthetic violating module for the scanner self-check."""
 import socket
+import aiohttp
+import boto3
+import fastapi
 from temporalio.client import Client
 from r2_object_storage import bucket
 
@@ -151,18 +155,28 @@ def test_scanner_detects_a_violating_module() -> None:
     roots = _import_roots(tree)
     identifiers = _identifiers_matching_tokens(tree, FORBIDDEN_IDENTIFIER_TOKENS)
     calls = _call_names(tree)
-    assert FORBIDDEN_IMPORT_ROOTS & roots == {"socket", "temporalio", "r2_object_storage"}
+    assert FORBIDDEN_IMPORT_ROOTS & roots == {
+        "aiohttp",
+        "boto3",
+        "fastapi",
+        "socket",
+        "temporalio",
+        "r2_object_storage",
+    }
     assert {identifier.split("_")[0] for identifier in identifiers} == {"temporal", "r2"}
     assert FORBIDDEN_CALL_NAMES & calls == {"start_workflow", "put_object"}
 
 
 def test_adapter_modules_import_no_object_storage_temporal_or_network_library() -> None:
     offenders: list[str] = []
+    scanned_imports: set[str] = set()
     for path in _iter_module_paths():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        scanned_imports.update(_import_roots(tree))
         violating = FORBIDDEN_IMPORT_ROOTS & _import_roots(tree)
         if violating:
             offenders.append(f"{path.name}: imports {sorted(violating)}")
+    assert {"fastapi", "aiohttp", "boto3"}.isdisjoint(scanned_imports)
     assert not offenders, (
         "adapter modules must not import network or Temporal roots:\n" + "\n".join(offenders)
     )

@@ -208,19 +208,19 @@ def test_dml_metadata_covers_every_migrated_column_and_type() -> None:
         assert migration_table.schema == SOURCE_STORE_SCHEMA, table_name
         assert dml_table.metadata is SOURCE_STORE_METADATA
 
-        dml_columns = {column.name: _column_signature(column) for column in dml_table.columns}
-        migration_columns = {
+        actual_field_map = {column.name: _column_signature(column) for column in dml_table.columns}
+        expected_field_map = {
             column.name: _column_signature(column) for column in migration_table.columns
         }
-        assert dml_columns == migration_columns, (
+        assert expected_field_map.items() == actual_field_map.items(), (
             f"{table_name}: DML columns must exactly cover the migrated columns; "
-            f"missing={set(migration_columns) - set(dml_columns)} "
-            f"extra={set(dml_columns) - set(migration_columns)} "
+            f"missing={set(expected_field_map) - set(actual_field_map)} "
+            f"extra={set(actual_field_map) - set(expected_field_map)} "
             f"changed={
                 {
                     name
-                    for name in dml_columns.keys() & migration_columns.keys()
-                    if dml_columns[name] != migration_columns[name]
+                    for name in actual_field_map.keys() & expected_field_map.keys()
+                    if actual_field_map[name] != expected_field_map[name]
                 }
             }"
         )
