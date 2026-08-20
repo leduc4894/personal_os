@@ -53,16 +53,24 @@ from personal_os.diagnostics.logging import DiagnosticLogger
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.exclusion_policy.contracts import (
     EnforcedPolicyDecision,
+    ExclusionPolicyRevision,
     PolicySubject,
     RawPolicyDecision,
 )
 from personal_os.exclusion_policy.enforcement import (
+    ActivePolicySnapshotMaterial,
     AllowedPolicyRevisionBinding,
     PolicyBoundary,
     PolicyDecision,
     PolicyEnforcementService,
 )
 from personal_os.exclusion_policy.errors import ExclusionPolicyError
+from personal_os.exclusion_policy.signatures import (
+    SNAPSHOT_SIGNING_DOMAIN,
+    build_signed_message,
+    build_snapshot_payload,
+    compute_payload_sha256_hex,
+)
 from personal_os.object_storage import CanonicalMediaType, ContentDigest, ExpectedObject
 from personal_os.runtime_configuration.models import RuntimeEnvironment
 from personal_os.small_file_sync.contracts import (
@@ -106,6 +114,19 @@ def serve_engine(tmp_path: Path) -> Iterator[AsyncEngine]:
 
 @pytest.fixture
 def serve_runtime(tmp_path: Path, serve_engine: AsyncEngine) -> SmallFileSyncRuntime:
+    return _compose_serve_runtime(
+        tmp_path=tmp_path,
+        serve_engine=serve_engine,
+        signer=Ed25519PolicySigner.from_seed_bytes(_SIGNER_SEED),
+    )
+
+
+def _compose_serve_runtime(
+    *,
+    tmp_path: Path,
+    serve_engine: AsyncEngine,
+    signer: Ed25519PolicySigner,
+) -> SmallFileSyncRuntime:
     spool_root = tmp_path / "spool"
     spool_root.mkdir()
     settings = ObjectStorageSettings(
@@ -123,7 +144,7 @@ def serve_runtime(tmp_path: Path, serve_engine: AsyncEngine) -> SmallFileSyncRun
     )
     return compose_small_file_sync(
         engine=serve_engine,
-        signer=Ed25519PolicySigner.from_seed_bytes(_SIGNER_SEED),
+        signer=signer,
         object_storage_settings=settings,
         object_storage_credentials=credentials,
         logger=DiagnosticLogger({"service": "api", "environment": "local"}),
@@ -155,6 +176,56 @@ def test_serve_composition_never_binds_an_offline_double(
         type(serve_runtime.service.object_store),
     }
     assert serve_types.isdisjoint(offline_types)
+
+
+def test_serve_composition_verifies_an_active_snapshot_signed_before_rotation(
+    tmp_path: Path,
+    serve_engine: AsyncEngine,
+) -> None:
+    old_signer = Ed25519PolicySigner.from_seed_bytes(bytes(range(32, 64)))
+    current_signer = Ed25519PolicySigner.from_seed_bytes(_SIGNER_SEED)
+    runtime = _compose_serve_runtime(
+        tmp_path=tmp_path,
+        serve_engine=serve_engine,
+        signer=current_signer,
+    )
+    workspace_id = uuid4()
+    revision = ExclusionPolicyRevision(
+        policy_revision_id=uuid4(),
+        workspace_id=workspace_id,
+        revision_number=1,
+    )
+    payload_bytes = build_snapshot_payload(
+        revision,
+        parent_policy_revision_id=None,
+        published_at=datetime(2026, 8, 20, tzinfo=UTC),
+    )
+    material = ActivePolicySnapshotMaterial(
+        workspace_id=workspace_id,
+        policy_revision_id=revision.policy_revision_id,
+        revision_number=revision.revision_number,
+        payload_bytes=payload_bytes,
+        payload_sha256=compute_payload_sha256_hex(payload_bytes),
+        signature_bytes=old_signer.sign(
+            build_signed_message(SNAPSHOT_SIGNING_DOMAIN, payload_bytes)
+        ),
+        public_key_bytes=old_signer.public_key_bytes,
+    )
+    guard = runtime.service.policy_guard
+    assert isinstance(guard, PolicyEnforcementSmallFileGuard)
+
+    decision = guard.enforcement.evaluate_material(
+        material,
+        subject=PolicySubject(
+            workspace_id=workspace_id,
+            normalized_locator="notes/allowed.md",
+            media_type=CanonicalMediaType.parse("text/markdown"),
+            size_bytes=128,
+        ),
+        boundary=PolicyBoundary.SINGLE_PART_UPLOAD,
+    )
+
+    assert decision.enforced_decision is EnforcedPolicyDecision.ALLOWED
 
 
 def test_serve_runtime_serves_the_sync_routes(
