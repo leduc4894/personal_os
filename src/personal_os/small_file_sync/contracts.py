@@ -114,6 +114,9 @@ class SmallFileIdempotencyKey:
 
     value: str
 
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(value=<redacted>)"
+
     def __post_init__(self) -> None:
         if _IDEMPOTENCY_KEY_PATTERN.fullmatch(self.value) is None:
             raise ValueError("idempotency key must be a canonical lowercase hyphenated UUID")
@@ -134,6 +137,9 @@ class NormalizedLocator:
     """
 
     value: str
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(value=<redacted>)"
 
     def __post_init__(self) -> None:
         if not is_normalized("NFC", self.value):
@@ -174,6 +180,9 @@ class UploadOperationToken:
     """
 
     value: str
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(value=<redacted>)"
 
     def __post_init__(self) -> None:
         length = len(self.value)

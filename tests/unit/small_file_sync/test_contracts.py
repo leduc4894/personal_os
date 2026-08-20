@@ -159,6 +159,22 @@ def test_idempotency_key_rejects_nil_uuid() -> None:
         SmallFileIdempotencyKey("00000000-0000-0000-0000-000000000000")
 
 
+@pytest.mark.parametrize(
+    ("value_object", "raw_value"),
+    [
+        (SmallFileIdempotencyKey, "12345678-1234-1234-1234-123456789abc"),
+        (NormalizedLocator, "notes/private-plan.md"),
+        (UploadOperationToken, "Qm9ndXNTeXpjRWxlZW1FZ0Rhenp1R2h1"),
+    ],
+)
+def test_sensitive_value_objects_redact_raw_values_from_repr(value_object, raw_value) -> None:
+    instance = value_object(raw_value)
+
+    assert raw_value not in repr(instance)
+    assert instance.value == raw_value
+    assert instance == value_object(raw_value)
+
+
 # --- create versus update field requirements (spec 10.1) -----------------------------------
 
 
