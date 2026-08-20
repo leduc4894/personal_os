@@ -319,9 +319,7 @@ async def test_child_env_sets_only_pgpassfile_and_never_password_env(
     assert "PGPASSFILE" in child_env_keys
     assert "PGPASSWORD" not in child_env_keys
     assert "DATABASE_URL" not in child_env_keys
-    leaked_pg_keys = {
-        key for key in child_env_keys if key.startswith("PG") and key != "PGPASSFILE"
-    }
+    leaked_pg_keys = {key for key in child_env_keys if key.startswith("PG") and key != "PGPASSFILE"}
     assert leaked_pg_keys == set()
     # Non-PG environment still reaches the child (libpq needs PATH to resolve).
     assert "PATH" in child_env_keys

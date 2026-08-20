@@ -129,9 +129,7 @@ async def run_bounded_child(
                 await asyncio.shield(drain_task)
         raise
     exit_code = process.returncode if process.returncode is not None else -1
-    return ProcessRunResult(
-        returncode=exit_code, timed_out=timed_out, stdout=capped_stdout
-    )
+    return ProcessRunResult(returncode=exit_code, timed_out=timed_out, stdout=capped_stdout)
 
 
 async def _terminate_then_kill_child(process: asyncio.subprocess.Process) -> None:
@@ -400,16 +398,19 @@ class PostgresqlDumpProcessAdapter:
 
     def _build_passfile_line(self, target: PostgresqlConnectionTarget) -> str:
         """Build one libpq line, rejecting unrepresentable line-break fields."""
-        return ":".join(
-            _escape_passfile_field(field)
-            for field in (
-                target.host,
-                str(target.port),
-                target.database,
-                target.user,
-                self._password.get_secret_value(),
+        return (
+            ":".join(
+                _escape_passfile_field(field)
+                for field in (
+                    target.host,
+                    str(target.port),
+                    target.database,
+                    target.user,
+                    self._password.get_secret_value(),
+                )
             )
-        ) + "\n"
+            + "\n"
+        )
 
     @asynccontextmanager
     async def _ephemeral_passfile(self, passfile_line: str) -> AsyncIterator[Path]:
