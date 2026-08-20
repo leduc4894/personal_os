@@ -389,7 +389,6 @@ class R2S3ObjectStore:
                 )
             finally:
                 await verification.close()
-            self._record_reserved(operation)
             self._record_succeeded(
                 operation,
                 started=started,
@@ -399,7 +398,6 @@ class R2S3ObjectStore:
             return receipt
         finally:
             self._metrics.decrement_in_flight(operation=operation)
-            self._record_reserved(operation)
 
     async def verify_existing_object(self, expected: ExpectedObject) -> VerifiedObjectReceipt:
         """Verify an object the caller asserts exists; raise on absence.
@@ -431,7 +429,6 @@ class R2S3ObjectStore:
                 )
             finally:
                 await verification.close()
-            self._record_reserved(operation)
             self._record_succeeded(
                 operation,
                 started=started,
@@ -441,7 +438,6 @@ class R2S3ObjectStore:
             return receipt
         finally:
             self._metrics.decrement_in_flight(operation=operation)
-            self._record_reserved(operation)
 
     async def store_stream(
         self,
@@ -489,8 +485,11 @@ class R2S3ObjectStore:
             canonical_media = _parse_canonical_media_type(media_type)
             claimed_digest = _parse_claimed_digest(claimed_sha256)
 
-            async with self._spools.receive_stream(stream, expected_size_bytes) as hashed:
-                self._record_reserved(operation)
+            async with self._spools.receive_stream(
+                stream,
+                expected_size_bytes,
+                reservation_observer=self._reservation_observer(operation),
+            ) as hashed:
                 if claimed_digest is not None and hashed.content_digest != claimed_digest:
                     raise ObjectStorageError(
                         ErrorCode.OBJECT_STORAGE_INPUT_INVALID,
@@ -523,7 +522,6 @@ class R2S3ObjectStore:
             raise
         finally:
             self._metrics.decrement_in_flight(operation=operation)
-            self._record_reserved(operation)
 
     @asynccontextmanager
     async def open_verified_reader(
@@ -589,7 +587,6 @@ class R2S3ObjectStore:
                 await reader.aclose()
         finally:
             self._metrics.decrement_in_flight(operation=operation)
-            self._record_reserved(operation)
 
     async def close(self) -> None:
         """Close the store's underlying client exactly once."""
@@ -618,8 +615,10 @@ class R2S3ObjectStore:
         object_key = derive_canonical_object_key(expected.content_digest)
         head = await self._head_exact(object_key, operation, tracker)
         require_exact_metadata(head, expected)
-        verification = await self._spools.reserve_verification(expected.size_bytes)
-        self._record_reserved(operation)
+        verification = await self._spools.reserve_verification(
+            expected.size_bytes,
+            reservation_observer=self._reservation_observer(operation),
+        )
         try:
             response = await self._get_with_retry(object_key, head.etag, operation, tracker)
             try:
@@ -628,7 +627,6 @@ class R2S3ObjectStore:
                 await _close_streaming_body(response.body)
         except BaseException:
             await verification.close()
-            self._record_reserved(operation)
             raise
         return verification
 
@@ -827,7 +825,7 @@ class R2S3ObjectStore:
                 except ApplicationError as cause:
                     waiter_failure = _clone_application_error(cause)
             finally:
-                await _run_shielded(self._detach_single_flight_waiter(digest))
+                await _run_shielded(self._detach_single_flight_waiter(digest, entry))
             if waiter_failure is not None:
                 raise waiter_failure
             assert outcome is not None, "a successful owner must publish its outcome"
@@ -846,15 +844,18 @@ class R2S3ObjectStore:
                 receipt = self._build_receipt(verification, expected, method)
             finally:
                 await verification.close()
-            self._record_reserved(operation)
         except BaseException as cause:
             await _run_shielded(self._finish_single_flight(digest, cause=cause))
             raise
         await _run_shielded(self._finish_single_flight(digest, outcome=(receipt, method)))
         return receipt, method
 
-    async def _detach_single_flight_waiter(self, digest: ContentDigest) -> None:
-        """Detach one waiter from the digest's entry under the lock.
+    async def _detach_single_flight_waiter(
+        self,
+        digest: ContentDigest,
+        attached_entry: _SingleFlightEntry,
+    ) -> None:
+        """Detach one waiter from its exact digest-entry generation under the lock.
 
         When the last waiter detaches after the future already failed, the
         exception is marked retrieved so an unobserved failure can never raise
@@ -863,7 +864,7 @@ class R2S3ObjectStore:
 
         async with self._single_flight_lock:
             entry = self._single_flight.get(digest)
-            if entry is None:
+            if entry is not attached_entry:
                 return
             if entry.waiter_count > 0:
                 entry.waiter_count -= 1
@@ -907,18 +908,16 @@ class R2S3ObjectStore:
 
     # --- Metrics and diagnostics ------------------------------------------
 
-    def _record_reserved(self, operation: ObjectStorageOperation) -> None:
-        """Sample the process-wide spool reservation into the metrics sink.
+    def _reservation_observer(
+        self,
+        operation: ObjectStorageOperation,
+    ) -> Callable[[int], None]:
+        """Bind one operation label to lock-atomic reservation observations."""
 
-        The value is the spool manager's current aggregate reservation (input
-        and verification spools together); ``operation`` only identifies which
-        operation's admission change triggered the sample. Sampling the
-        aggregate keeps the recorded maximum an exact bound of true state.
-        """
+        def observe(size_bytes: int) -> None:
+            self._metrics.record_reserved_bytes(operation=operation, size_bytes=size_bytes)
 
-        self._metrics.record_reserved_bytes(
-            operation=operation, size_bytes=self._spools.reserved_size_bytes
-        )
+        return observe
 
     def _duration_ms(self, started: float) -> int:
         return max(0, int((self._monotonic() - started) * 1000))

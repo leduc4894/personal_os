@@ -22,10 +22,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from botocore.exceptions import ClientError
@@ -46,7 +47,7 @@ from r2_object_storage.metrics import (
     ObjectStorageOperation,
     ObjectStorageResult,
 )
-from r2_object_storage.spool import SpoolLimits, SpoolManager
+from r2_object_storage.spool import SpoolLimits, SpoolManager, VerificationSpool
 
 #: One mebibyte, the spool chunk size and the scaled test object size.
 _ONE_MEBIBYTE = 1_048_576
@@ -212,6 +213,17 @@ class RepeatingStoreClient:
 
     async def close(self) -> None:
         self.close_count += 1
+
+    def configure_head(
+        self,
+        *,
+        gate: asyncio.Event | None,
+        failure: BaseException | None,
+    ) -> None:
+        """Select the deterministic HEAD behavior for the next flight generation."""
+
+        self._head_gate = gate
+        self._head_failure = failure
 
 
 def build_repeating_store(
@@ -568,6 +580,97 @@ async def test_same_digest_failure_is_fresh_for_waiter_with_zero_attempts(
 
 
 @pytest.mark.asyncio
+async def test_old_waiter_detach_cannot_cancel_new_generation_waiter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delayed old detach cannot consume the replacement flight's real waiter."""
+
+    first_head_gate = asyncio.Event()
+    store, client, _metrics = build_repeating_store(
+        tmp_path,
+        head_gate=first_head_gate,
+        head_failure=_client_error("AccessDenied", 403),
+    )
+    payload = b"cross-generation single-flight failure"
+    old_detach_started = asyncio.Event()
+    allow_old_detach = asyncio.Event()
+    old_detach_finished = asyncio.Event()
+    detach_call_count = 0
+    original_detach = store._detach_single_flight_waiter
+    call_original_detach = cast("Callable[..., Awaitable[None]]", original_detach)
+
+    async def coordinate_first_detach(*arguments: object) -> None:
+        nonlocal detach_call_count
+        detach_call_count += 1
+        if detach_call_count == 1:
+            old_detach_started.set()
+            await allow_old_detach.wait()
+        await call_original_detach(*arguments)
+        if detach_call_count == 1:
+            old_detach_finished.set()
+
+    monkeypatch.setattr(store, "_detach_single_flight_waiter", coordinate_first_detach)
+
+    first_owner = asyncio.create_task(
+        store.store_stream(chunks(payload), len(payload), "application/octet-stream")
+    )
+    await _wait_until(
+        lambda: store.single_flight_entry_count == 1,
+        description="first owner joined the table",
+    )
+    first_waiter = asyncio.create_task(
+        store.store_stream(chunks(payload), len(payload), "application/octet-stream")
+    )
+    await _wait_until(
+        lambda: store.single_flight_waiter_count == 1,
+        description="first waiter joined the entry",
+    )
+
+    first_head_gate.set()
+    await asyncio.wait_for(old_detach_started.wait(), timeout=2)
+    first_owner_failure = (await asyncio.gather(first_owner, return_exceptions=True))[0]
+    assert isinstance(first_owner_failure, ObjectStorageError)
+    assert first_owner_failure.error_code is ErrorCode.OBJECT_STORAGE_ACCESS_DENIED
+
+    second_head_gate = asyncio.Event()
+    client.configure_head(gate=second_head_gate, failure=None)
+    second_owner = asyncio.create_task(
+        store.store_stream(chunks(payload), len(payload), "application/octet-stream")
+    )
+    await _wait_until(
+        lambda: store.single_flight_entry_count == 1,
+        description="replacement owner joined the table",
+    )
+    second_waiter = asyncio.create_task(
+        store.store_stream(chunks(payload), len(payload), "application/octet-stream")
+    )
+    await _wait_until(
+        lambda: store.single_flight_waiter_count == 1,
+        description="replacement waiter joined the entry",
+    )
+
+    allow_old_detach.set()
+    await asyncio.wait_for(old_detach_finished.wait(), timeout=2)
+    second_owner.cancel()
+    second_owner_failure, second_waiter_failure = await asyncio.gather(
+        second_owner,
+        second_waiter,
+        return_exceptions=True,
+    )
+    first_waiter_failure = (await asyncio.gather(first_waiter, return_exceptions=True))[0]
+
+    assert isinstance(first_waiter_failure, ObjectStorageError)
+    assert first_waiter_failure.error_code is ErrorCode.OBJECT_STORAGE_ACCESS_DENIED
+    assert isinstance(second_owner_failure, asyncio.CancelledError)
+    assert isinstance(second_waiter_failure, ObjectStorageError)
+    assert second_waiter_failure.error_code is ErrorCode.OBJECT_STORAGE_UNAVAILABLE
+    assert second_waiter_failure.__context__ is None
+    assert second_waiter_failure.__cause__ is None
+    _assert_no_residual_state(store, tmp_path)
+
+
+@pytest.mark.asyncio
 async def test_internal_application_error_records_failed_operation(tmp_path: Path) -> None:
     """Unknown provider-boundary failures still count as failed operations."""
 
@@ -617,6 +720,52 @@ async def test_reservation_gauge_emits_after_failed_verification_mutations(
         len(payload),
         0,
     ]
+    _assert_no_residual_state(store, tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_reservation_peak_survives_interleaved_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A release after verification admission cannot erase its true peak sample."""
+
+    metrics = _ReservationRecordingMetrics()
+    store, _client, _ = build_repeating_store(tmp_path, metrics=metrics)
+    payload = b"atomic reservation peak"
+    spools = store.spool_manager
+    existing_reservation = await spools.reserve_verification(len(payload))
+    verification_reserved = asyncio.Event()
+    allow_reservation_return = asyncio.Event()
+    original_reserve = cast(
+        "Callable[..., Awaitable[VerificationSpool]]",
+        spools.reserve_verification,
+    )
+
+    async def pause_after_reservation(
+        *arguments: object,
+        **keywords: object,
+    ) -> VerificationSpool:
+        verification = await original_reserve(*arguments, **keywords)
+        verification_reserved.set()
+        await allow_reservation_return.wait()
+        return verification
+
+    monkeypatch.setattr(spools, "reserve_verification", pause_after_reservation)
+    store_task = asyncio.create_task(
+        store.store_stream(chunks(payload), len(payload), "application/octet-stream")
+    )
+
+    await asyncio.wait_for(verification_reserved.wait(), timeout=2)
+    assert spools.reserved_size_bytes == 3 * len(payload)
+    await existing_reservation.close()
+    assert spools.reserved_size_bytes == 2 * len(payload)
+    allow_reservation_return.set()
+
+    receipt = await asyncio.wait_for(store_task, timeout=2)
+
+    assert receipt.size_bytes == len(payload)
+    assert metrics.maximum_reserved_size_bytes == 3 * len(payload)
     _assert_no_residual_state(store, tmp_path)
 
 
