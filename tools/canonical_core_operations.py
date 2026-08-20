@@ -1426,6 +1426,7 @@ def _compose_phase_one_acceptance(
                             verifier=policy_verifier,
                             metrics=policy_metrics,
                         ),
+                        diagnostics=diagnostic_logger,
                     ),
                     read_service=CanonicalSourceReadService(
                         store=PostgresqlCanonicalSourceReadStore(

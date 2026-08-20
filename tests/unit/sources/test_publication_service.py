@@ -37,6 +37,7 @@ from tests.unit.sources.fakes import (
     denying_policy_guard,
 )
 
+from personal_os.diagnostics.events import EventName
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.exclusion_policy.enforcement import (
     AllowedPolicyRevisionBinding,
@@ -60,6 +61,16 @@ from personal_os.sources.results import SourceVersionPublicationResult
 _PUBLICATION_START: Final[datetime] = datetime(2026, 8, 14, 12, 0, 0, tzinfo=UTC)
 
 
+class RecordingDiagnosticSink:
+    """Capture the service's validated event boundary for one unit test."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[EventName, dict[str, object]]] = []
+
+    def emit(self, event_name: EventName, fields: dict[str, object]) -> None:
+        self.events.append((event_name, fields))
+
+
 def _build_service(
     *,
     committed_result: SourceVersionPublicationResult | None = None,
@@ -68,6 +79,7 @@ def _build_service(
     resolve_receipts: list[VerifiedObjectReceipt | None] | None = None,
     store_receipt: VerifiedObjectReceipt | None = None,
     publication_evidence: PublicationPolicyEvidence | None = None,
+    diagnostics: RecordingDiagnosticSink | None = None,
 ) -> tuple[
     SourceVersionPublicationService,
     FakeSourcePublicationStore,
@@ -100,8 +112,53 @@ def _build_service(
             ledger=ledger,
             publication_evidence=publication_evidence,
         ),
+        diagnostics=diagnostics,
     )
     return service, store, object_store, metrics, ledger
+
+
+@pytest.mark.asyncio
+async def test_retryable_publication_failure_is_not_recorded_as_a_rejection() -> None:
+    """A busy dependency must remain retryable in metrics and diagnostics.
+
+    This catches the bug where every ``SourcePublicationError`` is recorded
+    under the terminal rejected outcome, which makes transient dependency
+    pressure indistinguishable from a known business rejection.
+    """
+
+    diagnostics = RecordingDiagnosticSink()
+    busy_command = build_create_command()
+    service, _, _, metrics, _ = _build_service(
+        resolve_error=SourcePublicationError(
+            ErrorCode.SOURCE_CONCURRENCY_BUSY,
+            safe_details={"source_id": busy_command.source_id},
+        ),
+        diagnostics=diagnostics,
+    )
+
+    with pytest.raises(SourcePublicationError):
+        await service.publish_create(
+            command=busy_command,
+            stream=ProbedByteStream([b"unused"]),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+    assert PublicationMetricOutcome.REJECTED not in [
+        record.outcome for record in metrics.publication_records()
+    ]
+    assert [event_name for event_name, _ in diagnostics.events] == [
+        EventName.SOURCE_VERSION_PUBLISH_FAILED
+    ]
+    assert set(diagnostics.events[0][1]) == {
+        "operation",
+        "outcome",
+        "duration_ms",
+        "error_code",
+        "error_category",
+        "is_retryable",
+        "source_id",
+        "event_id",
+    }
 
 
 @pytest.mark.asyncio

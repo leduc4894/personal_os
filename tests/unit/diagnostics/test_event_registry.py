@@ -126,6 +126,32 @@ def test_source_publication_events_are_registered_with_exact_contracts() -> None
                 }
             ),
         ),
+        EventName.SOURCE_VERSION_PUBLISH_FAILED: (
+            DiagnosticLevel.ERROR,
+            ResultCode.FAILED,
+            frozenset(
+                {
+                    "operation",
+                    "outcome",
+                    "duration_ms",
+                    "error_code",
+                    "error_category",
+                    "is_retryable",
+                }
+            ),
+            frozenset(
+                {
+                    "operation",
+                    "outcome",
+                    "duration_ms",
+                    "error_code",
+                    "error_category",
+                    "is_retryable",
+                    "source_id",
+                    "event_id",
+                }
+            ),
+        ),
         EventName.PROJECTION_INTENT_DISPATCHED: (
             DiagnosticLevel.INFO,
             ResultCode.SUCCEEDED,

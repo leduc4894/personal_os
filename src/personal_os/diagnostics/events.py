@@ -100,6 +100,7 @@ class EventName(StrEnum):
     SOURCE_VERSION_PUBLISH_SUCCEEDED = "source_version_publish_succeeded"
     SOURCE_VERSION_PUBLISH_REPLAYED = "source_version_publish_replayed"
     SOURCE_VERSION_PUBLISH_REJECTED = "source_version_publish_rejected"
+    SOURCE_VERSION_PUBLISH_FAILED = "source_version_publish_failed"
     PROJECTION_INTENT_DISPATCHED = "projection_intent_dispatched"
     PROJECTION_INTENT_DISPATCH_FAILED = "projection_intent_dispatch_failed"
     PROJECTION_INTENT_LEASE_RECLAIMED = "projection_intent_lease_reclaimed"
@@ -377,6 +378,32 @@ EVENT_DEFINITIONS: Final[Mapping[EventName, EventDefinition]] = MappingProxyType
                     "source_id",
                     "event_id",
                     "reason_code",
+                }
+            ),
+        ),
+        EventName.SOURCE_VERSION_PUBLISH_FAILED: EventDefinition(
+            level=DiagnosticLevel.ERROR,
+            result_code=ResultCode.FAILED,
+            required_fields=frozenset(
+                {
+                    "operation",
+                    "outcome",
+                    "duration_ms",
+                    "error_code",
+                    "error_category",
+                    "is_retryable",
+                }
+            ),
+            allowed_fields=frozenset(
+                {
+                    "operation",
+                    "outcome",
+                    "duration_ms",
+                    "error_code",
+                    "error_category",
+                    "is_retryable",
+                    "source_id",
+                    "event_id",
                 }
             ),
         ),

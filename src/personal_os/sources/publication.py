@@ -34,7 +34,15 @@ from typing import TYPE_CHECKING, Final
 from uuid import UUID
 
 from personal_os.diagnostics.context import DiagnosticContext
+from personal_os.diagnostics.events import (
+    DiagnosticEventSink,
+    EventName,
+    RejectedDiagnosticPayload,
+    SafeToken,
+    build_registered_event,
+)
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.error_contracts.exceptions import InternalApplicationError
 from personal_os.object_storage import (
     CanonicalMediaType,
     CanonicalObjectStore,
@@ -199,6 +207,7 @@ class SourceVersionPublicationService:
     metrics: SourcePublicationMetrics
     clock: AwareUtcClock
     policy_guard: PolicyEnforcementGuard
+    diagnostics: DiagnosticEventSink | None = None
 
     async def publish_create(
         self,
@@ -250,7 +259,12 @@ class SourceVersionPublicationService:
                 started_at=started_at,
             )
         except SourcePublicationError as error:
-            self._record_failure(operation=operation, error=error, started_at=started_at)
+            self._record_failure(
+                command=command,
+                operation=operation,
+                error=error,
+                started_at=started_at,
+            )
             raise
         return result
 
@@ -291,6 +305,13 @@ class SourceVersionPublicationService:
                 outcome=PublicationMetricOutcome.REPLAYED,
                 duration_seconds=duration_seconds,
             )
+            self._emit_registered_event(
+                *publication_replayed_event_fields(
+                    operation=operation,
+                    result=committed,
+                    duration_seconds=duration_seconds,
+                )
+            )
             return committed
         # One verified receipt per invocation, validated before the commit.
         receipt = await self._obtain_verified_receipt(command=command, stream=stream)
@@ -310,10 +331,18 @@ class SourceVersionPublicationService:
                 diagnostic_context,
                 preflight_decision=preflight_decision,
             )
+        duration_seconds = self._elapsed_seconds_since(started_at)
         self.metrics.record_publication(
             operation=operation,
             outcome=PublicationMetricOutcome.SUCCEEDED,
-            duration_seconds=self._elapsed_seconds_since(started_at),
+            duration_seconds=duration_seconds,
+        )
+        self._emit_registered_event(
+            *publication_succeeded_event_fields(
+                operation=operation,
+                result=committed,
+                duration_seconds=duration_seconds,
+            )
         )
         return committed
 
@@ -345,18 +374,178 @@ class SourceVersionPublicationService:
     def _record_failure(
         self,
         *,
+        command: SourceVersionCommand,
         operation: PublicationOperation,
         error: SourcePublicationError,
         started_at: datetime,
     ) -> None:
+        duration_seconds = self._elapsed_seconds_since(started_at)
         rejection_reason = REJECTION_REASON_BY_ERROR_CODE.get(error.error_code)
         if rejection_reason is not None:
             self.metrics.record_rejection(
                 operation=operation,
                 reason_code=rejection_reason,
             )
-        self.metrics.record_publication(
+            self.metrics.record_publication(
+                operation=operation,
+                outcome=PublicationMetricOutcome.REJECTED,
+                duration_seconds=duration_seconds,
+            )
+            self._emit_registered_event(
+                *publication_rejected_event_fields(
+                    command=command,
+                    operation=operation,
+                    error=error,
+                    reason_code=rejection_reason,
+                    duration_seconds=duration_seconds,
+                )
+            )
+            return
+        self._emit_retryable_failure(
+            command=command,
             operation=operation,
-            outcome=PublicationMetricOutcome.REJECTED,
-            duration_seconds=self._elapsed_seconds_since(started_at),
+            error=error,
+            duration_seconds=duration_seconds,
         )
+
+    def _emit_retryable_failure(
+        self,
+        *,
+        command: SourceVersionCommand,
+        operation: PublicationOperation,
+        error: SourcePublicationError,
+        duration_seconds: float,
+    ) -> None:
+        """Emit the retryable failure without assigning a terminal metric outcome."""
+
+        self._emit_registered_event(
+            *publication_failed_event_fields(
+                command=command,
+                operation=operation,
+                error=error,
+                duration_seconds=duration_seconds,
+            )
+        )
+
+    def _emit_registered_event(self, event_name: EventName, fields: Mapping[str, object]) -> None:
+        """Validate a registered event and deliver it when composition bound a sink."""
+
+        built = build_registered_event(event_name, fields)
+        if isinstance(built, RejectedDiagnosticPayload):
+            raise InternalApplicationError(ErrorCode.INTERNAL_ERROR)
+        if self.diagnostics is not None:
+            self.diagnostics.emit(event_name, dict(fields))
+
+
+def _duration_ms(duration_seconds: float) -> int:
+    return max(0, int(duration_seconds * 1000))
+
+
+def _publication_result_event_fields(
+    event_name: EventName,
+    operation: PublicationOperation,
+    result: SourceVersionPublicationResult,
+    duration_seconds: float,
+) -> tuple[EventName, dict[str, object]]:
+    return event_name, {
+        "operation": operation,
+        "outcome": result.outcome,
+        "duration_ms": _duration_ms(duration_seconds),
+        "attempt_count": 1,
+        "content_version": result.content_version,
+        "source_id": result.source_id,
+        "source_version_id": result.source_version_id,
+        "event_id": result.event_id,
+    }
+
+
+def publication_succeeded_event_fields(
+    *,
+    operation: PublicationOperation,
+    result: SourceVersionPublicationResult,
+    duration_seconds: float,
+) -> tuple[EventName, dict[str, object]]:
+    """Return the safe, registered event fields for a new publication."""
+
+    return _publication_result_event_fields(
+        EventName.SOURCE_VERSION_PUBLISH_SUCCEEDED,
+        operation,
+        result,
+        duration_seconds,
+    )
+
+
+def publication_replayed_event_fields(
+    *,
+    operation: PublicationOperation,
+    result: SourceVersionPublicationResult,
+    duration_seconds: float,
+) -> tuple[EventName, dict[str, object]]:
+    """Return the safe, registered event fields for an exact replay."""
+
+    return _publication_result_event_fields(
+        EventName.SOURCE_VERSION_PUBLISH_REPLAYED,
+        operation,
+        result,
+        duration_seconds,
+    )
+
+
+def _publication_error_event_fields(
+    event_name: EventName,
+    command: SourceVersionCommand,
+    operation: PublicationOperation,
+    error: SourcePublicationError,
+    duration_seconds: float,
+) -> tuple[EventName, dict[str, object]]:
+    return event_name, {
+        "operation": operation,
+        "outcome": SafeToken.parse("failed")
+        if event_name is EventName.SOURCE_VERSION_PUBLISH_FAILED
+        else PublicationMetricOutcome.REJECTED,
+        "duration_ms": _duration_ms(duration_seconds),
+        "error_code": error.error_code,
+        "error_category": error.category,
+        "is_retryable": error.is_retryable,
+        "source_id": command.source_id,
+        "event_id": command.event_id,
+    }
+
+
+def publication_rejected_event_fields(
+    *,
+    command: SourceVersionCommand,
+    operation: PublicationOperation,
+    error: SourcePublicationError,
+    reason_code: PublicationRejectionReason,
+    duration_seconds: float,
+) -> tuple[EventName, dict[str, object]]:
+    """Return the safe, registered event fields for a known rejection."""
+
+    event_name, fields = _publication_error_event_fields(
+        EventName.SOURCE_VERSION_PUBLISH_REJECTED,
+        command,
+        operation,
+        error,
+        duration_seconds,
+    )
+    fields["reason_code"] = reason_code
+    return event_name, fields
+
+
+def publication_failed_event_fields(
+    *,
+    command: SourceVersionCommand,
+    operation: PublicationOperation,
+    error: SourcePublicationError,
+    duration_seconds: float,
+) -> tuple[EventName, dict[str, object]]:
+    """Return the safe, registered event fields for a retryable failure."""
+
+    return _publication_error_event_fields(
+        EventName.SOURCE_VERSION_PUBLISH_FAILED,
+        command,
+        operation,
+        error,
+        duration_seconds,
+    )

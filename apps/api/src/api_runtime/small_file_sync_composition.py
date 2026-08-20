@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from api_runtime.exclusion_policy_crypto import Ed25519PolicySigner, TrustAnchorEd25519Verifier
 from personal_os.diagnostics.context import DiagnosticContext
+from personal_os.diagnostics.events import DiagnosticEventSink
 from personal_os.diagnostics.logging import DiagnosticLogger
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.exclusion_policy.contracts import PolicySubject
@@ -201,6 +202,7 @@ class BoundPolicySmallFilePublicationGateway:
     clock: SourceAwareUtcClock
     enforcement: PolicyEnforcementService
     operation_store: PostgresqlSmallFileUploadOperationStore | None = None
+    diagnostics: DiagnosticEventSink | None = None
 
     async def publish_create(
         self,
@@ -225,6 +227,7 @@ class BoundPolicySmallFilePublicationGateway:
                     binding=policy_binding,
                 ),
             ),
+            diagnostics=self.diagnostics,
         )
         return await publication_service.publish_create(
             command=command,
@@ -255,6 +258,7 @@ class BoundPolicySmallFilePublicationGateway:
                     binding=policy_binding,
                 ),
             ),
+            diagnostics=self.diagnostics,
         )
         return await publication_service.publish_update(
             command=command,
@@ -348,6 +352,7 @@ def compose_small_file_sync(
         clock=default_utc_clock,
         enforcement=enforcement,
         operation_store=operation_store,
+        diagnostics=logger,
     )
     service = SmallFileSyncService(
         operation_store=operation_store,
