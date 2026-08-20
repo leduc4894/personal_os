@@ -345,11 +345,15 @@ Backend UUIDv7 values are allocated once per service invocation and reused throu
 For a new content reference:
 
 1. `INSERT ... ON CONFLICT (content_hash) DO NOTHING` using receipt metadata.
+   On the first insert, both `verified_at` and `created_at` are the receipt's
+   verified instant; PostgreSQL transaction time is not mixed with the
+   application/R2 receipt clock.
 2. Select the row by full hash.
 3. Compare object key, size and media type exactly.
 4. Reuse only an exact match; otherwise roll back with `source_content_object_conflict`.
 
-The first `verified_at` remains unchanged on later deduplication. Reference count is derived, never stored.
+The first `verified_at` and `created_at` remain unchanged on later
+deduplication. Reference count is derived, never stored.
 
 ### 8.5 Create
 

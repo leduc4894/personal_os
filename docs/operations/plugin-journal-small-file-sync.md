@@ -45,6 +45,37 @@ below never retry automatically. An interrupted pass needs no operator
 action: the journal is the durable truth and the next trigger resumes
 through ordinary eligibility.
 
+## Server upload-operation claim and expiry
+
+The server reserves a `pending` upload operation with an opaque token, the
+server-authorized policy revision, and a deadline. Content receive atomically
+claims that row as `receiving` before consuming the stream. The deadline has
+two meanings only: an expired `pending` token cannot start receive, and a later
+successful locator-aware preflight may reclaim that pending identity by
+rotating token, deadline, and policy revision together.
+
+A `receiving` row is already owned. It is never reclaimed merely because the
+reservation deadline passes: token and expiry never rotate, while the exact
+token may resume after interruption. One narrow rebind is permitted under the
+operation identity lock: a successful locator-aware re-preflight of the same
+claimed identity may update only its allowed policy revision, preserving the
+exact token and every other bound field. Its guarded terminal write must still
+match `receiving`, token hash, workspace/device/event/idempotency identity,
+declared content fields, and the rebound policy revision; expiry is not part of
+that terminal fence. Consequently a receive that crossed the deadline cannot
+publish canonical state and then lose terminalization to a rotated row. After
+a lost response, run `Sync now`; the exact token resumes, canonical publication
+idempotency replays, and the single terminal receipt is frozen. Operators do
+not edit operation rows or extend deadlines manually.
+
+The plugin still preflights every retry. A matching deny/indeterminate policy
+change settles the event before content resumes; an irrelevant locator-only
+revision reauthorizes the event and resumes the unchanged token. Only the
+claimed-state response may reuse the token persisted on that frozen event.
+Unknown, missing, or concurrently replaced tokens remain on bounded retry and
+are never resumed as claimed work. Expiry alone neither replaces nor
+invalidates a token after the operation reached `receiving`.
+
 ## Safe diagnostics
 
 The only diagnostic surfaces are the plugin status bar text and the
@@ -101,19 +132,23 @@ per file, not an error state of the queue.
 
 Every preflight re-evaluates the active signed policy server-side with the
 locator-aware subject (the plugin's local gate is a filter, never the
-authority). A denied or indeterminate subject answers the terminal
-`excluded` outcome — a born-terminal `excluded_policy` event on the
-plugin, never retried, no automatic re-upload. A policy revision published
-between an accepted preflight and the content stream is caught by the
-publication guard: the upload fails closed (403, nothing published).
-Because the plugin's closed failure table maps every 403 to
-`login_required`, that pass first ends as **Login required** with the whole
-queue retained — a transient status, not a credential failure (the
-credential is untouched and still valid). The next preflight of the same
-identity re-evaluates policy, answers `excluded`, and the event settles
-terminally as `excluded_policy`; no re-login is ever needed. Operators
-seeing Login required here with valid credentials should run one more
-pass (or `Sync now`) and expect the `excluded_policy` settlement.
+authority) and persists the server-returned allowed revision on the upload
+operation. At publication, a matching active revision reuses that immutable
+allowed binding after verifying the signed active snapshot; it does not
+re-evaluate a locator-free subject. A changed revision is re-evaluated
+fail-closed using the authoritative subject. A denied or indeterminate subject
+answers the terminal `excluded` outcome — a born-terminal `excluded_policy`
+event on the plugin, never retried, no automatic re-upload. A policy revision
+published between an accepted preflight and the content stream is caught by
+the publication guard: that request fails closed (403, nothing canonical
+published). The next locator-aware preflight decides the actual outcome. If a
+new rule matches, the event settles `excluded_policy`. If the revision is
+locator-only but irrelevant to this file, the server reauthorizes only the
+claimed row's policy revision and the plugin resumes the exact persisted token
+to one canonical publication and one terminal receipt. The transient 403 may
+briefly render **Login required** because of the closed client mapping, but the
+credential is untouched: run one more pass (or `Sync now`); do not re-login or
+classify every policy change as exclusion.
 Publishing and rotating policies is covered by
 `docs/operations/exclusion-policy-publication.md`; revoking a device is
 covered by `docs/operations/web-authentication-and-device-authorization.md`
@@ -128,7 +163,8 @@ surfaces and its reserved operations can never be continued).
 | Response lost after commit | next pass re-preflights the same identity | `committed_replay` with the frozen result, exactly one publication |
 | File at exactly 16 MiB / one byte over | `blocked_size` at capture when over | accepted at the ceiling; over is rejected before reservation |
 | Denied policy | born-terminal `excluded_policy` | `excluded` outcome, no reservation |
-| Policy changed during upload | pass first ends Login required (transient 403 mapping, queue retained); next preflight settles `excluded_policy` | 403 at the publication guard, nothing published |
+| Matching deny policy published during upload | pass first ends Login required (transient 403 mapping, queue retained); next preflight settles `excluded_policy` | changed revision is re-evaluated fail-closed; nothing published |
+| Irrelevant locator-only policy published after claim | interruption remains one durable pending event; next pass commits once with the same opaque token | re-preflight updates only the claimed row's policy revision; exact-token resume creates one canonical publication and one terminal receipt |
 | Stale update base | born-terminal `blocked_conflict` | `conflict` outcome, no upload |
 | Local bytes changed after freeze | frozen event closes `integrity_failed`; successor syncs | digest verification sees only the successor bytes |
 | Torn newest generation | `prior_generation_recovered` | none (local recovery) |
@@ -153,11 +189,12 @@ disposable local stack — never a personal Vault):
    revision. Use synthetic content only.
 2. Run each scenario of the table above once: edit offline and reconnect,
    force a dropped response (kill network mid-upload), add a file at and
-   over 16 MiB, publish a denying revision before an upload lands, edit a
-   file whose base went stale from another device, corrupt nothing (skip
-   recovery on device — recovery is covered by automated fixtures), fill
-   no queue (covered by automated fixtures), delete a file mid-sync,
-   revoke the test device.
+   over 16 MiB, publish a denying revision before an upload lands, publish an
+   irrelevant locator-only revision after a different upload is claimed and
+   resume it, edit a file whose base went stale from another device, corrupt
+   nothing (skip recovery on device — recovery is covered by automated
+   fixtures), fill no queue (covered by automated fixtures), delete a file
+   mid-sync, revoke the test device.
 3. Record, per scenario, ONLY: the device class (Desktop/Mobile), the
    scenario name, the observed status-bar value, the observed terminal
    state label from the settings snapshot, the UTC date, and the server
@@ -206,4 +243,3 @@ uv run poe api-contract-check
 The reference-device half of acceptance is the operator evidence procedure
 above; it fails — never skips — while the device rows are absent, and no
 automated gate substitutes for it.
-

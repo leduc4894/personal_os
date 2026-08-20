@@ -20,7 +20,7 @@ import hashlib
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 from uuid import UUID, uuid4
@@ -142,7 +142,7 @@ async def _seed_population(engine: AsyncEngine) -> QueryPlanPopulation:
                 ),
                 "byte_size": len(salt),
                 "media_type": "text/markdown",
-                "verified_at": datetime.now(UTC) - timedelta(seconds=1),
+                "verified_at": datetime.now(UTC),
             }
         )
     source_rows = [

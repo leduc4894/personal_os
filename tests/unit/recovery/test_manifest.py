@@ -19,7 +19,11 @@ from personal_os.error_contracts.codes import ErrorCode
 from personal_os.recovery.contracts import (
     CANONICAL_COUNT_TABLES,
     MANIFEST_CONTRACT,
+    MANIFEST_CONTRACT_V1,
+    MANIFEST_CONTRACT_V2,
     MAXIMUM_OBJECT_SIZE_BYTES,
+    POSTGRESQL_SCHEMA_REVISION,
+    V1_CANONICAL_COUNT_TABLES,
     ManifestDumpEntry,
     ManifestObjectEntry,
     RecoveryEnvironment,
@@ -35,6 +39,29 @@ _CREATED_AT = datetime(2026, 8, 15, 12, 30, 45, 123456)
 _FIRST_DIGEST = "0" * 64
 _SECOND_DIGEST = "1" * 64
 _DUMP_SHA256 = "2" * 64
+_HISTORICAL_SCHEMA_REVISION = "20260813_01"
+_LEGACY_V2_CANONICAL_COUNT_TABLES = (
+    "users",
+    "workspaces",
+    "devices",
+    "content_objects",
+    "sources",
+    "source_versions",
+    "sync_events",
+    "projection_intents",
+    "audit_events",
+    "workspace_policy_state",
+    "policy_signing_keys",
+    "policy_keysets",
+    "policy_keyset_signatures",
+    "source_policies",
+    "policy_rules",
+    "policy_drafts",
+    "policy_draft_rules",
+    "policy_evaluations",
+    "policy_reconciliation_intents",
+    "small_file_upload_operations",
+)
 
 
 def _object_entry(digest_hexadecimal: str, size_bytes: int) -> dict[str, object]:
@@ -55,9 +82,10 @@ def build_manifest(**overrides: object) -> RecoveryManifest:
     fields: dict[str, object] = {
         "bundle_id": _BUNDLE_ID,
         "created_at": _CREATED_AT,
+        "contract": MANIFEST_CONTRACT,
         "source_environment": RecoveryEnvironment.LOCAL,
         "postgresql_server_version": "18.4",
-        "postgresql_schema_revision": "20260813_01",
+        "postgresql_schema_revision": POSTGRESQL_SCHEMA_REVISION,
         "postgres_dump": {
             "relative_path": "postgres.dump",
             "size_bytes": 4096,
@@ -97,6 +125,7 @@ def build_manifest(**overrides: object) -> RecoveryManifest:
         postgres_dump=postgres_dump_value,  # type: ignore[arg-type]
         canonical_counts=fields["canonical_counts"],  # type: ignore[arg-type]
         objects=objects_value,  # type: ignore[arg-type]
+        contract=fields["contract"],  # type: ignore[arg-type]
     )
 
 
@@ -153,6 +182,48 @@ def test_round_trip_preserves_every_field() -> None:
         parsed.canonical_counts["users"] = 99  # type: ignore[index]
 
 
+def test_historical_v1_nine_table_manifest_remains_byte_canonical() -> None:
+    """The original public v1 shape must remain readable and re-encodable."""
+
+    historical_tables = (
+        "users",
+        "workspaces",
+        "devices",
+        "content_objects",
+        "sources",
+        "source_versions",
+        "sync_events",
+        "projection_intents",
+        "audit_events",
+    )
+    raw = canonical_json(
+        manifest_payload(
+            contract=MANIFEST_CONTRACT_V1,
+            canonical_counts={table: index + 1 for index, table in enumerate(historical_tables)},
+            postgresql_schema_revision=_HISTORICAL_SCHEMA_REVISION,
+        )
+    )
+
+    parsed = parse_manifest(raw)
+
+    assert parsed.contract == MANIFEST_CONTRACT_V1
+    assert frozenset(parsed.canonical_counts) == frozenset(historical_tables)
+    assert encode_manifest(parsed) == raw
+
+
+def test_legacy_v2_twenty_table_manifest_remains_byte_canonical() -> None:
+    """The branch-local original v2 shape remains readable after widening."""
+
+    counts = {table: index + 1 for index, table in enumerate(_LEGACY_V2_CANONICAL_COUNT_TABLES)}
+    raw = canonical_json(manifest_payload(canonical_counts=counts))
+
+    parsed = parse_manifest(raw)
+
+    assert parsed.contract == MANIFEST_CONTRACT_V2
+    assert frozenset(parsed.canonical_counts) == frozenset(_LEGACY_V2_CANONICAL_COUNT_TABLES)
+    assert encode_manifest(parsed) == raw
+
+
 def test_round_trip_accepts_boundary_object_sizes() -> None:
     manifest = build_manifest(
         objects=(
@@ -164,9 +235,41 @@ def test_round_trip_accepts_boundary_object_sizes() -> None:
 
 
 def test_rejects_unsupported_contract_version() -> None:
-    unsupported = canonical_json(manifest_payload(contract="canonical_core_backup/v2"))
+    unsupported = canonical_json(manifest_payload(contract="canonical_core_backup/v3"))
     assert_bundle_invalid(unsupported, "contract_unsupported")
     assert_bundle_invalid(canonical_json(manifest_payload(contract="")), "contract_unsupported")
+
+
+@pytest.mark.parametrize("contract_value", ([], {}), ids=("array", "object"))
+def test_rejects_non_string_contract_values_through_typed_error_boundary(
+    contract_value: object,
+) -> None:
+    assert_bundle_invalid(
+        canonical_json(manifest_payload(contract=contract_value)), "contract_unsupported"
+    )
+
+
+def test_rejects_crossed_contract_schema_revision_combinations() -> None:
+    historical_counts = {table: index + 1 for index, table in enumerate(V1_CANONICAL_COUNT_TABLES)}
+    assert_bundle_invalid(
+        canonical_json(
+            manifest_payload(
+                contract=MANIFEST_CONTRACT_V1,
+                canonical_counts=historical_counts,
+                postgresql_schema_revision=POSTGRESQL_SCHEMA_REVISION,
+            )
+        ),
+        "field_invalid",
+    )
+    assert_bundle_invalid(
+        canonical_json(
+            manifest_payload(
+                contract=MANIFEST_CONTRACT_V2,
+                postgresql_schema_revision=_HISTORICAL_SCHEMA_REVISION,
+            )
+        ),
+        "field_invalid",
+    )
 
 
 def test_rejects_unknown_top_level_field() -> None:
@@ -285,7 +388,16 @@ def test_rejects_out_of_range_object_size() -> None:
 
 
 def test_manifest_contract_constant_is_pinned() -> None:
-    assert MANIFEST_CONTRACT == "canonical_core_backup/v1"
-    # Nineteen since the exclusion-policy child: the nine canonical tables
-    # plus the ten policy tables the snapshot lock order counts.
-    assert len(CANONICAL_COUNT_TABLES) == 19
+    assert MANIFEST_CONTRACT == "canonical_core_backup/v2"
+    assert len(CANONICAL_COUNT_TABLES) == 28
+    assert CANONICAL_COUNT_TABLES[9:17] == (
+        "user_credentials",
+        "web_sessions",
+        "totp_credentials",
+        "totp_recovery_codes",
+        "device_token_families",
+        "device_tokens",
+        "device_authorization_grants",
+        "authentication_throttle_buckets",
+    )
+    assert CANONICAL_COUNT_TABLES[-1] == "small_file_upload_operations"

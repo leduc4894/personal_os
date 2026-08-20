@@ -19,6 +19,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import asdict, dataclass
+from dataclasses import field as dataclass_field
 from datetime import date
 from enum import IntEnum, StrEnum
 from pathlib import Path
@@ -26,6 +27,8 @@ from types import MappingProxyType
 from typing import BinaryIO, Final, Never, Protocol, cast
 
 import yaml  # type: ignore[import-untyped]
+
+from personal_os.diagnostics.events import SafeToken
 
 _MAX_CAPTURE_BYTES = 8192
 _MIN_PORT = 1024
@@ -56,6 +59,11 @@ _SECRET_ALPHABET: Final = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0
 _SECRET_BYTE_COUNT: Final = 32
 _MIN_DISTINCT_SECRET_CHARACTERS: Final = 8
 _QDRANT_CONFIG_FILENAME: Final = "qdrant_config.yaml"
+_APPLICATION_SECRET_FILE_NAME_PATTERN: Final = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+)
+_MAXIMUM_APPLICATION_SECRET_FILE_NAME_LENGTH: Final = 128
+_MAXIMUM_PREVIOUS_AUTHENTICATION_KEY_COUNT: Final = 4
 _IMAGE_DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 _IMAGE_LOCK_KEYS: Final = frozenset({"version", "images"})
 _IMAGE_LOCK_ENTRY_KEYS: Final = frozenset(
@@ -153,6 +161,26 @@ class PrerequisiteVersions:
 
 
 @dataclass(frozen=True, slots=True)
+class _ApplicationSecretReferences:
+    """Validated non-secret runtime references used only for local secret ownership."""
+
+    current_authentication_key_id: str | None
+    current_authentication_key_file: str | None
+    previous_authentication_keys: tuple[tuple[str, str], ...]
+    policy_signing_key_file: str | None
+
+    @property
+    def relative_paths(self) -> frozenset[str]:
+        """Return the exact configured file names without exposing key material."""
+        paths = {file_name for _key_id, file_name in self.previous_authentication_keys}
+        if self.current_authentication_key_file is not None:
+            paths.add(self.current_authentication_key_file)
+        if self.policy_signing_key_file is not None:
+            paths.add(self.policy_signing_key_file)
+        return frozenset(paths)
+
+
+@dataclass(frozen=True, slots=True)
 class StackContext:
     """Immutable, project-scoped input to every local lifecycle operation."""
 
@@ -160,8 +188,14 @@ class StackContext:
     project_name: str
     ports: Mapping[str, int]
     environment: Mapping[str, str]
+    application_secret_references: _ApplicationSecretReferences = dataclass_field(init=False)
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "application_secret_references",
+            _parse_application_secret_references(self.environment),
+        )
         object.__setattr__(self, "ports", MappingProxyType(dict(self.ports)))
         object.__setattr__(
             self,
@@ -225,6 +259,135 @@ SECRET_SPECS: Final = (
 _SECRET_FILENAMES: Final = frozenset(spec.filename for spec in SECRET_SPECS) | {
     _QDRANT_CONFIG_FILENAME
 }
+
+_APPLICATION_SECRET_FILENAMES: Final = frozenset(
+    {
+        "auth-key-2026-08.key",
+        "policy_signing_a.pem",
+        "policy_signing_b.pem",
+        "r2_access_key_id",
+        "r2_secret_access_key",
+        "web-credential-password.key",
+    }
+)
+
+
+def _secret_relative_path_identity(value: str) -> str:
+    """Return filesystem identity without changing identifier semantics.
+
+    The configured grammar already admits only slash-separated ASCII paths.
+    Windows path comparison is case-insensitive, while POSIX keeps exact case;
+    authentication key IDs never pass through this function.
+    """
+
+    return value.casefold() if sys.platform == "win32" else value
+
+
+def _validate_application_secret_relative_path(value: str) -> str:
+    managed_path_identities = {
+        _secret_relative_path_identity(filename) for filename in _SECRET_FILENAMES
+    }
+    if (
+        len(value) > _MAXIMUM_APPLICATION_SECRET_FILE_NAME_LENGTH
+        or _APPLICATION_SECRET_FILE_NAME_PATTERN.fullmatch(value) is None
+        or _secret_relative_path_identity(value) in managed_path_identities
+    ):
+        raise StackFailure(StackExitCode.CONTRACT, "application_secret_configuration_invalid")
+    return value
+
+
+def _validate_application_secret_key_id(value: str) -> str:
+    try:
+        return SafeToken.parse(value).value
+    except ValueError:
+        raise StackFailure(
+            StackExitCode.CONTRACT, "application_secret_configuration_invalid"
+        ) from None
+
+
+def _parse_application_secret_references(
+    environment: Mapping[str, str],
+) -> _ApplicationSecretReferences:
+    """Parse only bounded key identifiers and file names from runtime configuration."""
+    current_authentication_key_id = environment.get("KNOWLEDGE_AUTH_CURRENT_KEY_ID")
+    if current_authentication_key_id is not None:
+        current_authentication_key_id = _validate_application_secret_key_id(
+            current_authentication_key_id
+        )
+    current_authentication_path = environment.get("KNOWLEDGE_AUTH_CURRENT_KEY_FILE")
+    if current_authentication_path is not None:
+        current_authentication_path = _validate_application_secret_relative_path(
+            current_authentication_path
+        )
+    policy_signing_key_file = environment.get("KNOWLEDGE_POLICY_SIGNING_KEY_FILE")
+    if policy_signing_key_file is not None:
+        policy_signing_key_file = _validate_application_secret_relative_path(
+            policy_signing_key_file
+        )
+
+    previous_keys = environment.get("KNOWLEDGE_AUTH_PREVIOUS_KEYS")
+    parsed_previous_keys: list[tuple[str, str]] = []
+    if previous_keys is not None and previous_keys != "":
+        entries = previous_keys.split(",")
+        if len(entries) > _MAXIMUM_PREVIOUS_AUTHENTICATION_KEY_COUNT:
+            raise StackFailure(StackExitCode.CONTRACT, "application_secret_configuration_invalid")
+        key_ids: set[str] = set()
+        previous_path_identities: set[str] = set()
+        for entry in entries:
+            key_id, separator, file_name = entry.partition("=")
+            if not separator or "=" in file_name:
+                raise StackFailure(
+                    StackExitCode.CONTRACT, "application_secret_configuration_invalid"
+                )
+            key_id = _validate_application_secret_key_id(key_id)
+            relative_path = _validate_application_secret_relative_path(file_name)
+            relative_path_identity = _secret_relative_path_identity(relative_path)
+            if key_id in key_ids or relative_path_identity in previous_path_identities:
+                raise StackFailure(
+                    StackExitCode.CONTRACT, "application_secret_configuration_invalid"
+                )
+            key_ids.add(key_id)
+            previous_path_identities.add(relative_path_identity)
+            parsed_previous_keys.append((key_id, relative_path))
+        if current_authentication_key_id in key_ids:
+            raise StackFailure(StackExitCode.CONTRACT, "application_secret_configuration_invalid")
+        if (
+            current_authentication_path is not None
+            and _secret_relative_path_identity(current_authentication_path)
+            in previous_path_identities
+        ):
+            raise StackFailure(StackExitCode.CONTRACT, "application_secret_configuration_invalid")
+    authentication_path_identities = {
+        _secret_relative_path_identity(file_name) for _key_id, file_name in parsed_previous_keys
+    }
+    if current_authentication_path is not None:
+        authentication_path_identities.add(
+            _secret_relative_path_identity(current_authentication_path)
+        )
+    if (
+        policy_signing_key_file is not None
+        and _secret_relative_path_identity(policy_signing_key_file)
+        in authentication_path_identities
+    ):
+        raise StackFailure(StackExitCode.CONTRACT, "application_secret_configuration_invalid")
+    return _ApplicationSecretReferences(
+        current_authentication_key_id=current_authentication_key_id,
+        current_authentication_key_file=current_authentication_path,
+        previous_authentication_keys=tuple(parsed_previous_keys),
+        policy_signing_key_file=policy_signing_key_file,
+    )
+
+
+def _resolve_application_secret_references(
+    *,
+    environment: Mapping[str, str] | None,
+    application_secret_references: _ApplicationSecretReferences | None,
+) -> _ApplicationSecretReferences:
+    if environment is not None and application_secret_references is not None:
+        raise StackFailure(StackExitCode.CONTRACT, "application_secret_configuration_invalid")
+    if application_secret_references is not None:
+        return application_secret_references
+    return _parse_application_secret_references(os.environ if environment is None else environment)
 
 
 @dataclass(frozen=True, slots=True)
@@ -472,8 +635,23 @@ def _parse_image_lock_entry(raw_entry: object) -> ImageLockEntry:
     )
 
 
-def inspect_secret_set(paths: StackPaths) -> SecretSetState:
+def inspect_secret_set(
+    paths: StackPaths,
+    *,
+    environment: Mapping[str, str] | None = None,
+    application_secret_references: _ApplicationSecretReferences | None = None,
+) -> SecretSetState:
     """Return the safe state of the exact local secret set without reading values."""
+    references = _resolve_application_secret_references(
+        environment=environment,
+        application_secret_references=application_secret_references,
+    )
+    allowed_application_paths = _APPLICATION_SECRET_FILENAMES | references.relative_paths
+    allowed_directory_path_identities = {
+        _secret_relative_path_identity("/".join(relative_path.split("/")[:segment_count]))
+        for relative_path in allowed_application_paths
+        for segment_count in range(1, len(relative_path.split("/")))
+    }
     secret_directory = _validate_secret_directory_location(paths)
     local_directory = secret_directory.parent
     local_stat = _lstat_or_failure(local_directory, "secret_set_inspection_failed")
@@ -486,35 +664,72 @@ def inspect_secret_set(paths: StackPaths) -> SecretSetState:
         return SecretSetState.MISSING
     _validate_private_directory(secret_directory, secret_stat)
 
-    found_filenames: set[str] = set()
+    found_relative_path_identities: set[str] = set()
     child_stats: list[tuple[Path, os.stat_result]] = []
-    try:
-        children = tuple(secret_directory.iterdir())
-    except OSError:
-        raise StackFailure(StackExitCode.CONTRACT, "secret_set_inspection_failed") from None
-    for child in children:
-        child_stat = _lstat_or_failure(child, "secret_set_inspection_failed")
-        if child_stat is None:
-            raise StackFailure(StackExitCode.CONTRACT, "secret_set_inspection_failed")
-        _validate_private_file(child, child_stat)
-        child_stats.append((child, child_stat))
-        found_filenames.add(child.name)
 
-    if found_filenames == _SECRET_FILENAMES:
-        _validate_private_directory(local_directory, local_stat, require_mode=True)
-        _validate_private_directory(secret_directory, secret_stat, require_mode=True)
-        for child, child_stat in child_stats:
+    def inspect_directory(directory: Path, relative_parts: tuple[str, ...]) -> None:
+        try:
+            children = tuple(directory.iterdir())
+        except OSError:
+            raise StackFailure(StackExitCode.CONTRACT, "secret_set_inspection_failed") from None
+        for child in children:
+            child_stat = _lstat_or_failure(child, "secret_set_inspection_failed")
+            if child_stat is None:
+                raise StackFailure(StackExitCode.CONTRACT, "secret_set_inspection_failed")
+            relative_path = "/".join((*relative_parts, child.name))
+            if stat.S_ISDIR(child_stat.st_mode) and not stat.S_ISLNK(child_stat.st_mode):
+                _validate_private_directory(child, child_stat)
+                child_stats.append((child, child_stat))
+                relative_path_identity = _secret_relative_path_identity(relative_path)
+                if relative_path_identity not in allowed_directory_path_identities:
+                    found_relative_path_identities.add(relative_path_identity)
+                    continue
+                inspect_directory(child, (*relative_parts, child.name))
+                continue
+            _validate_private_file(child, child_stat)
+            child_stats.append((child, child_stat))
+            found_relative_path_identities.add(_secret_relative_path_identity(relative_path))
+
+    inspect_directory(secret_directory, ())
+
+    allowed_relative_path_identities = {
+        _secret_relative_path_identity(relative_path)
+        for relative_path in _SECRET_FILENAMES | allowed_application_paths
+    }
+    if not found_relative_path_identities <= allowed_relative_path_identities:
+        return SecretSetState.PARTIAL
+    _validate_private_directory(local_directory, local_stat, require_mode=True)
+    _validate_private_directory(secret_directory, secret_stat, require_mode=True)
+    for child, child_stat in child_stats:
+        if stat.S_ISDIR(child_stat.st_mode):
+            _validate_private_directory(child, child_stat, require_mode=True)
+        else:
             _validate_private_file(child, child_stat, require_mode=True)
-        _validate_complete_secret_contents(secret_directory)
-        return SecretSetState.COMPLETE
-    return SecretSetState.PARTIAL
+    managed_path_identities = {
+        _secret_relative_path_identity(filename) for filename in _SECRET_FILENAMES
+    }
+    found_managed_path_identities = found_relative_path_identities & managed_path_identities
+    if not found_managed_path_identities:
+        return SecretSetState.MISSING
+    if found_managed_path_identities != managed_path_identities:
+        return SecretSetState.PARTIAL
+    _validate_complete_secret_contents(secret_directory)
+    return SecretSetState.COMPLETE
 
 
 def bootstrap_secret_set(
-    paths: StackPaths, *, random_bytes: Callable[[int], bytes] = secrets.token_bytes
+    paths: StackPaths,
+    *,
+    random_bytes: Callable[[int], bytes] = secrets.token_bytes,
+    environment: Mapping[str, str] | None = None,
+    application_secret_references: _ApplicationSecretReferences | None = None,
 ) -> SecretSetState:
     """Atomically create or safely reuse the complete local secret set."""
-    state = inspect_secret_set(paths)
+    references = _resolve_application_secret_references(
+        environment=environment,
+        application_secret_references=application_secret_references,
+    )
+    state = inspect_secret_set(paths, application_secret_references=references)
     if state is SecretSetState.COMPLETE:
         return state
     if state is SecretSetState.PARTIAL:
@@ -525,6 +740,7 @@ def bootstrap_secret_set(
     _create_or_validate_local_directory(local_directory)
     staging_directory: Path | None = None
     created_files: list[Path] = []
+    installed_files: list[Path] = []
     has_renamed_secret_set = False
     try:
         staging_directory = Path(
@@ -542,35 +758,63 @@ def bootstrap_secret_set(
             created_files.append(secret_path)
             _write_private_secret_file(secret_path, content)
         _flush_directory(staging_directory)
-        os.rename(staging_directory, secret_directory)
-        staging_directory = None
-        has_renamed_secret_set = True
+        secret_stat = _lstat_or_failure(secret_directory, "secret_set_creation_failed")
+        if secret_stat is None:
+            os.rename(staging_directory, secret_directory)
+            staging_directory = None
+            has_renamed_secret_set = True
+        else:
+            _validate_private_directory(secret_directory, secret_stat, require_mode=True)
+            for staged_path in created_files:
+                installed_path = secret_directory / staged_path.name
+                os.rename(staged_path, installed_path)
+                installed_files.append(installed_path)
+            staging_directory.rmdir()
+            staging_directory = None
+            _flush_directory(secret_directory)
         _flush_directory(local_directory)
     except StackFailure:
-        if has_renamed_secret_set:
+        if has_renamed_secret_set or installed_files:
             try:
-                if inspect_secret_set(paths) is SecretSetState.COMPLETE:
+                if (
+                    inspect_secret_set(paths, application_secret_references=references)
+                    is SecretSetState.COMPLETE
+                ):
                     return SecretSetState.COMPLETE
             except StackFailure:
                 pass
+        for installed_file in reversed(installed_files):
+            with suppress(OSError):
+                installed_file.unlink()
         raise
     except OSError, ValueError:
+        for installed_file in reversed(installed_files):
+            with suppress(OSError):
+                installed_file.unlink()
         raise StackFailure(StackExitCode.CONTRACT, "secret_set_creation_failed") from None
     finally:
         if staging_directory is not None:
             _remove_staging_files(staging_directory, created_files)
 
-    state = inspect_secret_set(paths)
+    state = inspect_secret_set(paths, application_secret_references=references)
     if state is not SecretSetState.COMPLETE:
         raise StackFailure(StackExitCode.CONTRACT, "secret_set_creation_failed")
     return state
 
 
 def validate_secret_set(
-    paths: StackPaths, *, list_project_volumes: Callable[[], Sequence[str]]
+    paths: StackPaths,
+    *,
+    list_project_volumes: Callable[[], Sequence[str]],
+    environment: Mapping[str, str] | None = None,
+    application_secret_references: _ApplicationSecretReferences | None = None,
 ) -> SecretSetState:
     """Refuse missing credentials when existing volumes could depend on them."""
-    state = inspect_secret_set(paths)
+    state = inspect_secret_set(
+        paths,
+        environment=environment,
+        application_secret_references=application_secret_references,
+    )
     if state is SecretSetState.PARTIAL:
         raise StackFailure(StackExitCode.CONTRACT, "partial_secret_set")
     if state is SecretSetState.MISSING:
@@ -583,9 +827,18 @@ def validate_secret_set(
     return state
 
 
-def remove_secret_set_after_reset(paths: StackPaths) -> SecretSetState:
-    """Remove only an exact complete set after its project reset has succeeded."""
-    state = inspect_secret_set(paths)
+def remove_secret_set_after_reset(
+    paths: StackPaths,
+    *,
+    environment: Mapping[str, str] | None = None,
+    application_secret_references: _ApplicationSecretReferences | None = None,
+) -> SecretSetState:
+    """Remove only managed stack secrets after the project reset succeeds."""
+    references = _resolve_application_secret_references(
+        environment=environment,
+        application_secret_references=application_secret_references,
+    )
+    state = inspect_secret_set(paths, application_secret_references=references)
     if state is SecretSetState.MISSING:
         return state
     if state is SecretSetState.PARTIAL:
@@ -595,9 +848,18 @@ def remove_secret_set_after_reset(paths: StackPaths) -> SecretSetState:
     try:
         for filename in _SECRET_FILENAMES:
             (secret_directory / filename).unlink()
-        secret_directory.rmdir()
+        if not any(secret_directory.iterdir()):
+            secret_directory.rmdir()
+        else:
+            _flush_directory(secret_directory)
+        _flush_directory(secret_directory.parent)
     except OSError:
         raise StackFailure(StackExitCode.CONTRACT, "secret_set_removal_failed") from None
+    if (
+        inspect_secret_set(paths, application_secret_references=references)
+        is not SecretSetState.MISSING
+    ):
+        raise StackFailure(StackExitCode.CONTRACT, "secret_set_removal_failed")
     return SecretSetState.MISSING
 
 
@@ -1033,7 +1295,10 @@ def reset_stack(
 
     secret_state = "preserved"
     if rotate_secrets:
-        remove_secret_set_after_reset(context.paths)
+        remove_secret_set_after_reset(
+            context.paths,
+            application_secret_references=context.application_secret_references,
+        )
         secret_state = "removed"
     return {
         "project": context.project_name,
@@ -1586,9 +1851,15 @@ def _assert_smoke_project_absent(
             raise StackFailure(StackExitCode.STARTUP, "smoke_cleanup_incomplete")
 
 
-def _smoke_secret_fingerprint(paths: StackPaths) -> str:
+def _smoke_secret_fingerprint(
+    paths: StackPaths,
+    application_secret_references: _ApplicationSecretReferences,
+) -> str:
     try:
-        secret_state = inspect_secret_set(paths)
+        secret_state = inspect_secret_set(
+            paths,
+            application_secret_references=application_secret_references,
+        )
     except StackFailure:
         raise StackFailure(StackExitCode.CONTRACT, "smoke_secret_set_changed") from None
     if secret_state is not SecretSetState.COMPLETE:
@@ -1615,8 +1886,14 @@ class _DefaultSmokeOperations:
         reset_stack(context, confirm_project=context.project_name, runner=self._runner)
 
     def bootstrap(self, context: StackContext) -> None:
-        bootstrap_secret_set(context.paths)
-        self._secret_fingerprint = _smoke_secret_fingerprint(context.paths)
+        bootstrap_secret_set(
+            context.paths,
+            application_secret_references=context.application_secret_references,
+        )
+        self._secret_fingerprint = _smoke_secret_fingerprint(
+            context.paths,
+            context.application_secret_references,
+        )
 
     def config(self, context: StackContext) -> None:
         validate_compose_config(context, runner=self._runner)
@@ -1672,7 +1949,11 @@ class _DefaultSmokeOperations:
         _assert_smoke_project_absent(context, runner=self._runner)
         if (
             self._secret_fingerprint is not None
-            and _smoke_secret_fingerprint(context.paths) != self._secret_fingerprint
+            and _smoke_secret_fingerprint(
+                context.paths,
+                context.application_secret_references,
+            )
+            != self._secret_fingerprint
         ):
             raise StackFailure(StackExitCode.CONTRACT, "smoke_secret_set_changed")
 
@@ -2000,6 +2281,7 @@ def _require_complete_secret_set(
     state = validate_secret_set(
         context.paths,
         list_project_volumes=list_project_volumes,
+        application_secret_references=context.application_secret_references,
     )
     if state is not SecretSetState.COMPLETE:
         raise StackFailure(StackExitCode.CONTRACT, "secret_set_missing")
@@ -2698,7 +2980,10 @@ def _execute_cli_command(
     command = cast(str, arguments.command)
     if command == "bootstrap":
         _validate_lifecycle_project(context)
-        bootstrap_secret_set(context.paths)
+        bootstrap_secret_set(
+            context.paths,
+            application_secret_references=context.application_secret_references,
+        )
         return {
             "project": context.project_name,
             "state": "ready",

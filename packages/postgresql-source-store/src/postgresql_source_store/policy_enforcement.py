@@ -6,11 +6,14 @@ boundaries compose: the engine-backed
 :class:`PostgresqlPolicySubjectEvidenceSource` port adapters of the domain
 enforcement service, and — the authoritative piece —
 :func:`load_locked_active_policy_snapshot` plus
+:func:`authorize_locked_publication_policy` and
 :func:`evaluate_locked_policy_decision`, which lock the
 ``workspace_policy_state`` row ``FOR UPDATE``, load the active revision's
 signed snapshot joined with its persisted trust anchor, and re-evaluate the
 authoritative subject through the domain verify/parse/evaluate path. Source
-publication invokes the recheck between the idempotency recheck and the
+publication may reuse matching bound allowed evidence only after verifying
+that locked snapshot; changed revisions and ordinary decisions evaluate
+unconditionally. Publication invokes the check between the idempotency recheck and the
 source advisory lock; canonical read invokes it inside the same transaction
 that resolves the current source state, so no object-store request can be
 issued before the active policy permitted the subject.
@@ -38,17 +41,25 @@ from personal_os.error_contracts.exceptions import InternalApplicationError
 from personal_os.exclusion_policy.contracts import PolicySubject
 from personal_os.exclusion_policy.enforcement import (
     ActivePolicySnapshotMaterial,
+    AllowedPolicyRevisionBinding,
     PolicyDecision,
     PolicyEnforcementService,
     PolicyTrustAnchorVerifier,
+    PublicationPolicyEvidence,
     enforce_policy_decision,
     evaluate_policy_decision,
     parse_verified_policy_revision,
     policy_not_initialized_error,
     record_evaluation_metric,
 )
-from personal_os.exclusion_policy.metrics import ExclusionPolicyMetrics, PolicyBoundary
+from personal_os.exclusion_policy.metrics import (
+    EvaluationMetricOutcome,
+    ExclusionPolicyMetrics,
+    PolicyBoundary,
+)
 from personal_os.sources.commands import SourceType
+from personal_os.sources.errors import SourcePublicationError
+from personal_os.sources.fingerprint import SourceVersionCommand
 from postgresql_source_store.engine import apply_transaction_bounds
 from postgresql_source_store.locks import policy_state_lock_statement
 from postgresql_source_store.tables import (
@@ -187,6 +198,59 @@ async def evaluate_locked_policy_decision(
     return decision
 
 
+async def authorize_locked_publication_policy(
+    connection: AsyncConnection,
+    command: SourceVersionCommand,
+    subject: PolicySubject,
+    policy_evidence: PublicationPolicyEvidence | None,
+    verifier: PolicyTrustAnchorVerifier,
+    metrics: ExclusionPolicyMetrics | None,
+) -> PublicationPolicyEvidence:
+    """Authorize publication against the verified transaction-final revision.
+
+    A bound allowed revision may skip only the locator-free evaluator, never
+    the locked active-snapshot load or signature verification. Changed bound
+    revisions, ordinary decisions and absent evidence all retain the existing
+    unconditional authoritative evaluation.
+    """
+
+    started_monotonic = time.monotonic()
+    material = await load_locked_active_policy_snapshot(
+        connection,
+        command.workspace_id,
+    )
+    revision = parse_verified_policy_revision(material, verifier=verifier)
+    if isinstance(policy_evidence, AllowedPolicyRevisionBinding):
+        if policy_evidence.workspace_id != command.workspace_id:
+            raise SourcePublicationError(
+                ErrorCode.SOURCE_CONCURRENCY_INVARIANT_FAILED,
+                safe_details={"source_id": command.source_id},
+            )
+        if revision.revision_number == policy_evidence.policy_revision_number:
+            if metrics is not None:
+                metrics.record_evaluation(
+                    boundary=PolicyBoundary.SOURCE_CREATE_UPDATE,
+                    decision=EvaluationMetricOutcome.ALLOWED,
+                    duration_seconds=max(time.monotonic() - started_monotonic, 0.0),
+                )
+            return policy_evidence
+
+    decision = evaluate_policy_decision(
+        revision=revision,
+        subject=subject,
+        evaluated_at=datetime.now(UTC),
+    )
+    if metrics is not None:
+        record_evaluation_metric(
+            metrics,
+            boundary=PolicyBoundary.SOURCE_CREATE_UPDATE,
+            decision=decision,
+            duration_seconds=max(time.monotonic() - started_monotonic, 0.0),
+        )
+    enforce_policy_decision(decision)
+    return decision
+
+
 class PostgresqlActivePolicySnapshotSource:
     """Engine-backed active-snapshot source port of the domain guard.
 
@@ -276,6 +340,7 @@ __all__ = [
     "PostgresqlActivePolicySnapshotSource",
     "PostgresqlPolicySubjectEvidenceSource",
     "active_policy_snapshot_select_statement",
+    "authorize_locked_publication_policy",
     "compose_policy_enforcement",
     "evaluate_locked_policy_decision",
     "hydrate_active_policy_snapshot",

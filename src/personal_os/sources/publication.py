@@ -30,7 +30,7 @@ from collections.abc import AsyncIterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
-from typing import Final
+from typing import TYPE_CHECKING, Final
 from uuid import UUID
 
 from personal_os.diagnostics.context import DiagnosticContext
@@ -65,6 +65,9 @@ from personal_os.sources.ports import (
     SourcePublicationStore,
 )
 from personal_os.sources.results import SourceVersionPublicationResult
+
+if TYPE_CHECKING:
+    from personal_os.exclusion_policy.enforcement import PublicationPolicyEvidence
 
 #: Maximum age of an accepted receipt (spec section 5.3: at most five minutes).
 MAXIMUM_RECEIPT_AGE: Final[timedelta] = timedelta(minutes=5)
@@ -185,9 +188,10 @@ class SourceVersionPublicationService:
     a missing active signed policy or corrupt signature material fails closed
     with the typed denial and zero object-store calls — including an exact
     replay, whose committed data is canonical data the current policy must
-    permit before it is returned. The store re-evaluates independently under
-    the policy-state row lock inside the commit transaction; the decision
-    handed to the commit is only non-authoritative evidence.
+    permit before it is returned. The store verifies the active signed revision
+    under the policy-state row lock inside the commit transaction; it reuses
+    only an allowed binding for that exact revision and re-evaluates every
+    other evidence shape.
     """
 
     store: SourcePublicationStore
@@ -267,8 +271,11 @@ class SourceVersionPublicationService:
         # the candidate evaluated before the idempotent preflight and before
         # any object-store access, so a denied subject never observes or
         # replays canonical data and never touches object storage.
-        preflight_decision = await self.policy_guard.authorize_publication(
-            command, diagnostic_context
+        preflight_decision: PublicationPolicyEvidence = (
+            await self.policy_guard.authorize_publication(
+                command,
+                diagnostic_context,
+            )
         )
         # Fingerprint.
         request_fingerprint = compute_request_fingerprint(command)

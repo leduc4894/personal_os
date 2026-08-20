@@ -38,6 +38,10 @@ from tests.unit.sources.fakes import (
 )
 
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.exclusion_policy.enforcement import (
+    AllowedPolicyRevisionBinding,
+    PublicationPolicyEvidence,
+)
 from personal_os.exclusion_policy.errors import ExclusionPolicyError
 from personal_os.object_storage import ContentDigest, ExpectedObject, VerifiedObjectReceipt
 from personal_os.sources import (
@@ -63,6 +67,7 @@ def _build_service(
     internal_retry_attempts: int = 0,
     resolve_receipts: list[VerifiedObjectReceipt | None] | None = None,
     store_receipt: VerifiedObjectReceipt | None = None,
+    publication_evidence: PublicationPolicyEvidence | None = None,
 ) -> tuple[
     SourceVersionPublicationService,
     FakeSourcePublicationStore,
@@ -91,7 +96,10 @@ def _build_service(
         object_store=object_store,
         metrics=metrics,
         clock=SequencedUtcClock(moments=[_PUBLICATION_START, _PUBLICATION_START]),
-        policy_guard=AllowingPolicyGuard(ledger=ledger),
+        policy_guard=AllowingPolicyGuard(
+            ledger=ledger,
+            publication_evidence=publication_evidence,
+        ),
     )
     return service, store, object_store, metrics, ledger
 
@@ -164,6 +172,29 @@ async def test_new_commit_resolves_existing_object_and_commits_without_upload() 
         == 1
     )
     assert metrics.replay_count(PublicationOperation.CREATE) == 0
+
+
+@pytest.mark.asyncio
+async def test_bound_policy_evidence_flows_to_the_commit_unchanged() -> None:
+    command = build_create_command()
+    binding = AllowedPolicyRevisionBinding(
+        workspace_id=command.workspace_id,
+        policy_revision_number=7,
+    )
+    receipt = build_verified_receipt(command.expected_object, _PUBLICATION_START)
+    service, store, _, _, _ = _build_service(
+        resolve_receipts=[receipt],
+        publication_evidence=binding,
+    )
+
+    await service.publish_create(
+        command=command,
+        stream=ProbedByteStream([b"unused"]),
+        diagnostic_context=build_diagnostic_context(),
+    )
+
+    assert store.commit_policy_decisions == [binding]
+    assert store.commit_policy_decisions[0] is binding
 
 
 @pytest.mark.asyncio

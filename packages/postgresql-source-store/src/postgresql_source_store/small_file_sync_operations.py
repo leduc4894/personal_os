@@ -15,10 +15,12 @@ token stored only as its one-way SHA-256 hash (a re-preflight rotates the
 hash, so the raw token is never persisted or reused), a create reserves the
 server-generated source UUID on the row without inserting any ``sources``
 row, and an update records its base pair without reserving anything. An
-expired non-terminal row is invalid for continuation — the receive-side
-binding and the terminal write both refuse it — while a same-identity
-re-preflight re-reserves it (fresh token, extended deadline): nothing was
-committed for a non-terminal row, so re-reservation cannot double-publish.
+expired pending row is invalid for continuation and may be re-reserved with a
+fresh token and extended deadline. Once a receive claims the row, that
+``receiving`` claim retains its token/revision fence across the reservation
+deadline: exact-token retries may resume it and guarded terminalization may
+finish, while same-identity preflight cannot rotate it underneath canonical
+publication.
 
 ``record_terminal_result`` persists the publication result and the operation's
 terminal state as one guarded update inside a single transaction, and exposes
@@ -31,8 +33,9 @@ operation state in one commit. The receive-side binding
 :meth:`record_bound_terminal_result
 <PostgresqlSmallFileUploadOperationStore.record_bound_terminal_result>`)
 resolves one row by its one-way token hash — the raw token never exists in
-storage — rechecks the credential-derived identity, state and expiry, and
-applies the same guarded terminal transition over the token-bound view.
+storage — rechecks the credential-derived identity and state, applies expiry
+only before a pending receive is claimed, and uses the same guarded terminal
+transition over the token-bound view.
 Every statement is schema-qualified and
 parameter-bound; the adapter stores and logs no bytes, locator, token, receipt
 or provider detail, and driver failures cross the boundary only through the
@@ -46,7 +49,7 @@ import hashlib
 import random
 import secrets
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 from uuid import UUID, uuid7
@@ -58,6 +61,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import ApplicationError, InternalApplicationError
+from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
 from personal_os.object_storage import CanonicalMediaType, ContentDigest
 from personal_os.small_file_sync.contracts import (
     SmallFileDeviceContext,
@@ -185,8 +189,8 @@ def operation_fingerprint_matches(
     source/base pair). Any divergence — including the same identity retrying
     with different bytes — fails, so no payload substitution is ever admitted.
     The accepted policy revision is deliberately not part of the fingerprint:
-    the row keeps the revision that authorized the operation, and a later
-    accepted snapshot is re-evaluated by the service, not by mutation.
+    a successful re-preflight rebinds the row to its newly allowed server
+    revision while preserving the declared payload identity.
     """
     return (
         row["workspace_id"] == device_context.workspace_id
@@ -264,6 +268,7 @@ def operation_insert_statement(
     operation_token_hash: str,
     device_context: SmallFileDeviceContext,
     preflight: SmallFilePreflight,
+    policy_revision_number: int,
     reserved_source_id: UUID | None,
     expires_at: datetime,
 ) -> sa.Insert:
@@ -279,7 +284,7 @@ def operation_insert_statement(
         declared_sha256=preflight.sha256.hexadecimal,
         declared_size_bytes=preflight.size_bytes,
         declared_media_type=preflight.media_type.value,
-        policy_revision_number=preflight.policy_revision_number,
+        policy_revision_number=policy_revision_number,
         reserved_source_id=reserved_source_id,
         update_source_id=preflight.source_id,
         update_base_version_id=preflight.base_version_id,
@@ -289,7 +294,11 @@ def operation_insert_statement(
 
 
 def operation_token_rotation_statement(
-    *, operation_id: UUID, operation_token_hash: str, expires_at: datetime
+    *,
+    operation_id: UUID,
+    operation_token_hash: str,
+    expires_at: datetime,
+    policy_revision_number: int,
 ) -> sa.Update:
     """Build the guarded rotation of the stored token hash for one row.
 
@@ -303,9 +312,50 @@ def operation_token_rotation_statement(
         .values(
             operation_token_hash=operation_token_hash,
             expires_at=expires_at,
+            policy_revision_number=policy_revision_number,
+            state=STATE_PENDING,
             updated_at=sa.text("CURRENT_TIMESTAMP"),
         )
         .where(small_file_upload_operations.c.operation_id == operation_id)
+    )
+
+
+def claimed_policy_revision_update_statement(
+    *, operation_id: UUID, policy_revision_number: int
+) -> sa.Update:
+    """Rebind only a claimed row's server-authorized policy revision.
+
+    The operation identity, token hash, expiry, declared geometry and state
+    remain immutable. The receiving-state predicate makes a concurrent
+    terminal winner visible as a zero-row guarded update.
+    """
+
+    return (
+        sa.update(small_file_upload_operations)
+        .values(
+            policy_revision_number=policy_revision_number,
+            updated_at=sa.text("CURRENT_TIMESTAMP"),
+        )
+        .where(
+            small_file_upload_operations.c.operation_id == operation_id,
+            small_file_upload_operations.c.state == STATE_RECEIVING,
+        )
+    )
+
+
+def receive_claim_statement(*, operation_id: UUID) -> sa.Update:
+    """Build the guarded receive claim from ``pending`` to ``receiving``."""
+
+    return (
+        sa.update(small_file_upload_operations)
+        .values(
+            state=STATE_RECEIVING,
+            updated_at=sa.text("CURRENT_TIMESTAMP"),
+        )
+        .where(
+            small_file_upload_operations.c.operation_id == operation_id,
+            small_file_upload_operations.c.state == STATE_PENDING,
+        )
     )
 
 
@@ -331,7 +381,30 @@ def terminal_result_update_statement(
         )
         .where(
             small_file_upload_operations.c.operation_id == operation_id,
-            small_file_upload_operations.c.state.in_(_NON_TERMINAL_STATES),
+            small_file_upload_operations.c.state == STATE_PENDING,
+        )
+    )
+
+
+def bound_terminal_result_update_statement(
+    *, operation_id: UUID, result: SmallFileTerminalResult
+) -> sa.Update:
+    """Build the guarded terminal transition of one claimed receive row."""
+
+    return (
+        sa.update(small_file_upload_operations)
+        .values(
+            state=STATE_COMMITTED,
+            result_kind=result.result_kind.value,
+            result_source_id=result.source_id,
+            result_source_version_id=result.source_version_id,
+            result_content_version=result.content_version,
+            result_committed_at=result.committed_at,
+            updated_at=sa.text("CURRENT_TIMESTAMP"),
+        )
+        .where(
+            small_file_upload_operations.c.operation_id == operation_id,
+            small_file_upload_operations.c.state == STATE_RECEIVING,
         )
     )
 
@@ -499,9 +572,7 @@ def _is_expired(expires_at: datetime, now: datetime) -> bool:
     return expires_at <= now
 
 
-def _frozen_result_matches(
-    row: SmallFileOperationRow, result: SmallFileTerminalResult
-) -> bool:
+def _frozen_result_matches(row: SmallFileOperationRow, result: SmallFileTerminalResult) -> bool:
     return (
         row.result_kind == result.result_kind.value
         and row.result_source_id == result.source_id
@@ -580,6 +651,7 @@ def _bound_matches_row(row: SmallFileOperationRow, bound: SmallFileBoundOperatio
         and row.reserved_source_id == bound.reserved_source_id
         and row.update_source_id == bound.update_source_id
         and row.update_base_version_id == bound.update_base_version_id
+        and int(row.policy_revision_number) == bound.policy_revision_number
     )
 
 
@@ -623,11 +695,16 @@ class PostgresqlSmallFileUploadOperationStore:
         self,
         preflight: SmallFilePreflight,
         device_context: SmallFileDeviceContext,
+        policy_binding: AllowedPolicyRevisionBinding,
         diagnostic_context: DiagnosticContext,
     ) -> SmallFileUploadOperation:
         del diagnostic_context
+        if policy_binding.workspace_id != device_context.workspace_id:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
         return await self._retry.run(
-            lambda _attempt: self._reserve_operation_once(preflight, device_context)
+            lambda _attempt: self._reserve_operation_once(
+                preflight, device_context, policy_binding.policy_revision_number
+            )
         )
 
     async def record_terminal_result(
@@ -637,9 +714,7 @@ class PostgresqlSmallFileUploadOperationStore:
         diagnostic_context: DiagnosticContext,
     ) -> None:
         del diagnostic_context
-        await self._retry.run(
-            lambda _attempt: self._record_terminal_result_once(operation, result)
-        )
+        await self._retry.run(lambda _attempt: self._record_terminal_result_once(operation, result))
 
     async def record_terminal_result_in_transaction(
         self,
@@ -670,15 +745,14 @@ class PostgresqlSmallFileUploadOperationStore:
         The lookup is by the one-way token hash only; the credential-derived
         workspace/device must then match the reserving identity exactly. A
         committed row carries its frozen terminal result so a response-loss
-        replay returns it unchanged — terminal evidence survives expiry —
-        while a non-terminal row past its deadline fails closed as the closed
-        expired error and a failed row as the closed state-invalid error.
+        replay returns it unchanged — terminal evidence survives expiry. An
+        expired pending row fails closed before it can be claimed; a receive
+        already claimed before the deadline may resume by the exact token, and
+        a failed row returns the closed state-invalid error.
         """
         del diagnostic_context
         return await self._retry.run(
-            lambda _attempt: self._resolve_bound_operation_once(
-                operation_token, device_context
-            )
+            lambda _attempt: self._resolve_bound_operation_once(operation_token, device_context)
         )
 
     async def record_bound_terminal_result(
@@ -692,12 +766,59 @@ class PostgresqlSmallFileUploadOperationStore:
         Mirrors :meth:`record_terminal_result` over the token-bound receive
         view: the operation-identity advisory lock, the guarded terminal
         update and the identical-result idempotence all apply, so a replayed
-        or concurrent receive converges on the single frozen result.
+        or concurrent receive converges on the single frozen result. A valid
+        claim may finish after its reservation deadline because state, token,
+        identity and policy revision — not elapsed wall time — fence it.
         """
         del diagnostic_context
         await self._retry.run(
             lambda _attempt: self._record_bound_terminal_result_once(bound, result)
         )
+
+    async def acquire_bound_publication_fence_in_transaction(
+        self,
+        connection: AsyncConnection,
+        bound: SmallFileBoundOperation,
+    ) -> None:
+        """Lock and validate the exact receive binding before canonical writes.
+
+        The caller owns the transaction. Holding this operation-identity lock
+        until commit serializes locator-aware reauthorization against both
+        canonical mutation and the matching terminal transition.
+        """
+
+        await connection.execute(
+            advisory_xact_lock_statement(
+                UPLOAD_OPERATION_LOCK_NAMESPACE,
+                upload_operation_identity_lock_key(
+                    bound.workspace_id,
+                    bound.device_id,
+                    bound.event_id,
+                    bound.idempotency_key.value,
+                ),
+            )
+        )
+        result_set = await connection.execute(
+            operation_token_lookup_statement(bound.operation_token)
+        )
+        row_mapping = result_set.mappings().one_or_none()
+        if row_mapping is None:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND)
+        row = SmallFileOperationRow.from_row_mapping(row_mapping)
+        if not _bound_matches_row(row, bound):
+            raise _identity_mismatch()
+        if row.state not in {STATE_RECEIVING, STATE_COMMITTED}:
+            raise _state_invalid()
+
+    async def record_bound_terminal_result_in_transaction(
+        self,
+        connection: AsyncConnection,
+        bound: SmallFileBoundOperation,
+        result: SmallFileTerminalResult,
+    ) -> None:
+        """Terminalize the exact receive inside its publication transaction."""
+
+        await self._apply_bound_terminal_transition(connection, bound, result)
 
     async def _resolve_bound_operation_once(
         self,
@@ -709,24 +830,49 @@ class PostgresqlSmallFileUploadOperationStore:
             connection.begin(),
         ):
             await apply_transaction_bounds(connection)
-            result = await connection.execute(operation_token_lookup_statement(operation_token))
-            row = result.mappings().one_or_none()
-        if row is None:
-            raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND)
-        hydrated = SmallFileOperationRow.from_row_mapping(row)
-        if (
-            hydrated.workspace_id != device_context.workspace_id
-            or hydrated.device_id != device_context.device_id
-        ):
-            raise _identity_mismatch()
-        bound = _bound_operation_from_row(operation_token, hydrated)
-        if bound.terminal_result is not None:
-            return bound
-        if hydrated.state == STATE_FAILED:
-            raise _state_invalid()
-        if _is_expired(hydrated.expires_at, self._clock()):
-            raise _operation_expired()
-        return bound
+            hydrated = await self._fetch_row_by_token(connection, operation_token)
+            if hydrated is None:
+                raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND)
+            if (
+                hydrated.workspace_id != device_context.workspace_id
+                or hydrated.device_id != device_context.device_id
+            ):
+                raise _identity_mismatch()
+            await connection.execute(
+                advisory_xact_lock_statement(
+                    UPLOAD_OPERATION_LOCK_NAMESPACE,
+                    upload_operation_identity_lock_key(
+                        hydrated.workspace_id,
+                        hydrated.device_id,
+                        hydrated.event_id,
+                        hydrated.idempotency_key,
+                    ),
+                )
+            )
+            hydrated = await self._fetch_row_by_token(connection, operation_token)
+            if hydrated is None:
+                raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND)
+            if (
+                hydrated.workspace_id != device_context.workspace_id
+                or hydrated.device_id != device_context.device_id
+            ):
+                raise _identity_mismatch()
+            if hydrated.terminal_result() is not None:
+                return _bound_operation_from_row(operation_token, hydrated)
+            if hydrated.state == STATE_FAILED:
+                raise _state_invalid()
+            if hydrated.state == STATE_PENDING:
+                if _is_expired(hydrated.expires_at, self._clock()):
+                    raise _operation_expired()
+                claimed = await connection.execute(
+                    receive_claim_statement(operation_id=hydrated.operation_id)
+                )
+                if claimed.rowcount != 1:
+                    raise _state_invalid()
+                hydrated = replace(hydrated, state=STATE_RECEIVING)
+            elif hydrated.state != STATE_RECEIVING:
+                raise _state_invalid()
+        return _bound_operation_from_row(operation_token, hydrated)
 
     async def _record_bound_terminal_result_once(
         self, bound: SmallFileBoundOperation, result: SmallFileTerminalResult
@@ -770,10 +916,10 @@ class PostgresqlSmallFileUploadOperationStore:
             raise _state_invalid()
         if row.state == STATE_FAILED:
             raise _state_invalid()
-        if _is_expired(row.expires_at, self._clock()):
-            raise _operation_expired()
+        if row.state != STATE_RECEIVING:
+            raise _state_invalid()
         guarded = await connection.execute(
-            terminal_result_update_statement(operation_id=row.operation_id, result=result)
+            bound_terminal_result_update_statement(operation_id=row.operation_id, result=result)
         )
         if guarded.rowcount != 1:
             raise _state_invalid()
@@ -801,7 +947,10 @@ class PostgresqlSmallFileUploadOperationStore:
         return hydrated.terminal_result()
 
     async def _reserve_operation_once(
-        self, preflight: SmallFilePreflight, device_context: SmallFileDeviceContext
+        self,
+        preflight: SmallFilePreflight,
+        device_context: SmallFileDeviceContext,
+        policy_revision_number: int,
     ) -> SmallFileUploadOperation:
         async with (
             self._engine.connect() as connection,
@@ -824,6 +973,7 @@ class PostgresqlSmallFileUploadOperationStore:
                         operation_token_hash=upload_operation_token_hash(token),
                         device_context=device_context,
                         preflight=preflight,
+                        policy_revision_number=policy_revision_number,
                         reserved_source_id=reserved_source_id,
                         expires_at=expires_at,
                     )
@@ -839,31 +989,45 @@ class PostgresqlSmallFileUploadOperationStore:
                 raise _identity_mismatch()
             if row.state not in _NON_TERMINAL_STATES:
                 raise _state_invalid()
-            # An expired non-terminal row re-reserves instead of refusing: no
-            # terminal evidence exists for it (exact replay is unaffected —
-            # terminal results survive expiry and are keyed by identity), and
-            # nothing was committed, so rotating the token and extending the
-            # deadline cannot double-publish. The pre-expiry token dies with
-            # the rotation, and receive-time expiry checks keep refusing the
-            # continuation of any token past its deadline.
-            expires_at = row.expires_at
-            if _is_expired(expires_at, self._clock()):
-                expires_at = compute_upload_operation_expiry(self._clock())
-            token = self._token_generator()
-            await connection.execute(
-                operation_token_rotation_statement(
-                    operation_id=row.operation_id,
-                    operation_token_hash=upload_operation_token_hash(token),
+            if row.state == STATE_RECEIVING:
+                guarded = await connection.execute(
+                    claimed_policy_revision_update_statement(
+                        operation_id=row.operation_id,
+                        policy_revision_number=policy_revision_number,
+                    )
+                )
+                if guarded.rowcount != 1:
+                    raise _state_invalid()
+                # Exit the transaction normally so the freshly authorized
+                # revision commits before surfacing the existing retry signal.
+                # The exact token and receiving state remain unchanged.
+                should_resume_claimed = True
+            else:
+                should_resume_claimed = False
+            if not should_resume_claimed:
+                # Only an expired pending row is reclaimable. A receiving row owns
+                # its token fence through guarded terminalization, even if its
+                # original reservation deadline passes during publication.
+                expires_at = row.expires_at
+                if _is_expired(expires_at, self._clock()):
+                    expires_at = compute_upload_operation_expiry(self._clock())
+                token = self._token_generator()
+                await connection.execute(
+                    operation_token_rotation_statement(
+                        operation_id=row.operation_id,
+                        operation_token_hash=upload_operation_token_hash(token),
+                        expires_at=expires_at,
+                        policy_revision_number=policy_revision_number,
+                    )
+                )
+                return SmallFileUploadOperation(
+                    operation_token=token,
+                    preflight=preflight,
+                    device_context=device_context,
+                    reserved_source_id=row.reserved_source_id,
                     expires_at=expires_at,
                 )
-            )
-            return SmallFileUploadOperation(
-                operation_token=token,
-                preflight=preflight,
-                device_context=device_context,
-                reserved_source_id=row.reserved_source_id,
-                expires_at=expires_at,
-            )
+        raise _state_invalid()
 
     async def _record_terminal_result_once(
         self, operation: SmallFileUploadOperation, result: SmallFileTerminalResult
@@ -919,5 +1083,14 @@ class PostgresqlSmallFileUploadOperationStore:
         preflight: SmallFilePreflight,
     ) -> SmallFileOperationRow | None:
         result = await connection.execute(identity_lookup_statement(device_context, preflight))
+        row = result.mappings().one_or_none()
+        return None if row is None else SmallFileOperationRow.from_row_mapping(row)
+
+    async def _fetch_row_by_token(
+        self,
+        connection: AsyncConnection,
+        operation_token: UploadOperationToken,
+    ) -> SmallFileOperationRow | None:
+        result = await connection.execute(operation_token_lookup_statement(operation_token))
         row = result.mappings().one_or_none()
         return None if row is None else SmallFileOperationRow.from_row_mapping(row)

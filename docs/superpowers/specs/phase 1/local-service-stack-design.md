@@ -266,9 +266,11 @@ The tool never chooses another port automatically. Direct `docker compose` invoc
 
 ## 8. Secrets and authentication
 
-### 8.1 Secret set
+### 8.1 Managed stack set and preserved application secrets
 
-The lifecycle tool creates one atomic secret set under `.local/stack-secrets/`:
+The lifecycle tool owns exactly eight managed stack files under
+`.local/stack-secrets/`: the seven generated credential files below plus the
+generated `qdrant_config.yaml` derived from `qdrant_api_key`.
 
 ```text
 postgres_admin_password
@@ -278,6 +280,7 @@ qdrant_api_key
 neo4j_auth
 redis_acl
 redis_application_password
+qdrant_config.yaml               # generated managed configuration
 ```
 
 Fixed non-secret principals are:
@@ -295,15 +298,42 @@ Passwords and the Qdrant API key use a cryptographically secure generator and at
 
 `neo4j_auth` contains the exact native Docker secret shape `neo4j/<generated-password>`. `redis_acl` disables the default user and enables only the named `knowledge` user. Qdrant receives a generated secret configuration file derived atomically from its API-key secret; the rendered secret configuration remains in `.local/stack-secrets/` and is mounted read-only.
 
-R2 credentials are deliberately absent. They belong to the object-storage adapter secret contract and must never be copied into Compose or stack lifecycle state.
+The same directory may also contain preserved application secrets that the
+stack does not generate, overwrite, validate by value, rotate or delete. The
+fixed allowlist is the authentication key, the two policy-signing key slots,
+the two R2 credential files and the Web credential file used by the local
+application runbooks. Additional authentication/policy files are admitted only
+when named by `KNOWLEDGE_AUTH_CURRENT_KEY_FILE`,
+`KNOWLEDGE_AUTH_PREVIOUS_KEYS` or `KNOWLEDGE_POLICY_SIGNING_KEY_FILE`.
+
+Dynamic paths are relative slash-separated paths of at most 128 characters;
+each segment matches `[A-Za-z0-9][A-Za-z0-9._-]*`. Absolute paths, traversal,
+empty segments and every managed stack filename are rejected. Previous
+authentication keys use at most four comma-separated `key-id=relative/path`
+entries; key IDs use the safe-token grammar, previous IDs and paths are
+unique, and neither may collide with the configured current authentication ID
+or path. Filesystem-path collision checks use the host filesystem identity:
+case-insensitive on Windows and exact on POSIX. This applies between managed
+and configured paths and between current, previous, and policy-signing paths,
+so a Windows case variant is rejected before inspection or reset can touch an
+alias. Key IDs are not filesystem paths: they retain the exact `SafeToken`
+grammar and comparison semantics. An unallowlisted file or directory makes
+inspection `partial` and blocks bootstrap. R2 credentials remain outside
+Compose and stack lifecycle state even though their application-owned files
+are preserved in the shared local secret directory.
 
 ### 8.2 Creation behavior
 
 - The tool resolves the repository root and proves the secret directory remains beneath `<workspace>/.local/stack-secrets`.
-- Generation occurs in a sibling staging directory followed by atomic rename.
+- Generation occurs in a sibling private staging directory. An absent secret
+  directory is installed by atomic rename; when preserved application files
+  already own the directory, only the eight staged managed files are renamed
+  into it and rolled back on failure.
 - An already complete set is reused byte-for-byte.
 - Existing files are never overwritten by `bootstrap` or `up`.
-- A partial set is terminal; the tool does not guess whether regeneration is safe.
+- A partial managed set or an unknown path is terminal; preserved allowlisted
+  application files alone still mean the managed set is `missing` and may be
+  completed by bootstrap.
 - A missing set while project volumes exist is terminal.
 - Secret filenames, absolute paths and values are absent from normal/error output.
 - On POSIX, directories use `0700` and files use `0600`.
@@ -328,8 +358,11 @@ Changing a file alone is not credential rotation because persisted PostgreSQL, N
 
 - `bootstrap` never rotates.
 - `stack reset` keeps secrets by default.
-- `stack reset --rotate-secrets` first deletes the exact project volumes successfully, then removes the exact validated local-stack secret set.
-- The next `bootstrap` creates a new atomic set.
+- `stack reset --rotate-secrets` first deletes the exact project volumes
+  successfully, then removes only the eight managed stack files. Preserved
+  application secrets and their admitted directories remain untouched; the
+  sanitized `"secrets":"removed"` result refers only to the managed set.
+- The next `bootstrap` creates a new managed set alongside any preserved files.
 - In-place rotation of a populated local stack is deferred until an owning credential-rotation spec exists.
 
 ## 9. Service-specific contracts

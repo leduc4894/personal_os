@@ -77,6 +77,12 @@ Short, duplicate, missing or path-escaping key files fail `serve` during
 startup with `configuration_secret_invalid` — before the listening socket is
 exposed.
 
+The local-stack lifecycle compares secret relative paths with
+case-insensitive filesystem identity on Windows (exact identity on POSIX), so
+case variants cannot alias managed, current, previous, or policy-signing
+files during inspection/reset. Authentication key IDs keep their existing
+exact lowercase `SafeToken` grammar; path normalization never changes an ID.
+
 Rotation procedure:
 
 1. Create the new key file under the secret root.
@@ -198,6 +204,12 @@ Authentication state is canonical PostgreSQL data and is covered by the
 existing canonical backup/restore procedure (see
 `docs/operations/canonical-core-recovery.md`). Operator notes:
 
+- Current v2 recovery snapshots lock, count, dump and restore all eight
+  authentication tables: `user_credentials`, `web_sessions`,
+  `totp_credentials`, `totp_recovery_codes`, `device_token_families`,
+  `device_tokens`, `device_authorization_grants`, and
+  `authentication_throttle_buckets`. The post-restore count witness covers
+  the same set; these rows are not an unverified side effect of `pg_dump`.
 - A restore replays credential, session, TOTP, grant, token, throttle and
   audit rows together; point-in-time consistency matters because a family's
   refresh lineage is a single logical unit — restoring mid-rotation is

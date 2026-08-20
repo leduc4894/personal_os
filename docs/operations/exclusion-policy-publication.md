@@ -148,16 +148,19 @@ network sync; trust is never reset silently.
 ## Concurrency: the frozen lock order
 
 ```text
-source/enforcement path: publication idempotency advisory lock → workspace_policy_state row → source row
+ordinary source/enforcement path: publication idempotency advisory lock → workspace_policy_state row → source row
+claimed upload path: operation identity advisory lock → publication idempotency advisory lock → workspace_policy_state row → source row
 policy publication path: policy idempotency advisory lock → workspace_policy_state row
 ```
 
 Policy publication locks the workspace policy-state row and never touches
-source rows; the source path re-evaluates the locked active policy between the
-idempotency recheck and the source advisory lock. Reconciliation never holds
-the policy-state lock while acquiring source rows. AST-order contract tests
-pin this order; an inverse-order refactor fails the gate instead of deadlocking
-production.
+source rows. The claimed-upload path first fences reauthorization and terminal
+publication with the operation identity lock, then enters the ordinary
+publication order. The source path re-evaluates the locked active policy
+between the idempotency recheck and the source advisory lock. Reconciliation
+never holds the policy-state lock while acquiring source rows. AST-order and
+race contract tests pin these orders; an inverse-order refactor fails the gate
+instead of deadlocking production.
 
 ## Reconciliation
 

@@ -12,16 +12,21 @@ the serve process compose the graph before its first request.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from api_runtime.exclusion_policy_crypto import Ed25519PolicySigner
 from api_runtime.small_file_sync_composition import (
+    BoundPolicySmallFilePublicationGateway,
+    OfflineSmallFileClock,
     OfflineSmallFileSyncState,
+    OfflineSmallFileUploadOperationStore,
     PolicyEnforcementSmallFileGuard,
     SmallFileSyncRuntime,
     compose_offline_small_file_sync,
@@ -29,6 +34,16 @@ from api_runtime.small_file_sync_composition import (
 )
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from tests.unit.small_file_sync.fakes import (
+    SYNC_CONTENT_BYTES,
+    SYNC_CONTENT_DIGEST,
+    SYNC_MEDIA_TYPE,
+    CallLedger,
+    FakeCanonicalObjectStore,
+    FakeSourcePublicationStore,
+    FixedUtcClock,
+    ProbedByteStream,
+)
 
 from personal_os.diagnostics.context import (
     DiagnosticContext,
@@ -36,14 +51,19 @@ from personal_os.diagnostics.context import (
 )
 from personal_os.diagnostics.logging import DiagnosticLogger
 from personal_os.error_contracts.codes import ErrorCode
-from personal_os.exclusion_policy.contracts import PolicySubject
+from personal_os.exclusion_policy.contracts import (
+    EnforcedPolicyDecision,
+    PolicySubject,
+    RawPolicyDecision,
+)
 from personal_os.exclusion_policy.enforcement import (
+    AllowedPolicyRevisionBinding,
     PolicyBoundary,
     PolicyDecision,
     PolicyEnforcementService,
 )
 from personal_os.exclusion_policy.errors import ExclusionPolicyError
-from personal_os.object_storage import CanonicalMediaType, ContentDigest
+from personal_os.object_storage import CanonicalMediaType, ContentDigest, ExpectedObject
 from personal_os.runtime_configuration.models import RuntimeEnvironment
 from personal_os.small_file_sync.contracts import (
     NormalizedLocator,
@@ -51,8 +71,18 @@ from personal_os.small_file_sync.contracts import (
     SmallFileIdempotencyKey,
     SmallFileOperation,
     SmallFilePreflight,
+    SmallFileTerminalResult,
+    SmallFileTerminalResultKind,
 )
-from personal_os.sources.publication import SourceVersionPublicationService
+from personal_os.small_file_sync.errors import SmallFileSyncError
+from personal_os.sources.actors import ActorKind, SourceActor
+from personal_os.sources.commands import (
+    CreateSourceVersion,
+    IdempotencyKey,
+    SourceTitle,
+    SourceType,
+)
+from personal_os.sources.metrics import InMemorySourcePublicationMetrics
 from postgresql_source_store.canonical_read import PostgresqlCanonicalSourceReadStore
 from postgresql_source_store.publication_store import PostgresqlSourcePublicationStore
 from postgresql_source_store.small_file_sync_operations import (
@@ -100,14 +130,17 @@ def serve_runtime(tmp_path: Path, serve_engine: AsyncEngine) -> SmallFileSyncRun
     )
 
 
-def test_serve_composition_binds_the_real_adapters(serve_runtime: SmallFileSyncRuntime) -> None:
+def test_serve_composition_binds_the_bound_policy_publication_gateway(
+    serve_runtime: SmallFileSyncRuntime,
+) -> None:
     service = serve_runtime.service
     assert isinstance(service.operation_store, PostgresqlSmallFileUploadOperationStore)
     assert isinstance(service.object_store, R2S3ObjectStore)
     assert isinstance(service.current_sources, PostgresqlCanonicalSourceReadStore)
-    assert isinstance(service.publication_service, SourceVersionPublicationService)
-    assert isinstance(service.publication_service.store, PostgresqlSourcePublicationStore)
-    assert isinstance(service.publication_service.policy_guard, PolicyEnforcementService)
+    assert isinstance(service.publication_gateway, BoundPolicySmallFilePublicationGateway)
+    assert isinstance(service.publication_gateway.store, PostgresqlSourcePublicationStore)
+    assert service.publication_gateway.operation_store is service.operation_store
+    assert isinstance(service.publication_gateway.enforcement, PolicyEnforcementService)
     assert isinstance(service.policy_guard, PolicyEnforcementSmallFileGuard)
     assert isinstance(service.policy_guard.enforcement, PolicyEnforcementService)
 
@@ -156,6 +189,7 @@ class _RecordingEnforcement:
 
     subject: PolicySubject | None = None
     boundary: PolicyBoundary | None = None
+    active_revision_number: int = 1
 
     async def authorize_preflight(
         self,
@@ -163,11 +197,153 @@ class _RecordingEnforcement:
         subject: PolicySubject,
         boundary: PolicyBoundary,
         context: DiagnosticContext,
-    ) -> PolicyDecision | None:
+    ) -> PolicyDecision:
         del context
         self.subject = subject
         self.boundary = boundary
-        return None
+        return PolicyDecision(
+            workspace_id=subject.workspace_id,
+            policy_revision_id=uuid4(),
+            revision_number=self.active_revision_number,
+            subject_fingerprint=bytes(32),
+            raw_decision=RawPolicyDecision.ALLOWED,
+            enforced_decision=EnforcedPolicyDecision.ALLOWED,
+            matched_rule_ids=(),
+            missing_fields=(),
+            evaluated_at=datetime(2026, 8, 19, tzinfo=UTC),
+        )
+
+
+@dataclass
+class _BoundPublicationRecordingEnforcement:
+    bindings: list[AllowedPolicyRevisionBinding]
+    entered_by_revision: dict[int, asyncio.Event]
+    release_by_revision: dict[int, asyncio.Event]
+
+    async def authorize_bound_publication(
+        self,
+        command: CreateSourceVersion,
+        binding: AllowedPolicyRevisionBinding,
+        diagnostic_context: DiagnosticContext,
+    ) -> AllowedPolicyRevisionBinding:
+        del command, diagnostic_context
+        self.bindings.append(binding)
+        entered = self.entered_by_revision.get(binding.policy_revision_number)
+        if entered is not None:
+            entered.set()
+        release = self.release_by_revision.get(binding.policy_revision_number)
+        if release is not None:
+            await release.wait()
+        return binding
+
+
+def _build_gateway_create_command(workspace_id: UUID) -> CreateSourceVersion:
+    return CreateSourceVersion(
+        workspace_id=workspace_id,
+        source_id=uuid4(),
+        event_id=uuid4(),
+        idempotency_key=IdempotencyKey(str(uuid4())),
+        source_type=SourceType.MARKDOWN,
+        title=SourceTitle("Markdown file"),
+        actor=SourceActor(actor_kind=ActorKind.DEVICE, actor_id=uuid4()),
+        expected_object=ExpectedObject(
+            content_digest=SYNC_CONTENT_DIGEST,
+            size_bytes=len(SYNC_CONTENT_BYTES),
+            media_type=SYNC_MEDIA_TYPE,
+        ),
+        client_timestamp=None,
+    )
+
+
+def _build_bound_gateway(
+    enforcement: _BoundPublicationRecordingEnforcement,
+) -> BoundPolicySmallFilePublicationGateway:
+    clock = FixedUtcClock(datetime(2026, 8, 19, tzinfo=UTC))
+    ledger = CallLedger()
+    return BoundPolicySmallFilePublicationGateway(
+        store=FakeSourcePublicationStore(ledger=ledger),
+        object_store=FakeCanonicalObjectStore(ledger=ledger, clock=clock),
+        metrics=InMemorySourcePublicationMetrics(),
+        clock=clock,
+        enforcement=enforcement,
+    )
+
+
+@pytest.mark.asyncio
+async def test_gateway_builds_a_fresh_immutable_guard_for_each_invocation() -> None:
+    workspace_id = uuid4()
+    enforcement = _BoundPublicationRecordingEnforcement(
+        bindings=[], entered_by_revision={}, release_by_revision={}
+    )
+    gateway = _build_bound_gateway(enforcement)
+
+    await gateway.publish_create(
+        command=_build_gateway_create_command(workspace_id),
+        stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+        policy_binding=AllowedPolicyRevisionBinding(
+            workspace_id=workspace_id, policy_revision_number=11
+        ),
+        diagnostic_context=create_diagnostic_context().context,
+    )
+    await gateway.publish_create(
+        command=_build_gateway_create_command(workspace_id),
+        stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+        policy_binding=AllowedPolicyRevisionBinding(
+            workspace_id=workspace_id, policy_revision_number=12
+        ),
+        diagnostic_context=create_diagnostic_context().context,
+    )
+
+    assert enforcement.bindings == [
+        AllowedPolicyRevisionBinding(workspace_id=workspace_id, policy_revision_number=11),
+        AllowedPolicyRevisionBinding(workspace_id=workspace_id, policy_revision_number=12),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_gateway_calls_do_not_share_bound_evidence() -> None:
+    workspace_id = uuid4()
+    first_entered = asyncio.Event()
+    second_entered = asyncio.Event()
+    first_release = asyncio.Event()
+    second_release = asyncio.Event()
+    enforcement = _BoundPublicationRecordingEnforcement(
+        bindings=[],
+        entered_by_revision={11: first_entered, 12: second_entered},
+        release_by_revision={11: first_release, 12: second_release},
+    )
+    gateway = _build_bound_gateway(enforcement)
+    first_task = asyncio.create_task(
+        gateway.publish_create(
+            command=_build_gateway_create_command(workspace_id),
+            stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+            policy_binding=AllowedPolicyRevisionBinding(
+                workspace_id=workspace_id, policy_revision_number=11
+            ),
+            diagnostic_context=create_diagnostic_context().context,
+        )
+    )
+    second_task = asyncio.create_task(
+        gateway.publish_create(
+            command=_build_gateway_create_command(workspace_id),
+            stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+            policy_binding=AllowedPolicyRevisionBinding(
+                workspace_id=workspace_id, policy_revision_number=12
+            ),
+            diagnostic_context=create_diagnostic_context().context,
+        )
+    )
+    await first_entered.wait()
+    await second_entered.wait()
+
+    second_release.set()
+    second_result = await second_task
+    first_release.set()
+    first_result = await first_task
+
+    assert {binding.policy_revision_number for binding in enforcement.bindings} == {11, 12}
+    assert first_result.outcome.value == "published"
+    assert second_result.outcome.value == "published"
 
 
 def _build_create_preflight() -> SmallFilePreflight:
@@ -184,6 +360,100 @@ def _build_create_preflight() -> SmallFilePreflight:
         media_type=CanonicalMediaType.parse("text/markdown"),
         policy_revision_number=7,
     )
+
+
+@pytest.mark.asyncio
+async def test_offline_store_unbound_terminal_write_cannot_bypass_a_claimed_receive() -> None:
+    state = OfflineSmallFileSyncState(now=datetime(2026, 8, 19, tzinfo=UTC))
+    clock = OfflineSmallFileClock(state)
+    store = OfflineSmallFileUploadOperationStore(state, clock)
+    device_context = SmallFileDeviceContext(device_id=uuid4(), workspace_id=uuid4())
+    preflight = _build_create_preflight()
+    operation = await store.reserve_operation(
+        preflight,
+        device_context,
+        AllowedPolicyRevisionBinding(
+            workspace_id=device_context.workspace_id,
+            policy_revision_number=7,
+        ),
+        create_diagnostic_context().context,
+    )
+    bound = await store.resolve_bound_operation(
+        operation.operation_token,
+        device_context,
+        create_diagnostic_context().context,
+    )
+
+    with pytest.raises(SmallFileSyncError) as raised:
+        await store.record_terminal_result(
+            operation,
+            SmallFileTerminalResult(
+                result_kind=SmallFileTerminalResultKind.COMMITTED,
+                source_id=uuid4(),
+                source_version_id=uuid4(),
+                content_version=1,
+                committed_at=clock(),
+            ),
+            create_diagnostic_context().context,
+        )
+
+    assert raised.value.error_code is ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID
+    await store.record_bound_terminal_result(
+        bound,
+        SmallFileTerminalResult(
+            result_kind=SmallFileTerminalResultKind.COMMITTED,
+            source_id=uuid4(),
+            source_version_id=uuid4(),
+            content_version=1,
+            committed_at=clock(),
+        ),
+        create_diagnostic_context().context,
+    )
+
+
+@pytest.mark.asyncio
+async def test_offline_store_bound_terminalization_rejects_policy_revision_drift() -> None:
+    state = OfflineSmallFileSyncState(now=datetime(2026, 8, 19, tzinfo=UTC))
+    clock = OfflineSmallFileClock(state)
+    store = OfflineSmallFileUploadOperationStore(state, clock)
+    device_context = SmallFileDeviceContext(device_id=uuid4(), workspace_id=uuid4())
+    preflight = _build_create_preflight()
+    operation = await store.reserve_operation(
+        preflight,
+        device_context,
+        AllowedPolicyRevisionBinding(
+            workspace_id=device_context.workspace_id,
+            policy_revision_number=7,
+        ),
+        create_diagnostic_context().context,
+    )
+    bound = await store.resolve_bound_operation(
+        operation.operation_token,
+        device_context,
+        create_diagnostic_context().context,
+    )
+    result = SmallFileTerminalResult(
+        result_kind=SmallFileTerminalResultKind.COMMITTED,
+        source_id=uuid4(),
+        source_version_id=uuid4(),
+        content_version=1,
+        committed_at=clock(),
+    )
+
+    with pytest.raises(SmallFileSyncError) as raised:
+        await store.record_bound_terminal_result(
+            replace(bound, policy_revision_number=bound.policy_revision_number + 1),
+            result,
+            create_diagnostic_context().context,
+        )
+
+    assert raised.value.error_code is ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH
+    resumed = await store.resolve_bound_operation(
+        operation.operation_token,
+        device_context,
+        create_diagnostic_context().context,
+    )
+    assert resumed.terminal_result is None
 
 
 @pytest.mark.asyncio
@@ -204,6 +474,25 @@ async def test_locator_guard_evaluates_the_capture_subject_at_the_upload_boundar
     assert subject.media_type == CanonicalMediaType.parse("text/markdown")
     assert subject.size_bytes == 128
     assert subject.source_id is None  # a create carries no canonical source yet
+
+
+@pytest.mark.asyncio
+async def test_locator_guard_returns_the_server_verified_revision_not_the_plugin_claim() -> None:
+    active_revision_number = 11
+    enforcement = _RecordingEnforcement(active_revision_number=active_revision_number)
+    guard = PolicyEnforcementSmallFileGuard(enforcement=enforcement)  # type: ignore[arg-type]
+    device_context = SmallFileDeviceContext(device_id=uuid4(), workspace_id=uuid4())
+    preflight = _build_create_preflight()
+
+    binding = await guard.authorize_small_file(
+        preflight, device_context, create_diagnostic_context().context
+    )
+
+    assert binding == AllowedPolicyRevisionBinding(
+        workspace_id=device_context.workspace_id,
+        policy_revision_number=active_revision_number,
+    )
+    assert binding.policy_revision_number != preflight.policy_revision_number
 
 
 @pytest.mark.asyncio

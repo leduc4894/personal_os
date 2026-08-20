@@ -23,6 +23,7 @@ from sqlalchemy.dialects import postgresql
 
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import ApplicationError, InternalApplicationError
+from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
 from personal_os.object_storage import CanonicalMediaType, ContentDigest
 from personal_os.small_file_sync.contracts import (
     NormalizedLocator,
@@ -34,14 +35,20 @@ from personal_os.small_file_sync.contracts import (
     UploadOperationToken,
 )
 from personal_os.small_file_sync.errors import SmallFileSyncError
+from personal_os.small_file_sync.ports import SmallFileBoundOperation
 from postgresql_source_store.small_file_sync_operations import (
     UPLOAD_OPERATION_EXPIRY_SECONDS,
+    PostgresqlSmallFileUploadOperationStore,
     SmallFileDatabaseRetryPolicy,
+    SmallFileOperationRow,
+    _bound_matches_row,
     compute_upload_operation_expiry,
     identity_lookup_statement,
     map_small_file_database_failure,
     mint_upload_operation_token,
     operation_fingerprint_matches,
+    operation_insert_statement,
+    operation_token_rotation_statement,
     upload_operation_lock_key,
     upload_operation_lock_statement,
     upload_operation_token_hash,
@@ -108,6 +115,14 @@ def _device_context() -> SmallFileDeviceContext:
     return SmallFileDeviceContext(device_id=uuid4(), workspace_id=uuid4())
 
 
+def _policy_binding(
+    device_context: SmallFileDeviceContext, revision: int
+) -> AllowedPolicyRevisionBinding:
+    return AllowedPolicyRevisionBinding(
+        workspace_id=device_context.workspace_id, policy_revision_number=revision
+    )
+
+
 def _declared_fingerprint_row(
     preflight: SmallFilePreflight,
     device_context: SmallFileDeviceContext,
@@ -124,9 +139,7 @@ def _declared_fingerprint_row(
         "device_id": device_context.device_id,
         "event_id": preflight.event_id,
         "idempotency_key": preflight.idempotency_key.value,
-        "operation_kind": (
-            preflight.operation.value if operation_kind is None else operation_kind
-        ),
+        "operation_kind": (preflight.operation.value if operation_kind is None else operation_kind),
         "declared_sha256": (
             preflight.sha256.hexadecimal if declared_sha256 is None else declared_sha256
         ),
@@ -136,9 +149,7 @@ def _declared_fingerprint_row(
         "declared_media_type": (
             preflight.media_type.value if declared_media_type is None else declared_media_type
         ),
-        "update_source_id": (
-            preflight.source_id if update_source_id is None else update_source_id
-        ),
+        "update_source_id": (preflight.source_id if update_source_id is None else update_source_id),
         "update_base_version_id": (
             preflight.base_version_id if update_base_version_id is None else update_base_version_id
         ),
@@ -265,6 +276,116 @@ def test_workspace_or_device_substitution_fails_the_identity_match() -> None:
     assert not operation_fingerprint_matches(
         {**row, "device_id": uuid4()}, preflight, device_context
     )
+
+
+def test_insert_binds_the_server_policy_revision() -> None:
+    device_context = _device_context()
+    statement = operation_insert_statement(
+        operation_id=uuid4(),
+        operation_token_hash="a" * 64,
+        device_context=device_context,
+        preflight=_preflight(),
+        policy_revision_number=7,
+        reserved_source_id=uuid4(),
+        expires_at=datetime.now(UTC),
+    )
+
+    assert statement.compile(dialect=postgresql.dialect()).params["policy_revision_number"] == 7
+
+
+def test_token_rotation_rebinds_policy_revision_without_changing_fingerprint() -> None:
+    device_context = _device_context()
+    preflight = _preflight()
+    statement = operation_token_rotation_statement(
+        operation_id=uuid4(),
+        operation_token_hash="a" * 64,
+        expires_at=datetime.now(UTC),
+        policy_revision_number=7,
+    )
+
+    assert statement.compile(dialect=postgresql.dialect()).params["policy_revision_number"] == 7
+    assert operation_fingerprint_matches(
+        {**_declared_fingerprint_row(preflight, device_context), "policy_revision_number": 2},
+        preflight,
+        device_context,
+    )
+
+
+def test_bound_row_comparison_includes_policy_revision() -> None:
+    device_context = _device_context()
+    preflight = _preflight()
+    row = SmallFileOperationRow(
+        operation_id=uuid4(),
+        operation_token_hash="a" * 64,
+        workspace_id=device_context.workspace_id,
+        device_id=device_context.device_id,
+        event_id=preflight.event_id,
+        idempotency_key=preflight.idempotency_key.value,
+        operation_kind=preflight.operation.value,
+        declared_sha256=preflight.sha256.hexadecimal,
+        declared_size_bytes=preflight.size_bytes,
+        declared_media_type=preflight.media_type.value,
+        policy_revision_number=4,
+        reserved_source_id=uuid4(),
+        update_source_id=None,
+        update_base_version_id=None,
+        state="pending",
+        safe_error_code=None,
+        result_kind=None,
+        result_source_id=None,
+        result_source_version_id=None,
+        result_content_version=None,
+        result_committed_at=None,
+        expires_at=datetime.now(UTC),
+    )
+    bound = SmallFileBoundOperation(
+        operation_token=UploadOperationToken("A" * 43),
+        workspace_id=row.workspace_id,
+        device_id=row.device_id,
+        event_id=row.event_id,
+        idempotency_key=preflight.idempotency_key,
+        operation=preflight.operation,
+        declared_sha256=preflight.sha256,
+        declared_size_bytes=preflight.size_bytes,
+        declared_media_type=preflight.media_type,
+        policy_revision_number=5,
+        reserved_source_id=row.reserved_source_id,
+        update_source_id=None,
+        update_base_version_id=None,
+        expires_at=row.expires_at,
+        terminal_result=None,
+    )
+
+    assert not _bound_matches_row(row, bound)
+
+
+class _NoSqlEngine:
+    def __init__(self) -> None:
+        self.was_entered = False
+
+    def connect(self) -> None:
+        self.was_entered = True
+        raise AssertionError("foreign binding must be rejected before SQL")
+
+
+@pytest.mark.asyncio
+async def test_reservation_rejects_a_foreign_workspace_binding_before_sql() -> None:
+    engine = _NoSqlEngine()
+    store = PostgresqlSmallFileUploadOperationStore(engine, clock=lambda: datetime.now(UTC))  # type: ignore[arg-type]
+    device_context = _device_context()
+
+    with pytest.raises(SmallFileSyncError) as rejected:
+        await store.reserve_operation(
+            _preflight(),
+            device_context,
+            _policy_binding(
+                SmallFileDeviceContext(device_id=device_context.device_id, workspace_id=uuid4()), 7
+            ),
+            None,  # type: ignore[arg-type]
+        )
+
+    assert rejected.value.error_code is ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID
+    assert not engine.was_entered
 
 
 # --- server-owned expiry -----------------------------------------------------------

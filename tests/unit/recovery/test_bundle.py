@@ -14,6 +14,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -27,6 +28,7 @@ from personal_os.recovery.bundle import (
 )
 from personal_os.recovery.contracts import (
     CANONICAL_COUNT_TABLES,
+    POSTGRESQL_SCHEMA_REVISION,
     ManifestDumpEntry,
     ManifestObjectEntry,
     RecoveryEnvironment,
@@ -64,7 +66,7 @@ def _build_manifest(
         created_at=_CREATED_AT,
         source_environment=RecoveryEnvironment.LOCAL,
         postgresql_server_version="18.4",
-        postgresql_schema_revision="20260813_01",
+        postgresql_schema_revision=POSTGRESQL_SCHEMA_REVISION,
         postgres_dump=ManifestDumpEntry(
             relative_path="postgres.dump",
             size_bytes=len(dump_bytes),
@@ -84,10 +86,11 @@ async def _write_bundle(
     store = FilesystemRecoveryBundleStore(bundle_root)
     manifest = _build_manifest(dump_bytes, payloads)
     async with store.create_staging(_BUNDLE_ID) as writer:
-        await writer.write_dump(dump_bytes)
+        staging_writer = cast(Any, writer)
+        await staging_writer.write_dump(dump_bytes)
         for payload in payloads:
-            await writer.write_object(hashlib.sha256(payload).hexdigest(), payload)
-        await writer.finalize(manifest)
+            await staging_writer.write_object(hashlib.sha256(payload).hexdigest(), payload)
+        await staging_writer.finalize(manifest)
     return manifest
 
 
@@ -156,8 +159,9 @@ async def test_abandon_removes_exactly_the_staging_directory(bundle_root: Path) 
 
     store = FilesystemRecoveryBundleStore(bundle_root)
     async with store.create_staging(_BUNDLE_ID) as writer:
-        await writer.write_dump(b"partial")
-        await writer.abandon()
+        staging_writer = cast(Any, writer)
+        await staging_writer.write_dump(b"partial")
+        await staging_writer.abandon()
 
     assert decoy_staging.is_dir()
     assert unrelated.read_text(encoding="utf-8") == "keep"
@@ -174,13 +178,14 @@ async def test_manifest_written_last_and_sidecar_matches_digest(bundle_root: Pat
     manifest = _build_manifest()
 
     async with store.create_staging(_BUNDLE_ID) as writer:
-        await writer.write_dump(_DUMP_BYTES)
+        staging_writer = cast(Any, writer)
+        await staging_writer.write_dump(_DUMP_BYTES)
         for payload in _OBJECT_PAYLOADS:
-            await writer.write_object(hashlib.sha256(payload).hexdigest(), payload)
-        staging = writer.dump_path.parent
+            await staging_writer.write_object(hashlib.sha256(payload).hexdigest(), payload)
+        staging = staging_writer.dump_path.parent
         assert (staging / "manifest.json").exists() is False
         assert (staging / "manifest.sha256").exists() is False
-        await writer.finalize(manifest)
+        await staging_writer.finalize(manifest)
 
     final = bundle_root / str(_BUNDLE_ID)
     manifest_bytes = (final / "manifest.json").read_bytes()

@@ -17,6 +17,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -26,6 +27,7 @@ from personal_os.recovery import bundle as bundle_module
 from personal_os.recovery.bundle import STAGING_NAME_PREFIX, FilesystemRecoveryBundleStore
 from personal_os.recovery.contracts import (
     CANONICAL_COUNT_TABLES,
+    POSTGRESQL_SCHEMA_REVISION,
     ManifestDumpEntry,
     ManifestObjectEntry,
     RecoveryEnvironment,
@@ -58,7 +60,7 @@ async def _write_valid_bundle(bundle_root: Path) -> Path:
         created_at=_CREATED_AT,
         source_environment=RecoveryEnvironment.LOCAL,
         postgresql_server_version="18.4",
-        postgresql_schema_revision="20260813_01",
+        postgresql_schema_revision=POSTGRESQL_SCHEMA_REVISION,
         postgres_dump=ManifestDumpEntry(
             relative_path="postgres.dump",
             size_bytes=len(_DUMP_BYTES),
@@ -69,10 +71,11 @@ async def _write_valid_bundle(bundle_root: Path) -> Path:
     )
     store = FilesystemRecoveryBundleStore(bundle_root)
     async with store.create_staging(_BUNDLE_ID) as writer:
-        await writer.write_dump(_DUMP_BYTES)
+        staging_writer = cast(Any, writer)
+        await staging_writer.write_dump(_DUMP_BYTES)
         for payload in _OBJECT_PAYLOADS:
-            await writer.write_object(hashlib.sha256(payload).hexdigest(), payload)
-        await writer.finalize(manifest)
+            await staging_writer.write_object(hashlib.sha256(payload).hexdigest(), payload)
+        await staging_writer.finalize(manifest)
     return bundle_root / str(_BUNDLE_ID)
 
 
@@ -250,6 +253,6 @@ def test_has_reparse_point_detects_reparse_attribute() -> None:
     normal = SimpleNamespace(st_file_attributes=stat.FILE_ATTRIBUTE_NORMAL)
     absent = SimpleNamespace()
 
-    assert bundle_module._has_reparse_point(reparse) is True
-    assert bundle_module._has_reparse_point(normal) is False
-    assert bundle_module._has_reparse_point(absent) is False
+    assert bundle_module._has_reparse_point(cast(os.stat_result, reparse)) is True
+    assert bundle_module._has_reparse_point(cast(os.stat_result, normal)) is False
+    assert bundle_module._has_reparse_point(cast(os.stat_result, absent)) is False

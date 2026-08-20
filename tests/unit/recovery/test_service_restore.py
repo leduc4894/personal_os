@@ -38,8 +38,10 @@ from personal_os.object_storage.errors import ObjectStorageError
 from personal_os.recovery import service as service_module
 from personal_os.recovery.contracts import (
     CANONICAL_COUNT_TABLES,
+    MANIFEST_CONTRACT_V1,
     POSTGRESQL_SCHEMA_REVISION,
     POSTGRESQL_SERVER_VERSION,
+    V1_CANONICAL_COUNT_TABLES,
     InMemoryCanonicalBackupMetrics,
     ManifestDumpEntry,
     ManifestObjectEntry,
@@ -84,6 +86,28 @@ _RESTORE_COMPLETED_AT: datetime = datetime(2026, 8, 15, 12, 2, 0, tzinfo=UTC)
 _STORE_VERIFIED_AT: datetime = datetime(2026, 8, 15, 12, 1, 30, tzinfo=UTC)
 _DUMP_SHA256: str = hashlib.sha256(b"fake pg_dump archive").hexdigest()
 _BUNDLE_ID: UUID = UUID("018f5b7d-21c0-7c2e-9a4f-3b6d8e5a7c91")
+_LEGACY_V2_CANONICAL_COUNT_TABLES = (
+    "users",
+    "workspaces",
+    "devices",
+    "content_objects",
+    "sources",
+    "source_versions",
+    "sync_events",
+    "projection_intents",
+    "audit_events",
+    "workspace_policy_state",
+    "policy_signing_keys",
+    "policy_keysets",
+    "policy_keyset_signatures",
+    "source_policies",
+    "policy_rules",
+    "policy_drafts",
+    "policy_draft_rules",
+    "policy_evaluations",
+    "policy_reconciliation_intents",
+    "small_file_upload_operations",
+)
 
 
 def build_counts() -> dict[str, int]:
@@ -216,6 +240,7 @@ class FakeRestoreTarget:
     schema_head_calls: int = 0
     counts_calls: int = 0
     pointer_calls: int = 0
+    requested_count_tables: list[tuple[str, ...]] = field(default_factory=list)
 
     async def is_application_empty(self) -> bool:
         self.emptiness_calls += 1
@@ -235,10 +260,11 @@ class FakeRestoreTarget:
         self.ledger.append(TARGET_SCHEMA_HEAD_PRE)
         return self.pre_schema_head
 
-    async def read_canonical_counts(self) -> Mapping[str, int]:
+    async def read_canonical_counts(self, table_names: tuple[str, ...]) -> Mapping[str, int]:
         self.counts_calls += 1
+        self.requested_count_tables.append(table_names)
         self.ledger.append(TARGET_COUNTS)
-        return self.counts
+        return {table_name: self.counts[table_name] for table_name in table_names}
 
     async def read_current_pointer_resolution(self) -> int:
         self.pointer_calls += 1
@@ -617,6 +643,62 @@ async def test_restore_order_is_verify_r2_pgrestore_graph_smoke_receipt(
     assert result.completed_at == _RESTORE_COMPLETED_AT
     assert result.table_counts == build_counts()
     assert result.object_count == 3
+
+
+@pytest.mark.asyncio
+async def test_historical_v1_restore_verifies_its_schema_and_nine_table_shape(
+    tmp_path: Path,
+) -> None:
+    """A v1 dump restores at its historical head before forward migration."""
+
+    harness = build_restore_harness(tmp_path, object_count=1)
+    v1_counts = {
+        table_name: index + 1 for index, table_name in enumerate(V1_CANONICAL_COUNT_TABLES)
+    }
+    v1_manifest = dataclasses.replace(
+        harness.manifest,
+        contract=MANIFEST_CONTRACT_V1,
+        postgresql_schema_revision="20260813_01",
+        canonical_counts=v1_counts,
+    )
+    harness.bundle.manifest = v1_manifest
+    harness.restore_target.post_schema_head = "20260813_01"
+    harness.restore_target.counts = v1_counts
+
+    result = await harness.service.restore_empty(
+        build_restore_command(),
+        read_service=harness.read_service,
+        restore_target=harness.restore_target,
+    )
+
+    assert result.table_counts == v1_counts
+    assert harness.restore_target.requested_count_tables == [V1_CANONICAL_COUNT_TABLES]
+
+
+@pytest.mark.asyncio
+async def test_legacy_v2_restore_verifies_the_manifest_twenty_table_shape(
+    tmp_path: Path,
+) -> None:
+    """A v2 bundle created before auth completeness uses its validated keys."""
+
+    harness = build_restore_harness(tmp_path, object_count=1)
+    legacy_counts = {
+        table_name: index + 1 for index, table_name in enumerate(_LEGACY_V2_CANONICAL_COUNT_TABLES)
+    }
+    harness.bundle.manifest = dataclasses.replace(
+        harness.manifest,
+        canonical_counts=legacy_counts,
+    )
+    harness.restore_target.counts = legacy_counts
+
+    result = await harness.service.restore_empty(
+        build_restore_command(),
+        read_service=harness.read_service,
+        restore_target=harness.restore_target,
+    )
+
+    assert result.table_counts == legacy_counts
+    assert harness.restore_target.requested_count_tables == [_LEGACY_V2_CANONICAL_COUNT_TABLES]
 
 
 @pytest.mark.asyncio

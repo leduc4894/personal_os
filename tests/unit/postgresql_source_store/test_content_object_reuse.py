@@ -82,6 +82,7 @@ def test_upsert_binds_every_column_from_the_verified_receipt() -> None:
         "byte_size": receipt.size_bytes,
         "media_type": receipt.media_type.value,
         "verified_at": receipt.verified_at,
+        "created_at": receipt.verified_at,
     }
 
 

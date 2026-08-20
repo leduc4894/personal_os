@@ -52,7 +52,6 @@ from personal_os.object_storage import (
     derive_canonical_object_key,
 )
 from personal_os.recovery.contracts import (
-    MANIFEST_CONTRACT,
     POSTGRESQL_SCHEMA_REVISION,
     POSTGRESQL_SERVER_VERSION,
     CanonicalBackupMetrics,
@@ -229,7 +228,7 @@ class PostgresqlRestoreTarget(Protocol):
 
     async def read_schema_head(self) -> str | None: ...
 
-    async def read_canonical_counts(self) -> Mapping[str, int]: ...
+    async def read_canonical_counts(self, table_names: tuple[str, ...]) -> Mapping[str, int]: ...
 
     async def read_current_pointer_resolution(self) -> int: ...
 
@@ -516,7 +515,7 @@ class RecoveryService:
         )
         return BundleVerificationResult(
             bundle_id=command.bundle_id,
-            contract=MANIFEST_CONTRACT,
+            contract=manifest.contract,
             object_count=object_count,
             byte_total=byte_total,
             table_counts=dict(manifest.canonical_counts),
@@ -688,12 +687,15 @@ class RecoveryService:
     ) -> None:
         """Re-verify the restored schema, counts, pointers and objects (spec 11.3)."""
 
-        if await restore_target.read_schema_head() != POSTGRESQL_SCHEMA_REVISION:
+        if await restore_target.read_schema_head() != manifest.postgresql_schema_revision:
             raise RecoveryError(
                 ErrorCode.CANONICAL_RECOVERY_RESTORE_FAILED,
                 safe_details={"component": RecoveryComponent.CANONICAL_GRAPH},
             )
-        if dict(await restore_target.read_canonical_counts()) != dict(manifest.canonical_counts):
+        count_tables = tuple(manifest.canonical_counts)
+        if dict(await restore_target.read_canonical_counts(count_tables)) != dict(
+            manifest.canonical_counts
+        ):
             raise RecoveryError(
                 ErrorCode.CANONICAL_RECOVERY_RESTORE_FAILED,
                 safe_details={"component": RecoveryComponent.CANONICAL_GRAPH},

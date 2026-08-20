@@ -59,10 +59,18 @@ from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.diagnostics.events import SafeToken
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.exclusion_policy.contracts import PolicySubject
-from personal_os.exclusion_policy.enforcement import PolicyDecision, PolicyTrustAnchorVerifier
+from personal_os.exclusion_policy.enforcement import (
+    PolicyTrustAnchorVerifier,
+    PublicationPolicyEvidence,
+)
 from personal_os.exclusion_policy.metrics import ExclusionPolicyMetrics
 from personal_os.object_storage import VerifiedObjectReceipt
 from personal_os.object_storage.keys import ContentDigest
+from personal_os.small_file_sync.contracts import (
+    SmallFileTerminalResult,
+    SmallFileTerminalResultKind,
+)
+from personal_os.small_file_sync.ports import SmallFileBoundOperation
 from personal_os.sources.actors import ActorKind, SourceActor
 from personal_os.sources.commands import (
     CreateSourceVersion,
@@ -82,8 +90,11 @@ from postgresql_source_store.engine import apply_transaction_bounds
 from postgresql_source_store.error_mapping import DatabaseRetryPolicy
 from postgresql_source_store.locks import idempotency_lock_statement, source_lock_statement
 from postgresql_source_store.policy_enforcement import (
-    evaluate_locked_policy_decision,
+    authorize_locked_publication_policy,
     source_type_select_statement,
+)
+from postgresql_source_store.small_file_sync_operations import (
+    PostgresqlSmallFileUploadOperationStore,
 )
 from postgresql_source_store.tables import (
     audit_events,
@@ -430,6 +441,7 @@ def content_object_upsert_statement(
         byte_size=receipt.size_bytes,
         media_type=receipt.media_type.value,
         verified_at=receipt.verified_at,
+        created_at=receipt.verified_at,
     )
     return statement.on_conflict_do_nothing(index_elements=[content_objects.c.content_hash])
 
@@ -478,11 +490,33 @@ class PostgresqlSourcePublicationStore:
         retry: DatabaseRetryPolicy | None = None,
         policy_verifier: PolicyTrustAnchorVerifier,
         policy_metrics: ExclusionPolicyMetrics | None = None,
+        small_file_operation_store: PostgresqlSmallFileUploadOperationStore | None = None,
+        small_file_bound_operation: SmallFileBoundOperation | None = None,
     ) -> None:
+        if (small_file_operation_store is None) != (small_file_bound_operation is None):
+            raise ValueError("small-file operation store and binding must be supplied together")
         self._engine = engine
         self._retry = retry if retry is not None else DatabaseRetryPolicy()
         self._policy_verifier = policy_verifier
         self._policy_metrics = policy_metrics
+        self._small_file_operation_store = small_file_operation_store
+        self._small_file_bound_operation = small_file_bound_operation
+
+    def with_small_file_operation_fence(
+        self,
+        operation_store: PostgresqlSmallFileUploadOperationStore,
+        bound: SmallFileBoundOperation,
+    ) -> PostgresqlSourcePublicationStore:
+        """Return an invocation-local store fenced to one claimed upload."""
+
+        return PostgresqlSourcePublicationStore(
+            self._engine,
+            retry=self._retry,
+            policy_verifier=self._policy_verifier,
+            policy_metrics=self._policy_metrics,
+            small_file_operation_store=operation_store,
+            small_file_bound_operation=bound,
+        )
 
     async def resolve_committed(
         self,
@@ -504,7 +538,7 @@ class PostgresqlSourcePublicationStore:
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
         *,
-        preflight_decision: PolicyDecision | None = None,
+        preflight_decision: PublicationPolicyEvidence | None = None,
     ) -> SourceVersionPublicationResult:
         identities = SourceCreateIdentities.allocate()
         return await self._retry.run(
@@ -529,7 +563,7 @@ class PostgresqlSourcePublicationStore:
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
         *,
-        preflight_decision: PolicyDecision | None = None,
+        preflight_decision: PublicationPolicyEvidence | None = None,
     ) -> SourceVersionPublicationResult:
         identities = SourceUpdateIdentities.allocate()
         return await self._retry.run(
@@ -554,7 +588,7 @@ class PostgresqlSourcePublicationStore:
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
         identities: SourceCreateIdentities,
-        preflight_decision: PolicyDecision | None,
+        preflight_decision: PublicationPolicyEvidence | None,
     ) -> SourceVersionPublicationResult:
         return await self._run_locked_transition(
             command,
@@ -579,7 +613,7 @@ class PostgresqlSourcePublicationStore:
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
         identities: SourceUpdateIdentities,
-        preflight_decision: PolicyDecision | None,
+        preflight_decision: PublicationPolicyEvidence | None,
     ) -> SourceVersionPublicationResult:
         return await self._run_locked_transition(
             command,
@@ -608,19 +642,20 @@ class PostgresqlSourcePublicationStore:
             Awaitable[tuple[_PendingRejection | None, SourceVersionPublicationResult | None]],
         ],
         *,
-        preflight_decision: PolicyDecision | None = None,
+        preflight_decision: PublicationPolicyEvidence | None = None,
     ) -> SourceVersionPublicationResult:
         """Run the common locked prefix and one command-specific transition.
 
         The prefix follows design section 8.3 plus the spec-14 policy recheck:
         ``SET LOCAL`` bounds, the idempotency advisory lock, the trusted
         workspace/actor revalidation, the replay/mismatch recheck under lock,
-        then the ``workspace_policy_state`` row lock with the authoritative
-        policy re-evaluation, then the source advisory lock. The policy recheck
+        then the ``workspace_policy_state`` row lock with authoritative signed
+        policy verification, then the source advisory lock. The policy check
         runs for the replay-return path too — a replay must not return
-        canonical data until the current policy permits the subject — and any
-        preflight decision is a non-authoritative hint never consulted for the
-        outcome. Every rejection raises out of the ``async with`` block via
+        canonical data until the current policy permits the subject. Matching
+        bound allowed evidence skips only the evaluator after locked snapshot
+        verification; changed revisions and ordinary decisions are evaluated
+        unconditionally. Every rejection raises out of the ``async with`` block via
         :class:`_RejectionAbort` so the transaction always rolls back — a
         rejection found after a canonical write must never commit a partial
         graph — and the standalone rejection audit is written only after the
@@ -636,6 +671,16 @@ class PostgresqlSourcePublicationStore:
                 connection.begin(),
             ):
                 await apply_transaction_bounds(connection)
+                if (
+                    self._small_file_operation_store is not None
+                    and self._small_file_bound_operation is not None
+                ):
+                    # Global lock order for the small-file path starts with
+                    # operation identity, before source idempotency/policy/source.
+                    operation_store = self._small_file_operation_store
+                    await operation_store.acquire_bound_publication_fence_in_transaction(
+                        connection, self._small_file_bound_operation
+                    )
                 await connection.execute(
                     idempotency_lock_statement(command.workspace_id, command.idempotency_key)
                 )
@@ -670,10 +715,11 @@ class PostgresqlSourcePublicationStore:
                         safe_details={"source_id": command.source_id},
                     )
                 subject = await self._build_authoritative_subject(connection, command, receipt)
-                await evaluate_locked_policy_decision(
-                    connection,
-                    workspace_id=command.workspace_id,
+                await authorize_locked_publication_policy(
+                    connection=connection,
+                    command=command,
                     subject=subject,
+                    policy_evidence=preflight_decision,
                     verifier=self._policy_verifier,
                     metrics=self._policy_metrics,
                 )
@@ -682,6 +728,30 @@ class PostgresqlSourcePublicationStore:
                     rejection, result = await transition(connection)
                     if rejection is not None:
                         raise _RejectionAbort(rejection)
+                if (
+                    result is not None
+                    and self._small_file_operation_store is not None
+                    and self._small_file_bound_operation is not None
+                ):
+                    result_kind = (
+                        SmallFileTerminalResultKind.NO_CHANGE
+                        if result.outcome is PublicationOutcome.NO_CHANGE
+                        else SmallFileTerminalResultKind.COMMITTED
+                    )
+                    record_terminal = (
+                        self._small_file_operation_store.record_bound_terminal_result_in_transaction
+                    )
+                    await record_terminal(
+                        connection,
+                        self._small_file_bound_operation,
+                        SmallFileTerminalResult(
+                            result_kind=result_kind,
+                            source_id=result.source_id,
+                            source_version_id=result.source_version_id,
+                            content_version=result.content_version,
+                            committed_at=result.committed_at,
+                        ),
+                    )
         except _RejectionAbort as abort:
             rejection = abort.rejection
         if rejection is not None:

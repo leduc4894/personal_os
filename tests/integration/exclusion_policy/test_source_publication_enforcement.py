@@ -37,6 +37,7 @@ from personal_os.diagnostics.context import DiagnosticContext, TraceContext
 from personal_os.diagnostics.trace_context import SpanId, TraceId
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.exclusion_policy.contracts import RuleKind
+from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
 from personal_os.exclusion_policy.errors import ExclusionPolicyError
 from personal_os.exclusion_policy.normalization import normalize_rule
 from personal_os.exclusion_policy.ports import PolicyActor, PolicyActorKind
@@ -114,6 +115,9 @@ class RecordingObjectStore:
             object_key=derive_canonical_object_key(digest),
             size_bytes=len(payload),
             media_type=CanonicalMediaType.parse(media_type),
+            # The database owns created_at. Keep the receipt safely before it
+            # across host/container clock skew so the canonical CHECK remains
+            # deterministic in the real PostgreSQL gate.
             verified_at=datetime.now(UTC),
             verification_method=VerificationMethod.UPLOADED_FULL_READ,
         )
@@ -459,6 +463,61 @@ async def test_final_recheck_denies_a_policy_change_during_upload(
 
 
 @pytest.mark.asyncio
+async def test_matching_bound_revision_commits_despite_locator_only_rule(
+    enforcement_harness: EnforcementHarness,
+) -> None:
+    bound_revision = await enforcement_harness.publish_revision(_rule(RuleKind.EXTENSION, ".tmp"))
+    command = enforcement_harness.build_create_command(PAYLOAD)
+    binding = AllowedPolicyRevisionBinding(
+        workspace_id=command.workspace_id,
+        policy_revision_number=bound_revision,
+    )
+    receipt = enforcement_harness.object_store._receipt(PAYLOAD, "text/markdown")
+
+    result = await enforcement_harness.source_store.commit_create(
+        command,
+        compute_request_fingerprint(command),
+        receipt,
+        _context(),
+        preflight_decision=binding,
+    )
+
+    assert result.source_id == command.source_id
+    assert await enforcement_harness.new_rows("sources") == 1
+    assert await enforcement_harness.new_rows("source_versions") == 1
+    assert await enforcement_harness.new_rows("sync_events") == 1
+
+
+@pytest.mark.asyncio
+async def test_changed_bound_revision_rechecks_and_rolls_back_locator_only_rule(
+    enforcement_harness: EnforcementHarness,
+) -> None:
+    bound_revision = await enforcement_harness.publish_revision()
+    binding = AllowedPolicyRevisionBinding(
+        workspace_id=enforcement_harness.workspace_id,
+        policy_revision_number=bound_revision,
+    )
+    active_revision = await enforcement_harness.publish_revision(_rule(RuleKind.EXTENSION, ".tmp"))
+    assert active_revision != bound_revision
+    command = enforcement_harness.build_create_command(PAYLOAD)
+    receipt = enforcement_harness.object_store._receipt(PAYLOAD, "text/markdown")
+
+    with pytest.raises(ExclusionPolicyError) as raised:
+        await enforcement_harness.source_store.commit_create(
+            command,
+            compute_request_fingerprint(command),
+            receipt,
+            _context(),
+            preflight_decision=binding,
+        )
+
+    assert raised.value.error_code is ErrorCode.EXCLUSION_POLICY_INDETERMINATE
+    assert await enforcement_harness.new_rows("sources") == 0
+    assert await enforcement_harness.new_rows("source_versions") == 0
+    assert await enforcement_harness.new_rows("sync_events") == 0
+
+
+@pytest.mark.asyncio
 async def test_exact_replay_now_excluded_returns_no_canonical_data(
     enforcement_harness: EnforcementHarness,
 ) -> None:
@@ -501,17 +560,30 @@ async def test_store_rejects_foreign_workspace_preflight_evidence(
 
 
 @pytest.mark.asyncio
-async def test_tampered_signature_material_denies_as_signing_unavailable(
+async def test_locked_bound_tampered_signature_rolls_back_without_canonical_rows(
     enforcement_harness: EnforcementHarness,
 ) -> None:
-    await enforcement_harness.publish_revision()
+    bound_revision = await enforcement_harness.publish_revision()
+    command = enforcement_harness.build_create_command(PAYLOAD + b"other")
+    binding = AllowedPolicyRevisionBinding(
+        workspace_id=command.workspace_id,
+        policy_revision_number=bound_revision,
+    )
+    receipt = enforcement_harness.object_store._receipt(PAYLOAD + b"other", "text/markdown")
     prior_pointer = await _activate_forged_revision(enforcement_harness)
 
     with pytest.raises(ExclusionPolicyError) as raised:
-        await enforcement_harness.publish_source(PAYLOAD + b"other")
+        await enforcement_harness.source_store.commit_create(
+            command,
+            compute_request_fingerprint(command),
+            receipt,
+            _context(),
+            preflight_decision=binding,
+        )
     assert raised.value.error_code is ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE
-    assert enforcement_harness.object_store.calls == []
     assert await enforcement_harness.new_rows("sources") == 0
+    assert await enforcement_harness.new_rows("source_versions") == 0
+    assert await enforcement_harness.new_rows("sync_events") == 0
     del prior_pointer  # The forged revision stays; this test runs last.
 
 

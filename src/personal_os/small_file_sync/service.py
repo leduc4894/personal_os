@@ -4,7 +4,7 @@
 injected ports only — the durable upload-operation store, the locator-aware
 exclusion-policy guard, the current-source resolver, the canonical object
 store, the existing
-:class:`~personal_os.sources.publication.SourceVersionPublicationService`,
+:class:`~personal_os.small_file_sync.ports.SmallFilePublicationGateway`,
 the closed low-cardinality metrics sink and the aware UTC clock. Preflight
 re-evaluates policy server-side before any store or object-store access,
 replays a frozen terminal result exactly, resolves the update base (stale,
@@ -37,6 +37,7 @@ from typing import Final
 from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import ApplicationError
+from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
 from personal_os.exclusion_policy.errors import ExclusionPolicyError
 from personal_os.object_storage import (
     CanonicalMediaType,
@@ -64,6 +65,7 @@ from personal_os.small_file_sync.ports import (
     AwareUtcClock,
     SmallFileBoundOperation,
     SmallFilePolicyGuard,
+    SmallFilePublicationGateway,
     SmallFileUploadOperationStore,
 )
 from personal_os.sources.actors import ActorKind, SourceActor
@@ -74,7 +76,6 @@ from personal_os.sources.commands import (
     SourceType,
     UpdateSourceVersion,
 )
-from personal_os.sources.publication import SourceVersionPublicationService
 from personal_os.sources.reading import (
     CanonicalReadStateError,
     CanonicalSourceReadStore,
@@ -236,8 +237,8 @@ class SmallFileSyncService:
     :class:`~personal_os.small_file_sync.ports.SmallFilePolicyGuard`, the
     read-only current-source resolver for update-base checks, the canonical
     object store's bounded spool/verification path, the existing
-    :class:`SourceVersionPublicationService` (the only path that turns
-    verified bytes into canonical source versions), the closed metrics sink
+    publication gateway (which invokes the only path that turns verified bytes
+    into canonical source versions), the closed metrics sink
     and the aware UTC clock. Expiry and state transitions of the durable
     operation row are the store's own authority: this service never
     re-derives them and never masks the store's closed errors.
@@ -245,7 +246,7 @@ class SmallFileSyncService:
 
     operation_store: SmallFileUploadOperationStore
     policy_guard: SmallFilePolicyGuard
-    publication_service: SourceVersionPublicationService
+    publication_gateway: SmallFilePublicationGateway
     object_store: CanonicalObjectStore
     current_sources: CanonicalSourceReadStore
     metrics: SmallFileSyncMetrics
@@ -328,7 +329,7 @@ class SmallFileSyncService:
         # replay lookup, reservation or object-store access, so a denied or
         # indeterminate subject never receives canonical data or an upload.
         try:
-            await self.policy_guard.authorize_small_file(
+            policy_binding = await self.policy_guard.authorize_small_file(
                 preflight, device_context, diagnostic_context
             )
         except ExclusionPolicyError:
@@ -355,13 +356,17 @@ class SmallFileSyncService:
             base_result = await self._check_update_base(
                 preflight=preflight,
                 device_context=device_context,
+                policy_binding=policy_binding,
                 diagnostic_context=diagnostic_context,
                 started_at=started_at,
             )
             if base_result is not None:
                 return base_result
         operation = await self.operation_store.reserve_operation(
-            preflight, device_context, diagnostic_context
+            preflight=preflight,
+            device_context=device_context,
+            policy_binding=policy_binding,
+            diagnostic_context=diagnostic_context,
         )
         self._record_preflight(
             preflight.operation, SmallFilePreflightOutcome.SINGLE_PART_UPLOAD, started_at
@@ -377,6 +382,7 @@ class SmallFileSyncService:
         *,
         preflight: SmallFilePreflight,
         device_context: SmallFileDeviceContext,
+        policy_binding: AllowedPolicyRevisionBinding,
         diagnostic_context: DiagnosticContext,
         started_at: datetime,
     ) -> SmallFilePreflightResult | None:
@@ -416,7 +422,10 @@ class SmallFileSyncService:
         if reference.expected_object.content_digest != preflight.sha256:
             return None
         operation = await self.operation_store.reserve_operation(
-            preflight, device_context, diagnostic_context
+            preflight=preflight,
+            device_context=device_context,
+            policy_binding=policy_binding,
+            diagnostic_context=diagnostic_context,
         )
         terminal = SmallFileTerminalResult(
             result_kind=SmallFileTerminalResultKind.NO_CHANGE,
@@ -425,12 +434,8 @@ class SmallFileSyncService:
             content_version=reference.content_version,
             committed_at=reference.committed_at,
         )
-        await self.operation_store.record_terminal_result(
-            operation, terminal, diagnostic_context
-        )
-        self._record_preflight(
-            preflight.operation, SmallFilePreflightOutcome.NO_CHANGE, started_at
-        )
+        await self.operation_store.record_terminal_result(operation, terminal, diagnostic_context)
+        self._record_preflight(preflight.operation, SmallFilePreflightOutcome.NO_CHANGE, started_at)
         return SmallFilePreflightResult(
             outcome=SmallFilePreflightOutcome.NO_CHANGE, terminal_result=terminal
         )
@@ -464,9 +469,7 @@ class SmallFileSyncService:
             )
         except ObjectStorageError as error:
             if error.error_code in _RECEIVE_INTEGRITY_FAILURE_CODES:
-                raise SmallFileSyncError(
-                    ErrorCode.SMALL_FILE_CONTENT_INTEGRITY_FAILED
-                ) from error
+                raise SmallFileSyncError(ErrorCode.SMALL_FILE_CONTENT_INTEGRITY_FAILED) from error
             raise
         if (
             receipt.content_digest != bound.declared_sha256
@@ -480,9 +483,7 @@ class SmallFileSyncService:
             diagnostic_context=diagnostic_context,
         )
         terminal = terminal_result_from_publication(result)
-        await self.operation_store.record_bound_terminal_result(
-            bound, terminal, diagnostic_context
-        )
+        await self.operation_store.record_bound_terminal_result(bound, terminal, diagnostic_context)
         self.metrics.record_upload(
             operation=bound.operation,
             outcome=SmallFileMetricOutcome.COMMITTED,
@@ -497,7 +498,7 @@ class SmallFileSyncService:
         device_context: SmallFileDeviceContext,
         diagnostic_context: DiagnosticContext,
     ) -> SourceVersionPublicationResult:
-        """Publish through the canonical service over the verified object.
+        """Publish through the bound gateway over the verified object.
 
         The publication command binds the operation's frozen identity: the
         credential-derived workspace and device actor, the journal event and
@@ -512,10 +513,12 @@ class SmallFileSyncService:
             size_bytes=bound.declared_size_bytes,
             media_type=bound.declared_media_type,
         )
-        actor = SourceActor(
-            actor_kind=ActorKind.DEVICE, actor_id=device_context.device_id
-        )
+        actor = SourceActor(actor_kind=ActorKind.DEVICE, actor_id=device_context.device_id)
         idempotency_key = IdempotencyKey(bound.idempotency_key.value)
+        policy_binding = AllowedPolicyRevisionBinding(
+            workspace_id=bound.workspace_id,
+            policy_revision_number=bound.policy_revision_number,
+        )
         if bound.operation is SmallFileOperation.CREATE:
             reserved_source_id = bound.reserved_source_id
             if reserved_source_id is None:
@@ -531,9 +534,16 @@ class SmallFileSyncService:
                 expected_object=expected_object,
                 client_timestamp=None,
             )
-            return await self.publication_service.publish_create(
+            if (
+                create_command.workspace_id != device_context.workspace_id
+                or policy_binding.workspace_id != device_context.workspace_id
+            ):
+                raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+            return await self.publication_gateway.publish_create(
                 command=create_command,
                 stream=_EXHAUSTED_BYTE_STREAM,
+                policy_binding=policy_binding,
+                bound_operation=bound,
                 diagnostic_context=diagnostic_context,
             )
         update_source_id = bound.update_source_id
@@ -550,9 +560,16 @@ class SmallFileSyncService:
             expected_object=expected_object,
             client_timestamp=None,
         )
-        return await self.publication_service.publish_update(
+        if (
+            update_command.workspace_id != device_context.workspace_id
+            or policy_binding.workspace_id != device_context.workspace_id
+        ):
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        return await self.publication_gateway.publish_update(
             command=update_command,
             stream=_EXHAUSTED_BYTE_STREAM,
+            policy_binding=policy_binding,
+            bound_operation=bound,
             diagnostic_context=diagnostic_context,
         )
 
@@ -568,9 +585,7 @@ class SmallFileSyncService:
             duration_seconds=self._elapsed_seconds_since(started_at),
         )
 
-    def _record_rejection(
-        self, operation: SmallFileOperation, error: SmallFileSyncError
-    ) -> None:
+    def _record_rejection(self, operation: SmallFileOperation, error: SmallFileSyncError) -> None:
         self.metrics.record_rejection(
             operation=operation,
             reason_code=SmallFileRejectionReason(error.error_code.value),

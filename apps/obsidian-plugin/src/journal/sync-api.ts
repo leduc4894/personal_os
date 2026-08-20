@@ -50,9 +50,9 @@ export type SyncHttpTransport = (request: SyncHttpRequest) => Promise<SyncHttpRe
  * retry matrix: the four retryable network conditions, the two credential
  * conditions the driver resolves through its one-per-pass refresh, and the
  * two terminal integrity/size rejections. `operation_retry_required` covers
- * the server's closed upload-operation failures (unknown, expired or
- * already-consumed operation): nothing was published and the next
- * same-identity preflight replays or reopens the flow.
+ * the server's closed upload-operation failures. Its safe resume flag
+ * distinguishes a claimed receive from an unknown or expired token without
+ * widening the cross-language failure vocabulary.
  */
 export const SYNC_API_FAILURE_KINDS = [
   "network_offline",
@@ -75,16 +75,21 @@ export type SyncApiFailureKind = (typeof SYNC_API_FAILURE_KINDS)[number];
  */
 export class SyncApiError extends Error {
   readonly kind: SyncApiFailureKind;
+  readonly canResumeClaimedOperation: boolean;
 
-  constructor(kind: SyncApiFailureKind) {
+  constructor(kind: SyncApiFailureKind, canResumeClaimedOperation = false) {
     super(`sync api failed: ${kind}`);
     this.name = "SyncApiError";
     this.kind = kind;
+    this.canResumeClaimedOperation = canResumeClaimedOperation;
   }
 }
 
-function syncApiError(kind: SyncApiFailureKind): SyncApiError {
-  return new SyncApiError(kind);
+function syncApiError(
+  kind: SyncApiFailureKind,
+  canResumeClaimedOperation = false,
+): SyncApiError {
+  return new SyncApiError(kind, canResumeClaimedOperation);
 }
 
 // --- hand-mirrored wire shapes (spec 10.1, 10.3) --------------------------------------------------
@@ -190,8 +195,9 @@ function mapWireFailure(status: number, code: string | null): SyncApiError {
       return syncApiError("integrity_failed");
     case "small_file_operation_not_found":
     case "small_file_operation_expired":
-    case "small_file_upload_state_invalid":
       return syncApiError("operation_retry_required");
+    case "small_file_upload_state_invalid":
+      return syncApiError("operation_retry_required", true);
     default:
       return syncApiError("server_error");
   }

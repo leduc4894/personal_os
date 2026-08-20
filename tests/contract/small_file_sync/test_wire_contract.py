@@ -177,9 +177,7 @@ def test_the_wire_corpus_is_registered_and_its_hash_matches() -> None:
 def test_the_typescript_replay_reads_exactly_the_registered_corpus() -> None:
     source_path = REPO_ROOT / TS_REPLAY_SOURCE
     assert source_path.is_file(), f"the TypeScript replay surface {source_path} is missing"
-    referenced = set(
-        re.findall(r"(wire-golden\.json)", source_path.read_text(encoding="utf-8"))
-    )
+    referenced = set(re.findall(r"(wire-golden\.json)", source_path.read_text(encoding="utf-8")))
     assert referenced == {"wire-golden.json"}, (
         "the TypeScript replay no longer reads the registered wire corpus; the "
         "cross-language contract is broken"
@@ -252,9 +250,7 @@ def _offline_drivers(offline_harness: SmallFileWireHarness) -> dict[str, Callabl
 
     def size_limit() -> Any:
         return offline_harness.preflight(
-            _create_body(
-                size_bytes=MAX_SINGLE_PART_FILE_SIZE_BYTES + 1, sha256_text="0" * 64
-            )
+            _create_body(size_bytes=MAX_SINGLE_PART_FILE_SIZE_BYTES + 1, sha256_text="0" * 64)
         )
 
     def integrity_failed() -> Any:
@@ -332,8 +328,7 @@ def _assert_envelope_matches_entry(entry: dict[str, Any], response: Any) -> None
         if isinstance(golden["data"].get("result"), dict):
             assert set(live["data"]["result"]) == set(golden["data"]["result"]), entry["name"]
             assert (
-                live["data"]["result"]["result_kind"]
-                == golden["data"]["result"]["result_kind"]
+                live["data"]["result"]["result_kind"] == golden["data"]["result"]["result_kind"]
             ), entry["name"]
         if "result_kind" in golden["data"]:
             assert live["data"]["result_kind"] == golden["data"]["result_kind"], entry["name"]
@@ -354,8 +349,7 @@ def test_every_route_reachable_entry_replays_against_the_real_routes(
     entries = _entries()
     reachable = [entry for entry in entries if entry["name"] not in _ROUTE_UNREACHABLE_ENTRIES]
     assert {entry["name"] for entry in reachable} == set(drivers), (
-        "the wire corpus and the route replay drivers must list the same "
-        "route-reachable entries"
+        "the wire corpus and the route replay drivers must list the same route-reachable entries"
     )
     for entry in reachable:
         response = drivers[str(entry["name"])]()

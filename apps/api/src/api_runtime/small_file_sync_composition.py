@@ -5,8 +5,8 @@ runs: the durable PostgreSQL upload-operation store, the real R2
 content-addressable object store behind a lazy per-process client (no
 connection opens at composition — the first store call does), the real
 :class:`~personal_os.exclusion_policy.enforcement.PolicyEnforcementService`
-behind the locator-aware :class:`PolicyEnforcementSmallFileGuard` and as the
-publication service's own guard, the durable source-publication store and
+behind the locator-aware :class:`PolicyEnforcementSmallFileGuard` and as an
+invocation-local publication gateway guard, the durable source-publication store and
 the canonical read store over the shared engine, and the in-memory low
 cardinality metrics sinks.
 
@@ -16,9 +16,8 @@ operation rows mirroring the durable adapter semantics (token rotation on
 re-preflight, payload-fingerprint matching, expiry that ends continuation but
 never terminal evidence, an idempotent guarded terminal transition), an
 object-store double performing the real size/digest verification over the
-streamed bytes, the real
-:class:`~personal_os.sources.publication.SourceVersionPublicationService`
-over an in-memory idempotent publication store, and the real
+streamed bytes, an invocation-local publication gateway over an in-memory
+idempotent publication store, and the real
 :class:`~personal_os.small_file_sync.service.SmallFileSyncService` binding
 them together with the in-memory metrics sink and a state-owned clock. It
 reads no environment value, no secret file, no database and no provider
@@ -47,8 +46,10 @@ from personal_os.diagnostics.logging import DiagnosticLogger
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.exclusion_policy.contracts import PolicySubject
 from personal_os.exclusion_policy.enforcement import (
+    AllowedPolicyRevisionBinding,
     KeyedTrustAnchorVerifier,
     PolicyEnforcementService,
+    PublicationPolicyEvidence,
     default_utc_clock,
 )
 from personal_os.exclusion_policy.errors import ExclusionPolicyError
@@ -56,6 +57,7 @@ from personal_os.exclusion_policy.metrics import PolicyBoundary
 from personal_os.object_storage import (
     CanonicalMediaType,
     CanonicalObjectKey,
+    CanonicalObjectStore,
     ContentDigest,
     ExpectedObject,
     VerificationMethod,
@@ -80,9 +82,11 @@ from personal_os.small_file_sync.ports import (
     SmallFileBoundOperation,
 )
 from personal_os.small_file_sync.service import SmallFileSyncService
+from personal_os.sources.commands import CreateSourceVersion, UpdateSourceVersion
 from personal_os.sources.fingerprint import RequestFingerprint, SourceVersionCommand
-from personal_os.sources.metrics import InMemorySourcePublicationMetrics
-from personal_os.sources.ports import PolicyEnforcementGuard
+from personal_os.sources.metrics import InMemorySourcePublicationMetrics, SourcePublicationMetrics
+from personal_os.sources.ports import AwareUtcClock as SourceAwareUtcClock
+from personal_os.sources.ports import PolicyEnforcementGuard, SourcePublicationStore
 from personal_os.sources.publication import SourceVersionPublicationService
 from personal_os.sources.reading import (
     CanonicalReadStateError,
@@ -113,6 +117,7 @@ from r2_object_storage.spool import SpoolManager
 _OFFLINE_EXPIRY_SECONDS: Final[int] = 900
 
 _PENDING_STATE: Final[str] = "pending"
+_RECEIVING_STATE: Final[str] = "receiving"
 _COMMITTED_STATE: Final[str] = "committed"
 
 
@@ -137,8 +142,8 @@ class PolicyEnforcementSmallFileGuard:
     locator, the declared media type and size) and evaluates it through
     ``authorize_preflight`` at the single-part-upload boundary. A definite
     exclusion, an indeterminate outcome or any fail-closed policy failure
-    propagates as the typed exclusion denial; only an allowed decision
-    returns. The internal decision evidence stays inside the service.
+    propagates as the typed exclusion denial; an allowed decision becomes a
+    server-owned revision binding without retaining the full decision evidence.
     """
 
     def __init__(self, *, enforcement: PolicyEnforcementService) -> None:
@@ -149,7 +154,7 @@ class PolicyEnforcementSmallFileGuard:
         preflight: SmallFilePreflight,
         device_context: SmallFileDeviceContext,
         diagnostic_context: DiagnosticContext,
-    ) -> None:
+    ) -> AllowedPolicyRevisionBinding:
         subject = PolicySubject(
             workspace_id=device_context.workspace_id,
             source_id=preflight.source_id,
@@ -157,11 +162,126 @@ class PolicyEnforcementSmallFileGuard:
             media_type=preflight.media_type,
             size_bytes=preflight.size_bytes,
         )
-        await self.enforcement.authorize_preflight(
+        decision = await self.enforcement.authorize_preflight(
             subject=subject,
             boundary=PolicyBoundary.SINGLE_PART_UPLOAD,
             context=diagnostic_context,
         )
+        return AllowedPolicyRevisionBinding(
+            workspace_id=decision.workspace_id,
+            policy_revision_number=decision.revision_number,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _BoundPolicyPublicationGuard:
+    """One immutable authorization guard for one gateway invocation."""
+
+    enforcement: PolicyEnforcementService
+    binding: AllowedPolicyRevisionBinding
+
+    async def authorize_publication(
+        self,
+        command: SourceVersionCommand,
+        diagnostic_context: DiagnosticContext,
+    ) -> PublicationPolicyEvidence:
+        return await self.enforcement.authorize_bound_publication(
+            command,
+            self.binding,
+            diagnostic_context,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BoundPolicySmallFilePublicationGateway:
+    """Create a fresh immutable policy guard for every small-file publish."""
+
+    store: SourcePublicationStore
+    object_store: CanonicalObjectStore
+    metrics: SourcePublicationMetrics
+    clock: SourceAwareUtcClock
+    enforcement: PolicyEnforcementService
+    operation_store: PostgresqlSmallFileUploadOperationStore | None = None
+
+    async def publish_create(
+        self,
+        *,
+        command: CreateSourceVersion,
+        stream: AsyncIterable[bytes],
+        policy_binding: AllowedPolicyRevisionBinding,
+        diagnostic_context: DiagnosticContext,
+        bound_operation: SmallFileBoundOperation | None = None,
+    ) -> SourceVersionPublicationResult:
+        self._validate_workspace(command, policy_binding)
+        store = self._publication_store(bound_operation)
+        publication_service = SourceVersionPublicationService(
+            store=store,
+            object_store=self.object_store,
+            metrics=self.metrics,
+            clock=self.clock,
+            policy_guard=cast(
+                "PolicyEnforcementGuard",
+                _BoundPolicyPublicationGuard(
+                    enforcement=self.enforcement,
+                    binding=policy_binding,
+                ),
+            ),
+        )
+        return await publication_service.publish_create(
+            command=command,
+            stream=stream,
+            diagnostic_context=diagnostic_context,
+        )
+
+    async def publish_update(
+        self,
+        *,
+        command: UpdateSourceVersion,
+        stream: AsyncIterable[bytes],
+        policy_binding: AllowedPolicyRevisionBinding,
+        diagnostic_context: DiagnosticContext,
+        bound_operation: SmallFileBoundOperation | None = None,
+    ) -> SourceVersionPublicationResult:
+        self._validate_workspace(command, policy_binding)
+        store = self._publication_store(bound_operation)
+        publication_service = SourceVersionPublicationService(
+            store=store,
+            object_store=self.object_store,
+            metrics=self.metrics,
+            clock=self.clock,
+            policy_guard=cast(
+                "PolicyEnforcementGuard",
+                _BoundPolicyPublicationGuard(
+                    enforcement=self.enforcement,
+                    binding=policy_binding,
+                ),
+            ),
+        )
+        return await publication_service.publish_update(
+            command=command,
+            stream=stream,
+            diagnostic_context=diagnostic_context,
+        )
+
+    def _publication_store(
+        self, bound_operation: SmallFileBoundOperation | None
+    ) -> SourcePublicationStore:
+        if bound_operation is None or self.operation_store is None:
+            return self.store
+        if not isinstance(self.store, PostgresqlSourcePublicationStore):
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        return self.store.with_small_file_operation_fence(
+            self.operation_store,
+            bound_operation,
+        )
+
+    @staticmethod
+    def _validate_workspace(
+        command: SourceVersionCommand,
+        policy_binding: AllowedPolicyRevisionBinding,
+    ) -> None:
+        if command.workspace_id != policy_binding.workspace_id:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
 
 
 class LazyR2ClientSource:
@@ -222,17 +342,19 @@ def compose_small_file_sync(
         metrics=InMemoryObjectStorageMetrics(),
         logger=logger,
     )
-    publication_service = SourceVersionPublicationService(
+    operation_store = PostgresqlSmallFileUploadOperationStore(engine, clock=default_utc_clock)
+    publication_gateway = BoundPolicySmallFilePublicationGateway(
         store=PostgresqlSourcePublicationStore(engine, policy_verifier=verifier),
         object_store=object_store,
         metrics=InMemorySourcePublicationMetrics(),
         clock=default_utc_clock,
-        policy_guard=enforcement,
+        enforcement=enforcement,
+        operation_store=operation_store,
     )
     service = SmallFileSyncService(
-        operation_store=PostgresqlSmallFileUploadOperationStore(engine, clock=default_utc_clock),
+        operation_store=operation_store,
         policy_guard=PolicyEnforcementSmallFileGuard(enforcement=enforcement),
-        publication_service=publication_service,
+        publication_gateway=publication_gateway,
         object_store=object_store,
         current_sources=PostgresqlCanonicalSourceReadStore(engine, policy_verifier=verifier),
         metrics=InMemorySmallFileSyncMetrics(),
@@ -263,6 +385,7 @@ class _OfflineOperationRow:
     reserved_source_id: UUID | None
     expires_at: datetime
     state: str
+    policy_revision_number: int
     terminal_result: SmallFileTerminalResult | None = None
 
 
@@ -280,6 +403,7 @@ class OfflineSmallFileSyncState:
     """
 
     is_policy_denied: bool = False
+    active_policy_revision_number: int = 1
     current_reference: CanonicalSourceReference | None = None
     now: datetime | None = None
     rows: list[_OfflineOperationRow] = field(default_factory=list)
@@ -315,6 +439,25 @@ def _fingerprint_matches(row: SmallFilePreflight, candidate: SmallFilePreflight)
         and row.media_type == candidate.media_type
         and row.source_id == candidate.source_id
         and row.base_version_id == candidate.base_version_id
+    )
+
+
+def _bound_matches_offline_row(row: _OfflineOperationRow, bound: SmallFileBoundOperation) -> bool:
+    """Mirror the PostgreSQL terminal fence over offline row geometry."""
+
+    return (
+        row.device_context.workspace_id == bound.workspace_id
+        and row.device_context.device_id == bound.device_id
+        and row.preflight.event_id == bound.event_id
+        and row.preflight.idempotency_key == bound.idempotency_key
+        and row.preflight.operation is bound.operation
+        and row.preflight.sha256 == bound.declared_sha256
+        and row.preflight.size_bytes == bound.declared_size_bytes
+        and row.preflight.media_type == bound.declared_media_type
+        and row.reserved_source_id == bound.reserved_source_id
+        and row.preflight.source_id == bound.update_source_id
+        and row.preflight.base_version_id == bound.update_base_version_id
+        and row.policy_revision_number == bound.policy_revision_number
     )
 
 
@@ -361,9 +504,12 @@ class OfflineSmallFileUploadOperationStore:
         self,
         preflight: SmallFilePreflight,
         device_context: SmallFileDeviceContext,
+        policy_binding: AllowedPolicyRevisionBinding,
         diagnostic_context: DiagnosticContext,
     ) -> SmallFileUploadOperation:
         del diagnostic_context
+        if policy_binding.workspace_id != device_context.workspace_id:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
         now = self._now()
         row = self._identity_row(preflight, device_context)
         if row is None:
@@ -376,6 +522,7 @@ class OfflineSmallFileUploadOperationStore:
                 ),
                 expires_at=now + timedelta(seconds=_OFFLINE_EXPIRY_SECONDS),
                 state=_PENDING_STATE,
+                policy_revision_number=policy_binding.policy_revision_number,
             )
             self._state.rows.append(row)
         else:
@@ -383,13 +530,17 @@ class OfflineSmallFileUploadOperationStore:
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH)
             if row.state == _COMMITTED_STATE:
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
-            # Mirroring the durable adapter: an expired non-terminal row
-            # re-reserves — fresh token, extended deadline — because nothing
-            # was committed for it; receive-time expiry checks keep refusing
-            # the continuation of any token past its deadline.
+            if row.state == _RECEIVING_STATE:
+                row.policy_revision_number = policy_binding.policy_revision_number
+                raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+            # Mirroring the durable adapter: only an expired pending row is
+            # reclaimable. A claimed receive keeps its token/revision fence
+            # through guarded terminalization across the original deadline.
             if row.expires_at <= now:
                 row.expires_at = now + timedelta(seconds=_OFFLINE_EXPIRY_SECONDS)
             row.operation_token = UploadOperationToken(secrets.token_urlsafe(32))
+            row.state = _PENDING_STATE
+            row.policy_revision_number = policy_binding.policy_revision_number
         return SmallFileUploadOperation(
             operation_token=row.operation_token,
             preflight=preflight,
@@ -408,7 +559,7 @@ class OfflineSmallFileUploadOperationStore:
         row = self._token_row(operation.operation_token)
         if row is None:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND)
-        self._apply_terminal_transition(row, result)
+        self._apply_terminal_transition(row, result, require_pending=True)
 
     async def resolve_bound_operation(
         self,
@@ -425,8 +576,10 @@ class OfflineSmallFileUploadOperationStore:
             or row.device_context.device_id != device_context.device_id
         ):
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH)
-        if row.state != _COMMITTED_STATE and row.expires_at <= self._now():
-            raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_EXPIRED)
+        if row.state == _PENDING_STATE:
+            if row.expires_at <= self._now():
+                raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_EXPIRED)
+            row.state = _RECEIVING_STATE
         return SmallFileBoundOperation(
             operation_token=row.operation_token,
             workspace_id=row.device_context.workspace_id,
@@ -437,7 +590,7 @@ class OfflineSmallFileUploadOperationStore:
             declared_sha256=row.preflight.sha256,
             declared_size_bytes=row.preflight.size_bytes,
             declared_media_type=row.preflight.media_type,
-            policy_revision_number=row.preflight.policy_revision_number,
+            policy_revision_number=row.policy_revision_number,
             reserved_source_id=row.reserved_source_id,
             update_source_id=row.preflight.source_id,
             update_base_version_id=row.preflight.base_version_id,
@@ -455,16 +608,27 @@ class OfflineSmallFileUploadOperationStore:
         row = self._token_row(bound.operation_token)
         if row is None:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND)
-        self._apply_terminal_transition(row, result)
+        if not _bound_matches_offline_row(row, bound):
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH)
+        self._apply_terminal_transition(row, result, require_claimed=True)
 
     def _apply_terminal_transition(
-        self, row: _OfflineOperationRow, result: SmallFileTerminalResult
+        self,
+        row: _OfflineOperationRow,
+        result: SmallFileTerminalResult,
+        *,
+        require_claimed: bool = False,
+        require_pending: bool = False,
     ) -> None:
         if row.state == _COMMITTED_STATE:
             if row.terminal_result == result:
                 return
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
-        if row.expires_at <= self._now():
+        if require_pending and row.state != _PENDING_STATE:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        if require_claimed and row.state != _RECEIVING_STATE:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        if not require_claimed and row.expires_at <= self._now():
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_EXPIRED)
         row.state = _COMMITTED_STATE
         row.terminal_result = result
@@ -481,10 +645,14 @@ class OfflineSmallFilePolicyGuard:
         preflight: SmallFilePreflight,
         device_context: SmallFileDeviceContext,
         diagnostic_context: DiagnosticContext,
-    ) -> None:
-        del preflight, device_context, diagnostic_context
+    ) -> AllowedPolicyRevisionBinding:
+        del preflight, diagnostic_context
         if self._state.is_policy_denied:
             raise ExclusionPolicyError(ErrorCode.EXCLUSION_POLICY_DENIED)
+        return AllowedPolicyRevisionBinding(
+            workspace_id=device_context.workspace_id,
+            policy_revision_number=self._state.active_policy_revision_number,
+        )
 
 
 class OfflineCurrentSourceStore:
@@ -603,35 +771,79 @@ class OfflineCanonicalObjectStore:
         return _reader()
 
 
-class _OfflinePublicationGuard:
-    """Allowing policy-guard stand-in of the offline publication stack.
+@dataclass(frozen=True, slots=True)
+class _OfflineBoundPolicyPublicationGuard:
+    """Deterministically allow one explicitly supplied offline binding."""
 
-    The guard's decision is non-authoritative evidence the offline stores
-    never consume, so the stand-in answers ``None`` exactly like the offline
-    service fakes of the domain suites; the internal evidence value itself
-    never crosses into the API runtime, which is why the stand-in is bound
-    behind a structural cast at composition time.
-    """
+    binding: AllowedPolicyRevisionBinding
 
     async def authorize_publication(
         self,
         command: SourceVersionCommand,
         diagnostic_context: DiagnosticContext,
-    ) -> object:
-        del command, diagnostic_context
-        return None
+    ) -> PublicationPolicyEvidence:
+        del diagnostic_context
+        if command.workspace_id != self.binding.workspace_id:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        return self.binding
 
-    async def authorize_read(
+
+@dataclass(frozen=True, slots=True)
+class _OfflineSmallFilePublicationGateway:
+    """Offline gateway preserving the invocation-local binding contract."""
+
+    store: SourcePublicationStore
+    object_store: CanonicalObjectStore
+    metrics: SourcePublicationMetrics
+    clock: SourceAwareUtcClock
+
+    async def publish_create(
         self,
-        reference: CanonicalSourceReference,
+        *,
+        command: CreateSourceVersion,
+        stream: AsyncIterable[bytes],
+        policy_binding: AllowedPolicyRevisionBinding,
+        bound_operation: SmallFileBoundOperation,
         diagnostic_context: DiagnosticContext,
-    ) -> object:
-        del reference, diagnostic_context
-        return None
+    ) -> SourceVersionPublicationResult:
+        del bound_operation
+        publication_service = self._publication_service(policy_binding)
+        return await publication_service.publish_create(
+            command=command,
+            stream=stream,
+            diagnostic_context=diagnostic_context,
+        )
 
+    async def publish_update(
+        self,
+        *,
+        command: UpdateSourceVersion,
+        stream: AsyncIterable[bytes],
+        policy_binding: AllowedPolicyRevisionBinding,
+        bound_operation: SmallFileBoundOperation,
+        diagnostic_context: DiagnosticContext,
+    ) -> SourceVersionPublicationResult:
+        del bound_operation
+        publication_service = self._publication_service(policy_binding)
+        return await publication_service.publish_update(
+            command=command,
+            stream=stream,
+            diagnostic_context=diagnostic_context,
+        )
 
-def _offline_publication_guard() -> PolicyEnforcementGuard:
-    return cast("PolicyEnforcementGuard", _OfflinePublicationGuard())
+    def _publication_service(
+        self, policy_binding: AllowedPolicyRevisionBinding
+    ) -> SourceVersionPublicationService:
+        return SourceVersionPublicationService(
+            store=self.store,
+            object_store=self.object_store,
+            metrics=self.metrics,
+            clock=self.clock,
+            policy_guard=cast(
+                "PolicyEnforcementGuard",
+                _OfflineBoundPolicyPublicationGuard(binding=policy_binding),
+            ),
+        )
 
 
 class OfflineSourcePublicationStore:
@@ -664,7 +876,7 @@ class OfflineSourcePublicationStore:
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
         *,
-        preflight_decision: object = None,
+        preflight_decision: PublicationPolicyEvidence | None = None,
     ) -> SourceVersionPublicationResult:
         del receipt, preflight_decision
         return self._commit(command, diagnostic_context, is_create=True)
@@ -676,7 +888,7 @@ class OfflineSourcePublicationStore:
         receipt: VerifiedObjectReceipt,
         diagnostic_context: DiagnosticContext,
         *,
-        preflight_decision: object = None,
+        preflight_decision: PublicationPolicyEvidence | None = None,
     ) -> SourceVersionPublicationResult:
         del receipt, preflight_decision
         return self._commit(command, diagnostic_context, is_create=False)
@@ -720,17 +932,16 @@ def compose_offline_small_file_sync(
     clock = OfflineSmallFileClock(offline_state)
     object_store = OfflineCanonicalObjectStore(offline_state, clock)
     publication_store = OfflineSourcePublicationStore(offline_state, clock)
-    publication_service = SourceVersionPublicationService(
+    publication_gateway = _OfflineSmallFilePublicationGateway(
         store=publication_store,
         object_store=object_store,
         metrics=InMemorySourcePublicationMetrics(),
         clock=clock,
-        policy_guard=_offline_publication_guard(),
     )
     service = SmallFileSyncService(
         operation_store=OfflineSmallFileUploadOperationStore(offline_state, clock),
         policy_guard=OfflineSmallFilePolicyGuard(offline_state),
-        publication_service=publication_service,
+        publication_gateway=publication_gateway,
         object_store=object_store,
         current_sources=OfflineCurrentSourceStore(offline_state),
         metrics=metrics if metrics is not None else InMemorySmallFileSyncMetrics(),
@@ -740,6 +951,7 @@ def compose_offline_small_file_sync(
 
 
 __all__ = [
+    "BoundPolicySmallFilePublicationGateway",
     "LazyR2ClientSource",
     "OfflineCanonicalObjectStore",
     "OfflineCurrentSourceStore",

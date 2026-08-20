@@ -35,6 +35,7 @@ from tests.integration.source_publication.conftest import (
 from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.diagnostics.trace_context import SpanId, TraceContext, TraceId
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
 from personal_os.object_storage import CanonicalMediaType, ContentDigest
 from personal_os.small_file_sync.contracts import (
     NormalizedLocator,
@@ -135,6 +136,13 @@ class SmallFileOperationHarness:
             device_id=workspace.device_id, workspace_id=workspace.workspace_id
         )
 
+    def policy_binding(
+        self, device_context: SmallFileDeviceContext, revision: int = _POLICY_REVISION_NUMBER
+    ) -> AllowedPolicyRevisionBinding:
+        return AllowedPolicyRevisionBinding(
+            workspace_id=device_context.workspace_id, policy_revision_number=revision
+        )
+
     async def operation_row(self, event_id: UUID) -> dict[str, object] | None:
         statement = sa.select(
             small_file_upload_operations.c.operation_id,
@@ -220,7 +228,10 @@ async def _reserve_created_operation(
 ) -> tuple[SmallFilePreflight, object]:
     preflight = harness.preflight()
     operation = await harness.store.reserve_operation(
-        preflight, harness.device_context(workspace), _context()
+        preflight,
+        harness.device_context(workspace),
+        harness.policy_binding(harness.device_context(workspace)),
+        _context(),
     )
     return preflight, operation
 
@@ -237,8 +248,12 @@ async def test_same_identity_reservation_converges_on_one_row(
     preflight = harness.preflight()
     context = _context()
 
-    first = await harness.store.reserve_operation(preflight, device_context, context)
-    second = await harness.store.reserve_operation(preflight, device_context, context)
+    first = await harness.store.reserve_operation(
+        preflight, device_context, harness.policy_binding(device_context), context
+    )
+    second = await harness.store.reserve_operation(
+        preflight, device_context, harness.policy_binding(device_context), context
+    )
 
     assert await harness.operation_row_count(preflight.event_id) == 1
     assert first.reserved_source_id == second.reserved_source_id
@@ -248,8 +263,169 @@ async def test_same_identity_reservation_converges_on_one_row(
 
     row = await harness.operation_row(preflight.event_id)
     assert row is not None
+
+
+@pytest.mark.asyncio
+async def test_successful_repreflight_rotates_token_and_rebinds_server_revision(
+    small_file_harness: SmallFileOperationHarness, seeded_workspace: object
+) -> None:
+    harness = small_file_harness
+    device_context = harness.device_context(seeded_workspace)
+    preflight = harness.preflight()
+
+    first = await harness.store.reserve_operation(
+        preflight, device_context, harness.policy_binding(device_context, 4), _context()
+    )
+    second = await harness.store.reserve_operation(
+        preflight, device_context, harness.policy_binding(device_context, 5), _context()
+    )
+
+    assert await harness.operation_row_count(preflight.event_id) == 1
+    assert first.operation_token.value != second.operation_token.value
+    assert first.reserved_source_id == second.reserved_source_id
+    row = await harness.operation_row(preflight.event_id)
+    assert row is not None
+    assert row["policy_revision_number"] == 5
     assert row["state"] == "pending"
     assert row["reserved_source_id"] == first.reserved_source_id
+
+
+@pytest.mark.asyncio
+async def test_server_revision_overrides_plugin_claim_in_row_and_receive_binding(
+    small_file_harness: SmallFileOperationHarness, seeded_workspace: object
+) -> None:
+    harness = small_file_harness
+    device_context = harness.device_context(seeded_workspace)
+    preflight = harness.preflight()
+    server_revision = preflight.policy_revision_number + 37
+    assert preflight.policy_revision_number != server_revision
+
+    operation = await harness.store.reserve_operation(
+        preflight,
+        device_context,
+        harness.policy_binding(device_context, server_revision),
+        _context(),
+    )
+
+    row = await harness.operation_row(preflight.event_id)
+    assert row is not None
+    assert row["policy_revision_number"] == server_revision
+    bound = await harness.store.resolve_bound_operation(
+        operation.operation_token,
+        device_context,
+        _context(),
+    )
+    assert bound.policy_revision_number == server_revision
+
+
+@pytest.mark.asyncio
+async def test_claimed_exact_token_is_rebound_to_fresh_locator_authority(
+    small_file_harness: SmallFileOperationHarness, seeded_workspace: object
+) -> None:
+    """Re-preflight updates only the claimed row's revision, never its token."""
+
+    harness = small_file_harness
+    device_context = harness.device_context(seeded_workspace)
+    preflight = harness.preflight()
+    operation = await harness.store.reserve_operation(
+        preflight, device_context, harness.policy_binding(device_context, 4), _context()
+    )
+    await harness.store.resolve_bound_operation(
+        operation.operation_token,
+        device_context,
+        _context(),
+    )
+
+    with pytest.raises(SmallFileSyncError) as retry_required:
+        await harness.store.reserve_operation(
+            preflight, device_context, harness.policy_binding(device_context, 5), _context()
+        )
+    assert retry_required.value.error_code is ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID
+
+    row = await harness.operation_row(preflight.event_id)
+    assert row is not None
+    assert row["state"] == "receiving"
+    assert row["policy_revision_number"] == 5
+    assert row["operation_token_hash"] == upload_operation_token_hash(operation.operation_token)
+
+    rebound = await harness.store.resolve_bound_operation(
+        operation.operation_token,
+        device_context,
+        _context(),
+    )
+    assert rebound.policy_revision_number == 5
+
+
+@pytest.mark.asyncio
+async def test_claimed_reauthorization_after_expiry_rejects_stale_terminal_writer(
+    small_file_harness: SmallFileOperationHarness,
+    preflight_harness: PreflightHarness,
+    seeded_workspace: object,
+) -> None:
+    harness = small_file_harness
+    device_context = harness.device_context(seeded_workspace)
+    preflight = harness.preflight()
+
+    operation = await harness.store.reserve_operation(
+        preflight, device_context, harness.policy_binding(device_context, 4), _context()
+    )
+    bound = await harness.store.resolve_bound_operation(
+        operation.operation_token,
+        device_context,
+        _context(),
+    )
+
+    # Deterministically cross the reservation deadline after the receive has
+    # claimed its row, then model a publication result awaiting terminalization.
+    harness.clock.advance(seconds=UPLOAD_OPERATION_EXPIRY_SECONDS + 1)
+    assert operation.reserved_source_id is not None
+    published = await preflight_harness.seed_active_source_with_version_one(
+        workspace=seeded_workspace,
+        source_id=operation.reserved_source_id,
+        title="Claim expiry fence",
+    )
+
+    with pytest.raises(SmallFileSyncError) as rejected:
+        await harness.store.reserve_operation(
+            preflight,
+            device_context,
+            harness.policy_binding(device_context, 5),
+            _context(),
+        )
+    assert rejected.value.error_code is ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID
+
+    row = await harness.operation_row(preflight.event_id)
+    assert row is not None
+    assert row["state"] == "receiving"
+    assert row["policy_revision_number"] == 5
+    assert row["operation_token_hash"] == upload_operation_token_hash(operation.operation_token)
+
+    resumed = await harness.store.resolve_bound_operation(
+        operation.operation_token,
+        device_context,
+        _context(),
+    )
+    assert resumed.policy_revision_number == 5
+
+    terminal = SmallFileTerminalResult(
+        result_kind=SmallFileTerminalResultKind.COMMITTED,
+        source_id=operation.reserved_source_id,
+        source_version_id=published.source_version_id,
+        content_version=published.content_version,
+        committed_at=datetime.now(UTC),
+    )
+    with pytest.raises(SmallFileSyncError) as stale_writer:
+        await harness.store.record_bound_terminal_result(bound, terminal, _context())
+    assert stale_writer.value.error_code is ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH
+
+    await harness.store.record_bound_terminal_result(resumed, terminal, _context())
+
+    committed = await harness.operation_row(preflight.event_id)
+    assert committed is not None
+    assert committed["state"] == "committed"
+    assert committed["result_kind"] == SmallFileTerminalResultKind.COMMITTED.value
+    assert committed["result_source_id"] == operation.reserved_source_id
+    assert await harness.sources_row_count(operation.reserved_source_id) == 1
 
 
 @pytest.mark.asyncio
@@ -262,8 +438,12 @@ async def test_concurrent_preflights_yield_exactly_one_operation_row(
     context = _context()
 
     first, second = await asyncio.gather(
-        harness.store.reserve_operation(preflight, device_context, context),
-        harness.store.reserve_operation(preflight, device_context, context),
+        harness.store.reserve_operation(
+            preflight, device_context, harness.policy_binding(device_context), context
+        ),
+        harness.store.reserve_operation(
+            preflight, device_context, harness.policy_binding(device_context), context
+        ),
     )
 
     assert await harness.operation_row_count(preflight.event_id) == 1
@@ -278,11 +458,14 @@ async def test_distinct_idempotency_keys_allocate_distinct_operations(
     device_context = harness.device_context(seeded_workspace)
     first_preflight = harness.preflight()
     second_preflight = harness.preflight()
-    await harness.store.reserve_operation(first_preflight, device_context, _context())
-    await harness.store.reserve_operation(second_preflight, device_context, _context())
+    await harness.store.reserve_operation(
+        first_preflight, device_context, harness.policy_binding(device_context), _context()
+    )
+    await harness.store.reserve_operation(
+        second_preflight, device_context, harness.policy_binding(device_context), _context()
+    )
     assert (
-        await harness.operation_row_count(first_preflight.event_id, second_preflight.event_id)
-        == 2
+        await harness.operation_row_count(first_preflight.event_id, second_preflight.event_id) == 2
     )
 
 
@@ -293,7 +476,9 @@ async def test_database_rejects_a_duplicate_identity_row(
     harness = small_file_harness
     device_context = harness.device_context(seeded_workspace)
     preflight = harness.preflight()
-    await harness.store.reserve_operation(preflight, device_context, _context())
+    await harness.store.reserve_operation(
+        preflight, device_context, harness.policy_binding(device_context), _context()
+    )
 
     with pytest.raises(sa.exc.IntegrityError) as outcome:
         async with harness.engine.begin() as connection:
@@ -326,7 +511,9 @@ async def test_same_identity_with_a_different_payload_is_rejected(
     harness = small_file_harness
     device_context = harness.device_context(seeded_workspace)
     preflight = harness.preflight()
-    await harness.store.reserve_operation(preflight, device_context, _context())
+    await harness.store.reserve_operation(
+        preflight, device_context, harness.policy_binding(device_context), _context()
+    )
 
     substituted = harness.preflight(
         sha256=_DIGEST_B,
@@ -334,7 +521,9 @@ async def test_same_identity_with_a_different_payload_is_rejected(
         idempotency_key=preflight.idempotency_key,
     )
     with pytest.raises(SmallFileSyncError) as rejected:
-        await harness.store.reserve_operation(substituted, device_context, _context())
+        await harness.store.reserve_operation(
+            substituted, device_context, harness.policy_binding(device_context), _context()
+        )
     assert rejected.value.error_code is ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH
 
     with pytest.raises(SmallFileSyncError) as replay_rejected:
@@ -367,7 +556,10 @@ async def test_update_reservation_records_the_update_base_and_reserves_nothing(
         operation=SmallFileOperation.UPDATE, source_id=source_id, base_version_id=base_version_id
     )
     operation = await harness.store.reserve_operation(
-        preflight, harness.device_context(seeded_workspace), _context()
+        preflight,
+        harness.device_context(seeded_workspace),
+        harness.policy_binding(harness.device_context(seeded_workspace)),
+        _context(),
     )
     assert operation.reserved_source_id is None
 
@@ -432,7 +624,9 @@ async def test_expired_pending_re_preflight_re_reserves_the_same_row(
     device_context = harness.device_context(seeded_workspace)
     assert expired_operation.reserved_source_id is not None
 
-    re_reserved = await harness.store.reserve_operation(preflight, device_context, _context())
+    re_reserved = await harness.store.reserve_operation(
+        preflight, device_context, harness.policy_binding(device_context), _context()
+    )
 
     assert re_reserved.operation_token.value != expired_operation.operation_token.value
     assert re_reserved.reserved_source_id == expired_operation.reserved_source_id
@@ -447,9 +641,7 @@ async def test_expired_pending_re_preflight_re_reserves_the_same_row(
     assert await harness.operation_row_count(preflight.event_id) == 1
     assert row["state"] == "pending"
     assert row["reserved_source_id"] == expired_operation.reserved_source_id
-    assert row["operation_token_hash"] == upload_operation_token_hash(
-        re_reserved.operation_token
-    )
+    assert row["operation_token_hash"] == upload_operation_token_hash(re_reserved.operation_token)
     assert row["expires_at"] == expected_deadline
     assert await harness.sources_row_count(expired_operation.reserved_source_id) == 0
 
@@ -505,7 +697,9 @@ async def test_replay_after_commit_returns_the_frozen_terminal_result(
 
     # A terminal operation accepts no further reservation or duplicate write.
     with pytest.raises(SmallFileSyncError) as reserved:
-        await harness.store.reserve_operation(preflight, device_context, _context())
+        await harness.store.reserve_operation(
+            preflight, device_context, harness.policy_binding(device_context), _context()
+        )
     assert reserved.value.error_code is ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID
 
     await harness.store.record_terminal_result(operation, result, _context())
@@ -558,6 +752,93 @@ async def test_terminal_write_is_atomic_with_the_publication_seam(
     assert row is not None
     assert row["state"] == "pending"
     assert row["result_kind"] is None
+
+
+@pytest.mark.asyncio
+async def test_reauthorization_winner_fences_stale_bound_before_canonical_mutation(
+    small_file_harness: SmallFileOperationHarness, seeded_workspace: object
+) -> None:
+    """A fresh locator decision wins before the old publisher can mutate."""
+
+    harness = small_file_harness
+    device_context = harness.device_context(seeded_workspace)
+    preflight = harness.preflight()
+    operation = await harness.store.reserve_operation(
+        preflight, device_context, harness.policy_binding(device_context, 4), _context()
+    )
+    stale_bound = await harness.store.resolve_bound_operation(
+        operation.operation_token, device_context, _context()
+    )
+    with pytest.raises(SmallFileSyncError):
+        await harness.store.reserve_operation(
+            preflight, device_context, harness.policy_binding(device_context, 5), _context()
+        )
+
+    assert operation.reserved_source_id is not None
+    with pytest.raises(SmallFileSyncError) as fenced:
+        async with harness.engine.begin() as connection:
+            await harness.store.acquire_bound_publication_fence_in_transaction(
+                connection, stale_bound
+            )
+            await connection.execute(
+                sa.insert(sources).values(
+                    source_id=operation.reserved_source_id,
+                    workspace_id=device_context.workspace_id,
+                    source_type="markdown",
+                    title="Stale publisher must not commit",
+                )
+            )
+    assert fenced.value.error_code is ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH
+    assert await harness.sources_row_count(operation.reserved_source_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_publication_winner_commits_canonical_and_terminal_before_repreflight(
+    small_file_harness: SmallFileOperationHarness, seeded_workspace: object
+) -> None:
+    """The operation fence serializes reauthorization after atomic commit."""
+
+    harness = small_file_harness
+    device_context = harness.device_context(seeded_workspace)
+    preflight = harness.preflight()
+    operation = await harness.store.reserve_operation(
+        preflight, device_context, harness.policy_binding(device_context, 4), _context()
+    )
+    bound = await harness.store.resolve_bound_operation(
+        operation.operation_token, device_context, _context()
+    )
+    assert operation.reserved_source_id is not None
+    terminal = _terminal_result(source_id=operation.reserved_source_id)
+
+    async def reauthorize() -> None:
+        with pytest.raises(SmallFileSyncError) as blocked:
+            await harness.store.reserve_operation(
+                preflight, device_context, harness.policy_binding(device_context, 5), _context()
+            )
+        assert blocked.value.error_code is ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID
+
+    async with harness.engine.begin() as connection:
+        await harness.store.acquire_bound_publication_fence_in_transaction(connection, bound)
+        reauthorization = asyncio.create_task(reauthorize())
+        await connection.execute(
+            sa.insert(sources).values(
+                source_id=operation.reserved_source_id,
+                workspace_id=device_context.workspace_id,
+                source_type="markdown",
+                title="Atomic publication winner",
+            )
+        )
+        await harness.store.record_bound_terminal_result_in_transaction(connection, bound, terminal)
+
+    await reauthorization
+    assert await harness.sources_row_count(operation.reserved_source_id) == 1
+    assert await harness.store.resolve_terminal_result(preflight, device_context, _context()) == (
+        terminal
+    )
+    row = await harness.operation_row(preflight.event_id)
+    assert row is not None
+    assert row["state"] == "committed"
+    assert row["policy_revision_number"] == 4
 
 
 # --- migration downgrade ---------------------------------------------------------------

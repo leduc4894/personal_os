@@ -17,7 +17,9 @@
  * lost response returns the event to bounded jittered backoff; the next
  * pass re-preflights with the SAME event/idempotency identity so the
  * server's exact replay either returns the original receipt or reopens the
- * flow (spec 10.3).
+ * flow (spec 10.3). If that preflight reports that the server already owns
+ * the claimed receive, only the unchanged operation handle persisted for
+ * this frozen event may resume the content request.
  *
  * Credentials (spec 8): one pass refreshes the access credential at most
  * once; a second 401, a revoked family or a failed refresh ends the pass
@@ -125,6 +127,10 @@ interface RefreshBudget {
 function syncFailureKind(error: unknown): string | null {
   const kind = (error as { kind?: unknown } | null)?.kind;
   return typeof kind === "string" ? kind : null;
+}
+
+function canResumeClaimedOperation(error: unknown): boolean {
+  return (error as { canResumeClaimedOperation?: unknown } | null)?.canResumeClaimedOperation === true;
 }
 
 // --- the driver ----------------------------------------------------------------------------------------
@@ -282,9 +288,40 @@ export class JournalQueueDriver {
       if (this.#isStopped) {
         return "end_pass";
       }
-      const continuation = await this.#handleFailure(event.eventId, error, correlationId, refreshBudget);
+      let failure = error;
+      const resumeOperationId = this.#claimedResumeOperationId(event, error);
+      if (resumeOperationId !== null) {
+        try {
+          return await this.#streamContent(
+            event,
+            resumeOperationId,
+            passDeadlineEpochMs,
+            refreshBudget,
+            correlationId,
+          );
+        } catch (resumeError) {
+          if (this.#isStopped) {
+            return "end_pass";
+          }
+          failure = resumeError;
+        }
+      }
+      const continuation = await this.#handleFailure(event.eventId, failure, correlationId, refreshBudget);
       return continuation;
     }
+  }
+
+  #claimedResumeOperationId(event: JournalEvent, error: unknown): string | null {
+    if (
+      syncFailureKind(error) !== "operation_retry_required" ||
+      !canResumeClaimedOperation(error) ||
+      (event.state !== "uploading" && event.state !== "waiting_retry") ||
+      event.operationId === null
+    ) {
+      return null;
+    }
+    const persisted = this.#repository.readEvent(event.eventId);
+    return persisted?.operationId === event.operationId ? event.operationId : null;
   }
 
   async #streamContent(
@@ -487,9 +524,9 @@ export class JournalQueueDriver {
       case "network_rate_limited":
         return "network_rate_limited";
       default:
-        // `server_error`, `operation_retry_required` and any unmapped local
-        // failure all keep the event under the bounded retry of the spec-12
-        // "keep event" row; nothing is dropped and nothing retries blindly.
+        // Server/operation failures and any unmapped local failure all keep
+        // the event under the bounded retry of the spec-12 "keep event" row;
+        // nothing is dropped and nothing retries blindly.
         return "server_error";
     }
   }

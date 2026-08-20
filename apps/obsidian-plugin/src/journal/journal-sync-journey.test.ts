@@ -88,6 +88,7 @@ interface ReservedOperation {
   readonly baseVersionId: string | null;
   readonly sha256: string;
   readonly sizeBytes: number;
+  state: "pending" | "receiving";
   terminal: FrozenTerminal | null;
 }
 
@@ -111,8 +112,10 @@ class SyncServerDouble {
   readonly preflightBodies: Record<string, unknown>[] = [];
   readonly receivedDigests: string[] = [];
   publications = 0;
+  contentAttempts = 0;
   isOffline = false;
   dropResponses = false;
+  interruptBeforePublicationOnce = false;
   #counter = 0;
 
   /** Optional mid-pass hook fired inside the next preflight handling. */
@@ -137,6 +140,12 @@ class SyncServerDouble {
       const outcome = frozen.resultKind === "committed" ? "committed_replay" : "no_change";
       return { status: 200, bodyText: successBody({ outcome, result: resultBody(frozen) }) };
     }
+    const claimed = [...this.operations.values()].find(
+      (operation) => operation.identity === identity && operation.state === "receiving",
+    );
+    if (claimed !== undefined) {
+      return { status: 409, bodyText: errorBody("small_file_upload_state_invalid") };
+    }
     if (body["operation"] === "update") {
       const sourceId = String(body["source_id"]);
       const current = this.currentVersions.get(sourceId);
@@ -153,6 +162,7 @@ class SyncServerDouble {
       baseVersionId: body["operation"] === "update" ? String(body["base_version_id"]) : null,
       sha256: String(body["sha256"]),
       sizeBytes: Number(body["size_bytes"]),
+      state: "pending",
       terminal: null,
     });
     return {
@@ -169,12 +179,18 @@ class SyncServerDouble {
     operationId: string,
     bytes: Uint8Array,
   ): Promise<{ status: number; bodyText: string }> {
+    this.contentAttempts += 1;
     const operation = this.operations.get(operationId);
     if (operation === undefined) {
       return { status: 404, bodyText: errorBody("small_file_operation_not_found") };
     }
     if (operation.terminal !== null) {
       return { status: 200, bodyText: successBody(resultBody(operation.terminal)) };
+    }
+    operation.state = "receiving";
+    if (this.interruptBeforePublicationOnce) {
+      this.interruptBeforePublicationOnce = false;
+      throw new Error("content request interrupted after claim");
     }
     const digest = await sha256Hex(bytes);
     if (digest !== operation.sha256 || bytes.byteLength !== operation.sizeBytes) {
@@ -436,6 +452,35 @@ describe("journal sync journeys over the durable stack", () => {
     const localFile = localFileOf(harness, "notes/dropped.md");
     expect(localFile.sourceId).not.toBeNull();
     expect(localFile.baseVersionId).not.toBeNull();
+  });
+
+  it("resumes one claimed upload with the exact persisted operation token", async () => {
+    const harness = await createJourneyHarness();
+    const event = await captureBytes(
+      harness,
+      "notes/claimed-resume.md",
+      new TextEncoder().encode("claimed upload resume"),
+    );
+    harness.server.interruptBeforePublicationOnce = true;
+
+    await harness.driver.runPass();
+
+    const interrupted = harness.repository.readEvent(event.eventId);
+    expect(interrupted?.state).toBe("waiting_retry");
+    expect(interrupted?.operationId).not.toBeNull();
+    expect(harness.server.publications).toBe(0);
+    expect(harness.server.operations.size).toBe(1);
+
+    harness.advanceClock(5_000);
+    const resumedPass = await harness.driver.runPass();
+
+    expect(resumedPass.outcome).toBe("completed");
+    expect(harness.repository.readEvent(event.eventId)?.state).toBe("committed");
+    expect(harness.server.preflightBodies).toHaveLength(2);
+    expect(harness.server.operations.size).toBe(1);
+    expect(harness.server.contentAttempts).toBe(2);
+    expect(harness.server.publications).toBe(1);
+    expect(harness.server.receivedDigests).toHaveLength(1);
   });
 
   it("closes changed local bytes as integrity failed and commits the successor", async () => {

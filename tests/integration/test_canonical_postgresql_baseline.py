@@ -93,9 +93,7 @@ _POLICY_TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
     "policy_reconciliation_intents",
 )
 
-_SMALL_FILE_TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
-    "small_file_upload_operations",
-)
+_SMALL_FILE_TABLES_IN_COUNT_ORDER: tuple[str, ...] = ("small_file_upload_operations",)
 
 _TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
     *_PHASE1_TABLES_IN_COUNT_ORDER,

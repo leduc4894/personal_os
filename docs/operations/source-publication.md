@@ -22,6 +22,11 @@ at most **five minutes** old. A stale receipt is re-created by verifying the exi
 object again — never by editing a timestamp. Receipts never cross HTTP, MCP, Worker,
 Web App or Obsidian serialization.
 
+The first immutable `content_objects` row stores that one receipt instant in
+both `verified_at` and `created_at`. This avoids comparing the application/R2
+clock with PostgreSQL transaction time under `verified_at <= created_at`;
+deduplication preserves the original timestamp pair.
+
 ## Concurrency and ambiguous commits
 
 - The transaction takes two transaction-scoped advisory locks in fixed order:

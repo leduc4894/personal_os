@@ -27,8 +27,12 @@ from personal_os.object_storage.keys import (
 )
 from personal_os.recovery.contracts import (
     CANONICAL_COUNT_TABLES,
-    MANIFEST_CONTRACT,
+    LEGACY_V2_CANONICAL_COUNT_TABLES,
+    MANIFEST_CONTRACT_V1,
+    MANIFEST_CONTRACT_V2,
     MAXIMUM_OBJECT_SIZE_BYTES,
+    POSTGRESQL_SCHEMA_REVISION,
+    V1_CANONICAL_COUNT_TABLES,
     ManifestDumpEntry,
     ManifestObjectEntry,
     RecoveryBundleInvalidReason,
@@ -60,6 +64,12 @@ _OBJECT_KEYS: Final[frozenset[str]] = frozenset(
     {"content_sha256", "media_type", "object_key", "relative_path", "size_bytes"}
 )
 _HEX_LOWER: Final[frozenset[str]] = frozenset("0123456789abcdef")
+_CONTRACT_SCHEMA_REVISIONS: Final[MappingProxyType[str, str]] = MappingProxyType(
+    {
+        MANIFEST_CONTRACT_V1: "20260813_01",
+        MANIFEST_CONTRACT_V2: POSTGRESQL_SCHEMA_REVISION,
+    }
+)
 
 
 def _reject(reason: RecoveryBundleInvalidReason) -> NoReturn:
@@ -94,7 +104,7 @@ def encode_manifest(manifest: RecoveryManifest) -> bytes:
     payload = {
         "bundle_id": str(manifest.bundle_id),
         "canonical_counts": dict(sorted(manifest.canonical_counts.items())),
-        "contract": MANIFEST_CONTRACT,
+        "contract": manifest.contract,
         "created_at": format_manifest_timestamp(manifest.created_at),
         "objects": [
             {
@@ -147,7 +157,10 @@ def parse_manifest(raw: bytes) -> RecoveryManifest:
         payload = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
     except json.JSONDecodeError:
         _reject(RecoveryBundleInvalidReason.JSON_NONCANONICAL)
-    if not isinstance(payload, dict) or payload.get("contract") != MANIFEST_CONTRACT:
+    if not isinstance(payload, dict):
+        _reject(RecoveryBundleInvalidReason.CONTRACT_UNSUPPORTED)
+    contract_value = payload.get("contract")
+    if not isinstance(contract_value, str) or contract_value not in _CONTRACT_SCHEMA_REVISIONS:
         _reject(RecoveryBundleInvalidReason.CONTRACT_UNSUPPORTED)
     if frozenset(payload) != _MANIFEST_KEYS:
         _reject(RecoveryBundleInvalidReason.FIELD_UNKNOWN)
@@ -185,6 +198,8 @@ def parse_manifest(raw: bytes) -> RecoveryManifest:
     schema_revision_value = payload["postgresql_schema_revision"]
     if not isinstance(server_version_value, str) or not isinstance(schema_revision_value, str):
         _reject(RecoveryBundleInvalidReason.FIELD_INVALID)
+    if schema_revision_value != _CONTRACT_SCHEMA_REVISIONS[contract_value]:
+        _reject(RecoveryBundleInvalidReason.FIELD_INVALID)
 
     dump_value = payload["postgres_dump"]
     if not isinstance(dump_value, dict) or frozenset(dump_value) != _DUMP_KEYS:
@@ -205,8 +220,16 @@ def parse_manifest(raw: bytes) -> RecoveryManifest:
         _reject(RecoveryBundleInvalidReason.FIELD_INVALID)
 
     counts_value = payload["canonical_counts"]
-    if not isinstance(counts_value, dict) or frozenset(counts_value) != frozenset(
-        CANONICAL_COUNT_TABLES
+    expected_count_table_sets = (
+        (frozenset(V1_CANONICAL_COUNT_TABLES),)
+        if contract_value == MANIFEST_CONTRACT_V1
+        else (
+            frozenset(LEGACY_V2_CANONICAL_COUNT_TABLES),
+            frozenset(CANONICAL_COUNT_TABLES),
+        )
+    )
+    if not isinstance(counts_value, dict) or frozenset(counts_value) not in (
+        expected_count_table_sets
     ):
         _reject(RecoveryBundleInvalidReason.FIELD_INVALID)
     counts: dict[str, int] = {}
@@ -281,6 +304,7 @@ def parse_manifest(raw: bytes) -> RecoveryManifest:
         ),
         canonical_counts=MappingProxyType(counts),
         objects=tuple(entries),
+        contract=contract_value,
     )
     if encode_manifest(manifest) != raw:
         _reject(RecoveryBundleInvalidReason.JSON_NONCANONICAL)

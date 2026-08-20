@@ -340,17 +340,17 @@ The writer uses a sibling staging directory named from the bundle ID plus an ung
 ### 8.2 Manifest
 
 ```text
-contract                         canonical_core_backup/v1
+contract                         canonical_core_backup/v2
 bundle_id                        UUIDv7
 created_at                       UTC RFC 3339, six fractional digits, Z
 source_environment               local | test
 postgresql_server_version        18.4
-postgresql_schema_revision       20260813_01
+postgresql_schema_revision       20260818_01
 postgres_dump.format             custom
 postgres_dump.relative_path      postgres.dump
 postgres_dump.size_bytes         non-negative integer
 postgres_dump.sha256             lowercase SHA-256
-canonical_counts                 closed map of nine table counts
+canonical_counts                 closed map of 28 table counts
 objects[]
   content_sha256                 lowercase SHA-256
   object_key                     canonical derived key
@@ -366,6 +366,18 @@ Object entries are sorted by `content_sha256`. Keys and hashes are intentionally
 The sidecar detects accidental or partial bundle change; it is not an authenticity signature because Phase 1 introduces no signing key. Production authenticity, encryption and independent retention belong to Phase 10. Restore trusts a bundle only inside the configured local/test operator boundary and still re-verifies every restored canonical object.
 
 Unknown top-level/member fields, duplicate keys/hashes, noncanonical ordering, path/key disagreement or an unsupported contract version is invalid. Contract evolution requires a new version and explicit reader support; it is never guessed.
+
+The reader retains exact historical `canonical_core_backup/v1` compatibility:
+v1 admits only its original nine baseline counts and re-encodes to identical v1
+bytes. It also retains the exact branch-local legacy v2 twenty-table shape.
+New backups always emit v2 with the current 28-table graph, including the eight
+canonical authentication tables. V2 was strengthened in place because its
+introduction had not escaped this branch; no third contract token is needed.
+A restore verifies the schema revision and exact count set declared by its
+validated manifest. Before a v1 target may serve, the operator runs the normal
+forward Alembic migration; before either a v1 or legacy v2 target may serve,
+the operator creates and verifies a current 28-count v2 backup. No reader
+silently widens an older manifest's count witness.
 
 ### 8.3 Filesystem safety
 
@@ -389,7 +401,7 @@ The bundle is unencrypted by Phase 1. It is allowed only in `local/test` and mus
 - `KNOWLEDGE_ENVIRONMENT` is exactly `local` or `test`;
 - the operator supplies the exact confirmation `--confirm-write-admission-disabled`;
 - database and R2 settings pass their existing offline validation;
-- the database schema head is exactly `20260813_01`;
+- the database schema head is exactly `20260818_01`;
 - the destination bundle does not exist;
 - PostgreSQL 18.4 client tools are available;
 - backup root safety and free-space checks pass.
@@ -402,10 +414,19 @@ Use one bounded PostgreSQL transaction:
 
 1. Begin `REPEATABLE READ` before the first query.
 2. Acquire `SHARE MODE NOWAIT` table locks in the fixed order:
-   `users`, `workspaces`, `devices`, `content_objects`, `sources`, `source_versions`, `sync_events`, `projection_intents`, `audit_events`.
+   `users`, `workspaces`, `devices`, `content_objects`, `sources`,
+   `source_versions`, `sync_events`, `projection_intents`, `audit_events`,
+   `user_credentials`, `web_sessions`, `totp_credentials`,
+   `totp_recovery_codes`, `device_token_families`, `device_tokens`,
+   `device_authorization_grants`, `authentication_throttle_buckets`,
+   `workspace_policy_state`, `policy_signing_keys`, `policy_keysets`,
+   `policy_keyset_signatures`, `source_policies`, `policy_rules`,
+   `policy_drafts`, `policy_draft_rules`, `policy_evaluations`,
+   `policy_reconciliation_intents`, `small_file_upload_operations`.
 3. `SHARE` conflicts with DML `ROW EXCLUSIVE` locks but remains compatible with the `ACCESS SHARE` reads used by `pg_dump`.
 4. Export the snapshot with `pg_export_snapshot()`.
-5. Query the nine table counts and exact content objects referenced by `source_versions` from the same snapshot.
+5. Query the 28 current-v2 table counts and exact content objects referenced by
+   `source_versions` from the same snapshot.
 6. Launch one `pg_dump --format=custom --snapshot=<snapshot>` for the application database with no owner/privilege replay.
 7. Copy the referenced R2 objects through the verified reader, at most four concurrently.
 8. Recheck for observed queued DML before the final cutoff. An observed writer aborts bundle finalization; an operation arriving after the cutoff belongs after the snapshot.
@@ -513,9 +534,10 @@ It does not use `--clean`, `--create`, parallel jobs, partial selection or shell
 
 Before success:
 
-- Alembic head is exactly `20260813_01`;
+- Alembic head is exactly the revision declared by the verified manifest;
 - the normalized migrated catalog matches the baseline contract;
-- all nine table counts match the manifest;
+- the exact versioned table-count set matches the manifest (nine for v1,
+  twenty for legacy v2, 28 for current v2);
 - bootstrap user/workspace/device IDs and status relationships match;
 - every source current pointer resolves to its own immutable version/object;
 - every referenced object full-verifies from R2;
@@ -783,7 +805,7 @@ Phase 1 is complete only when all criteria pass on one final commit:
 2. Empty workspace and all pinned packages build from lockfiles.
 3. Runtime settings, secret files, typed errors and privacy tests pass.
 4. Disposable local stack health/persistence/recovery smoke passes.
-5. PostgreSQL empty upgrade, constraint, downgrade and re-upgrade gates pass with sole head `20260813_01`.
+5. PostgreSQL empty upgrade, constraint, downgrade and re-upgrade gates pass with sole head `20260818_01`.
 6. Offline and live Cloudflare R2 object-storage gates pass.
 7. Identity bootstrap creates one active user/workspace/device atomically.
 8. Exact bootstrap replay returns original UUIDs and creates no row.

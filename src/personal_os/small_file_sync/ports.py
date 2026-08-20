@@ -12,13 +12,14 @@ adapter's own concerns; only the domain values cross this boundary.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import AsyncIterable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
 from personal_os.diagnostics.context import DiagnosticContext
+from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
 from personal_os.object_storage import CanonicalMediaType, ContentDigest
 from personal_os.small_file_sync.contracts import (
     SmallFileDeviceContext,
@@ -29,6 +30,8 @@ from personal_os.small_file_sync.contracts import (
     SmallFileUploadOperation,
     UploadOperationToken,
 )
+from personal_os.sources.commands import CreateSourceVersion, UpdateSourceVersion
+from personal_os.sources.results import SourceVersionPublicationResult
 
 #: Injectable clock returning the current aware UTC moment.
 type AwareUtcClock = Callable[[], datetime]
@@ -77,8 +80,8 @@ class SmallFilePolicyGuard(Protocol):
     boundary. A definite exclusion, an indeterminate outcome or any
     fail-closed policy failure raises the typed
     :class:`~personal_os.exclusion_policy.errors.ExclusionPolicyError`; only
-    an allowed decision returns ``None``. The guard runs before any
-    operation-store reservation or object-store access.
+    an allowed decision returns the server-owned revision binding. The guard
+    runs before any operation-store reservation or object-store access.
     """
 
     async def authorize_small_file(
@@ -86,7 +89,36 @@ class SmallFilePolicyGuard(Protocol):
         preflight: SmallFilePreflight,
         device_context: SmallFileDeviceContext,
         diagnostic_context: DiagnosticContext,
-    ) -> None: ...
+    ) -> AllowedPolicyRevisionBinding: ...
+
+
+class SmallFilePublicationGateway(Protocol):
+    """Publish one verified small-file operation with bound policy evidence.
+
+    The receive orchestration reconstructs the immutable binding from its
+    durable operation row and passes it explicitly. Implementations must not
+    recover policy state from the plugin request or retain a current binding.
+    """
+
+    async def publish_create(
+        self,
+        *,
+        command: CreateSourceVersion,
+        stream: AsyncIterable[bytes],
+        policy_binding: AllowedPolicyRevisionBinding,
+        bound_operation: SmallFileBoundOperation,
+        diagnostic_context: DiagnosticContext,
+    ) -> SourceVersionPublicationResult: ...
+
+    async def publish_update(
+        self,
+        *,
+        command: UpdateSourceVersion,
+        stream: AsyncIterable[bytes],
+        policy_binding: AllowedPolicyRevisionBinding,
+        bound_operation: SmallFileBoundOperation,
+        diagnostic_context: DiagnosticContext,
+    ) -> SourceVersionPublicationResult: ...
 
 
 class SmallFileUploadOperationStore(Protocol):
@@ -117,6 +149,7 @@ class SmallFileUploadOperationStore(Protocol):
         self,
         preflight: SmallFilePreflight,
         device_context: SmallFileDeviceContext,
+        policy_binding: AllowedPolicyRevisionBinding,
         diagnostic_context: DiagnosticContext,
     ) -> SmallFileUploadOperation: ...
 
@@ -140,4 +173,3 @@ class SmallFileUploadOperationStore(Protocol):
         result: SmallFileTerminalResult,
         diagnostic_context: DiagnosticContext,
     ) -> None: ...
-

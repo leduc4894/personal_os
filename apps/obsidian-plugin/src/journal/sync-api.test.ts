@@ -352,6 +352,26 @@ describe("journal sync api failure mapping (spec 12)", () => {
     }
   });
 
+  it("marks only claimed-state operation failures as safe for exact-token resume", async () => {
+    const claimedTransport = createRecordingTransport(async () => ({
+      status: 409,
+      bodyText: errorBody("small_file_upload_state_invalid"),
+    }));
+    const unknownTransport = createRecordingTransport(async () => ({
+      status: 404,
+      bodyText: errorBody("small_file_operation_not_found"),
+    }));
+
+    await expect(createApi(claimedTransport).preflightJournalEvent(PREFLIGHT_INPUT)).rejects.toMatchObject({
+      kind: "operation_retry_required",
+      canResumeClaimedOperation: true,
+    });
+    await expect(createApi(unknownTransport).preflightJournalEvent(PREFLIGHT_INPUT)).rejects.toMatchObject({
+      kind: "operation_retry_required",
+      canResumeClaimedOperation: false,
+    });
+  });
+
   it("adds no automatic retry of its own", async () => {
     const transport = createRecordingTransport(async () => ({
       status: 500,

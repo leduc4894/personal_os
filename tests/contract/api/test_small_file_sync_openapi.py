@@ -71,7 +71,7 @@ def test_sync_operations_carry_their_semantic_ids_and_methods(
 def test_both_sync_operations_bind_exactly_the_access_bearer_scheme(
     schema: dict[str, Any],
 ) -> None:
-    for (path, method) in SYNC_OPERATION_IDS:
+    for path, method in SYNC_OPERATION_IDS:
         operation = schema["paths"][path][method]
         assert operation["security"] == [{"AccessCredential": []}], (path, method)
         assert "AccessCredential" in schema["components"]["securitySchemes"]
@@ -121,7 +121,7 @@ def _sync_property_names(schema: dict[str, Any]) -> set[str]:
         "SmallFileTerminalResultData",
     ):
         names |= set(schema["components"]["schemas"][schema_name]["properties"])
-    for (path, method) in SYNC_OPERATION_IDS:
+    for path, method in SYNC_OPERATION_IDS:
         operation = schema["paths"][path][method]
         names |= {parameter["name"] for parameter in operation.get("parameters", [])}
     return names

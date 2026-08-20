@@ -370,6 +370,221 @@ def test_windows_boundary_accepts_regular_non_symlink_secret_files(
     assert inspect_secret_set(paths) is SecretSetState.COMPLETE
 
 
+def test_complete_stack_secret_set_allows_documented_application_secret_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    bootstrap_secret_set(paths)
+    for filename in (
+        "auth-key-2026-08.key",
+        "policy_signing_a.pem",
+        "policy_signing_b.pem",
+        "r2_access_key_id",
+        "r2_secret_access_key",
+        "web-credential-password.key",
+    ):
+        (paths.secret_directory / filename).write_text("application-secret", encoding="ascii")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(stack_module, "_is_current_windows_user_owner", lambda path: True)
+
+    assert inspect_secret_set(paths) is SecretSetState.COMPLETE
+
+
+@pytest.mark.parametrize(
+    ("environment", "configured_relative_paths"),
+    [
+        (
+            {"KNOWLEDGE_AUTH_CURRENT_KEY_FILE": "auth-key-2026-09.key"},
+            ("auth-key-2026-09.key",),
+        ),
+        (
+            {
+                "KNOWLEDGE_AUTH_PREVIOUS_KEYS": (
+                    "auth-key-2026-07=auth-key-2026-07.key,"
+                    "auth-key-2026-08=authentication/2026-08.key"
+                )
+            },
+            ("auth-key-2026-07.key", "authentication/2026-08.key"),
+        ),
+        (
+            {"KNOWLEDGE_POLICY_SIGNING_KEY_FILE": "policy/rotation-2026_09.pem"},
+            ("policy/rotation-2026_09.pem",),
+        ),
+    ],
+)
+def test_configured_runtime_secret_survives_inspection_reset_and_rebootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    environment: dict[str, str],
+    configured_relative_paths: tuple[str, ...],
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    bootstrap_secret_set(paths, environment=environment)
+    application_secrets = tuple(
+        paths.secret_directory.joinpath(*relative_path.split("/"))
+        for relative_path in configured_relative_paths
+    )
+    for application_secret in application_secrets:
+        application_secret.parent.mkdir(parents=True, exist_ok=True)
+        application_secret.write_text("application-secret", encoding="ascii")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(stack_module, "_is_current_windows_user_owner", lambda path: True)
+
+    assert inspect_secret_set(paths, environment=environment) is SecretSetState.COMPLETE
+    assert remove_secret_set_after_reset(paths, environment=environment) is SecretSetState.MISSING
+    assert all(application_secret.exists() for application_secret in application_secrets)
+    assert bootstrap_secret_set(paths, environment=environment) is SecretSetState.COMPLETE
+    assert all(application_secret.exists() for application_secret in application_secrets)
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {"KNOWLEDGE_AUTH_CURRENT_KEY_FILE": "../outside.key"},
+        {"KNOWLEDGE_AUTH_PREVIOUS_KEYS": "old=authentication/../../outside.key"},
+        {"KNOWLEDGE_POLICY_SIGNING_KEY_FILE": "C:\\outside.pem"},
+    ],
+)
+def test_runtime_secret_allowlist_rejects_unsafe_paths_without_echoing_values(
+    tmp_path: Path, environment: dict[str, str]
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    configured_value = next(iter(environment.values()))
+
+    with pytest.raises(StackFailure) as raised:
+        inspect_secret_set(paths, environment=environment)
+
+    assert raised.value.exit_code is StackExitCode.CONTRACT
+    assert str(raised.value) == "application_secret_configuration_invalid"
+    assert configured_value not in str(raised.value)
+
+
+def test_runtime_secret_allowlist_rejects_previous_file_collision_with_current(
+    tmp_path: Path,
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    colliding_filename = "authentication/rotation-2026-09.key"
+    environment = {
+        "KNOWLEDGE_AUTH_CURRENT_KEY_FILE": colliding_filename,
+        "KNOWLEDGE_AUTH_PREVIOUS_KEYS": f"auth-key-previous={colliding_filename}",
+        "KNOWLEDGE_POLICY_SIGNING_KEY_FILE": "policy/rotation-2026-09.pem",
+    }
+
+    with pytest.raises(StackFailure) as raised:
+        inspect_secret_set(paths, environment=environment)
+
+    assert raised.value.exit_code is StackExitCode.CONTRACT
+    assert str(raised.value) == "application_secret_configuration_invalid"
+    assert colliding_filename not in str(raised.value)
+
+
+def test_windows_secret_path_identity_rejects_case_variant_of_managed_file_before_lifecycle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Inspection/bootstrap/reset must never alias-delete an application secret."""
+
+    paths = resolve_stack_paths(tmp_path)
+    bootstrap_secret_set(paths, environment={})
+    managed_secret = paths.secret_directory / "postgres_admin_password"
+    original_bytes = managed_secret.read_bytes()
+    environment = {"KNOWLEDGE_AUTH_CURRENT_KEY_FILE": "POSTGRES_ADMIN_PASSWORD"}
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    for lifecycle_operation in (
+        inspect_secret_set,
+        bootstrap_secret_set,
+        remove_secret_set_after_reset,
+    ):
+        with pytest.raises(StackFailure) as raised:
+            lifecycle_operation(paths, environment=environment)
+        assert raised.value.exit_code is StackExitCode.CONTRACT
+        assert str(raised.value) == "application_secret_configuration_invalid"
+        assert managed_secret.read_bytes() == original_bytes
+
+
+def test_windows_secret_path_identity_rejects_current_previous_case_variant_collision(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    environment = {
+        "KNOWLEDGE_AUTH_CURRENT_KEY_ID": "auth-key-current",
+        "KNOWLEDGE_AUTH_CURRENT_KEY_FILE": "Authentication/Current.key",
+        "KNOWLEDGE_AUTH_PREVIOUS_KEYS": ("auth-key-previous=authentication/current.KEY"),
+    }
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    with pytest.raises(StackFailure) as raised:
+        inspect_secret_set(paths, environment=environment)
+
+    assert raised.value.exit_code is StackExitCode.CONTRACT
+    assert str(raised.value) == "application_secret_configuration_invalid"
+
+
+def test_windows_secret_path_identity_does_not_casefold_authentication_key_ids(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    environment = {
+        "KNOWLEDGE_AUTH_CURRENT_KEY_ID": "Auth-Key-Current",
+        "KNOWLEDGE_AUTH_CURRENT_KEY_FILE": "authentication/current.key",
+        "KNOWLEDGE_AUTH_PREVIOUS_KEYS": ("auth-key-current=authentication/previous.key"),
+    }
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    with pytest.raises(StackFailure) as raised:
+        inspect_secret_set(paths, environment=environment)
+
+    assert raised.value.exit_code is StackExitCode.CONTRACT
+    assert str(raised.value) == "application_secret_configuration_invalid"
+
+
+@pytest.mark.parametrize(
+    "authentication_environment",
+    [
+        {
+            "KNOWLEDGE_AUTH_CURRENT_KEY_ID": "auth-key-current",
+            "KNOWLEDGE_AUTH_CURRENT_KEY_FILE": "Keys/Shared.key",
+        },
+        {
+            "KNOWLEDGE_AUTH_PREVIOUS_KEYS": "auth-key-previous=Keys/Shared.key",
+        },
+    ],
+)
+def test_windows_secret_path_identity_rejects_policy_authentication_case_variant_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    authentication_environment: dict[str, str],
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    environment = {
+        **authentication_environment,
+        "KNOWLEDGE_POLICY_SIGNING_KEY_FILE": "keys/shared.KEY",
+    }
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    with pytest.raises(StackFailure) as raised:
+        inspect_secret_set(paths, environment=environment)
+
+    assert raised.value.exit_code is StackExitCode.CONTRACT
+    assert str(raised.value) == "application_secret_configuration_invalid"
+
+
+def test_remove_managed_secret_set_preserves_shared_application_secrets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    bootstrap_secret_set(paths)
+    application_secret = paths.secret_directory / "r2_access_key_id"
+    application_secret.write_text("application-secret", encoding="ascii")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(stack_module, "_is_current_windows_user_owner", lambda path: True)
+
+    assert remove_secret_set_after_reset(paths) is SecretSetState.MISSING
+    assert application_secret.exists()
+    assert all(not (paths.secret_directory / spec.filename).exists() for spec in SECRET_SPECS)
+    assert inspect_secret_set(paths) is SecretSetState.MISSING
+
+
 def test_remove_secret_set_after_reset_removes_only_complete_set(tmp_path: Path) -> None:
     paths = resolve_stack_paths(tmp_path)
     bootstrap_secret_set(paths)
@@ -568,7 +783,15 @@ def test_port_availability_probe_sets_reuseaddr_before_binding_on_posix(
 
 def test_subprocess_environment_omits_credentials_and_r2() -> None:
     clean = sanitize_subprocess_environment(
-        {"PATH": "safe", "R2_SECRET_ACCESS_KEY": "secret", "POSTGRES_PASSWORD": "secret"}
+        {
+            "PATH": "safe",
+            "R2_SECRET_ACCESS_KEY": "secret",
+            "POSTGRES_PASSWORD": "secret",
+            "KNOWLEDGE_AUTH_CURRENT_KEY_ID": "auth-key-current",
+            "KNOWLEDGE_AUTH_CURRENT_KEY_FILE": "authentication/current.key",
+            "KNOWLEDGE_AUTH_PREVIOUS_KEYS": "auth-key-previous=authentication/previous.key",
+            "KNOWLEDGE_POLICY_SIGNING_KEY_FILE": "policy/current.pem",
+        }
     )
 
     assert clean == {"PATH": "safe"}
@@ -811,6 +1034,52 @@ def test_stack_context_is_frozen_and_copies_mutable_inputs(tmp_path: Path) -> No
         cast(dict[str, int], context.ports)["POSTGRES_PORT"] = 35432
 
 
+def test_stack_context_retains_runtime_secret_references_for_status_without_forwarding(
+    stack_context: Any,
+) -> None:
+    reference_environment = {
+        "PATH": "safe",
+        "KNOWLEDGE_AUTH_CURRENT_KEY_ID": "auth-key-current",
+        "KNOWLEDGE_AUTH_CURRENT_KEY_FILE": "authentication/current.key",
+        "KNOWLEDGE_AUTH_PREVIOUS_KEYS": ("auth-key-previous=authentication/previous.key"),
+        "KNOWLEDGE_POLICY_SIGNING_KEY_FILE": "policy/current.pem",
+    }
+    context = stack_module.StackContext(
+        stack_context.paths,
+        stack_context.project_name,
+        stack_context.ports,
+        reference_environment,
+    )
+    calls: list[tuple[tuple[str, ...], float, dict[str, str]]] = []
+
+    status = stack_module.stack_status(
+        context,
+        runner=_successful_lifecycle_runner(calls, ps_output=_healthy_ps_output()),
+    )
+
+    assert status["state"] == "ready"
+    assert context.environment == {"PATH": "safe"}
+    assert context.application_secret_references.current_authentication_key_id == (
+        "auth-key-current"
+    )
+    assert context.application_secret_references.current_authentication_key_file == (
+        "authentication/current.key"
+    )
+    assert context.application_secret_references.previous_authentication_keys == (
+        ("auth-key-previous", "authentication/previous.key"),
+    )
+    assert context.application_secret_references.policy_signing_key_file == "policy/current.pem"
+    assert calls
+    assert all(
+        not any(
+            environment_name.startswith("KNOWLEDGE_AUTH_")
+            or environment_name == "KNOWLEDGE_POLICY_SIGNING_KEY_FILE"
+            for environment_name in forwarded_environment
+        )
+        for _command, _timeout_seconds, forwarded_environment in calls
+    )
+
+
 def test_compose_arguments_are_array_based_and_project_scoped(stack_context: Any) -> None:
     assert stack_module.compose_arguments(stack_context) == [
         "docker",
@@ -971,7 +1240,13 @@ def test_up_preflight_order_precedes_first_mutating_command(
     def validate_ports(ports: Any) -> None:
         operations.append("validate_ports")
 
-    def validate_secrets(paths: Any, *, list_project_volumes: Any) -> Any:
+    def validate_secrets(
+        paths: Any,
+        *,
+        list_project_volumes: Any,
+        application_secret_references: Any = None,
+    ) -> Any:
+        assert application_secret_references == stack_context.application_secret_references
         operations.append("validate_secrets")
         return SecretSetState.COMPLETE
 
@@ -1945,6 +2220,195 @@ def test_secret_rotation_removes_exact_secret_set_after_verified_deletion(
         command[:4] == ("docker", "volume", "ls", "--quiet")
         for command in calls[last_remove_index + 1 :]
     )
+
+
+def test_secret_rotation_preserves_application_files_and_rebootstraps_fresh_managed_set(
+    stack_context: Any,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    application_filenames = (
+        "auth-key-2026-08.key",
+        "policy_signing_a.pem",
+        "policy_signing_b.pem",
+        "r2_access_key_id",
+        "r2_secret_access_key",
+        "web-credential-password.key",
+    )
+    expected_application_contents: dict[str, bytes] = {}
+    for index, filename in enumerate(application_filenames):
+        content = f"application-secret-{index}".encode("ascii")
+        application_path = stack_context.paths.secret_directory / filename
+        application_path.write_bytes(content)
+        application_path.chmod(0o600)
+        expected_application_contents[filename] = content
+    original_managed_fingerprint = stack_module._smoke_secret_fingerprint(
+        stack_context.paths, stack_context.application_secret_references
+    )
+
+    result = stack_module.reset_stack(
+        stack_context,
+        confirm_project="knowledge-local",
+        rotate_secrets=True,
+        runner=_reset_runner(calls),
+    )
+
+    assert result["secrets"] == "removed"
+    assert stack_context.paths.secret_directory.is_dir()
+    assert inspect_secret_set(stack_context.paths) is SecretSetState.MISSING
+    assert {
+        filename: (stack_context.paths.secret_directory / filename).read_bytes()
+        for filename in application_filenames
+    } == expected_application_contents
+
+    assert (
+        bootstrap_secret_set(
+            stack_context.paths,
+            random_bytes=lambda size: bytes(range(32, 32 + size)),
+            environment=stack_context.environment,
+        )
+        is SecretSetState.COMPLETE
+    )
+    assert {
+        filename: (stack_context.paths.secret_directory / filename).read_bytes()
+        for filename in application_filenames
+    } == expected_application_contents
+    assert (
+        stack_module._smoke_secret_fingerprint(
+            stack_context.paths,
+            stack_context.application_secret_references,
+        )
+        != original_managed_fingerprint
+    )
+
+
+def test_runtime_configured_secret_references_survive_reset_rotation_and_rebootstrap(
+    stack_context: Any,
+) -> None:
+    reference_environment = {
+        "PATH": "safe",
+        "KNOWLEDGE_AUTH_CURRENT_KEY_ID": "auth-key-current",
+        "KNOWLEDGE_AUTH_CURRENT_KEY_FILE": "authentication/current.key",
+        "KNOWLEDGE_AUTH_PREVIOUS_KEYS": ("auth-key-previous=authentication/previous.key"),
+        "KNOWLEDGE_POLICY_SIGNING_KEY_FILE": "policy/current.pem",
+    }
+    context = stack_module.StackContext(
+        stack_context.paths,
+        stack_context.project_name,
+        stack_context.ports,
+        reference_environment,
+    )
+    expected_contents = {
+        "authentication/current.key": b"current-application-key",
+        "authentication/previous.key": b"previous-application-key",
+        "policy/current.pem": b"policy-application-key",
+    }
+    for relative_path, content in expected_contents.items():
+        secret_path = context.paths.secret_directory.joinpath(*relative_path.split("/"))
+        secret_path.parent.mkdir(parents=True, exist_ok=True)
+        secret_path.write_bytes(content)
+        secret_path.chmod(0o600)
+
+    result = stack_module.reset_stack(
+        context,
+        confirm_project="knowledge-local",
+        rotate_secrets=True,
+        runner=_reset_runner([]),
+    )
+
+    assert result["secrets"] == "removed"
+    assert {
+        relative_path: context.paths.secret_directory.joinpath(
+            *relative_path.split("/")
+        ).read_bytes()
+        for relative_path in expected_contents
+    } == expected_contents
+    assert (
+        bootstrap_secret_set(
+            context.paths,
+            random_bytes=lambda size: bytes(range(32, 32 + size)),
+            application_secret_references=context.application_secret_references,
+        )
+        is SecretSetState.COMPLETE
+    )
+    assert {
+        relative_path: context.paths.secret_directory.joinpath(
+            *relative_path.split("/")
+        ).read_bytes()
+        for relative_path in expected_contents
+    } == expected_contents
+
+
+def test_cli_bootstrap_accepts_runtime_configured_secret_references(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    paths = resolve_stack_paths(tmp_path)
+    expected_contents = {
+        "authentication/current.key": b"current-application-key",
+        "authentication/previous.key": b"previous-application-key",
+        "policy/current.pem": b"policy-application-key",
+    }
+    for relative_path, content in expected_contents.items():
+        secret_path = paths.secret_directory.joinpath(*relative_path.split("/"))
+        secret_path.parent.mkdir(parents=True, exist_ok=True)
+        secret_path.write_bytes(content)
+        secret_path.chmod(0o600)
+    monkeypatch.setenv("KNOWLEDGE_AUTH_CURRENT_KEY_ID", "auth-key-current")
+    monkeypatch.setenv("KNOWLEDGE_AUTH_CURRENT_KEY_FILE", "authentication/current.key")
+    monkeypatch.setenv(
+        "KNOWLEDGE_AUTH_PREVIOUS_KEYS",
+        "auth-key-previous=authentication/previous.key",
+    )
+    monkeypatch.setenv("KNOWLEDGE_POLICY_SIGNING_KEY_FILE", "policy/current.pem")
+    monkeypatch.setattr(stack_module, "resolve_stack_paths", lambda _root: paths)
+
+    assert stack_module.main(["bootstrap"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out) == {
+        "project": "knowledge-local",
+        "result_code": "secret_set_ready",
+        "secret_set": "complete",
+        "state": "ready",
+    }
+    assert {
+        relative_path: paths.secret_directory.joinpath(*relative_path.split("/")).read_bytes()
+        for relative_path in expected_contents
+    } == expected_contents
+
+
+@pytest.mark.parametrize(
+    ("current_key_id", "previous_keys"),
+    [
+        ("UPPERCASE-KEY", "auth-key-previous=authentication/previous.key"),
+        ("auth-key-current", "auth-key-current=authentication/previous.key"),
+    ],
+)
+def test_cli_status_rejects_invalid_or_colliding_current_authentication_key_id(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    current_key_id: str,
+    previous_keys: str,
+) -> None:
+    monkeypatch.setenv("KNOWLEDGE_AUTH_CURRENT_KEY_ID", current_key_id)
+    monkeypatch.setenv("KNOWLEDGE_AUTH_CURRENT_KEY_FILE", "authentication/current.key")
+    monkeypatch.setenv("KNOWLEDGE_AUTH_PREVIOUS_KEYS", previous_keys)
+
+    def forbidden_runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        del arguments, timeout_seconds, environment
+        pytest.fail("invalid runtime references must fail before subprocess execution")
+
+    assert stack_module.main(["status"], runner=forbidden_runner) == 65
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out) == {
+        "result_code": "application_secret_configuration_invalid",
+        "state": "error",
+    }
+    assert current_key_id not in captured.out
 
 
 def test_cli_never_prints_raw_exception(capsys: pytest.CaptureFixture[str]) -> None:

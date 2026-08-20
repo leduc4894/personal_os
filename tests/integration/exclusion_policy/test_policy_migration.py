@@ -149,7 +149,7 @@ async def test_upgraded_schema_reflects_the_policy_contract(
 ) -> None:
     for table_name in _POLICY_TABLES:
         assert await _table_exists(policy_migration_harness, table_name), table_name
-    assert await _application_table_count(policy_migration_harness) == 29
+    assert await _application_table_count(policy_migration_harness) == 30
 
     origin_column = await policy_migration_harness.fetch_all(
         "SELECT is_nullable FROM information_schema.columns"

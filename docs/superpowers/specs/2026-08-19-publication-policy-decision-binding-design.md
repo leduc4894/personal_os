@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-19
 
-**Status:** Approved design; implementation not started
+**Status:** Implemented and verified (2026-08-19); implementation record: `docs/handoff/2026-08-19-publication-policy-decision-binding.md`
 
 **Scope:** Small-file sync publication only
 
@@ -163,21 +163,33 @@ validate request
 ```
 
 For a new operation, insert `policy_revision_number` from the binding. For an
-existing non-terminal operation reached by a new successful preflight, rotate
-the token hash and update `policy_revision_number` to the new server binding in
-the same transaction. This applies whether or not the old operation has
+existing `pending` operation reached by a new successful preflight, rotate the
+token hash and update `policy_revision_number` to the new server binding in the
+same transaction. This applies whether or not the pending reservation has
 expired. The current rotation statement updates only token hash, expiry, and
 timestamp
 (`packages/postgresql-source-store/src/postgresql_source_store/small_file_sync_operations.py:291-309`);
 implementation must extend that statement with the bound revision.
+
+`receiving` is a claimed ownership state, not an expired reservation that a
+second preflight may reclaim. The `pending -> receiving` claim must land before
+the content stream is consumed. Once claimed before the reservation deadline,
+the exact token and bound revision remain the receive's fence across that
+deadline: an exact-token retry may resume, but a same-identity preflight must
+fail closed and may not rotate either value. Only an expired `pending` row is
+reclaimable. This prevents a paused receive from publishing canonical state and
+then losing its terminal write to a later token/revision rotation.
 
 The request fingerprint continues to exclude policy revision so a later
 locator-aware preflight can reauthorize and rebind the same journal identity;
 the existing comparison deliberately follows that rule
 (`packages/postgresql-source-store/src/postgresql_source_store/small_file_sync_operations.py:177-202`).
 
-The receive-side terminal transition must compare the bound revision as part
-of its row-binding check. The current comparison covers identity and declared
+The receive-side terminal transition must compare the claimed token, operation
+state, bound revision, identity, and declared content fields as one guarded
+fence. Its eligibility does not depend on the original reservation deadline:
+expiry prevents a pending claim or enables a pending reclaim, but cannot revoke
+an already claimed receive. The current comparison covers identity and declared
 content fields but omits `policy_revision_number`
 (`packages/postgresql-source-store/src/postgresql_source_store/small_file_sync_operations.py:564-583`).
 
@@ -385,7 +397,9 @@ revision. Cancellation leaves no authorization state to reset.
 
 Operation rebind is protected by the existing operation-identity advisory lock
 and row lock (`packages/postgresql-source-store/src/postgresql_source_store/small_file_sync_operations.py:803-866`).
-Token rotation and revision update must be one SQL update in that transaction.
+Token rotation and revision update must be one SQL update in that transaction,
+and only a `pending` row may enter that update. A `receiving` row retains its
+claim until guarded terminalization even when wall-clock expiry passes.
 
 ## 5. Decisions and rejected alternatives
 
@@ -503,14 +517,18 @@ or driver text.
 6. Loss of database access during either active-revision read fails closed and
    creates no source, source version, current pointer, sync event, projection
    intent, or terminal committed operation result.
-7. Re-preflight of a non-terminal operation under a newly allowed revision
-   updates token hash and policy revision atomically.
-8. Existing callers outside small-file sync retain current
+7. Re-preflight of a `pending` operation under a newly allowed revision updates
+   token hash and policy revision atomically.
+8. A receive claimed before expiry retains its token and revision fence after
+   expiry. Same-identity preflight cannot reclaim its `receiving` row, the exact
+   token may resume, and guarded terminalization can commit once without an
+   expiry-only rejection.
+9. Existing callers outside small-file sync retain current
    `authorize_publication` and locked re-evaluation behavior.
-9. `tests/unit/small_file_sync`, small-file integration tests, and
+10. `tests/unit/small_file_sync`, small-file integration tests, and
    `tests/contract/small_file_sync` pass, along with relevant API route and
    OpenAPI snapshot tests.
-10. Ruff and mypy-strict pass for every affected Python package.
+11. Ruff and mypy-strict pass for every affected Python package.
 
 ## 8. Testing strategy
 
@@ -547,6 +565,8 @@ to prove:
 - token rotation and revision rebind are one parameter-bound update;
 - operation fingerprint still excludes policy revision;
 - receive-side row comparison includes policy revision; and
+- expired `pending` rows rebind, while claimed `receiving` rows cannot be
+  reclaimed and can terminalize after expiry; and
 - no locator, raw token, receipt, decision payload, or provider field is added.
 
 Keep `tests/unit/migrations/test_small_file_sync_migration.py` unchanged and
@@ -594,6 +614,12 @@ expect publication_commits == 1
 repeat same identity
 expect frozen replay + publication_commits == 1
 ```
+
+Add a deterministic PostgreSQL expiry race: reserve, claim, advance the store
+clock past `expires_at`, pause before terminalization, and attempt a successful
+same-identity preflight under a later allowed revision. The preflight must be
+rejected without rotating token or revision; the claimed token must still
+resolve and its bound terminal write must commit exactly once.
 
 Keep and adapt the changed-policy scenarios so they prove zero publication and
 the next preflight's locator-aware self-heal.
@@ -643,8 +669,9 @@ The following are explicitly outside this design:
 - changing `authorize_publication` semantics for any caller outside the
   explicit small-file gateway;
 - changing canonical-read, query, projection, or AI-provider policy guards; and
-- redesigning source-publication idempotency, operation terminal atomicity, or
-  trust-anchor rotation.
+- redesigning source-publication idempotency or trust-anchor rotation, or
+  changing operation terminal semantics outside the explicit claimed
+  small-file fence in section 11.
 
 The backlog entry for the publication-time locator gap is removed only after
 implementation and all acceptance gates pass. The separate verifier-chain
@@ -653,3 +680,48 @@ entry remains.
 ## 10. Open questions
 
 None. The design choices required for implementation are closed by this spec.
+
+## 11. Claimed-resume completion amendment (2026-08-20)
+
+An interrupted PUT may leave its operation in `receiving`. If a later active
+revision contains a locator-dependent rule that does not match the file, the
+next preflight can allow with its locator-aware subject while the old row
+binding would still make publication indeterminate. Discarding the new
+decision creates an infinite preflight/PUT retry loop.
+
+The locator-aware preflight may therefore synchronously update only the
+claimed row's `policy_revision_number` after its successful server decision.
+It must hold the operation-identity advisory lock, retain `receiving`, retain
+the exact token hash, expiry, identity, source/base geometry, and declared
+content fields, commit the revision update, and then surface the existing
+claimed-state response. The plugin consequently retries only its unchanged
+persisted exact token. A deny or indeterminate preflight never updates the
+row, and a missing, terminal, mismatched, or expired `pending` operation never
+enters this path. Preflight cannot rotate or substitute the row token; a PUT
+with any other token still fails exact lookup. A claimed `receiving` row
+retains its exact-token authority across the reservation deadline as already
+defined by the final-review completion contract.
+
+This update is safe only when canonical publication and operation
+terminalization share the same fence. A claimed small-file publication must:
+
+1. acquire the operation-identity advisory lock before the existing source
+   idempotency, policy-state, and source locks;
+2. validate the exact token, `receiving` or identical terminal state, complete
+   bound geometry, and policy revision before any canonical mutation;
+3. run the existing signed-policy and source-publication transaction; and
+4. write the matching operation terminal result inside that same transaction.
+
+If publication wins the operation fence, its canonical graph and terminal
+receipt commit together, after which re-preflight returns replay. If
+locator-aware reauthorization wins, an already-resolved stale publication
+binding fails before mutation and the unchanged token resolves the new bound
+revision on retry. This is a synchronous fenced handoff, not an asynchronous
+receiving-row rebind. No process-local grant, locator persistence, plugin
+revision trust, public wire member, schema column, or fingerprint change is
+permitted.
+
+Acceptance additionally requires a deterministic PostgreSQL race proving
+both lock orders and an actual plugin journal journey proving that one
+interruption followed by an irrelevant locator-policy revision converges to
+one canonical publication and one terminal operation.
