@@ -78,6 +78,9 @@ PROJECTION_DISPATCH_CONCURRENCY_LIMIT: Final[int] = 8
 #: The pause between dispatch cycles when no claim is outstanding.
 PROJECTION_DISPATCH_POLL_INTERVAL_SECONDS: Final[float] = 1.0
 
+#: Retryable database failures wait for the existing bounded poll interval.
+_RETRY_DELAY_SECONDS: Final[float] = PROJECTION_DISPATCH_POLL_INTERVAL_SECONDS
+
 #: Default Temporal target: the loopback-only unauthenticated local exception.
 DEFAULT_TEMPORAL_TARGET: Final[str] = "127.0.0.1:7233"
 
@@ -235,13 +238,16 @@ class ProjectionDispatchRuntime:
         for expiry.
         """
         while not shutdown.is_set():
-            await self.dispatch_pending_intents_once()
+            try:
+                await self.dispatch_pending_intents_once()
+            except ProjectionDispatchError as error:
+                if error.error_code is not ErrorCode.PROJECTION_DISPATCH_UNAVAILABLE:
+                    raise
+                await _wait_for_shutdown_or_delay(shutdown, _RETRY_DELAY_SECONDS)
+                continue
             if shutdown.is_set():
                 break
-            try:
-                await asyncio.wait_for(shutdown.wait(), timeout=poll_interval_seconds)
-            except TimeoutError:
-                continue
+            await _wait_for_shutdown_or_delay(shutdown, poll_interval_seconds)
 
     async def dispatch_pending_intents_once(self) -> int:
         """Run one reclaim/claim/dispatch cycle and return the claimed count."""
@@ -473,6 +479,14 @@ class ProjectionDispatchRuntime:
                 "is_retryable": True,
             },
         )
+
+
+async def _wait_for_shutdown_or_delay(shutdown: asyncio.Event, delay_seconds: float) -> None:
+    """Wait for shutdown or one bounded dispatch-loop delay."""
+    try:
+        await asyncio.wait_for(shutdown.wait(), timeout=delay_seconds)
+    except TimeoutError:
+        return
 
 
 def _utc_now() -> datetime:

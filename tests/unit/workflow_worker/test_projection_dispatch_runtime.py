@@ -157,6 +157,20 @@ class FakeIntentStore:
 
 
 @dataclass
+class UnavailableThenRecoveringIntentStore(FakeIntentStore):
+    """Fails one dispatch cycle, then stops after the recovered cycle."""
+
+    shutdown: asyncio.Event = field(default_factory=asyncio.Event)
+    dispatch_calls: int = 0
+
+    async def reclaim_expired(self, now: datetime) -> int:
+        self.dispatch_calls += 1
+        if self.dispatch_calls == 1:
+            raise _retryable_unavailable()
+        return await super().reclaim_expired(now)
+
+
+@dataclass
 class FakeStarter:
     result: ProjectionWorkflowStartResult = ProjectionWorkflowStartResult.STARTED
     error: ProjectionDispatchError | None = None
@@ -442,6 +456,17 @@ async def test_run_dispatches_until_shutdown_is_signalled() -> None:
     await stopper
 
     assert len(store.claim_calls) >= 1
+
+
+@pytest.mark.asyncio
+async def test_run_recovers_after_retryable_database_dispatch_failure() -> None:
+    store = UnavailableThenRecoveringIntentStore(())
+    store.on_claim = store.shutdown.set
+    runtime, _, _ = _runtime(store, FakeStarter())
+
+    await runtime.run_until_shutdown(store.shutdown, poll_interval_seconds=0.001)
+
+    assert store.dispatch_calls == 2
 
 
 # --- Activation gate and settings ----------------------------------------------

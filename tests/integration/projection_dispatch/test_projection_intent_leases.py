@@ -17,6 +17,7 @@ from datetime import timedelta
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import event
 from tests.integration.projection_dispatch.conftest import (
     ProjectionDispatchHarness,
     SeededIntent,
@@ -24,6 +25,7 @@ from tests.integration.projection_dispatch.conftest import (
 )
 
 from personal_os.diagnostics.events import EventName, SafeToken
+from personal_os.error_contracts.codes import ErrorCode
 from personal_os.sources.metrics import ProjectionKind
 from personal_os.sources.projection_dispatch import (
     LEASE_EXPIRED_ERROR_CODE,
@@ -416,6 +418,45 @@ async def test_stale_release_and_terminal_tokens_affect_zero_rows(
     )
     assert len(stale_events) == 2
     assert {event["intent_id"] for event in stale_events} == {seeded.projection_intent_id}
+    assert {event["error_code"] for event in stale_events} == {
+        SafeToken.parse(ErrorCode.PROJECTION_INTENT_CONTRACT_INVALID.value)
+    }
+
+
+@pytest.mark.asyncio
+async def test_stale_lease_diagnostic_emits_after_guarded_transaction_commits(
+    projection_dispatch_harness: ProjectionDispatchHarness,
+) -> None:
+    workspace = await projection_dispatch_harness.seed_workspace()
+    seeded, _intent = await _seed_claimed_intent(projection_dispatch_harness, workspace)
+    commit_events: list[None] = []
+    emitted_after_commit: list[bool] = []
+    original_emit = projection_dispatch_harness.diagnostics.emit
+
+    def record_commit(connection: object) -> None:
+        del connection
+        commit_events.append(None)
+
+    def record_emit(event_name: EventName, fields: dict[str, object] | None = None) -> None:
+        emitted_after_commit.append(bool(commit_events))
+        original_emit(event_name, fields)
+
+    event.listen(projection_dispatch_harness._engine.sync_engine, "commit", record_commit)
+    projection_dispatch_harness.diagnostics.emit = record_emit
+    try:
+        released = await projection_dispatch_harness.store.release_retry(
+            seeded.projection_intent_id,
+            uuid4(),
+            SafeToken.parse("projection_dispatch_unavailable"),
+            await projection_dispatch_harness.database_now() + timedelta(seconds=2),
+            await projection_dispatch_harness.database_now(),
+        )
+    finally:
+        projection_dispatch_harness.diagnostics.emit = original_emit
+        event.remove(projection_dispatch_harness._engine.sync_engine, "commit", record_commit)
+
+    assert released is False
+    assert emitted_after_commit == [True]
 
 
 @pytest.mark.asyncio

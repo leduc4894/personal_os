@@ -416,6 +416,7 @@ class _IntentDispatchContext:
 
     projection_kind: SafeToken
     attempt_count: int
+    status: ProjectionIntentStatus
 
 
 class PostgresqlProjectionIntentStore:
@@ -568,6 +569,7 @@ class PostgresqlProjectionIntentStore:
         return sum(reclaimed_by_kind.values())
 
     async def _fenced_transition_once(self, statement: sa.Update, intent_id: UUID) -> bool:
+        context: _IntentDispatchContext | None = None
         async with (
             self._engine.connect() as connection,
             connection.begin(),
@@ -578,18 +580,23 @@ class PostgresqlProjectionIntentStore:
                 return True
             # Zero rows: the lease is stale (expired and reclaimed, or held
             # by another fence). State is never overwritten; only the closed
-            # stale-lease diagnostic is emitted from safe looked-up fields.
+            # stale-lease diagnostic is assembled from safe looked-up fields.
             context = await self._select_dispatch_context(connection, intent_id)
-            if self._diagnostics is not None and context is not None:
-                self._diagnostics.emit(
-                    EventName.PROJECTION_INTENT_DISPATCH_FAILED,
-                    stale_lease_diagnostic_fields(
-                        projection_kind=context.projection_kind,
-                        intent_id=intent_id,
-                        attempt_count=context.attempt_count,
-                    ),
+        if self._diagnostics is not None and context is not None:
+            fields = stale_lease_diagnostic_fields(
+                projection_kind=context.projection_kind,
+                intent_id=intent_id,
+                attempt_count=context.attempt_count,
+            )
+            if context.status is ProjectionIntentStatus.LEASED:
+                # An active row rejected the caller's fence token. Reuse the
+                # closed contract-invalid token rather than misreporting an
+                # expiration or expanding the public error vocabulary.
+                fields["error_code"] = SafeToken.parse(
+                    ErrorCode.PROJECTION_INTENT_CONTRACT_INVALID.value
                 )
-            return False
+            self._diagnostics.emit(EventName.PROJECTION_INTENT_DISPATCH_FAILED, fields)
+        return False
 
     @staticmethod
     async def _select_dispatch_context(
@@ -599,6 +606,7 @@ class PostgresqlProjectionIntentStore:
             sa.select(
                 projection_intents.c.projection_kind,
                 projection_intents.c.attempt_count,
+                projection_intents.c.status,
             ).where(projection_intents.c.projection_intent_id == intent_id)
         )
         row = result.one_or_none()
@@ -607,4 +615,5 @@ class PostgresqlProjectionIntentStore:
         return _IntentDispatchContext(
             projection_kind=projection_kind_token(str(row.projection_kind)),
             attempt_count=int(row.attempt_count),
+            status=ProjectionIntentStatus(str(row.status)),
         )
