@@ -187,10 +187,24 @@ export async function onboardLiveDevice(
       return data["pending_grant"] !== null && data["pending_grant"] !== undefined;
     }, options.pluginDataPathSuffix);
     if (!isPending) {
-      return {
-        adminSessionCookies: sessionCookies,
-        adminSessionCsrf: sessionCsrf,
-      };
+      const isJournalReady = await browser.execute(() => {
+        const app = (
+          window as unknown as {
+            app: {
+              commands: { listCommands: () => Array<{ id: string }> };
+            };
+          }
+        ).app;
+        return app.commands
+          .listCommands()
+          .some((command) => command.id === "knowledge-workspace:sync-now");
+      });
+      if (isJournalReady) {
+        return {
+          adminSessionCookies: sessionCookies,
+          adminSessionCsrf: sessionCsrf,
+        };
+      }
     }
   }
   throw new Error("device onboarding did not converge");
