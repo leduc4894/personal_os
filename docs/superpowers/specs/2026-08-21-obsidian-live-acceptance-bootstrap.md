@@ -63,4 +63,3 @@ never forwarded.
    the entrypoint output.
 4. AGENTS.md explicitly states that missing active TOTP requires bootstrap and
    cannot be labeled blocked or deferred by itself.
-

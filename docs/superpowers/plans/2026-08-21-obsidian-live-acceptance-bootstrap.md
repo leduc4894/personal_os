@@ -32,8 +32,8 @@
 - Consumes: the approved four guardrails and Task 12 live acceptance contract.
 - Produces: closed behavior, failure, privacy, and verification requirements.
 
-- [ ] Write and self-review the plan/spec/task artifacts for placeholders, ambiguity, and scope drift.
-- [ ] Commit the artifacts with `docs: specify live acceptance bootstrap`.
+- [x] Write and self-review the plan/spec/task artifacts for placeholders, ambiguity, and scope drift.
+- [x] Commit the artifacts with `docs: specify live acceptance bootstrap`.
 
 ### Task 2: Prove fresh TOTP activation precedes WDIO
 
@@ -45,11 +45,11 @@
 - Consumes: protected identity/Web credential/policy CLIs, TOTP HTTP routes, local TOTP and policy helpers, focused WDIO command.
 - Produces: `run_live_acceptance(config, executor, client_factory, output) -> int` and a CLI accepting `--project-name`.
 
-- [ ] Write a contract test whose fresh helper preflight fails, whose HTTP verification activates the credential, and whose observed WDIO launch occurs only after the second helper succeeds.
-- [ ] Run `uv run pytest tests/contract/tools/test_obsidian_live_acceptance_bootstrap.py -q` and confirm the expected import failure.
-- [ ] Implement the smallest typed orchestration and closed status output that passes the fresh-state test.
-- [ ] Add rerun, invalid-project, failed-postflight, and sensitive-output cases one failing behavior at a time.
-- [ ] Run the focused contract tests after each implementation step.
+- [x] Write a contract test whose fresh helper preflight fails, whose HTTP verification activates the credential, and whose observed WDIO launch occurs only after the second helper succeeds.
+- [x] Run `uv run pytest tests/contract/tools/test_obsidian_live_acceptance_bootstrap.py -q` and confirm the expected import failure.
+- [x] Implement the smallest typed orchestration and closed status output that passes the fresh-state test.
+- [x] Add rerun, invalid-project, failed-postflight, and sensitive-output cases one failing behavior at a time.
+- [x] Run the focused contract tests after each implementation step.
 
 ### Task 3: Make the preflight rule durable
 
@@ -61,8 +61,7 @@
 - Consumes: the executable bootstrap contract from Task 2.
 - Produces: unambiguous agent and operator instructions.
 
-- [ ] Document that `.local/e2e-totp-code.py` produces codes only after activation and that absence selects bootstrap, not BLOCKED/deferred status.
-- [ ] Document the single bootstrap entrypoint without copying secret or launcher values.
-- [ ] Run focused tests, Ruff, mypy strict, inspect `git diff`, and verify AGENTS.md and the operations guide line counts before committing.
-- [ ] Commit with `feat: guard obsidian live acceptance bootstrap`.
-
+- [x] Document that `.local/e2e-totp-code.py` produces codes only after activation and that absence selects bootstrap, not BLOCKED/deferred status.
+- [x] Document the single bootstrap entrypoint without copying secret or launcher values.
+- [x] Run focused tests, Ruff, mypy strict, inspect `git diff`, and verify AGENTS.md and the operations guide line counts before committing.
+- [x] Commit with `feat: guard obsidian live acceptance bootstrap`.
