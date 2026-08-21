@@ -902,8 +902,8 @@ class SuggestModal<T> extends Modal {
       const row = list.createEl("li", { text: this.#render(item) });
       row.style.cursor = "pointer";
       row.addEventListener("click", () => {
-        this.close();
         this.onChooseItem(item);
+        this.close();
       });
     }
   }
@@ -945,8 +945,8 @@ class TextPromptModal extends Modal {
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         event.preventDefault();
-        this.close();
         this.#accept(this.#inputValue);
+        this.close();
       }
     });
     new Setting(contentEl)
@@ -955,8 +955,8 @@ class TextPromptModal extends Modal {
           .setButtonText("Restore")
           .setCta()
           .onClick(() => {
-            this.close();
             this.#accept(this.#inputValue);
+            this.close();
           }),
       )
       .addButton((button) =>
@@ -1003,8 +1003,8 @@ class ConfirmModal extends Modal {
           .setButtonText("Restore")
           .setCta()
           .onClick(() => {
-            this.close();
             this.#accept();
+            this.close();
           }),
       )
       .addButton((button) =>
