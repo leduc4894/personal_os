@@ -632,15 +632,29 @@ async def test_pre_migration_null_locator_rows_remain_readable(
     assert row["normalized_locator"] is None
     assert row["locator_fingerprint"] is None
 
-    # The bound operation still resolves: the preflight locator matches the
-    # pre-migration null fingerprint under the closed comparison rule.
+    # The bound operation still resolves: a pre-migration row hydrates without
+    # the locator or its digest, so the receive binding carries the canonical
+    # post-terminal shape — both locator fields are null, every immutable
+    # identity field stays populated so the row stays readable for replay.
     bound = await harness.store.resolve_bound_operation(
         operation.operation_token,
         harness.device_context(seeded_workspace),
         _context(),
     )
-    assert bound.normalized_locator is not None
+    assert bound.normalized_locator is None
     assert bound.locator_fingerprint is None
+    assert bound.operation_id == operation.operation_id
+    assert bound.workspace_id == harness.device_context(seeded_workspace).workspace_id
+    assert bound.device_id == harness.device_context(seeded_workspace).device_id
+    assert bound.event_id == preflight.event_id
+    assert bound.idempotency_key == SmallFileIdempotencyKey(preflight.idempotency_key.value)
+    assert bound.operation is SmallFileOperation.CREATE
+    assert bound.declared_sha256 == preflight.sha256
+    assert bound.declared_size_bytes == preflight.size_bytes
+    assert bound.declared_media_type == preflight.media_type
+    assert bound.policy_revision_number == preflight.policy_revision_number
+    assert bound.reserved_source_id == operation.reserved_source_id
+    assert bound.terminal_result is None
 
 
 @pytest.mark.asyncio
