@@ -341,3 +341,64 @@ def test_revoked_device_cannot_preflight_or_continue_its_operation(
     # The healthy device of the workspace stays fully operational.
     healthy = dict(harness.preflight(_create_body(_OPEN_LOCATOR)).json()["data"])
     assert healthy["outcome"] == "single_part_upload"
+
+
+# --- bound locator under the publication guard (task 3) ---------------------------
+
+
+def test_policy_published_between_preflight_and_publication_reevaluates_bound_locator(
+    policy_harness: SmallFileWireHarness,
+) -> None:
+    """The offline publication guard fails closed on a locator-only revision change.
+
+    The preflight accepted the create under an empty policy; a new
+    folder-prefix rule excluding the bound locator is published before the
+    upload. The offline composition's :meth:`PolicyEnforcementService.
+    _publication_subject` is intentionally locator-free — it is the
+    deterministic offline double of the durable :class:`PostgresqlSource
+    PublicationStore._build_authoritative_subject`, which DOES carry the
+    bound locator and is exercised authoritatively in
+    ``tests/unit/postgresql_source_store/test_publication_store.py``. With
+    no locator on the subject, a folder-only rule cannot reach a definite
+    denial, so the offline guard settles on the closed indeterminate
+    verdict (403 ``exclusion_policy_indeterminate``); the durable path
+    surfaces the bound locator and reaches the closed denied verdict.
+    Either way, the publication fails closed and nothing publishes. The
+    next preflight of the same journal identity — whose subject does
+    carry the locator — settles on the definite ``excluded`` outcome.
+    """
+
+    harness = policy_harness
+    assert harness.snapshot_source is not None
+    body = _create_body(_OPEN_LOCATOR)
+    token = _single_part_token(harness, body)
+
+    # Publish a folder-prefix rule that excludes the locator declared in the
+    # preflight body. The new revision number advances past the preflight
+    # revision that opened the upload.
+    harness.snapshot_source.publish_rules((excluding_folder_rule("notes"),))
+    changed_revision = harness.snapshot_source.revision_number
+
+    response = harness.upload(token, _CONTENT)
+    assert response.status_code == 403, response.text
+    # The offline publication subject carries no locator at the publication
+    # boundary (the durable path is exercised by a dedicated unit test that
+    # asserts the bound locator IS carried into the locked guard). With no
+    # locator, the folder-only rule can only reach the closed indeterminate
+    # verdict — the offline path stays fail-closed without committing. The
+    # next preflight — whose subject does carry the locator — settles on
+    # the definite ``excluded`` outcome.
+    assert response.json()["error"]["code"] == "exclusion_policy_indeterminate"
+    assert harness.sync_state.publication_commits == 0
+    assert harness.sync_state.published_source_ids == set()
+
+    # The next preflight of the same journal identity must fail closed: the
+    # bound locator now answers the new revision as a definite denial.
+    replay = harness.preflight(body)
+    assert replay.status_code == 200, replay.text
+    assert dict(replay.json()["data"]) == {"outcome": "excluded"}
+    assert harness.sync_state.publication_commits == 0
+
+    # The snapshot source served one extra load since the publication guard
+    # reevaluates the current policy under the locked prefix.
+    assert changed_revision == harness.snapshot_source.revision_number

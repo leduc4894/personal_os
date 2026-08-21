@@ -28,6 +28,7 @@ from personal_os.sources.actors import SourceActor
 from personal_os.sources.commands import CreateSourceVersion, UpdateSourceVersion
 
 REQUEST_CONTRACT: Final[str] = "source_version_publish/v1"
+REQUEST_CONTRACT_WITH_INITIAL_LOCATOR: Final[str] = "source_version_publish/v2"
 SAFE_DIFF_CONTRACT: Final[str] = "source_version_diff/v1"
 
 type SourceVersionCommand = CreateSourceVersion | UpdateSourceVersion
@@ -110,6 +111,9 @@ def _request_envelope(command: SourceVersionCommand) -> dict[str, object]:
         envelope["base_version_id"] = None
         envelope["source_type"] = command.source_type.value
         envelope["title"] = command.title.value
+        if command.initial_locator is not None:
+            envelope["contract"] = REQUEST_CONTRACT_WITH_INITIAL_LOCATOR
+            envelope["initial_locator"] = command.initial_locator.value
     else:
         envelope["command_kind"] = "update"
         envelope["base_version_id"] = str(command.base_version_id)

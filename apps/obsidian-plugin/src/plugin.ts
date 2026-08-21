@@ -9,8 +9,10 @@
  */
 
 import { Modal, Platform, Plugin, requestUrl, Setting, TFile } from "obsidian";
+import type { TAbstractFile } from "obsidian";
 
 import { createObsidianPolicyHttpTransport, createObsidianSyncHttpTransport } from "./api/obsidian-api-transport";
+import { createRequestUrlTransport } from "./api/request-url-transport";
 import {
   createDeviceApiTransport,
   parseServerOrigin,
@@ -35,11 +37,20 @@ import { DeviceAuthenticationSettingTab } from "./authentication/settings-tab";
 import { DeviceTokenSession, resolveStartupAction } from "./authentication/token-session";
 import { JournalCapture } from "./journal/capture";
 import type { CaptureVaultReader } from "./journal/capture";
+import { LifecycleCaptureImpl } from "./journal/lifecycle-capture";
+import type {
+  LifecycleVaultReader,
+  VaultRenameTarget,
+  VaultTargetFile,
+} from "./journal/lifecycle-capture";
 import { JournalQueueDriver } from "./journal/queue-driver";
 import type { QueuePassOutcome, QueuePassSummary } from "./journal/queue-driver";
+import { LifecycleDriverImpl } from "./journal/lifecycle-driver";
+import { createRequestUrlLifecycleApi } from "./journal/lifecycle-api";
 import { createVaultPluginJournalStore, JournalPersistence } from "./journal/persistence";
 import type { JournalFileStore } from "./journal/persistence";
 import { JournalRepository } from "./journal/repository";
+import { ConfirmModal, SuggestModal, TextPromptModal } from "./restore-modals";
 import type { JournalEventStateErrorCount, JournalRepositoryDatabase } from "./journal/repository";
 import {
   projectJournalSyncStatus,
@@ -47,9 +58,11 @@ import {
   syncBlockerGuidanceLines,
   SYNC_STATUS_TEXT,
 } from "./journal/status";
-import type { JournalSyncStatusSnapshot } from "./journal/status";
+import type { JournalSyncStatusSnapshot, LifecycleBlockedReasonCode } from "./journal/status";
+import type { LifecycleStateCounts } from "./journal/status";
 import { loadVendoredSqliteEngine } from "./journal/sqlite-database";
 import { createJournalSyncApi } from "./journal/sync-api";
+import { createUuidv7Factory } from "./journal/uuidv7";
 import { PolicySession } from "./exclusion-policy/policy-session";
 import type { PolicyCacheAdapter } from "./exclusion-policy/policy-cache";
 import type { PolicyIntegrityState } from "./exclusion-policy/contracts";
@@ -179,6 +192,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   #policyState: PolicyIntegrityState = "policy_not_initialized";
   #journalPersistence: JournalPersistence | null = null;
   #capture: JournalCapture | null = null;
+  #lifecycleCapture: LifecycleCaptureImpl | null = null;
   #queueDriver: JournalQueueDriver | null = null;
   #queueRepository: JournalRepository | null = null;
   #isQueuePassActive = false;
@@ -269,6 +283,12 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
             syncStatus === null ? null : SYNC_STATUS_TEXT[syncStatus.kind],
           syncBlockerGuidance:
             syncStatus === null ? [] : [...syncBlockerGuidanceLines(syncStatus)],
+          // Task 10 / fix round 1 I1: the redacted lifecycle surface
+          // reaches the settings tab through the same projection.
+          lifecycleStateCounts: syncStatus?.lifecycleStateCounts ?? null,
+          pendingLifecycleEventCount: syncStatus?.pendingLifecycleEventCount ?? 0,
+          failedAttemptCount: syncStatus?.failedAttemptCount ?? 0,
+          lifecycleBlockedReasonCodes: syncStatus?.lifecycleBlockedReasonCodes ?? [],
         };
       },
       setServerOrigin: (origin) => {
@@ -319,6 +339,8 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     // the memory credential go away.
     this.#queueDriver?.stop();
     this.#queueDriver = null;
+    this.#lifecycleCapture?.dispose();
+    this.#lifecycleCapture = null;
     this.#capture?.dispose();
     this.#capture = null;
     // Safe unload (spec 11): every journal mutation already persisted its
@@ -399,12 +421,37 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           return persistence.readAll(sql);
         },
       };
-      const repository = new JournalRepository({ database: journalDatabase });
+      const createJournalId = createUuidv7Factory();
+      const repository = new JournalRepository({
+        database: journalDatabase,
+        createId: createJournalId,
+      });
       const vaultReader = this.#createCaptureVaultReader();
+      const lifecycleVaultReader = this.#createLifecycleVaultReader(vaultReader);
+      const lifecycleCapture = new LifecycleCaptureImpl({
+        repository,
+        lifecycle: repository.lifecycle,
+        vaultReader: lifecycleVaultReader,
+        createId: createJournalId,
+        policyRevision: 1,
+      });
       const capture = new JournalCapture({
         repository,
         vaultReader,
         policyGate: policySession,
+        lifecycleCapture,
+      });
+      const lifecycleDriver = new LifecycleDriverImpl({
+        repository,
+        lifecycle: repository.lifecycle,
+        api: createRequestUrlLifecycleApi({
+          baseUrl:
+            parseServerOrigin(this.#settings.server_origin, {
+              allowLoopbackHttp: ALLOW_LOOPBACK_HTTP_ORIGIN,
+            }) ?? "",
+          transport: createRequestUrlTransport((request) => requestUrl(request)),
+          resolveAccessToken: () => session.accessCredential,
+        }),
       });
       const queueDriver = new JournalQueueDriver({
         repository,
@@ -417,6 +464,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           getAccessToken: () => session.accessCredential,
         }),
         fileBytesReader: vaultReader,
+        lifecycleDriver,
         refreshAccessToken: () => session.refresh(),
       });
       this.registerEvent(
@@ -437,12 +485,12 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       );
       this.registerEvent(
         this.app.vault.on("delete", (file) => {
-          void capture.notifyPathDeleted(file.path);
+          void capture.notifyPathDeleted(this.#toVaultTargetFile(file));
         }),
       );
       this.registerEvent(
         this.app.vault.on("rename", (file, oldPath) => {
-          void capture.notifyPathRenamed(oldPath, file.path);
+          void capture.notifyPathRenamed(this.#toVaultRenameTarget(file), oldPath);
         }),
       );
       this.addCommand({
@@ -459,10 +507,28 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           void this.#runExistingFilesScan();
         },
       });
+      // Explicit restore surface (Task 10, spec 6.3 + 7.1): the user
+      // picks one retained tombstone by its plugin-local id (the only
+      // identity the journal actually retains for the row), confirms a
+      // target path, and the lifecycle capture verifies the bytes hash
+      // against the file's last-committed fingerprint before recording
+      // a restore event. The surface never logs paths, locators, source
+      // ids, tokens or fingerprints — failures surface as the closed
+      // `journal_mutation_failed` `JournalStoreErrorReason` and the Sync
+      // status is refreshed so the lifecycle state transitions stay
+      // visible.
+      this.addCommand({
+        id: "restore-selected-tombstone",
+        name: "Restore selected tombstone",
+        callback: () => {
+          void this.#runRestoreSelectedTombstone();
+        },
+      });
       this.#journalPersistence = persistence;
       this.#capture = capture;
       this.#queueDriver = queueDriver;
       this.#queueRepository = repository;
+      this.#lifecycleCapture = lifecycleCapture;
       // Plugin load after safe recovery is the first bounded foreground
       // trigger (spec 8): fire-and-forget, never awaited in onload. A
       // reconcile-required journal stops the driver inside the status
@@ -484,6 +550,118 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       .runExistingFilesScan({ confirm: () => this.#confirmExistingFilesScan() })
       .catch(() => undefined);
     this.#refreshSyncStatus();
+  }
+
+  /**
+   * The explicit-restore command callback (Task 10, spec 6.3 + 7.1):
+   * show the picker for retained tombstones, confirm the target path
+   * with the user and call the lifecycle capture port to validate the
+   * bytes hash and record the restore event. Failures surface as the
+   * closed `journal_mutation_failed` `JournalStoreErrorReason` and
+   * never reach the console; the sync status is refreshed on both
+   * branches so the redacted status surface reflects the new lifecycle
+   * state.
+   */
+  async #runRestoreSelectedTombstone(): Promise<void> {
+    const lifecycleCapture = this.#lifecycleCapture;
+    const repository = this.#queueRepository;
+    if (lifecycleCapture === null || repository === null) {
+      return;
+    }
+    const selection = await this.#pickTombstonedFile(repository);
+    if (selection === null) {
+      return;
+    }
+    const targetPath = await this.#promptForRestoreTargetPath();
+    if (targetPath === null) {
+      return;
+    }
+    const confirmed = await this.#confirmRestoreRequest(selection, targetPath);
+    if (!confirmed) {
+      return;
+    }
+    try {
+      await lifecycleCapture.requestRestore(selection.localFileId, targetPath);
+    } catch {
+      // The lifecycle capture closes the failure as the closed
+      // `journal_mutation_failed` `JournalStoreErrorReason`; the
+      // rejected bytes hash, missing retained mapping, missing open
+      // tombstone or missing delete predecessor stays local. The sync
+      // status refresh is the single source of truth for the user.
+    }
+    this.#refreshSyncStatus();
+  }
+
+  /**
+   * The narrow picker for retained tombstones. Each candidate carries
+   * only its plugin-local `localFileId` and a short safe label — the
+   * underlying path never reaches the picker text. The picker closes
+   * with `null` when the user dismisses the modal without a choice.
+   */
+  #pickTombstonedFile(
+    repository: JournalRepository,
+  ): Promise<{ readonly localFileId: string; readonly shortLabel: string } | null> {
+    return new Promise((resolve) => {
+      const localFileIds = repository.readTombstonedLocalFileIds();
+      const candidates: readonly { readonly localFileId: string; readonly shortLabel: string }[] =
+        localFileIds.map((localFileId) => ({
+          localFileId,
+          shortLabel: `Tombstone #${localFileId.slice(-8)}`,
+        }));
+      if (candidates.length === 0) {
+        new NoticeModal(
+          this.app,
+          "No retained tombstones",
+          "There are no tombstoned files eligible for restore right now.",
+        ).open();
+        resolve(null);
+        return;
+      }
+      const modal = new SuggestModal<{ readonly localFileId: string; readonly shortLabel: string }>(
+        this.app,
+        candidates,
+        (item) => item.shortLabel,
+      );
+      modal.setPlaceholder("Pick a tombstone to restore");
+      modal.onChooseItem = (item) => resolve(item);
+      modal.onClose = () => resolve(null);
+      modal.open();
+    });
+  }
+
+  /** The narrow text prompt for the restore target path. */
+  #promptForRestoreTargetPath(): Promise<string | null> {
+    return new Promise((resolve) => {
+      const modal = new TextPromptModal(
+        this.app,
+        "Restore target path",
+        "Vault path the restored bytes should occupy (no path is recorded yet).",
+        (value) => resolve(value),
+        () => resolve(null),
+      );
+      modal.open();
+    });
+  }
+
+  /** The narrow confirmation modal of an explicit restore request. */
+  #confirmRestoreRequest(
+    selection: { readonly localFileId: string; readonly shortLabel: string },
+    targetPath: string,
+  ): Promise<boolean> {
+    return new Promise((resolve) => {
+      const modal = new ConfirmModal(
+        this.app,
+        "Confirm restore",
+        [
+          `Restore ${selection.shortLabel} to the chosen Vault path?`,
+          "The bytes hash must match the server-committed content hash or the restore is rejected.",
+        ].join("\n"),
+        () => resolve(true),
+        () => resolve(false),
+      );
+      void targetPath;
+      modal.open();
+    });
   }
 
   /**
@@ -541,7 +719,11 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   /**
    * The closed projection input, or null while no journal runs: the
    * composition reads the redacted repository histogram plus the sticky
-   * journal reconcile flag, the live credential fact and the pass facts.
+   * journal reconcile flag, the live credential fact, the pass facts and
+   * (Task 10) the redacted source-lifecycle surface (state histogram,
+   * pending-event count, failed-attempt count, closed blocker codes). All
+   * five reads share one `try { … } catch { return null }` boundary so an
+   * unreadable journal renders no status rather than a partial one.
    */
   #projectSyncStatus(): JournalSyncStatusSnapshot | null {
     const repository = this.#queueRepository;
@@ -549,8 +731,16 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       return null;
     }
     let eventStateErrorCounts: readonly JournalEventStateErrorCount[];
+    let lifecycleStateCounts: LifecycleStateCounts;
+    let pendingLifecycleEventCount: number;
+    let failedAttemptCount: number;
+    let lifecycleBlockedReasonCodes: readonly LifecycleBlockedReasonCode[];
     try {
       eventStateErrorCounts = repository.readEventStateErrorCounts();
+      lifecycleStateCounts = repository.readLifecycleStateCounts();
+      pendingLifecycleEventCount = repository.countPendingLifecycleEvents();
+      failedAttemptCount = repository.countFailedAttempts();
+      lifecycleBlockedReasonCodes = repository.readLifecycleBlockedReasonCodes() as readonly LifecycleBlockedReasonCode[];
     } catch {
       // The journal store is closed or unreadable: render no status rather
       // than a wrong one (the fail-closed rule of the journal design).
@@ -559,6 +749,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     return projectJournalSyncStatus({
       isReconcileRequired: this.#journalPersistence?.isReconcileRequired ?? false,
       eventStateErrorCounts,
+      lifecycleStateCounts,
+      pendingLifecycleEventCount,
+      failedAttemptCount,
+      lifecycleBlockedReasonCodes,
       hasAccessCredential: this.#session?.accessCredential != null,
       isQueuePassActive: this.#isQueuePassActive,
       lastQueuePassOutcome: this.#lastQueuePassOutcome,
@@ -619,6 +813,32 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     };
   }
 
+  /**
+   * The narrow read-only Vault slice the lifecycle capture needs
+   * (journal design 6.3, 7.1): just the current bytes of one regular
+   * file for tombstone verification on restore, layered on top of the
+   * capture reader so plugin composition stays in one place.
+   */
+  #createLifecycleVaultReader(captureReader: CaptureVaultReader): LifecycleVaultReader {
+    return {
+      readRegularFileBytes: (normalizedPath) => captureReader.readRegularFileBytes(normalizedPath),
+    };
+  }
+
+  /** Narrow an Obsidian file into the lifecycle capture's rename target. */
+  #toVaultRenameTarget(file: TAbstractFile): VaultRenameTarget {
+    return this.#toVaultTargetFile(file) as VaultRenameTarget;
+  }
+
+  /** Narrow an Obsidian file into the lifecycle capture's delete target. */
+  #toVaultTargetFile(file: TAbstractFile): VaultTargetFile {
+    const parentPath = file.parent?.path ?? null;
+    return {
+      path: file.path,
+      parent: parentPath === null ? null : { path: parentPath },
+    };
+  }
+
   /** Read the vendored engine bytes from the configured plugin directory. */
   async #readJournalEngineWasmBinary(): Promise<ArrayBuffer> {
     const { configDir, adapter } = this.app.vault;
@@ -647,5 +867,29 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         });
       },
     };
+  }
+}
+
+// --- task-10 modal helpers (composition only, no behaviour) ---------------------------------
+
+/** A minimal read-only notice modal that closes on its own. */
+class NoticeModal extends Modal {
+  readonly #title: string;
+  readonly #body: string;
+
+  constructor(app: import("obsidian").App, title: string, body: string) {
+    super(app);
+    this.#title = title;
+    this.#body = body;
+  }
+
+  override onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    this.titleEl.setText(this.#title);
+    contentEl.createEl("p", { text: this.#body });
+    new Setting(contentEl).addButton((button) =>
+      button.setButtonText("Close").setCta().onClick(() => this.close()),
+    );
   }
 }

@@ -92,6 +92,15 @@ secret/content leak scanners
 
 Integration/live/performance gates chạy theo pipeline riêng với dependency manifest rõ ràng. Không đánh dấu milestone hoàn thành khi acceptance bắt buộc chưa chạy.
 
+Child 5 source lifecycle có ba lớp gate: unit/contract/integration trên
+disposable PostgreSQL; real Desktop journey qua `wdio-obsidian-service`, public
+HTTPS origin và canonical backend; và ma trận Mobile vật lý gồm tracked rename,
+move, delete, automatic restore có chứng minh, explicit restore, offline
+reconnect, unload/reload và policy-denied transition. Mock không thay thế hai
+live gate. Record thiết bị đã redaction trong operations guide được kiểm tra bởi
+marker `device_records`; thiếu hoặc non-PASS là hard failure và Child 5 vẫn
+BLOCKED.
+
 Exclusion-policy child (2026-08-17) đóng bộ feature gates riêng: `uv run poe
 exclusion-policy-test` (unit/contract/API/disposable-stack integration),
 `pnpm run test:e2e:exclusion-policy` (browser journey),

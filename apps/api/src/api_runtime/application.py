@@ -76,6 +76,9 @@ from api_runtime.small_file_sync_models import (
     SmallFileTerminalResultData,
 )
 from api_runtime.small_file_sync_routes import create_small_file_sync_route_endpoints
+from api_runtime.source_lifecycle_composition import SourceLifecycleRuntime
+from api_runtime.source_lifecycle_models import SourceLifecycleCommitData
+from api_runtime.source_lifecycle_routes import create_source_lifecycle_route_endpoints
 from api_runtime.totp_routes import create_totp_route_endpoints
 from api_runtime.web_security import WebSecurityHeadersMiddleware
 from personal_os.api_contracts import (
@@ -154,16 +157,17 @@ def create_api_application(
     web_authentication: WebAuthenticationRuntime,
     exclusion_policy: ExclusionPolicyRuntime | None = None,
     small_file_sync: SmallFileSyncRuntime | None = None,
+    source_lifecycle: SourceLifecycleRuntime | None = None,
     event_sink: DiagnosticEventSink | None = None,
     lifespan: Lifespan[FastAPI] | None = None,
 ) -> FastAPI:
     """Compose the runnable API application for one runtime environment.
 
-    The exclusion-policy and small-file-sync runtimes are optional only so the
-    authentication-only contract compositions of the earlier children stay
-    constructible; the serve graph and the full contract document always
-    compose them, and the routes register only when the runtime is present —
-    never through router auto-discovery.
+    The exclusion-policy, small-file-sync and source-lifecycle runtimes are
+    optional only so the authentication-only contract compositions of the
+    earlier children stay constructible; the serve graph and the full
+    contract document always compose them, and the routes register only when
+    the runtime is present — never through router auto-discovery.
     """
     app = FastAPI(
         title="Personal Knowledge API",
@@ -202,6 +206,8 @@ def create_api_application(
         _register_exclusion_policy_routes(app, web_authentication, exclusion_policy)
     if small_file_sync is not None:
         _register_small_file_sync_routes(app, web_authentication, small_file_sync)
+    if source_lifecycle is not None:
+        _register_source_lifecycle_routes(app, web_authentication, source_lifecycle)
     _classify_openapi_route(app)
     _suppress_framework_validation_error_document(app)
     # The pure-ASGI correlation middleware declares read-only ``Mapping``
@@ -512,6 +518,30 @@ def _register_exclusion_policy_routes(
         operation_id="getExclusionPolicySnapshot",
         response_model=ApiEnvelope[SignedPolicySnapshotData],
         responses={"304": {"description": "The presented entity tag is current"}},
+    )
+
+
+def _register_source_lifecycle_routes(
+    app: FastAPI,
+    web_authentication: WebAuthenticationRuntime,
+    source_lifecycle: SourceLifecycleRuntime,
+) -> None:
+    """Register the closed source lifecycle route set (spec 19.2).
+
+    The route carries its manually assigned semantic operation id and the
+    envelope response model; the access Bearer dependency and the closed
+    workspace/device/user derivation live in the endpoint factory.
+    """
+
+    endpoints = create_source_lifecycle_route_endpoints(
+        web_authentication=web_authentication, source_lifecycle=source_lifecycle
+    )
+    app.add_api_route(
+        "/api/sources/lifecycle-events",
+        endpoints.commit_source_lifecycle_event,
+        methods=["POST"],
+        operation_id="commitSourceLifecycleEvent",
+        response_model=ApiEnvelope[SourceLifecycleCommitData],
     )
 
 

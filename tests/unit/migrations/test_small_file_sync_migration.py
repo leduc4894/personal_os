@@ -164,13 +164,15 @@ def _migration_source() -> str:
 
 
 def test_alembic_graph_has_exactly_one_head_at_the_small_file_revision() -> None:
-    assert _script_directory().get_heads() == [SMALL_FILE_REVISION]
+    # The locator-lifecycle revision ``20260820_01`` stacks on the
+    # small-file sync revision, so the single graph head moved past it.
+    assert _script_directory().get_heads() == ["20260820_01"]
 
 
 def test_small_file_revision_stacks_on_the_policy_head() -> None:
     script_directory = _script_directory()
     revisions = list(script_directory.walk_revisions())
-    assert len(revisions) == 4
+    assert len(revisions) == 5
     revision = script_directory.get_revision(SMALL_FILE_REVISION)
     assert revision is not None
     assert revision.down_revision == POLICY_HEAD_REVISION

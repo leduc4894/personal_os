@@ -410,6 +410,21 @@ export class JournalPersistence {
   }
 
   /**
+   * The required lifecycle table names that must be present on every
+   * verified generation (spec 6.3, child 5): the keyed operands extension
+   * is part of the durable schema, so a torn / missing table is image
+   * corruption that recovery must surface as `journal_image_invalid`
+   * instead of silently passing verification.
+   */
+  static readonly #LIFECYCLE_REQUIRED_TABLES = [
+    "journal_meta",
+    "local_files",
+    "journal_events",
+    "journal_attempts",
+    "lifecycle_event_operands",
+  ] as const;
+
+  /**
    * Read the manifest, distinguishing ABSENT from PRESENT-but-unverifiable:
    * a present manifest that fails to parse still proves journal artifacts
    * exist, which forces the rebuild path with `reconcile_required`. An
@@ -483,9 +498,40 @@ export class JournalPersistence {
       if ((await sha256Hex(imageBytes)) !== candidate.sha256) {
         return null;
       }
-      return SqliteDatabase.openFromImage(this.#engineModule, imageBytes);
+      const database = SqliteDatabase.openFromImage(this.#engineModule, imageBytes);
+      if (!JournalPersistence.#databaseHasLifecycleSurface(database)) {
+        database.close();
+        return null;
+      }
+      return database;
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * Verify the lifecycle surface is intact on a freshly-opened verified
+   * generation: every required table — including
+   * `lifecycle_event_operands` — must be present. A missing table means
+   * the generation is corrupt and recovery must fall back instead of
+   * trusting it.
+   */
+  static #databaseHasLifecycleSurface(database: SqliteDatabase): boolean {
+    try {
+      const tables = database.readAll(
+        "select name from sqlite_master where type = 'table' order by name;",
+      );
+      const present = new Set<string>(
+        (tables[0]?.values ?? []).map((row) => String(row[0])),
+      );
+      for (const required of JournalPersistence.#LIFECYCLE_REQUIRED_TABLES) {
+        if (!present.has(required)) {
+          return false;
+        }
+      }
+      return true;
+    } catch {
+      return false;
     }
   }
 

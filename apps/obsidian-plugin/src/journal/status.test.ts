@@ -32,7 +32,9 @@ import {
   projectJournalSyncStatus,
   renderJournalSyncStatusText,
   syncBlockerGuidanceLines,
+  LIFECYCLE_BLOCKED_REASON_CODES,
 } from "./status";
+import type { LifecycleBlockedReasonCode } from "./status";
 import type { JournalSyncStatusInput } from "./status";
 import { JOURNAL_SCHEMA_VERSION, SqliteDatabase } from "./sqlite-database";
 import type { SqliteEngineModule } from "./sqlite-database";
@@ -612,5 +614,292 @@ describe("suspended pass stays resumable across unload (spec 8, 11)", () => {
     );
     expect(snapshot.kind).toBe("ready");
     reopened.close();
+  });
+});
+
+// --- redacted source lifecycle surface (Task 10) ---------------------------------------------
+
+import type { LifecycleEventOperands } from "./lifecycle-contracts";
+import { createLifecycleEventOperands } from "./lifecycle-contracts";
+import { LifecycleRepository } from "./lifecycle-repository";
+
+const LIFECYCLE_TEST_SOURCE_VERSION_ID = "77777777-7777-4777-8777-777777777777";
+const LIFECYCLE_TEST_TOMBSTONE_ID = "88888888-8888-4888-8888-888888888888";
+const LIFECYCLE_TEST_POLICY_REVISION = 1;
+
+/**
+ * Bring one tracked file to a closed lifecycle state for the projection
+ * tests below: create the durable row, commit a receipt so a `source_id`
+ * is present and then record the requested lifecycle event so the file
+ * transitions to the expected state.
+ */
+async function recordLifecycleForState(
+  repository: JournalRepository,
+  lifecycle: LifecycleRepository,
+  normalizedPath: string,
+  bytes: Uint8Array,
+  operands: LifecycleEventOperands,
+  options: { readonly tombstoneId?: string | null; readonly newPath?: string | undefined } = {},
+): Promise<void> {
+  const capture = await repository.recordCapture({
+    normalizedPath,
+    fingerprint: await deriveFrozenFingerprint(bytes),
+    policyRevisionNumber: LIFECYCLE_TEST_POLICY_REVISION,
+    admission: "policy_allowed",
+  });
+  if (capture.outcome !== "event_recorded") {
+    throw new Error("seedTrackLifecycle: capture failed");
+  }
+  await repository.recordCommittedReceipt({
+    eventId: capture.event.eventId,
+    sourceId: "99999999-9999-4999-8999-999999999999",
+    baseVersionId: LIFECYCLE_TEST_SOURCE_VERSION_ID,
+  });
+  const localFile = repository.readLocalFileByPath(normalizedPath);
+  if (localFile === null) {
+    throw new Error("seedTrackLifecycle: local file missing");
+  }
+  await lifecycle.recordLifecycleEvent(operands, {
+    localFile,
+    tombstoneId: options.tombstoneId ?? null,
+    newPath: options.newPath,
+  });
+}
+
+function lifecycleInput(
+  overrides: Partial<JournalSyncStatusInput> = {},
+): JournalSyncStatusInput {
+  return projectInput(overrides);
+}
+
+describe("source lifecycle surface (Task 10)", () => {
+  it("exposes the closed set of lifecycle blocked reason codes with no others", () => {
+    expect(LIFECYCLE_BLOCKED_REASON_CODES).toEqual([
+      "idempotency_conflict",
+      "version_conflict",
+      "locator_conflict",
+      "tombstone_not_found",
+      "tombstone_closed",
+      "commit_outcome_unknown",
+      "integrity_failed",
+    ]);
+  });
+
+  it("projects lifecycle state counts derived from the local_files histogram", async () => {
+    const database = SqliteDatabase.createEmpty(engineModule, {
+      schemaVersion: JOURNAL_SCHEMA_VERSION,
+      dirtyGeneration: 1,
+      lastVerifiedGeneration: 1,
+      isReconcileRequired: false,
+      recoveryState: "verified_generation_loaded",
+    } satisfies JournalMeta);
+    let epoch = 1_784_000_000_000;
+    const repository = new JournalRepository({
+      database,
+      nowEpochMs: () => epoch++,
+      createId: () => crypto.randomUUID(),
+    });
+    const lifecycle = new LifecycleRepository({ database });
+    const sourceId = "99999999-9999-4999-8999-999999999999";
+    // Two tombstoned files: same source_id, distinct local file ids.
+    await recordLifecycleForState(
+      repository,
+      lifecycle,
+      "notes/tombstone-a.md",
+      new TextEncoder().encode("a-bytes"),
+      createLifecycleEventOperands({
+        operation: "delete",
+        sourceId,
+        expectedVersionId: LIFECYCLE_TEST_SOURCE_VERSION_ID,
+        expectedLocator: "notes/tombstone-a.md",
+        targetLocator: null,
+        tombstoneId: LIFECYCLE_TEST_TOMBSTONE_ID,
+        policyRevision: LIFECYCLE_TEST_POLICY_REVISION,
+        predecessorEventId: null,
+      }),
+      { tombstoneId: LIFECYCLE_TEST_TOMBSTONE_ID },
+    );
+    await recordLifecycleForState(
+      repository,
+      lifecycle,
+      "notes/tombstone-b.md",
+      new TextEncoder().encode("b-bytes"),
+      createLifecycleEventOperands({
+        operation: "delete",
+        sourceId,
+        expectedVersionId: LIFECYCLE_TEST_SOURCE_VERSION_ID,
+        expectedLocator: "notes/tombstone-b.md",
+        targetLocator: null,
+        tombstoneId: "99999999-9999-4999-8999-999999999990",
+        policyRevision: LIFECYCLE_TEST_POLICY_REVISION,
+        predecessorEventId: null,
+      }),
+      { tombstoneId: "99999999-9999-4999-8999-999999999990" },
+    );
+    // One rename_pending file.
+    await recordLifecycleForState(
+      repository,
+      lifecycle,
+      "notes/rename-pending.md",
+      new TextEncoder().encode("rename-pending-bytes"),
+      createLifecycleEventOperands({
+        operation: "rename",
+        sourceId,
+        expectedVersionId: LIFECYCLE_TEST_SOURCE_VERSION_ID,
+        expectedLocator: "notes/rename-pending.md",
+        targetLocator: "notes/rename-pending-renamed.md",
+        tombstoneId: null,
+        policyRevision: LIFECYCLE_TEST_POLICY_REVISION,
+        predecessorEventId: null,
+      }),
+      { newPath: "notes/rename-pending-renamed.md" },
+    );
+
+    const counts = repository.readLifecycleStateCounts();
+    expect(counts).toEqual({
+      active: 0,
+      rename_pending: 1,
+      move_pending: 0,
+      delete_pending: 0,
+      restore_pending: 0,
+      tombstoned: 2,
+      restored: 0,
+      reconcile_required: 0,
+    });
+
+    const snapshot = projectJournalSyncStatus(
+      lifecycleInput({ lifecycleStateCounts: counts }),
+    );
+    expect(snapshot.lifecycleStateCounts).toEqual(counts);
+  });
+
+  it("projects the closed set of blocked reason codes that match observable journal evidence", async () => {
+    const database = SqliteDatabase.createEmpty(engineModule, {
+      schemaVersion: JOURNAL_SCHEMA_VERSION,
+      dirtyGeneration: 1,
+      lastVerifiedGeneration: 1,
+      isReconcileRequired: false,
+      recoveryState: "verified_generation_loaded",
+    } satisfies JournalMeta);
+    let epoch = 1_784_000_000_000;
+    const repository = new JournalRepository({
+      database,
+      nowEpochMs: () => epoch++,
+      createId: () => crypto.randomUUID(),
+    });
+    const lifecycle = new LifecycleRepository({ database });
+    const sourceId = "99999999-9999-4999-8999-999999999999";
+    const tombstoneId = "99999999-9999-4999-8999-999999999988";
+    await recordLifecycleForState(
+      repository,
+      lifecycle,
+      "notes/blocked-conflict.md",
+      new TextEncoder().encode("blocked-bytes"),
+      createLifecycleEventOperands({
+        operation: "delete",
+        sourceId,
+        expectedVersionId: LIFECYCLE_TEST_SOURCE_VERSION_ID,
+        expectedLocator: "notes/blocked-conflict.md",
+        targetLocator: null,
+        tombstoneId,
+        policyRevision: LIFECYCLE_TEST_POLICY_REVISION,
+        predecessorEventId: null,
+      }),
+      { tombstoneId },
+    );
+    // Close the event as integrity_failed so the journal carries the
+    // observable evidence the projection derives the closed code from.
+    const blockedFile = repository.readLocalFileByPath("notes/blocked-conflict.md");
+    if (blockedFile === null) {
+      throw new Error("blocked conflict file missing");
+    }
+    const blockedEvents = repository.readEventsByLocalFileId(blockedFile.localFileId);
+    const deleteEvent = blockedEvents.find((event) => event.operation === "delete");
+    if (deleteEvent === undefined) {
+      throw new Error("blocked conflict delete event missing");
+    }
+    await repository.markEventTerminal(deleteEvent.eventId, "integrity_failed", "integrity_failed");
+
+    const snapshot = projectJournalSyncStatus(
+      lifecycleInput({
+        lifecycleBlockedReasonCodes: repository.readLifecycleBlockedReasonCodes() as readonly LifecycleBlockedReasonCode[],
+      }),
+    );
+    expect(snapshot.lifecycleBlockedReasonCodes).toContain("integrity_failed");
+    // No other closed codes leak when the journal has no evidence.
+    for (const code of LIFECYCLE_BLOCKED_REASON_CODES) {
+      if (code === "integrity_failed") continue;
+      expect(snapshot.lifecycleBlockedReasonCodes).not.toContain(code);
+    }
+  });
+
+  it("counts pending lifecycle events and failed attempts on the projection", () => {
+    const snapshot = projectJournalSyncStatus(
+      lifecycleInput({
+        pendingLifecycleEventCount: 3,
+        failedAttemptCount: 1,
+      }),
+    );
+    expect(snapshot.pendingLifecycleEventCount).toBe(3);
+    expect(snapshot.failedAttemptCount).toBe(1);
+  });
+
+  it("never exposes paths, locators, source IDs, tokens or fingerprints in the status surface", () => {
+    const snapshot = projectJournalSyncStatus(
+      lifecycleInput({
+        lifecycleStateCounts: {
+          active: 0,
+          rename_pending: 1,
+          move_pending: 0,
+          delete_pending: 0,
+          restore_pending: 0,
+          tombstoned: 1,
+          restored: 0,
+          reconcile_required: 0,
+        },
+        pendingLifecycleEventCount: 2,
+        failedAttemptCount: 1,
+        lifecycleBlockedReasonCodes: ["integrity_failed"],
+      }),
+    );
+    const telemetry = `${JSON.stringify(snapshot)} ${renderJournalSyncStatusText(snapshot)} ${JSON.stringify(
+      snapshot.lifecycleBlockedReasonCodes,
+    )}`;
+    for (const forbidden of [
+      "secret",
+      "at1.",
+      "rt1.",
+      ".md",
+      "notes/",
+      "https://",
+      "Bearer",
+    ]) {
+      expect(telemetry).not.toContain(forbidden);
+    }
+    // No 64-character hex digest ever leaks through the redacted surface.
+    expect(telemetry.match(/[0-9a-f]{64}/i)).toBeNull();
+    // No UUID-shaped identifier (8-4-4-4-12) leaks through either.
+    expect(telemetry.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)).toBeNull();
+  });
+
+  it("keeps redacted telemetry redaction across the real journal behind every blocked code path", async () => {
+    const repository = createEmptyRepository();
+    const secretPath = "notes/private-secret-restore.md";
+    const secretBytes = new TextEncoder().encode("private restore bytes");
+    const secretDigest = (await deriveFrozenFingerprint(secretBytes)).sha256;
+    await captureBytes(repository, secretPath, secretBytes);
+    const counts = repository.readLifecycleStateCounts();
+    const codes = repository.readLifecycleBlockedReasonCodes() as readonly LifecycleBlockedReasonCode[];
+    const snapshot = projectJournalSyncStatus(
+      lifecycleInput({
+        lifecycleStateCounts: counts,
+        lifecycleBlockedReasonCodes: codes,
+      }),
+    );
+    const telemetry = `${JSON.stringify(snapshot)} ${renderJournalSyncStatusText(snapshot)}`;
+    for (const forbidden of [secretPath, "secret", ".md", "notes/", secretDigest, ACCESS_TOKEN, "at1."]) {
+      expect(telemetry).not.toContain(forbidden);
+    }
+    expect(telemetry.match(/[0-9a-f]{64}/i)).toBeNull();
   });
 });

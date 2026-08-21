@@ -104,6 +104,36 @@ def _require_positive(value: int, field_name: str) -> None:
         raise ValueError(f"{field_name} must be positive")
 
 
+def intent_insert_statement(
+    *,
+    projection_intent_id: UUID,
+    workspace_id: UUID,
+    event_id: UUID,
+    source_id: UUID,
+    source_version_id: UUID,
+    projection_kind: str,
+    operation: str,
+) -> sa.Insert:
+    """Build the parameter-bound ``projection_intents`` insert for a new pending intent.
+
+    The lifecycle adapter uses this to persist one fresh ``pending`` intent
+    per ``(Qdrant, Neo4j)`` projection for each committed source-lifecycle
+    transition. Every value is bound; no literal projection intent id,
+    workspace id, event id, source id, source version id, projection kind or
+    operation ever appears as SQL text.
+    """
+
+    return sa.insert(projection_intents).values(
+        projection_intent_id=projection_intent_id,
+        workspace_id=workspace_id,
+        event_id=event_id,
+        source_id=source_id,
+        source_version_id=source_version_id,
+        projection_kind=projection_kind,
+        operation=operation,
+    )
+
+
 def claim_available_select_statement(now: datetime, limit: int) -> sa.Select[tuple[Any, ...]]:
     """Build the due-intent claim select with the pinned order and row skip.
 

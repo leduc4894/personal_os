@@ -45,6 +45,7 @@ from personal_os.object_storage import (
     derive_canonical_object_key,
 )
 from personal_os.object_storage.errors import ObjectStorageError
+from personal_os.source_locators.values import NormalizedLocator
 from personal_os.sources.actors import ActorKind, SourceActor
 from personal_os.sources.commands import (
     CreateSourceVersion,
@@ -131,8 +132,18 @@ def build_expected_object() -> ExpectedObject:
     )
 
 
-def build_create_command(expected_object: ExpectedObject | None = None) -> CreateSourceVersion:
-    """A valid create command; ``expected_object`` overrides the claim under test."""
+def build_create_command(
+    expected_object: ExpectedObject | None = None,
+    *,
+    initial_locator: NormalizedLocator | None = None,
+) -> CreateSourceVersion:
+    """A valid create command; ``expected_object`` overrides the claim under test.
+
+    A small-file create carries its bound initial locator through
+    ``initial_locator``; the durable publication store is required to surface
+    that locator on the locked-policy subject so the bound locator is
+    reevaluated under the current revision.
+    """
 
     return CreateSourceVersion(
         workspace_id=uuid4(),
@@ -144,6 +155,7 @@ def build_create_command(expected_object: ExpectedObject | None = None) -> Creat
         actor=SourceActor(actor_kind=ActorKind.USER, actor_id=uuid4()),
         expected_object=expected_object if expected_object is not None else build_expected_object(),
         client_timestamp=None,
+        initial_locator=initial_locator,
     )
 
 

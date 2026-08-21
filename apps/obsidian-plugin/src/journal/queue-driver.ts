@@ -35,6 +35,7 @@
 import type { JournalEvent, JournalSafeErrorLabel, LocalFile } from "./contracts";
 import { MAX_FILE_SIZE_BYTES } from "./contracts";
 import { deriveFrozenFingerprint } from "./fingerprint";
+import type { LifecycleDriver, LifecycleRunOutcome } from "./lifecycle-driver";
 import type { JournalRepository } from "./repository";
 import type { JournalPreflightOutcome, JournalSyncApi, SmallFileTerminalReceipt } from "./sync-api";
 import { SyncApiError } from "./sync-api";
@@ -101,6 +102,16 @@ export interface JournalQueueDriverOptions {
   readonly repository: JournalRepository;
   readonly syncApi: JournalSyncApi;
   readonly fileBytesReader: QueueVaultFileReader;
+  /**
+   * Optional lifecycle driver. When provided, the content pass
+   * interleaves: it first calls `lifecycleDriver.runOne(signal)` to
+   * drain one ready lifecycle event (predecessor-must-be-committed
+   * rule), then processes one content event. The two lanes never
+   * have an active mutating request in flight at the same time, and
+   * the predecessor ordering invariant from the lifecycle contract
+   * (spec 19.2) is enforced deterministically.
+   */
+  readonly lifecycleDriver?: LifecycleDriver;
   /** Rotates the access credential once; a rejection ends the pass as login required. */
   readonly refreshAccessToken: () => Promise<void>;
   /** Clock for deadlines, retries and attempt timestamps; defaults to `Date.now`. */
@@ -145,6 +156,8 @@ export class JournalQueueDriver {
   readonly #repository: JournalRepository;
   readonly #syncApi: JournalSyncApi;
   readonly #fileBytesReader: QueueVaultFileReader;
+  readonly #lifecycleDriver: LifecycleDriver | null;
+  readonly #passAbortController: AbortController;
   readonly #refreshAccessToken: () => Promise<void>;
   readonly #nowEpochMs: () => number;
   readonly #createCorrelationId: () => string;
@@ -158,6 +171,8 @@ export class JournalQueueDriver {
     this.#repository = options.repository;
     this.#syncApi = options.syncApi;
     this.#fileBytesReader = options.fileBytesReader;
+    this.#lifecycleDriver = options.lifecycleDriver ?? null;
+    this.#passAbortController = new AbortController();
     this.#refreshAccessToken = options.refreshAccessToken;
     this.#nowEpochMs = options.nowEpochMs ?? (() => Date.now());
     this.#createCorrelationId = options.createCorrelationId ?? (() => crypto.randomUUID());
@@ -174,10 +189,13 @@ export class JournalQueueDriver {
   /**
    * Stop the driver (plugin unload / mobile suspension): no new pass
    * starts, and any in-flight `requestUrl` result arriving afterwards is
-   * discarded rather than applied to the journal.
+   * discarded rather than applied to the journal. The pass-scoped
+   * AbortController is aborted so the lifecycle lane (when wired in)
+   * also cancels cleanly.
    */
   stop(): void {
     this.#isStopped = true;
+    this.#passAbortController.abort();
   }
 
   /**
@@ -195,7 +213,13 @@ export class JournalQueueDriver {
   /**
    * Run one bounded pass: the oldest eligible event at a time, one active
    * content request, until the queue drains, the deadline passes, login is
-   * required, or the driver stops.
+   * required, or the driver stops. When a lifecycle driver is wired in,
+   * the pass interleaves: it first drains the lifecycle lane to IDLE
+   * (spec 19.2 predecessor rule, task 9 fix round 1 I3), then processes
+   * one content event. The two lanes never have an active mutating
+   * request in flight at the same time, and the content lane never
+   * sees a lifecycle event because the lane filter is enforced by
+   * draining the lifecycle lane before each content selection.
    */
   async runPass(): Promise<QueuePassSummary> {
     if (this.#isStopped) {
@@ -211,6 +235,34 @@ export class JournalQueueDriver {
     let passOutcome: QueuePassOutcome = "completed";
     try {
       while (!this.#isStopped && this.#nowEpochMs() < passDeadlineEpochMs) {
+        // Drain the lifecycle lane to IDLE before each content-lane
+        // selection. The previous one-call-per-iteration design let
+        // the content lane re-select a queued lifecycle event when
+        // two lifecycle events were queued — the content lane then
+        // tried to send it through the wrong API. Looping until
+        // `runOne` returns "idle" keeps the predecessor rule
+        // deterministic and avoids the lane-crossing dispatch.
+        if (this.#lifecycleDriver !== null && !this.#isStopped) {
+          let lifecycleOutcome: LifecycleRunOutcome = "idle";
+          do {
+            try {
+              lifecycleOutcome = await this.#lifecycleDriver.runOne(
+                this.#passAbortController.signal,
+              );
+            } catch {
+              // The lifecycle driver swallows its own errors and
+              // returns closed outcomes; a thrown error here is
+              // fail-closed.
+              break;
+            }
+            if (this.#isStopped || this.#nowEpochMs() >= passDeadlineEpochMs) {
+              break;
+            }
+          } while (lifecycleOutcome === "committed");
+          if (this.#isStopped) {
+            break;
+          }
+        }
         let continuation: PassContinuation;
         try {
           const event = this.#repository.readOldestEligibleEvent(this.#nowEpochMs());

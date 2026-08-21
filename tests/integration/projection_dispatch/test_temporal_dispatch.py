@@ -122,7 +122,12 @@ class TemporalDispatchHarness:
         return SeededWorkspace(owner_user_id=owner_user_id, workspace_id=workspace_id)
 
     async def seed_due_intent(
-        self, workspace: SeededWorkspace, *, projection_kind: str = "qdrant"
+        self,
+        workspace: SeededWorkspace,
+        *,
+        projection_kind: str = "qdrant",
+        operation: str = "upsert",
+        event_type: str = "create",
     ) -> SeededIntent:
         """Seed one due pending intent plus its full canonical graph."""
         import hashlib
@@ -173,7 +178,7 @@ class TemporalDispatchHarness:
                     committed_version_id=source_version_id,
                     idempotency_key=f"temporal-{nonce}",
                     request_fingerprint=content_hash,
-                    event_type="create",
+                    event_type=event_type,
                 )
             )
             await connection.execute(
@@ -184,7 +189,7 @@ class TemporalDispatchHarness:
                     source_id=source_id,
                     source_version_id=source_version_id,
                     projection_kind=projection_kind,
-                    operation="upsert",
+                    operation=operation,
                     status="pending",
                     attempt_count=0,
                     available_at=sa.text("CURRENT_TIMESTAMP - interval '5 seconds'"),
@@ -523,3 +528,87 @@ async def test_closed_execution_rejects_duplicate_run_as_terminal(
         event["error_code"] == SafeToken.parse("projection_intent_contract_invalid")
         for event in failed
     )
+
+
+# --- lifecycle intent ingestion (Task 11) -----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_delete_intent_dispatches_into_one_workflow_run(
+    temporal_dispatch: TemporalDispatchHarness,
+) -> None:
+    """A lifecycle delete intent drives the same deterministic SourceIngestionWorkflow.
+
+    The lifecycle intent shape (``event_id`` + non-null ``source_version_id``
+    + closed ``operation='delete'`` token) carries through the
+    dispatcher unchanged and starts the same deterministic workflow
+    execution as a create intent; the only difference is the closed
+    projection operation the workflow input never exposes.
+    """
+
+    workspace = await temporal_dispatch.seed_workspace()
+    seeded = await temporal_dispatch.seed_due_intent(
+        workspace, projection_kind="qdrant", operation="delete", event_type="delete"
+    )
+    workflow_id = projection_workflow_id(seeded.workspace_id, seeded.event_id)
+
+    await temporal_dispatch.runtime.dispatch_pending_intents_once()
+
+    row = await temporal_dispatch.fetch_intent(seeded.projection_intent_id)
+    assert row["status"] == "dispatched"
+    assert row["dispatched_at"] is not None
+    assert await temporal_dispatch.workflow_run_count(workflow_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_rename_intent_pair_dispatches_into_one_workflow_run(
+    temporal_dispatch: TemporalDispatchHarness,
+) -> None:
+    """A lifecycle rename event's two intents (Qdrant + Neo4j) reach one workflow.
+
+    The Qdrant and Neo4j intents of a single rename share the same
+    ``(workspace_id, event_id)`` identity, so they both resolve to the
+    same deterministic workflow id and never produce two executions.
+    """
+
+    workspace = await temporal_dispatch.seed_workspace()
+    seeded = await temporal_dispatch.seed_due_intent(
+        workspace, projection_kind="qdrant", operation="upsert", event_type="rename"
+    )
+    duplicate_intent_id = await temporal_dispatch.duplicate_intent_for_event(
+        seeded, projection_kind="neo4j"
+    )
+    workflow_id = projection_workflow_id(seeded.workspace_id, seeded.event_id)
+
+    await temporal_dispatch.runtime.dispatch_pending_intents_once()
+
+    first = await temporal_dispatch.fetch_intent(seeded.projection_intent_id)
+    second = await temporal_dispatch.fetch_intent(duplicate_intent_id)
+    assert first["status"] == "dispatched"
+    assert second["status"] == "dispatched"
+    assert await temporal_dispatch.workflow_run_count(workflow_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_restore_intent_dispatches_with_source_version_id(
+    temporal_dispatch: TemporalDispatchHarness,
+) -> None:
+    """A lifecycle restore intent keeps its non-null ``source_version_id``.
+
+    The dispatcher's leased view carries the closed ``operation='upsert'``
+    token and the non-null ``source_version_id`` the lifecycle adapter
+    persisted; the Temporal ingestion accepts the intent unchanged.
+    """
+
+    workspace = await temporal_dispatch.seed_workspace()
+    seeded = await temporal_dispatch.seed_due_intent(
+        workspace, projection_kind="neo4j", operation="upsert", event_type="restore"
+    )
+    workflow_id = projection_workflow_id(seeded.workspace_id, seeded.event_id)
+
+    await temporal_dispatch.runtime.dispatch_pending_intents_once()
+
+    row = await temporal_dispatch.fetch_intent(seeded.projection_intent_id)
+    assert row["status"] == "dispatched"
+    assert row["dispatched_at"] is not None
+    assert await temporal_dispatch.workflow_run_count(workflow_id) == 1

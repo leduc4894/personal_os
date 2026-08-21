@@ -63,7 +63,7 @@ describe("JOURNAL_EVENT_STATES closed set (spec 7.2)", () => {
 });
 
 describe("JOURNAL_SAFE_ERROR_LABELS closed set (spec 12)", () => {
-  it("mirrors the spec-12 error and retry matrix exactly", () => {
+  it("mirrors the spec-12 error and retry matrix plus the success token", () => {
     expect([...JOURNAL_SAFE_ERROR_LABELS]).toEqual([
       "network_offline",
       "network_timeout",
@@ -76,6 +76,7 @@ describe("JOURNAL_SAFE_ERROR_LABELS closed set (spec 12)", () => {
       "deferred_lifecycle",
       "integrity_failed",
       "reconcile_required",
+      "committed",
     ]);
   });
 
@@ -133,14 +134,30 @@ describe("JOURNAL_RECOVERY_STATES closed set (spec 6.2)", () => {
   });
 });
 
-describe("journal operations (spec 6.3)", () => {
-  it("allows only create and update in this child", () => {
+describe("journal operations (spec 6.3, child 5)", () => {
+  it("allows create and update from the content surface", () => {
     const createOperation: JournalOperation = "create";
     const updateOperation: JournalOperation = "update";
     expect([createOperation, updateOperation]).toEqual(["create", "update"]);
-    // @ts-expect-error lifecycle mutations belong to child 5 and must stay unassignable
-    const forbiddenOperation: JournalOperation = "delete";
-    expect(forbiddenOperation).toBe("delete");
+  });
+
+  it("admits the four lifecycle operations once child 5 lands", () => {
+    const renameOperation: JournalOperation = "rename";
+    const moveOperation: JournalOperation = "move";
+    const deleteOperation: JournalOperation = "delete";
+    const restoreOperation: JournalOperation = "restore";
+    expect([renameOperation, moveOperation, deleteOperation, restoreOperation]).toEqual([
+      "rename",
+      "move",
+      "delete",
+      "restore",
+    ]);
+  });
+
+  it("still rejects unknown operation tokens at the type level", () => {
+    // @ts-expect-error an unknown operation must stay unassignable
+    const forbiddenOperation: JournalOperation = "merge";
+    expect(forbiddenOperation).toBe("merge");
   });
 });
 
@@ -190,9 +207,11 @@ describe("journal record shapes (spec 6.3)", () => {
       },
       baseVersionId: null,
       policyRevisionNumber: 7,
+      lastCommittedFingerprint: null,
     };
     expect(localFile.sourceId).toBeNull();
     expect(localFile.policyRevisionNumber).toBe(7);
+    expect(localFile.lastCommittedFingerprint).toBeNull();
   });
 
   it("types one journal event with the spec-6.3 fields", () => {

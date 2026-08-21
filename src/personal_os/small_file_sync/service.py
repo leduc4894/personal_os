@@ -533,6 +533,7 @@ class SmallFileSyncService:
                 actor=actor,
                 expected_object=expected_object,
                 client_timestamp=None,
+                initial_locator=bound.normalized_locator,
             )
             if (
                 create_command.workspace_id != device_context.workspace_id

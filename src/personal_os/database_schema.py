@@ -12,7 +12,6 @@ from typing import Final
 
 #: Canonical PostgreSQL schema revision pinned by the acceptance/recovery contract;
 #: readiness accepts exactly this head and nothing else. The small-file sync
-#: revision ``20260818_01`` stacks on the ``20260817_01`` exclusion policy
-#: revision, which stacks on the ``20260816_01`` authentication revision and
-#: the ``20260813_01`` baseline.
-CANONICAL_POSTGRESQL_SCHEMA_REVISION: Final[str] = "20260818_01"
+#: revision ``20260820_01`` stacks on the ``20260818_01`` small-file revision,
+#: which stacks on the exclusion-policy, authentication and baseline revisions.
+CANONICAL_POSTGRESQL_SCHEMA_REVISION: Final[str] = "20260820_01"

@@ -14,15 +14,16 @@ treated as private values: they never enter diagnostics or metric labels.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Final
-from unicodedata import category, is_normalized
 from uuid import UUID
 
 from personal_os.object_storage import CanonicalMediaType, ContentDigest
+from personal_os.source_locators.values import NormalizedLocator as NormalizedLocator
 from personal_os.sources.actors import reject_nil_uuid
 from personal_os.sources.commands import normalize_utc_timestamp
 
@@ -37,12 +38,6 @@ MAX_SINGLE_PART_FILE_SIZE_BYTES: Final[int] = 16 * 1024 * 1024
 _IDEMPOTENCY_KEY_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
-
-#: Locator bounds mirrored from the plugin policy evaluator
-#: (``normalizePolicyLocator``): the server accepts exactly what one
-#: normalized vault locator is, never a freer grammar.
-_LOCATOR_MAXIMUM_BYTES: Final[int] = 4096
-_LOCATOR_MAXIMUM_SEGMENTS: Final[int] = 256
 
 #: Opaque operation-token grammar: printable URL-safe base64url text of 32
 #: to 128 characters. The grammar deliberately excludes the hyphenated UUID
@@ -122,51 +117,6 @@ class SmallFileIdempotencyKey:
             raise ValueError("idempotency key must be a canonical lowercase hyphenated UUID")
         if self.value == "00000000-0000-0000-0000-000000000000":
             raise ValueError("idempotency key must be a non-nil UUID")
-
-
-@dataclass(frozen=True, slots=True)
-class NormalizedLocator:
-    """Current normalized vault locator for policy/display context only.
-
-    Mirrors the plugin-side canonical grammar exactly: NFC-normalized,
-    non-empty, ``/``-separated vault-relative segments without a scheme or
-    drive prefix, empty, ``.`` or ``..`` segments, control characters or
-    backslashes, bounded by the shared segment/byte limits. The locator is
-    used for policy evaluation and display; it is never a canonical source
-    identity and never enters diagnostics or metrics.
-    """
-
-    value: str
-
-    def __repr__(self) -> str:
-        return f"{type(self).__name__}(value=<redacted>)"
-
-    def __post_init__(self) -> None:
-        if not is_normalized("NFC", self.value):
-            raise ValueError("normalized locator must be NFC-normalized")
-        if not self.value:
-            raise ValueError("normalized locator must be non-empty")
-        if "\\" in self.value:
-            raise ValueError("normalized locator must not contain a backslash separator")
-        if self.value.startswith("/"):
-            raise ValueError("normalized locator must not be absolute")
-        if self.value.endswith("/"):
-            raise ValueError("normalized locator must not have a trailing separator")
-        if any(category(char) == "Cc" for char in self.value):
-            raise ValueError("normalized locator must not contain control characters")
-        segments = self.value.split("/")
-        if ":" in segments[0]:
-            raise ValueError("normalized locator must not contain a scheme or drive prefix")
-        if any(segment in {"", ".", ".."} for segment in segments):
-            raise ValueError("normalized locator segments must not be empty, '.' or '..'")
-        if len(segments) > _LOCATOR_MAXIMUM_SEGMENTS:
-            raise ValueError(
-                f"normalized locator must have at most {_LOCATOR_MAXIMUM_SEGMENTS} segments"
-            )
-        if len(self.value.encode("utf-8")) > _LOCATOR_MAXIMUM_BYTES:
-            raise ValueError(
-                f"normalized locator must be at most {_LOCATOR_MAXIMUM_BYTES} UTF-8 bytes"
-            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,4 +275,73 @@ class SmallFileTerminalResult:
             self,
             "committed_at",
             normalize_utc_timestamp("committed_at", self.committed_at),
+        )
+
+
+def compute_locator_fingerprint(locator: NormalizedLocator) -> str:
+    """Return the lowercase SHA-256 digest of one canonical normalized locator.
+
+    The digest is the retained identifier the durable operation row keeps
+    after the raw locator is cleared, so an exact replay can compare the
+    locator without ever re-reading a sensitive path.
+    """
+
+    return hashlib.sha256(locator.value.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class BoundSmallFileOperation:
+    """The durable receive-side view of one upload operation, locator-bound.
+
+    Carries every immutable operation field the receive binding already
+    held plus the bound initial locator evidence: the transient
+    :class:`NormalizedLocator` (cleared on terminal transition) and the
+    retained ``locator_fingerprint`` digest (kept for exact replay). An
+    update preflight, a pre-migration row or a terminal operation may carry
+    a null locator and a null digest; the digest alone (without the raw
+    locator) is the canonical post-terminal shape.
+    """
+
+    operation_id: UUID
+    operation_token: UploadOperationToken
+    workspace_id: UUID
+    device_id: UUID
+    event_id: UUID
+    idempotency_key: SmallFileIdempotencyKey
+    operation: SmallFileOperation
+    declared_sha256: ContentDigest
+    declared_size_bytes: int
+    declared_media_type: CanonicalMediaType
+    policy_revision_number: int
+    reserved_source_id: UUID | None
+    update_source_id: UUID | None
+    update_base_version_id: UUID | None
+    normalized_locator: NormalizedLocator | None
+    locator_fingerprint: str | None
+    expires_at: datetime
+    terminal_result: SmallFileTerminalResult | None
+
+    def __post_init__(self) -> None:
+        reject_nil_uuid("operation_id", self.operation_id)
+        reject_nil_uuid("workspace_id", self.workspace_id)
+        reject_nil_uuid("device_id", self.device_id)
+        reject_nil_uuid("event_id", self.event_id)
+        if self.policy_revision_number < 1:
+            raise ValueError("policy_revision_number must be a positive integer")
+        if self.reserved_source_id is not None:
+            reject_nil_uuid("reserved_source_id", self.reserved_source_id)
+            if self.operation is SmallFileOperation.UPDATE:
+                raise ValueError("update operation must not reserve a source_id")
+        if self.normalized_locator is not None:
+            if self.operation is SmallFileOperation.UPDATE:
+                raise ValueError("update operation must not carry a normalized locator")
+            if self.locator_fingerprint is None:
+                raise ValueError("normalized_locator requires a matching locator_fingerprint")
+            expected = compute_locator_fingerprint(self.normalized_locator)
+            if self.locator_fingerprint != expected:
+                raise ValueError("locator_fingerprint does not match the normalized locator")
+        object.__setattr__(
+            self,
+            "expires_at",
+            normalize_utc_timestamp("expires_at", self.expires_at),
         )

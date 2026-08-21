@@ -2,7 +2,7 @@
 
 :class:`PostgresqlSmallFileUploadOperationStore` implements the provider-neutral
 :class:`~personal_os.small_file_sync.ports.SmallFileUploadOperationStore` port
-against the ``20260818_01`` migration. ``resolve_terminal_result`` performs the
+against the ``20260818_01`` and ``20260820_01`` migrations. ``resolve_terminal_result`` performs the
 exact-replay lookup by the credential-derived device/workspace plus journal
 event/idempotency identity (spec 10.3): a committed row returns its frozen
 terminal canonical result unchanged — expiry never erases terminal evidence —
@@ -14,13 +14,17 @@ the unique constraint admits, a fresh reservation mints a new opaque URL-safe
 token stored only as its one-way SHA-256 hash (a re-preflight rotates the
 hash, so the raw token is never persisted or reused), a create reserves the
 server-generated source UUID on the row without inserting any ``sources``
-row, and an update records its base pair without reserving anything. An
-expired pending row is invalid for continuation and may be re-reserved with a
-fresh token and extended deadline. Once a receive claims the row, that
-``receiving`` claim retains its token/revision fence across the reservation
-deadline: exact-token retries may resume it and guarded terminalization may
-finish, while same-identity preflight cannot rotate it underneath canonical
-publication.
+row, and an update records its base pair without reserving anything. A
+create's bound initial locator evidence (the transient ``normalized_locator``
+and the retained lowercase ``locator_fingerprint`` digest) lands with the
+reservation so the receive binding can carry it under the locked publication
+transaction; the raw locator is cleared on terminal transition while the
+digest remains for exact replay. An expired pending row is invalid for
+continuation and may be re-reserved with a fresh token and extended deadline.
+Once a receive claims the row, that ``receiving`` claim retains its
+token/revision fence across the reservation deadline: exact-token retries may
+resume it and guarded terminalization may finish, while same-identity
+preflight cannot rotate it underneath canonical publication.
 
 ``record_terminal_result`` persists the publication result and the operation's
 terminal state as one guarded update inside a single transaction, and exposes
@@ -35,7 +39,10 @@ operation state in one commit. The receive-side binding
 resolves one row by its one-way token hash — the raw token never exists in
 storage — rechecks the credential-derived identity and state, applies expiry
 only before a pending receive is claimed, and uses the same guarded terminal
-transition over the token-bound view.
+transition over the token-bound view. The receive binding carries the bound
+initial locator into the publication transaction so the
+:class:`PostgresqlSourcePublicationStore` can re-evaluate the locator-aware
+policy under the same locked prefix.
 Every statement is schema-qualified and
 parameter-bound; the adapter stores and logs no bytes, locator, token, receipt
 or provider detail, and driver failures cross the boundary only through the
@@ -64,6 +71,8 @@ from personal_os.error_contracts.exceptions import ApplicationError, InternalApp
 from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
 from personal_os.object_storage import CanonicalMediaType, ContentDigest
 from personal_os.small_file_sync.contracts import (
+    BoundSmallFileOperation,
+    NormalizedLocator,
     SmallFileDeviceContext,
     SmallFileIdempotencyKey,
     SmallFileOperation,
@@ -72,6 +81,7 @@ from personal_os.small_file_sync.contracts import (
     SmallFileTerminalResultKind,
     SmallFileUploadOperation,
     UploadOperationToken,
+    compute_locator_fingerprint,
 )
 from personal_os.small_file_sync.errors import SmallFileSyncError
 from personal_os.small_file_sync.ports import SmallFileBoundOperation
@@ -203,6 +213,11 @@ def operation_fingerprint_matches(
         and row["declared_media_type"] == preflight.media_type.value
         and row["update_source_id"] == preflight.source_id
         and row["update_base_version_id"] == preflight.base_version_id
+        and locator_fingerprint_persisted(row["locator_fingerprint"], row["normalized_locator"])
+        and locator_fingerprint_persisted(
+            row["locator_fingerprint"],
+            None if preflight.normalized_locator is None else preflight.normalized_locator.value,
+        )
     )
 
 
@@ -221,6 +236,8 @@ _OPERATION_ROW_COLUMNS: Final[tuple[str, ...]] = (
     "reserved_source_id",
     "update_source_id",
     "update_base_version_id",
+    "normalized_locator",
+    "locator_fingerprint",
     "state",
     "safe_error_code",
     "result_kind",
@@ -271,8 +288,17 @@ def operation_insert_statement(
     policy_revision_number: int,
     reserved_source_id: UUID | None,
     expires_at: datetime,
+    normalized_locator: NormalizedLocator | None = None,
+    locator_fingerprint: str | None = None,
 ) -> sa.Insert:
-    """Build the parameter-bound reservation insert of one pending operation."""
+    """Build the parameter-bound reservation insert of one pending operation.
+
+    A create that carries an initial locator binds the row to that locator
+    evidence: ``normalized_locator`` is the transient path and
+    ``locator_fingerprint`` is the retained lowercase SHA-256 digest. Both
+    columns default to NULL so update operations and pre-migration rows
+    remain insertable without evidence.
+    """
     return sa.insert(small_file_upload_operations).values(
         operation_id=operation_id,
         operation_token_hash=operation_token_hash,
@@ -288,6 +314,8 @@ def operation_insert_statement(
         reserved_source_id=reserved_source_id,
         update_source_id=preflight.source_id,
         update_base_version_id=preflight.base_version_id,
+        normalized_locator=(None if normalized_locator is None else normalized_locator.value),
+        locator_fingerprint=locator_fingerprint,
         state=STATE_PENDING,
         expires_at=expires_at,
     )
@@ -318,6 +346,107 @@ def operation_token_rotation_statement(
         )
         .where(small_file_upload_operations.c.operation_id == operation_id)
     )
+
+
+def operation_locator_rotation_statement(
+    *,
+    operation_id: UUID,
+    operation_token_hash: str,
+    expires_at: datetime,
+    policy_revision_number: int,
+    locator_fingerprint: str,
+) -> sa.Update:
+    """Build the guarded rotation that rebinds token, deadline and locator digest.
+
+    A pending re-preflight of a create that already carries an initial
+    locator rotates the token and the deadline without disturbing the
+    retained ``locator_fingerprint`` digest — the locator binding survives
+    the rotation, so the receive-side comparison still finds the same
+    locator authority.
+    """
+
+    return (
+        sa.update(small_file_upload_operations)
+        .values(
+            operation_token_hash=operation_token_hash,
+            expires_at=expires_at,
+            policy_revision_number=policy_revision_number,
+            locator_fingerprint=locator_fingerprint,
+            state=STATE_PENDING,
+            updated_at=sa.text("CURRENT_TIMESTAMP"),
+        )
+        .where(small_file_upload_operations.c.operation_id == operation_id)
+    )
+
+
+def terminal_locator_clear_statement(*, operation_id: UUID) -> sa.Update:
+    """Build the guarded update that clears the raw locator on terminal transition.
+
+    Only the transient ``normalized_locator`` is nulled; the retained
+    ``locator_fingerprint`` digest stays so an exact replay can still
+    confirm the locator identity. The guard admits only the non-terminal
+    states, so a concurrent terminal winner is visible as a zero-row
+    update.
+    """
+
+    return (
+        sa.update(small_file_upload_operations)
+        .values(
+            normalized_locator=None,
+            updated_at=sa.text("CURRENT_TIMESTAMP"),
+        )
+        .where(
+            small_file_upload_operations.c.operation_id == operation_id,
+            small_file_upload_operations.c.state == STATE_PENDING,
+        )
+    )
+
+
+def bound_terminal_locator_clear_statement(*, operation_id: UUID) -> sa.Update:
+    """Build the guarded update that clears the raw locator on a claimed terminal.
+
+    The receive-side counterpart of :func:`terminal_locator_clear_statement`:
+    it admits the ``receiving`` state the bound terminal transition guards
+    on and leaves the retained ``locator_fingerprint`` untouched.
+    """
+
+    return (
+        sa.update(small_file_upload_operations)
+        .values(
+            normalized_locator=None,
+            updated_at=sa.text("CURRENT_TIMESTAMP"),
+        )
+        .where(
+            small_file_upload_operations.c.operation_id == operation_id,
+            small_file_upload_operations.c.state == STATE_RECEIVING,
+        )
+    )
+
+
+def locator_fingerprint_persisted(
+    stored_fingerprint: str | None, candidate_locator: str | None
+) -> bool:
+    """Return whether a stored locator digest matches the locator a binding carries.
+
+    The exact replay comparison is on the locator fingerprint only: a
+    non-null stored digest matches any binding that either carries the
+    locator value (and a digest that hashes to the stored one) or carries
+    no locator (the post-terminal shape that retains only the digest).
+    A null stored digest matches a null candidate locator — the
+    pre-migration shape that never recorded any locator evidence.
+    """
+
+    if stored_fingerprint is None:
+        return candidate_locator is None
+    if candidate_locator is None:
+        return True
+    return compute_locator_fingerprint(NormalizedLocator(candidate_locator)) == stored_fingerprint
+
+
+def operation_locator_fingerprint_column() -> str:
+    """Return the canonical locator-fingerprint column name on the operation row."""
+
+    return "locator_fingerprint"
 
 
 def claimed_policy_revision_update_statement(
@@ -443,6 +572,8 @@ class SmallFileOperationRow:
     reserved_source_id: UUID | None
     update_source_id: UUID | None
     update_base_version_id: UUID | None
+    normalized_locator: str | None
+    locator_fingerprint: str | None
     state: str
     safe_error_code: str | None
     result_kind: str | None
@@ -470,6 +601,8 @@ class SmallFileOperationRow:
             reserved_source_id=row["reserved_source_id"],
             update_source_id=row["update_source_id"],
             update_base_version_id=row["update_base_version_id"],
+            normalized_locator=row["normalized_locator"],
+            locator_fingerprint=row["locator_fingerprint"],
             state=row["state"],
             safe_error_code=row["safe_error_code"],
             result_kind=row["result_kind"],
@@ -598,13 +731,14 @@ def operation_token_lookup_statement(
 
 def _bound_operation_from_row(
     operation_token: UploadOperationToken, row: SmallFileOperationRow
-) -> SmallFileBoundOperation:
-    """Hydrate the receive-side binding of one operation row.
+) -> BoundSmallFileOperation:
+    """Hydrate the receive-side binding of one operation row with locator evidence.
 
     The caller's opaque token — the only place the raw token exists — rides
-    along unchanged; every other member comes from the row. A value the row
-    cannot re-parse (grammar drift) fails closed as the closed
-    upload-state-invalid error, never as raw database evidence.
+    along unchanged; every other member comes from the row. The bound
+    locator and its retained digest are exposed verbatim so the publication
+    service can carry them under its transaction lock; the raw locator is
+    cleared on terminal transition while the digest remains.
     """
     try:
         idempotency_key = SmallFileIdempotencyKey(row.idempotency_key)
@@ -613,7 +747,14 @@ def _bound_operation_from_row(
         declared_media_type = CanonicalMediaType.parse(row.declared_media_type)
     except ValueError:
         raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID) from None
-    return SmallFileBoundOperation(
+    normalized_locator: NormalizedLocator | None = None
+    if row.normalized_locator is not None:
+        try:
+            normalized_locator = NormalizedLocator(row.normalized_locator)
+        except ValueError:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID) from None
+    return BoundSmallFileOperation(
+        operation_id=row.operation_id,
         operation_token=operation_token,
         workspace_id=row.workspace_id,
         device_id=row.device_id,
@@ -627,6 +768,8 @@ def _bound_operation_from_row(
         reserved_source_id=row.reserved_source_id,
         update_source_id=row.update_source_id,
         update_base_version_id=row.update_base_version_id,
+        normalized_locator=normalized_locator,
+        locator_fingerprint=row.locator_fingerprint,
         expires_at=row.expires_at,
         terminal_result=row.terminal_result(),
     )
@@ -652,6 +795,10 @@ def _bound_matches_row(row: SmallFileOperationRow, bound: SmallFileBoundOperatio
         and row.update_source_id == bound.update_source_id
         and row.update_base_version_id == bound.update_base_version_id
         and int(row.policy_revision_number) == bound.policy_revision_number
+        and locator_fingerprint_persisted(
+            row.locator_fingerprint,
+            None if bound.normalized_locator is None else bound.normalized_locator.value,
+        )
     )
 
 
@@ -923,6 +1070,13 @@ class PostgresqlSmallFileUploadOperationStore:
         )
         if guarded.rowcount != 1:
             raise _state_invalid()
+        # Clear the transient raw locator on the bound terminal transition;
+        # the retained digest stays for exact replay. The guard admits only
+        # the receiving state, matching the bound terminal predicate.
+        if row.normalized_locator is not None:
+            await connection.execute(
+                bound_terminal_locator_clear_statement(operation_id=row.operation_id)
+            )
 
     async def _resolve_terminal_result_once(
         self, preflight: SmallFilePreflight, device_context: SmallFileDeviceContext
@@ -967,6 +1121,15 @@ class PostgresqlSmallFileUploadOperationStore:
                     else None
                 )
                 expires_at = compute_upload_operation_expiry(self._clock())
+                # A create binds its preflight locator to the durable row so
+                # the receive binding and the publication guard can carry it
+                # under the locked transaction. An update preflight never
+                # carries a locator; the preflight.normalized_locator is the
+                # authoritative source.
+                initial_locator = preflight.normalized_locator
+                initial_locator_fingerprint: str | None = None
+                if initial_locator is not None:
+                    initial_locator_fingerprint = compute_locator_fingerprint(initial_locator)
                 await connection.execute(
                     operation_insert_statement(
                         operation_id=self._identity_generator(),
@@ -976,6 +1139,8 @@ class PostgresqlSmallFileUploadOperationStore:
                         policy_revision_number=policy_revision_number,
                         reserved_source_id=reserved_source_id,
                         expires_at=expires_at,
+                        normalized_locator=initial_locator,
+                        locator_fingerprint=initial_locator_fingerprint,
                     )
                 )
                 return SmallFileUploadOperation(
@@ -1075,6 +1240,14 @@ class PostgresqlSmallFileUploadOperationStore:
         )
         if guarded.rowcount != 1:
             raise _state_invalid()
+        # Clear the transient raw locator on terminal transition; the retained
+        # digest stays on the row so an exact replay can still confirm the
+        # locator identity. The guard admits only the non-terminal states, so
+        # a concurrent terminal winner is visible as a zero-row update.
+        if row.normalized_locator is not None:
+            await connection.execute(
+                terminal_locator_clear_statement(operation_id=row.operation_id)
+            )
 
     async def _fetch_identity_row(
         self,

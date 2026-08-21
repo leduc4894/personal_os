@@ -10,6 +10,9 @@ import type { App, Plugin } from "obsidian";
 
 import { CONNECTION_STATUS_TEXT, resolveAuthenticationControls } from "./contracts";
 import type { ConnectionState } from "./contracts";
+import type { LifecycleStateCounts, LifecycleBlockedReasonCode } from "../journal/status";
+import { LIFECYCLE_LOCAL_FILE_STATES } from "../journal/lifecycle-contracts";
+import type { LifecycleLocalFileState } from "../journal/lifecycle-contracts";
 
 export interface DeviceAuthenticationSnapshot {
   readonly connectionState: ConnectionState;
@@ -25,6 +28,18 @@ export interface DeviceAuthenticationSnapshot {
   readonly syncStatusText: string | null;
   /** The spec-11 blocker guidance lines, already redacted and closed. */
   readonly syncBlockerGuidance: readonly string[];
+  /**
+   * Task 10 / fix round 1 I1: the redacted lifecycle state histogram. The
+   * map carries ONLY closed enum keys and non-negative integer counts.
+   * `null` when no journal runs on the device.
+   */
+  readonly lifecycleStateCounts: LifecycleStateCounts | null;
+  /** Pending lifecycle event count; zero when no journal runs. */
+  readonly pendingLifecycleEventCount: number;
+  /** Failed-attempt count in the bounded audit ring; zero when no journal runs. */
+  readonly failedAttemptCount: number;
+  /** Closed blocked reason codes observed on the journal; empty when none. */
+  readonly lifecycleBlockedReasonCodes: readonly LifecycleBlockedReasonCode[];
 }
 
 export interface DeviceAuthenticationTabView {
@@ -69,6 +84,17 @@ export class DeviceAuthenticationSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Sync status")
       .setDesc(syncStatusDescription(snapshot));
+
+    // Task 10 / fix round 1 I1: the redacted lifecycle state histogram
+    // reaches the settings tab here. Counts only, closed enum keys, no
+    // path, no source ID, no tombstone id, no fingerprint.
+    new Setting(containerEl)
+      .setName("Lifecycle state")
+      .setDesc(lifecycleStateCountsDescription(snapshot));
+
+    new Setting(containerEl)
+      .setName("Lifecycle blockers")
+      .setDesc(lifecycleBlockedReasonCodesDescription(snapshot));
 
     new Setting(containerEl)
       .setName("Server origin")
@@ -146,3 +172,58 @@ function syncStatusDescription(snapshot: DeviceAuthenticationSnapshot): string {
   }
   return lines.join(" ");
 }
+
+/**
+ * The redacted lifecycle state histogram (Task 10, fix round 1 I1): each
+ * closed enum state plus its count, in the closed enum's declared order.
+ * The rendered text never includes a path, locator, source ID, token,
+ * fingerprint or any other raw value. Returns a single blank line when no
+ * journal runs on the device.
+ */
+function lifecycleStateCountsDescription(snapshot: DeviceAuthenticationSnapshot): string {
+  const counts = snapshot.lifecycleStateCounts;
+  if (counts === null) {
+    return "Journal not running on this device";
+  }
+  const parts: string[] = [];
+  for (const state of LIFECYCLE_LOCAL_FILE_STATES) {
+    const value = counts[state];
+    parts.push(`${LIFECYCLE_STATE_LABEL[state]}: ${value}`);
+  }
+  parts.push(`Pending lifecycle events: ${snapshot.pendingLifecycleEventCount}`);
+  parts.push(`Failed attempts: ${snapshot.failedAttemptCount}`);
+  return parts.join(" · ");
+}
+
+/**
+ * The closed set of lifecycle blocked reason codes (Task 10, fix round 1
+ * I1): each closed enum code on its own line, or a blank line when no
+ * journal runs. Only the closed enum vocabulary surfaces; no row, locator,
+ * source ID, tombstone id or fingerprint ever reaches the description.
+ */
+function lifecycleBlockedReasonCodesDescription(snapshot: DeviceAuthenticationSnapshot): string {
+  const counts = snapshot.lifecycleStateCounts;
+  if (counts === null) {
+    return "Journal not running on this device";
+  }
+  if (snapshot.lifecycleBlockedReasonCodes.length === 0) {
+    return "No lifecycle blockers observed";
+  }
+  return [...snapshot.lifecycleBlockedReasonCodes].join(", ");
+}
+
+/**
+ * The closed vocab-to-display mapping of {@link LifecycleLocalFileState}.
+ * The closed enum is the only source of labels; the plugin never renders
+ * any path, locator, source ID, tombstone id or fingerprint.
+ */
+const LIFECYCLE_STATE_LABEL: Readonly<Record<LifecycleLocalFileState, string>> = {
+  active: "Active",
+  rename_pending: "Rename pending",
+  move_pending: "Move pending",
+  delete_pending: "Delete pending",
+  restore_pending: "Restore pending",
+  tombstoned: "Tombstoned",
+  restored: "Restored",
+  reconcile_required: "Reconcile required",
+};

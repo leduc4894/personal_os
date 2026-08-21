@@ -45,6 +45,7 @@ from personal_os.small_file_sync.contracts import (
     SmallFilePreflight,
     SmallFileTerminalResult,
     SmallFileTerminalResultKind,
+    compute_locator_fingerprint,
 )
 from personal_os.small_file_sync.errors import SmallFileSyncError
 from postgresql_source_store.small_file_sync_operations import (
@@ -159,6 +160,8 @@ class SmallFileOperationHarness:
             small_file_upload_operations.c.reserved_source_id,
             small_file_upload_operations.c.update_source_id,
             small_file_upload_operations.c.update_base_version_id,
+            small_file_upload_operations.c.normalized_locator,
+            small_file_upload_operations.c.locator_fingerprint,
             small_file_upload_operations.c.state,
             small_file_upload_operations.c.safe_error_code,
             small_file_upload_operations.c.result_kind,
@@ -543,6 +546,115 @@ async def test_create_reservation_inserts_no_sources_row(
 
     assert operation.reserved_source_id is not None
     assert await harness.sources_row_count(operation.reserved_source_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_create_reservation_persists_initial_locator_evidence(
+    small_file_harness: SmallFileOperationHarness, seeded_workspace: object
+) -> None:
+    """A create binds the preflight locator to the row and its retained digest."""
+
+    harness = small_file_harness
+    preflight, operation = await _reserve_created_operation(harness, seeded_workspace)
+    digest = compute_locator_fingerprint(preflight.normalized_locator)
+
+    row = await harness.operation_row(preflight.event_id)
+    assert row is not None
+    assert row["normalized_locator"] == preflight.normalized_locator.value
+    assert row["locator_fingerprint"] == digest
+    assert operation.reserved_source_id is not None
+
+
+@pytest.mark.asyncio
+async def test_update_reservation_records_no_locator_evidence(
+    small_file_harness: SmallFileOperationHarness, seeded_workspace: object
+) -> None:
+    """Update rows leave the locator columns NULL — they never carried one."""
+
+    harness = small_file_harness
+    source_id = uuid4()
+    base_version_id = uuid4()
+    preflight = harness.preflight(
+        operation=SmallFileOperation.UPDATE, source_id=source_id, base_version_id=base_version_id
+    )
+    await harness.store.reserve_operation(
+        preflight,
+        harness.device_context(seeded_workspace),
+        harness.policy_binding(harness.device_context(seeded_workspace)),
+        _context(),
+    )
+
+    row = await harness.operation_row(preflight.event_id)
+    assert row is not None
+    assert row["normalized_locator"] is None
+    assert row["locator_fingerprint"] is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_transition_clears_raw_locator_and_keeps_digest(
+    small_file_harness: SmallFileOperationHarness, seeded_workspace: object
+) -> None:
+    """The terminal state retains the digest while nulling the raw locator."""
+
+    harness = small_file_harness
+    preflight, operation = await _reserve_created_operation(harness, seeded_workspace)
+    assert operation.reserved_source_id is not None
+    result = _terminal_result(source_id=operation.reserved_source_id)
+    await harness.store.record_terminal_result(operation, result, _context())
+
+    row = await harness.operation_row(preflight.event_id)
+    assert row is not None
+    assert row["state"] == "committed"
+    assert row["normalized_locator"] is None
+    assert row["locator_fingerprint"] == compute_locator_fingerprint(preflight.normalized_locator)
+
+
+@pytest.mark.asyncio
+async def test_pre_migration_null_locator_rows_remain_readable(
+    small_file_harness: SmallFileOperationHarness, seeded_workspace: object
+) -> None:
+    """A pre-migration row with NULL locator columns reads back without error."""
+
+    harness = small_file_harness
+    preflight, operation = await _reserve_created_operation(harness, seeded_workspace)
+    assert operation.reserved_source_id is not None
+
+    # Null out the locator columns as a pre-migration row would carry them.
+    async with harness.engine.begin() as connection:
+        await connection.execute(
+            sa.update(small_file_upload_operations)
+            .values(normalized_locator=None, locator_fingerprint=None)
+            .where(small_file_upload_operations.c.event_id == preflight.event_id)
+        )
+
+    row = await harness.operation_row(preflight.event_id)
+    assert row is not None
+    assert row["normalized_locator"] is None
+    assert row["locator_fingerprint"] is None
+
+    # The bound operation still resolves: a pre-migration row hydrates without
+    # the locator or its digest, so the receive binding carries the canonical
+    # post-terminal shape — both locator fields are null, every immutable
+    # identity field stays populated so the row stays readable for replay.
+    bound = await harness.store.resolve_bound_operation(
+        operation.operation_token,
+        harness.device_context(seeded_workspace),
+        _context(),
+    )
+    assert bound.normalized_locator is None
+    assert bound.locator_fingerprint is None
+    assert bound.operation_id == operation.operation_id
+    assert bound.workspace_id == harness.device_context(seeded_workspace).workspace_id
+    assert bound.device_id == harness.device_context(seeded_workspace).device_id
+    assert bound.event_id == preflight.event_id
+    assert bound.idempotency_key == SmallFileIdempotencyKey(preflight.idempotency_key.value)
+    assert bound.operation is SmallFileOperation.CREATE
+    assert bound.declared_sha256 == preflight.sha256
+    assert bound.declared_size_bytes == preflight.size_bytes
+    assert bound.declared_media_type == preflight.media_type
+    assert bound.policy_revision_number == preflight.policy_revision_number
+    assert bound.reserved_source_id == operation.reserved_source_id
+    assert bound.terminal_result is None
 
 
 @pytest.mark.asyncio

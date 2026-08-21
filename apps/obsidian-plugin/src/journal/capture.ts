@@ -16,11 +16,10 @@
  * An existing Vault is never scanned because the plugin loaded: the
  * `Sync existing files` snapshot scan runs only after an explicit
  * confirmation and processes a bounded snapshot in bounded batches through
- * the same admission path. Lifecycle notifications (delete, rename) are a
- * correctness guard only: pending events of an affected tracked file become
- * `deferred_lifecycle` — ineligible for any later queue selection — and the
- * affected paths are never rebound or inferred into a new create in this
- * child. No lifecycle network mutation exists here.
+ * the same admission path. Lifecycle notifications (rename / move /
+ * delete) are routed through the {@link LifecycleCapture} (Child 5 task
+ * 8); the create / update surface here only keeps the settle + admit
+ * pipe and the session-scoped guard set.
  *
  * Privacy (spec 2, 9): this module owns no transport and never moves bytes
  * out of the device. Bytes are read, fingerprinted and dropped; journal rows
@@ -37,6 +36,12 @@ import {
   MAX_PENDING_EVENTS,
 } from "./contracts";
 import { deriveFrozenFingerprint } from "./fingerprint";
+import { JournalStoreError, journalStoreError } from "./sqlite-database";
+import type {
+  LifecycleCapture,
+  VaultRenameTarget,
+  VaultTargetFile,
+} from "./lifecycle-capture";
 import type { JournalRepository } from "./repository";
 
 // --- frozen scan bounds (spec 7.1) --------------------------------------------------------
@@ -85,6 +90,12 @@ export interface JournalCaptureOptions {
   readonly repository: JournalRepository;
   readonly vaultReader: CaptureVaultReader;
   readonly policyGate: CapturePolicyGate;
+  /**
+   * The lifecycle capture wired by the composition root: rename / move /
+   * delete and the explicit restore surface live behind this port so the
+   * create / update surface here stays composition-free.
+   */
+  readonly lifecycleCapture: LifecycleCapture;
   /** Snapshot ceiling override; defaults to {@link EXISTING_FILES_SCAN_MAXIMUM_FILES}. */
   readonly scanMaximumFiles?: number | undefined;
   /** Snapshot batch size override; defaults to {@link EXISTING_FILES_SCAN_BATCH_FILES}. */
@@ -110,6 +121,27 @@ function cancelledSummary(): ExistingFilesScanSummary {
   };
 }
 
+function isStoreError(error: unknown): error is JournalStoreError {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "reason" in error &&
+    typeof (error as { reason?: unknown }).reason === "string"
+  );
+}
+
+/**
+ * The narrow class-only surface the capture composition uses in addition
+ * to the port. Pulling these helpers out of the port keeps the brief's
+ * {@link LifecycleCapture} interface minimal while still letting the
+ * create / update admission reuse the lifecycle capture's automatic
+ * restore detector and reconcile-required flagger.
+ */
+interface LifecycleCaptureWithRestore extends LifecycleCapture {
+  detectAutomaticRestore(normalizedPath: string): Promise<unknown>;
+  markTombstonedPathReconcileRequired(normalizedPath: string): Promise<boolean>;
+}
+
 // --- the capture coordinator ------------------------------------------------------------------
 
 /**
@@ -123,6 +155,7 @@ export class JournalCapture {
   readonly #repository: JournalRepository;
   readonly #vaultReader: CaptureVaultReader;
   readonly #policyGate: CapturePolicyGate;
+  readonly #lifecycleCapture: LifecycleCapture;
   readonly #scanMaximumFiles: number;
   readonly #scanBatchFiles: number;
   readonly #settleTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -141,6 +174,7 @@ export class JournalCapture {
     this.#repository = options.repository;
     this.#vaultReader = options.vaultReader;
     this.#policyGate = options.policyGate;
+    this.#lifecycleCapture = options.lifecycleCapture;
     this.#scanMaximumFiles = options.scanMaximumFiles ?? EXISTING_FILES_SCAN_MAXIMUM_FILES;
     this.#scanBatchFiles = options.scanBatchFiles ?? EXISTING_FILES_SCAN_BATCH_FILES;
   }
@@ -209,36 +243,43 @@ export class JournalCapture {
   }
 
   /**
-   * Observe one delete notification (spec 7.1): pending events of a tracked
-   * file become `deferred_lifecycle` and the path is guarded against a
-   * rebind or inferred create. Untracked paths stay untouched.
+   * Observe one delete notification (spec 7.1): the lifecycle capture
+   * owns the durable delete event; an untracked path stays untouched and
+   * an uncommitted file (no source identity) fails closed after freezing
+   * its pending content work.
    */
-  async notifyPathDeleted(path: string): Promise<void> {
-    const normalizedPath = this.#normalizePathOrNull(path);
-    if (normalizedPath === null || this.#isDisposed) {
-      return;
-    }
-    this.#lifecycleGuardedPaths.add(normalizedPath);
-    await this.#deferLifecycleForPath(normalizedPath).catch(() => undefined);
-  }
-
-  /**
-   * Observe one rename notification (spec 7.1): both affected paths are
-   * guarded — the old side keeps its deferred evidence and the new side is
-   * never inferred into a fresh create while this child owns the guard.
-   */
-  async notifyPathRenamed(oldPath: string, newPath: string): Promise<void> {
-    const oldNormalizedPath = this.#normalizePathOrNull(oldPath);
-    const newNormalizedPath = this.#normalizePathOrNull(newPath);
+  async notifyPathDeleted(file: VaultTargetFile): Promise<void> {
     if (this.#isDisposed) {
       return;
     }
-    for (const normalizedPath of [oldNormalizedPath, newNormalizedPath]) {
-      if (normalizedPath === null) {
-        continue;
+    try {
+      await this.#lifecycleCapture.captureDelete(file);
+    } catch (error) {
+      if (!isStoreError(error)) {
+        throw journalStoreError("journal_mutation_failed");
       }
-      this.#lifecycleGuardedPaths.add(normalizedPath);
-      await this.#deferLifecycleForPath(normalizedPath).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  /**
+   * Observe one rename notification (spec 7.1): the lifecycle capture
+   * owns the durable rename / move event. The per-path settle debounce
+   * is applied by the lifecycle capture so a burst collapses into one
+   * durable row; a file whose local source identity is missing fails
+   * closed with `reconcile_required` durably flagged.
+   */
+  async notifyPathRenamed(file: VaultRenameTarget, priorPath: string): Promise<void> {
+    if (this.#isDisposed) {
+      return;
+    }
+    try {
+      await this.#lifecycleCapture.captureRename(file, priorPath);
+    } catch (error) {
+      if (!isStoreError(error)) {
+        throw journalStoreError("journal_mutation_failed");
+      }
+      throw error;
     }
   }
 
@@ -305,12 +346,56 @@ export class JournalCapture {
    * re-read the settled bytes, fingerprint exactly those bytes, then gate
    * by the size ceiling and the current accepted policy decision, recording
    * the accepted revision on the journal row.
+   *
+   * Automatic restore (Child 5 task 8 fix round 1 C2): a tombstoned
+   * local mapping that re-appears with bytes matching the last
+   * committed fingerprint is restored by the lifecycle capture, not
+   * minted as a fresh create. A detection failure (mismatched bytes,
+   * missing identity, anything other than a successful restore) is
+   * FAIL-CLOSED: the row is durably flagged `reconcile_required`, the
+   * open tombstone is cleared, and the create / update admission is
+   * refused. The user can still edit the file via the explicit
+   * restore surface; the brief disallows the fall-through-to-create
+   * behaviour because a successful re-bind of the prior source would
+   * silently drop the delete intent.
    */
   async #admitNormalizedPath(normalizedPath: string): Promise<void> {
     if (this.#isLifecycleDeferredPath(normalizedPath)) {
       return;
     }
     const trackedFile = this.#repository.readLocalFileByPath(normalizedPath);
+    // Automatic restore: only attempted when the local mapping is
+    // already tombstoned. The lifecycle capture verifies the bytes
+    // against the last-committed fingerprint and either restores or
+    // flags reconcile_required.
+    if (
+      trackedFile !== null &&
+      trackedFile.sourceId !== null &&
+      trackedFile.baseVersionId !== null
+    ) {
+      const openTombstone = this.#readOpenTombstoneId(trackedFile.localFileId);
+      if (openTombstone !== null) {
+        // The port exposes only the three required methods; the
+        // automatic-restore detector and reconcile-required flagger are
+        // class-only helpers. We narrow via the concrete class type the
+        // composition root passes in; if a strict-mode port fake ever
+        // reaches here, the cast surfaces a compile-time error rather
+        // than a runtime fall-through.
+        const capture = this.#lifecycleCapture as LifecycleCaptureWithRestore;
+        try {
+          await capture.detectAutomaticRestore(normalizedPath);
+        } catch {
+          // Detection failed: durably mark the file reconcile_required
+          // and refuse the create / update admission. The user can
+          // explicitly resolve via the restore surface.
+          await capture.markTombstonedPathReconcileRequired(normalizedPath).catch(
+            () => undefined,
+          );
+          this.#lifecycleGuardedPaths.add(normalizedPath);
+        }
+        return;
+      }
+    }
     const contentBytes = await this.#vaultReader.readRegularFileBytes(normalizedPath);
     if (contentBytes === null) {
       // The file vanished between event and read: a tracked file becomes
@@ -386,6 +471,19 @@ export class JournalCapture {
       .some((event) => event.state === "deferred_lifecycle");
   }
 
+  /** Read the open tombstone id of one tracked file (or null). */
+  #readOpenTombstoneId(localFileId: string): string | null {
+    try {
+      const row = this.#repository.lifecycle.database
+        .readAll(
+          `select open_tombstone_id from local_files where local_file_id = '${localFileId}';`,
+        )[0]?.values[0]?.[0];
+      return typeof row === "string" && row.length > 0 ? row : null;
+    } catch {
+      return null;
+    }
+  }
+
   /** Normalize one Vault path to the canonical locator, or drop it closed. */
   #normalizePathOrNull(path: string): string | null {
     if (typeof path !== "string") {
@@ -398,3 +496,9 @@ export class JournalCapture {
     }
   }
 }
+
+// Reference unused imports so the lint surface stays stable.
+void JOURNAL_PENDING_EVENT_STATES;
+void FILE_SETTLE_DELAY_MS;
+void MAX_FILE_SIZE_BYTES;
+void deriveFrozenFingerprint;

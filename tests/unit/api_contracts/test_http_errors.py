@@ -104,6 +104,16 @@ def test_http_status_map_is_closed_for_the_api_surface() -> None:
         ErrorCode.SMALL_FILE_SIZE_LIMIT_EXCEEDED: 422,
         ErrorCode.SMALL_FILE_CONTENT_INTEGRITY_FAILED: 422,
         ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID: 409,
+        # Source lifecycle exposes only this closed status mapping: input and
+        # missing-locator failures are 400, missing tombstones are 404,
+        # conflicts are 409 and ambiguous commit recovery is 503.
+        ErrorCode.SOURCE_LIFECYCLE_INPUT_INVALID: 400,
+        ErrorCode.SOURCE_LOCATOR_MISSING: 400,
+        ErrorCode.SOURCE_LOCATOR_CONFLICT: 409,
+        ErrorCode.SOURCE_TOMBSTONE_NOT_FOUND: 404,
+        ErrorCode.SOURCE_TOMBSTONE_CLOSED: 409,
+        ErrorCode.SOURCE_LIFECYCLE_VERSION_CONFLICT: 409,
+        ErrorCode.SOURCE_LIFECYCLE_COMMIT_OUTCOME_UNKNOWN: 503,
     }
 
 

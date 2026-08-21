@@ -59,6 +59,7 @@ ROUTE_OPERATION_IDS: dict[str, dict[str, str]] = {
     "/api/sync/exclusion-policy/snapshot": {"get": "getExclusionPolicySnapshot"},
     "/api/sync/journal-events/preflight": {"post": "preflightJournalEventUpload"},
     "/api/uploads/{operation_id}/content": {"put": "uploadSmallFileContent"},
+    "/api/sources/lifecycle-events": {"post": "commitSourceLifecycleEvent"},
 }
 
 #: Component schema names emitted for every frozen ``extra="forbid"`` model.

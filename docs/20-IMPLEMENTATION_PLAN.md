@@ -153,6 +153,17 @@ section 17). Trạng thái từng child:
   verification records (Desktop + Mobile) còn blocking — xem handoff. Deliverable
   6 đóng; các deliverable Vault-sync (2–5, 7) và projection consumers của
   policy-transition intents thuộc child sau.
+- Child 5 `source-locator-and-tombstone-lifecycle-design.md` — **BLOCKED
+  acceptance (2026-08-21)**: schema/domain/PostgreSQL/API/plugin lifecycle
+  implementation và automated gates are delivered, nhưng real Desktop WDIO
+  journey chưa PASS. Desktop PASS vẫn là gate bắt buộc. Mobile có thể PASS
+  hoặc được ghi `DEFERRED` chỉ khi living record nêu lý do, trỏ tới đúng source
+  handoff, có đúng một dòng `BACKLOG.md`, và `Implement by` là mốc kiểm chứng
+  được. Mobile hiện đã đóng theo contract deferral đó; vì Desktop vẫn chưa
+  PASS nên Child 5 chưa đóng và Child 6 chưa được bắt đầu. Plan:
+  `docs/superpowers/plans/2026-08-20-source-locator-and-tombstone-lifecycle.md`;
+  runbook: `docs/operations/source-locator-tombstone-lifecycle.md`; handoff:
+  `docs/handoff/2026-08-20-source-locator-and-tombstone-lifecycle.md`.
 
 Deliverables:
 

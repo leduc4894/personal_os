@@ -55,6 +55,19 @@ Transaction retry bị chặn ở tối đa 3 attempts, chỉ áp dụng cho dea
 
 Object upload xảy ra trước transaction; orphan object được GC sau grace period nếu transaction không commit.
 
+### Commit source lifecycle event
+
+Lifecycle commit khóa idempotency identity, source, các locator theo thứ tự
+canonical và tombstone liên quan trong một transaction. `source_locators` là
+lịch sử locator có khoảng mở/đóng; tại một thời điểm mỗi source chỉ có một
+locator mở và mỗi workspace chỉ có một owner cho locator mở.
+`source_tombstones` giữ retained version cùng delete/restore lineage. Rename,
+move, delete và restore không insert `source_versions` và không đổi
+`sources.current_version_id`. Transaction ghi lifecycle event, audit và
+projection intents cùng canonical mutation; policy deny/indeterminate vẫn ghi
+trạng thái thật nhưng chọn projection delete. Exact replay trả receipt cũ và
+không tạo thêm row.
+
 ### Activate projection
 
 Trong một transaction: verify deployment state/checkpoint/contract, compare route revision, swap target, increment revision và ghi audit event.

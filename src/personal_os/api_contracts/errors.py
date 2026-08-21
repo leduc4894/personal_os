@@ -63,6 +63,17 @@ _APPROVED_HTTP_STATUS_CODES: Final[frozenset[ErrorCode]] = frozenset(
         ErrorCode.SMALL_FILE_SIZE_LIMIT_EXCEEDED,
         ErrorCode.SMALL_FILE_CONTENT_INTEGRITY_FAILED,
         ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID,
+        # The source lifecycle block of the lifecycle API (spec 19.2): 400 for
+        # validation and missing-locator, 404 for tombstone-not-found, 409 for
+        # locator-conflict, tombstone-closed and version-conflict, 503 for the
+        # ambiguous-commit recovery path.
+        ErrorCode.SOURCE_LIFECYCLE_INPUT_INVALID,
+        ErrorCode.SOURCE_LOCATOR_MISSING,
+        ErrorCode.SOURCE_LOCATOR_CONFLICT,
+        ErrorCode.SOURCE_TOMBSTONE_NOT_FOUND,
+        ErrorCode.SOURCE_TOMBSTONE_CLOSED,
+        ErrorCode.SOURCE_LIFECYCLE_VERSION_CONFLICT,
+        ErrorCode.SOURCE_LIFECYCLE_COMMIT_OUTCOME_UNKNOWN,
     }
 )
 
@@ -142,6 +153,16 @@ HTTP_ERROR_STATUSES: Final[Mapping[ErrorCode, int]] = MappingProxyType(
             ErrorCode.SMALL_FILE_SIZE_LIMIT_EXCEEDED: 422,
             ErrorCode.SMALL_FILE_CONTENT_INTEGRITY_FAILED: 422,
             ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID: 409,
+            # The source lifecycle status column (spec 19.2): 400 for validation
+            # and missing-locator, 404 for tombstone-not-found, 409 for the three
+            # conflict verdicts and 503 for the ambiguous-commit recovery.
+            ErrorCode.SOURCE_LIFECYCLE_INPUT_INVALID: 400,
+            ErrorCode.SOURCE_LOCATOR_MISSING: 400,
+            ErrorCode.SOURCE_LOCATOR_CONFLICT: 409,
+            ErrorCode.SOURCE_TOMBSTONE_NOT_FOUND: 404,
+            ErrorCode.SOURCE_TOMBSTONE_CLOSED: 409,
+            ErrorCode.SOURCE_LIFECYCLE_VERSION_CONFLICT: 409,
+            ErrorCode.SOURCE_LIFECYCLE_COMMIT_OUTCOME_UNKNOWN: 503,
         }
     )
 )

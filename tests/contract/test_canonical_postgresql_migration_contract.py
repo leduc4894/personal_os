@@ -32,6 +32,7 @@ BASELINE_REVISION: str = "20260813_01"
 AUTHENTICATION_REVISION: str = "20260816_01"
 POLICY_REVISION: str = "20260817_01"
 SMALL_FILE_REVISION: str = "20260818_01"
+SOURCE_LIFECYCLE_REVISION: str = "20260820_01"
 SCHEMA_NAME: str = "knowledge"
 
 EXPECTED_TABLES_IN_CREATION_ORDER: tuple[str, ...] = (
@@ -579,13 +580,13 @@ def _script_directory() -> ScriptDirectory:
 
 def test_alembic_graph_has_exactly_one_head_revision() -> None:
     script_directory = _script_directory()
-    assert script_directory.get_heads() == [SMALL_FILE_REVISION]
+    assert script_directory.get_heads() == [SOURCE_LIFECYCLE_REVISION]
 
 
 def test_baseline_revision_is_the_single_graph_root() -> None:
     script_directory = _script_directory()
     revisions = list(script_directory.walk_revisions())
-    assert len(revisions) == 4
+    assert len(revisions) == 5
     revision = script_directory.get_revision(BASELINE_REVISION)
     assert revision is not None
     assert revision.down_revision is None
@@ -607,6 +608,11 @@ def test_baseline_revision_is_the_single_graph_root() -> None:
     assert small_file.down_revision == POLICY_REVISION
     assert not small_file.branch_labels
     assert small_file.dependencies is None
+    lifecycle = script_directory.get_revision(SOURCE_LIFECYCLE_REVISION)
+    assert lifecycle is not None
+    assert lifecycle.down_revision == SMALL_FILE_REVISION
+    assert not lifecycle.branch_labels
+    assert lifecycle.dependencies is None
 
 
 def test_alembic_graph_loads_without_database_settings_or_secrets() -> None:
@@ -617,7 +623,7 @@ def test_alembic_graph_loads_without_database_settings_or_secrets() -> None:
             removed[key] = os.environ.pop(key)
     try:
         script_directory = _script_directory()
-        assert script_directory.get_heads() == [SMALL_FILE_REVISION]
+        assert script_directory.get_heads() == [SOURCE_LIFECYCLE_REVISION]
     finally:
         os.environ.update(removed)
 

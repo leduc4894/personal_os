@@ -27,6 +27,7 @@ from api_runtime.application import create_api_application
 from api_runtime.authentication_composition import compose_offline_web_authentication
 from api_runtime.exclusion_policy_composition import compose_offline_exclusion_policy
 from api_runtime.small_file_sync_composition import compose_offline_small_file_sync
+from api_runtime.source_lifecycle_composition import compose_offline_source_lifecycle
 from personal_os.runtime_configuration.models import RuntimeEnvironment
 
 _EXIT_INTERNAL_FAILURE: Final[int] = 70
@@ -60,6 +61,7 @@ def create_contract_application() -> FastAPI:
         web_authentication=compose_offline_web_authentication(),
         exclusion_policy=compose_offline_exclusion_policy(),
         small_file_sync=compose_offline_small_file_sync(),
+        source_lifecycle=compose_offline_source_lifecycle(),
     )
 
 

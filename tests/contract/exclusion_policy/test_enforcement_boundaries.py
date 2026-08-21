@@ -13,6 +13,7 @@ scanner proves the scanner detects real violations.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 from typing import Final
 
@@ -60,6 +61,10 @@ def leak_decision() -> dict[str, object]:
     return {"policy_decision": "evidence"}
 '''
 
+_INTERNAL_POLICY_DECISION_IDENTIFIER: Final[re.Pattern[str]] = re.compile(
+    r"\b(?:PolicyDecision|policy_decision)\b"
+)
+
 
 def _import_roots(tree: ast.Module) -> set[str]:
     roots: set[str] = set()
@@ -94,6 +99,7 @@ def _call_names(node: ast.AST) -> list[str]:
 def test_scanner_detects_a_violating_module() -> None:
     tree = ast.parse(_VIOLATING_MODULE_SOURCE)
     assert FORBIDDEN_IMPORT_ROOTS & _import_roots(tree) == {"sqlalchemy", "fastapi"}
+    assert _INTERNAL_POLICY_DECISION_IDENTIFIER.search(_VIOLATING_MODULE_SOURCE) is not None
 
 
 def test_domain_enforcement_imports_no_infrastructure() -> None:
@@ -109,7 +115,7 @@ def test_policy_decision_never_surfaces_in_the_api_runtime() -> None:
     offenders: list[str] = []
     for path in sorted(API_RUNTIME_ROOT.rglob("*.py")):
         source = path.read_text(encoding="utf-8")
-        if "PolicyDecision" in source or "policy_decision" in source:
+        if _INTERNAL_POLICY_DECISION_IDENTIFIER.search(source) is not None:
             offenders.append(path.name)
     assert not offenders, (
         "the internal PolicyDecision evidence must never cross into the API runtime: "

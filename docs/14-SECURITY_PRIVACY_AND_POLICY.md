@@ -37,6 +37,14 @@ Phase 2 exclusion là deny-only với default allow. Missing active revision, mi
 
 Child 3 (exclusion-policy publication, 2026-08-17) đã triển khai: publication là immutable revision duy nhất thay đổi policy — không có in-place edit/delete, rollback là publish một revision mới; signing key Ed25519 nằm trong secret-file boundary và không thuộc database backup. Operator contract (initial trust, preview/publish, key rotation, degraded states, recovery limits): `docs/operations/exclusion-policy-publication.md`.
 
+Lifecycle locator là dữ liệu nhạy cảm. Raw locator chỉ được đi qua request đã
+xác thực, journal local và transaction PostgreSQL; không được xuất hiện trong
+log, metric, trace, safe error, device record hoặc handoff. Audit chỉ giữ opaque
+identity, closed action/result và safe diff digest. Policy deny hoặc
+indeterminate không được làm sai lệch rename/move/delete/restore đã xảy ra:
+canonical transition vẫn commit, còn projection intents là `delete` để dữ liệu
+không tiếp tục được index.
+
 ## 6. Prompt injection defense
 
 - Source text luôn được đóng khung là untrusted data.
@@ -73,7 +81,7 @@ Approval bind proposal hash, source ID, base version, user và expiry. Nếu bas
 - R2 production và test/CI buckets đều private, dùng credentials riêng chỉ có Object Read & Write trên đúng bucket và không có quyền chéo.
 - R2 credentials nằm trong secret files/manager; không dùng `.env`, CLI arguments hoặc committed configuration.
 - Application không có quyền tạo/xóa bucket, đổi lifecycle, public access hoặc bucket policy.
-- Presigned URL là bearer credential, chỉ được bật bởi owning API spec với exact operation, object key và bounded expiry.
+- Presigned URL là credential trao quyền theo possession, chỉ được bật bởi owning API spec với exact operation, object key và bounded expiry.
 - R2 dependency failure fail closed sau bounded retry; không có object-store fallback, dual-write hoặc automatic failover.
 - Admin operational UIs đi qua VPN/SSH tunnel hoặc authenticated proxy.
 - Host-to-host observability traffic dùng private network và authenticated OTLP/scrape boundary.

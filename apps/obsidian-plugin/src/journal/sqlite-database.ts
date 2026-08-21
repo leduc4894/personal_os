@@ -27,8 +27,34 @@ import type { JournalMeta, JournalRecoveryState } from "./contracts";
  * The journal logical schema version this build writes and understands.
  * Version 2 added the `local_files`, `journal_events` and `journal_attempts`
  * records of spec 6.3 on top of the version-1 `journal_meta` skeleton.
+ *
+ * Version 3 (Child 5) extends the durable journal with lifecycle records
+ * for `rename`, `move`, `delete` and `restore` operations: the
+ * `lifecycle_event_operands` keyed extension table, the
+ * `last_locator`/`open_tombstone_id`/`lifecycle_state` columns on
+ * `local_files` and the closed `LIFECYCLE_JOURNAL_OPERATIONS` enum on
+ * `journal_events.operation`. The migration is deterministic and runs
+ * inside a single transaction; no child-4 row is lost.
+ *
+ * Version 4 (fix round 1) adds the `last_committed_sha256` /
+ * `last_committed_size_bytes` / `last_committed_media_type` columns on
+ * `local_files` so the lifecycle capture can verify a restore eligibility
+ * against the bytes that the server last committed, not the bytes the
+ * device most recently observed. The new columns are nullable; every
+ * Child 5 row reads back with `last_committed_* = null` until the first
+ * committed receipt lands.
+ *
+ * Version 5 (task 9 fix round 1 I1) adds the
+ * `server_receipt_tombstone_id` column on `lifecycle_event_operands` so
+ * the durable record of one committed `delete` carries the tombstone id
+ * the server returned on the wire — the same id the follow-up `restore`
+ * sends back. The restore driver is now guaranteed to read the
+ * server-confirmed tombstone id from the predecessor's persisted
+ * receipt, never from a locally-derived guess. The column is nullable;
+ * every v4 row reads back with `server_receipt_tombstone_id = null`
+ * until the first delete commits.
  */
-export const JOURNAL_SCHEMA_VERSION = 2;
+export const JOURNAL_SCHEMA_VERSION = 5;
 
 // --- closed failure reasons ---------------------------------------------------------------
 
@@ -125,6 +151,18 @@ create table if not exists journal_meta (
  * identity (never a canonical locator), the normalized current path, the
  * nullable server `source_id`, the observed fingerprint, the last committed
  * base version and the policy revision of the observation.
+ *
+ * The Child 5 lifecycle extension appends the last known locator, the open
+ * tombstone id (when the source has been tombstoned but not yet restored)
+ * and the closed `lifecycle_state`. Existing rows from a child-4 image
+ * read back with `last_locator = null`, `open_tombstone_id = null` and
+ * `lifecycle_state = 'active'`.
+ *
+ * Version 4 adds the `last_committed_*` triple of columns. The triple is
+ * written ONLY by `recordCommittedReceipt` and `recordNoChangeReceipt` so
+ * the lifecycle capture can verify a restore eligibility against the
+ * bytes the server last committed — never against the mutable
+ * `observed_fingerprint` that a fresh capture may have overwritten.
  */
 const LOCAL_FILES_DDL = `
 create table if not exists local_files (
@@ -135,7 +173,16 @@ create table if not exists local_files (
   observed_size_bytes integer not null check (observed_size_bytes >= 0),
   observed_media_type text not null,
   base_version_id text,
-  policy_revision integer not null check (policy_revision >= 0)
+  policy_revision integer not null check (policy_revision >= 0),
+  last_locator text,
+  open_tombstone_id text,
+  lifecycle_state text not null default 'active'
+    check (lifecycle_state in ('active', 'rename_pending', 'move_pending',
+      'delete_pending', 'restore_pending', 'tombstoned', 'restored',
+      'reconcile_required')),
+  last_committed_sha256 text,
+  last_committed_size_bytes integer check (last_committed_size_bytes >= 0),
+  last_committed_media_type text
 );
 `;
 
@@ -143,13 +190,20 @@ create table if not exists local_files (
  * The durable create/update intent of spec 6.3/7.2, including the freeze
  * marker that makes the fingerprint immutable from the moment preflight
  * starts — a later save then needs a successor event, never an update.
+ *
+ * The Child 5 lifecycle extension broadens `operation` to also admit the
+ * four closed lifecycle tokens (`rename`, `move`, `delete`, `restore`).
+ * Lifecycle events reuse the same freeze marker: once preflight starts the
+ * operands and the fingerprint never change, and a later lifecycle
+ * mutation becomes a successor event (no lifecycle coalescing).
  */
 const JOURNAL_EVENTS_DDL = `
 create table if not exists journal_events (
   event_id text primary key,
   local_file_id text not null references local_files (local_file_id),
   idempotency_key text not null unique,
-  operation text not null check (operation in ('create', 'update')),
+  operation text not null check (operation in ('create', 'update',
+    'rename', 'move', 'delete', 'restore')),
   sha256 text not null,
   size_bytes integer not null check (size_bytes >= 0),
   media_type text not null,
@@ -186,12 +240,56 @@ create index if not exists journal_attempts_event_idx
   on journal_attempts (event_id, attempt_ordinal);
 `;
 
+/**
+ * The Child 5 lifecycle operands keyed extension: every journal_events row
+ * whose operation is a lifecycle token (`rename`, `move`, `delete`,
+ * `restore`) carries exactly one `lifecycle_event_operands` row with the
+ * `source_id`, the expected version id, the nullable expected / target
+ * locator pointers, the nullable tombstone id, the policy revision under
+ * which the decision was taken and the ordered predecessor event id when
+ * one exists. Content events do not have a row here; the keyed extension
+ * is the single source of truth for lifecycle operands.
+ */
+const LIFECYCLE_EVENT_OPERANDS_DDL = `
+create table if not exists lifecycle_event_operands (
+  event_id text primary key references journal_events (event_id),
+  source_id text not null,
+  expected_version_id text not null,
+  expected_locator text,
+  target_locator text,
+  tombstone_id text,
+  policy_revision integer not null check (policy_revision >= 1),
+  predecessor_event_id text references journal_events (event_id),
+  server_receipt_tombstone_id text
+);
+create index if not exists lifecycle_operands_predecessor_idx
+  on lifecycle_event_operands (predecessor_event_id);
+`;
+
 const JOURNAL_SCHEMA_DDL = [
   JOURNAL_META_DDL,
   LOCAL_FILES_DDL,
   JOURNAL_EVENTS_DDL,
   JOURNAL_ATTEMPTS_DDL,
+  LIFECYCLE_EVENT_OPERANDS_DDL,
 ].join("");
+
+/**
+ * The Child 4 schema version (2). The Child 4 → Child 5 migration
+ * function lives in `lifecycle-contracts.ts`; this constant is exported
+ * so the migration can pin the source version it accepts.
+ */
+export const CHILD_FOUR_SCHEMA_VERSION = 2;
+
+/**
+ * The Child 5 fix schema version (4). The v4 → v5 migration adds the
+ * `server_receipt_tombstone_id` column on `lifecycle_event_operands`;
+ * the function lives in `lifecycle-contracts.ts` and pins this constant
+ * as the source version it accepts.
+ */
+export const CHILD_FIVE_FIX_SCHEMA_VERSION = 4;
+
+// --- closed failure reasons ---------------------------------------------------------------
 
 function isJournalRecoveryState(value: unknown): value is JournalRecoveryState {
   return (

@@ -28,7 +28,8 @@ from personal_os.error_contracts.exceptions import ApplicationError
 #: Historical and current manifest contract identifiers; never guessed.
 MANIFEST_CONTRACT_V1: Final[str] = "canonical_core_backup/v1"
 MANIFEST_CONTRACT_V2: Final[str] = "canonical_core_backup/v2"
-MANIFEST_CONTRACT: Final[str] = MANIFEST_CONTRACT_V2
+MANIFEST_CONTRACT_V3: Final[str] = "canonical_core_backup/v3"
+MANIFEST_CONTRACT: Final[str] = MANIFEST_CONTRACT_V3
 
 #: Compatibility alias: revision authority lives in
 #: :mod:`personal_os.database_schema`; existing recovery imports keep
@@ -78,11 +79,10 @@ LEGACY_V2_CANONICAL_COUNT_TABLES: Final[tuple[str, ...]] = (
     "small_file_upload_operations",
 )
 
-#: The exact closed set of canonical tables counted in every new v2 manifest.
-#: Mirrors the snapshot lock order. Authentication rows are PostgreSQL
-#: canonical state just like baseline, policy and durable upload-operation
-#: rows; omitting any of them would leave the restored graph unwitnessed.
-CANONICAL_COUNT_TABLES: Final[tuple[str, ...]] = (
+#: The complete v2 count set emitted immediately before lifecycle schema.  It
+#: remains readable so already-created v2 bundles stay verifiable/restorable;
+#: writers emit v3 from this revision onward.
+V2_CANONICAL_COUNT_TABLES: Final[tuple[str, ...]] = (
     "users",
     "workspaces",
     "devices",
@@ -111,6 +111,17 @@ CANONICAL_COUNT_TABLES: Final[tuple[str, ...]] = (
     "policy_evaluations",
     "policy_reconciliation_intents",
     "small_file_upload_operations",
+)
+
+#: The exact closed set of canonical tables counted in every new v3 manifest.
+#: Mirrors the snapshot lock order. Authentication rows, lifecycle history,
+#: policy state and durable upload operations are all canonical PostgreSQL
+#: evidence and therefore cannot be omitted from a recoverable snapshot.
+CANONICAL_COUNT_TABLES: Final[tuple[str, ...]] = (
+    *V2_CANONICAL_COUNT_TABLES[:7],
+    "source_locators",
+    "source_tombstones",
+    *V2_CANONICAL_COUNT_TABLES[7:],
 )
 
 #: Maximum number of retained backup records. The recorder is a bounded ring

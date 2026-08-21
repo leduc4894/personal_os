@@ -13,18 +13,14 @@ adapter's own concerns; only the domain values cross this boundary.
 from __future__ import annotations
 
 from collections.abc import AsyncIterable, Callable
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
-from uuid import UUID
 
 from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
-from personal_os.object_storage import CanonicalMediaType, ContentDigest
 from personal_os.small_file_sync.contracts import (
+    BoundSmallFileOperation,
     SmallFileDeviceContext,
-    SmallFileIdempotencyKey,
-    SmallFileOperation,
     SmallFilePreflight,
     SmallFileTerminalResult,
     SmallFileUploadOperation,
@@ -36,37 +32,13 @@ from personal_os.sources.results import SourceVersionPublicationResult
 #: Injectable clock returning the current aware UTC moment.
 type AwareUtcClock = Callable[[], datetime]
 
+#: The receive-side binding is the new :class:`BoundSmallFileOperation` —
+#: it carries the bound initial locator evidence alongside every immutable
+#: operation field. Older call sites that still reference
+#: :class:`SmallFileBoundOperation` see the same shape through this alias.
+SmallFileBoundOperation = BoundSmallFileOperation
 
-@dataclass(frozen=True, slots=True)
-class SmallFileBoundOperation:
-    """The durable receive-side view of one upload operation, token-bound.
-
-    Reconstructed by the store from the operation row alone: the
-    credential-derived identity, the declared fingerprint fields the row
-    froze at reservation, the create's reserved canonical UUID (or the
-    update's source/base pair), the expiry deadline and — for an
-    already-committed operation — the frozen terminal result an exact replay
-    returns unchanged. The normalized locator and local file id are
-    deliberately absent: the row never stores a path, so the value carries
-    exactly what the content stream needs and permits no payload
-    substitution, no locator echo and no receipt or object-store detail.
-    """
-
-    operation_token: UploadOperationToken
-    workspace_id: UUID
-    device_id: UUID
-    event_id: UUID
-    idempotency_key: SmallFileIdempotencyKey
-    operation: SmallFileOperation
-    declared_sha256: ContentDigest
-    declared_size_bytes: int
-    declared_media_type: CanonicalMediaType
-    policy_revision_number: int
-    reserved_source_id: UUID | None
-    update_source_id: UUID | None
-    update_base_version_id: UUID | None
-    expires_at: datetime
-    terminal_result: SmallFileTerminalResult | None
+__all__ = ["BoundSmallFileOperation", "SmallFileBoundOperation"]
 
 
 class SmallFilePolicyGuard(Protocol):

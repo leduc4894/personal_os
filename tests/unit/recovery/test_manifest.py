@@ -21,6 +21,7 @@ from personal_os.recovery.contracts import (
     MANIFEST_CONTRACT,
     MANIFEST_CONTRACT_V1,
     MANIFEST_CONTRACT_V2,
+    MANIFEST_CONTRACT_V3,
     MAXIMUM_OBJECT_SIZE_BYTES,
     POSTGRESQL_SCHEMA_REVISION,
     V1_CANONICAL_COUNT_TABLES,
@@ -216,7 +217,13 @@ def test_legacy_v2_twenty_table_manifest_remains_byte_canonical() -> None:
     """The branch-local original v2 shape remains readable after widening."""
 
     counts = {table: index + 1 for index, table in enumerate(_LEGACY_V2_CANONICAL_COUNT_TABLES)}
-    raw = canonical_json(manifest_payload(canonical_counts=counts))
+    raw = canonical_json(
+        manifest_payload(
+            contract=MANIFEST_CONTRACT_V2,
+            canonical_counts=counts,
+            postgresql_schema_revision="20260818_01",
+        )
+    )
 
     parsed = parse_manifest(raw)
 
@@ -235,8 +242,13 @@ def test_round_trip_accepts_boundary_object_sizes() -> None:
     assert parse_manifest(encode_manifest(manifest)).objects == manifest.objects
 
 
-def test_rejects_unsupported_contract_version() -> None:
-    unsupported = canonical_json(manifest_payload(contract="canonical_core_backup/v3"))
+def test_accepts_the_current_v3_contract_version() -> None:
+    parsed = parse_manifest(canonical_json(manifest_payload(contract=MANIFEST_CONTRACT_V3)))
+    assert parsed.contract == MANIFEST_CONTRACT_V3
+
+
+def test_rejects_unknown_contract_version() -> None:
+    unsupported = canonical_json(manifest_payload(contract="canonical_core_backup/v4"))
     assert_bundle_invalid(unsupported, "contract_unsupported")
     assert_bundle_invalid(canonical_json(manifest_payload(contract="")), "contract_unsupported")
 
@@ -396,9 +408,9 @@ def test_rejects_out_of_range_object_size() -> None:
 
 
 def test_manifest_contract_constant_is_pinned() -> None:
-    assert MANIFEST_CONTRACT == "canonical_core_backup/v2"
-    assert len(CANONICAL_COUNT_TABLES) == 28
-    assert CANONICAL_COUNT_TABLES[9:17] == (
+    assert MANIFEST_CONTRACT == "canonical_core_backup/v3"
+    assert len(CANONICAL_COUNT_TABLES) == 30
+    assert CANONICAL_COUNT_TABLES[11:19] == (
         "user_credentials",
         "web_sessions",
         "totp_credentials",
@@ -408,4 +420,5 @@ def test_manifest_contract_constant_is_pinned() -> None:
         "device_authorization_grants",
         "authentication_throttle_buckets",
     )
+    assert CANONICAL_COUNT_TABLES[7:9] == ("source_locators", "source_tombstones")
     assert CANONICAL_COUNT_TABLES[-1] == "small_file_upload_operations"

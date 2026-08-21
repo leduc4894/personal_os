@@ -26,6 +26,7 @@ from personal_os.error_contracts.exceptions import ApplicationError, InternalApp
 from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
 from personal_os.object_storage import CanonicalMediaType, ContentDigest
 from personal_os.small_file_sync.contracts import (
+    BoundSmallFileOperation,
     NormalizedLocator,
     SmallFileDeviceContext,
     SmallFileIdempotencyKey,
@@ -33,6 +34,7 @@ from personal_os.small_file_sync.contracts import (
     SmallFilePreflight,
     SmallFileTerminalResultKind,
     UploadOperationToken,
+    compute_locator_fingerprint,
 )
 from personal_os.small_file_sync.errors import SmallFileSyncError
 from personal_os.small_file_sync.ports import SmallFileBoundOperation
@@ -44,10 +46,13 @@ from postgresql_source_store.small_file_sync_operations import (
     _bound_matches_row,
     compute_upload_operation_expiry,
     identity_lookup_statement,
+    locator_fingerprint_persisted,
     map_small_file_database_failure,
     mint_upload_operation_token,
     operation_fingerprint_matches,
     operation_insert_statement,
+    operation_locator_fingerprint_column,
+    operation_locator_rotation_statement,
     operation_token_rotation_statement,
     upload_operation_lock_key,
     upload_operation_lock_statement,
@@ -153,6 +158,8 @@ def _declared_fingerprint_row(
         "update_base_version_id": (
             preflight.base_version_id if update_base_version_id is None else update_base_version_id
         ),
+        "normalized_locator": preflight.normalized_locator.value,
+        "locator_fingerprint": compute_locator_fingerprint(preflight.normalized_locator),
     }
 
 
@@ -305,7 +312,12 @@ def test_token_rotation_rebinds_policy_revision_without_changing_fingerprint() -
 
     assert statement.compile(dialect=postgresql.dialect()).params["policy_revision_number"] == 7
     assert operation_fingerprint_matches(
-        {**_declared_fingerprint_row(preflight, device_context), "policy_revision_number": 2},
+        {
+            **_declared_fingerprint_row(preflight, device_context),
+            "policy_revision_number": 2,
+            "normalized_locator": preflight.normalized_locator.value,
+            "locator_fingerprint": compute_locator_fingerprint(preflight.normalized_locator),
+        },
         preflight,
         device_context,
     )
@@ -329,6 +341,8 @@ def test_bound_row_comparison_includes_policy_revision() -> None:
         reserved_source_id=uuid4(),
         update_source_id=None,
         update_base_version_id=None,
+        normalized_locator=None,
+        locator_fingerprint=None,
         state="pending",
         safe_error_code=None,
         result_kind=None,
@@ -339,6 +353,7 @@ def test_bound_row_comparison_includes_policy_revision() -> None:
         expires_at=datetime.now(UTC),
     )
     bound = SmallFileBoundOperation(
+        operation_id=row.operation_id,
         operation_token=UploadOperationToken("A" * 43),
         workspace_id=row.workspace_id,
         device_id=row.device_id,
@@ -352,6 +367,8 @@ def test_bound_row_comparison_includes_policy_revision() -> None:
         reserved_source_id=row.reserved_source_id,
         update_source_id=None,
         update_base_version_id=None,
+        normalized_locator=None,
+        locator_fingerprint=None,
         expires_at=row.expires_at,
         terminal_result=None,
     )
@@ -459,3 +476,215 @@ def test_terminal_result_kind_vocabulary_stays_domain_closed() -> None:
 def test_application_error_surface_is_small_file_or_internal() -> None:
     assert issubclass(SmallFileSyncError, ApplicationError)
     assert issubclass(InternalApplicationError, ApplicationError)
+
+
+# --- initial locator persistence (task 3) ----------------------------------------
+
+
+def test_insert_statement_binds_normalized_locator_and_its_digest() -> None:
+    device_context = _device_context()
+    preflight = _preflight()
+    locator = preflight.normalized_locator
+    digest = compute_locator_fingerprint(locator)
+
+    statement = operation_insert_statement(
+        operation_id=uuid4(),
+        operation_token_hash="a" * 64,
+        device_context=device_context,
+        preflight=preflight,
+        policy_revision_number=7,
+        reserved_source_id=uuid4(),
+        expires_at=datetime.now(UTC),
+        normalized_locator=locator,
+        locator_fingerprint=digest,
+    )
+
+    compiled = statement.compile(dialect=postgresql.dialect())
+    params = compiled.params
+    assert params["normalized_locator"] == locator.value
+    assert params["locator_fingerprint"] == digest
+
+
+def test_insert_statement_accepts_null_locator_for_legacy_pre_migration_rows() -> None:
+    device_context = _device_context()
+    preflight = _preflight()
+
+    statement = operation_insert_statement(
+        operation_id=uuid4(),
+        operation_token_hash="a" * 64,
+        device_context=device_context,
+        preflight=preflight,
+        policy_revision_number=7,
+        reserved_source_id=uuid4(),
+        expires_at=datetime.now(UTC),
+        normalized_locator=None,
+        locator_fingerprint=None,
+    )
+
+    compiled = statement.compile(dialect=postgresql.dialect())
+    params = compiled.params
+    assert params["normalized_locator"] is None
+    assert params["locator_fingerprint"] is None
+
+
+def test_locator_fingerprint_persisted_predicate_compares_digest_only() -> None:
+    """Replay compares the locator fingerprint, not the raw locator string."""
+
+    locator = NormalizedLocator("notes/planning.md")
+    other = NormalizedLocator("notes/other.md")
+    digest = compute_locator_fingerprint(locator)
+
+    # The stored digest matches — the raw locator may or may not be present.
+    assert locator_fingerprint_persisted(digest, locator.value)
+    assert locator_fingerprint_persisted(digest, None)
+    # A different locator does not match the stored digest.
+    assert not locator_fingerprint_persisted(digest, other.value)
+    # A stored None digest only matches a None locator.
+    assert locator_fingerprint_persisted(None, None)
+    assert not locator_fingerprint_persisted(None, locator.value)
+
+
+def test_operation_row_exposes_locator_evidence_field() -> None:
+    """The locator evidence column is part of the hydrated operation row."""
+
+    assert operation_locator_fingerprint_column() == "locator_fingerprint"
+
+
+def test_rotation_statement_preserves_locator_fingerprint_when_token_rebinds() -> None:
+    """Pending re-preflight may rotate the token without disturbing the digest."""
+
+    preflight = _preflight()
+    locator = preflight.normalized_locator
+    digest = compute_locator_fingerprint(locator)
+
+    statement = operation_locator_rotation_statement(
+        operation_id=uuid4(),
+        operation_token_hash="a" * 64,
+        expires_at=datetime.now(UTC),
+        policy_revision_number=7,
+        locator_fingerprint=digest,
+    )
+
+    compiled = statement.compile(dialect=postgresql.dialect())
+    params = compiled.params
+    assert params["locator_fingerprint"] == digest
+
+
+def test_bound_operation_comparison_includes_locator_fingerprint() -> None:
+    """Replay matches the locator fingerprint so raw locator drift is detected."""
+
+    device_context = _device_context()
+    preflight = _preflight()
+    locator = preflight.normalized_locator
+    digest = compute_locator_fingerprint(locator)
+
+    row = SmallFileOperationRow(
+        operation_id=uuid4(),
+        operation_token_hash="a" * 64,
+        workspace_id=device_context.workspace_id,
+        device_id=device_context.device_id,
+        event_id=preflight.event_id,
+        idempotency_key=preflight.idempotency_key.value,
+        operation_kind=preflight.operation.value,
+        declared_sha256=preflight.sha256.hexadecimal,
+        declared_size_bytes=preflight.size_bytes,
+        declared_media_type=preflight.media_type.value,
+        policy_revision_number=4,
+        reserved_source_id=uuid4(),
+        update_source_id=None,
+        update_base_version_id=None,
+        state="pending",
+        safe_error_code=None,
+        result_kind=None,
+        result_source_id=None,
+        result_source_version_id=None,
+        result_content_version=None,
+        result_committed_at=None,
+        expires_at=datetime.now(UTC),
+        normalized_locator=locator.value,
+        locator_fingerprint=digest,
+    )
+    bound = BoundSmallFileOperation(
+        operation_id=row.operation_id,
+        operation_token=UploadOperationToken("A" * 43),
+        workspace_id=row.workspace_id,
+        device_id=row.device_id,
+        event_id=row.event_id,
+        idempotency_key=preflight.idempotency_key,
+        operation=preflight.operation,
+        declared_sha256=preflight.sha256,
+        declared_size_bytes=preflight.size_bytes,
+        declared_media_type=preflight.media_type,
+        policy_revision_number=4,
+        reserved_source_id=row.reserved_source_id,
+        update_source_id=None,
+        update_base_version_id=None,
+        normalized_locator=locator,
+        locator_fingerprint=digest,
+        expires_at=row.expires_at,
+        terminal_result=None,
+    )
+
+    assert _bound_matches_row(row, bound)
+
+
+def test_bound_operation_comparison_rejects_digest_mismatch() -> None:
+    """A drifted locator digest makes the binding fail closed."""
+
+    device_context = _device_context()
+    preflight = _preflight()
+    locator = preflight.normalized_locator
+    digest = compute_locator_fingerprint(locator)
+    other_locator = NormalizedLocator("notes/other.md")
+    other_digest = compute_locator_fingerprint(other_locator)
+
+    row = SmallFileOperationRow(
+        operation_id=uuid4(),
+        operation_token_hash="a" * 64,
+        workspace_id=device_context.workspace_id,
+        device_id=device_context.device_id,
+        event_id=preflight.event_id,
+        idempotency_key=preflight.idempotency_key.value,
+        operation_kind=preflight.operation.value,
+        declared_sha256=preflight.sha256.hexadecimal,
+        declared_size_bytes=preflight.size_bytes,
+        declared_media_type=preflight.media_type.value,
+        policy_revision_number=4,
+        reserved_source_id=uuid4(),
+        update_source_id=None,
+        update_base_version_id=None,
+        state="pending",
+        safe_error_code=None,
+        result_kind=None,
+        result_source_id=None,
+        result_source_version_id=None,
+        result_content_version=None,
+        result_committed_at=None,
+        expires_at=datetime.now(UTC),
+        normalized_locator=locator.value,
+        locator_fingerprint=digest,
+    )
+    bound = BoundSmallFileOperation(
+        operation_id=row.operation_id,
+        operation_token=UploadOperationToken("A" * 43),
+        workspace_id=row.workspace_id,
+        device_id=row.device_id,
+        event_id=row.event_id,
+        idempotency_key=preflight.idempotency_key,
+        operation=preflight.operation,
+        declared_sha256=preflight.sha256,
+        declared_size_bytes=preflight.size_bytes,
+        declared_media_type=preflight.media_type,
+        policy_revision_number=4,
+        reserved_source_id=row.reserved_source_id,
+        update_source_id=None,
+        update_base_version_id=None,
+        # The bound carries a different locator with its own digest, so the
+        # locator_fingerprint_persisted comparison must reject it.
+        normalized_locator=other_locator,
+        locator_fingerprint=other_digest,
+        expires_at=row.expires_at,
+        terminal_result=None,
+    )
+
+    assert not _bound_matches_row(row, bound)

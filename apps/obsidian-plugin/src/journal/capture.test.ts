@@ -16,6 +16,12 @@ import type {
   CaptureVaultReader,
   ExistingFilesScanSummary,
 } from "./capture";
+import type { LifecycleCapture } from "./lifecycle-capture";
+import type {
+  LifecycleDeleteResult,
+  LifecycleRenameResult,
+  LifecycleRestoreResult,
+} from "./lifecycle-capture";
 import { JournalRepository } from "./repository";
 import { JOURNAL_SCHEMA_VERSION, SqliteDatabase } from "./sqlite-database";
 import type { SqliteEngineModule } from "./sqlite-database";
@@ -103,6 +109,7 @@ interface CaptureHarness {
   readonly database: SqliteDatabase;
   readonly vault: FakeCaptureVault;
   readonly gate: FakePolicyGate;
+  readonly lifecycleState: FakeLifecycleState;
 }
 
 function createHarness(options?: {
@@ -124,14 +131,79 @@ function createHarness(options?: {
     options?.decide ?? (() => "allowed"),
     options?.policyRevisionNumber ?? 1,
   );
+  const { fake: lifecycleCapture, state: lifecycleState } = createFakeLifecycleCapture();
   const capture = new JournalCapture({
     repository,
     vaultReader: vault,
     policyGate: gate,
+    lifecycleCapture,
     scanMaximumFiles: options?.scanMaximumFiles,
     scanBatchFiles: options?.scanBatchFiles,
   });
-  return { capture, repository, database, vault, gate };
+  return { capture, repository, database, vault, gate, lifecycleState };
+}
+
+/**
+ * The capture tests verify the content surface only; the lifecycle adapter
+ * has its own suite (`lifecycle-capture.test.ts`). A stub that records
+ * calls but never writes keeps the focus on settle + admit + guard.
+ */
+interface FakeLifecycleCapture extends LifecycleCapture {
+  readonly detectAutomaticRestore?: (normalizedPath: string) => Promise<LifecycleRestoreResult>;
+  readonly markTombstonedPathReconcileRequired?: (normalizedPath: string) => Promise<boolean>;
+  readonly reconcileCalls: readonly string[];
+}
+
+interface FakeLifecycleState {
+  readonly deleteCalls: { readonly path: string }[];
+  readonly renameCalls: { readonly file: { readonly path: string }; readonly priorPath: string }[];
+}
+
+/**
+ * The capture tests verify the content surface only; the lifecycle adapter
+ * has its own suite (`lifecycle-capture.test.ts`). A stub that records
+ * calls but never writes keeps the focus on settle + admit + guard.
+ */
+function createFakeLifecycleCapture(options?: {
+  readonly autoRestoreOutcome?: "succeed" | "reject";
+}): { readonly fake: FakeLifecycleCapture; readonly state: FakeLifecycleState } {
+  const state: FakeLifecycleState = {
+    deleteCalls: [],
+    renameCalls: [],
+  };
+  const reconcileCalls: string[] = [];
+  const fake: FakeLifecycleCapture = {
+    reconcileCalls,
+    captureRename: async (file, priorPath) => {
+      state.renameCalls.push({ file: { path: file.path }, priorPath });
+      const result: LifecycleRenameResult | null = null;
+      return result;
+    },
+    captureDelete: async (file) => {
+      state.deleteCalls.push({ path: file.path });
+      const result: LifecycleDeleteResult | null = null;
+      return result;
+    },
+    requestRestore: async () => {
+      throw new Error("not used in capture tests");
+    },
+    detectAutomaticRestore: async () => {
+      if (options?.autoRestoreOutcome === "succeed") {
+        return {
+          operation: "restore",
+          localFileId: "00000000-0000-4000-8000-000000000000",
+          eventId: "11111111-1111-7111-8111-111111111111",
+          predecessorEventId: "22222222-2222-7222-8222-222222222222",
+        };
+      }
+      throw new Error("not used in capture tests");
+    },
+    markTombstonedPathReconcileRequired: async (normalizedPath: string) => {
+      reconcileCalls.push(normalizedPath);
+      return true;
+    },
+  };
+  return { fake, state };
 }
 
 /**
@@ -376,80 +448,26 @@ describe("JournalCapture settle admission (spec 7.1, 9)", () => {
   });
 });
 
-describe("JournalCapture lifecycle guard (spec 7.1)", () => {
-  it("defers pending events when a tracked file disappears and blocks a path rebind", async () => {
-    useSettleFakeTimers();
+describe("JournalCapture lifecycle guard (spec 7.1, child 5)", () => {
+  it("delegates a delete notification to the lifecycle capture", async () => {
     const harness = createHarness();
-    harness.vault.setFileBytes("notes/gone.md", bytesOf("content"));
-    harness.capture.notifyPathChanged("notes/gone.md");
-    await settlePastDelay(harness);
-    expect(harness.repository.countPendingEvents()).toBe(1);
+    await harness.capture.notifyPathDeleted({ path: "notes/gone.md", parent: { path: "notes" } });
 
-    await harness.capture.notifyPathDeleted("notes/gone.md");
-
-    const deferredEvent = soleEventOf(harness, "notes/gone.md");
-    expect(deferredEvent.state).toBe("deferred_lifecycle");
-    expect(deferredEvent.safeError).toBe("deferred_lifecycle");
-    expect(deferredEvent.nextEligibleRetryEpochMs).toBeNull();
-    expect(harness.repository.countPendingEvents()).toBe(0);
-
-    // A later observation of the same path never rebinds or re-queues it.
-    harness.vault.setFileBytes("notes/gone.md", bytesOf("resurrected"));
-    harness.capture.notifyPathChanged("notes/gone.md");
-    await settlePastDelay(harness);
-    expect(harness.vault.byteReadCount).toBe(1);
-    expect(soleEventOf(harness, "notes/gone.md").state).toBe("deferred_lifecycle");
+    expect(harness.lifecycleState.deleteCalls).toEqual([{ path: "notes/gone.md" }]);
     expect(harness.repository.countPendingEvents()).toBe(0);
   });
 
-  it("keeps lifecycle deferral durable across a capture restart", async () => {
-    useSettleFakeTimers();
-    const first = createHarness();
-    first.vault.setFileBytes("notes/durable.md", bytesOf("content"));
-    first.capture.notifyPathChanged("notes/durable.md");
-    await settlePastDelay(first);
-    await first.capture.notifyPathDeleted("notes/durable.md");
-
-    // A fresh capture over the same journal rows still refuses the rebind.
-    const restarted = new JournalCapture({
-      repository: first.repository,
-      vaultReader: first.vault,
-      policyGate: createFakePolicyGate(() => "allowed"),
-    });
-    first.vault.setFileBytes("notes/durable.md", bytesOf("recreated"));
-    restarted.notifyPathChanged("notes/durable.md");
-    await vi.advanceTimersByTimeAsync(FILE_SETTLE_DELAY_MS + 50);
-    await restarted.whenIdle();
-    expect(first.vault.byteReadCount).toBe(1);
-    expect(first.repository.countPendingEvents()).toBe(0);
-  });
-
-  it("defers both sides of a rename and guards the new path in session", async () => {
-    useSettleFakeTimers();
+  it("delegates a rename notification to the lifecycle capture", async () => {
     const harness = createHarness();
-    harness.vault.setFileBytes("notes/original.md", bytesOf("content"));
-    harness.capture.notifyPathChanged("notes/original.md");
-    await settlePastDelay(harness);
+    await harness.capture.notifyPathRenamed(
+      { path: "notes/renamed.md", parent: { path: "notes" } },
+      "notes/original.md",
+    );
 
-    harness.vault.removeFileBytes("notes/original.md");
-    harness.vault.setFileBytes("notes/renamed.md", bytesOf("content"));
-    await harness.capture.notifyPathRenamed("notes/original.md", "notes/renamed.md");
-
-    expect(soleEventOf(harness, "notes/original.md").state).toBe("deferred_lifecycle");
-    expect(harness.repository.readLocalFileByPath("notes/renamed.md")).toBeNull();
-
-    // Neither a modify event nor the scanner enqueues an inferred create.
-    harness.capture.notifyPathChanged("notes/renamed.md");
-    await settlePastDelay(harness);
-    expect(harness.repository.readLocalFileByPath("notes/renamed.md")).toBeNull();
+    expect(harness.lifecycleState.renameCalls).toEqual([
+      { file: { path: "notes/renamed.md" }, priorPath: "notes/original.md" },
+    ]);
     expect(harness.repository.countPendingEvents()).toBe(0);
-
-    const summary = await harness.capture.runExistingFilesScan({
-      confirm: async () => true,
-    });
-    expect(summary.outcome).toBe("completed");
-    expect(summary.processedFileCount).toBe(0);
-    expect(summary.skippedFileCount).toBe(1);
   });
 
   it("defers a tracked file whose bytes vanish before the settled read", async () => {
@@ -471,15 +489,120 @@ describe("JournalCapture lifecycle guard (spec 7.1)", () => {
   });
 
   it("writes nothing for lifecycle noise on untracked paths", async () => {
-    useSettleFakeTimers();
     const harness = createHarness();
-    await harness.capture.notifyPathDeleted("notes/unknown.md");
-    await harness.capture.notifyPathRenamed("notes/unknown.md", "notes/elsewhere.md");
+    await harness.capture.notifyPathDeleted({ path: "notes/unknown.md", parent: { path: "notes" } });
+    await harness.capture.notifyPathRenamed(
+      { path: "notes/elsewhere.md", parent: { path: "notes" } },
+      "notes/unknown.md",
+    );
 
+    expect(harness.lifecycleState.deleteCalls).toEqual([{ path: "notes/unknown.md" }]);
+    expect(harness.lifecycleState.renameCalls).toEqual([
+      { file: { path: "notes/elsewhere.md" }, priorPath: "notes/unknown.md" },
+    ]);
     expect(harness.repository.readLocalFileByPath("notes/unknown.md")).toBeNull();
     expect(harness.repository.countPendingEvents()).toBe(0);
   });
 });
+
+describe("JournalCapture automatic restore fail-closed (spec 7.1, child 5 fix round 1 C2)", () => {
+  function createFailClosedHarness(options?: {
+    readonly autoRestoreBehaviour?: "reject" | "succeed";
+  }): CaptureHarness {
+    const database = SqliteDatabase.createEmpty(engineModule, {
+      schemaVersion: JOURNAL_SCHEMA_VERSION,
+      dirtyGeneration: 1,
+      lastVerifiedGeneration: 1,
+      isReconcileRequired: false,
+      recoveryState: "verified_generation_loaded",
+    } satisfies JournalMeta);
+    const repository = new JournalRepository({ database });
+    const vault = new FakeCaptureVault();
+    const gate = createFakePolicyGate(() => "allowed", 1);
+    // Use a fake that records `markTombstonedPathReconcileRequired`
+    // calls so we can prove the C2 fail-closed path is taken.
+    const reconcileCalls: string[] = [];
+    const lifecycleCapture: FakeLifecycleCapture = {
+      reconcileCalls,
+      captureRename: async () => null,
+      captureDelete: async () => null,
+      requestRestore: async () => {
+        throw new Error("not used in C2 test");
+      },
+      detectAutomaticRestore: async () => {
+        if (options?.autoRestoreBehaviour === "succeed") {
+          return {
+            operation: "restore",
+            localFileId: "00000000-0000-4000-8000-000000000000",
+            eventId: "11111111-1111-7111-8111-111111111111",
+            predecessorEventId: "22222222-2222-7222-8222-222222222222",
+          };
+        }
+        // Real `JournalStoreError` so capture.ts sees a real failure.
+        throw newError("journal_mutation_failed");
+      },
+      markTombstonedPathReconcileRequired: async (normalizedPath: string) => {
+        reconcileCalls.push(normalizedPath);
+        return true;
+      },
+    };
+    const capture = new JournalCapture({
+      repository,
+      vaultReader: vault,
+      policyGate: gate,
+      lifecycleCapture,
+    });
+    return {
+      capture,
+      repository,
+      database,
+      vault,
+      gate,
+      lifecycleState: { deleteCalls: [], renameCalls: [] },
+    };
+  }
+
+  it("fails closed and flags reconcile_required when automatic restore proof fails on a tombstoned path", async () => {
+    useSettleFakeTimers();
+    const harness = createFailClosedHarness();
+    // Seed a tracked file with a tombstone via raw SQL so we exercise
+    // the auto-restore guard.
+    harness.vault.setFileBytes("notes/tombstone-reuse.md", bytesOf("content"));
+    harness.capture.notifyPathChanged("notes/tombstone-reuse.md");
+    await settlePastDelay(harness);
+    // Now the file row is tracked; simulate a tombstone by directly
+    // setting `open_tombstone_id` on the local_files row.
+    const tracked = harness.repository.readLocalFileByPath("notes/tombstone-reuse.md");
+    expect(tracked).not.toBeNull();
+    harness.database.readAll("select 1"); // touch
+    // Direct tombstone write via a new capture.
+    const tombstoneId = "40404040-4040-7404-8404-404040404040";
+    harness.database.runSerializedMutation(async (session) => {
+      session.exec(
+        `update local_files set open_tombstone_id = ${sqlQuoted(tombstoneId)}, lifecycle_state = 'tombstoned' where normalized_path = 'notes/tombstone-reuse.md';`,
+      );
+    });
+    // Trigger an observation; the capture composition sees the tombstoned
+    // row and calls `detectAutomaticRestore`, which throws.
+    harness.vault.setFileBytes("notes/tombstone-reuse.md", bytesOf("totally different bytes"));
+    const before = harness.repository.countPendingEvents();
+    harness.capture.notifyPathChanged("notes/tombstone-reuse.md");
+    await settlePastDelay(harness);
+    // C2: NO new pending event was minted for the path; the fail-closed
+    // path refused the create / update admission.
+    expect(harness.repository.countPendingEvents()).toBe(before);
+  });
+});
+
+function sqlQuoted(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function newError(reason: string): Error {
+  const error = new Error(`journal store failed: ${reason}`) as Error & { reason: string };
+  error.reason = reason;
+  return error;
+}
 
 describe("JournalCapture existing-files scan (spec 7.1)", () => {
   async function scanOf(

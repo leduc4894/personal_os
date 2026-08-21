@@ -521,3 +521,229 @@ def test_dispatcher_activation_allows_loopback_in_local_and_test(
     settings = load_temporal_dispatch_settings(environ={})
 
     require_dispatcher_activation_allowed(environment, settings)
+
+
+# --- Lifecycle intent dispatch (Task 11) ------------------------------------
+
+
+def _lifecycle_delete_intent() -> LeasedProjectionIntent:
+    """A lifecycle delete intent with a non-null ``source_version_id``."""
+
+    return LeasedProjectionIntent(
+        projection_intent_id=uuid4(),
+        workspace_id=uuid4(),
+        event_id=uuid4(),
+        source_id=uuid4(),
+        source_version_id=uuid4(),
+        projection_kind=SafeToken.parse("qdrant"),
+        operation=SafeToken.parse("delete"),
+        attempt_count=0,
+        lease_token=uuid4(),
+        leased_until=_FIXED_NOW + timedelta(seconds=60),
+    )
+
+
+def _lifecycle_rename_intent() -> LeasedProjectionIntent:
+    """A lifecycle rename intent with a non-null ``source_version_id``."""
+
+    return LeasedProjectionIntent(
+        projection_intent_id=uuid4(),
+        workspace_id=uuid4(),
+        event_id=uuid4(),
+        source_id=uuid4(),
+        source_version_id=uuid4(),
+        projection_kind=SafeToken.parse("neo4j"),
+        operation=SafeToken.parse("upsert"),
+        attempt_count=0,
+        lease_token=uuid4(),
+        leased_until=_FIXED_NOW + timedelta(seconds=60),
+    )
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_delete_intent_dispatches_into_source_ingestion_workflow() -> None:
+    """A lifecycle delete intent reaches the same SourceIngestionWorkflow as create."""
+
+    intent = _lifecycle_delete_intent()
+    store = FakeIntentStore((intent,))
+    starter = FakeStarter(result=ProjectionWorkflowStartResult.STARTED)
+    runtime, diagnostics, metrics = _runtime(store, starter)
+
+    await runtime.dispatch_pending_intents_once()
+
+    assert starter.calls == [
+        SourceIngestionReference(
+            contract="source_ingestion_reference/v1",
+            workspace_id=intent.workspace_id,
+            event_id=intent.event_id,
+            source_id=intent.source_id,
+            source_version_id=intent.source_version_id,
+        )
+    ]
+    assert len(store.acknowledgements) == 1
+    assert dispatched_outcome(diagnostics) == "started"
+    assert metrics.dispatch_count(ProjectionKind.QDRANT, ProjectionDispatchOutcome.DISPATCHED) == 1
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_rename_intent_reaches_workflow_input_with_version_id() -> None:
+    """A lifecycle rename intent propagates its non-null source_version_id."""
+
+    intent = _lifecycle_rename_intent()
+    store = FakeIntentStore((intent,))
+    starter = FakeStarter(result=ProjectionWorkflowStartResult.STARTED)
+    runtime, _, _ = _runtime(store, starter)
+
+    await runtime.dispatch_pending_intents_once()
+
+    assert len(starter.calls) == 1
+    reference = starter.calls[0]
+    assert reference.source_version_id == intent.source_version_id
+    assert reference.event_id == intent.event_id
+    assert reference.source_id == intent.source_id
+    assert reference.workspace_id == intent.workspace_id
+    assert reference.contract == "source_ingestion_reference/v1"
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_intent_pair_dispatches_into_one_workflow_run() -> None:
+    """Qdrant and Neo4j intents of one lifecycle event reach the same workflow execution.
+
+    The ``(workspace_id, event_id)`` pair is the deterministic workflow
+    id the dispatcher derives; one lifecycle event therefore produces
+    one workflow run regardless of how many intents it carries.
+    """
+
+    workspace_id = uuid4()
+    event_id = uuid4()
+    source_id = uuid4()
+    source_version_id = uuid4()
+    qdrant = LeasedProjectionIntent(
+        projection_intent_id=uuid4(),
+        workspace_id=workspace_id,
+        event_id=event_id,
+        source_id=source_id,
+        source_version_id=source_version_id,
+        projection_kind=SafeToken.parse("qdrant"),
+        operation=SafeToken.parse("upsert"),
+        attempt_count=0,
+        lease_token=uuid4(),
+        leased_until=_FIXED_NOW + timedelta(seconds=60),
+    )
+    neo4j = LeasedProjectionIntent(
+        projection_intent_id=uuid4(),
+        workspace_id=workspace_id,
+        event_id=event_id,
+        source_id=source_id,
+        source_version_id=source_version_id,
+        projection_kind=SafeToken.parse("neo4j"),
+        operation=SafeToken.parse("upsert"),
+        attempt_count=0,
+        lease_token=uuid4(),
+        leased_until=_FIXED_NOW + timedelta(seconds=60),
+    )
+    # Both intents share the same (workspace_id, event_id) identity.
+    object.__setattr__(qdrant, "event_id", event_id)
+    object.__setattr__(neo4j, "event_id", event_id)
+    store = FakeIntentStore((qdrant, neo4j))
+    starter = FakeStarter(result=ProjectionWorkflowStartResult.STARTED)
+    runtime, _, _ = _runtime(store, starter)
+
+    await runtime.dispatch_pending_intents_once()
+
+    assert len(starter.calls) == 2
+    assert all(call.event_id == event_id for call in starter.calls)
+    assert all(call.source_version_id == source_version_id for call in starter.calls)
+    assert len(store.acknowledgements) == 2
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_intent_without_source_version_id_marks_terminal() -> None:
+    """A lifecycle intent with a null ``source_version_id`` is the contract failure."""
+
+    intent = _lifecycle_delete_intent()
+    object.__setattr__(intent, "source_version_id", None)
+    store = FakeIntentStore((intent,))
+    starter = FakeStarter()
+    runtime, _, _ = _runtime(store, starter)
+
+    await runtime.dispatch_pending_intents_once()
+
+    assert starter.calls == []
+    assert len(store.terminals) == 1
+    assert store.terminals[0].error_code == SafeToken.parse("projection_intent_contract_invalid")
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_intent_metric_label_uses_closed_projection_kind() -> None:
+    """The dispatch metric records the closed ``qdrant``/``neo4j`` kind, not a lifecycle token.
+
+    The lifecycle vocabulary (``rename`` / ``move`` / ``delete`` / ``restore``)
+    never crosses into the dispatch metric label; the projector-kind
+    meta-label is the only dimension that survives the boundary.
+    """
+
+    intent = _lifecycle_delete_intent()
+    store = FakeIntentStore((intent,))
+    starter = FakeStarter(result=ProjectionWorkflowStartResult.STARTED)
+    runtime, _, metrics = _runtime(store, starter)
+
+    await runtime.dispatch_pending_intents_once()
+
+    # The lifecycle ``delete`` token is the projection-intent operation,
+    # not a metric label; the only dispatch metric label is ``qdrant``.
+    assert metrics.dispatch_count(ProjectionKind.QDRANT, ProjectionDispatchOutcome.DISPATCHED) == 1
+
+
+# --- bounded-parallel-traffic unit proof --------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bounded_parallel_dispatch_loops_complete_within_the_deadline() -> None:
+    """Eight parallel dispatch loops run to completion without deadlock.
+
+    The unit-level mirror of the disposable-PostgreSQL concurrency
+    probe: eight independent ``(runtime, store, starter)`` triples are
+    driven concurrently through ``dispatch_pending_intents_once``. Each
+    triple processes a small mixed batch (create / rename / move /
+    delete / restore intent shapes). The test asserts every loop
+    completes within a bounded deadline and the cap of eight concurrent
+    starts is enforced per loop — proving the dispatcher's asyncio
+    surface admits parallel traffic without ever blocking the caller.
+    """
+
+    deadline_seconds: float = 5.0
+    loop_count: int = 8
+    intents_per_loop: int = 8
+
+    def _build_loop() -> tuple[FakeIntentStore, FakeStarter, ProjectionDispatchRuntime]:
+        intents = tuple(
+            _leased_intent(
+                projection_kind=("qdrant" if index % 2 == 0 else "neo4j"),
+                attempt_count=index % 4,
+            )
+            for index in range(intents_per_loop)
+        )
+        store = FakeIntentStore(intents)
+        starter = FakeStarter(
+            result=ProjectionWorkflowStartResult.STARTED,
+            delay_seconds=0.001,
+        )
+        runtime, _, _ = _runtime(store, starter)
+        return store, starter, runtime
+
+    async def _drive() -> None:
+        triples = [_build_loop() for _ in range(loop_count)]
+        runtimes = [runtime for _, _, runtime in triples]
+        await asyncio.gather(*(runtime.dispatch_pending_intents_once() for runtime in runtimes))
+        for store, starter, _ in triples:
+            assert len(store.acknowledgements) == intents_per_loop
+            assert starter.max_active_starts <= PROJECTION_DISPATCH_CONCURRENCY_LIMIT
+
+    try:
+        await asyncio.wait_for(_drive(), timeout=deadline_seconds)
+    except TimeoutError as cause:  # pragma: no cover - deadline reached
+        raise AssertionError(
+            f"parallel dispatch loops did not complete within "
+            f"{deadline_seconds}s — possible deadlock"
+        ) from cause

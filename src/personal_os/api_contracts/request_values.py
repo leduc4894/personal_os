@@ -52,6 +52,7 @@ class ApiRouteTemplate(StrEnum):
     SYNC_EXCLUSION_POLICY_SNAPSHOT = "/api/sync/exclusion-policy/snapshot"
     SYNC_JOURNAL_EVENTS_PREFLIGHT = "/api/sync/journal-events/preflight"
     UPLOAD_CONTENT = "/api/uploads/{operation_id}/content"
+    SYNC_SOURCE_LIFECYCLE_EVENTS = "/api/sources/lifecycle-events"
     OPENAPI_DOCUMENT = "/api/openapi.json"
     UNMATCHED = "unmatched"
 
@@ -124,6 +125,16 @@ SMALL_FILE_SYNC_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset(
     }
 )
 
+#: The closed source lifecycle route set of the lifecycle API (spec 19.2):
+#: the lifecycle-events commit behind the ``obsidian_sync`` access Bearer
+#: credential. The route never carries a workspace or device selector; both
+#: derive from the resolved token context.
+SOURCE_LIFECYCLE_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset(
+    {
+        ApiRouteTemplate.SYNC_SOURCE_LIFECYCLE_EVENTS,
+    }
+)
+
 #: Every route whose responses — success, service rejection and dependency
 #: failure alike — carry ``Cache-Control: no-store`` (spec 16): the
 #: authentication-bound sets plus the exclusion-policy and small-file sync
@@ -133,6 +144,7 @@ NO_STORE_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = (
     AUTHENTICATION_ROUTE_TEMPLATES
     | EXCLUSION_POLICY_ROUTE_TEMPLATES
     | SMALL_FILE_SYNC_ROUTE_TEMPLATES
+    | SOURCE_LIFECYCLE_ROUTE_TEMPLATES
 )
 
 #: Immutable view of the no-store template values, for classifying a raw

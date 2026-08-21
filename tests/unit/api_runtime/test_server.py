@@ -269,6 +269,17 @@ def test_server_serves_the_small_file_sync_routes() -> None:
     assert "/api/uploads/{operation_id}/content" in paths
 
 
+def test_server_serves_the_source_lifecycle_route() -> None:
+    """The production serve graph must bind the authenticated lifecycle API."""
+
+    captured = RecordingServerFactory()
+    assert run_server(environ=LOCAL_ENVIRONMENT, server_factory=captured) == 0
+    application = captured.config.app
+    assert isinstance(application, FastAPI)
+    paths = {route.path for route in application.routes}
+    assert "/api/sources/lifecycle-events" in paths
+
+
 def test_server_missing_object_storage_configuration_exits_seventy_eight(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

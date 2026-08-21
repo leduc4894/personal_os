@@ -38,10 +38,16 @@ import type {
   LocalFile,
 } from "./contracts";
 import {
+  LIFECYCLE_LOCAL_FILE_STATES,
+  type LifecycleLocalFileState,
+} from "./lifecycle-contracts";
+import { LifecycleRepository as JournalLifecycleRepository } from "./lifecycle-repository";
+import {
   JOURNAL_CAPTURE_ADMISSIONS,
   JOURNAL_COALESCABLE_EVENT_STATES,
   JOURNAL_EVENT_STATES,
   JOURNAL_NON_RETRY_EVENT_STATES,
+  JOURNAL_OPERATIONS,
   JOURNAL_PENDING_EVENT_STATES,
   JOURNAL_SAFE_ERROR_LABELS,
   MAX_EVENT_ATTEMPT_HISTORY,
@@ -118,6 +124,19 @@ export interface JournalRepositoryOptions {
   readonly createId?: () => string;
   /** Clock for event creation and attempt timestamps; defaults to `Date.now`. */
   readonly nowEpochMs?: () => number;
+  /**
+   * Optional lifecycle factory; the shared facade constructs the
+   * {@link LifecycleRepository} over the same `database` slice so the
+   * child-5 surface composes into the existing writer without a
+   * parallel SQL channel. Defaults to the canonical lifecycle
+   * repository wired against `database` and the inherited identity /
+   * clock seams.
+   */
+  readonly createLifecycleRepository?: (deps: {
+    readonly database: JournalRepositoryDatabase;
+    readonly createId: () => string;
+    readonly nowEpochMs: () => number;
+  }) => JournalLifecycleRepository;
 }
 
 // --- closed value validation -------------------------------------------------------------------
@@ -219,6 +238,9 @@ const LOCAL_FILE_COLUMNS = [
   "observed_media_type",
   "base_version_id",
   "policy_revision",
+  "last_committed_sha256",
+  "last_committed_size_bytes",
+  "last_committed_media_type",
 ] as const;
 
 const JOURNAL_EVENT_COLUMNS = [
@@ -264,6 +286,9 @@ function parseLocalFileRow(row: readonly unknown[]): LocalFile {
     observedMediaType,
     baseVersionId,
     policyRevision,
+    lastCommittedSha256,
+    lastCommittedSizeBytes,
+    lastCommittedMediaType,
   ] = row;
   if (
     typeof localFileId !== "string" ||
@@ -277,6 +302,16 @@ function parseLocalFileRow(row: readonly unknown[]): LocalFile {
   ) {
     throw journalStoreError("journal_image_invalid");
   }
+  const lastCommittedFingerprint =
+    typeof lastCommittedSha256 === "string" &&
+    typeof lastCommittedSizeBytes === "number" &&
+    typeof lastCommittedMediaType === "string"
+      ? {
+          sha256: lastCommittedSha256,
+          sizeBytes: lastCommittedSizeBytes,
+          mediaType: lastCommittedMediaType,
+        }
+      : null;
   return {
     localFileId,
     normalizedPath,
@@ -288,6 +323,7 @@ function parseLocalFileRow(row: readonly unknown[]): LocalFile {
     },
     baseVersionId,
     policyRevisionNumber: policyRevision,
+    lastCommittedFingerprint,
   };
 }
 
@@ -312,7 +348,7 @@ function parseJournalEventRow(row: readonly unknown[]): StoredJournalEvent {
     typeof eventId !== "string" ||
     typeof localFileId !== "string" ||
     typeof idempotencyKey !== "string" ||
-    (operation !== "create" && operation !== "update") ||
+    !isClosedToken(String(operation), [...JOURNAL_OPERATIONS]) ||
     typeof sha256 !== "string" ||
     typeof sizeBytes !== "number" ||
     typeof mediaType !== "string" ||
@@ -330,7 +366,7 @@ function parseJournalEventRow(row: readonly unknown[]): StoredJournalEvent {
     eventId,
     localFileId,
     idempotencyKey,
-    operation,
+    operation: operation as JournalOperation,
     fingerprint: { sha256, sizeBytes, mediaType },
     state: state as JournalEventState,
     isFingerprintFrozen: isFingerprintFrozen === 1,
@@ -397,11 +433,30 @@ export class JournalRepository {
   readonly #database: JournalRepositoryDatabase;
   readonly #createId: () => string;
   readonly #nowEpochMs: () => number;
+  readonly #lifecycle: JournalLifecycleRepository;
 
   constructor(options: JournalRepositoryOptions) {
     this.#database = options.database;
     this.#createId = options.createId ?? (() => crypto.randomUUID());
     this.#nowEpochMs = options.nowEpochMs ?? (() => Date.now());
+    if (options.createLifecycleRepository) {
+      this.#lifecycle = options.createLifecycleRepository({
+        database: this.#database,
+        createId: this.#createId,
+        nowEpochMs: this.#nowEpochMs,
+      });
+    } else {
+      this.#lifecycle = new JournalLifecycleRepository({
+        database: this.#database,
+        createId: this.#createId,
+        nowEpochMs: this.#nowEpochMs,
+      });
+    }
+  }
+
+  /** The lifecycle repository wired against the same writer. */
+  get lifecycle(): JournalLifecycleRepository {
+    return this.#lifecycle;
   }
 
   // --- capture (spec 6.3, 7.1, 7.2) ---------------------------------------------------------
@@ -636,13 +691,93 @@ export class JournalRepository {
     });
   }
 
+  // --- lifecycle orchestration helpers (child 5) ------------------------------------------------
+
+  /**
+   * Freeze every still-pending content event (`queued` / `preflight` /
+   * `waiting_retry`) of one tracked file as a terminal `deferred_lifecycle`
+   * row, in one transaction. Lifecycle events are never touched: a
+   * `rename` / `move` / `delete` / `restore` row already owns its own
+   * durable identity and must not be replaced by a content freeze.
+   *
+   * The lifecycle capture calls this BEFORE recording a rename / move /
+   * delete so every later queue pass ignores the file's outstanding
+   * content work without ever queuing more.
+   */
+  async freezePendingForLocalFile(localFileId: string): Promise<void> {
+    if (!isUuid(localFileId)) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    await this.#database.runSerializedMutation((session) => {
+      const existing = firstRow(
+        session.readRows(
+          `select local_file_id from local_files where local_file_id = ${sqlText(localFileId)};`,
+        ),
+      );
+      if (existing === null) {
+        throw journalStoreError("journal_mutation_failed");
+      }
+      const pendingStateList = JOURNAL_PENDING_EVENT_STATES.map((state) => sqlText(state)).join(", ");
+      session.exec(
+        [
+          "update journal_events set",
+          "state = 'deferred_lifecycle',",
+          "next_eligible_retry_epoch_ms = null,",
+          "safe_error = 'deferred_lifecycle',",
+          "is_fingerprint_frozen = 1",
+          `where local_file_id = ${sqlText(localFileId)}`,
+          `and state in (${pendingStateList})`,
+          "and operation in ('create', 'update');",
+        ].join(" "),
+      );
+    });
+  }
+
+  /**
+   * Remove one tracked `local_files` row together with every dependent
+   * event / operand row in one transaction. The lifecycle capture calls
+   * this AFTER a tombstone event has been recorded, so the durable
+   * operand row keeps the tombstone reference for restore even though
+   * the local mapping row itself is gone.
+   */
+  async removeLocalMapping(localFileId: string): Promise<void> {
+    if (!isUuid(localFileId)) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    await this.#database.runSerializedMutation((session) => {
+      const existing = firstRow(
+        session.readRows(
+          `select local_file_id from local_files where local_file_id = ${sqlText(localFileId)};`,
+        ),
+      );
+      if (existing === null) {
+        return;
+      }
+      session.exec(
+        `delete from journal_attempts where event_id in (select event_id from journal_events where local_file_id = ${sqlText(localFileId)});`,
+      );
+      session.exec(
+        `delete from lifecycle_event_operands where event_id in (select event_id from journal_events where local_file_id = ${sqlText(localFileId)});`,
+      );
+      session.exec(
+        `delete from journal_events where local_file_id = ${sqlText(localFileId)};`,
+      );
+      session.exec(
+        `delete from local_files where local_file_id = ${sqlText(localFileId)};`,
+      );
+    });
+  }
+
   // --- receipts and attempts (spec 6.3, 7.2) ----------------------------------------------------
 
   /**
    * Persist the canonical receipt of one committed event: the event closes
    * as `committed` and its file takes the server-returned source and base
    * version identities. The observed fingerprint is left untouched — a
-   * successor capture may already have observed newer bytes.
+   * successor capture may already have observed newer bytes — but the
+   * provable `last_committed_*` triple is updated from the event's frozen
+   * fingerprint so the lifecycle capture can verify a later restore
+   * eligibility against bytes the server actually acknowledged.
    */
   async recordCommittedReceipt(input: JournalCommittedReceiptInput): Promise<void> {
     if (
@@ -670,7 +805,10 @@ export class JournalRepository {
         [
           "update local_files set",
           `source_id = ${sqlText(input.sourceId)},`,
-          `base_version_id = ${sqlText(input.baseVersionId)}`,
+          `base_version_id = ${sqlText(input.baseVersionId)},`,
+          `last_committed_sha256 = ${sqlText(event.fingerprint.sha256)},`,
+          `last_committed_size_bytes = ${event.fingerprint.sizeBytes},`,
+          `last_committed_media_type = ${sqlText(event.fingerprint.mediaType)}`,
           `where local_file_id = ${sqlText(event.localFileId)};`,
         ].join(" "),
       );
@@ -680,7 +818,10 @@ export class JournalRepository {
   /**
    * Persist the safe no-op receipt of one `no_change` preflight (spec 7.2,
    * 10.1): the event closes as `no_change` and its file adopts the confirmed
-   * current server base — no bytes were uploaded and nothing retries.
+   * current server base — no bytes were uploaded and nothing retries. The
+   * `last_committed_*` triple is updated from the event's frozen fingerprint
+   * so the lifecycle capture can verify restore eligibility against the
+   * server's acknowledgement.
    */
   async recordNoChangeReceipt(input: JournalCommittedReceiptInput): Promise<void> {
     if (
@@ -708,7 +849,10 @@ export class JournalRepository {
         [
           "update local_files set",
           `source_id = ${sqlText(input.sourceId)},`,
-          `base_version_id = ${sqlText(input.baseVersionId)}`,
+          `base_version_id = ${sqlText(input.baseVersionId)},`,
+          `last_committed_sha256 = ${sqlText(event.fingerprint.sha256)},`,
+          `last_committed_size_bytes = ${event.fingerprint.sizeBytes},`,
+          `last_committed_media_type = ${sqlText(event.fingerprint.mediaType)}`,
           `where local_file_id = ${sqlText(event.localFileId)};`,
         ].join(" "),
       );
@@ -889,6 +1033,132 @@ export class JournalRepository {
     });
   }
 
+  /**
+   * The redacted lifecycle-state histogram of the status projection
+   * (Task 10, spec 6.3): the closed {@link LifecycleLocalFileState} of
+   * each tracked `local_files` row, counted per state. The closed enum
+   * is the only thing that reaches the status surface — no path,
+   * source id, locator, tombstone id, fingerprint or any other row
+   * detail ever escapes the read.
+   */
+  readLifecycleStateCounts(): Readonly<Record<LifecycleLocalFileState, number>> {
+    const counts: Record<LifecycleLocalFileState, number> = {
+      active: 0,
+      rename_pending: 0,
+      move_pending: 0,
+      delete_pending: 0,
+      restore_pending: 0,
+      tombstoned: 0,
+      restored: 0,
+      reconcile_required: 0,
+    };
+    const result = this.#database.readAll(
+      "select lifecycle_state, count(*) from local_files group by lifecycle_state;",
+    );
+    for (const row of result[0]?.values ?? []) {
+      const [state, count] = row;
+      if (typeof state !== "string" || !isClosedToken(state, LIFECYCLE_LOCAL_FILE_STATES)) {
+        throw journalStoreError("journal_image_invalid");
+      }
+      if (
+        typeof count !== "number" ||
+        !Number.isInteger(count) ||
+        count < 0
+      ) {
+        throw journalStoreError("journal_image_invalid");
+      }
+      counts[state as LifecycleLocalFileState] = count;
+    }
+    return counts;
+  }
+
+  /**
+   * The number of lifecycle events that still owe work (Task 10): the
+   * oldest eligible lifecycle event count surfaced as a status
+   * affordance. The number is derived from the same closed pending-event
+   * vocabulary the content queue uses, restricted to the four lifecycle
+   * operations so the count never leaks a content event.
+   */
+  countPendingLifecycleEvents(): number {
+    const pendingStateList = JOURNAL_PENDING_EVENT_STATES.map((state) => sqlText(state)).join(", ");
+    const row = firstRow(
+      this.#database.readAll(
+        [
+          `select count(*) from journal_events`,
+          `where state in (${pendingStateList})`,
+          `and operation in ('rename', 'move', 'delete', 'restore');`,
+        ].join(" "),
+      ),
+    );
+    const count = row?.[0];
+    return typeof count === "number" ? count : 0;
+  }
+
+  /**
+   * The number of failed attempts in the bounded `journal_attempts`
+   * ring (Task 10, spec 6.3): every row whose closed `outcome_label`
+   * is anything other than the success token (`committed`) counts as
+   * one failed attempt. The number never leaks a path, digest, source
+   * id or credential; only closed labels and correlation IDs reach
+   * the audit ring.
+   */
+  countFailedAttempts(): number {
+    const row = firstRow(
+      this.#database.readAll(
+        "select count(*) from journal_attempts where outcome_label != 'committed';",
+      ),
+    );
+    const count = row?.[0];
+    return typeof count === "number" ? count : 0;
+  }
+
+  /**
+   * The redacted lifecycle blocked-reason-code list of the status
+   * projection (Task 10, spec 6.3): the closed set of reasons any
+   * lifecycle event currently owns that block its forward progress.
+   * The mapping is derived from the existing telemetry (event states
+   * + bounded attempt outcome labels); no path, digest, locator,
+   * source id, tombstone id or credential ever escapes the read.
+   */
+  readLifecycleBlockedReasonCodes(): readonly string[] {
+    const codes = new Set<string>();
+    const blockedEvents = this.#database.readAll(
+      [
+        "select safe_error from journal_events",
+        "where operation in ('rename', 'move', 'delete', 'restore')",
+        "and safe_error = 'integrity_failed';",
+      ].join(" "),
+    );
+    for (const row of blockedEvents[0]?.values ?? []) {
+      const [safeError] = row;
+      if (typeof safeError === "string") {
+        codes.add(safeError);
+      }
+    }
+    return Array.from(codes);
+  }
+
+  /**
+   * The retained tombstone ids the explicit restore surface addresses
+   * (Task 10, spec 6.3 + 7.1). The read returns every tracked file
+   * row whose `lifecycle_state` is `tombstoned`, identified by the
+   * plugin-local `localFileId`. No path, source id, tombstone id,
+   * locator or fingerprint reaches the caller; the picker constructs
+   * its display label from the safe identifier alone.
+   */
+  readTombstonedLocalFileIds(): readonly string[] {
+    const rows = this.#database.readAll(
+      [
+        "select local_file_id from local_files",
+        "where lifecycle_state = 'tombstoned'",
+        "order by normalized_path asc;",
+      ].join(" "),
+    );
+    return (rows[0]?.values ?? [])
+      .map((row) => row[0])
+      .filter((value): value is string => typeof value === "string" && value.length > 0);
+  }
+
   // --- internals ------------------------------------------------------------------------------------
 
   #readLocalFileRow(
@@ -943,6 +1213,24 @@ export class JournalRepository {
     localFileId: string,
   ): StoredJournalEvent | null {
     const coalescableStateList = JOURNAL_COALESCABLE_EVENT_STATES.map((state) => sqlText(state)).join(", ");
+    // Coalesce discipline (Child 4 + Child 5): only the content surface
+    // (`create`, `update`) is coalescable; a queued lifecycle event for the
+    // same file is never replaced by a later content capture and vice-versa.
+    const coalescableOperationList = ["create", "update"]
+      .map((operation) => sqlText(operation))
+      .join(", ");
+    // A file with any recorded lifecycle event must not have its content
+    // events coalesced away — the lifecycle surface freezes the file's
+    // locator evidence and a coalesced content capture would silently drop
+    // the queued lifecycle intent. The probe reads only one indexed row.
+    const lifecycleProbe = firstRow(
+      session.readRows(
+        `select 1 from journal_events where local_file_id = ${sqlText(localFileId)} and operation in ('rename', 'move', 'delete', 'restore') limit 1;`,
+      ),
+    );
+    if (lifecycleProbe !== null) {
+      return null;
+    }
     const row = firstRow(
       session.readRows(
         selectColumns(
@@ -951,6 +1239,7 @@ export class JournalRepository {
           [
             `where local_file_id = ${sqlText(localFileId)}`,
             `and state in (${coalescableStateList})`,
+            `and operation in (${coalescableOperationList})`,
             "and is_fingerprint_frozen = 0",
             "order by created_at_epoch_ms desc, rowid desc limit 1",
           ].join(" "),

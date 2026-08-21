@@ -71,6 +71,7 @@ from personal_os.small_file_sync.contracts import (
     SmallFileTerminalResultKind,
 )
 from personal_os.small_file_sync.ports import SmallFileBoundOperation
+from personal_os.source_locators import NormalizedLocator
 from personal_os.sources.actors import ActorKind, SourceActor
 from personal_os.sources.commands import (
     CreateSourceVersion,
@@ -101,6 +102,7 @@ from postgresql_source_store.tables import (
     content_objects,
     devices,
     projection_intents,
+    source_locators,
     source_versions,
     sources,
     sync_events,
@@ -338,25 +340,28 @@ class _RejectionAbort(Exception):
 class SourceCreateIdentities:
     """Backend UUIDv7 identities for one create service invocation.
 
-    The five generated identities are allocated once per service invocation
+    The six generated identities are allocated once per service invocation
     and reused through the bounded transaction attempts, so a retry rewrites
     the same canonical identity rather than leaking a new one per attempt.
-    The source and event identities come from the command, and the event
+    The source and event identities come from the command, the initial
+    locator identity is reserved alongside the create, and the event
     sequence and every timestamp stay PostgreSQL-owned.
     """
 
     content_object_id: UUID
     source_version_id: UUID
+    source_locator_id: UUID
     qdrant_intent_id: UUID
     neo4j_intent_id: UUID
     audit_event_id: UUID
 
     @classmethod
     def allocate(cls) -> SourceCreateIdentities:
-        """Allocate the five fresh time-ordered UUIDv7 identities."""
+        """Allocate the six fresh time-ordered UUIDv7 identities."""
         return cls(
             content_object_id=uuid7(),
             source_version_id=uuid7(),
+            source_locator_id=uuid7(),
             qdrant_intent_id=uuid7(),
             neo4j_intent_id=uuid7(),
             audit_event_id=uuid7(),
@@ -652,8 +657,13 @@ class PostgresqlSourcePublicationStore:
         then the ``workspace_policy_state`` row lock with authoritative signed
         policy verification, then the source advisory lock. The policy check
         runs for the replay-return path too — a replay must not return
-        canonical data until the current policy permits the subject. Matching
-        bound allowed evidence skips only the evaluator after locked snapshot
+        canonical data until the current policy permits the subject. A
+        small-file create carries a bound initial locator that the locked
+        subject surfaces so the publication guard can re-evaluate the
+        locator-aware policy under the current revision (the receipt-level
+        preflight may have authorized the preflight revision; the locked
+        guard is the authoritative verdict). Matching bound allowed evidence
+        skips only the locator-free evaluator after locked snapshot
         verification; changed revisions and ordinary decisions are evaluated
         unconditionally. Every rejection raises out of the ``async with`` block via
         :class:`_RejectionAbort` so the transaction always rolls back — a
@@ -665,6 +675,9 @@ class PostgresqlSourcePublicationStore:
         """
         result: SourceVersionPublicationResult | None = None
         rejection: _PendingRejection | None = None
+        bound_locator: NormalizedLocator | None = None
+        if isinstance(command, CreateSourceVersion):
+            bound_locator = command.initial_locator
         try:
             async with (
                 self._engine.connect() as connection,
@@ -714,7 +727,9 @@ class PostgresqlSourcePublicationStore:
                         ErrorCode.SOURCE_CONCURRENCY_INVARIANT_FAILED,
                         safe_details={"source_id": command.source_id},
                     )
-                subject = await self._build_authoritative_subject(connection, command, receipt)
+                subject = await self._build_authoritative_subject(
+                    connection, command, receipt, bound_locator
+                )
                 await authorize_locked_publication_policy(
                     connection=connection,
                     command=command,
@@ -772,6 +787,7 @@ class PostgresqlSourcePublicationStore:
         connection: AsyncConnection,
         command: SourceVersionCommand,
         receipt: VerifiedObjectReceipt,
+        bound_locator: NormalizedLocator | None = None,
     ) -> PolicySubject:
         """Rebuild the evaluation subject from the command's own evidence.
 
@@ -781,7 +797,10 @@ class PostgresqlSourcePublicationStore:
         stable across the lock). The media type and byte size come from the
         verified receipt the service already validated against the expected
         object, so the subject reflects the canonical content being published
-        rather than a client claim.
+        rather than a client claim. A small-file create with a bound initial
+        locator surfaces that locator on the subject so the locked
+        publication guard can reach a definite verdict without rebuilding
+        path evidence from the plugin request.
         """
 
         source_type: SourceType | None
@@ -793,9 +812,13 @@ class PostgresqlSourcePublicationStore:
             )
             stored = result.scalar_one_or_none()
             source_type = SourceType(str(stored)) if stored is not None else None
+        normalized_locator_value: str | None = None
+        if bound_locator is not None:
+            normalized_locator_value = bound_locator.value
         return PolicySubject(
             workspace_id=command.workspace_id,
             source_id=command.source_id,
+            normalized_locator=normalized_locator_value,
             source_type=source_type,
             media_type=receipt.media_type,
             size_bytes=receipt.size_bytes,
@@ -810,7 +833,12 @@ class PostgresqlSourcePublicationStore:
         diagnostic_context: DiagnosticContext,
         identities: SourceCreateIdentities,
     ) -> tuple[_PendingRejection | None, SourceVersionPublicationResult | None]:
-        """Execute the create state transition under both advisory locks."""
+        """Execute the create state transition under both advisory locks.
+
+        The initial ``source_locators`` row lands AFTER the create event and
+        BEFORE the projection intents and the succeeded audit, so a duplicate
+        active locator rejection rolls the whole create graph back.
+        """
         if await self._select_source_workspace_id(connection, command.source_id) is not None:
             # ``source_id`` is a global primary key: any existing row, in the
             # requested workspace or another, rejects without tenant disclosure.
@@ -860,6 +888,14 @@ class PostgresqlSourcePublicationStore:
         event_sequence, committed_at = await self._insert_create_event(
             connection, command, request_fingerprint, identities.source_version_id
         )
+        if command.initial_locator is not None:
+            await self._insert_initial_locator(
+                connection,
+                command,
+                identities.source_locator_id,
+                event_sequence,
+                command.initial_locator,
+            )
         await self._insert_projection_intent(
             connection,
             command,
@@ -1366,6 +1402,34 @@ class PostgresqlSourcePublicationStore:
                 workspace_id=command.workspace_id,
                 source_type=command.source_type.value,
                 title=command.title.value,
+            )
+        )
+
+    async def _insert_initial_locator(
+        self,
+        connection: AsyncConnection,
+        command: CreateSourceVersion,
+        source_locator_id: UUID,
+        opened_sequence: int,
+        locator: NormalizedLocator,
+    ) -> None:
+        """Insert the bound initial ``source_locators`` row for one create.
+
+        The opening event and sequence come from the just-committed create
+        event; the display locator mirrors the canonical normalized value
+        until the lifecycle mutates it. The unique active locator index
+        raises a constraint violation if the same workspace already has an
+        active locator at the same path, rolling the whole create back.
+        """
+        await connection.execute(
+            sa.insert(source_locators).values(
+                source_locator_id=source_locator_id,
+                workspace_id=command.workspace_id,
+                source_id=command.source_id,
+                normalized_locator=locator.value,
+                display_locator=locator.value,
+                opened_event_id=command.event_id,
+                opened_sequence=opened_sequence,
             )
         )
 

@@ -63,6 +63,8 @@ def test_snapshot_lock_order_covers_the_canonical_policy_and_operation_tables() 
         "sources",
         "source_versions",
         "sync_events",
+        "source_locators",
+        "source_tombstones",
         "projection_intents",
         "audit_events",
         "user_credentials",
@@ -103,7 +105,7 @@ def test_snapshot_lock_timeout_is_fifteen_seconds() -> None:
 def test_share_lock_statements_follow_fixed_spec_order() -> None:
     statements = build_share_lock_statements()
     texts = [str(s.compile(dialect=postgresql.dialect())) for s in statements]
-    assert len(texts) == 28
+    assert len(texts) == 30
     for text, table in zip(texts, SNAPSHOT_LOCK_ORDER, strict=True):
         assert f'{SOURCE_STORE_SCHEMA}."{table}"' in text
         assert "SHARE MODE NOWAIT" in text
@@ -222,3 +224,77 @@ def test_hydrate_rejects_a_conflicting_duplicate_object() -> None:
 
 def test_hydrate_of_no_rows_yields_an_empty_object_set() -> None:
     assert hydrate_referenced_objects([]) == ()
+
+
+# --- source lifecycle round-trip coverage (Task 11) ---------------------------
+
+
+def test_snapshot_lock_order_includes_lifecycle_tables() -> None:
+    """Locator history, tombstones and pending projection intents join the snapshot.
+
+    The 30-table lock order covers the canonical post-lifecycle
+    (migration ``20260820_01``) tables: locator history, source
+    tombstones and the projection-intent outbox. They sit between the
+    earlier source/version tables and the audit row so the snapshot
+    includes the lifecycle evidence that the exact-replay lookup
+    resolves.
+    """
+
+    assert "source_locators" in SNAPSHOT_LOCK_ORDER
+    assert "source_tombstones" in SNAPSHOT_LOCK_ORDER
+    assert "projection_intents" in SNAPSHOT_LOCK_ORDER
+    # The lifecycle tables sit between source versioning and durable policy state.
+    assert SNAPSHOT_LOCK_ORDER.index("source_locators") < SNAPSHOT_LOCK_ORDER.index("audit_events")
+    assert SNAPSHOT_LOCK_ORDER.index("source_tombstones") > SNAPSHOT_LOCK_ORDER.index(
+        "source_locators"
+    )
+    assert SNAPSHOT_LOCK_ORDER.index("source_tombstones") < SNAPSHOT_LOCK_ORDER.index(
+        "projection_intents"
+    )
+
+
+def test_share_lock_statements_cover_lifecycle_tables_in_spec_order() -> None:
+    """The binding share-lock order covers the lifecycle tables in the fixed order."""
+
+    statements = build_share_lock_statements()
+    texts = [str(s.compile(dialect=postgresql.dialect())) for s in statements]
+    for lifecycle_table in ("source_locators", "source_tombstones", "projection_intents"):
+        matching = [text for text in texts if f'{SOURCE_STORE_SCHEMA}."{lifecycle_table}"' in text]
+        assert len(matching) == 1, lifecycle_table
+        assert "SHARE MODE NOWAIT" in matching[0]
+        assert matching[0].startswith("LOCK TABLE")
+
+
+def test_snapshot_lock_order_position_of_lifecycle_tables_is_stable() -> None:
+    """The lifecycle tables occupy a stable slot in the lock order.
+
+    The lock order is the single fixed order of the spec; the lifecycle
+    tables must not drift past the audit row or before the
+    ``sync_events`` table, otherwise a restore would not see the
+    locator history that backs the exact-replay lookup.
+    """
+
+    sync_events_index = SNAPSHOT_LOCK_ORDER.index("sync_events")
+    locators_index = SNAPSHOT_LOCK_ORDER.index("source_locators")
+    tombstones_index = SNAPSHOT_LOCK_ORDER.index("source_tombstones")
+    intents_index = SNAPSHOT_LOCK_ORDER.index("projection_intents")
+    audit_index = SNAPSHOT_LOCK_ORDER.index("audit_events")
+    assert sync_events_index < locators_index < tombstones_index < intents_index < audit_index
+
+
+def test_lifecycle_tables_are_schema_qualified_in_lock_statements() -> None:
+    """The lifecycle tables share the canonical knowledge schema in the lock SQL."""
+
+    statements = build_share_lock_statements()
+    texts = [str(s.compile(dialect=postgresql.dialect())) for s in statements]
+    for table in ("source_locators", "source_tombstones"):
+        text = next(text for text in texts if f'{SOURCE_STORE_SCHEMA}."{table}"' in text)
+        assert "knowledge" in text
+        assert table in text
+
+
+def test_snapshot_lock_order_count_is_thirty() -> None:
+    """The lock order covers 30 tables — the canonical schema size after migration."""
+
+    assert len(SNAPSHOT_LOCK_ORDER) == 30
+    assert len(set(SNAPSHOT_LOCK_ORDER)) == 30

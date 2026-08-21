@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any, cast
+from typing import Any, Final, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -136,8 +136,9 @@ class _ControlledStore(PostgresqlSourcePublicationStore):
         connection: object,
         command: object,
         receipt: object,
+        bound_locator: object = None,
     ) -> PolicySubject:
-        del connection, command, receipt
+        del connection, command, receipt, bound_locator
         self.order.append("subject")
         return self.subject
 
@@ -293,3 +294,105 @@ async def test_foreign_workspace_binding_fails_before_source_mutation(
     assert raised.value.error_code is ErrorCode.SOURCE_CONCURRENCY_INVARIANT_FAILED
     assert store.order == []
     assert transition_calls == 0
+
+
+class _LocatorBoundStore(_ControlledStore):
+    """Publication store double that builds the subject from the bound locator.
+
+    The double mirrors the durable
+    :meth:`PostgresqlSourcePublicationStore._build_authoritative_subject`:
+    a small-file create carries its bound initial locator onto the policy
+    subject so the locked guard reevaluates the locator-aware rule under
+    the current revision. The double records every argument and the
+    emitted subject so the test can assert the wiring exactly.
+    """
+
+    def __init__(self, command: CreateSourceVersion) -> None:
+        super().__init__(command)
+        self.bound_locator_argument: object = _MISSING
+        self.observed_subject: PolicySubject | None = None
+
+    async def _build_authoritative_subject(
+        self,
+        connection: object,
+        command: object,
+        receipt: object,
+        bound_locator: object = None,
+    ) -> PolicySubject:
+        del connection, command, receipt
+        self.bound_locator_argument = bound_locator
+        self.order.append("subject")
+        normalized_locator_value: str | None = None
+        if bound_locator is not None:
+            normalized_locator_value = bound_locator.value
+        self.observed_subject = PolicySubject(
+            workspace_id=self.subject.workspace_id,
+            source_id=self.subject.source_id,
+            source_type=self.subject.source_type,
+            normalized_locator=normalized_locator_value,
+            media_type=self.subject.media_type,
+            size_bytes=self.subject.size_bytes,
+        )
+        return self.observed_subject
+
+
+@pytest.mark.asyncio
+async def test_durable_publication_store_carries_bound_locator_into_locked_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A small-file create carries its bound locator through the locked guard.
+
+    The brief requires the publication guard to reevaluate the bound
+    locator under the locked current policy. The offline composition's
+    :meth:`PolicyEnforcementService._publication_subject` is intentionally
+    locator-free (the offline wire test asserts the closed indeterminate
+    failure there). The durable
+    :meth:`PostgresqlSourcePublicationStore._build_authoritative_subject`
+    is the authoritative path — it surfaces the bound locator on the
+    subject that reaches :func:`authorize_locked_publication_policy`, so a
+    folder rule that excludes the locator can reach a definite denial.
+    """
+
+    from personal_os.source_locators.values import NormalizedLocator
+
+    locator = NormalizedLocator("notes/foo.md")
+    command = build_create_command(initial_locator=locator)
+    binding = AllowedPolicyRevisionBinding(command.workspace_id, 7)
+    store = _LocatorBoundStore(command)
+    committed = build_committed_result(command)
+    captured_subjects: list[PolicySubject] = []
+
+    async def authorize_locked(*args: object, **kwargs: object) -> PublicationPolicyEvidence:
+        del args
+        store.order.append("policy")
+        captured_subjects.append(cast(PolicySubject, kwargs["subject"]))
+        return binding
+
+    async def transition(
+        connection: object,
+    ) -> tuple[None, SourceVersionPublicationResult]:
+        del connection
+        store.order.append("transition")
+        return None, committed
+
+    monkeypatch.setattr(
+        publication_store,
+        "authorize_locked_publication_policy",
+        authorize_locked,
+        raising=False,
+    )
+
+    result = await _run_transition(store, command, binding, transition)
+
+    assert result is committed
+    # The bound locator reaches the subject-building path verbatim.
+    assert store.bound_locator_argument is locator
+    # The subject the locked guard sees carries the bound locator.
+    assert len(captured_subjects) == 1
+    assert captured_subjects[0].normalized_locator == "notes/foo.md"
+    assert captured_subjects[0].workspace_id == command.workspace_id
+    assert captured_subjects[0].source_id == command.source_id
+    assert store.order == ["subject", "policy", "transition"]
+
+
+_MISSING: Final[object] = object()
