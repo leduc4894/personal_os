@@ -217,6 +217,13 @@ describe("Obsidian plugin composition root", () => {
     expect(pluginSource).toContain("lifecycleDriver");
   });
 
+  it("injects UUIDv7 identities into the production lifecycle capture", () => {
+    const captureIndex = pluginSource.indexOf("new LifecycleCaptureImpl(");
+    expect(captureIndex).toBeGreaterThanOrEqual(0);
+    const captureComposition = pluginSource.slice(captureIndex, captureIndex + 500);
+    expect(captureComposition).toContain("createId: createUuidv7Factory()");
+  });
+
   it("never logs paths, locators, source IDs, tokens or fingerprints from the restore command", () => {
     // The error reporter of the restore command must surface only the
     // closed safe-code label of the journal store error; the raw failure

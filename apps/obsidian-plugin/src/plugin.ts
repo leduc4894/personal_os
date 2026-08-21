@@ -61,6 +61,7 @@ import type { JournalSyncStatusSnapshot, LifecycleBlockedReasonCode } from "./jo
 import type { LifecycleStateCounts } from "./journal/status";
 import { loadVendoredSqliteEngine } from "./journal/sqlite-database";
 import { createJournalSyncApi } from "./journal/sync-api";
+import { createUuidv7Factory } from "./journal/uuidv7";
 import { PolicySession } from "./exclusion-policy/policy-session";
 import type { PolicyCacheAdapter } from "./exclusion-policy/policy-cache";
 import type { PolicyIntegrityState } from "./exclusion-policy/contracts";
@@ -426,6 +427,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         repository,
         lifecycle: repository.lifecycle,
         vaultReader: lifecycleVaultReader,
+        createId: createUuidv7Factory(),
         policyRevision: 1,
       });
       const capture = new JournalCapture({
