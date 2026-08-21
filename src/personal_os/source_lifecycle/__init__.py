@@ -16,13 +16,24 @@ from personal_os.source_lifecycle.metrics import (
     LifecycleMetricOutcome,
     SourceLifecycleMetrics,
 )
-from personal_os.source_lifecycle.ports import SourceLifecyclePolicy, SourceLifecycleStore
+from personal_os.source_lifecycle.ports import (
+    LifecycleCommitResult,
+    LifecycleDeviceContext,
+    LifecyclePolicyDecision,
+    LifecyclePolicyOutcome,
+    SourceLifecyclePolicy,
+    SourceLifecycleStore,
+)
 from personal_os.source_lifecycle.title import derive_title_v1
 
 __all__ = [
     "SOURCE_LIFECYCLE_METRIC_CONTRACTS",
+    "LifecycleCommitResult",
+    "LifecycleDeviceContext",
     "LifecycleMetricOutcome",
     "LifecycleOperation",
+    "LifecyclePolicyDecision",
+    "LifecyclePolicyOutcome",
     "LifecycleRequestFingerprint",
     "LifecycleState",
     "SourceLifecycleCommand",

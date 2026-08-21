@@ -32,6 +32,7 @@ TRANSACTION_MODULE_NAMES: Final[tuple[str, ...]] = (
     "projection_intents.py",
     "policy_enforcement.py",
     "canonical_read.py",
+    "lifecycle_store.py",
 )
 
 #: Import roots that would bridge a transaction onto the network or Temporal.
