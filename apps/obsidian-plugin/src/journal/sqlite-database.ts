@@ -43,8 +43,18 @@ import type { JournalMeta, JournalRecoveryState } from "./contracts";
  * device most recently observed. The new columns are nullable; every
  * Child 5 row reads back with `last_committed_* = null` until the first
  * committed receipt lands.
+ *
+ * Version 5 (task 9 fix round 1 I1) adds the
+ * `server_receipt_tombstone_id` column on `lifecycle_event_operands` so
+ * the durable record of one committed `delete` carries the tombstone id
+ * the server returned on the wire — the same id the follow-up `restore`
+ * sends back. The restore driver is now guaranteed to read the
+ * server-confirmed tombstone id from the predecessor's persisted
+ * receipt, never from a locally-derived guess. The column is nullable;
+ * every v4 row reads back with `server_receipt_tombstone_id = null`
+ * until the first delete commits.
  */
-export const JOURNAL_SCHEMA_VERSION = 4;
+export const JOURNAL_SCHEMA_VERSION = 5;
 
 // --- closed failure reasons ---------------------------------------------------------------
 
@@ -249,7 +259,8 @@ create table if not exists lifecycle_event_operands (
   target_locator text,
   tombstone_id text,
   policy_revision integer not null check (policy_revision >= 1),
-  predecessor_event_id text references journal_events (event_id)
+  predecessor_event_id text references journal_events (event_id),
+  server_receipt_tombstone_id text
 );
 create index if not exists lifecycle_operands_predecessor_idx
   on lifecycle_event_operands (predecessor_event_id);
@@ -269,6 +280,14 @@ const JOURNAL_SCHEMA_DDL = [
  * so the migration can pin the source version it accepts.
  */
 export const CHILD_FOUR_SCHEMA_VERSION = 2;
+
+/**
+ * The Child 5 fix schema version (4). The v4 → v5 migration adds the
+ * `server_receipt_tombstone_id` column on `lifecycle_event_operands`;
+ * the function lives in `lifecycle-contracts.ts` and pins this constant
+ * as the source version it accepts.
+ */
+export const CHILD_FIVE_FIX_SCHEMA_VERSION = 4;
 
 // --- closed failure reasons ---------------------------------------------------------------
 

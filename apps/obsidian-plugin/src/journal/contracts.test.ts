@@ -63,7 +63,7 @@ describe("JOURNAL_EVENT_STATES closed set (spec 7.2)", () => {
 });
 
 describe("JOURNAL_SAFE_ERROR_LABELS closed set (spec 12)", () => {
-  it("mirrors the spec-12 error and retry matrix exactly", () => {
+  it("mirrors the spec-12 error and retry matrix plus the success token", () => {
     expect([...JOURNAL_SAFE_ERROR_LABELS]).toEqual([
       "network_offline",
       "network_timeout",
@@ -76,6 +76,7 @@ describe("JOURNAL_SAFE_ERROR_LABELS closed set (spec 12)", () => {
       "deferred_lifecycle",
       "integrity_failed",
       "reconcile_required",
+      "committed",
     ]);
   });
 

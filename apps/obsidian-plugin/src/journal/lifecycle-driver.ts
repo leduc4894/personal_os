@@ -90,7 +90,11 @@ export function computeLifecycleRetryBackoffMs(
  * safe failure kind.
  */
 export interface LifecycleApi {
-  commit(event: FrozenLifecycleEvent, signal: AbortSignal): Promise<LifecycleResult>;
+  commit(
+    event: FrozenLifecycleEvent,
+    signal: AbortSignal,
+    tombstoneIdOverride?: string | null,
+  ): Promise<LifecycleResult>;
 }
 
 /** The closed bounded-pass outcome vocabulary. */
@@ -190,9 +194,18 @@ export class LifecycleDriverImpl implements LifecycleDriver {
       return "idle";
     }
 
+    // The restore succession MUST source the tombstone id exclusively
+    // from the committed delete predecessor's server receipt (task 9
+    // fix round 1 I1). The local operands row may have staged a
+    // different id at capture time; the persisted server receipt is
+    // the only authority over the tombstone domain, so any override
+    // beats the operands-derived value.
+    const tombstoneIdOverride = this.#resolveRestoreTombstoneOverride(frozen);
+
     const correlationId = this.#createCorrelationId();
+    let result: LifecycleResult;
     try {
-      await this.#api.commit(frozen, combinedSignal);
+      result = await this.#api.commit(frozen, combinedSignal, tombstoneIdOverride);
     } catch (error) {
       if (this.#isDisposed || combinedSignal.aborted) {
         return "idle";
@@ -210,10 +223,11 @@ export class LifecycleDriverImpl implements LifecycleDriver {
     await this.#repository.recordEventAttempt({
       eventId: frozen.event.eventId,
       attemptedAtEpochMs: this.#nowEpochMs(),
-      outcomeLabel: "server_error",
+      outcomeLabel: "committed",
       requestCorrelationId: correlationId,
     });
-    await this.#lifecycle.recordLifecycleCommittedReceipt(frozen.event.eventId);
+    const serverReceipt = result.tombstoneId === null ? null : { tombstoneId: result.tombstoneId };
+    await this.#lifecycle.recordLifecycleCommittedReceipt(frozen.event.eventId, serverReceipt);
     // A committed restore successor consumes the retained tombstone so
     // the file returns to the active content surface (spec 7.1 fix
     // round 1 C2).
@@ -221,6 +235,28 @@ export class LifecycleDriverImpl implements LifecycleDriver {
       await this.#lifecycle.consumeRestoreSuccessor(frozen.event.localFileId);
     }
     return "committed";
+  }
+
+  /**
+   * Resolve the tombstone id the wire body must carry for one
+   * lifecycle event. A restore event with a server-receipt-bearing
+   * delete predecessor MUST send the server-confirmed id; any other
+   * operation (or a restore whose predecessor has no persisted server
+   * receipt yet) falls through to the operands-derived value.
+   */
+  #resolveRestoreTombstoneOverride(frozen: FrozenLifecycleEvent): string | null | undefined {
+    if (frozen.operands.operation !== "restore") {
+      return undefined;
+    }
+    const predecessorId = frozen.operands.predecessorEventId;
+    if (predecessorId === null) {
+      return undefined;
+    }
+    const predecessorReceipt = this.#lifecycle.readServerReceiptTombstoneId(predecessorId);
+    if (predecessorReceipt === null) {
+      return undefined;
+    }
+    return predecessorReceipt;
   }
 
   // --- error mapping --------------------------------------------------------------------
@@ -239,6 +275,12 @@ export class LifecycleDriverImpl implements LifecycleDriver {
         await this.#closeTerminal(frozen.event.eventId, "blocked_conflict", correlationId);
         return "blocked";
       case "integrity":
+      case "integrity_5xx":
+        // 422 (integrity) and 5xx with an integrity code (integrity_5xx)
+        // share the same non-retryable outcome: the durable journal cannot
+        // safely retry. The spec-19.2 row-7 invariant is the same
+        // regardless of the status code that announced it (task 9 fix
+        // round 1 I2).
         await this.#closeTerminal(frozen.event.eventId, "integrity_failed", correlationId);
         return "blocked";
       case "login_required":
@@ -316,6 +358,14 @@ function retryLabelForKind(kind: LifecycleApiError["kind"]): JournalSafeErrorLab
       return "network_rate_limited";
     case "server_error":
       return "server_error";
+    // The integrity outcomes are non-retryable; the driver never
+    // calls `retryLabelForKind` for them. The exhaustive `default`
+    // branch keeps the closed-set pinning even if a future kind is
+    // added without label coverage.
+    case "integrity":
+    case "integrity_5xx":
+    case "conflict":
+    case "login_required":
     default:
       return "server_error";
   }

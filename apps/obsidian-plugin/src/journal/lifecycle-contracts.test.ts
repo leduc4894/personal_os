@@ -165,15 +165,19 @@ describe("schema migration from Child 4 to Child 5", () => {
     engineModule = await initSqlJs({ wasmBinary });
   });
 
-  it("bumps JOURNAL_SCHEMA_VERSION to 3 with lifecycle tables present", async () => {
+  it("bumps JOURNAL_SCHEMA_VERSION to 5 with lifecycle tables present", async () => {
     const { LIFECYCLE_SCHEMA_VERSION } = await import("./lifecycle-contracts");
     expect(LIFECYCLE_SCHEMA_VERSION).toBe(JOURNAL_SCHEMA_VERSION);
-    expect(LIFECYCLE_SCHEMA_VERSION).toBe(4);
-    expect(JOURNAL_SCHEMA_VERSION).toBe(4);
+    expect(LIFECYCLE_SCHEMA_VERSION).toBe(5);
+    expect(JOURNAL_SCHEMA_VERSION).toBe(5);
   });
 
-  it("migrates a Child 4 journal through v3 to v4 without losing any prior row", async () => {
-    const { migrateChildFourJournalToLifecycleSchema, migrateLifecycleJournalToLastCommittedSchema } = await import(
+  it("migrates a Child 4 journal through v3 to v5 without losing any prior row", async () => {
+    const {
+      migrateChildFourJournalToLifecycleSchema,
+      migrateLifecycleJournalToLastCommittedSchema,
+      migrateLastCommittedJournalToServerReceiptSchema,
+    } = await import(
       "./lifecycle-contracts"
     );
     // Seed a Child 4 journal by hand (no lifecycle columns) using raw sql.js.
@@ -250,8 +254,9 @@ describe("schema migration from Child 4 to Child 5", () => {
 
     const v3Image = migrateChildFourJournalToLifecycleSchema(engineModule, childFourImage);
     const v4Image = migrateLifecycleJournalToLastCommittedSchema(engineModule, v3Image);
+    const v5Image = migrateLastCommittedJournalToServerReceiptSchema(engineModule, v4Image);
 
-    const reopened = SqliteDatabase.openFromImage(engineModule, v4Image);
+    const reopened = SqliteDatabase.openFromImage(engineModule, v5Image);
     const meta = reopened.readJournalMeta() satisfies JournalMeta;
     expect(meta.schemaVersion).toBe(JOURNAL_SCHEMA_VERSION);
     expect(meta.dirtyGeneration).toBe(4);
@@ -290,8 +295,13 @@ describe("schema migration from Child 4 to Child 5", () => {
       ["f1f1f1f1-0000-4000-8000-000000000001", "active", null, null, null],
       ["f1f1f1f1-0000-4000-8000-000000000002", "active", null, null, null],
     ]);
-    // The schema version has advanced to v4.
-    expect(reopened.readSchemaVersion()).toBe(4);
+    // The schema version has advanced to v5; the new server-receipt column is
+    // present and every row reads back with `server_receipt_tombstone_id = null`.
+    expect(reopened.readSchemaVersion()).toBe(5);
+    const columnCheck = reopened.readAll(
+      "select server_receipt_tombstone_id from lifecycle_event_operands;",
+    );
+    expect(columnCheck[0]?.values ?? []).toEqual([]);
     reopened.close();
   });
 

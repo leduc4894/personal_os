@@ -75,7 +75,11 @@ function fingerprintOf(prefix: string, sizeBytes = 32) {
 }
 
 interface FakeApi extends LifecycleApi {
-  readonly commits: { event: FrozenLifecycleEvent; signal: AbortSignal }[];
+  readonly commits: {
+    event: FrozenLifecycleEvent;
+    signal: AbortSignal;
+    tombstoneIdOverride: string | null | undefined;
+  }[];
   install(
     handler: (
       event: FrozenLifecycleEvent,
@@ -86,12 +90,16 @@ interface FakeApi extends LifecycleApi {
 }
 
 function createFakeApi(): FakeApi {
-  const commits: { event: FrozenLifecycleEvent; signal: AbortSignal }[] = [];
+  const commits: {
+    event: FrozenLifecycleEvent;
+    signal: AbortSignal;
+    tombstoneIdOverride: string | null | undefined;
+  }[] = [];
   let handler: ((event: FrozenLifecycleEvent, signal: AbortSignal) => Promise<LifecycleResult>) | null = null;
   let throwLoginRequired = false;
   const api: LifecycleApi = {
-    async commit(event, signal) {
-      commits.push({ event, signal });
+    async commit(event, signal, tombstoneIdOverride) {
+      commits.push({ event, signal, tombstoneIdOverride });
       if (throwLoginRequired) {
         throw new Error("login_required: simulated");
       }
@@ -588,6 +596,33 @@ describe("lifecycle driver non-retryable conflict and integrity (spec 12)", () =
     expect(stored?.state).toBe("integrity_failed");
     expect(stored?.safeError).toBe("integrity_failed");
   });
+
+  it("closes a 5xx integrity outcome as integrity_failed and never retries (task 9 fix round 1 I2)", async () => {
+    const harness = createHarness({ randomJitter: () => 0 });
+    await harness.seedTrackedFile("notes/5xx-integrity.md");
+    const recorded = await harness.recordLifecycle(
+      createLifecycleEventOperands({
+        operation: "rename",
+        sourceId: SOURCE_ID,
+        expectedVersionId: VERSION_ID,
+        expectedLocator: "notes/5xx-integrity.md",
+        targetLocator: "notes/5xx-integrity-renamed.md",
+        policyRevision: 1,
+        predecessorEventId: null,
+      }),
+      { newPath: "notes/5xx-integrity-renamed.md" },
+    );
+    harness.api.install(async () => {
+      throw new LifecycleApiError("integrity_5xx");
+    });
+    const outcome = await harness.driver.runOne(activeSignal());
+    expect(outcome).toBe("blocked");
+    const stored = harness.repository.readEvent(recorded.event.eventId);
+    expect(stored?.state).toBe("integrity_failed");
+    expect(stored?.safeError).toBe("integrity_failed");
+    expect(stored?.nextEligibleRetryEpochMs).toBeNull();
+    expect(stored?.attemptCount).toBe(0);
+  });
 });
 
 // --- cancellation and unload -----------------------------------------------------------
@@ -778,6 +813,242 @@ describe("lifecycle driver race tests: predecessor order across rename/edit/dele
     expect(harness.api.commits).toHaveLength(1);
     expect(harness.api.commits[0]?.event.event.eventId).toBe(restore.eventId);
     expect(harness.repository.readEvent(restore.eventId)?.state).toBe("committed");
+  });
+
+  // M2: predecessor must NOT be replaced mid-flight by the successor.
+  // The driver dispatches the oldest eligible event each time it is
+  // asked; the restore successor is guarded by the predecessor rule,
+  // so a second runOne call mid-flight must NOT dispatch the restore.
+  it("does not dispatch a successor while the predecessor's HTTP call is mid-flight", async () => {
+    const harness = createHarness();
+    const file = await harness.seedTrackedFile("notes/race-midflight.md");
+    const del = await harness.lifecycle.recordLifecycleEvent(
+      createLifecycleEventOperands({
+        operation: "delete",
+        sourceId: SOURCE_ID,
+        expectedVersionId: VERSION_ID,
+        expectedLocator: "notes/race-midflight.md",
+        tombstoneId: RESULT_TOMBSTONE_ID,
+        policyRevision: 1,
+        predecessorEventId: null,
+      }),
+      { localFile: file, tombstoneId: RESULT_TOMBSTONE_ID },
+    );
+    const restore = await harness.lifecycle.recordLifecycleEvent(
+      createLifecycleEventOperands({
+        operation: "restore",
+        sourceId: SOURCE_ID,
+        expectedVersionId: VERSION_ID,
+        expectedLocator: null,
+        targetLocator: "notes/race-midflight.md",
+        tombstoneId: RESULT_TOMBSTONE_ID,
+        policyRevision: 1,
+        predecessorEventId: del.eventId,
+      }),
+      { localFile: file, tombstoneId: RESULT_TOMBSTONE_ID },
+    );
+    const predecessorGates: Array<() => void> = [];
+    const dispatchedEvents: string[] = [];
+    harness.api.install(async (event) => {
+      dispatchedEvents.push(event.event.eventId);
+      if (event.event.eventId === del.eventId) {
+        // The predecessor's HTTP call is mid-flight: each invocation
+        // waits on its own gate so the test can release them in
+        // order.
+        await new Promise<void>((resolve) => {
+          predecessorGates.push(resolve);
+        });
+      }
+      return committedResult({
+        eventId: event.event.eventId,
+        state: event.event.eventId === del.eventId ? "deleted" : "active",
+        tombstoneId: RESULT_TOMBSTONE_ID,
+        resultingLocator:
+          event.event.eventId === restore.eventId ? "notes/race-midflight.md" : null,
+      });
+    });
+    // First runOne: the predecessor is dispatched and stalls in flight.
+    const firstPromise = harness.driver.runOne(activeSignal());
+    // Yield to the event loop so the predecessor's HTTP call is in
+    // flight (the api.commit promise is awaiting the gate).
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    // Issue a second runOne WHILE the predecessor is in flight. The
+    // driver MUST NOT dispatch the successor yet — the predecessor is
+    // still queued (not yet terminal-success), so the successor is
+    // not eligible. The second runOne re-selects the predecessor
+    // (which is still the oldest eligible event), but the predecessor
+    // is mid-flight; the test pin is that the successor event id
+    // never lands in the dispatched list while the predecessor is in
+    // flight.
+    const secondPromise = harness.driver.runOne(activeSignal());
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    // Mid-flight: the successor (restore) MUST NOT be in the
+    // dispatched list yet. The predecessor may have been re-selected
+    // (the test does not pin that detail — the brief's M2 finding
+    // is about the successor, not the predecessor).
+    expect(dispatchedEvents).not.toContain(restore.eventId);
+    // Release both predecessor gates so the first and second runOne
+    // calls resolve; the first flips the durable row to committed.
+    while (predecessorGates.length > 0) {
+      const resolve = predecessorGates.shift();
+      if (resolve !== undefined) {
+        resolve();
+      }
+    }
+    const firstOutcome = await firstPromise;
+    expect(firstOutcome).toBe("committed");
+    await secondPromise;
+    // After the predecessor commits, a third runOne dispatches the
+    // successor (the predecessor is now terminal-success).
+    const thirdOutcome = await harness.driver.runOne(activeSignal());
+    expect(thirdOutcome).toBe("committed");
+    expect(harness.api.commits.map((c) => c.event.event.eventId)).toContain(restore.eventId);
+    expect(harness.repository.readEvent(restore.eventId)?.state).toBe("committed");
+  });
+});
+
+// --- server-receipt tombstone race (task 9 fix round 1 I1) ---------------------------------
+//
+// The driver MUST source the restore wire body's tombstone_id from the
+// delete predecessor's server-computed receipt, not from the operands
+// row the capture path staged at restore time. The server is the only
+// authority over the tombstone identity; the restore is the client
+// acknowledging the same id the server mailed on the paired delete.
+
+describe("lifecycle driver sources the restore tombstone id from the delete predecessor's server receipt (spec 19.2, task 9 fix round 1 I1)", () => {
+  const SERVER_TOMBSTONE_ID = "99999999-9999-4999-8999-999999999999";
+  const LOCAL_TOMBSTONE_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+  it("persists the server-returned tombstone id on the committed delete", async () => {
+    const harness = createHarness();
+    const file = await harness.seedTrackedFile("notes/server-receipt-delete.md");
+    const del = await harness.lifecycle.recordLifecycleEvent(
+      createLifecycleEventOperands({
+        operation: "delete",
+        sourceId: SOURCE_ID,
+        expectedVersionId: VERSION_ID,
+        expectedLocator: "notes/server-receipt-delete.md",
+        tombstoneId: LOCAL_TOMBSTONE_ID,
+        policyRevision: 1,
+        predecessorEventId: null,
+      }),
+      { localFile: file, tombstoneId: LOCAL_TOMBSTONE_ID },
+    );
+    harness.api.install(async (event) =>
+      committedResult({
+        eventId: event.event.eventId,
+        state: "deleted",
+        tombstoneId: SERVER_TOMBSTONE_ID,
+      }),
+    );
+    const outcome = await harness.driver.runOne(activeSignal());
+    expect(outcome).toBe("committed");
+    // The durable row carries the server-returned id, not the local stub.
+    expect(harness.lifecycle.readServerReceiptTombstoneId(del.eventId)).toBe(SERVER_TOMBSTONE_ID);
+  });
+
+  it("sends the server-receipt tombstone id on the restore wire body when the operands row disagrees", async () => {
+    const harness = createHarness();
+    const file = await harness.seedTrackedFile("notes/server-receipt-restore.md");
+    const del = await harness.lifecycle.recordLifecycleEvent(
+      createLifecycleEventOperands({
+        operation: "delete",
+        sourceId: SOURCE_ID,
+        expectedVersionId: VERSION_ID,
+        expectedLocator: "notes/server-receipt-restore.md",
+        tombstoneId: LOCAL_TOMBSTONE_ID,
+        policyRevision: 1,
+        predecessorEventId: null,
+      }),
+      { localFile: file, tombstoneId: LOCAL_TOMBSTONE_ID },
+    );
+    await harness.lifecycle.recordLifecycleCommittedReceipt(del.eventId, {
+      tombstoneId: SERVER_TOMBSTONE_ID,
+    });
+    // The restore operands row carries the OLD local tombstone id; the
+    // driver MUST read the predecessor's server receipt and use it on
+    // the wire body instead, overriding the operands-derived value.
+    await harness.lifecycle.recordLifecycleEvent(
+      createLifecycleEventOperands({
+        operation: "restore",
+        sourceId: SOURCE_ID,
+        expectedVersionId: VERSION_ID,
+        expectedLocator: null,
+        targetLocator: "notes/server-receipt-restore.md",
+        tombstoneId: LOCAL_TOMBSTONE_ID,
+        policyRevision: 1,
+        predecessorEventId: del.eventId,
+      }),
+      { localFile: file, tombstoneId: LOCAL_TOMBSTONE_ID },
+    );
+    harness.api.install(async (event) =>
+      committedResult({
+        eventId: event.event.eventId,
+        state: "active",
+        tombstoneId: SERVER_TOMBSTONE_ID,
+      }),
+    );
+    // The delete is already committed; the restore is the only queued
+    // lifecycle event, so a single runOne dispatches it.
+    const outcome = await harness.driver.runOne(activeSignal());
+    expect(outcome).toBe("committed");
+    expect(harness.api.commits).toHaveLength(1);
+    const restoreApiCall = harness.api.commits[0];
+    expect(restoreApiCall?.event.operands.operation).toBe("restore");
+    expect(restoreApiCall?.event.operands.tombstoneId).toBe(LOCAL_TOMBSTONE_ID);
+    // The contract: the third argument to `commit` is the tombstone id
+    // override. When the predecessor has a server receipt, the wire
+    // body carries the server id, NOT the operands-derived value.
+    expect(restoreApiCall?.tombstoneIdOverride).toBe(SERVER_TOMBSTONE_ID);
+  });
+
+  it("falls back to the operands-derived tombstone id when the predecessor has no server receipt yet", async () => {
+    const harness = createHarness();
+    const file = await harness.seedTrackedFile("notes/staged-restore.md");
+    // Seed a delete predecessor that is committed but received NO
+    // server receipt (the rare case where the durable row was created
+    // before the schema upgrade; e.g. a v4 image carried over).
+    const del = await harness.lifecycle.recordLifecycleEvent(
+      createLifecycleEventOperands({
+        operation: "delete",
+        sourceId: SOURCE_ID,
+        expectedVersionId: VERSION_ID,
+        expectedLocator: "notes/staged-restore.md",
+        tombstoneId: LOCAL_TOMBSTONE_ID,
+        policyRevision: 1,
+        predecessorEventId: null,
+      }),
+      { localFile: file, tombstoneId: LOCAL_TOMBSTONE_ID },
+    );
+    await harness.lifecycle.recordLifecycleCommittedReceipt(del.eventId);
+    await harness.lifecycle.recordLifecycleEvent(
+      createLifecycleEventOperands({
+        operation: "restore",
+        sourceId: SOURCE_ID,
+        expectedVersionId: VERSION_ID,
+        expectedLocator: null,
+        targetLocator: "notes/staged-restore.md",
+        tombstoneId: LOCAL_TOMBSTONE_ID,
+        policyRevision: 1,
+        predecessorEventId: del.eventId,
+      }),
+      { localFile: file, tombstoneId: LOCAL_TOMBSTONE_ID },
+    );
+    harness.api.install(async (event) =>
+      committedResult({
+        eventId: event.event.eventId,
+        state: "active",
+        tombstoneId: LOCAL_TOMBSTONE_ID,
+      }),
+    );
+    const outcome = await harness.driver.runOne(activeSignal());
+    expect(outcome).toBe("committed");
+    expect(harness.api.commits).toHaveLength(1);
+    const restoreApiCall = harness.api.commits[0];
+    expect(restoreApiCall?.event.operands.operation).toBe("restore");
+    // No override when no server receipt is available — the operands
+    // value flows through unchanged.
+    expect(restoreApiCall?.tombstoneIdOverride).toBeUndefined();
   });
 });
 

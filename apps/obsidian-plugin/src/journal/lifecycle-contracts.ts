@@ -16,6 +16,7 @@
 
 import { JOURNAL_SCHEMA_VERSION } from "./sqlite-database";
 import {
+  CHILD_FIVE_FIX_SCHEMA_VERSION,
   CHILD_FOUR_SCHEMA_VERSION,
   JournalStoreError,
   journalStoreError,
@@ -245,8 +246,27 @@ const LAST_COMMITTED_MIGRATION_DDL = [
   "alter table local_files add column last_committed_sha256 text;",
   "alter table local_files add column last_committed_size_bytes integer;",
   "alter table local_files add column last_committed_media_type text;",
-  `update journal_meta set schema_version = ${JOURNAL_SCHEMA_VERSION} where singleton_key = 1;`,
-  `pragma user_version = ${JOURNAL_SCHEMA_VERSION};`,
+  "update journal_meta set schema_version = 4 where singleton_key = 1;",
+  "pragma user_version = 4;",
+].join("");
+
+// --- Child 5 fix → server-receipt schema migration (v4 → v5) ------------------------------
+
+/**
+ * The schema version that introduced the `server_receipt_tombstone_id`
+ * column on `lifecycle_event_operands`. The migration adds the column
+ * (nullable; every prior row reads back with `null` until the first
+ * committed delete writes a server receipt) and bumps
+ * `journal_meta.schema_version` plus `pragma user_version` to v5.
+ *
+ * The destination version is pinned to `5` here (NOT interpolated from
+ * `JOURNAL_SCHEMA_VERSION`) so a future v5 → v6 migration can layer on
+ * top of this block without rewriting the v4 → v5 DDL.
+ */
+const SERVER_RECEIPT_MIGRATION_DDL = [
+  "alter table lifecycle_event_operands add column server_receipt_tombstone_id text;",
+  "update journal_meta set schema_version = 5 where singleton_key = 1;",
+  "pragma user_version = 5;",
 ].join("");
 
 function readUserVersion(engine: SqliteDatabaseEngine): number {
@@ -389,6 +409,89 @@ export function migrateLifecycleJournalToLastCommittedSchema(
     engine.exec("begin immediate;");
     try {
       engine.exec(LAST_COMMITTED_MIGRATION_DDL);
+      engine.exec("commit;");
+    } catch (error) {
+      try {
+        engine.exec("rollback;");
+      } catch {
+        // Best-effort rollback: the closed reason below is the answer.
+      }
+      throw error instanceof JournalStoreError
+        ? error
+        : journalStoreError("journal_mutation_failed");
+    }
+    return engine.export();
+  } finally {
+    engine.close();
+  }
+}
+
+/**
+ * The image validator for the v4 fix: the lifecycle operands table is
+ * already present from v3, the `last_committed_*` columns from the v3
+ * → v4 fix are in place, and the schema bookkeeping reflects v4.
+ * Migration adds the `server_receipt_tombstone_id` column on
+ * `lifecycle_event_operands` so the restore driver can read the
+ * server-confirmed tombstone id from the delete predecessor's persisted
+ * receipt (task 9 fix round 1 I1).
+ */
+function lastCommittedJournalImageLooksValid(engine: SqliteDatabaseEngine): boolean {
+  try {
+    const metaRows = engine.exec(
+      [
+        "select schema_version from journal_meta where singleton_key = 1;",
+      ].join(" "),
+    );
+    if (metaRows[0]?.values[0] === undefined) {
+      return false;
+    }
+    const tables = engine.exec(
+      "select name from sqlite_master where type = 'table' order by name;",
+    );
+    const tableNames = (tables[0]?.values ?? []).map((row) => row[0]);
+    const required = [
+      "journal_attempts",
+      "journal_events",
+      "journal_meta",
+      "lifecycle_event_operands",
+      "local_files",
+    ];
+    for (const name of required) {
+      if (!(tableNames as readonly unknown[]).includes(name)) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Migrate one Child 5 fix (`pragma user_version = 4`) journal image to
+ * the v5 server-receipt schema in memory. The migration adds the
+ * `server_receipt_tombstone_id` column on `lifecycle_event_operands`;
+ * every v4 row reads back with `server_receipt_tombstone_id = null`
+ * until the first committed delete writes a server receipt. The input
+ * image is never mutated; the function returns the upgraded image and
+ * runs the DDL inside one transaction.
+ */
+export function migrateLastCommittedJournalToServerReceiptSchema(
+  engineModule: SqliteEngineModule,
+  image: ArrayLike<number>,
+): Uint8Array {
+  const engine = new engineModule.Database(image);
+  try {
+    const currentVersion = readUserVersion(engine);
+    if (currentVersion !== CHILD_FIVE_FIX_SCHEMA_VERSION) {
+      throw journalStoreError("journal_schema_unsupported");
+    }
+    if (!lastCommittedJournalImageLooksValid(engine)) {
+      throw journalStoreError("journal_image_invalid");
+    }
+    engine.exec("begin immediate;");
+    try {
+      engine.exec(SERVER_RECEIPT_MIGRATION_DDL);
       engine.exec("commit;");
     } catch (error) {
       try {

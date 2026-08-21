@@ -58,6 +58,13 @@ export interface LifecycleResult {
  * (`network_offline`, `network_timeout`, `network_rate_limited`,
  * `server_error`) are the four permitted retry classes of the
  * journal contract (spec 8, 12); the rest are non-retryable.
+ *
+ * The `integrity_5xx` kind is the closed 5xx-integrity outcome (task
+ * 9 fix round 1 I2): when a 5xx status carries an `error.code` from
+ * the integrity closed set, the envelope is non-retryable and the
+ * driver closes the event as `integrity_failed`. A 5xx without an
+ * integrity code keeps the retryable `server_error` mapping, so the
+ * driver respects the journal contract's failing-closed default.
  */
 export type LifecycleApiFailureKind =
   | "network_offline"
@@ -66,7 +73,8 @@ export type LifecycleApiFailureKind =
   | "server_error"
   | "login_required"
   | "conflict"
-  | "integrity";
+  | "integrity"
+  | "integrity_5xx";
 
 export class LifecycleApiError extends Error {
   readonly kind: LifecycleApiFailureKind;
@@ -90,9 +98,20 @@ export class LifecycleApiError extends Error {
  * `LifecycleResult`; every failure path throws one
  * {@link LifecycleApiError} the driver maps onto its retry / blocked
  * verdicts.
+ *
+ * The optional `tombstoneIdOverride` lets the driver align the wire
+ * body's tombstone id with the server-confirmed one carried by the
+ * committed delete predecessor. The override is the closed
+ * server-only authority over the tombstone domain (spec 19.2, task
+ * 9 fix round 1 I1): the restore driver hands it in so the server
+ * hears the same identity it returned on the predecessor commit.
  */
 export interface LifecycleApi {
-  commit(event: FrozenLifecycleEvent, signal: AbortSignal): Promise<LifecycleResult>;
+  commit(
+    event: FrozenLifecycleEvent,
+    signal: AbortSignal,
+    tombstoneIdOverride?: string | null,
+  ): Promise<LifecycleResult>;
 }
 
 export interface LifecycleApiOptions {
@@ -153,12 +172,42 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const DATETIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/;
 
 /**
+ * The closed set of lifecycle-domain error codes that, when carried by
+ * a 5xx envelope, signal the durable journal cannot safely retry
+ * (task 9 fix round 1 I2). The codes are the canonical 5xx-integrity
+ * surfaces of the lifecycle commit path: a duplicate outcome, a
+ * verified receipt drift, a source version conflict, or an
+ * invariant failure all share the same non-retryable verdict. The
+ * closed set is intentionally narrow so unmapped 5xx codes fall
+ * through to the retryable `server_error` mapping.
+ */
+const LIFECYCLE_5XX_INTEGRITY_CODES: ReadonlySet<string> = new Set([
+  "source_commit_outcome_unknown",
+  "source_idempotency_mismatch",
+  "source_event_identity_mismatch",
+  "source_verified_receipt_stale",
+  "source_version_conflict",
+  "source_content_object_conflict",
+  "source_concurrency_invariant_failed",
+  "canonical_recovery_integrity_failed",
+  "canonical_recovery_restore_failed",
+  "object_storage_integrity_failed",
+  "object_storage_metadata_conflict",
+]);
+
+/**
  * Read one openapi-fetch POST result envelope and translate it onto
  * either a typed `LifecycleResult` (success) or a thrown
  * `LifecycleApiError` (failure). The translation is fail-closed:
- * unknown status codes and codes map onto the retryable
+ * unknown status codes and unparseable bodies map onto the retryable
  * `server_error` kind so unmapped conditions never silently drop
  * queued lifecycle work.
+ *
+ * The 5xx branch inspects the `error.code` envelope field (task 9 fix
+ * round 1 I2): a code in the integrity closed set maps onto the
+ * non-retryable `integrity_5xx` kind so the driver closes the event
+ * as `integrity_failed`. A 5xx without an integrity code keeps the
+ * retryable `server_error` mapping.
  */
 async function translate(
   result: Promise<{ data?: unknown; error?: unknown; response: Response }>,
@@ -183,6 +232,16 @@ async function translate(
     throw new LifecycleApiError("network_rate_limited");
   }
   if (status >= 500) {
+    // openapi-fetch surfaces the parsed JSON body on `data` for the
+    // happy path; on an error response, the body surfaces on `error`.
+    // The error envelope's `error.code` is the discriminator between
+    // 5xx-integrity (non-retryable) and 5xx-transient (retryable);
+    // the probe checks both fields so an openapi-fetch version that
+    // surfaces the body on `data` instead of `error` also routes
+    // through the integrity verdict.
+    if (isIntegrity5xxEnvelope(envelope.data) || isIntegrity5xxEnvelope(envelope.error)) {
+      throw new LifecycleApiError("integrity_5xx");
+    }
     throw new LifecycleApiError("server_error");
   }
   // The success envelope still flows through openapi-fetch as the raw
@@ -197,6 +256,25 @@ async function translate(
     throw new LifecycleApiError("server_error");
   }
   return parseLifecycleResult(inner);
+}
+
+/**
+ * Whether the parsed envelope carries an integrity-class code on a
+ * 5xx status. The probe is safely nil-tolerant: any non-record
+ * envelope, a missing `error` body, or an unparseable code answers
+ * false so the envelope falls through to the retryable `server_error`
+ * mapping.
+ */
+function isIntegrity5xxEnvelope(parsedData: unknown): boolean {
+  if (!isRecord(parsedData)) {
+    return false;
+  }
+  const errorBody = parsedData["error"];
+  if (!isRecord(errorBody)) {
+    return false;
+  }
+  const code = errorBody["code"];
+  return typeof code === "string" && LIFECYCLE_5XX_INTEGRITY_CODES.has(code);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -260,9 +338,16 @@ type WireNormalizedLocator = components["schemas"]["NormalizedLocator"];
  * `NormalizedLocator` envelopes so the wire contract matches the
  * generated openapi-fetch `OperationRequestBody` type exactly under
  * `exactOptionalPropertyTypes`.
+ *
+ * The optional `tombstoneIdOverride` is the server-confirmed tombstone
+ * identity the predecessor's commit returned. When the driver passes
+ * it in, the wire body carries the override INSTEAD of the operands-
+ * derived tombstone id so the restore sends back the same id the
+ * server mailed on the paired delete (task 9 fix round 1 I1).
  */
 function buildBody(
   event: FrozenLifecycleEvent,
+  tombstoneIdOverride: string | null | undefined,
 ): components["schemas"]["SourceLifecycleEventRequest"] {
   const expectedLocator: WireNormalizedLocator | null =
     event.operands.expectedLocator === null
@@ -272,6 +357,8 @@ function buildBody(
     event.operands.targetLocator === null
       ? null
       : { value: event.operands.targetLocator };
+  const tombstoneId =
+    tombstoneIdOverride !== undefined ? tombstoneIdOverride : event.operands.tombstoneId;
   return {
     event_id: event.event.eventId,
     idempotency_key: event.event.idempotencyKey,
@@ -280,7 +367,7 @@ function buildBody(
     expected_version_id: event.operands.expectedVersionId,
     expected_locator: expectedLocator,
     target_locator: targetLocator,
-    tombstone_id: event.operands.tombstoneId,
+    tombstone_id: tombstoneId,
     policy_revision: event.operands.policyRevision,
     client_timestamp: new Date().toISOString(),
   };
@@ -309,9 +396,9 @@ function buildLifecycleApi(options: LifecycleApiOptions): LifecycleApi {
   }
 
   return {
-    async commit(event, signal): Promise<LifecycleResult> {
+    async commit(event, signal, tombstoneIdOverride): Promise<LifecycleResult> {
       const headers = bearerHeaders();
-      const body = buildBody(event);
+      const body = buildBody(event, tombstoneIdOverride);
       // openapi-fetch exposes the typed `POST` overload for the
       // generated operation; pass the body, headers, and signal
       // through to the underlying transport exactly once.

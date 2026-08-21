@@ -129,6 +129,19 @@ export interface LifecycleReconcileRow {
     | "expected_version_mismatch";
 }
 
+/**
+ * The closed server receipt of one committed lifecycle event. The
+ * `tombstoneId` is the server-computed identity of the tombstone
+ * row a committed `delete` allocates; it is non-null only for the
+ * operations that allocate or reference a tombstone. The driver
+ * forwards this receipt to {@link LifecycleRepository.recordLifecycleCommittedReceipt}
+ * so the durable row carries exactly the wire-confirmed values
+ * (task 9 fix round 1 I1).
+ */
+export interface LifecycleServerReceipt {
+  readonly tombstoneId: string | null;
+}
+
 export interface LifecycleRepositoryOptions {
   readonly database: LifecycleRepositoryDatabase;
   /** Identity mint; defaults to the platform `crypto.randomUUID`. */
@@ -569,16 +582,32 @@ export class LifecycleRepository {
    * for the closed operation, and the server-returned tombstone id
    * (when present) replaces any locally-staged value so the durable
    * record is exactly what the server acknowledged (spec 19.2
-   * exact-replay rule).
+   * exact-replay rule; task 9 fix round 1 I1).
    *
    * The last_committed_* columns are intentionally left untouched:
    * a rename / move / delete / restore does not change file bytes,
    * so the prior `last_committed_*` triple stays provable for the
    * next restore-eligibility check.
+   *
+   * The nullable `serverReceipt` argument carries the server-
+   * returned tombstone id when the operation is `delete` (or
+   * `restore` reporting a server-derived tombstone identity). When
+   * the receipt is omitted or its `tombstoneId` is null, the existing
+   * `lifecycle_event_operands.tombstone_id` column is preserved (a
+   * non-`delete` commit never overwrites the tombstone identity).
    */
-  async recordLifecycleCommittedReceipt(eventId: string): Promise<void> {
+  async recordLifecycleCommittedReceipt(
+    eventId: string,
+    serverReceipt: LifecycleServerReceipt | null = null,
+  ): Promise<void> {
     if (!isUuid(eventId)) {
       throw journalStoreError("journal_mutation_failed");
+    }
+    if (serverReceipt !== null) {
+      const tombstoneId = serverReceipt.tombstoneId;
+      if (tombstoneId !== null && !isUuid(tombstoneId)) {
+        throw journalStoreError("journal_mutation_failed");
+      }
     }
     await this.#database.runSerializedMutation((session) => {
       const event = firstRow(
@@ -609,6 +638,22 @@ export class LifecycleRepository {
           `where event_id = ${sqlText(eventId)};`,
         ].join(" "),
       );
+      // Persist the server-receipt tombstone id when the server
+      // returned one. A delete receipt writes the server-computed
+      // tombstone id (the server is the only authority over the
+      // tombstone domain — spec 19.2 task 9 fix round 1 I1); a
+      // restore receipt writes the same id the predecessor delete
+      // returned so the durable row is exactly what the server
+      // acknowledged across the pair.
+      if (serverReceipt !== null && serverReceipt.tombstoneId !== null) {
+        session.exec(
+          [
+            "update lifecycle_event_operands set",
+            `server_receipt_tombstone_id = ${sqlText(serverReceipt.tombstoneId)}`,
+            `where event_id = ${sqlText(eventId)};`,
+          ].join(" "),
+        );
+      }
       // Lifecycle-state transitions for each closed operation.
       switch (operation) {
         case "rename":
@@ -643,6 +688,44 @@ export class LifecycleRepository {
           break;
       }
     });
+  }
+
+  /**
+   * Read the server-confirmed tombstone id of one committed lifecycle
+   * event. The reader returns the `server_receipt_tombstone_id`
+   * column the {@link recordLifecycleCommittedReceipt} mutator writes
+   * on a successful `delete` commit. The restore driver uses this
+   * read to override the operands-derived tombstone id on the wire
+   * body so the server hears the same identity it returned on the
+   * predecessor (task 9 fix round 1 I1).
+   *
+   * Returns `null` when the event has no persisted server receipt —
+   * the predecessor's commit is still in flight, or the operation is
+   * not `delete` / `restore`.
+   */
+  readServerReceiptTombstoneId(eventId: string): string | null {
+    if (!isUuid(eventId)) {
+      throw journalStoreError("journal_query_failed");
+    }
+    const row = firstRow(
+      this.#database.readAll(
+        [
+          "select server_receipt_tombstone_id",
+          `from lifecycle_event_operands where event_id = ${sqlText(eventId)};`,
+        ].join(" "),
+      ),
+    );
+    if (row === null) {
+      return null;
+    }
+    const [stored] = row;
+    if (stored === null) {
+      return null;
+    }
+    if (typeof stored !== "string" || !isUuid(stored)) {
+      throw journalStoreError("journal_image_invalid");
+    }
+    return stored;
   }
 
   /**

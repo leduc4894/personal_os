@@ -101,6 +101,11 @@ export type JournalNonRetryEventState = (typeof JOURNAL_NON_RETRY_EVENT_STATES)[
  * The closed safe error vocabulary mirroring the spec-12 error and retry
  * matrix. Diagnostics may carry these labels and nothing else: no library
  * exception, provider text, path, full digest or credential detail.
+ *
+ * Note: this list carries the error tokens AND the single success token
+ * `committed`. The `JournalAttempt` audit row uses the success token
+ * for a successful commit so the audit trail no longer labels a
+ * successful send as `server_error` (task 9 fix round 1 M1).
  */
 export const JOURNAL_SAFE_ERROR_LABELS = [
   "network_offline",
@@ -114,6 +119,7 @@ export const JOURNAL_SAFE_ERROR_LABELS = [
   "deferred_lifecycle",
   "integrity_failed",
   "reconcile_required",
+  "committed",
 ] as const;
 
 export type JournalSafeErrorLabel = (typeof JOURNAL_SAFE_ERROR_LABELS)[number];

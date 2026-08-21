@@ -405,6 +405,42 @@ describe("lifecycle-api response mapping", () => {
     ).rejects.toMatchObject({ kind: "server_error" });
   });
 
+  it("throws a typed integrity_5xx error on a 5xx integrity envelope (task 9 fix round 1 I2)", async () => {
+    const harness = createHarness();
+    harness.transport.install(async () =>
+      errorEnvelope(500, "source_commit_outcome_unknown", false),
+    );
+    await expect(
+      harness.api.commit(frozenEventFor(operandsFor()), new AbortController().signal),
+    ).rejects.toMatchObject({ kind: "integrity_5xx" });
+  });
+
+  it("throws a typed integrity_5xx error on a 503 with an integrity code", async () => {
+    const harness = createHarness();
+    harness.transport.install(async () =>
+      errorEnvelope(503, "source_idempotency_mismatch", false),
+    );
+    await expect(
+      harness.api.commit(frozenEventFor(operandsFor()), new AbortController().signal),
+    ).rejects.toMatchObject({ kind: "integrity_5xx" });
+  });
+
+  it("falls back to server_error on a 5xx without an integrity code", async () => {
+    const harness = createHarness();
+    harness.transport.install(async () => errorEnvelope(502, "internal_error", true));
+    await expect(
+      harness.api.commit(frozenEventFor(operandsFor()), new AbortController().signal),
+    ).rejects.toMatchObject({ kind: "server_error" });
+  });
+
+  it("falls back to server_error on a 5xx with a non-record body", async () => {
+    const harness = createHarness();
+    harness.transport.install(async () => new Response("not-json", { status: 503 }));
+    await expect(
+      harness.api.commit(frozenEventFor(operandsFor()), new AbortController().signal),
+    ).rejects.toMatchObject({ kind: "server_error" });
+  });
+
   it("throws a typed login_required error on a 401 envelope", async () => {
     const harness = createHarness();
     harness.transport.install(async () =>
