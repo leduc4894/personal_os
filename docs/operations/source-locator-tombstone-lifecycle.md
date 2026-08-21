@@ -278,14 +278,14 @@ copy child output into acceptance evidence.
 - Device: WDIO Obsidian Desktop on Windows
 - App version: 1.13.7
 - Plugin version: 0.1.0
-- Recorded at UTC: 2026-08-21T15:40:00Z
+- Recorded at UTC: 2026-08-21T17:20:00Z
 - Operator: Codex automated WDIO operator
 
 | Scenario | Outcome | Evidence |
 | --- | --- | --- |
-| Tracked rename | NOT REACHED | handoff:desktop-live-gate |
-| Tracked move | NOT REACHED | handoff:desktop-live-gate |
-| Delete | NOT REACHED | handoff:desktop-live-gate |
+| Tracked rename | PASS | handoff:desktop-live-gate |
+| Tracked move | PASS | handoff:desktop-live-gate |
+| Delete | FAIL | handoff:desktop-live-gate |
 | Explicit restore | NOT REACHED | handoff:desktop-live-gate |
 | Stable source and version identity | NOT REACHED | handoff:desktop-live-gate |
 | Pending lifecycle drain | NOT REACHED | handoff:desktop-live-gate |
