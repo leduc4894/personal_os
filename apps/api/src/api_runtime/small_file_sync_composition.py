@@ -66,12 +66,14 @@ from personal_os.object_storage import (
 )
 from personal_os.object_storage.errors import DIGEST_MISMATCH, SIZE_MISMATCH, ObjectStorageError
 from personal_os.small_file_sync.contracts import (
+    NormalizedLocator,
     SmallFileDeviceContext,
     SmallFileOperation,
     SmallFilePreflight,
     SmallFileTerminalResult,
     SmallFileUploadOperation,
     UploadOperationToken,
+    compute_locator_fingerprint,
 )
 from personal_os.small_file_sync.errors import SmallFileSyncError
 from personal_os.small_file_sync.metrics import (
@@ -382,6 +384,7 @@ class OfflineSmallFileClock:
 class _OfflineOperationRow:
     """One durable operation row as the offline store keeps it."""
 
+    operation_id: UUID
     operation_token: UploadOperationToken
     preflight: SmallFilePreflight
     device_context: SmallFileDeviceContext
@@ -517,6 +520,7 @@ class OfflineSmallFileUploadOperationStore:
         row = self._identity_row(preflight, device_context)
         if row is None:
             row = _OfflineOperationRow(
+                operation_id=uuid4(),
                 operation_token=UploadOperationToken(secrets.token_urlsafe(32)),
                 preflight=preflight,
                 device_context=device_context,
@@ -583,7 +587,13 @@ class OfflineSmallFileUploadOperationStore:
             if row.expires_at <= self._now():
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_EXPIRED)
             row.state = _RECEIVING_STATE
+        normalized_locator: NormalizedLocator | None = None
+        locator_fingerprint: str | None = None
+        if row.preflight.operation is SmallFileOperation.CREATE:
+            normalized_locator = row.preflight.normalized_locator
+            locator_fingerprint = compute_locator_fingerprint(row.preflight.normalized_locator)
         return SmallFileBoundOperation(
+            operation_id=row.operation_id,
             operation_token=row.operation_token,
             workspace_id=row.device_context.workspace_id,
             device_id=row.device_context.device_id,
@@ -597,6 +607,8 @@ class OfflineSmallFileUploadOperationStore:
             reserved_source_id=row.reserved_source_id,
             update_source_id=row.preflight.source_id,
             update_base_version_id=row.preflight.base_version_id,
+            normalized_locator=normalized_locator,
+            locator_fingerprint=locator_fingerprint,
             expires_at=row.expires_at,
             terminal_result=row.terminal_result,
         )

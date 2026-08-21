@@ -19,6 +19,7 @@ from personal_os.object_storage import CanonicalMediaType, ContentDigest
 from personal_os.small_file_sync.contracts import (
     MAX_SINGLE_PART_FILE_SIZE_BYTES,
     TERMINAL_PREFLIGHT_OUTCOMES,
+    BoundSmallFileOperation,
     NormalizedLocator,
     SmallFileDeviceContext,
     SmallFileIdempotencyKey,
@@ -29,6 +30,7 @@ from personal_os.small_file_sync.contracts import (
     SmallFileTerminalResultKind,
     SmallFileUploadOperation,
     UploadOperationToken,
+    compute_locator_fingerprint,
 )
 from personal_os.small_file_sync.metrics import (
     SMALL_FILE_METRIC_CONTRACTS,
@@ -577,3 +579,125 @@ def test_in_memory_metrics_reject_open_text_labels_and_bad_durations() -> None:
             operation=SmallFileOperation.CREATE,
             reason_code="small_file_size_limit_exceeded",  # type: ignore[arg-type]
         )
+
+
+# --- bound locator envelope (task 3) ----------------------------------------------------
+
+
+def _bound_operation(
+    *,
+    normalized_locator: NormalizedLocator | None = None,
+    locator_fingerprint: str | None = None,
+    operation: SmallFileOperation = SmallFileOperation.CREATE,
+    terminal_result: SmallFileTerminalResult | None = None,
+) -> BoundSmallFileOperation:
+    """Build a BoundSmallFileOperation with locator fields and frozen identity."""
+
+    preflight = (
+        _create_preflight()
+        if operation is SmallFileOperation.CREATE
+        else _update_preflight(source_id=uuid4(), base_version_id=uuid4())
+    )
+    return BoundSmallFileOperation(
+        operation_id=uuid4(),
+        operation_token=UploadOperationToken("Qm9ndXNTeXpjRWxlZW1FZ0Rhenp1R2h1"),
+        workspace_id=uuid4(),
+        device_id=uuid4(),
+        event_id=preflight.event_id,
+        idempotency_key=preflight.idempotency_key,
+        operation=preflight.operation,
+        declared_sha256=preflight.sha256,
+        declared_size_bytes=preflight.size_bytes,
+        declared_media_type=preflight.media_type,
+        policy_revision_number=preflight.policy_revision_number,
+        reserved_source_id=uuid4() if operation is SmallFileOperation.CREATE else None,
+        update_source_id=preflight.source_id,
+        update_base_version_id=preflight.base_version_id,
+        normalized_locator=normalized_locator,
+        locator_fingerprint=locator_fingerprint,
+        expires_at=_EXPIRES_AT,
+        terminal_result=terminal_result,
+    )
+
+
+def test_compute_locator_fingerprint_is_a_stable_lowercase_hex_digest() -> None:
+    locator = NormalizedLocator("notes/planning.md")
+
+    digest = compute_locator_fingerprint(locator)
+
+    assert isinstance(digest, str)
+    assert len(digest) == 64
+    assert digest == digest.lower()
+    # Deterministic: same locator computes the same digest.
+    assert compute_locator_fingerprint(locator) == digest
+    # Different locator yields a different digest.
+    assert compute_locator_fingerprint(NormalizedLocator("notes/other.md")) != digest
+
+
+def test_bound_operation_carries_the_locator_and_digest_for_a_create() -> None:
+    locator = NormalizedLocator("notes/planning.md")
+    bound = _bound_operation(
+        normalized_locator=locator,
+        locator_fingerprint=compute_locator_fingerprint(locator),
+    )
+
+    assert bound.normalized_locator == locator
+    assert bound.locator_fingerprint == compute_locator_fingerprint(locator)
+
+
+def test_bound_operation_accepts_no_locator_for_pre_migration_and_update_rows() -> None:
+    bound = _bound_operation(
+        normalized_locator=None,
+        locator_fingerprint=None,
+        operation=SmallFileOperation.UPDATE,
+    )
+
+    assert bound.normalized_locator is None
+    assert bound.locator_fingerprint is None
+
+
+def test_bound_operation_accepts_digest_without_locator_for_terminal_transition() -> None:
+    """Terminal transitions clear the raw locator yet retain its digest."""
+
+    locator = NormalizedLocator("notes/planning.md")
+    bound = _bound_operation(
+        normalized_locator=None,
+        locator_fingerprint=compute_locator_fingerprint(locator),
+    )
+
+    assert bound.normalized_locator is None
+    assert bound.locator_fingerprint == compute_locator_fingerprint(locator)
+
+
+def test_bound_operation_rejects_digest_mismatch_with_locator() -> None:
+    locator = NormalizedLocator("notes/planning.md")
+    with pytest.raises(ValueError, match="locator_fingerprint"):
+        _bound_operation(
+            normalized_locator=locator,
+            locator_fingerprint=compute_locator_fingerprint(NormalizedLocator("notes/other.md")),
+        )
+
+
+def test_bound_operation_rejects_locator_present_under_update() -> None:
+    """An update operation must not carry a fresh locator binding."""
+
+    locator = NormalizedLocator("notes/planning.md")
+    with pytest.raises(ValueError, match="update"):
+        _bound_operation(
+            normalized_locator=locator,
+            locator_fingerprint=compute_locator_fingerprint(locator),
+            operation=SmallFileOperation.UPDATE,
+        )
+
+
+def test_bound_operation_repr_redacts_locator_and_token() -> None:
+    locator = NormalizedLocator("private/notes/secret.md")
+    bound = _bound_operation(
+        normalized_locator=locator,
+        locator_fingerprint=compute_locator_fingerprint(locator),
+    )
+
+    rendered = repr(bound)
+    assert "private" not in rendered
+    assert "secret" not in rendered
+    assert bound.operation_token.value not in rendered

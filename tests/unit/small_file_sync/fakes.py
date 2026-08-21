@@ -51,6 +51,7 @@ from personal_os.small_file_sync.contracts import (
     SmallFileTerminalResult,
     SmallFileUploadOperation,
     UploadOperationToken,
+    compute_locator_fingerprint,
 )
 from personal_os.small_file_sync.errors import SmallFileSyncError
 from personal_os.small_file_sync.metrics import InMemorySmallFileSyncMetrics
@@ -233,6 +234,7 @@ def build_current_reference(
 class _OperationRecord:
     """One durable operation row as the fake store keeps it."""
 
+    operation_id: UUID
     operation_token: UploadOperationToken
     preflight: SmallFilePreflight
     device_context: SmallFileDeviceContext
@@ -335,6 +337,7 @@ class FakeSmallFileUploadOperationStore:
         record = self._identity_record(preflight, device_context)
         if record is None:
             record = _OperationRecord(
+                operation_id=uuid4(),
                 operation_token=UploadOperationToken(secrets.token_urlsafe(32)),
                 preflight=preflight,
                 device_context=device_context,
@@ -457,7 +460,13 @@ class FakeSmallFileUploadOperationStore:
         record.terminal_result = result
 
     def _bound_operation(self, record: _OperationRecord) -> SmallFileBoundOperation:
+        normalized_locator: NormalizedLocator | None = None
+        locator_fingerprint: str | None = None
+        if record.preflight.operation is SmallFileOperation.CREATE:
+            normalized_locator = record.preflight.normalized_locator
+            locator_fingerprint = compute_locator_fingerprint(record.preflight.normalized_locator)
         return SmallFileBoundOperation(
+            operation_id=record.operation_id,
             operation_token=record.operation_token,
             workspace_id=(
                 self.bound_workspace_id_override
@@ -479,6 +488,8 @@ class FakeSmallFileUploadOperationStore:
             reserved_source_id=record.reserved_source_id,
             update_source_id=record.preflight.source_id,
             update_base_version_id=record.preflight.base_version_id,
+            normalized_locator=normalized_locator,
+            locator_fingerprint=locator_fingerprint,
             expires_at=record.expires_at,
             terminal_result=record.terminal_result,
         )

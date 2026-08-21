@@ -573,6 +573,8 @@ small_file_upload_operations: Final[Table] = Table(
     Column("reserved_source_id", sa.Uuid(), nullable=True),
     Column("update_source_id", sa.Uuid(), nullable=True),
     Column("update_base_version_id", sa.Uuid(), nullable=True),
+    Column("normalized_locator", sa.Text(), nullable=True),
+    Column("locator_fingerprint", sa.String(length=64), nullable=True),
     Column("state", sa.Text(), nullable=False),
     Column("safe_error_code", sa.String(length=100), nullable=True),
     Column("result_kind", sa.Text(), nullable=True),

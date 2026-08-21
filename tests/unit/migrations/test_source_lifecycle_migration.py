@@ -106,6 +106,12 @@ class _Op:
     def drop_table(self, name: str, *args: Any, **kwargs: Any) -> None:
         self.events.append(("drop_table", name))
 
+    def add_column(self, table_name: str, column: Any, **kwargs: Any) -> None:
+        self.events.append(("add_column", f"{table_name}.{column.name}"))
+
+    def drop_column(self, table_name: str, column_name: str, **kwargs: Any) -> None:
+        self.events.append(("drop_column", f"{table_name}.{column_name}"))
+
     def execute(self, statement: Any, **kwargs: Any) -> None:
         self.events.append(("execute", str(statement)))
 

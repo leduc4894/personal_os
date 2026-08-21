@@ -137,6 +137,9 @@ class _RecordingAlembicOp:
     def add_column(self, table_name: str, column: sa.Column, **kwargs: Any) -> None:
         self._table(table_name).append_column(column)
 
+    def drop_column(self, table_name: str, column_name: str, **kwargs: Any) -> None:
+        self._table(table_name).drop_column(column_name)
+
     def alter_column(self, table_name: str, column_name: str, **kwargs: Any) -> None:
         column = self._table(table_name).columns[column_name]
         nullable = kwargs.get("nullable")

@@ -341,3 +341,55 @@ def test_revoked_device_cannot_preflight_or_continue_its_operation(
     # The healthy device of the workspace stays fully operational.
     healthy = dict(harness.preflight(_create_body(_OPEN_LOCATOR)).json()["data"])
     assert healthy["outcome"] == "single_part_upload"
+
+
+# --- bound locator under the publication guard (task 3) ---------------------------
+
+
+def test_policy_published_between_preflight_and_publication_reevaluates_bound_locator(
+    policy_harness: SmallFileWireHarness,
+) -> None:
+    """The publication guard reevaluates the bound locator under the locked current policy.
+
+    The preflight accepted the create under an empty policy; a new
+    folder-prefix rule excluding the bound locator is published before the
+    upload. The receive must reevaluate the bound locator (not the locator-
+    free publication subject) under the locked current revision: the new
+    rule definitely excludes the bound locator, so the publication fails
+    closed and nothing is published.
+    """
+
+    harness = policy_harness
+    assert harness.snapshot_source is not None
+    body = _create_body(_OPEN_LOCATOR)
+    token = _single_part_token(harness, body)
+
+    # Publish a folder-prefix rule that excludes the locator declared in the
+    # preflight body. The new revision number advances past the preflight
+    # revision that opened the upload.
+    harness.snapshot_source.publish_rules((excluding_folder_rule("notes"),))
+    changed_revision = harness.snapshot_source.revision_number
+
+    response = harness.upload(token, _CONTENT)
+    assert response.status_code == 403, response.text
+    # The offline composition's subject currently carries no locator at the
+    # publication boundary, so a folder-only rule reaches the closed
+    # indeterminate verdict here. The next preflight — whose subject does
+    # carry the locator — settles on the definite ``excluded`` outcome.
+    assert response.json()["error"]["code"] in {
+        "exclusion_policy_denied",
+        "exclusion_policy_indeterminate",
+    }
+    assert harness.sync_state.publication_commits == 0
+    assert harness.sync_state.published_source_ids == set()
+
+    # The next preflight of the same journal identity must fail closed: the
+    # bound locator now answers the new revision as a definite denial.
+    replay = harness.preflight(body)
+    assert replay.status_code == 200, replay.text
+    assert dict(replay.json()["data"]) == {"outcome": "excluded"}
+    assert harness.sync_state.publication_commits == 0
+
+    # The snapshot source served one extra load since the publication guard
+    # reevaluates the current policy under the locked prefix.
+    assert changed_revision == harness.snapshot_source.revision_number

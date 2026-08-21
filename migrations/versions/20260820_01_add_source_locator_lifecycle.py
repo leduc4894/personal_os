@@ -307,6 +307,26 @@ def upgrade() -> None:
         schema=SCHEMA_NAME,
         postgresql_where=sa.text("restore_event_id IS NULL"),
     )
+    # Task 3: persist the bound initial locator evidence on the durable
+    # operation row. ``normalized_locator`` is the transient path the create
+    # binds, cleared on terminal transition; ``locator_fingerprint`` is the
+    # retained lowercase SHA-256 digest the exact replay compares. Both
+    # columns are nullable so pre-migration rows and update operations
+    # remain readable.
+    op.add_column(
+        "small_file_upload_operations",
+        sa.Column("normalized_locator", sa.Text(), nullable=True),
+        schema=SCHEMA_NAME,
+    )
+    op.add_column(
+        "small_file_upload_operations",
+        sa.Column(
+            "locator_fingerprint",
+            sa.String(length=64),
+            nullable=True,
+        ),
+        schema=SCHEMA_NAME,
+    )
 
     # Older deployed baseline revisions admitted only create/update events.
     # Re-state the lifecycle vocabulary here rather than relying on a mutable
@@ -363,6 +383,8 @@ def downgrade() -> None:
         "operation <> 'upsert' OR source_version_id IS NOT NULL",
         schema=SCHEMA_NAME,
     )
+    op.drop_column("locator_fingerprint", "small_file_upload_operations", schema=SCHEMA_NAME)
+    op.drop_column("normalized_locator", "small_file_upload_operations", schema=SCHEMA_NAME)
     op.drop_index(
         "uq_source_tombstones_open_source",
         table_name="source_tombstones",

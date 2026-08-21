@@ -35,6 +35,7 @@ from personal_os.object_storage import (
     VerifiedObjectReceipt,
     derive_canonical_object_key,
 )
+from personal_os.source_locators import NormalizedLocator
 from personal_os.sources.actors import ActorKind, SourceActor
 from personal_os.sources.commands import (
     CreateSourceVersion,
@@ -50,6 +51,7 @@ from postgresql_source_store.tables import (
     audit_events,
     content_objects,
     projection_intents,
+    source_locators,
     source_versions,
     sources,
     sync_events,
@@ -91,6 +93,7 @@ def _create_command(
     source_id: UUID | None = None,
     event_id: UUID | None = None,
     idempotency_value: str,
+    initial_locator: NormalizedLocator | None = None,
 ) -> tuple[CreateSourceVersion, VerifiedObjectReceipt]:
     receipt = _receipt(salt)
     actor = (
@@ -112,6 +115,7 @@ def _create_command(
             media_type=receipt.media_type,
         ),
         client_timestamp=None,
+        initial_locator=initial_locator,
     )
     return command, receipt
 
@@ -649,3 +653,186 @@ async def test_cross_workspace_source_id_reuse_rejects_without_tenant_disclosure
     )
     assert len(requesting_audits) == 1
     assert requesting_audits[0].reason_code == "source_already_exists"
+
+
+# --- initial locator binding (task 3) ----------------------------------------------
+
+
+async def _fetch_locator_row(engine: AsyncEngine, source_id: UUID):
+    async with engine.connect() as connection:
+        result = await connection.execute(
+            sa.select(
+                source_locators.c.source_locator_id,
+                source_locators.c.workspace_id,
+                source_locators.c.source_id,
+                source_locators.c.normalized_locator,
+                source_locators.c.display_locator,
+                source_locators.c.opened_event_id,
+                source_locators.c.opened_sequence,
+                source_locators.c.closed_event_id,
+                source_locators.c.closed_sequence,
+                source_locators.c.opened_at,
+                source_locators.c.closed_at,
+            ).where(source_locators.c.source_id == source_id)
+        )
+        return result.one_or_none()
+
+
+async def _fetch_locator_count_by_workspace(engine: AsyncEngine, workspace_id: UUID) -> int:
+    async with engine.connect() as connection:
+        result = await connection.execute(
+            sa.select(sa.func.count())
+            .select_from(source_locators)
+            .where(source_locators.c.workspace_id == workspace_id)
+        )
+        return int(result.scalar_one())
+
+
+@pytest.mark.asyncio
+async def test_create_with_initial_locator_inserts_locator_row_with_opening_event(
+    preflight_harness, inspection_engine
+) -> None:
+    """The initial source_locators row is created in the same commit as the create."""
+
+    workspace = await preflight_harness.seed_workspace()
+    initial_locator = NormalizedLocator("notes/daily/today.md")
+    command, receipt = _create_command(
+        workspace,
+        f"create-with-locator-{uuid4()}",
+        idempotency_value=f"create-with-locator-{uuid4()}-1",
+        initial_locator=initial_locator,
+    )
+    counts_before = await preflight_harness.table_row_counts()
+
+    result = await preflight_harness.store.commit_create(
+        command,
+        compute_request_fingerprint(command),
+        receipt,
+        _diagnostic_context(),
+    )
+
+    counts_after = await preflight_harness.table_row_counts()
+    # The create adds one new row to every canonical table plus one new row
+    # to source_locators for the bound initial locator.
+    deltas = {
+        table_name: counts_after[table_name] - counts_before[table_name]
+        for table_name in counts_after
+    }
+    assert deltas["source_locators"] == 1
+    assert deltas["content_objects"] == 1
+    assert deltas["sources"] == 1
+    assert deltas["source_versions"] == 1
+    assert deltas["sync_events"] == 1
+    assert deltas["projection_intents"] == 2
+    assert deltas["audit_events"] == 1
+
+    locator_row = await _fetch_locator_row(inspection_engine, command.source_id)
+    assert locator_row is not None
+    assert locator_row.workspace_id == workspace.workspace_id
+    assert locator_row.source_id == command.source_id
+    assert locator_row.normalized_locator == initial_locator.value
+    assert locator_row.display_locator == initial_locator.value
+    assert locator_row.opened_event_id == command.event_id
+    assert locator_row.opened_sequence == result.event_sequence
+    assert locator_row.opened_sequence >= 1
+    assert locator_row.closed_event_id is None
+    assert locator_row.closed_sequence is None
+    assert locator_row.closed_at is None
+    assert locator_row.opened_at is not None
+
+
+@pytest.mark.asyncio
+async def test_create_without_initial_locator_inserts_no_locator_row(
+    preflight_harness, inspection_engine
+) -> None:
+    """A create without initial_locator leaves the source_locators table untouched."""
+
+    workspace = await preflight_harness.seed_workspace()
+    command, receipt = _create_command(
+        workspace,
+        f"create-without-locator-{uuid4()}",
+        idempotency_value=f"create-without-locator-{uuid4()}-1",
+    )
+    counts_before = await preflight_harness.table_row_counts()
+
+    await preflight_harness.store.commit_create(
+        command,
+        compute_request_fingerprint(command),
+        receipt,
+        _diagnostic_context(),
+    )
+
+    counts_after = await preflight_harness.table_row_counts()
+    assert counts_after["source_locators"] == counts_before["source_locators"]
+    locator_row = await _fetch_locator_row(inspection_engine, command.source_id)
+    assert locator_row is None
+
+
+@pytest.mark.asyncio
+async def test_rollback_after_locator_insert_leaves_no_partial_locator_graph(
+    preflight_harness, inspection_engine
+) -> None:
+    """A duplicate active locator must roll back every canonical write.
+
+    The unique active locator constraint forces a rejection after the
+    initial source_locators row was already inserted. The transaction must
+    roll back fully: no source, version, locator, event, intent or audit row
+    may survive.
+    """
+
+    workspace = await preflight_harness.seed_workspace()
+    initial_locator = NormalizedLocator(f"notes/dup-{uuid4()}/shared.md")
+
+    # First create commits successfully: source, version, event, intents, audit
+    # and the bound locator all land.
+    first_command, first_receipt = _create_command(
+        workspace,
+        f"locator-rollback-anchor-{uuid4()}",
+        idempotency_value=f"locator-rollback-anchor-{uuid4()}-1",
+        initial_locator=initial_locator,
+    )
+    await preflight_harness.store.commit_create(
+        first_command,
+        compute_request_fingerprint(first_command),
+        first_receipt,
+        _diagnostic_context(),
+    )
+    counts_after_first = await preflight_harness.table_row_counts()
+    assert await _fetch_locator_count_by_workspace(inspection_engine, workspace.workspace_id) == 1
+
+    # Second create with the same locator must roll back the entire graph.
+    second_command, second_receipt = _create_command(
+        workspace,
+        f"locator-rollback-contender-{uuid4()}",
+        idempotency_value=f"locator-rollback-contender-{uuid4()}-1",
+        initial_locator=initial_locator,
+    )
+    counts_before_contender = await preflight_harness.table_row_counts()
+
+    with pytest.raises(SourcePublicationError):
+        await preflight_harness.store.commit_create(
+            second_command,
+            compute_request_fingerprint(second_command),
+            second_receipt,
+            _diagnostic_context(),
+        )
+
+    counts_after_contender = await preflight_harness.table_row_counts()
+    # No canonical row may have survived the rejected contender attempt.
+    for table_name, expected_delta in (
+        ("content_objects", 0),
+        ("sources", 0),
+        ("source_versions", 0),
+        ("sync_events", 0),
+        ("projection_intents", 0),
+        ("source_locators", 0),
+    ):
+        delta = counts_after_contender[table_name] - counts_before_contender[table_name]
+        assert delta == expected_delta, table_name
+    # Only the standalone rejection audit may have been added.
+    assert counts_after_contender["audit_events"] - counts_before_contender["audit_events"] == 1
+    # The anchored locator still stands: no contender locator was committed.
+    assert await _fetch_locator_count_by_workspace(inspection_engine, workspace.workspace_id) == 1
+    assert counts_after_first == counts_after_contender or (
+        counts_after_first["audit_events"] + 1 == counts_after_contender["audit_events"]
+    )

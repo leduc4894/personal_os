@@ -136,8 +136,9 @@ class _ControlledStore(PostgresqlSourcePublicationStore):
         connection: object,
         command: object,
         receipt: object,
+        bound_locator: object = None,
     ) -> PolicySubject:
-        del connection, command, receipt
+        del connection, command, receipt, bound_locator
         self.order.append("subject")
         return self.subject
 

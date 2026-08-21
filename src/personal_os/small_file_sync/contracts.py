@@ -14,6 +14,7 @@ treated as private values: they never enter diagnostics or metric labels.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -274,4 +275,73 @@ class SmallFileTerminalResult:
             self,
             "committed_at",
             normalize_utc_timestamp("committed_at", self.committed_at),
+        )
+
+
+def compute_locator_fingerprint(locator: NormalizedLocator) -> str:
+    """Return the lowercase SHA-256 digest of one canonical normalized locator.
+
+    The digest is the retained identifier the durable operation row keeps
+    after the raw locator is cleared, so an exact replay can compare the
+    locator without ever re-reading a sensitive path.
+    """
+
+    return hashlib.sha256(locator.value.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class BoundSmallFileOperation:
+    """The durable receive-side view of one upload operation, locator-bound.
+
+    Carries every immutable operation field the receive binding already
+    held plus the bound initial locator evidence: the transient
+    :class:`NormalizedLocator` (cleared on terminal transition) and the
+    retained ``locator_fingerprint`` digest (kept for exact replay). An
+    update preflight, a pre-migration row or a terminal operation may carry
+    a null locator and a null digest; the digest alone (without the raw
+    locator) is the canonical post-terminal shape.
+    """
+
+    operation_id: UUID
+    operation_token: UploadOperationToken
+    workspace_id: UUID
+    device_id: UUID
+    event_id: UUID
+    idempotency_key: SmallFileIdempotencyKey
+    operation: SmallFileOperation
+    declared_sha256: ContentDigest
+    declared_size_bytes: int
+    declared_media_type: CanonicalMediaType
+    policy_revision_number: int
+    reserved_source_id: UUID | None
+    update_source_id: UUID | None
+    update_base_version_id: UUID | None
+    normalized_locator: NormalizedLocator | None
+    locator_fingerprint: str | None
+    expires_at: datetime
+    terminal_result: SmallFileTerminalResult | None
+
+    def __post_init__(self) -> None:
+        reject_nil_uuid("operation_id", self.operation_id)
+        reject_nil_uuid("workspace_id", self.workspace_id)
+        reject_nil_uuid("device_id", self.device_id)
+        reject_nil_uuid("event_id", self.event_id)
+        if self.policy_revision_number < 1:
+            raise ValueError("policy_revision_number must be a positive integer")
+        if self.reserved_source_id is not None:
+            reject_nil_uuid("reserved_source_id", self.reserved_source_id)
+            if self.operation is SmallFileOperation.UPDATE:
+                raise ValueError("update operation must not reserve a source_id")
+        if self.normalized_locator is not None:
+            if self.operation is SmallFileOperation.UPDATE:
+                raise ValueError("update operation must not carry a normalized locator")
+            if self.locator_fingerprint is None:
+                raise ValueError("normalized_locator requires a matching locator_fingerprint")
+            expected = compute_locator_fingerprint(self.normalized_locator)
+            if self.locator_fingerprint != expected:
+                raise ValueError("locator_fingerprint does not match the normalized locator")
+        object.__setattr__(
+            self,
+            "expires_at",
+            normalize_utc_timestamp("expires_at", self.expires_at),
         )
