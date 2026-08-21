@@ -34,6 +34,15 @@ client_timestamp
 
 Event types gồm `create`, `update`, `rename`, `move`, `delete`, `restore`. Rename/move không tạo source identity mới.
 
+Lifecycle event giữ nguyên `source_id` và `current_version_id`: rename/move chỉ
+đóng locator cũ rồi mở locator mới, delete mở tombstone giữ version hiện tại,
+và restore đóng đúng tombstone rồi mở locator do người dùng chọn. Plugin lưu
+event lifecycle bất biến trong journal, gửi theo thứ tự của từng source và chỉ
+xóa trạng thái pending sau receipt canonical. Automatic restore chỉ hợp lệ khi
+bytes tái xuất hiện khớp fingerprint đã commit; explicit restore là command có
+xác nhận. Repair của `reconcile_required` thuộc Child 6, không được triển khai
+trước trong lifecycle client.
+
 ## 4. Manifest reconciliation
 
 Plugin gửi manifest phân trang gồm stable ID, path, hash, size và local version. Backend trả action plan: `upload`, `download`, `apply_tombstone`, `conflict`, `no_change`, `excluded`.
@@ -80,6 +89,8 @@ Khi Web App commit version, plugin nhận change qua cursor polling/push hint. P
 
 - Replay event không tạo duplicate version.
 - Rename giữ nguyên source ID.
+- Move/delete/restore giữ nguyên current version; delete/restore giữ tombstone lineage.
+- Desktop WDIO và ma trận thiết bị Mobile thật đều phải PASS trước khi đóng Child 5.
 - Missed watcher event được reconciliation phát hiện.
 - Excluded folder không được upload/index ngoài policy.
 - Concurrent edit không silent overwrite.

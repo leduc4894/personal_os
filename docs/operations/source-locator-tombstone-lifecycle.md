@@ -1,7 +1,7 @@
 # Source-locator and tombstone lifecycle operations
 
 This guide covers the operator playbook for the Child 5 source-locator
-and tombstone lifecycle that runs entirely on the device. It describes
+and tombstone lifecycle across the plugin and canonical backend. It describes
 the closed state machine, the safe operator actions, the handling of
 `reconcile_required`, the exact replay semantics, the deletion
 semantics and the redacted diagnostics the plugin surfaces.
@@ -38,7 +38,7 @@ The closed `LifecycleLocalFileState` enum has exactly eight values:
 | `restored`           | no extra banner         | Server confirmed the restore; the source is live again.                          |
 | `reconcile_required` | `Reconcile required`    | Hard stop; child 6 owns repair before any further sync runs.                     |
 
-`pending_pending` blocks other writes to the same file but does NOT
+A pending lifecycle state blocks other writes to the same file but does NOT
 block the device's foreground pass: the bounded queue interleaves the
 content lane and the lifecycle lane so a rename / move / delete /
 restore commits before the next content event for the same file.
@@ -218,7 +218,7 @@ What the user **does not** see — never, anywhere on the surface:
 - Tombstone IDs (the safe picker label uses the plugin-local file id
   suffix, never the tombstone id itself).
 - Fingerprints (SHA-256, byte size, media type).
-- Access tokens, refresh tokens, bearer headers, session identifiers.
+- Access tokens, refresh tokens, authorization headers, session identifiers.
 - Server URLs, request correlation IDs, response bodies or status codes
   (the bounded retry translates everything onto closed safe-error
   labels).
@@ -241,3 +241,49 @@ tab or any telemetry.
   blocked reason codes onto the spec-11 sync status.
 - Live launcher / secrets — [`.local/RESTART.md`](../../.local/RESTART.md)
   (NEVER copy launcher details or secrets into this guide).
+
+## Live acceptance procedure
+
+Follow [`.local/RESTART.md`](../../.local/RESTART.md) exactly. Use a disposable
+`knowledge-ci-*` project, the repository launchers, both policy workers, Web
+Admin on port 38000 and the existing tunnel. Run the focused WDIO command from
+the plan, then execute the full matrix on a physical Mobile device. Evidence
+references must identify a sanitized operator record; they must never contain
+paths, locator values, content, digests, credentials or tokens. These records
+are mandatory gates, not deferred backlog work.
+
+## Desktop live acceptance record
+
+- Device: WDIO Obsidian Desktop on Windows
+- App version: 1.13.7
+- Plugin version: 0.1.0
+- Recorded at UTC: 2026-08-21T14:55:32Z
+- Operator: Codex automated WDIO operator
+
+| Scenario | Outcome | Evidence |
+| --- | --- | --- |
+| Tracked rename | FAIL | Task 12 handoff Desktop gate |
+| Tracked move | NOT REACHED | Task 12 handoff Desktop gate |
+| Delete | NOT REACHED | Task 12 handoff Desktop gate |
+| Explicit restore | NOT REACHED | Task 12 handoff Desktop gate |
+| Stable source and version identity | NOT REACHED | Task 12 handoff Desktop gate |
+| Pending lifecycle drain | NOT REACHED | Task 12 handoff Desktop gate |
+
+## Mobile live acceptance record
+
+- Device: PENDING
+- App version: PENDING
+- Plugin version: PENDING
+- Recorded at UTC: PENDING
+- Operator: PENDING
+
+| Scenario | Outcome | Evidence |
+| --- | --- | --- |
+| Tracked rename | NOT RUN | PENDING |
+| Tracked move | NOT RUN | PENDING |
+| Delete | NOT RUN | PENDING |
+| Proven automatic restore | NOT RUN | PENDING |
+| Explicit restore | NOT RUN | PENDING |
+| Offline capture and reconnect | NOT RUN | PENDING |
+| Unload and reload | NOT RUN | PENDING |
+| Policy-denied transition | NOT RUN | PENDING |
