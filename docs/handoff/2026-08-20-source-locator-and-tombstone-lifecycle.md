@@ -39,6 +39,26 @@ contain its own SHA.
 | Repository verify | PASS | `uv run poe verify` exited 0 after formatting the new classifier: format, lint, strict typing over 176 Python files, import/architecture boundaries, OpenAPI/generated client, Python (3,317 passed, 21 skipped, 398 deselected), plugin (491 passed), web (139 passed), package builds and production web build all passed. |
 | Clean shutdown | PASS | All API, Web Admin and worker processes owned by the retry were stopped; ports 8000/38000 were clear. Exact project `knowledge-ci-source-lifecycle` and ordinary `knowledge-local` both returned `stack_absent`; the pre-existing tunnel remained running. Owned temporary logs were removed without retaining child diagnostics. |
 
+## Post-fix retry audit trail
+
+| Step | Repository command | Sanitized outcome |
+| --- | --- | --- |
+| Ordinary stack preflight | `uv run poe stack-status` | `knowledge-local`: `stack_absent`. |
+| Ordinary stack lowering | `uv run poe stack-down` | `stack_down_complete`. |
+| Disposable stack bootstrap | `uv run python tools/local_service_stack.py bootstrap --project-name knowledge-ci-source-lifecycle` | `secret_set_ready`; only contract presence was observed. |
+| Disposable stack validation | `uv run python tools/local_service_stack.py config --project-name knowledge-ci-source-lifecycle` | `stack_config_valid`. |
+| Disposable stack start | `uv run python tools/local_service_stack.py up --project-name knowledge-ci-source-lifecycle` | `stack_ready`; declared services healthy. |
+| Disposable stack probe | `uv run python tools/local_service_stack.py verify --project-name knowledge-ci-source-lifecycle` | `stack_verified`; every closed service probe was ready. |
+| API | `bash .local/serve-local.sh` | The controller corrected a local argument-quoting error, then API readiness returned HTTP 200. No runtime or secret contract was missing. |
+| Web Admin | `pnpm --filter @workspace/web-runtime exec next start --port 38000` | Local readiness returned HTTP 200. |
+| Preview worker | `bash .local/run-worker.sh run-policy-previews` | The controller corrected the same local argument-quoting error, then the worker stayed alive for the guarded run. |
+| Reconciliation worker | `bash .local/run-worker.sh run-policy-reconciliations` | The controller corrected the same local argument-quoting error, then the worker stayed alive for the guarded run. |
+| Existing tunnel | `Get-Process cloudflared` plus bounded public readiness probes | Existing process remained alive; both configured origins returned HTTP 200. No tunnel or DNS mutation occurred. |
+| Guarded Desktop run | `CI=true uv run python tools/obsidian_live_acceptance_bootstrap.py --project-name knowledge-ci-source-lifecycle` | `{"result_code":"obsidian_wdio_failed","state":"error"}`; no child diagnostics crossed the boundary. |
+| Owned process cleanup | `Stop-Process` for the resolved owned process trees | Zero owned roots remained; ports 8000/38000 were clear. The existing tunnel remained alive. |
+| Disposable stack stop | `uv run python tools/local_service_stack.py down --project-name knowledge-ci-source-lifecycle` | `stack_down_complete`. |
+| Final absence checks | `uv run python tools/local_service_stack.py status --project-name knowledge-ci-source-lifecycle` and `uv run poe stack-status` | Both exact CI and ordinary projects returned `stack_absent`; owned temporary logs were absent. |
+
 ## Rulings and interpretations
 
 - The brief's environment note does not waive the live gates. Actual Desktop
