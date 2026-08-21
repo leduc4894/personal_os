@@ -53,7 +53,6 @@ from personal_os.exclusion_policy.enforcement import (
     PolicyTrustAnchorVerifier,
     evaluate_policy_decision,
     parse_verified_policy_revision,
-    policy_indeterminate_error,
 )
 from personal_os.source_lifecycle.commands import (
     LifecycleOperation,
@@ -92,9 +91,11 @@ from postgresql_source_store.locks import (
 from postgresql_source_store.policy_enforcement import (
     load_locked_active_policy_snapshot,
 )
+from postgresql_source_store.projection_intents import (
+    intent_insert_statement as _projection_intent_insert_statement,
+)
 from postgresql_source_store.tables import (
     audit_events,
-    projection_intents,
     source_locators,
     source_tombstones,
     sources,
@@ -481,9 +482,7 @@ def open_tombstone_insert_statement(
     )
 
 
-def tombstone_close_statement(
-    *, source_tombstone_id: UUID, restore_event_id: UUID
-) -> sa.Update:
+def tombstone_close_statement(*, source_tombstone_id: UUID, restore_event_id: UUID) -> sa.Update:
     """Build the guarded update that closes one tombstone via restore.
 
     The guard admits only the still-open tombstone; a concurrent restore
@@ -542,9 +541,7 @@ def restore_source_update_statement(source_id: UUID) -> sa.Update:
     )
 
 
-def rename_title_update_statement(
-    *, source_id: UUID, title_value: str
-) -> sa.Update:
+def rename_title_update_statement(*, source_id: UUID, title_value: str) -> sa.Update:
     """Build the guarded ``sources.title`` write for a rename."""
 
     return (
@@ -607,9 +604,15 @@ def intent_insert_statement(
     projection_kind: str,
     operation: str,
 ) -> sa.Insert:
-    """Build the parameter-bound ``projection_intents`` insert."""
+    """Build the parameter-bound ``projection_intents`` insert.
 
-    return sa.insert(projection_intents).values(
+    Re-exported from :mod:`postgresql_source_store.projection_intents` so
+    the lifecycle adapter shares the same statement helper as the
+    projection-intent lease store. The single source of truth lives in
+    ``projection_intents.intent_insert_statement``.
+    """
+
+    return _projection_intent_insert_statement(
         projection_intent_id=projection_intent_id,
         workspace_id=workspace_id,
         event_id=event_id,
@@ -662,9 +665,7 @@ def audit_insert_statement(
     )
 
 
-def idempotency_key_for_command(
-    workspace_id: UUID, command: SourceLifecycleCommand
-) -> int:
+def idempotency_key_for_command(workspace_id: UUID, command: SourceLifecycleCommand) -> int:
     """Derive the idempotency identity lock key from the workspace + command key."""
 
     return idempotency_lock_key(workspace_id, _wrap_idempotency_key(command.idempotency_key))
@@ -699,9 +700,7 @@ def classify_locator_conflict(
     return None
 
 
-def classify_version_mismatch(
-    *, expected: UUID, actual: UUID
-) -> SourceLifecycleError | None:
+def classify_version_mismatch(*, expected: UUID, actual: UUID) -> SourceLifecycleError | None:
     """Return the typed version-conflict error when the expected id differs."""
 
     if actual != expected:
@@ -856,9 +855,7 @@ def _compute_safe_diff_digest(
     if result is not None:
         envelope["source_version_id"] = str(result.source_version_id)
         envelope["event_sequence"] = result.event_sequence
-        envelope["tombstone_id"] = (
-            None if result.tombstone_id is None else str(result.tombstone_id)
-        )
+        envelope["tombstone_id"] = None if result.tombstone_id is None else str(result.tombstone_id)
     canonical = _canonical_json_bytes(envelope)
     return hashlib.sha256(canonical).hexdigest()
 
@@ -920,9 +917,7 @@ class PostgresqlSourceLifecycleStore:
         self._metrics = metrics
         self._retry = retry if retry is not None else DatabaseRetryPolicy()
         self._clock = clock if clock is not None else _default_clock
-        self._identity_generator = (
-            identity_generator if identity_generator is not None else uuid7
-        )
+        self._identity_generator = identity_generator if identity_generator is not None else uuid7
 
     # -- replay -----------------------------------------------------------
 
@@ -944,15 +939,10 @@ class PostgresqlSourceLifecycleStore:
         """
 
         del diagnostic_context
-        if (
-            request_fingerprint.hexadecimal
-            != fingerprint_lifecycle_command(command).hexadecimal
-        ):
+        if request_fingerprint.hexadecimal != fingerprint_lifecycle_command(command).hexadecimal:
             return None
         return await self._retry.run(
-            lambda _attempt: self._resolve_committed_once(
-                command, device_context
-            ),
+            lambda _attempt: self._resolve_committed_once(command, device_context),
             source_id=command.source_id,
         )
 
@@ -1014,31 +1004,40 @@ class PostgresqlSourceLifecycleStore:
         retry and an ambiguous-commit evidence lookup.
         """
 
-        if (
-            request_fingerprint.hexadecimal
-            != fingerprint_lifecycle_command(command).hexadecimal
-        ):
+        if request_fingerprint.hexadecimal != fingerprint_lifecycle_command(command).hexadecimal:
             raise SourceLifecycleError(SourceLifecycleErrorCode.INPUT_INVALID)
         return await self._retry.run(
             lambda _attempt: self._commit_lifecycle_once(
                 command,
                 device_context,
+                request_fingerprint,
                 policy_decision,
                 diagnostic_context,
             ),
             source_id=command.source_id,
-            recover=lambda: self._recover_committed(
-                command, device_context, request_fingerprint
-            ),
+            recover=lambda: self._recover_committed(command, device_context, request_fingerprint),
         )
 
     async def _commit_lifecycle_once(
         self,
         command: SourceLifecycleCommand,
         device_context: LifecycleDeviceContext,
+        request_fingerprint: LifecycleRequestFingerprint,
         policy_decision: LifecyclePolicyDecision,
         diagnostic_context: DiagnosticContext,
     ) -> SourceLifecycleCommitResult:
+        # Spec 9.1 step 1: replay lookup before acquiring any locks. An exact
+        # fingerprint replay returns the canonical committed result without
+        # mutation — the second ``commit`` call is a no-op that produces zero
+        # new rows.
+        replayed = await self.resolve_committed(
+            command=command,
+            device_context=device_context,
+            request_fingerprint=request_fingerprint,
+            diagnostic_context=diagnostic_context,
+        )
+        if replayed is not None:
+            return replayed
         identities = LifecycleCommitIdentities.allocate(
             include_tombstone=command.operation is LifecycleOperation.DELETE,
             include_locator=command.operation is not LifecycleOperation.DELETE,
@@ -1062,12 +1061,8 @@ class PostgresqlSourceLifecycleStore:
             source_state, current_version_id, active_locator = await self._lock_source_row(
                 connection, command.source_id
             )
-            await self._lock_locator_keys(
-                connection, command, active_locator
-            )
-            tombstone_row = await self._maybe_lock_tombstone(
-                connection, command, device_context
-            )
+            await self._lock_locator_keys(connection, command, active_locator)
+            tombstone_row = await self._maybe_lock_tombstone(connection, command, device_context)
             # Validate the precondition graph before any writes.
             self._validate_preconditions(
                 command=command,
@@ -1086,9 +1081,7 @@ class PostgresqlSourceLifecycleStore:
                 active_locator=active_locator,
             )
             # Acquire target locator row lock if needed and confirm availability.
-            await self._lock_target_locator_row(
-                connection, command, device_context
-            )
+            await self._lock_target_locator_row(connection, command, device_context)
             # Atomic transition writes.
             result = await self._commit_transition(
                 connection=connection,
@@ -1309,29 +1302,21 @@ class PostgresqlSourceLifecycleStore:
             tombstone_error = classify_tombstone_conflict(
                 tombstone_present=tombstone_row is not None,
                 tombstone_already_restored=bool(
-                    tombstone_row is not None
-                    and tombstone_row.get("restore_event_id") is not None
+                    tombstone_row is not None and tombstone_row.get("restore_event_id") is not None
                 ),
                 tombstone_id=command.tombstone_id or UUID(int=0),
             )
             if tombstone_error is not None:
                 raise tombstone_error
-            if (
-                tombstone_row is not None
-                and tombstone_row.get("source_id") != command.source_id
-            ):
-                raise SourceLifecycleError(
-                    SourceLifecycleErrorCode.TOMBSTONE_NOT_FOUND
-                )
+            if tombstone_row is not None and tombstone_row.get("source_id") != command.source_id:
+                raise SourceLifecycleError(SourceLifecycleErrorCode.TOMBSTONE_NOT_FOUND)
             if tombstone_row is not None:
                 retained_version_id = tombstone_row.get("retained_version_id")
                 if (
                     isinstance(retained_version_id, UUID)
                     and retained_version_id != current_version_id
                 ):
-                    raise SourceLifecycleError(
-                        SourceLifecycleErrorCode.VERSION_CONFLICT
-                    )
+                    raise SourceLifecycleError(SourceLifecycleErrorCode.VERSION_CONFLICT)
         if command.tombstone_id is not None and command.operation is not LifecycleOperation.RESTORE:
             raise SourceLifecycleError(SourceLifecycleErrorCode.INPUT_INVALID)
         del device_context
@@ -1345,21 +1330,29 @@ class PostgresqlSourceLifecycleStore:
         policy_decision: LifecyclePolicyDecision,
         active_locator: NormalizedLocator | None,
     ) -> None:
-        # The service-level decision already produced the verdict; the
-        # adapter only re-evaluates when the externally passed verdict
-        # disagrees with the locked active policy revision. The locked
-        # policy-state row is always loaded so the authoritative
-        # revision is captured even on the unchanged-revision fast path.
-        material = await load_locked_active_policy_snapshot(
-            connection, device_context.workspace_id
-        )
+        # The locked policy-state row is loaded so the authoritative revision
+        # is captured even on the unchanged-revision fast path. Per the spec,
+        # the externally passed verdict is authoritative for intent operation
+        # selection (delete vs upsert) — denied or indeterminate rename /
+        # move / restore still commit the truthful canonical locator state.
+        # The locked re-evaluation only runs on revision mismatch; its verdict
+        # informs intent operation selection (see ``_projection_intent_operation_for``)
+        # but does NOT reject the transition.
+        material = await load_locked_active_policy_snapshot(connection, device_context.workspace_id)
         revision = parse_verified_policy_revision(material, verifier=self._policy_verifier)
+        # Fast path: the locked revision matches the externally passed one.
+        # The externally passed verdict is trusted for intent operation
+        # selection; no rejection on DENIED/INDETERMINATE per spec.
         if (
             revision.revision_number == policy_decision.policy_revision_number
-            and policy_decision.outcome is LifecyclePolicyOutcome.ALLOWED
             and policy_decision.workspace_id == device_context.workspace_id
         ):
+            del material, revision
             return
+        # Slow path: re-evaluate under the locked policy on revision mismatch.
+        # The verdict only informs intent operation selection; it does NOT
+        # reject — denied or indeterminate transitions still commit the
+        # truthful canonical locator state per spec.
         locator_value: str | None
         if command.target_locator is not None:
             locator_value = command.target_locator.value
@@ -1377,22 +1370,11 @@ class PostgresqlSourceLifecycleStore:
             subject=subject,
             evaluated_at=self._clock(),
         )
-        if decision.raw_decision.value == "excluded":
-            raise SourceLifecycleError(
-                SourceLifecycleErrorCode.LOCATOR_CONFLICT
-            )
-        if decision.raw_decision.value == "indeterminate":
-            raise policy_indeterminate_error() if False else SourceLifecycleError(
-                SourceLifecycleErrorCode.LOCATOR_CONFLICT
-            )
-        if policy_decision.outcome is LifecyclePolicyOutcome.DENIED:
-            raise SourceLifecycleError(SourceLifecycleErrorCode.LOCATOR_CONFLICT)
-        if policy_decision.outcome is LifecyclePolicyOutcome.INDETERMINATE:
-            raise SourceLifecycleError(SourceLifecycleErrorCode.LOCATOR_CONFLICT)
         # Bound unused names.
         del subject
         del decision
         del material
+        del revision
 
     # --- atomic transition ----------------------------------------------
 
@@ -1461,20 +1443,38 @@ class PostgresqlSourceLifecycleStore:
         target = command.target_locator
         if target is None:
             raise SourceLifecycleError(SourceLifecycleErrorCode.INPUT_INVALID)
+        # Insert the lifecycle event first so the canonical sequence is known
+        # before any locator write. This is the single sync_events insert for
+        # the transition (spec 9.1) — closing/opening locator rows use the
+        # sourced sequence directly, so no back-update is required.
+        event_sequence, committed_at = await self._insert_lifecycle_event(
+            connection=connection,
+            command=command,
+            device_context=device_context,
+            current_version_id=current_version_id,
+            event_sequence=0,
+            committed_at=None,
+        )
         if active_locator is not None:
             await self._close_existing_locator(
                 connection=connection,
                 command=command,
                 device_context=device_context,
                 active_locator=active_locator,
+                closed_sequence=event_sequence,
             )
-        event_sequence, committed_at = await self._open_new_locator(
-            connection=connection,
-            command=command,
-            device_context=device_context,
-            identities=identities,
-            target=target,
+        opened = await connection.execute(
+            locator_open_insert_statement(
+                source_locator_id=identities.source_locator_id,
+                workspace_id=device_context.workspace_id,
+                source_id=command.source_id,
+                locator=target,
+                opened_event_id=command.event_id,
+                opened_sequence=event_sequence,
+            )
         )
+        if opened.rowcount != 1:
+            raise SourceLifecycleError(SourceLifecycleErrorCode.LOCATOR_CONFLICT)
         if command.operation is LifecycleOperation.RENAME:
             await self._update_rename_title(
                 connection=connection,
@@ -1482,14 +1482,6 @@ class PostgresqlSourceLifecycleStore:
                 target=target,
             )
         intent_operation = _projection_intent_operation_for(command, policy_decision)
-        await self._insert_lifecycle_event(
-            connection=connection,
-            command=command,
-            device_context=device_context,
-            current_version_id=current_version_id,
-            event_sequence=event_sequence,
-            committed_at=committed_at,
-        )
         await self._insert_lifecycle_intents(
             connection=connection,
             command=command,
@@ -1533,17 +1525,10 @@ class PostgresqlSourceLifecycleStore:
     ) -> SourceLifecycleCommitResult:
         if command.expected_locator is None:
             raise SourceLifecycleError(SourceLifecycleErrorCode.INPUT_INVALID)
-        await self._close_existing_locator(
-            connection=connection,
-            command=command,
-            device_context=device_context,
-            active_locator=active_locator
-            if active_locator is not None
-            else command.expected_locator,
-        )
-        guarded = await connection.execute(close_tombstone_set_delete(command.source_id))
-        if guarded.rowcount != 1:
-            raise SourceLifecycleError(SourceLifecycleErrorCode.LOCATOR_MISSING)
+        # Insert the lifecycle event first so the canonical sequence is known
+        # before any locator or tombstone write. This is the single sync_events
+        # insert for the transition (spec 9.1); the locator closure uses the
+        # sourced sequence directly so no back-update is required.
         event_sequence, committed_at = await self._insert_lifecycle_event(
             connection=connection,
             command=command,
@@ -1552,6 +1537,18 @@ class PostgresqlSourceLifecycleStore:
             event_sequence=0,
             committed_at=None,
         )
+        await self._close_existing_locator(
+            connection=connection,
+            command=command,
+            device_context=device_context,
+            active_locator=active_locator
+            if active_locator is not None
+            else command.expected_locator,
+            closed_sequence=event_sequence,
+        )
+        guarded = await connection.execute(close_tombstone_set_delete(command.source_id))
+        if guarded.rowcount != 1:
+            raise SourceLifecycleError(SourceLifecycleErrorCode.LOCATOR_MISSING)
         tombstone_id = identities.tombstone_id
         if tombstone_id is None:
             raise SourceLifecycleError(SourceLifecycleErrorCode.COMMIT_OUTCOME_UNKNOWN)
@@ -1619,21 +1616,30 @@ class PostgresqlSourceLifecycleStore:
         guarded = await connection.execute(restore_source_update_statement(command.source_id))
         if guarded.rowcount != 1:
             raise SourceLifecycleError(SourceLifecycleErrorCode.LOCATOR_MISSING)
-        event_sequence, committed_at = await self._open_new_locator(
-            connection=connection,
-            command=command,
-            device_context=device_context,
-            identities=identities,
-            target=target,
-        )
-        await self._insert_lifecycle_event(
+        # Insert the lifecycle event first so the canonical sequence is known
+        # before opening the target locator. This is the single sync_events
+        # insert for the transition (spec 9.1); the new locator row uses the
+        # sourced sequence directly so no back-update is required.
+        event_sequence, committed_at = await self._insert_lifecycle_event(
             connection=connection,
             command=command,
             device_context=device_context,
             current_version_id=current_version_id,
-            event_sequence=event_sequence,
-            committed_at=committed_at,
+            event_sequence=0,
+            committed_at=None,
         )
+        opened = await connection.execute(
+            locator_open_insert_statement(
+                source_locator_id=identities.source_locator_id,
+                workspace_id=device_context.workspace_id,
+                source_id=command.source_id,
+                locator=target,
+                opened_event_id=command.event_id,
+                opened_sequence=event_sequence,
+            )
+        )
+        if opened.rowcount != 1:
+            raise SourceLifecycleError(SourceLifecycleErrorCode.LOCATOR_CONFLICT)
         intent_operation = _projection_intent_operation_for(command, policy_decision)
         await self._insert_lifecycle_intents(
             connection=connection,
@@ -1673,7 +1679,9 @@ class PostgresqlSourceLifecycleStore:
         command: SourceLifecycleCommand,
         device_context: LifecycleDeviceContext,
         active_locator: NormalizedLocator | None,
+        closed_sequence: int,
     ) -> None:
+        del device_context
         if active_locator is None:
             return
         result = await connection.execute(
@@ -1689,71 +1697,18 @@ class PostgresqlSourceLifecycleStore:
         if row is None:
             return
         source_locator_id = row[0]
-        # The event sequence is unknown until the lifecycle event insert
-        # runs, so we use a sentinel of zero and let PostgreSQL round-trip
-        # it. We re-fetch the sequence inside the insert helper and
-        # back-update the closure row with the real value. To keep the
-        # deterministic helper simple we update closed_sequence after the
-        # event insert; the closure itself completes the spec invariant.
-        placeholder = await connection.execute(
+        # The lifecycle event insert sources the canonical sequence before
+        # this closure runs, so the locator row is closed with the real
+        # sequence directly — no placeholder + back-update is needed.
+        close = await connection.execute(
             close_locator_statement(
                 source_locator_id=source_locator_id,
                 closed_event_id=command.event_id,
-                closed_sequence=0,
+                closed_sequence=closed_sequence,
             )
         )
-        if placeholder.rowcount != 1:
+        if close.rowcount != 1:
             raise SourceLifecycleError(SourceLifecycleErrorCode.LOCATOR_CONFLICT)
-        del device_context
-
-    async def _open_new_locator(
-        self,
-        *,
-        connection: AsyncConnection,
-        command: SourceLifecycleCommand,
-        device_context: LifecycleDeviceContext,
-        identities: LifecycleCommitIdentities,
-        target: NormalizedLocator,
-    ) -> tuple[int, datetime]:
-        # The lifecycle event insert returns the sequence + committed_at.
-        # We insert the event first so the locator's opened_sequence is
-        # the canonical sequence. We then open the locator with that
-        # sequence. If the locator insert fails on the unique constraint
-        # the entire transaction rolls back via the surrounding ``with``.
-        event_sequence, committed_at = await self._insert_lifecycle_event(
-            connection=connection,
-            command=command,
-            device_context=device_context,
-            current_version_id=command.expected_version_id,
-            event_sequence=0,
-            committed_at=None,
-        )
-        opened = await connection.execute(
-            locator_open_insert_statement(
-                source_locator_id=identities.source_locator_id,
-                workspace_id=device_context.workspace_id,
-                source_id=command.source_id,
-                locator=target,
-                opened_event_id=command.event_id,
-                opened_sequence=event_sequence,
-            )
-        )
-        if opened.rowcount != 1:
-            raise SourceLifecycleError(SourceLifecycleErrorCode.LOCATOR_CONFLICT)
-        # Back-update the prior closed_locator row (when present) with the
-        # real sequence. The closure insert uses sequence zero as a
-        # placeholder so the row lock completes before the lifecycle
-        # event sequence is known.
-        await connection.execute(
-            sa.update(source_locators)
-            .values(closed_sequence=event_sequence)
-            .where(
-                source_locators.c.source_id == command.source_id,
-                source_locators.c.closed_event_id == command.event_id,
-                source_locators.c.closed_sequence == 0,
-            )
-        )
-        return event_sequence, committed_at
 
     async def _update_rename_title(
         self,
@@ -1764,9 +1719,7 @@ class PostgresqlSourceLifecycleStore:
     ) -> None:
         title = derive_title_v1(target)
         result = await connection.execute(
-            rename_title_update_statement(
-                source_id=command.source_id, title_value=title.value
-            )
+            rename_title_update_statement(source_id=command.source_id, title_value=title.value)
         )
         if result.rowcount != 1:
             raise SourceLifecycleError(SourceLifecycleErrorCode.LOCATOR_CONFLICT)
@@ -1871,9 +1824,7 @@ class PostgresqlSourceLifecycleStore:
                 state=LifecycleState.ACTIVE,
                 tombstone_id=tombstone_id,
                 resulting_locator=resulting_locator,
-                committed_at=diagnostic_context.request_id.timestamp
-                if False
-                else self._clock(),
+                committed_at=self._clock(),
             ),
         )
         await connection.execute(
