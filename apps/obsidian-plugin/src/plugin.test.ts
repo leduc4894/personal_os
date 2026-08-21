@@ -250,6 +250,104 @@ describe("Obsidian plugin composition root", () => {
     expect(pluginSource).toContain("syncBlockerGuidanceLines");
   });
 
+  it("wires the lifecycle state histogram into the live composition projection", () => {
+    // Fix round 1 I1 (a): the lifecycle state histogram MUST be called
+    // from `#projectSyncStatus()` and passed verbatim to the projection.
+    const projectionHeaderIndex = pluginSource.indexOf(
+      "#projectSyncStatus(): JournalSyncStatusSnapshot | null",
+    );
+    expect(projectionHeaderIndex).toBeGreaterThanOrEqual(0);
+    const projectionBody = pluginSource.slice(
+      projectionHeaderIndex,
+      projectionHeaderIndex + 2_000,
+    );
+    expect(projectionBody).toContain("repository.readLifecycleStateCounts()");
+    expect(projectionBody).toContain("lifecycleStateCounts:");
+  });
+
+  it("wires the pending lifecycle event count into the live composition projection", () => {
+    // Fix round 1 I1 (b): the pending lifecycle event count MUST be
+    // called from `#projectSyncStatus()` and passed verbatim to the
+    // projection. Otherwise the count is dead code from the UI's view.
+    const projectionHeaderIndex = pluginSource.indexOf(
+      "#projectSyncStatus(): JournalSyncStatusSnapshot | null",
+    );
+    const projectionBody = pluginSource.slice(
+      projectionHeaderIndex,
+      projectionHeaderIndex + 2_000,
+    );
+    expect(projectionBody).toContain("repository.countPendingLifecycleEvents()");
+    expect(projectionBody).toContain("pendingLifecycleEventCount:");
+  });
+
+  it("wires the failed attempt count into the live composition projection", () => {
+    // Fix round 1 I1 (c): the failed-attempt count MUST be called from
+    // `#projectSyncStatus()` and passed verbatim to the projection.
+    const projectionHeaderIndex = pluginSource.indexOf(
+      "#projectSyncStatus(): JournalSyncStatusSnapshot | null",
+    );
+    const projectionBody = pluginSource.slice(
+      projectionHeaderIndex,
+      projectionHeaderIndex + 2_000,
+    );
+    expect(projectionBody).toContain("repository.countFailedAttempts()");
+    expect(projectionBody).toContain("failedAttemptCount:");
+  });
+
+  it("wires the blocked reason codes into the live composition projection", () => {
+    // Fix round 1 I1 (d): the closed blocked reason codes MUST be called
+    // from `#projectSyncStatus()` and passed verbatim to the projection.
+    const projectionHeaderIndex = pluginSource.indexOf(
+      "#projectSyncStatus(): JournalSyncStatusSnapshot | null",
+    );
+    const projectionBody = pluginSource.slice(
+      projectionHeaderIndex,
+      projectionHeaderIndex + 2_000,
+    );
+    expect(projectionBody).toContain("repository.readLifecycleBlockedReasonCodes()");
+    expect(projectionBody).toContain("lifecycleBlockedReasonCodes:");
+  });
+
+  it("folds the lifecycle state histogram onto the settings snapshot", () => {
+    // Fix round 1 I1: the settings snapshot holds the same four lifecycle
+    // fields so the settings tab can render the histogram and the blocked
+    // reason codes list. Without this the operator can never see the
+    // security-grade redacted lifecycle surface.
+    const snapshotBuilderIndex = pluginSource.indexOf("getSnapshot: () => {");
+    expect(snapshotBuilderIndex).toBeGreaterThanOrEqual(0);
+    const snapshotBuilderBody = pluginSource.slice(
+      snapshotBuilderIndex,
+      snapshotBuilderIndex + 2_000,
+    );
+    expect(snapshotBuilderBody).toContain("lifecycleStateCounts");
+    expect(snapshotBuilderBody).toContain("pendingLifecycleEventCount");
+    expect(snapshotBuilderBody).toContain("failedAttemptCount");
+    expect(snapshotBuilderBody).toContain("lifecycleBlockedReasonCodes");
+  });
+
+  it("keeps the projection fail-closed when the journal store throws on the lifecycle reads", () => {
+    // Fix round 1 I1: the four new repository read calls live inside the
+    // same `try { … } catch { return null }` block so an unreadable
+    // journal still renders no status rather than a partial one.
+    const projectionHeaderIndex = pluginSource.indexOf(
+      "#projectSyncStatus(): JournalSyncStatusSnapshot | null",
+    );
+    const projectionBody = pluginSource.slice(
+      projectionHeaderIndex,
+      projectionHeaderIndex + 2_000,
+    );
+    // The try-block must contain all four new reads; the catch path must
+    // still return null.
+    const tryBlock = projectionBody.match(/try\s*\{[\s\S]*?\}\s*catch\s*\{[\s\S]*?return null/s);
+    expect(tryBlock).not.toBeNull();
+    const body = tryBlock?.[0] ?? "";
+    expect(body).toContain("readLifecycleStateCounts");
+    expect(body).toContain("countPendingLifecycleEvents");
+    expect(body).toContain("countFailedAttempts");
+    expect(body).toContain("readLifecycleBlockedReasonCodes");
+    expect(body).toContain("return null");
+  });
+
   it("stops the driver when the projection says reconcile required", () => {
     // The carried spec-11 requirement: reconcile_required is a hard stop —
     // the status refresh itself must stop the driver.

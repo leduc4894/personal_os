@@ -102,8 +102,8 @@ command palette) is the only safe path to revive a tombstoned file:
 
 A hash mismatch, a missing retained mapping, a missing open tombstone
 or a missing delete predecessor is rejected with the closed
-`journal_mutation_failed` safe code. The Sync status refresh is the
-single source of truth for what landed and what did not.
+`journal_mutation_failed` `JournalStoreErrorReason`. The Sync status
+refresh is the single source of truth for what landed and what did not.
 
 Automatic restore is permitted ONLY when the capture detects a
 tombstoned path re-appearing with bytes that hash to the last-committed

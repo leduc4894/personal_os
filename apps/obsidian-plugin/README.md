@@ -164,9 +164,9 @@ The narrow command surface owns exactly three commands:
   the lifecycle capture verifies the bytes hash against the file's
   last-committed fingerprint before recording the restore event. A
   hash mismatch or a missing retained mapping is rejected with the
-  closed `journal_mutation_failed` safe code; the Sync status is
-  refreshed on both branches so the redacted surface always reflects
-  the new lifecycle state.
+  closed `journal_mutation_failed` `JournalStoreErrorReason`; the Sync
+  status is refreshed on both branches so the redacted surface always
+  reflects the new lifecycle state.
 
 Automatic restore is permitted ONLY when the capture detects a
 tombstoned path re-appearing with bytes that hash to the last-committed

@@ -69,6 +69,30 @@ describe("DeviceAuthenticationSettingTab source contract", () => {
     expect(tabSource).toContain("syncBlockerGuidance");
   });
 
+  it("renders the redacted lifecycle state histogram (Task 10, fix round 1 I1)", () => {
+    // Fix round 1 I1: the settings snapshot must accept the four new
+    // lifecycle fields and the tab must render the histogram counts and
+    // the closed blocked reason codes list. The render is a Setting
+    // description only — no controls, no path, no source ID.
+    expect(tabSource).toContain("lifecycleStateCounts");
+    expect(tabSource).toContain("pendingLifecycleEventCount");
+    expect(tabSource).toContain("failedAttemptCount");
+    expect(tabSource).toContain("lifecycleBlockedReasonCodes");
+    // The tab MUST render a Setting that names both the histogram and the
+    // blocked reason codes so the operator can see them.
+    expect(tabSource).toContain("Lifecycle state");
+    expect(tabSource).toContain("Lifecycle blockers");
+    // Reject any path-leaking pattern that the new render surfaces must
+    // never include: the description is closed-enum counts and codes only.
+    const descriptionSnippet = tabSource.match(/Lifecycle blockers[\s\S]*?setDesc\(([^)]+)\)/);
+    if (descriptionSnippet !== null) {
+      const descriptionBuilder = descriptionSnippet[1] ?? "";
+      for (const forbidden of [".md", "notes/", "at1.", "secret", "https://"]) {
+        expect(descriptionBuilder).not.toContain(forbidden);
+      }
+    }
+  });
+
   it("offers no control implying automatic full-Vault upload", () => {
     for (const forbiddenLabel of ["Sync all", "Upload all", "Sync everything", "Upload everything"]) {
       expect(tabSource).not.toContain(forbiddenLabel);

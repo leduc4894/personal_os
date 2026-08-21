@@ -56,7 +56,8 @@ import {
   syncBlockerGuidanceLines,
   SYNC_STATUS_TEXT,
 } from "./journal/status";
-import type { JournalSyncStatusSnapshot } from "./journal/status";
+import type { JournalSyncStatusSnapshot, LifecycleBlockedReasonCode } from "./journal/status";
+import type { LifecycleStateCounts } from "./journal/status";
 import { loadVendoredSqliteEngine } from "./journal/sqlite-database";
 import { createJournalSyncApi } from "./journal/sync-api";
 import { PolicySession } from "./exclusion-policy/policy-session";
@@ -279,6 +280,12 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
             syncStatus === null ? null : SYNC_STATUS_TEXT[syncStatus.kind],
           syncBlockerGuidance:
             syncStatus === null ? [] : [...syncBlockerGuidanceLines(syncStatus)],
+          // Task 10 / fix round 1 I1: the redacted lifecycle surface
+          // reaches the settings tab through the same projection.
+          lifecycleStateCounts: syncStatus?.lifecycleStateCounts ?? null,
+          pendingLifecycleEventCount: syncStatus?.pendingLifecycleEventCount ?? 0,
+          failedAttemptCount: syncStatus?.failedAttemptCount ?? 0,
+          lifecycleBlockedReasonCodes: syncStatus?.lifecycleBlockedReasonCodes ?? [],
         };
       },
       setServerOrigin: (origin) => {
@@ -499,8 +506,9 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       // against the file's last-committed fingerprint before recording
       // a restore event. The surface never logs paths, locators, source
       // ids, tokens or fingerprints — failures surface as the closed
-      // `journal_mutation_failed` safe code and the Sync status is
-      // refreshed so the lifecycle state transitions stay visible.
+      // `journal_mutation_failed` `JournalStoreErrorReason` and the Sync
+      // status is refreshed so the lifecycle state transitions stay
+      // visible.
       this.addCommand({
         id: "restore-selected-tombstone",
         name: "Restore selected tombstone",
@@ -541,9 +549,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
    * show the picker for retained tombstones, confirm the target path
    * with the user and call the lifecycle capture port to validate the
    * bytes hash and record the restore event. Failures surface as the
-   * closed `journal_mutation_failed` safe code and never reach the
-   * console; the sync status is refreshed on both branches so the
-   * redacted status surface reflects the new lifecycle state.
+   * closed `journal_mutation_failed` `JournalStoreErrorReason` and
+   * never reach the console; the sync status is refreshed on both
+   * branches so the redacted status surface reflects the new lifecycle
+   * state.
    */
   async #runRestoreSelectedTombstone(): Promise<void> {
     const lifecycleCapture = this.#lifecycleCapture;
@@ -567,10 +576,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       await lifecycleCapture.requestRestore(selection.localFileId, targetPath);
     } catch {
       // The lifecycle capture closes the failure as the closed
-      // `journal_mutation_failed` safe-code; the rejected bytes hash,
-      // missing retained mapping, missing open tombstone or missing
-      // delete predecessor stays local. The sync status refresh is the
-      // single source of truth for the user.
+      // `journal_mutation_failed` `JournalStoreErrorReason`; the
+      // rejected bytes hash, missing retained mapping, missing open
+      // tombstone or missing delete predecessor stays local. The sync
+      // status refresh is the single source of truth for the user.
     }
     this.#refreshSyncStatus();
   }
@@ -702,7 +711,11 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   /**
    * The closed projection input, or null while no journal runs: the
    * composition reads the redacted repository histogram plus the sticky
-   * journal reconcile flag, the live credential fact and the pass facts.
+   * journal reconcile flag, the live credential fact, the pass facts and
+   * (Task 10) the redacted source-lifecycle surface (state histogram,
+   * pending-event count, failed-attempt count, closed blocker codes). All
+   * five reads share one `try { … } catch { return null }` boundary so an
+   * unreadable journal renders no status rather than a partial one.
    */
   #projectSyncStatus(): JournalSyncStatusSnapshot | null {
     const repository = this.#queueRepository;
@@ -710,8 +723,16 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       return null;
     }
     let eventStateErrorCounts: readonly JournalEventStateErrorCount[];
+    let lifecycleStateCounts: LifecycleStateCounts;
+    let pendingLifecycleEventCount: number;
+    let failedAttemptCount: number;
+    let lifecycleBlockedReasonCodes: readonly LifecycleBlockedReasonCode[];
     try {
       eventStateErrorCounts = repository.readEventStateErrorCounts();
+      lifecycleStateCounts = repository.readLifecycleStateCounts();
+      pendingLifecycleEventCount = repository.countPendingLifecycleEvents();
+      failedAttemptCount = repository.countFailedAttempts();
+      lifecycleBlockedReasonCodes = repository.readLifecycleBlockedReasonCodes() as readonly LifecycleBlockedReasonCode[];
     } catch {
       // The journal store is closed or unreadable: render no status rather
       // than a wrong one (the fail-closed rule of the journal design).
@@ -720,6 +741,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     return projectJournalSyncStatus({
       isReconcileRequired: this.#journalPersistence?.isReconcileRequired ?? false,
       eventStateErrorCounts,
+      lifecycleStateCounts,
+      pendingLifecycleEventCount,
+      failedAttemptCount,
+      lifecycleBlockedReasonCodes,
       hasAccessCredential: this.#session?.accessCredential != null,
       isQueuePassActive: this.#isQueuePassActive,
       lastQueuePassOutcome: this.#lastQueuePassOutcome,
