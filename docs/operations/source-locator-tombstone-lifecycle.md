@@ -278,8 +278,11 @@ copy child output into acceptance evidence.
 - Device: WDIO Obsidian Desktop on Windows
 - App version: 1.13.7
 - Plugin version: 0.1.0
-- Recorded at UTC: 2026-08-21T17:20:00Z
+- Recorded at UTC: 2026-08-21T17:45:23Z
 - Operator: Codex automated WDIO operator
+- Latest guarded result: BLOCKED (`obsidian_wdio_failed`). The approved
+  bootstrap emitted no child diagnostics, so this retry does not prove which
+  lifecycle scenario failed and cannot promote any remaining scenario to PASS.
 
 | Scenario | Outcome | Evidence |
 | --- | --- | --- |

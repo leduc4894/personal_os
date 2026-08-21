@@ -3,15 +3,15 @@
 ## Status
 
 BLOCKED. Child 5 implementation and automated verification are present, but
-the mandatory Desktop gate has not passed. The guarded bootstrap created the
-fresh Web identity, enrolled and activated TOTP through the approved HTTP flow,
-proved the helper preflight, published policy, and launched real WDIO without
-printing secret or code material. The latest bounded Desktop run committed
-tracked rename and move through the live route, then waited on a delete that
-the API rejected with safe HTTP 422. Static TDD subsequently fixed that delete
-wire mismatch, but the bounded live window had closed, so the fix has no live
-PASS evidence. Mobile is explicitly DEFERRED under the later AGENTS ruling and
-its single backlog row. Child 5 is not closed and Child 6 must not begin.
+the mandatory Desktop gate has not passed. After the delete-wire fix, one
+bounded real retry prepared the exact disposable stack and runbook services,
+used the existing tunnel, and invoked only the guarded bootstrap with
+`CI=true`. The bootstrap returned the closed status
+`obsidian_wdio_failed`. Its contract intentionally suppressed all child
+diagnostics, so this retry provides no safe evidence that delete, restore,
+stable identity or pending drain passed. No secret, code or raw locator was
+recorded. Mobile is explicitly DEFERRED under the later AGENTS ruling and its
+single backlog row. Child 5 is not closed and Child 6 must not begin.
 
 Final implementation commit before this handoff: `e6ccddf` (`fix: omit delete
 tombstone wire identity`). The documentation snapshot commit
@@ -26,7 +26,7 @@ contain its own SHA.
 | Production lifecycle route regression RED/GREEN | PASS | `test_server_serves_the_source_lifecycle_route` first failed because the route was absent, then passed after composition; server/composition slice: 22 passed. |
 | Stack prerequisite | PASS | The ordinary local project was absent and exact project `knowledge-ci-source-lifecycle` reached ready. The guarded bootstrap completed fresh identity, Web credential, TOTP enrollment/activation, helper preflight and policy publication. |
 | API/Web/workers/tunnel | PASS | API and Web Admin readiness succeeded; both policy workers ran via repository scripts; the existing configured tunnel served both public origins. No new tunnel or DNS change was made. |
-| Desktop WDIO | FAIL | Real Obsidian 1.13.7 / plugin 0.1.0 completed onboarding and initial publication. Live lifecycle routes returned 200 for tracked rename and 200 for tracked move. Delete returned safe HTTP 422; the final bounded rerun was stopped while its delete convergence wait remained open. Commit `e6ccddf` fixes the identified request-shape mismatch but was not rerun live. |
+| Desktop WDIO | FAIL | Historical live evidence remains 200 for tracked rename, 200 for tracked move and safe HTTP 422 for delete. After `e6ccddf`, one guarded bounded retry returned only `obsidian_wdio_failed`; the closed boundary exposed no scenario-level diagnostics, so the delete fix and later scenarios remain unproven live. |
 | Locator wire interoperability | PASS | RED proved OpenAPI exported locator wrappers while the runtime accepted strings. GREEN: API/OpenAPI 9 passed, plugin serialization 18 passed, generated-client drift check and both TypeScript builds exited 0. |
 | Locked policy race | PASS | The full disposable PostgreSQL race file passed 5 tests; the transaction-locked canonical verdict now selects projection intent operation. |
 | Migration selection | PASS | `uv run pytest tests/unit/migrations/test_source_lifecycle_migration.py tests/integration/source_lifecycle/test_lifecycle_migration.py -q`: 7 passed, 1 deselected. |
@@ -37,7 +37,7 @@ contain its own SHA.
 | Plugin build | PASS | `pnpm --filter @workspace/obsidian-plugin build`: exit 0. |
 | Lifecycle boundary registries | PASS | The four focused failures were reproduced RED, then the exact Obsidian type import, exact lifecycle API files/route, exact internal-policy identifier grammar and seven lifecycle HTTP status codes were registered without broad scanner exemptions. The four focused nodes passed; all four affected contract files passed 28 tests. |
 | Repository verify | PASS | `uv run poe verify` exited 0 after formatting the new classifier: format, lint, strict typing over 176 Python files, import/architecture boundaries, OpenAPI/generated client, Python (3,317 passed, 21 skipped, 398 deselected), plugin (491 passed), web (139 passed), package builds and production web build all passed. |
-| Clean shutdown | PASS | API, Web Admin and both workers were stopped; the exact disposable project was verified and removed. The ordinary local project remained absent. |
+| Clean shutdown | PASS | All API, Web Admin and worker processes owned by the retry were stopped; ports 8000/38000 were clear. Exact project `knowledge-ci-source-lifecycle` and ordinary `knowledge-local` both returned `stack_absent`; the pre-existing tunnel remained running. Owned temporary logs were removed without retaining child diagnostics. |
 
 ## Rulings and interpretations
 
@@ -80,13 +80,11 @@ contain its own SHA.
 
 ## Next actions
 
-1. Bring the disposable live environment up in the authoritative order:
-   `uv run poe stack-status`, `bash .local/serve-local.sh`,
-   `pnpm --filter @workspace/web-runtime exec next start --port 38000`,
-   `bash .local/run-worker.sh run-policy-previews`,
-   `bash .local/run-worker.sh run-policy-reconciliations`, then
-   `"/c/Program Files (x86)/cloudflared/cloudflared.exe" tunnel run knowledge-api-verify`.
-2. Run only the guarded entrypoint
+1. Add a secret-safe, scenario-level closed failure code to the guarded
+   Desktop boundary so a failed WDIO run can identify the failing lifecycle
+   phase without surfacing child output, locators, content or credentials.
+2. Bring the disposable live environment up in the authoritative order and run
+   only the guarded entrypoint
    `uv run python tools/obsidian_live_acceptance_bootstrap.py --project-name knowledge-ci-<bounded-token>`
    with `CI=true`. It owns TOTP bootstrap, policy publication and focused WDIO.
    Record a complete Desktop PASS only if its closed result says so.
@@ -102,9 +100,9 @@ contain its own SHA.
 
 ## Concerns
 
-- Desktop acceptance proves tracked rename and move only. The delete fix in
-  `e6ccddf` still requires a complete guarded live rerun through explicit
-  restore, stable identity and pending-drain assertions.
+- Desktop acceptance proves tracked rename and move only. The post-`e6ccddf`
+  guarded retry returned `obsidian_wdio_failed` without scenario detail;
+  delete, explicit restore, stable identity and pending drain remain unproven.
 - Physical Mobile behavior remains entirely unobserved.
 - Repository-wide verification is green. The remaining blocker is exclusively
   the incomplete mandatory Desktop live acceptance journey.
