@@ -37,11 +37,13 @@ import type {
   JournalSafeErrorLabel,
   LocalFile,
 } from "./contracts";
+import { LifecycleRepository as JournalLifecycleRepository } from "./lifecycle-repository";
 import {
   JOURNAL_CAPTURE_ADMISSIONS,
   JOURNAL_COALESCABLE_EVENT_STATES,
   JOURNAL_EVENT_STATES,
   JOURNAL_NON_RETRY_EVENT_STATES,
+  JOURNAL_OPERATIONS,
   JOURNAL_PENDING_EVENT_STATES,
   JOURNAL_SAFE_ERROR_LABELS,
   MAX_EVENT_ATTEMPT_HISTORY,
@@ -118,6 +120,19 @@ export interface JournalRepositoryOptions {
   readonly createId?: () => string;
   /** Clock for event creation and attempt timestamps; defaults to `Date.now`. */
   readonly nowEpochMs?: () => number;
+  /**
+   * Optional lifecycle factory; the shared facade constructs the
+   * {@link LifecycleRepository} over the same `database` slice so the
+   * child-5 surface composes into the existing writer without a
+   * parallel SQL channel. Defaults to the canonical lifecycle
+   * repository wired against `database` and the inherited identity /
+   * clock seams.
+   */
+  readonly createLifecycleRepository?: (deps: {
+    readonly database: JournalRepositoryDatabase;
+    readonly createId: () => string;
+    readonly nowEpochMs: () => number;
+  }) => JournalLifecycleRepository;
 }
 
 // --- closed value validation -------------------------------------------------------------------
@@ -312,7 +327,7 @@ function parseJournalEventRow(row: readonly unknown[]): StoredJournalEvent {
     typeof eventId !== "string" ||
     typeof localFileId !== "string" ||
     typeof idempotencyKey !== "string" ||
-    (operation !== "create" && operation !== "update") ||
+    !isClosedToken(String(operation), [...JOURNAL_OPERATIONS]) ||
     typeof sha256 !== "string" ||
     typeof sizeBytes !== "number" ||
     typeof mediaType !== "string" ||
@@ -330,7 +345,7 @@ function parseJournalEventRow(row: readonly unknown[]): StoredJournalEvent {
     eventId,
     localFileId,
     idempotencyKey,
-    operation,
+    operation: operation as JournalOperation,
     fingerprint: { sha256, sizeBytes, mediaType },
     state: state as JournalEventState,
     isFingerprintFrozen: isFingerprintFrozen === 1,
@@ -397,11 +412,30 @@ export class JournalRepository {
   readonly #database: JournalRepositoryDatabase;
   readonly #createId: () => string;
   readonly #nowEpochMs: () => number;
+  readonly #lifecycle: JournalLifecycleRepository;
 
   constructor(options: JournalRepositoryOptions) {
     this.#database = options.database;
     this.#createId = options.createId ?? (() => crypto.randomUUID());
     this.#nowEpochMs = options.nowEpochMs ?? (() => Date.now());
+    if (options.createLifecycleRepository) {
+      this.#lifecycle = options.createLifecycleRepository({
+        database: this.#database,
+        createId: this.#createId,
+        nowEpochMs: this.#nowEpochMs,
+      });
+    } else {
+      this.#lifecycle = new JournalLifecycleRepository({
+        database: this.#database,
+        createId: this.#createId,
+        nowEpochMs: this.#nowEpochMs,
+      });
+    }
+  }
+
+  /** The lifecycle repository wired against the same writer. */
+  get lifecycle(): JournalLifecycleRepository {
+    return this.#lifecycle;
   }
 
   // --- capture (spec 6.3, 7.1, 7.2) ---------------------------------------------------------
@@ -943,6 +977,24 @@ export class JournalRepository {
     localFileId: string,
   ): StoredJournalEvent | null {
     const coalescableStateList = JOURNAL_COALESCABLE_EVENT_STATES.map((state) => sqlText(state)).join(", ");
+    // Coalesce discipline (Child 4 + Child 5): only the content surface
+    // (`create`, `update`) is coalescable; a queued lifecycle event for the
+    // same file is never replaced by a later content capture and vice-versa.
+    const coalescableOperationList = ["create", "update"]
+      .map((operation) => sqlText(operation))
+      .join(", ");
+    // A file with any recorded lifecycle event must not have its content
+    // events coalesced away — the lifecycle surface freezes the file's
+    // locator evidence and a coalesced content capture would silently drop
+    // the queued lifecycle intent. The probe reads only one indexed row.
+    const lifecycleProbe = firstRow(
+      session.readRows(
+        `select 1 from journal_events where local_file_id = ${sqlText(localFileId)} and operation in ('rename', 'move', 'delete', 'restore') limit 1;`,
+      ),
+    );
+    if (lifecycleProbe !== null) {
+      return null;
+    }
     const row = firstRow(
       session.readRows(
         selectColumns(
@@ -951,6 +1003,7 @@ export class JournalRepository {
           [
             `where local_file_id = ${sqlText(localFileId)}`,
             `and state in (${coalescableStateList})`,
+            `and operation in (${coalescableOperationList})`,
             "and is_fingerprint_frozen = 0",
             "order by created_at_epoch_ms desc, rowid desc limit 1",
           ].join(" "),

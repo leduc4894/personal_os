@@ -173,8 +173,18 @@ export const JOURNAL_CAPTURE_ADMISSIONS = [
 
 export type JournalCaptureAdmission = (typeof JOURNAL_CAPTURE_ADMISSIONS)[number];
 
-/** The supported journal operations of this child; lifecycle is child 5. */
-export type JournalOperation = "create" | "update";
+/** The supported journal operations of this and the lifecycle child (child 5). */
+export const JOURNAL_OPERATIONS = [
+  "create",
+  "update",
+  "rename",
+  "move",
+  "delete",
+  "restore",
+] as const;
+
+/** The supported journal operations of this and the lifecycle child (child 5). */
+export type JournalOperation = (typeof JOURNAL_OPERATIONS)[number];
 
 /**
  * The content identity of one event: exact lowercase SHA-256, exact byte
