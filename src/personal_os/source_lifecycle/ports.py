@@ -107,9 +107,23 @@ class SourceLifecycleStore(Protocol):
 
 
 class SourceLifecyclePolicy(Protocol):
-    """Reserved policy seam; implementation is intentionally owned by task 5."""
+    """Service-level lifecycle policy seam (spec 11).
 
-    async def evaluate(self, command: SourceLifecycleCommand) -> object: ...
+    The service consults the policy before the atomic store commit and
+    hands the resulting :class:`LifecyclePolicyDecision` through unchanged
+    so the store can re-verify the locked active revision under the
+    policy-state row lock; the verdict and the safe-detail references are
+    the only evidence crossing the boundary. The decision is never
+    inspected by the service to choose a retry policy or to mutate the
+    canonical state — the store is the sole owner of the projection-intent
+    selection between ``upsert`` and ``delete``.
+    """
+
+    async def evaluate_lifecycle(
+        self,
+        command: SourceLifecycleCommand,
+        device_context: LifecycleDeviceContext,
+    ) -> LifecyclePolicyDecision: ...
 
 
 __all__ = [

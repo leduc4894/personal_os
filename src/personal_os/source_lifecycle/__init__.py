@@ -24,6 +24,7 @@ from personal_os.source_lifecycle.ports import (
     SourceLifecyclePolicy,
     SourceLifecycleStore,
 )
+from personal_os.source_lifecycle.service import SourceLifecycleService
 from personal_os.source_lifecycle.title import derive_title_v1
 
 __all__ = [
@@ -42,6 +43,7 @@ __all__ = [
     "SourceLifecycleErrorCode",
     "SourceLifecycleMetrics",
     "SourceLifecyclePolicy",
+    "SourceLifecycleService",
     "SourceLifecycleStore",
     "derive_title_v1",
     "fingerprint_lifecycle_command",
