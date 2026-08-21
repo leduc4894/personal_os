@@ -114,6 +114,13 @@ class ErrorCode(StrEnum):
     SMALL_FILE_SIZE_LIMIT_EXCEEDED = "small_file_size_limit_exceeded"
     SMALL_FILE_CONTENT_INTEGRITY_FAILED = "small_file_content_integrity_failed"
     SMALL_FILE_UPLOAD_STATE_INVALID = "small_file_upload_state_invalid"
+    SOURCE_LIFECYCLE_INPUT_INVALID = "source_lifecycle_input_invalid"
+    SOURCE_LOCATOR_MISSING = "source_locator_missing"
+    SOURCE_LOCATOR_CONFLICT = "source_locator_conflict"
+    SOURCE_TOMBSTONE_NOT_FOUND = "source_tombstone_not_found"
+    SOURCE_TOMBSTONE_CLOSED = "source_tombstone_closed"
+    SOURCE_LIFECYCLE_VERSION_CONFLICT = "source_lifecycle_version_conflict"
+    SOURCE_LIFECYCLE_COMMIT_OUTCOME_UNKNOWN = "source_lifecycle_commit_outcome_unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -701,6 +708,48 @@ ERROR_DEFINITIONS: Final[Mapping[ErrorCode, ErrorDefinition]] = MappingProxyType
             category=ErrorCategory.CONFLICT,
             is_retryable=False,
             safe_message="The upload operation state does not accept this action",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.SOURCE_LIFECYCLE_INPUT_INVALID: ErrorDefinition(
+            category=ErrorCategory.VALIDATION,
+            is_retryable=False,
+            safe_message="Source lifecycle input is invalid",
+            allowed_detail_fields=frozenset({"reason"}),
+        ),
+        ErrorCode.SOURCE_LOCATOR_MISSING: ErrorDefinition(
+            category=ErrorCategory.VALIDATION,
+            is_retryable=False,
+            safe_message="Source lifecycle locator is missing",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.SOURCE_LOCATOR_CONFLICT: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="Source lifecycle locator conflicts with existing canonical state",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.SOURCE_TOMBSTONE_NOT_FOUND: ErrorDefinition(
+            category=ErrorCategory.INTEGRITY,
+            is_retryable=False,
+            safe_message="Source lifecycle tombstone is not found",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.SOURCE_TOMBSTONE_CLOSED: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="Source lifecycle tombstone is closed",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.SOURCE_LIFECYCLE_VERSION_CONFLICT: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="Source lifecycle version conflict",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.SOURCE_LIFECYCLE_COMMIT_OUTCOME_UNKNOWN: ErrorDefinition(
+            category=ErrorCategory.DEPENDENCY,
+            is_retryable=True,
+            safe_message="Source lifecycle commit outcome could not be determined",
             allowed_detail_fields=frozenset(),
         ),
     }

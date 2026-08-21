@@ -566,6 +566,26 @@ export type paths = {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/sources/lifecycle-events": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Commit Source Lifecycle Event
+         * @description Commit one source lifecycle event behind the OBSIDIAN_SYNC scope.
+         */
+        readonly post: operations["commitSourceLifecycleEvent"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/sync/exclusion-policy/keysets": {
         readonly parameters: {
             readonly query?: never;
@@ -1037,6 +1057,21 @@ export type components = {
              */
             readonly warnings: readonly components["schemas"]["ApiWarning"][];
         };
+        /** ApiEnvelope[SourceLifecycleCommitData] */
+        readonly ApiEnvelope_SourceLifecycleCommitData_: {
+            readonly data: components["schemas"]["SourceLifecycleCommitData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
         /** ApiEnvelope[TotpEnrollmentData] */
         readonly ApiEnvelope_TotpEnrollmentData_: {
             readonly data: components["schemas"]["TotpEnrollmentData"] | null;
@@ -1294,7 +1329,7 @@ export type components = {
          * ErrorCode
          * @enum {string}
          */
-        readonly ErrorCode: "configuration_invalid" | "configuration_unknown_key" | "configuration_secret_invalid" | "secret_file_missing" | "secret_file_outside_root" | "secret_file_invalid_type" | "secret_file_insecure_permissions" | "secret_file_too_large" | "secret_file_invalid_encoding" | "secret_file_empty" | "diagnostic_context_invalid" | "diagnostic_payload_rejected" | "internal_error" | "database_migration_configuration_invalid" | "database_connection_unavailable" | "database_migration_busy" | "database_schema_contract_invalid" | "database_destructive_downgrade_refused" | "object_storage_configuration_invalid" | "object_storage_input_invalid" | "object_storage_busy" | "object_storage_unavailable" | "object_storage_access_denied" | "object_storage_contract_invalid" | "object_storage_object_missing" | "object_storage_integrity_failed" | "object_storage_metadata_conflict" | "source_publish_input_invalid" | "source_not_found" | "source_already_exists" | "source_state_invalid" | "source_version_conflict" | "source_idempotency_mismatch" | "source_event_identity_mismatch" | "source_verified_receipt_stale" | "source_content_object_conflict" | "source_concurrency_busy" | "source_concurrency_invariant_failed" | "source_commit_outcome_unknown" | "projection_dispatch_unavailable" | "projection_intent_contract_invalid" | "identity_bootstrap_input_invalid" | "identity_bootstrap_state_conflict" | "canonical_read_state_invalid" | "canonical_recovery_environment_refused" | "canonical_recovery_configuration_invalid" | "canonical_recovery_snapshot_busy" | "canonical_recovery_bundle_exists" | "canonical_recovery_bundle_invalid" | "canonical_recovery_target_not_empty" | "canonical_recovery_dependency_unavailable" | "canonical_recovery_integrity_failed" | "canonical_recovery_restore_failed" | "api_request_malformed" | "api_request_validation_failed" | "api_route_not_found" | "api_method_not_allowed" | "authentication_required" | "authentication_failed" | "authentication_rate_limited" | "recent_authentication_required" | "csrf_validation_failed" | "authorization_scope_denied" | "totp_enrollment_state_invalid" | "device_authorization_pending" | "device_authorization_slow_down" | "device_authorization_denied" | "device_authorization_expired" | "device_authorization_state_invalid" | "device_revocation_confirmation_invalid" | "device_credential_invalid" | "device_revoked" | "device_token_reuse_detected" | "plugin_version_unsupported" | "exclusion_policy_input_invalid" | "exclusion_policy_not_initialized" | "exclusion_policy_draft_conflict" | "exclusion_policy_preview_pending" | "exclusion_policy_preview_failed" | "exclusion_policy_preview_expired" | "exclusion_policy_preview_stale" | "exclusion_policy_confirmation_invalid" | "exclusion_policy_denied" | "exclusion_policy_indeterminate" | "exclusion_policy_snapshot_outdated" | "exclusion_policy_signing_unavailable" | "exclusion_policy_commit_outcome_unknown" | "small_file_preflight_invalid" | "small_file_operation_not_found" | "small_file_operation_expired" | "small_file_operation_identity_mismatch" | "small_file_size_limit_exceeded" | "small_file_content_integrity_failed" | "small_file_upload_state_invalid";
+        readonly ErrorCode: "configuration_invalid" | "configuration_unknown_key" | "configuration_secret_invalid" | "secret_file_missing" | "secret_file_outside_root" | "secret_file_invalid_type" | "secret_file_insecure_permissions" | "secret_file_too_large" | "secret_file_invalid_encoding" | "secret_file_empty" | "diagnostic_context_invalid" | "diagnostic_payload_rejected" | "internal_error" | "database_migration_configuration_invalid" | "database_connection_unavailable" | "database_migration_busy" | "database_schema_contract_invalid" | "database_destructive_downgrade_refused" | "object_storage_configuration_invalid" | "object_storage_input_invalid" | "object_storage_busy" | "object_storage_unavailable" | "object_storage_access_denied" | "object_storage_contract_invalid" | "object_storage_object_missing" | "object_storage_integrity_failed" | "object_storage_metadata_conflict" | "source_publish_input_invalid" | "source_not_found" | "source_already_exists" | "source_state_invalid" | "source_version_conflict" | "source_idempotency_mismatch" | "source_event_identity_mismatch" | "source_verified_receipt_stale" | "source_content_object_conflict" | "source_concurrency_busy" | "source_concurrency_invariant_failed" | "source_commit_outcome_unknown" | "projection_dispatch_unavailable" | "projection_intent_contract_invalid" | "identity_bootstrap_input_invalid" | "identity_bootstrap_state_conflict" | "canonical_read_state_invalid" | "canonical_recovery_environment_refused" | "canonical_recovery_configuration_invalid" | "canonical_recovery_snapshot_busy" | "canonical_recovery_bundle_exists" | "canonical_recovery_bundle_invalid" | "canonical_recovery_target_not_empty" | "canonical_recovery_dependency_unavailable" | "canonical_recovery_integrity_failed" | "canonical_recovery_restore_failed" | "api_request_malformed" | "api_request_validation_failed" | "api_route_not_found" | "api_method_not_allowed" | "authentication_required" | "authentication_failed" | "authentication_rate_limited" | "recent_authentication_required" | "csrf_validation_failed" | "authorization_scope_denied" | "totp_enrollment_state_invalid" | "device_authorization_pending" | "device_authorization_slow_down" | "device_authorization_denied" | "device_authorization_expired" | "device_authorization_state_invalid" | "device_revocation_confirmation_invalid" | "device_credential_invalid" | "device_revoked" | "device_token_reuse_detected" | "plugin_version_unsupported" | "exclusion_policy_input_invalid" | "exclusion_policy_not_initialized" | "exclusion_policy_draft_conflict" | "exclusion_policy_preview_pending" | "exclusion_policy_preview_failed" | "exclusion_policy_preview_expired" | "exclusion_policy_preview_stale" | "exclusion_policy_confirmation_invalid" | "exclusion_policy_denied" | "exclusion_policy_indeterminate" | "exclusion_policy_snapshot_outdated" | "exclusion_policy_signing_unavailable" | "exclusion_policy_commit_outcome_unknown" | "small_file_preflight_invalid" | "small_file_operation_not_found" | "small_file_operation_expired" | "small_file_operation_identity_mismatch" | "small_file_size_limit_exceeded" | "small_file_content_integrity_failed" | "small_file_upload_state_invalid" | "source_lifecycle_input_invalid" | "source_locator_missing" | "source_locator_conflict" | "source_tombstone_not_found" | "source_tombstone_closed" | "source_lifecycle_version_conflict" | "source_lifecycle_commit_outcome_unknown";
         /**
          * ExclusionPolicyStatusData
          * @description The Admin status read: revision metadata, draft and reconciliation.
@@ -1307,6 +1342,18 @@ export type components = {
             readonly draft: components["schemas"]["PolicyDraftData"];
             readonly reconciliation: components["schemas"]["PolicyReconciliationSummaryData"] | null;
         };
+        /**
+         * LifecycleOperation
+         * @description The only source lifecycle transitions this child permits.
+         * @enum {string}
+         */
+        readonly LifecycleOperation: "rename" | "move" | "delete" | "restore";
+        /**
+         * LifecycleState
+         * @description Resulting canonical source lifecycle state.
+         * @enum {string}
+         */
+        readonly LifecycleState: "active" | "deleted";
         /**
          * LivenessData
          * @description Process-liveness success data; it implies no I/O by construction.
@@ -1334,6 +1381,14 @@ export type components = {
             readonly password: string;
             /** Username */
             readonly username: string;
+        };
+        /**
+         * NormalizedLocator
+         * @description Validated NFC, slash-separated locator relative to one vault.
+         */
+        readonly NormalizedLocator: {
+            /** Value */
+            readonly value: string;
         };
         /**
          * PasswordChangeRequest
@@ -2049,6 +2104,85 @@ export type components = {
          * @enum {string}
          */
         readonly SmallFileTerminalResultKind: "committed" | "no_change";
+        /**
+         * SourceLifecycleCommitData
+         * @description The safe receipt of one closed lifecycle commit (spec 19.2).
+         *
+         *     Exactly the eight members of :class:`SourceLifecycleCommitResult` —
+         *     never a fingerprint, locator text, snapshot bytes, canonical envelope
+         *     or signed payload. The response renders with ``exclude_unset`` so the
+         *     ``deleted`` outcome emits ``tombstone_id`` and omits
+         *     ``resulting_locator``, mirroring the domain invariant that the
+         *     resulting locator is the canonical locator of the active state only.
+         */
+        readonly SourceLifecycleCommitData: {
+            /**
+             * Committed At
+             * Format: date-time
+             */
+            readonly committed_at: string;
+            /**
+             * Event Id
+             * Format: uuid
+             */
+            readonly event_id: string;
+            /** Event Sequence */
+            readonly event_sequence: number;
+            /** Resulting Locator */
+            readonly resulting_locator?: string | null;
+            /**
+             * Source Id
+             * Format: uuid
+             */
+            readonly source_id: string;
+            /**
+             * Source Version Id
+             * Format: uuid
+             */
+            readonly source_version_id: string;
+            readonly state: components["schemas"]["LifecycleState"];
+            /** Tombstone Id */
+            readonly tombstone_id?: string | null;
+        };
+        /**
+         * SourceLifecycleEventRequest
+         * @description The strict lifecycle event commit body (spec 19.2).
+         *
+         *     Carries the stable UUIDv7 ``event_id``, the opaque idempotency key, the
+         *     closed ``operation`` token, the source identity, the expected version
+         *     UUID, the operation-dependent locator evidence and tombstone identity,
+         *     the closed positive ``policy_revision`` and an optional RFC3339
+         *     ``client_timestamp``. Workspace, device and user identities are
+         *     deliberately absent — they derive from the resolved bearer context.
+         */
+        readonly SourceLifecycleEventRequest: {
+            /** Client Timestamp */
+            readonly client_timestamp?: string | null;
+            /**
+             * Event Id
+             * Format: uuid
+             */
+            readonly event_id: string;
+            readonly expected_locator?: components["schemas"]["NormalizedLocator"] | null;
+            /**
+             * Expected Version Id
+             * Format: uuid
+             */
+            readonly expected_version_id: string;
+            /** Idempotency Key */
+            readonly idempotency_key: string;
+            readonly operation: components["schemas"]["LifecycleOperation"];
+            /** Policy Revision */
+            readonly policy_revision: number;
+            /**
+             * Source Id
+             * Format: uuid
+             */
+            readonly source_id: string;
+            readonly target_locator?: components["schemas"]["NormalizedLocator"] | null;
+            /** Tombstone Id */
+            readonly tombstone_id?: string | null;
+        };
         /**
          * TotpCodeRequest
          * @description The six-digit code body of one TOTP challenge verification.
@@ -2781,6 +2915,30 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["ApiEnvelope_ReadinessData_"];
+                };
+            };
+        };
+    };
+    readonly commitSourceLifecycleEvent: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["SourceLifecycleEventRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_SourceLifecycleCommitData_"];
                 };
             };
         };

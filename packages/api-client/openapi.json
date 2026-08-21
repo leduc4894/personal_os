@@ -1118,6 +1118,51 @@
         "title": "ApiEnvelope[SmallFileTerminalResultData]",
         "type": "object"
       },
+      "ApiEnvelope_SourceLifecycleCommitData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceLifecycleCommitData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[SourceLifecycleCommitData]",
+        "type": "object"
+      },
       "ApiEnvelope_TotpEnrollmentData_": {
         "additionalProperties": false,
         "properties": {
@@ -1642,7 +1687,14 @@
           "small_file_operation_identity_mismatch",
           "small_file_size_limit_exceeded",
           "small_file_content_integrity_failed",
-          "small_file_upload_state_invalid"
+          "small_file_upload_state_invalid",
+          "source_lifecycle_input_invalid",
+          "source_locator_missing",
+          "source_locator_conflict",
+          "source_tombstone_not_found",
+          "source_tombstone_closed",
+          "source_lifecycle_version_conflict",
+          "source_lifecycle_commit_outcome_unknown"
         ],
         "title": "ErrorCode",
         "type": "string"
@@ -1690,6 +1742,26 @@
         "title": "ExclusionPolicyStatusData",
         "type": "object"
       },
+      "LifecycleOperation": {
+        "description": "The only source lifecycle transitions this child permits.",
+        "enum": [
+          "rename",
+          "move",
+          "delete",
+          "restore"
+        ],
+        "title": "LifecycleOperation",
+        "type": "string"
+      },
+      "LifecycleState": {
+        "description": "Resulting canonical source lifecycle state.",
+        "enum": [
+          "active",
+          "deleted"
+        ],
+        "title": "LifecycleState",
+        "type": "string"
+      },
       "LivenessData": {
         "additionalProperties": false,
         "description": "Process-liveness success data; it implies no I/O by construction.",
@@ -1731,6 +1803,20 @@
           "password"
         ],
         "title": "LoginRequest",
+        "type": "object"
+      },
+      "NormalizedLocator": {
+        "description": "Validated NFC, slash-separated locator relative to one vault.",
+        "properties": {
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "NormalizedLocator",
         "type": "object"
       },
       "PasswordChangeRequest": {
@@ -3297,6 +3383,161 @@
         "title": "SmallFileTerminalResultKind",
         "type": "string"
       },
+      "SourceLifecycleCommitData": {
+        "additionalProperties": false,
+        "description": "The safe receipt of one closed lifecycle commit (spec 19.2).\n\nExactly the eight members of :class:`SourceLifecycleCommitResult` —\nnever a fingerprint, locator text, snapshot bytes, canonical envelope\nor signed payload. The response renders with ``exclude_unset`` so the\n``deleted`` outcome emits ``tombstone_id`` and omits\n``resulting_locator``, mirroring the domain invariant that the\nresulting locator is the canonical locator of the active state only.",
+        "properties": {
+          "committed_at": {
+            "format": "date-time",
+            "title": "Committed At",
+            "type": "string"
+          },
+          "event_id": {
+            "format": "uuid",
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_sequence": {
+            "minimum": 1.0,
+            "title": "Event Sequence",
+            "type": "integer"
+          },
+          "resulting_locator": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resulting Locator"
+          },
+          "source_id": {
+            "format": "uuid",
+            "title": "Source Id",
+            "type": "string"
+          },
+          "source_version_id": {
+            "format": "uuid",
+            "title": "Source Version Id",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/LifecycleState"
+          },
+          "tombstone_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tombstone Id"
+          }
+        },
+        "required": [
+          "source_id",
+          "source_version_id",
+          "event_id",
+          "event_sequence",
+          "state",
+          "committed_at"
+        ],
+        "title": "SourceLifecycleCommitData",
+        "type": "object"
+      },
+      "SourceLifecycleEventRequest": {
+        "additionalProperties": false,
+        "description": "The strict lifecycle event commit body (spec 19.2).\n\nCarries the stable UUIDv7 ``event_id``, the opaque idempotency key, the\nclosed ``operation`` token, the source identity, the expected version\nUUID, the operation-dependent locator evidence and tombstone identity,\nthe closed positive ``policy_revision`` and an optional RFC3339\n``client_timestamp``. Workspace, device and user identities are\ndeliberately absent — they derive from the resolved bearer context.",
+        "properties": {
+          "client_timestamp": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Timestamp"
+          },
+          "event_id": {
+            "format": "uuid",
+            "title": "Event Id",
+            "type": "string"
+          },
+          "expected_locator": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NormalizedLocator"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expected_version_id": {
+            "format": "uuid",
+            "title": "Expected Version Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "pattern": "^[!-~]{1,200}$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/LifecycleOperation"
+          },
+          "policy_revision": {
+            "minimum": 1.0,
+            "title": "Policy Revision",
+            "type": "integer"
+          },
+          "source_id": {
+            "format": "uuid",
+            "title": "Source Id",
+            "type": "string"
+          },
+          "target_locator": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NormalizedLocator"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tombstone_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tombstone Id"
+          }
+        },
+        "required": [
+          "event_id",
+          "idempotency_key",
+          "source_id",
+          "operation",
+          "expected_version_id",
+          "policy_revision"
+        ],
+        "title": "SourceLifecycleEventRequest",
+        "type": "object"
+      },
       "TotpCodeRequest": {
         "additionalProperties": false,
         "description": "The six-digit code body of one TOTP challenge verification.",
@@ -4308,6 +4549,40 @@
           }
         },
         "summary": "Readiness Endpoint"
+      }
+    },
+    "/api/sources/lifecycle-events": {
+      "post": {
+        "description": "Commit one source lifecycle event behind the OBSIDIAN_SYNC scope.",
+        "operationId": "commitSourceLifecycleEvent",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceLifecycleEventRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_SourceLifecycleCommitData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Commit Source Lifecycle Event"
       }
     },
     "/api/sync/exclusion-policy/keysets": {
