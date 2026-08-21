@@ -766,15 +766,9 @@ def classify_classification(
     """
 
     expected_parent = (
-        expected_locator.value.rsplit("/", 1)[0]
-        if "/" in expected_locator.value
-        else ""
+        expected_locator.value.rsplit("/", 1)[0] if "/" in expected_locator.value else ""
     )
-    target_parent = (
-        target_locator.value.rsplit("/", 1)[0]
-        if "/" in target_locator.value
-        else ""
-    )
+    target_parent = target_locator.value.rsplit("/", 1)[0] if "/" in target_locator.value else ""
     same_parent = expected_parent == target_parent
     if operation is LifecycleOperation.RENAME and not same_parent:
         return SourceLifecycleError(SourceLifecycleErrorCode.LOCATOR_CONFLICT)
