@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Final
 
 import httpx
+import pytest
+import tools.obsidian_live_acceptance_bootstrap as live_bootstrap
 from tools.obsidian_live_acceptance_bootstrap import (
     CommandResult,
     LiveAcceptanceConfig,
@@ -21,6 +23,23 @@ _TOTP_SECRET_SENTINEL: Final = "JBSWY3DPEHPK3PXP"
 _PASSWORD_SENTINEL: Final = "correct horse battery staple!"
 _RECOVERY_SENTINEL: Final = "ABCD-EFGH-JKLM"
 _CHILD_OUTPUT_SENTINEL: Final = "child-private-output"
+
+
+@pytest.fixture(autouse=True)
+def _advance_totp_waits_without_wall_clock_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = {"unix_time_seconds": 120.0}
+    monkeypatch.setattr(
+        live_bootstrap.time,
+        "time",
+        lambda: clock["unix_time_seconds"],
+    )
+
+    def advance_clock(seconds: float) -> None:
+        clock["unix_time_seconds"] += seconds
+
+    monkeypatch.setattr(live_bootstrap.time, "sleep", advance_clock)
 
 
 class FreshDisposableExecutor:
@@ -203,6 +222,111 @@ def test_fresh_disposable_bootstrap_activates_totp_before_live_journey(
         "123456",
     ):
         assert private_value not in rendered
+
+
+def test_fresh_activation_uses_a_new_totp_step_for_policy_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The activation code is replay-locked and cannot authenticate policy."""
+    password_file = tmp_path / "web-credential-password.key"
+    password_file.write_text(_PASSWORD_SENTINEL, encoding="utf-8")
+    events: list[str] = []
+    state = {"totp_active": False}
+    clock = {"unix_time_seconds": 120.0}
+    monkeypatch.setattr(
+        live_bootstrap.time,
+        "time",
+        lambda: clock["unix_time_seconds"],
+    )
+
+    def advance_clock(seconds: float) -> None:
+        clock["unix_time_seconds"] += seconds
+
+    monkeypatch.setattr(live_bootstrap.time, "sleep", advance_clock)
+
+    def http_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/auth/login":
+            return httpx.Response(
+                200,
+                json={"data": {"state": "active"}},
+                headers=[
+                    ("set-cookie", "__Host-session=private; Secure; Path=/"),
+                    ("set-cookie", "__Host-csrf=private; Secure; Path=/"),
+                ],
+            )
+        if request.url.path == "/api/auth/totp/enrollments":
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "enrollment": {
+                            "enrollment_id": "018f47b1-8a44-7a21-bf19-6b2748c90862",
+                            "secret": _TOTP_SECRET_SENTINEL,
+                        }
+                    }
+                },
+            )
+        if request.url.path.endswith("/verify"):
+            state["totp_active"] = True
+            events.append("enrollment_verified")
+            return httpx.Response(200, json={"data": {"codes": [_RECOVERY_SENTINEL]}})
+        raise AssertionError("unexpected HTTP path")
+
+    class ReplayRejectingExecutor(FreshDisposableExecutor):
+        def run(
+            self,
+            arguments: Sequence[str],
+            *,
+            environment: Mapping[str, str],
+            cwd: Path,
+            timeout_seconds: float,
+            should_capture: bool,
+        ) -> CommandResult:
+            if (
+                ".local/publish-policy-revision.py" in " ".join(arguments)
+                and int(clock["unix_time_seconds"]) // 30 == 4
+            ):
+                self.events.append("policy_replay_rejected")
+                return CommandResult(1, "", "")
+            return super().run(
+                arguments,
+                environment=environment,
+                cwd=cwd,
+                timeout_seconds=timeout_seconds,
+                should_capture=should_capture,
+            )
+
+    config = LiveAcceptanceConfig(
+        repository_root=tmp_path,
+        project_name="knowledge-ci-fresh-totp-step",
+        username="duc",
+        workspace_key="duc-knowledge",
+        server_origin="http://127.0.0.1:8000",
+        allowed_origin="https://app.example.test",
+        plugin_origin="https://api.example.test",
+        password_file=password_file,
+        runtime_environment={"CI": "true", "KNOWLEDGE_ENVIRONMENT": "local"},
+    )
+    output = StringIO()
+
+    exit_code = run_live_acceptance(
+        config,
+        executor=ReplayRejectingExecutor(events, state),
+        client_factory=lambda: httpx.Client(
+            base_url=config.server_origin,
+            transport=httpx.MockTransport(http_handler),
+        ),
+        output=output,
+    )
+
+    assert exit_code == 0
+    assert "policy_replay_rejected" not in events
+    assert events.index("enrollment_verified") < events.index("policy_published")
+    assert json.loads(output.getvalue()) == {
+        "result_code": "obsidian_live_acceptance_passed",
+        "state": "complete",
+    }
 
 
 def test_malformed_totp_helper_output_runs_enrollment_before_wdio(tmp_path: Path) -> None:

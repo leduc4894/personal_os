@@ -24,7 +24,7 @@ from uuid import UUID
 
 import httpx
 
-from personal_os.authentication.totp import totp_code
+from personal_os.authentication.totp import TOTP_PERIOD_SECONDS, time_step_of, totp_code
 from personal_os.runtime_configuration.secret_files import read_secret_file
 
 _PROJECT_NAME_PATTERN: Final = re.compile(r"^knowledge-ci-[a-z0-9][a-z0-9-]{0,40}$")
@@ -187,7 +187,7 @@ def _require_http_success(response: httpx.Response, failure_code: str) -> Mappin
 
 def _activate_totp_over_http(
     config: LiveAcceptanceConfig, client_factory: HttpClientFactory
-) -> None:
+) -> int:
     secret_root_value = config.runtime_environment.get("KNOWLEDGE_SECRET_ROOT")
     secret_root = (
         Path(secret_root_value) if secret_root_value is not None else config.password_file.parent
@@ -228,17 +228,28 @@ def _activate_totp_over_http(
                 secret = base64.b32decode(secret_value, casefold=False)
             except ValueError, TypeError:
                 raise LiveAcceptanceFailure("totp_enrollment_response_invalid") from None
-            code = totp_code(secret=secret, unix_time_seconds=int(time.time()))
+            activation_unix_time_seconds = int(time.time())
+            code = totp_code(secret=secret, unix_time_seconds=activation_unix_time_seconds)
             verified = client.post(
                 f"/api/auth/totp/enrollments/{enrollment_id}/verify",
                 headers=protected_headers,
                 json={"code": code},
             )
             _require_http_success(verified, "totp_enrollment_verify_failed")
+            return time_step_of(unix_time_seconds=activation_unix_time_seconds)
     except LiveAcceptanceFailure:
         raise
     except OSError, httpx.HTTPError:
         raise LiveAcceptanceFailure("totp_http_unavailable") from None
+
+
+def _wait_for_unused_totp_step(activation_time_step: int) -> None:
+    while True:
+        unix_time_seconds = time.time()
+        if time_step_of(unix_time_seconds=int(unix_time_seconds)) > activation_time_step:
+            return
+        next_step_unix_time_seconds = (activation_time_step + 1) * TOTP_PERIOD_SECONDS
+        time.sleep(max(float(next_step_unix_time_seconds) - unix_time_seconds, 0.01))
 
 
 def _totp_preflight(config: LiveAcceptanceConfig, executor: CommandExecutor) -> bool:
@@ -399,9 +410,10 @@ def _execute_live_acceptance(
 
     has_active_totp = _totp_preflight(config, executor)
     if not has_active_totp:
-        _activate_totp_over_http(config, client_factory)
+        activation_time_step = _activate_totp_over_http(config, client_factory)
         if not _totp_preflight(config, executor):
             raise LiveAcceptanceFailure("active_totp_preflight_failed")
+        _wait_for_unused_totp_step(activation_time_step)
 
     _run_child(
         executor,
