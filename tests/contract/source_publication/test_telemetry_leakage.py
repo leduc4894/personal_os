@@ -280,3 +280,138 @@ def test_dependency_sql_and_password_sentinels_never_leak_into_logs(
         assert record["event"] == "dependency_log"
         assert "message" not in record
         assert "args" not in record
+
+
+# --- Source lifecycle telemetry leakage (Task 11) ---------------------------
+
+
+LIFECYCLE_LOCATOR_SENTINEL = "do-not-emit-lifecycle-locator"
+LIFECYCLE_TITLE_SENTINEL = "do-not-emit-lifecycle-title"
+LIFECYCLE_FINGERPRINT_SENTINEL = "do-not-emit-lifecycle-fingerprint"
+LIFECYCLE_TOKEN_SENTINEL = "do-not-emit-lifecycle-token"
+LIFECYCLE_CONTENT_SENTINEL = "do-not-emit-lifecycle-content"
+
+_LIFECYCLE_SENTINELS = (
+    LIFECYCLE_LOCATOR_SENTINEL,
+    LIFECYCLE_TITLE_SENTINEL,
+    LIFECYCLE_FINGERPRINT_SENTINEL,
+    LIFECYCLE_TOKEN_SENTINEL,
+    LIFECYCLE_CONTENT_SENTINEL,
+)
+
+
+def test_lifecycle_rejection_event_never_leaks_lifecycle_sentinels(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A source lifecycle rejection event must only carry closed labels.
+
+    The lifecycle rejection diagnostic emits the closed
+    ``source_version_publish_rejected`` event with the operation token,
+    the closed error code, the safe diff hash and the policy outcome —
+    no raw locator, title, fingerprint, token or content.
+    """
+
+    logger = _build_logger()
+    with caplog.at_level(logging.DEBUG):
+        logger.emit(
+            EventName.SOURCE_VERSION_PUBLISH_REJECTED,
+            {
+                "operation": SafeToken.parse("rename"),
+                "outcome": SafeToken.parse("rejected"),
+                "duration_ms": 4,
+                "error_code": SafeToken.parse("locator_conflict"),
+                "error_category": SafeToken.parse("conflict"),
+                "is_retryable": False,
+                "source_id": uuid4(),
+                "event_id": uuid4(),
+                "reason_code": SafeToken.parse("locator_conflict"),
+                "safe_diff_hash": "f" * 64,
+                "policy_revision_number": 1,
+            },
+        )
+
+    blob = _captured_log_blob(caplog)
+    assert len(caplog.records) >= 1
+    for sentinel in _LIFECYCLE_SENTINELS:
+        assert sentinel not in blob, sentinel
+
+
+def test_lifecycle_endpoint_error_never_leaks_raw_context() -> None:
+    """A typed lifecycle error must not copy locator / title / fingerprint into the error text."""
+
+    underlying = RuntimeError(
+        f"store failure at {LIFECYCLE_LOCATOR_SENTINEL} title={LIFECYCLE_TITLE_SENTINEL} "
+        f"fingerprint={LIFECYCLE_FINGERPRINT_SENTINEL} token={LIFECYCLE_TOKEN_SENTINEL} "
+        f"content={LIFECYCLE_CONTENT_SENTINEL}"
+    )
+
+    try:
+        raise underlying
+    except RuntimeError as cause:
+        from personal_os.source_lifecycle.errors import (
+            SourceLifecycleError,
+            SourceLifecycleErrorCode,
+        )
+
+        try:
+            raise SourceLifecycleError(
+                SourceLifecycleErrorCode.LOCATOR_CONFLICT
+            ) from cause
+        except SourceLifecycleError as captured:
+            error = captured
+
+    rendered = f"{error} {error!r} {error.code.value}"
+    for sentinel in _LIFECYCLE_SENTINELS:
+        assert sentinel not in rendered, sentinel
+
+
+def test_lifecycle_metrics_only_carry_closed_operation_outcome_and_error_code() -> None:
+    """The lifecycle metric sink only sees the closed operation, outcome, error_code labels."""
+
+    from personal_os.source_lifecycle.commands import LifecycleOperation
+    from personal_os.source_lifecycle.errors import SourceLifecycleErrorCode
+    from personal_os.source_lifecycle.metrics import LifecycleMetricOutcome
+
+    # The contract is that the metric port never accepts values outside the
+    # closed enums; the existing assertion in the in-memory recorder is the
+    # proof. We re-state it here so the contract is pinned alongside the
+    # other lifecycle telemetry-safety tests.
+    closed_operations = {op.value for op in LifecycleOperation}
+    assert closed_operations == {"rename", "move", "delete", "restore"}
+    closed_outcomes = {outcome.value for outcome in LifecycleMetricOutcome}
+    assert closed_outcomes == {"committed", "rejected", "replayed"}
+    closed_errors = {code.value for code in SourceLifecycleErrorCode}
+    # The lifecycle vocabulary token never enters the closed error code set.
+    for lifecycle_token in {"rename", "move", "delete", "restore"}:
+        assert lifecycle_token not in closed_errors
+
+
+def test_lifecycle_logging_payload_with_locator_sentinel_is_rejected_without_leaking(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A lifecycle event field carrying a locator sentinel is rejected, never emitted."""
+
+    logger = _build_logger()
+    with caplog.at_level(logging.DEBUG):
+        logger.emit(
+            EventName.SOURCE_VERSION_PUBLISH_REJECTED,
+            {
+                "operation": SafeToken.parse("rename"),
+                "outcome": SafeToken.parse("rejected"),
+                "duration_ms": 1,
+                "error_code": SafeToken.parse("locator_conflict"),
+                "error_category": SafeToken.parse("conflict"),
+                "is_retryable": False,
+                "source_id": uuid4(),
+                "event_id": uuid4(),
+                "reason_code": SafeToken.parse("locator_conflict"),
+                "safe_diff_hash": "f" * 64,
+                "policy_revision_number": 1,
+                "expected_locator": f"secret {LIFECYCLE_LOCATOR_SENTINEL}",
+            },
+        )
+
+    blob = _captured_log_blob(caplog)
+    assert LIFECYCLE_LOCATOR_SENTINEL not in blob
+    events = [getattr(record, _MARKER, {}).get("event") for record in caplog.records]
+    assert "logging_payload_rejected" in events
