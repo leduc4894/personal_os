@@ -30,7 +30,7 @@ contain its own SHA.
 | Locator wire interoperability | PASS | RED proved OpenAPI exported locator wrappers while the runtime accepted strings. GREEN: API/OpenAPI 9 passed, plugin serialization 18 passed, generated-client drift check and both TypeScript builds exited 0. |
 | Locked policy race | PASS | The full disposable PostgreSQL race file passed 5 tests; the transaction-locked canonical verdict now selects projection intent operation. |
 | Migration selection | PASS | `uv run pytest tests/unit/migrations/test_source_lifecycle_migration.py tests/integration/source_lifecycle/test_lifecycle_migration.py -q`: 7 passed, 1 deselected. |
-| Lifecycle feature selection | PASS | `uv run pytest tests/unit/source_locators tests/unit/source_lifecycle tests/contract/source_lifecycle tests/integration/source_lifecycle -q`: 70 passed, 53 deselected. Device records require their explicit marker. |
+| Lifecycle feature selection | PASS | `uv run pytest tests/unit/source_locators tests/unit/source_lifecycle tests/contract/source_lifecycle tests/integration/source_lifecycle -q`: 70 passed, 57 deselected. Device records require their explicit marker. |
 | Plugin tests | PASS | `pnpm --filter @workspace/obsidian-plugin test`: 32 files, 491 tests passed. |
 | Plugin type check | PASS | `pnpm --filter @workspace/obsidian-plugin type-check`: exit 0. |
 | Plugin lint | PASS | `pnpm --filter @workspace/obsidian-plugin lint`: exit 0. |
@@ -96,7 +96,9 @@ contain its own SHA.
    evidence references in the living runbook.
 4. Run
    `uv run pytest tests/contract/source_lifecycle/test_reference_device_records.py -m device_records -q`.
-   Only a PASS for both records permits Child 5 closure.
+   Child 5 closure requires Desktop PASS. Mobile must either PASS or satisfy the
+   exact closed deferral contract: living record with reason and source handoff,
+   exactly one BACKLOG row, and a verifiable `Implement by` trigger.
 
 ## Concerns
 
