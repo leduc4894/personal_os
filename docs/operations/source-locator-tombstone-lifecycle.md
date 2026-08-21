@@ -278,20 +278,20 @@ copy child output into acceptance evidence.
 - Device: WDIO Obsidian Desktop on Windows
 - App version: 1.13.7
 - Plugin version: 0.1.0
-- Recorded at UTC: 2026-08-21T17:45:23Z
+- Recorded at UTC: 2026-08-21T18:29:13Z
 - Operator: Codex automated WDIO operator
-- Latest guarded result: BLOCKED (`obsidian_wdio_failed`). The approved
-  bootstrap emitted no child diagnostics, so this retry does not prove which
-  lifecycle scenario failed and cannot promote any remaining scenario to PASS.
+- Latest guarded result: PASS (`obsidian_live_acceptance_passed`). The approved
+  bootstrap completed the focused journey after the explicit-restore modal
+  settlement fix. Child diagnostics remained outside the evidence boundary.
 
 | Scenario | Outcome | Evidence |
 | --- | --- | --- |
-| Tracked rename | PASS | handoff:desktop-live-gate |
-| Tracked move | PASS | handoff:desktop-live-gate |
-| Delete | FAIL | handoff:desktop-live-gate |
-| Explicit restore | NOT REACHED | handoff:desktop-live-gate |
-| Stable source and version identity | NOT REACHED | handoff:desktop-live-gate |
-| Pending lifecycle drain | NOT REACHED | handoff:desktop-live-gate |
+| Tracked rename | PASS | operator-record:desktop-live-20260822 |
+| Tracked move | PASS | operator-record:desktop-live-20260822 |
+| Delete | PASS | operator-record:desktop-live-20260822 |
+| Explicit restore | PASS | operator-record:desktop-live-20260822 |
+| Stable source and version identity | PASS | operator-record:desktop-live-20260822 |
+| Pending lifecycle drain | PASS | operator-record:desktop-live-20260822 |
 
 ## Mobile live acceptance record
 

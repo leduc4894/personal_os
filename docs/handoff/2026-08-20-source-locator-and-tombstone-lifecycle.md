@@ -2,21 +2,18 @@
 
 ## Status
 
-BLOCKED. Child 5 implementation and automated verification are present, but
-the mandatory Desktop gate has not passed. After adding the closed phase
-marker, exactly one instrumented real retry prepared the exact disposable
-stack and runbook services, used the existing tunnel, and invoked only the
-guarded bootstrap with `CI=true`. The bootstrap returned
-`obsidian_wdio_failed_after_delete`: its last allowlisted marker was written
-after canonical delete convergence, and the journey failed before a restore
-completion marker. Child output remained suppressed, so restore, stable
-identity and pending drain are not proven. No secret, code, raw locator or
-child diagnostic was recorded. Mobile is explicitly DEFERRED under the later
-AGENTS ruling and its single backlog row. Child 5 is not closed and Child 6
-must not begin.
+COMPLETE. Child 5 implementation, automated verification and the mandatory
+Desktop live gate are complete. After the explicit-restore modal settlement
+fixes `ce59fee` and `b981c71`, exactly one final guarded retry prepared the
+exact disposable stack and runbook services, used the existing tunnel, and
+invoked only the approved bootstrap with `CI=true`. It returned
+`obsidian_live_acceptance_passed`; child diagnostics remained suppressed and
+no secret, code, raw locator or content was recorded. Mobile remains explicitly
+DEFERRED under the later AGENTS ruling and its single backlog row, so Child 5
+is closed and Child 6 may begin but cannot close before that physical evidence.
 
-Final implementation commit before this handoff: `ff8bf1e` (`fix: expose
-closed wdio lifecycle phases`). The documentation snapshot commit
+Final implementation commit before this handoff: `b981c71` (`test: prove
+explicit restore modal settlement`). The documentation snapshot commit
 containing this file is recorded in the Task 12 report because a commit cannot
 contain its own SHA.
 
@@ -24,11 +21,11 @@ contain its own SHA.
 
 | Gate | Status | Evidence |
 | --- | --- | --- |
-| Reference-device contract RED | EXPECTED FAIL | `uv run pytest tests/contract/source_lifecycle/test_reference_device_records.py -m device_records -q`: 1 failed, 4 passed. Mobile is a contract-valid closed deferral with exactly one backlog row. The living Desktop record is not promoted by a partial failed journey and remains RED until every required scenario has observed PASS evidence. |
+| Reference-device contract | PASS | The living Desktop record now carries six observed PASS outcomes from the final guarded journey. Mobile remains a contract-valid closed deferral with exactly one backlog row. |
 | Production lifecycle route regression RED/GREEN | PASS | `test_server_serves_the_source_lifecycle_route` first failed because the route was absent, then passed after composition; server/composition slice: 22 passed. |
 | Stack prerequisite | PASS | The ordinary local project was absent and exact project `knowledge-ci-source-lifecycle` reached ready. The guarded bootstrap completed fresh identity, Web credential, TOTP enrollment/activation, helper preflight and policy publication. |
 | API/Web/workers/tunnel | PASS | API and Web Admin readiness succeeded; both policy workers ran via repository scripts; the existing configured tunnel served both public origins. No new tunnel or DNS change was made. |
-| Desktop WDIO | FAIL | The single post-instrumentation guarded retry returned `obsidian_wdio_failed_after_delete`. The allowlisted marker was written after delete reached canonical deleted state with one open tombstone; no restore-completion marker followed. The complete Desktop journey, restore, stable identity and drain therefore remain unproven. |
+| Desktop WDIO | PASS | Exactly one final guarded retry after `ce59fee` and `b981c71` returned `obsidian_live_acceptance_passed`, proving rename, move, delete, explicit restore, stable identity and final journal drain through the approved closed boundary. |
 | Locator wire interoperability | PASS | RED proved OpenAPI exported locator wrappers while the runtime accepted strings. GREEN: API/OpenAPI 9 passed, plugin serialization 18 passed, generated-client drift check and both TypeScript builds exited 0. |
 | Locked policy race | PASS | The full disposable PostgreSQL race file passed 5 tests; the transaction-locked canonical verdict now selects projection intent operation. |
 | Migration selection | PASS | `uv run pytest tests/unit/migrations/test_source_lifecycle_migration.py tests/integration/source_lifecycle/test_lifecycle_migration.py -q`: 7 passed, 1 deselected. |
@@ -39,7 +36,7 @@ contain its own SHA.
 | Plugin build | PASS | `pnpm --filter @workspace/obsidian-plugin build`: exit 0. |
 | Lifecycle boundary registries | PASS | The four focused failures were reproduced RED, then the exact Obsidian type import, exact lifecycle API files/route, exact internal-policy identifier grammar and seven lifecycle HTTP status codes were registered without broad scanner exemptions. The four focused nodes passed; all four affected contract files passed 28 tests. |
 | Repository verify | PASS | `uv run poe verify` exited 0 after formatting the new classifier: format, lint, strict typing over 176 Python files, import/architecture boundaries, OpenAPI/generated client, Python (3,317 passed, 21 skipped, 398 deselected), plugin (491 passed), web (139 passed), package builds and production web build all passed. |
-| Clean shutdown | PASS | All API, Web Admin and worker processes owned by both bounded retries were stopped; ports 8000/38000 were clear. Exact project `knowledge-ci-source-lifecycle` and ordinary `knowledge-local` both returned `stack_absent`; the pre-existing tunnel remained running. Owned temporary logs and phase markers were removed without retaining child diagnostics. |
+| Clean shutdown | PASS | All API, Web Admin and worker processes owned by the guarded retries were stopped; ports 8000/38000 were clear. Exact project `knowledge-ci-source-lifecycle` and ordinary `knowledge-local` both returned `stack_absent`; the pre-existing tunnel remained running. No phase marker remained and no child diagnostics were retained. |
 
 ## Post-fix retry audit trail
 
@@ -78,6 +75,30 @@ Cleanup stopped every owned API, Web and worker process, left zero owned roots,
 cleared ports 8000 and 38000, and removed the owned temporary logs and phase
 marker. Exact `knowledge-ci-source-lifecycle` and ordinary `knowledge-local`
 both ended at `stack_absent`; the pre-existing tunnel remained alive.
+
+## Final guarded Desktop retry audit trail
+
+Exactly one retry was run after the explicit-restore modal settlement fixes
+`ce59fee` and `b981c71`. The ordinary project was absent and was lowered through
+the repository contract. Exact `knowledge-ci-source-lifecycle` then returned
+`secret_set_ready`, `stack_config_valid`, `stack_ready` and `stack_verified`.
+API and Web Admin readiness returned HTTP 200, both policy workers stayed alive
+through the repository launcher, and the pre-existing tunnel served both
+configured origins without any tunnel or DNS mutation.
+
+The sole approved invocation was
+`CI=true uv run python tools/obsidian_live_acceptance_bootstrap.py --project-name knowledge-ci-source-lifecycle`.
+It returned
+`{"result_code":"obsidian_live_acceptance_passed","state":"complete"}`.
+This closed result proves the complete focused journey, including explicit
+restore, stable source/version identity and final lifecycle-journal drain. No
+second retry or code change followed it, and no child output was copied into
+the acceptance evidence.
+
+Cleanup stopped the four owned process sessions, cleared ports 8000 and 38000,
+and left no project-bound phase marker. Exact `knowledge-ci-source-lifecycle`
+and ordinary `knowledge-local` both ended at `stack_absent`; the pre-existing
+tunnel remained running.
 
 ## Rulings and interpretations
 
@@ -120,31 +141,18 @@ both ended at `stack_absent`; the pre-existing tunnel remained alive.
 
 ## Next actions
 
-1. Diagnose the explicit-restore phase from repository-owned contracts and
-   sanitized state. The latest safe boundary is
-   `obsidian_wdio_failed_after_delete`; do not infer the hidden child error.
-2. After a covered fix, bring the disposable live environment up in the
-   authoritative order and run
-   only the guarded entrypoint
-   `uv run python tools/obsidian_live_acceptance_bootstrap.py --project-name knowledge-ci-<bounded-token>`
-   with `CI=true`. It owns TOTP bootstrap, policy publication and focused WDIO.
-   Record a complete Desktop PASS only if its closed result says so.
-3. On a physical Mobile device, run tracked rename, tracked move, delete,
+1. On a physical Mobile device, run tracked rename, tracked move, delete,
    proven automatic restore, explicit restore, offline capture/reconnect,
    unload/reload and policy-denied transition. Record sanitized metadata and
-   evidence references in the living runbook.
-4. Run
+   evidence references in the living runbook before Child 6 acceptance
+   closure, then remove the single resolved backlog row.
+2. Run
    `uv run pytest tests/contract/source_lifecycle/test_reference_device_records.py -m device_records -q`.
-   Child 5 closure requires Desktop PASS. Mobile must either PASS or satisfy the
-   exact closed deferral contract: living record with reason and source handoff,
-   exactly one BACKLOG row, and a verifiable `Implement by` trigger.
+   Mobile must either PASS or continue to satisfy the exact closed deferral
+   contract until its implement-by trigger.
 
 ## Concerns
 
-- The instrumented retry reached the closed post-delete marker, then returned
-  `obsidian_wdio_failed_after_delete`. Explicit restore, stable identity and
-  pending drain remain unproven, and suppressed child diagnostics cannot be
-  used to guess the cause.
 - Physical Mobile behavior remains entirely unobserved.
-- Repository-wide verification is green. The remaining blocker is exclusively
-  the incomplete mandatory Desktop live acceptance journey.
+- Repository-wide verification and the mandatory Desktop journey are green.
+  The only remaining item is the explicitly bounded Mobile deferral.
