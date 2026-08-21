@@ -346,7 +346,11 @@ function buildBody(
   tombstoneIdOverride: string | null | undefined,
 ): components["schemas"]["SourceLifecycleEventRequest"] {
   const tombstoneId =
-    tombstoneIdOverride !== undefined ? tombstoneIdOverride : event.operands.tombstoneId;
+    event.operands.operation === "delete"
+      ? null
+      : tombstoneIdOverride !== undefined
+        ? tombstoneIdOverride
+        : event.operands.tombstoneId;
   return {
     event_id: event.event.eventId,
     idempotency_key: event.event.idempotencyKey,

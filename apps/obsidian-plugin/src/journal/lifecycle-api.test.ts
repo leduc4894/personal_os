@@ -366,6 +366,9 @@ describe("lifecycle-api response mapping", () => {
       frozenEventFor(operands),
       new AbortController().signal,
     );
+    const body = JSON.parse(harness.requests[0]?.bodyText ?? "{}");
+    expect(body.operation).toBe("delete");
+    expect(body.tombstone_id).toBeNull();
     expect(result.state).toBe("deleted");
     expect(result.tombstoneId).toBe(RESULT_TOMBSTONE_ID);
     expect(result.resultingLocator).toBeNull();
