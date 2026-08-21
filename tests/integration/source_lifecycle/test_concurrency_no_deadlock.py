@@ -117,9 +117,7 @@ def _command(
         source_id=source.source_id,
         event_id=event_id if event_id is not None else uuid7(),
         idempotency_key=(
-            idempotency_key
-            if idempotency_key is not None
-            else f"idempotency-{uuid4()}"
+            idempotency_key if idempotency_key is not None else f"idempotency-{uuid4()}"
         ),
         operation=operation,
         expected_version_id=source.current_version_id,
@@ -193,9 +191,7 @@ async def test_bounded_parallel_traffic_completes_within_the_deadline(
             workspace_id=workspace.workspace_id,
             outcome=LifecyclePolicyOutcome.ALLOWED,
             policy_revision_number=1,
-            subject=_subject(
-                workspace, seeded.source_id, locator=seeded.initial_locator.value
-            ),
+            subject=_subject(workspace, seeded.source_id, locator=seeded.initial_locator.value),
             expected_locator=NormalizedLocator(f"notes/renamed-{seeded.source_id}.md"),
             target_locator=None,
         )
@@ -252,9 +248,7 @@ async def test_bounded_parallel_traffic_completes_within_the_deadline(
 
         committed_count = int(
             (
-                await connection.execute(
-                    sa.select(sa.func.count()).select_from(sync_events)
-                )
+                await connection.execute(sa.select(sa.func.count()).select_from(sync_events))
             ).scalar_one()
         )
     # One create per seeded source plus three lifecycle transitions per

@@ -582,9 +582,7 @@ async def test_lifecycle_delete_intent_dispatches_into_source_ingestion_workflow
     ]
     assert len(store.acknowledgements) == 1
     assert dispatched_outcome(diagnostics) == "started"
-    assert (
-        metrics.dispatch_count(ProjectionKind.QDRANT, ProjectionDispatchOutcome.DISPATCHED) == 1
-    )
+    assert metrics.dispatch_count(ProjectionKind.QDRANT, ProjectionDispatchOutcome.DISPATCHED) == 1
 
 
 @pytest.mark.asyncio
@@ -694,9 +692,7 @@ async def test_lifecycle_intent_metric_label_uses_closed_projection_kind() -> No
 
     # The lifecycle ``delete`` token is the projection-intent operation,
     # not a metric label; the only dispatch metric label is ``qdrant``.
-    assert (
-        metrics.dispatch_count(ProjectionKind.QDRANT, ProjectionDispatchOutcome.DISPATCHED) == 1
-    )
+    assert metrics.dispatch_count(ProjectionKind.QDRANT, ProjectionDispatchOutcome.DISPATCHED) == 1
 
 
 # --- bounded-parallel-traffic unit proof --------------------------------------

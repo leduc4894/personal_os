@@ -91,10 +91,12 @@ _POPULATED_RELATIONS: Final[frozenset[str]] = frozenset(
 
 #: The index each hot query must use, keyed by query name.
 _EXPECTED_INDEX_BY_QUERY: Final[dict[str, frozenset[str]]] = {
-    "replay_by_event": frozenset({
-        "uq_sync_events__workspace_event",
-        "uq_sync_events__source_event",
-    }),
+    "replay_by_event": frozenset(
+        {
+            "uq_sync_events__workspace_event",
+            "uq_sync_events__source_event",
+        }
+    ),
     "replay_by_idempotency": frozenset({"uq_sync_events__idempotency_key"}),
     "active_locator_by_source": frozenset({"uq_source_locators_active_source"}),
     "active_locator_by_workspace_path": frozenset({"uq_source_locators_active_workspace_path"}),
@@ -401,9 +403,7 @@ def _assert_indexed_access(payload: list[dict[str, Any]], query_name: str) -> No
         for relation in _sequential_scan_relations(payload)
         if relation in _POPULATED_RELATIONS
     ]
-    assert not unbounded, (
-        f"{query_name}: plan sequentially scans populated relations {unbounded}"
-    )
+    assert not unbounded, f"{query_name}: plan sequentially scans populated relations {unbounded}"
 
 
 @pytest.mark.asyncio
@@ -412,9 +412,7 @@ async def test_replay_by_event_lookup_is_indexed(
 ) -> None:
     """The replay by event_id lookup must go through the (workspace_id, event_id) unique index."""
 
-    statement = sync_event_lookup_by_event_statement(
-        populated_lifecycle_store.sample_event_id
-    )
+    statement = sync_event_lookup_by_event_statement(populated_lifecycle_store.sample_event_id)
     async with populated_lifecycle_store.engine.connect() as connection:
         payload = await _explain(connection, statement)
     _assert_indexed_access(payload, "replay_by_event")

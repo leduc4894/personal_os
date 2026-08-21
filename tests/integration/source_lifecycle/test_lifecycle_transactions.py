@@ -102,9 +102,7 @@ def _command(
         source_id=source.source_id,
         event_id=event_id if event_id is not None else uuid7(),
         idempotency_key=(
-            idempotency_key
-            if idempotency_key is not None
-            else f"idempotency-{uuid4()}"
+            idempotency_key if idempotency_key is not None else f"idempotency-{uuid4()}"
         ),
         operation=operation,
         expected_version_id=source.current_version_id,
@@ -586,9 +584,7 @@ async def test_injected_failure_after_each_write_boundary_leaves_no_partial_grap
             raise RuntimeError(f"injected-{failure_after}")
         return await original_boundary(self, *args, **kwargs)
 
-    monkey.setattr(
-        lifecycle_store.PostgresqlSourceLifecycleStore, boundary_method, raising
-    )
+    monkey.setattr(lifecycle_store.PostgresqlSourceLifecycleStore, boundary_method, raising)
 
     with pytest.raises(InternalApplicationError):
         await lifecycle_harness.lifecycle_store.commit(

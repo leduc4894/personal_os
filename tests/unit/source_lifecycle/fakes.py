@@ -255,9 +255,7 @@ class FakeLifecyclePolicy:
     decision: LifecyclePolicyDecision | None = None
     error: SourceLifecycleError | None = None
     decision_delay_seconds: float = 0.0
-    calls: list[
-        tuple[SourceLifecycleCommand, LifecycleDeviceContext]
-    ] = field(default_factory=list)
+    calls: list[tuple[SourceLifecycleCommand, LifecycleDeviceContext]] = field(default_factory=list)
 
     async def evaluate_lifecycle(
         self,
@@ -271,9 +269,7 @@ class FakeLifecyclePolicy:
         if self.error is not None:
             raise self.error
         if self.decision is None:
-            raise AssertionError(
-                "FakeLifecyclePolicy has neither decision nor error configured"
-            )
+            raise AssertionError("FakeLifecyclePolicy has neither decision nor error configured")
         return self.decision
 
 

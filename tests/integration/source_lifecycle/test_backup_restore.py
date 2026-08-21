@@ -226,9 +226,7 @@ async def test_snapshot_replay_events_include_lifecycle_event_types(
         event_types = set(
             (
                 await connection.execute(
-                    sa.select(sync_events.c.event_type).where(
-                        sync_events.c.source_id == source_id
-                    )
+                    sa.select(sync_events.c.event_type).where(sync_events.c.source_id == source_id)
                 )
             )
             .scalars()

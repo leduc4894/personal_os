@@ -354,9 +354,7 @@ def test_lifecycle_endpoint_error_never_leaks_raw_context() -> None:
         )
 
         try:
-            raise SourceLifecycleError(
-                SourceLifecycleErrorCode.LOCATOR_CONFLICT
-            ) from cause
+            raise SourceLifecycleError(SourceLifecycleErrorCode.LOCATOR_CONFLICT) from cause
         except SourceLifecycleError as captured:
             error = captured
 

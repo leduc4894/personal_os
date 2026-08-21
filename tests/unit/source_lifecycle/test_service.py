@@ -70,9 +70,7 @@ class _RecordingMetrics:
     """
 
     def __init__(self) -> None:
-        self.commit_records: list[
-            tuple[LifecycleOperation, LifecycleMetricOutcome, float]
-        ] = []
+        self.commit_records: list[tuple[LifecycleOperation, LifecycleMetricOutcome, float]] = []
         self.rejection_records: list[tuple[LifecycleOperation, SourceLifecycleErrorCode]] = []
 
     def record_commit(
@@ -92,9 +90,7 @@ class _RecordingMetrics:
     ) -> None:
         self.rejection_records.append((operation, error_code))
 
-    def commit_count(
-        self, operation: LifecycleOperation, outcome: LifecycleMetricOutcome
-    ) -> int:
+    def commit_count(self, operation: LifecycleOperation, outcome: LifecycleMetricOutcome) -> int:
         return sum(
             1
             for recorded_operation, recorded_outcome, _ in self.commit_records
@@ -177,9 +173,7 @@ async def test_exact_replay_returns_committed_result_without_policy_or_commit_ca
     assert ledger.entries == [STORE_RESOLVE_COMMITTED]
     assert policy.calls == []
     assert store.commit_fingerprints == []
-    assert metrics.commit_count(
-        LifecycleOperation.RENAME, LifecycleMetricOutcome.REPLAYED
-    ) == 1
+    assert metrics.commit_count(LifecycleOperation.RENAME, LifecycleMetricOutcome.REPLAYED) == 1
 
 
 @pytest.mark.asyncio
@@ -211,9 +205,9 @@ async def test_allowed_rename_hands_decision_unchanged_to_store_commit() -> None
     assert policy.calls == [(command, device_context)]
     assert store.commit_decisions == [decision]
     assert store.commit_commands == [command]
-    assert metrics.commit_count(
-        LifecycleOperation.RENAME, LifecycleMetricOutcome.COMMITTED
-    ) == 0  # the service does not double-count COMMITTED; the store records it
+    assert (
+        metrics.commit_count(LifecycleOperation.RENAME, LifecycleMetricOutcome.COMMITTED) == 0
+    )  # the service does not double-count COMMITTED; the store records it
 
 
 @pytest.mark.asyncio
@@ -477,9 +471,10 @@ async def test_cancellation_during_policy_evaluation_propagates_without_retry() 
     assert exc_info.value.code is SourceLifecycleErrorCode.INPUT_INVALID
     assert ledger.entries == [STORE_RESOLVE_COMMITTED, POLICY_EVALUATE_LIFECYCLE]
     assert store.commit_fingerprints == []
-    assert metrics.rejection_count(
-        LifecycleOperation.RENAME, SourceLifecycleErrorCode.INPUT_INVALID
-    ) == 1
+    assert (
+        metrics.rejection_count(LifecycleOperation.RENAME, SourceLifecycleErrorCode.INPUT_INVALID)
+        == 1
+    )
 
 
 @pytest.mark.asyncio
@@ -575,9 +570,7 @@ async def test_store_typed_error_maps_to_rejection_metric_and_propagates(
     assert exc_info.value.code is expected_code
     assert metrics.rejection_count(LifecycleOperation.RENAME, expected_code) == 1
     # No commit metric is recorded for a typed rejection — only the rejection label.
-    assert metrics.commit_count(
-        LifecycleOperation.RENAME, LifecycleMetricOutcome.COMMITTED
-    ) == 0
+    assert metrics.commit_count(LifecycleOperation.RENAME, LifecycleMetricOutcome.COMMITTED) == 0
 
 
 @pytest.mark.asyncio
@@ -603,9 +596,7 @@ async def test_replay_path_records_replayed_outcome_never_rejection() -> None:
         diagnostic_context=build_diagnostic_context(),
     )
 
-    assert metrics.commit_count(
-        LifecycleOperation.RENAME, LifecycleMetricOutcome.REPLAYED
-    ) == 1
+    assert metrics.commit_count(LifecycleOperation.RENAME, LifecycleMetricOutcome.REPLAYED) == 1
     assert metrics.rejection_records == []
 
 

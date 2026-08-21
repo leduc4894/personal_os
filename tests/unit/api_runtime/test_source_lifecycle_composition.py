@@ -115,9 +115,7 @@ def test_offline_policy_decision_uses_expected_and_target_locator() -> None:
     runtime = compose_offline_source_lifecycle()
     command = _build_rename_command()
     device_context = _build_device_context()
-    decision = runtime.policy.build_decision(
-        command=command, device_context=device_context
-    )
+    decision = runtime.policy.build_decision(command=command, device_context=device_context)
     assert isinstance(decision, LifecyclePolicyDecision)
     assert decision.workspace_id == OFFLINE_WORKSPACE_ID
     assert decision.outcome is LifecyclePolicyOutcome.ALLOWED

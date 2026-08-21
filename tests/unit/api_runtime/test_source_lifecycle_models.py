@@ -138,9 +138,7 @@ def test_request_model_rejects_workspace_or_device_selectors() -> None:
             {**_rename_body(), "workspace_id": str(SOURCE_ID)}
         )
     with pytest.raises(ValidationError):
-        SourceLifecycleEventRequest.model_validate(
-            {**_rename_body(), "device_id": str(SOURCE_ID)}
-        )
+        SourceLifecycleEventRequest.model_validate({**_rename_body(), "device_id": str(SOURCE_ID)})
 
 
 def test_rename_rejects_tombstone_id() -> None:
@@ -179,9 +177,7 @@ def test_delete_rejects_tombstone_id() -> None:
 
 def test_restore_rejects_expected_locator() -> None:
     with pytest.raises(ValidationError):
-        SourceLifecycleEventRequest.model_validate(
-            _restore_body(expected_locator="notes/old.md")
-        )
+        SourceLifecycleEventRequest.model_validate(_restore_body(expected_locator="notes/old.md"))
 
 
 def test_restore_rejects_missing_tombstone_id() -> None:
@@ -214,9 +210,9 @@ def test_client_timestamp_is_optional_and_accepts_rfc3339_with_subseconds() -> N
     parsed = SourceLifecycleEventRequest.model_validate(
         _rename_body(client_timestamp="2026-08-20T01:02:03.000001Z")
     )
-    assert parsed.client_timestamp == datetime(
-        2026, 8, 20, 1, 2, 3, 0, tzinfo=UTC
-    ).replace(microsecond=1)
+    assert parsed.client_timestamp == datetime(2026, 8, 20, 1, 2, 3, 0, tzinfo=UTC).replace(
+        microsecond=1
+    )
 
 
 def test_client_timestamp_rejects_naive_string() -> None:

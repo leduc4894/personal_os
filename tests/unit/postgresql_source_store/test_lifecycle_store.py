@@ -229,9 +229,7 @@ def _committed_result(
         tombstone_id=tombstone_id,
         resulting_locator=resulting_locator,
         committed_at=(
-            committed_at
-            if committed_at is not None
-            else datetime(2026, 8, 20, 2, 2, 3, tzinfo=UTC)
+            committed_at if committed_at is not None else datetime(2026, 8, 20, 2, 2, 3, tzinfo=UTC)
         ),
     )
 
@@ -730,9 +728,7 @@ def test_store_does_not_emit_any_raw_locator_in_diagnostic_fields() -> None:
 def test_store_does_not_emit_any_raw_locator_in_safe_diff_hash() -> None:
     raw_locator = "notes/old.md"
     digest = _locator_fingerprint_hex(raw_locator)
-    safe_diff = _expected_safe_diff_for_rename(
-        _rename_command(), _denied_decision()
-    )
+    safe_diff = _expected_safe_diff_for_rename(_rename_command(), _denied_decision())
     assert raw_locator not in safe_diff
     assert digest not in safe_diff
 
@@ -773,6 +769,7 @@ def test_adapter_fingerprint_matches_domain_fingerprint() -> None:
     from personal_os.source_lifecycle.fingerprint import (
         fingerprint_lifecycle_command as _fingerprint,
     )
+
     expected = _fingerprint(command).hexadecimal
     assert expected == _fingerprint(command).hexadecimal
 

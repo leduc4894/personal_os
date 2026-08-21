@@ -34,7 +34,7 @@ contain its own SHA.
 | Plugin type check | PASS | `pnpm --filter @workspace/obsidian-plugin type-check`: exit 0. |
 | Plugin lint | PASS | `pnpm --filter @workspace/obsidian-plugin lint`: exit 0. |
 | Plugin build | PASS | `pnpm --filter @workspace/obsidian-plugin build`: exit 0. |
-| Repository verify | FAIL | `uv run poe verify` stopped at format-check: 28 existing source-lifecycle-area files would be reformatted. The Task 12 Python files were then formatted; unrelated files were not rewritten. |
+| Repository verify | FAIL | The inherited Ruff drift is resolved: 448 Python files are formatted, and format, lint, type, boundary and generated-contract gates pass. `uv run poe verify` now reaches Python tests and stops at 4 non-format contract failures with 3,303 passed, 21 skipped and 397 deselected. The skipped TypeScript test and build stages were run separately and passed. |
 | Clean shutdown | PASS | API, Web Admin and both workers were stopped; the exact disposable project was verified and removed. The ordinary local project remained absent. |
 
 ## Rulings and interpretations
@@ -83,13 +83,15 @@ items.
 5. Run
    `uv run pytest tests/contract/source_lifecycle/test_reference_device_records.py -m device_records -q`.
    Only a PASS for both records permits Child 5 closure.
-6. Resolve the inherited Ruff format drift, then rerun `uv run poe verify` to
-   exit 0 before closure.
+6. Adjudicate the four remaining non-format contract failures (Obsidian import
+   allowlist, policy-boundary token scan, publication-route token scan and the
+   closed HTTP-status map), then rerun `uv run poe verify` to exit 0.
 
 ## Concerns
 
 - Desktop acceptance still does not prove the corrected locator wire contract;
   the latest bounded run stopped at the missing active-TOTP prerequisite.
 - Physical Mobile behavior remains entirely unobserved.
-- Repository-wide format verification is red on pre-existing lifecycle-area
-  formatting drift, despite the Task 12 files themselves being formatted.
+- Repository-wide formatting is green. Full verification is now blocked later
+  by four non-format contract assertions that require semantic adjudication,
+  outside the formatting-only follow-up.

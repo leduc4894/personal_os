@@ -97,9 +97,7 @@ def _command(
         source_id=source.source_id,
         event_id=event_id if event_id is not None else uuid7(),
         idempotency_key=(
-            idempotency_key
-            if idempotency_key is not None
-            else f"idempotency-{uuid4()}"
+            idempotency_key if idempotency_key is not None else f"idempotency-{uuid4()}"
         ),
         operation=operation,
         expected_version_id=source.current_version_id,

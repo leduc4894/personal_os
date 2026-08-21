@@ -244,9 +244,7 @@ def test_snapshot_lock_order_includes_lifecycle_tables() -> None:
     assert "source_tombstones" in SNAPSHOT_LOCK_ORDER
     assert "projection_intents" in SNAPSHOT_LOCK_ORDER
     # The lifecycle tables sit between source versioning and durable policy state.
-    assert SNAPSHOT_LOCK_ORDER.index("source_locators") < SNAPSHOT_LOCK_ORDER.index(
-        "audit_events"
-    )
+    assert SNAPSHOT_LOCK_ORDER.index("source_locators") < SNAPSHOT_LOCK_ORDER.index("audit_events")
     assert SNAPSHOT_LOCK_ORDER.index("source_tombstones") > SNAPSHOT_LOCK_ORDER.index(
         "source_locators"
     )
@@ -261,11 +259,7 @@ def test_share_lock_statements_cover_lifecycle_tables_in_spec_order() -> None:
     statements = build_share_lock_statements()
     texts = [str(s.compile(dialect=postgresql.dialect())) for s in statements]
     for lifecycle_table in ("source_locators", "source_tombstones", "projection_intents"):
-        matching = [
-            text
-            for text in texts
-            if f'{SOURCE_STORE_SCHEMA}."{lifecycle_table}"' in text
-        ]
+        matching = [text for text in texts if f'{SOURCE_STORE_SCHEMA}."{lifecycle_table}"' in text]
         assert len(matching) == 1, lifecycle_table
         assert "SHARE MODE NOWAIT" in matching[0]
         assert matching[0].startswith("LOCK TABLE")
@@ -294,11 +288,7 @@ def test_lifecycle_tables_are_schema_qualified_in_lock_statements() -> None:
     statements = build_share_lock_statements()
     texts = [str(s.compile(dialect=postgresql.dialect())) for s in statements]
     for table in ("source_locators", "source_tombstones"):
-        text = next(
-            text
-            for text in texts
-            if f'{SOURCE_STORE_SCHEMA}."{table}"' in text
-        )
+        text = next(text for text in texts if f'{SOURCE_STORE_SCHEMA}."{table}"' in text)
         assert "knowledge" in text
         assert table in text
 

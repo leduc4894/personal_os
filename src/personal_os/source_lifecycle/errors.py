@@ -39,8 +39,9 @@ LIFECYCLE_ERROR_CODE_TO_REGISTRY: Final[dict[SourceLifecycleErrorCode, ErrorCode
     SourceLifecycleErrorCode.TOMBSTONE_NOT_FOUND: ErrorCode.SOURCE_TOMBSTONE_NOT_FOUND,
     SourceLifecycleErrorCode.TOMBSTONE_CLOSED: ErrorCode.SOURCE_TOMBSTONE_CLOSED,
     SourceLifecycleErrorCode.VERSION_CONFLICT: ErrorCode.SOURCE_LIFECYCLE_VERSION_CONFLICT,
-    SourceLifecycleErrorCode.COMMIT_OUTCOME_UNKNOWN:
-        ErrorCode.SOURCE_LIFECYCLE_COMMIT_OUTCOME_UNKNOWN,
+    SourceLifecycleErrorCode.COMMIT_OUTCOME_UNKNOWN: (
+        ErrorCode.SOURCE_LIFECYCLE_COMMIT_OUTCOME_UNKNOWN
+    ),
 }
 
 

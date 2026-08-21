@@ -230,10 +230,7 @@ async def test_ambiguous_commit_retries_when_lookup_proves_no_evidence(
     )
     assert result.event_id == command.event_id
     counts_after = await lifecycle_harness.table_row_counts()
-    diff = {
-        name: counts_after[name] - counts_before[name]
-        for name in counts_after
-    }
+    diff = {name: counts_after[name] - counts_before[name] for name in counts_after}
     assert diff["source_locators"] == 1
     assert diff["sync_events"] == 1
     assert diff["projection_intents"] == 2

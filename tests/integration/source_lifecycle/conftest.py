@@ -75,6 +75,7 @@ def monkey(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
 
     return monkeypatch
 
+
 __all__ = [
     "PreflightHarness",
     "SeededSourceLocator",
@@ -149,9 +150,7 @@ class LifecycleHarness:
         event_id = uuid4()
         digest = hashlib.sha256(str(source_id).encode("ascii")).hexdigest()
         async with self._engine.begin() as connection:
-            await self._insert_content_object(
-                connection, content_object_id, digest
-            )
+            await self._insert_content_object(connection, content_object_id, digest)
             await connection.execute(
                 sa.insert(sources).values(
                     source_id=source_id,
@@ -386,10 +385,7 @@ class LifecycleHarness:
         content_object_id: UUID,
         content_hash: str,
     ) -> None:
-        object_key = (
-            f"objects/sha256/{content_hash[:2]}/"
-            f"{content_hash[2:4]}/{content_hash}"
-        )
+        object_key = f"objects/sha256/{content_hash[:2]}/{content_hash[2:4]}/{content_hash}"
         await connection.execute(
             sa.insert(content_objects).values(
                 content_object_id=content_object_id,
