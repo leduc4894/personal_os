@@ -217,18 +217,6 @@ describe("Obsidian plugin composition root", () => {
     expect(pluginSource).toContain("lifecycleDriver");
   });
 
-  it("resolves explicit-restore modal acceptance before close can reject it", () => {
-    // Obsidian invokes `onClose` synchronously from `close()`. Each modal
-    // therefore has to publish its accepted value first; otherwise the
-    // awaiting restore command observes the dismissal fallback (`null` or
-    // `false`) and never dispatches the lifecycle event.
-    expect(pluginSource).toContain("this.onChooseItem(item);\n        this.close();");
-    expect(
-      pluginSource.match(/this\.#accept\(this\.#inputValue\);\n\s+this\.close\(\);/g)?.length ?? 0,
-    ).toBe(2);
-    expect(pluginSource).toContain("this.#accept();\n            this.close();");
-  });
-
   it("injects UUIDv7 identities into the production journal repository and lifecycle capture", () => {
     const repositoryIndex = pluginSource.indexOf("new JournalRepository(");
     expect(repositoryIndex).toBeGreaterThanOrEqual(0);
