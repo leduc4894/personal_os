@@ -203,6 +203,13 @@ export interface FrozenFingerprint {
  * server `source_id` (null until a committed create receipt), the observed
  * fingerprint, the last committed base version and the policy revision the
  * observation was evaluated against.
+ *
+ * `lastCommittedFingerprint` is the provable bytes hash the server last
+ * acknowledged for this source (spec 6.3, lifecycle child 5). It is updated
+ * only by `recordCommittedReceipt` / `recordNoChangeReceipt` and is `null`
+ * until the first commit receipt lands. The lifecycle capture reads this
+ * column to verify restore eligibility; `observedFingerprint` is mutable
+ * across pending captures and must never be used for that check.
  */
 export interface LocalFile {
   readonly localFileId: string;
@@ -211,6 +218,7 @@ export interface LocalFile {
   readonly observedFingerprint: FrozenFingerprint;
   readonly baseVersionId: string | null;
   readonly policyRevisionNumber: number;
+  readonly lastCommittedFingerprint: FrozenFingerprint | null;
 }
 
 /**

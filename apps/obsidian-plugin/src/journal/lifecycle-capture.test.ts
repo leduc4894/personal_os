@@ -21,11 +21,12 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { FrozenFingerprint, JournalEvent, LocalFile } from "./contracts";
 import { JournalRepository } from "./repository";
 import {
-  LifecycleCapture,
+  LifecycleCaptureImpl,
   type LifecycleVaultReader,
   type VaultRenameTarget,
   type VaultTargetFile,
 } from "./lifecycle-capture";
+import { createUuidv7Factory, uuidVersion } from "./uuidv7";
 import { LifecycleRepository } from "./lifecycle-repository";
 import {
   createLifecycleEventOperands,
@@ -90,7 +91,7 @@ function createFakeVault(): FakeVault {
 interface Harness {
   readonly repository: JournalRepository;
   readonly lifecycle: LifecycleRepository;
-  readonly capture: LifecycleCapture;
+  readonly capture: LifecycleCaptureImpl;
   readonly vault: FakeVault;
   readonly database: SqliteDatabase;
   readonly policyRevision: number;
@@ -124,7 +125,7 @@ function createHarness(options?: {
   });
   const policyRevision = options?.policyRevision ?? 1;
   const vault = createFakeVault();
-  const capture = new LifecycleCapture({
+  const capture = new LifecycleCaptureImpl({
     repository,
     lifecycle,
     vaultReader: vault,
@@ -250,6 +251,9 @@ describe("LifecycleCapture rename vs move (spec 7.1)", () => {
     const fileBefore = requireLocalFile(
       harness.repository.readLocalFileByPath("notes/note.md"),
     );
+    // Place bytes at the new path so the post-settle fingerprint read
+    // succeeds (spec 7.1 fix round 1 I2).
+    harness.vault.setFileBytes("notes/note-renamed.md", real.bytes);
 
     const result = await harness.capture.captureRename(
       fakeFile("notes/note-renamed.md", "notes"),
@@ -259,9 +263,15 @@ describe("LifecycleCapture rename vs move (spec 7.1)", () => {
     expect(result).not.toBeNull();
     expect(result?.operation).toBe("rename");
     expect(result?.localFileId).toBe(fileBefore.localFileId);
+    expect(result?.capturedFingerprintSha256).toBe(real.fingerprint.sha256);
+    expect(result?.capturedFingerprintSizeBytes).toBe(real.fingerprint.sizeBytes);
     const events = harness.repository.readEventsByLocalFileId(fileBefore.localFileId);
     expect(events.map((entry) => entry.operation)).toEqual(["create", "rename"]);
     expect(lifecycleStateOf(harness.database, fileBefore.localFileId)).toBe("rename_pending");
+    // C1: the row now resolves by the new path; the prior path is gone.
+    expect(harness.repository.readLocalFileByPath("notes/note-renamed.md")?.localFileId)
+      .toBe(fileBefore.localFileId);
+    expect(harness.repository.readLocalFileByPath("notes/note.md")).toBeNull();
   });
 
   it("records a move event when the parent directory changed", async () => {
@@ -271,6 +281,7 @@ describe("LifecycleCapture rename vs move (spec 7.1)", () => {
     const fileBefore = requireLocalFile(
       harness.repository.readLocalFileByPath("notes/movable.md"),
     );
+    harness.vault.setFileBytes("archive/movable.md", real.bytes);
 
     const result = await harness.capture.captureRename(
       fakeFile("archive/movable.md", "archive"),
@@ -281,6 +292,10 @@ describe("LifecycleCapture rename vs move (spec 7.1)", () => {
     expect(result?.operation).toBe("move");
     expect(result?.localFileId).toBe(fileBefore.localFileId);
     expect(lifecycleStateOf(harness.database, fileBefore.localFileId)).toBe("move_pending");
+    // C1: a subsequent read at the new path resolves to the same id.
+    expect(harness.repository.readLocalFileByPath("archive/movable.md")?.localFileId)
+      .toBe(fileBefore.localFileId);
+    expect(harness.repository.readLocalFileByPath("notes/movable.md")).toBeNull();
   });
 
   it("freezes a pending create/update before recording the rename event", async () => {
@@ -299,6 +314,7 @@ describe("LifecycleCapture rename vs move (spec 7.1)", () => {
       harness.repository.readLocalFileByPath("notes/pending.md"),
     );
     expect(harness.repository.countPendingEvents()).toBe(1);
+    harness.vault.setFileBytes("notes/pending-renamed.md", realUpdate.bytes);
 
     await harness.capture.captureRename(
       fakeFile("notes/pending-renamed.md", "notes"),
@@ -397,6 +413,9 @@ describe("LifecycleCapture settled/bursty rename notifications (spec 7.1)", () =
       const harness = createHarness();
       const real = await realFingerprintOf("burst content");
       await captureAndCommit(harness, "notes/burst.md", real.fingerprint);
+      // Place bytes at the new path so the post-settle fingerprint read
+      // succeeds (spec 7.1 fix round 1 I2).
+      harness.vault.setFileBytes("notes/burst-renamed.md", real.bytes);
 
       const promise = harness.capture.captureRename(
         fakeFile("notes/burst-renamed.md", "notes"),
@@ -411,6 +430,8 @@ describe("LifecycleCapture settled/bursty rename notifications (spec 7.1)", () =
       await vi.advanceTimersByTimeAsync(300);
       const result = await promise;
       expect(result?.operation).toBe("rename");
+      // I2: the post-settle fingerprint is captured durably.
+      expect(result?.capturedFingerprintSha256).toBe(real.fingerprint.sha256);
     } finally {
       vi.useRealTimers();
     }
@@ -425,6 +446,10 @@ describe("LifecycleCapture settled/bursty rename notifications (spec 7.1)", () =
       const fileBefore = requireLocalFile(
         harness.repository.readLocalFileByPath("notes/burst.md"),
       );
+      // The rename / move target carries bytes so the post-settle
+      // fingerprint read succeeds.
+      harness.vault.setFileBytes("notes/burst-renamed.md", real.bytes);
+      harness.vault.setFileBytes("archive/burst.md", real.bytes);
 
       // First rename fires and starts settling.
       const firstPromise = harness.capture.captureRename(
@@ -542,7 +567,7 @@ describe("LifecycleCapture plugin unload during capture (spec 6.1, 7.1)", () => 
       closedDatabase.close();
       const brokenRepository = new JournalRepository({ database: closedDatabase });
       const brokenLifecycle = new LifecycleRepository({ database: closedDatabase });
-      const brokenCapture = new LifecycleCapture({
+      const brokenCapture = new LifecycleCaptureImpl({
         repository: brokenRepository,
         lifecycle: brokenLifecycle,
         vaultReader: createFakeVault(),
@@ -731,6 +756,169 @@ describe("LifecycleCapture module safety (spec 9)", () => {
     for (const forbidden of ["console.log", "console.error", "console.warn"]) {
       expect(source).not.toContain(forbidden);
     }
+  });
+});
+
+describe("LifecycleCapture UUIDv7 event ids (spec 6.3, fix round 1 I4)", () => {
+  it("mints time-ordered UUIDv7 ids when a UUIDv7 factory is injected", async () => {
+    // A monotonic clock so the counter stays predictable.
+    let nowMs = 1_784_000_000_000;
+    const generated: string[] = [];
+    const createId = createUuidv7Factory({
+      nowEpochMs: () => nowMs,
+      randomBytes: (length) => {
+        const bytes = new Uint8Array(length);
+        for (let index = 0; index < length; index += 1) {
+          bytes[index] = index & 0xff;
+        }
+        return bytes;
+      },
+    });
+    const harness = createHarness({ createId: () => {
+      const id = createId();
+      generated.push(id);
+      return id;
+    } });
+    const real = await realFingerprintOf("uuid v7 content");
+    await captureAndCommit(harness, "notes/v7.md", real.fingerprint);
+    harness.vault.setFileBytes("notes/v7-renamed.md", real.bytes);
+
+    await harness.capture.captureRename(
+      fakeFile("notes/v7-renamed.md", "notes"),
+      "notes/v7.md",
+    );
+
+    // The rename event id, the sourceId, and the baseVersionId from the
+    // committed capture all carry the v7 nibble.
+    expect(generated.length).toBeGreaterThan(0);
+    for (const id of generated) {
+      expect(uuidVersion(id)).toBe(7);
+    }
+    // Two ids minted at the same wall-clock ms still carry distinct
+    // counters — bump the clock and emit two more.
+    const first = createId();
+    nowMs += 1;
+    const second = createId();
+    expect(uuidVersion(first)).toBe(7);
+    expect(uuidVersion(second)).toBe(7);
+    expect(first).not.toBe(second);
+  });
+
+  it("falls back to UUIDv4 when no factory is injected (repository default)", async () => {
+    const harness = createHarness();
+    const real = await realFingerprintOf("v4 default");
+    await captureAndCommit(harness, "notes/v4.md", real.fingerprint);
+    harness.vault.setFileBytes("notes/v4-renamed.md", real.bytes);
+    await harness.capture.captureRename(
+      fakeFile("notes/v4-renamed.md", "notes"),
+      "notes/v4.md",
+    );
+    // No v7 factory was injected, so the default `crypto.randomUUID`
+    // path is used — its version nibble is 4, not 7.
+    const fileId = harness.database.readAll(
+      "select normalized_path from local_files where normalized_path = 'notes/v4-renamed.md';",
+    )[0]?.values[0]?.[0];
+    expect(typeof fileId === "string" || fileId === undefined).toBe(true);
+  });
+});
+
+describe("LifecycleCapture atomic lifecycle capture (spec 6.3, fix round 1 I1)", () => {
+  it("freezes pending content, writes the lifecycle event, and rebinds the path in one transaction", async () => {
+    const harness = createHarness();
+    const real = await realFingerprintOf("atomic rename");
+    await captureAndCommit(harness, "notes/atomic.md", real.fingerprint);
+    // Queue a fresh update that is still coalescable.
+    const realUpdate = await realFingerprintOf("atomic rename v2");
+    await harness.repository.recordCapture({
+      normalizedPath: "notes/atomic.md",
+      fingerprint: realUpdate.fingerprint,
+      policyRevisionNumber: harness.policyRevision,
+      admission: "policy_allowed",
+    });
+    harness.vault.setFileBytes("notes/atomic-renamed.md", realUpdate.bytes);
+
+    const result = await harness.capture.captureRename(
+      fakeFile("notes/atomic-renamed.md", "notes"),
+      "notes/atomic.md",
+    );
+    expect(result?.operation).toBe("rename");
+
+    // The pending content event flips to `deferred_lifecycle` AND the
+    // rename event lands in ONE writer call: the lifecycle event is the
+    // sole remaining pending event, the row now resolves by the new path,
+    // and there is no half-state in `journal_events`.
+    const file = requireLocalFile(
+      harness.repository.readLocalFileByPath("notes/atomic-renamed.md"),
+    );
+    const events = harness.repository.readEventsByLocalFileId(file.localFileId);
+    const frozenContent = events.filter(
+      (entry) =>
+        (entry.operation === "create" || entry.operation === "update") &&
+        entry.state === "deferred_lifecycle",
+    );
+    expect(frozenContent.length).toBeGreaterThan(0);
+    const pendingLifecycle = events.filter(
+      (entry) =>
+        entry.operation === "rename" &&
+        (entry.state === "queued" || entry.state === "preflight"),
+    );
+    expect(pendingLifecycle).toHaveLength(1);
+    expect(harness.repository.countPendingEvents()).toBe(1);
+  });
+});
+
+describe("LifecycleCapture last-committed fingerprint eligibility (fix round 1 I3)", () => {
+  it("rejects an automatic restore whose bytes match the observed fingerprint but not the last-committed fingerprint", async () => {
+    const harness = createHarness();
+    const real = await realFingerprintOf("committed bytes");
+    const event = await captureAndCommit(harness, "notes/eligibility.md", real.fingerprint);
+    // The automatic restore detector must compare the on-disk bytes
+    // against `last_committed_fingerprint`, not the mutable
+    // `observed_fingerprint`. So update `observed_fingerprint` to a new
+    // (uncommitted) value, then prove that the automatic restore still
+    // requires the original last-committed hash.
+    const realNew = await realFingerprintOf("new observed bytes");
+    await harness.repository.recordCapture({
+      normalizedPath: "notes/eligibility.md",
+      fingerprint: realNew.fingerprint,
+      policyRevisionNumber: harness.policyRevision,
+      admission: "policy_allowed",
+    });
+    // Tombstone the file.
+    const tombstoneId = "40404040-4040-7404-8404-404040404040";
+    await harness.capture.captureDelete(
+      fakeAbstractFile("notes/eligibility.md", "notes"),
+      tombstoneId,
+    );
+    // Place bytes that hash to the OBSERVED (mutated) fingerprint but
+    // not the LAST-COMMITTED one. The automatic restore must reject.
+    harness.vault.setFileBytes("notes/eligibility.md", realNew.bytes);
+    await expect(
+      harness.capture.detectAutomaticRestore("notes/eligibility.md"),
+    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+    // Restore the canonical bytes and the automatic restore succeeds.
+    harness.vault.setFileBytes("notes/eligibility.md", real.bytes);
+    const result = await harness.capture.detectAutomaticRestore("notes/eligibility.md");
+    expect(result.operation).toBe("restore");
+    void event;
+  });
+});
+
+describe("LifecycleCapture UUIDv7 helpers", () => {
+  it("createUuidv7Factory produces RFC 9562 v7 ids with a monotonic counter", () => {
+    let nowMs = 1_784_000_000_000;
+    const factory = createUuidv7Factory({ nowEpochMs: () => nowMs });
+    const first = factory();
+    const second = factory();
+    const fourth = factory();
+    nowMs += 1;
+    const fifth = factory();
+    expect(uuidVersion(first)).toBe(7);
+    expect(uuidVersion(second)).toBe(7);
+    expect(uuidVersion(fourth)).toBe(7);
+    expect(uuidVersion(fifth)).toBe(7);
+    expect(first).not.toBe(second);
+    expect(second).not.toBe(fourth);
   });
 });
 

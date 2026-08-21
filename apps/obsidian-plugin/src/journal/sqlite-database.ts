@@ -35,8 +35,16 @@ import type { JournalMeta, JournalRecoveryState } from "./contracts";
  * `local_files` and the closed `LIFECYCLE_JOURNAL_OPERATIONS` enum on
  * `journal_events.operation`. The migration is deterministic and runs
  * inside a single transaction; no child-4 row is lost.
+ *
+ * Version 4 (fix round 1) adds the `last_committed_sha256` /
+ * `last_committed_size_bytes` / `last_committed_media_type` columns on
+ * `local_files` so the lifecycle capture can verify a restore eligibility
+ * against the bytes that the server last committed, not the bytes the
+ * device most recently observed. The new columns are nullable; every
+ * Child 5 row reads back with `last_committed_* = null` until the first
+ * committed receipt lands.
  */
-export const JOURNAL_SCHEMA_VERSION = 3;
+export const JOURNAL_SCHEMA_VERSION = 4;
 
 // --- closed failure reasons ---------------------------------------------------------------
 
@@ -139,6 +147,12 @@ create table if not exists journal_meta (
  * and the closed `lifecycle_state`. Existing rows from a child-4 image
  * read back with `last_locator = null`, `open_tombstone_id = null` and
  * `lifecycle_state = 'active'`.
+ *
+ * Version 4 adds the `last_committed_*` triple of columns. The triple is
+ * written ONLY by `recordCommittedReceipt` and `recordNoChangeReceipt` so
+ * the lifecycle capture can verify a restore eligibility against the
+ * bytes the server last committed — never against the mutable
+ * `observed_fingerprint` that a fresh capture may have overwritten.
  */
 const LOCAL_FILES_DDL = `
 create table if not exists local_files (
@@ -155,7 +169,10 @@ create table if not exists local_files (
   lifecycle_state text not null default 'active'
     check (lifecycle_state in ('active', 'rename_pending', 'move_pending',
       'delete_pending', 'restore_pending', 'tombstoned', 'restored',
-      'reconcile_required'))
+      'reconcile_required')),
+  last_committed_sha256 text,
+  last_committed_size_bytes integer check (last_committed_size_bytes >= 0),
+  last_committed_media_type text
 );
 `;
 

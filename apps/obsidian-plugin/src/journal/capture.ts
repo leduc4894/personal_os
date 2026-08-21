@@ -38,7 +38,7 @@ import {
 import { deriveFrozenFingerprint } from "./fingerprint";
 import { JournalStoreError, journalStoreError } from "./sqlite-database";
 import type {
-  LifecycleCapture as LifecycleCapturePort,
+  LifecycleCapture,
   VaultRenameTarget,
   VaultTargetFile,
 } from "./lifecycle-capture";
@@ -95,7 +95,7 @@ export interface JournalCaptureOptions {
    * delete and the explicit restore surface live behind this port so the
    * create / update surface here stays composition-free.
    */
-  readonly lifecycleCapture: LifecycleCapturePort;
+  readonly lifecycleCapture: LifecycleCapture;
   /** Snapshot ceiling override; defaults to {@link EXISTING_FILES_SCAN_MAXIMUM_FILES}. */
   readonly scanMaximumFiles?: number | undefined;
   /** Snapshot batch size override; defaults to {@link EXISTING_FILES_SCAN_BATCH_FILES}. */
@@ -130,6 +130,18 @@ function isStoreError(error: unknown): error is JournalStoreError {
   );
 }
 
+/**
+ * The narrow class-only surface the capture composition uses in addition
+ * to the port. Pulling these helpers out of the port keeps the brief's
+ * {@link LifecycleCapture} interface minimal while still letting the
+ * create / update admission reuse the lifecycle capture's automatic
+ * restore detector and reconcile-required flagger.
+ */
+interface LifecycleCaptureWithRestore extends LifecycleCapture {
+  detectAutomaticRestore(normalizedPath: string): Promise<unknown>;
+  markTombstonedPathReconcileRequired(normalizedPath: string): Promise<boolean>;
+}
+
 // --- the capture coordinator ------------------------------------------------------------------
 
 /**
@@ -143,7 +155,7 @@ export class JournalCapture {
   readonly #repository: JournalRepository;
   readonly #vaultReader: CaptureVaultReader;
   readonly #policyGate: CapturePolicyGate;
-  readonly #lifecycleCapture: LifecycleCapturePort;
+  readonly #lifecycleCapture: LifecycleCapture;
   readonly #scanMaximumFiles: number;
   readonly #scanBatchFiles: number;
   readonly #settleTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -334,15 +346,28 @@ export class JournalCapture {
    * re-read the settled bytes, fingerprint exactly those bytes, then gate
    * by the size ceiling and the current accepted policy decision, recording
    * the accepted revision on the journal row.
+   *
+   * Automatic restore (Child 5 task 8 fix round 1 C2): a tombstoned
+   * local mapping that re-appears with bytes matching the last
+   * committed fingerprint is restored by the lifecycle capture, not
+   * minted as a fresh create. A detection failure (mismatched bytes,
+   * missing identity, anything other than a successful restore) is
+   * FAIL-CLOSED: the row is durably flagged `reconcile_required`, the
+   * open tombstone is cleared, and the create / update admission is
+   * refused. The user can still edit the file via the explicit
+   * restore surface; the brief disallows the fall-through-to-create
+   * behaviour because a successful re-bind of the prior source would
+   * silently drop the delete intent.
    */
   async #admitNormalizedPath(normalizedPath: string): Promise<void> {
     if (this.#isLifecycleDeferredPath(normalizedPath)) {
       return;
     }
     const trackedFile = this.#repository.readLocalFileByPath(normalizedPath);
-    // Automatic restore (Child 5 task 8): a tombstoned local mapping that
-    // re-appears with bytes matching the committed fingerprint is restored
-    // by the lifecycle capture, not minted as a fresh create.
+    // Automatic restore: only attempted when the local mapping is
+    // already tombstoned. The lifecycle capture verifies the bytes
+    // against the last-committed fingerprint and either restores or
+    // flags reconcile_required.
     if (
       trackedFile !== null &&
       trackedFile.sourceId !== null &&
@@ -350,14 +375,25 @@ export class JournalCapture {
     ) {
       const openTombstone = this.#readOpenTombstoneId(trackedFile.localFileId);
       if (openTombstone !== null) {
+        // The port exposes only the three required methods; the
+        // automatic-restore detector and reconcile-required flagger are
+        // class-only helpers. We narrow via the concrete class type the
+        // composition root passes in; if a strict-mode port fake ever
+        // reaches here, the cast surfaces a compile-time error rather
+        // than a runtime fall-through.
+        const capture = this.#lifecycleCapture as LifecycleCaptureWithRestore;
         try {
-          await this.#lifecycleCapture.detectAutomaticRestore(normalizedPath);
-          return;
+          await capture.detectAutomaticRestore(normalizedPath);
         } catch {
-          // Detection failed (mismatched bytes or missing identity) —
-          // fall through to the durable create / update capture so the
-          // user can still edit the file.
+          // Detection failed: durably mark the file reconcile_required
+          // and refuse the create / update admission. The user can
+          // explicitly resolve via the restore surface.
+          await capture.markTombstonedPathReconcileRequired(normalizedPath).catch(
+            () => undefined,
+          );
+          this.#lifecycleGuardedPaths.add(normalizedPath);
         }
+        return;
       }
     }
     const contentBytes = await this.#vaultReader.readRegularFileBytes(normalizedPath);

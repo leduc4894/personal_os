@@ -168,12 +168,12 @@ describe("schema migration from Child 4 to Child 5", () => {
   it("bumps JOURNAL_SCHEMA_VERSION to 3 with lifecycle tables present", async () => {
     const { LIFECYCLE_SCHEMA_VERSION } = await import("./lifecycle-contracts");
     expect(LIFECYCLE_SCHEMA_VERSION).toBe(JOURNAL_SCHEMA_VERSION);
-    expect(LIFECYCLE_SCHEMA_VERSION).toBe(3);
-    expect(JOURNAL_SCHEMA_VERSION).toBe(3);
+    expect(LIFECYCLE_SCHEMA_VERSION).toBe(4);
+    expect(JOURNAL_SCHEMA_VERSION).toBe(4);
   });
 
-  it("migrates a Child 4 journal without losing local_files, events, attempts or manifest generation", async () => {
-    const { migrateChildFourJournalToLifecycleSchema } = await import(
+  it("migrates a Child 4 journal through v3 to v4 without losing any prior row", async () => {
+    const { migrateChildFourJournalToLifecycleSchema, migrateLifecycleJournalToLastCommittedSchema } = await import(
       "./lifecycle-contracts"
     );
     // Seed a Child 4 journal by hand (no lifecycle columns) using raw sql.js.
@@ -248,9 +248,10 @@ describe("schema migration from Child 4 to Child 5", () => {
     const childFourImage = seedDatabase.export();
     seedDatabase.close();
 
-    const migratedImage = migrateChildFourJournalToLifecycleSchema(engineModule, childFourImage);
+    const v3Image = migrateChildFourJournalToLifecycleSchema(engineModule, childFourImage);
+    const v4Image = migrateLifecycleJournalToLastCommittedSchema(engineModule, v3Image);
 
-    const reopened = SqliteDatabase.openFromImage(engineModule, migratedImage);
+    const reopened = SqliteDatabase.openFromImage(engineModule, v4Image);
     const meta = reopened.readJournalMeta() satisfies JournalMeta;
     expect(meta.schemaVersion).toBe(JOURNAL_SCHEMA_VERSION);
     expect(meta.dirtyGeneration).toBe(4);
@@ -283,14 +284,37 @@ describe("schema migration from Child 4 to Child 5", () => {
     );
     expect(lifecycleRows[0]?.values[0]?.[0]).toBe(0);
     const stateCheck = reopened.readAll(
-      "select local_file_id, lifecycle_state, last_locator, open_tombstone_id from local_files order by normalized_path;",
+      "select local_file_id, lifecycle_state, last_locator, open_tombstone_id, last_committed_sha256 from local_files order by normalized_path;",
     );
     expect(stateCheck[0]?.values).toEqual([
-      ["f1f1f1f1-0000-4000-8000-000000000001", "active", null, null],
-      ["f1f1f1f1-0000-4000-8000-000000000002", "active", null, null],
+      ["f1f1f1f1-0000-4000-8000-000000000001", "active", null, null, null],
+      ["f1f1f1f1-0000-4000-8000-000000000002", "active", null, null, null],
     ]);
-    // The schema version has advanced to Child 5.
-    expect(reopened.readSchemaVersion()).toBe(3);
+    // The schema version has advanced to v4.
+    expect(reopened.readSchemaVersion()).toBe(4);
     reopened.close();
+  });
+
+  it("rejects a Child 4 migration of an image that is not at v2", async () => {
+    const { migrateChildFourJournalToLifecycleSchema } = await import(
+      "./lifecycle-contracts"
+    );
+    const seedDatabase = new engineModule.Database();
+    seedDatabase.exec(`
+      create table journal_meta (
+        singleton_key integer primary key check (singleton_key = 1),
+        schema_version integer not null,
+        dirty_generation integer not null,
+        last_verified_generation integer not null,
+        is_reconcile_required integer not null check (is_reconcile_required in (0, 1)),
+        recovery_state text not null
+      );
+      insert into journal_meta values (1, 1, 1, 1, 0, 'verified_generation_loaded');
+      pragma user_version = 1;
+    `);
+    const image = seedDatabase.export();
+    seedDatabase.close();
+    expect(() => migrateChildFourJournalToLifecycleSchema(engineModule, image))
+      .toThrowError(expect.objectContaining({ reason: "journal_schema_unsupported" }));
   });
 });

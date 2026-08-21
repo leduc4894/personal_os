@@ -13,7 +13,11 @@
  * The 250 ms per-path settle delay from `FILE_SETTLE_DELAY_MS` is
  * applied before fingerprinting on the create / modify path; the same
  * delay is used here for rename / move debounce so a burst of rapid
- * notifications collapses into one durable event.
+ * notifications collapses into one durable event. After the settle
+ * completes, the rename / move path reads the target file bytes and the
+ * frozen fingerprint is recorded in the SAME transaction as the
+ * lifecycle event so a half-finished rename never escapes a verified
+ * generation.
  *
  * Coalescing (spec 7.2): lifecycle events MUST NOT coalesce with content
  * events — `LifecycleRepository.recordLifecycleEvent` already enforces
@@ -80,6 +84,8 @@ export interface LifecycleRenameResult {
   readonly localFileId: string;
   readonly eventId: string;
   readonly predecessorEventId: string | null;
+  readonly capturedFingerprintSha256: string;
+  readonly capturedFingerprintSizeBytes: number;
 }
 
 /**
@@ -104,6 +110,32 @@ export interface LifecycleDeleteResult {
   readonly eventId: string;
 }
 
+// --- the public port (brief requirement) ----------------------------------------------------
+
+/**
+ * The required Vault event lifecycle port the brief freezes. The
+ * {@link LifecycleCaptureImpl} class satisfies this interface; tests that
+ * compose against the port never have to know which class implements
+ * it. The interface exposes only the three required methods — the
+ * settle / fingerprinting helpers, the dispose hook, the automatic
+ * restore detector and the reconcile-required flagger stay on the
+ * class so a port fake never needs them.
+ */
+export interface LifecycleCapture {
+  captureRename(
+    file: VaultRenameTarget,
+    priorPath: string,
+  ): Promise<LifecycleRenameResult | null>;
+  captureDelete(
+    file: VaultTargetFile,
+    tombstoneId?: string,
+  ): Promise<LifecycleDeleteResult | null>;
+  requestRestore(
+    localFileId: string,
+    targetPath: string,
+  ): Promise<LifecycleRestoreResult>;
+}
+
 // --- options -------------------------------------------------------------------------------
 
 export interface LifecycleCaptureOptions {
@@ -112,7 +144,12 @@ export interface LifecycleCaptureOptions {
   readonly vaultReader: LifecycleVaultReader | (() => LifecycleVaultReader);
   /** Clock for event creation timestamps; defaults to `Date.now`. */
   readonly nowEpochMs?: () => number;
-  /** Identity mint for event ids and tombstone ids; defaults to `crypto.randomUUID`. */
+  /**
+   * Identity mint for event ids and tombstone ids; defaults to
+   * `crypto.randomUUID` (UUIDv4). Inject a UUIDv7 factory
+   * (see {@link createUuidv7Factory}) so the durable journal carries
+   * time-ordered ids.
+   */
   readonly createId?: () => string;
   /** Policy revision the lifecycle decision is taken under. */
   readonly policyRevision: number;
@@ -161,8 +198,12 @@ function isUuid(value: string): boolean {
  * rapid rename notifications collapses into one durable event; every
  * method runs all SQL through the existing `runSerializedMutation`
  * writer so the Child 4 / Child 5 schema invariants never break.
+ *
+ * Implements the required {@link LifecycleCapture} port; the helper
+ * methods (`detectAutomaticRestore`, `markTombstonedPathReconcileRequired`,
+ * `dispose`) stay on the class only.
  */
-export class LifecycleCapture {
+export class LifecycleCaptureImpl implements LifecycleCapture {
   readonly #repository: JournalRepository;
   readonly #lifecycle: LifecycleRepository;
   readonly #vaultReader: LifecycleVaultReader;
@@ -204,8 +245,15 @@ export class LifecycleCapture {
    * missing local source identity resolves to `null` after durably
    * flagging `reconcile_required` (fail-closed). A thrown journal
    * store error propagates to the caller.
+   *
+   * After the settle completes, the target file bytes are read and
+   * fingerprinted; the lifecycle event and the `local_files` path
+   * rebind land in one transaction (spec 7.1 fix round 1 I1 + I2).
    */
-  captureRename(file: VaultRenameTarget, priorPath: string): Promise<LifecycleRenameResult | null> {
+  captureRename(
+    file: VaultRenameTarget,
+    priorPath: string,
+  ): Promise<LifecycleRenameResult | null> {
     if (this.#isDisposed) {
       return Promise.resolve(null);
     }
@@ -224,7 +272,7 @@ export class LifecycleCapture {
           return;
         }
         settled = true;
-        this.#commitRename(operation, normalizedPrior, normalizedNew).then(
+        this.#commitRenameWithRebind(operation, normalizedPrior, normalizedNew).then(
           (result) => {
             resolve(result);
           },
@@ -268,7 +316,10 @@ export class LifecycleCapture {
    * can reach it. The `tombstoneId` is minted from the same identity
    * seam the lifecycle repository uses.
    */
-  async captureDelete(file: VaultTargetFile, tombstoneId?: string): Promise<LifecycleDeleteResult | null> {
+  async captureDelete(
+    file: VaultTargetFile,
+    tombstoneId?: string,
+  ): Promise<LifecycleDeleteResult | null> {
     if (this.#isDisposed) {
       return null;
     }
@@ -285,18 +336,17 @@ export class LifecycleCapture {
       await this.#flagReconcileRequired().catch(() => undefined);
       return null;
     }
-    await this.#repository.freezePendingForLocalFile(localFile.localFileId);
     const issuedTombstoneId = tombstoneId ?? this.#createId();
-    const operands = this.#buildOperands({
-      operation: "delete",
-      sourceId: localFile.sourceId,
-      expectedVersionId: localFile.baseVersionId,
-      expectedLocator: normalizedPath,
-      targetLocator: null,
-      tombstoneId: issuedTombstoneId,
-      predecessorEventId: null,
-    });
-    const result = await this.#lifecycle.recordLifecycleEvent(operands, {
+    const result = await this.#lifecycle.recordLifecycleEventWithFreeze({
+      operands: this.#buildOperands({
+        operation: "delete",
+        sourceId: localFile.sourceId,
+        expectedVersionId: localFile.baseVersionId,
+        expectedLocator: normalizedPath,
+        targetLocator: null,
+        tombstoneId: issuedTombstoneId,
+        predecessorEventId: null,
+      }),
       localFile,
       tombstoneId: issuedTombstoneId,
     });
@@ -335,7 +385,7 @@ export class LifecycleCapture {
       localFile === null ||
       localFile.sourceId === null ||
       localFile.baseVersionId === null ||
-      localFile.observedFingerprint === null
+      localFile.lastCommittedFingerprint === null
     ) {
       throw journalStoreError("journal_mutation_failed");
     }
@@ -344,15 +394,16 @@ export class LifecycleCapture {
     if (openTombstoneId === null) {
       throw journalStoreError("journal_mutation_failed");
     }
-    // Verify the target path's bytes still hash to the retained content.
+    // Verify the target path's bytes still hash to the committed content
+    // — the last-committed fingerprint, NOT the mutable observed one.
     const targetBytes = await this.#vaultReader.readRegularFileBytes(normalizedTarget);
     if (targetBytes === null) {
       throw journalStoreError("journal_mutation_failed");
     }
     const targetFingerprint = await deriveFrozenFingerprint(targetBytes);
     if (
-      targetFingerprint.sha256 !== localFile.observedFingerprint.sha256 ||
-      targetFingerprint.sizeBytes !== localFile.observedFingerprint.sizeBytes
+      targetFingerprint.sha256 !== localFile.lastCommittedFingerprint.sha256 ||
+      targetFingerprint.sizeBytes !== localFile.lastCommittedFingerprint.sizeBytes
     ) {
       throw journalStoreError("journal_mutation_failed");
     }
@@ -361,17 +412,16 @@ export class LifecycleCapture {
     if (predecessorEventId === null) {
       throw journalStoreError("journal_mutation_failed");
     }
-    await this.#repository.freezePendingForLocalFile(localFileId);
-    const operands = this.#buildOperands({
-      operation: "restore",
-      sourceId: localFile.sourceId,
-      expectedVersionId: localFile.baseVersionId,
-      expectedLocator: null,
-      targetLocator: normalizedTarget,
-      tombstoneId: openTombstoneId,
-      predecessorEventId,
-    });
-    const result = await this.#lifecycle.recordLifecycleEvent(operands, {
+    const result = await this.#lifecycle.recordLifecycleEventWithFreeze({
+      operands: this.#buildOperands({
+        operation: "restore",
+        sourceId: localFile.sourceId,
+        expectedVersionId: localFile.baseVersionId,
+        expectedLocator: null,
+        targetLocator: normalizedTarget,
+        tombstoneId: openTombstoneId,
+        predecessorEventId,
+      }),
       localFile,
       tombstoneId: openTombstoneId,
     });
@@ -390,12 +440,16 @@ export class LifecycleCapture {
    * (with `journal_mutation_failed`) unless BOTH conditions hold:
    *
    *   1. the `local_files` row is still mapped to a retained source id;
-   *   2. the bytes at the path hash to the file's last committed
-   *      content hash.
+   *   2. the bytes at the path hash to the file's LAST COMMITTED
+   *      fingerprint (never the mutable observed fingerprint).
    *
    * On success the adapter records a `restore` event in one
    * transaction and consumes the tombstone via
    * {@link LifecycleRepository.consumeRestoreSuccessor}.
+   *
+   * Class-only helper (not on the {@link LifecycleCapture} port): the
+   * capture composition uses it to detect automatic restores before
+   * minting a fresh create.
    */
   async detectAutomaticRestore(normalizedPath: string): Promise<LifecycleRestoreResult> {
     if (this.#isDisposed) {
@@ -410,7 +464,7 @@ export class LifecycleCapture {
       localFile === null ||
       localFile.sourceId === null ||
       localFile.baseVersionId === null ||
-      localFile.observedFingerprint === null
+      localFile.lastCommittedFingerprint === null
     ) {
       throw journalStoreError("journal_mutation_failed");
     }
@@ -424,8 +478,8 @@ export class LifecycleCapture {
     }
     const targetFingerprint = await deriveFrozenFingerprint(targetBytes);
     if (
-      targetFingerprint.sha256 !== localFile.observedFingerprint.sha256 ||
-      targetFingerprint.sizeBytes !== localFile.observedFingerprint.sizeBytes
+      targetFingerprint.sha256 !== localFile.lastCommittedFingerprint.sha256 ||
+      targetFingerprint.sizeBytes !== localFile.lastCommittedFingerprint.sizeBytes
     ) {
       throw journalStoreError("journal_mutation_failed");
     }
@@ -433,17 +487,16 @@ export class LifecycleCapture {
     if (predecessorEventId === null) {
       throw journalStoreError("journal_mutation_failed");
     }
-    await this.#repository.freezePendingForLocalFile(localFile.localFileId);
-    const operands = this.#buildOperands({
-      operation: "restore",
-      sourceId: localFile.sourceId,
-      expectedVersionId: localFile.baseVersionId,
-      expectedLocator: null,
-      targetLocator: cleanedPath,
-      tombstoneId: openTombstoneId,
-      predecessorEventId,
-    });
-    const result = await this.#lifecycle.recordLifecycleEvent(operands, {
+    const result = await this.#lifecycle.recordLifecycleEventWithFreeze({
+      operands: this.#buildOperands({
+        operation: "restore",
+        sourceId: localFile.sourceId,
+        expectedVersionId: localFile.baseVersionId,
+        expectedLocator: null,
+        targetLocator: cleanedPath,
+        tombstoneId: openTombstoneId,
+        predecessorEventId,
+      }),
       localFile,
       tombstoneId: openTombstoneId,
     });
@@ -454,6 +507,32 @@ export class LifecycleCapture {
       eventId: result.eventId,
       predecessorEventId,
     };
+  }
+
+  /**
+   * Fail-closed reconcile flag: a tombstoned path that re-appeared with
+   * bytes that do NOT match the last-committed fingerprint must NOT be
+   * re-captured as a fresh create. Instead the lifecycle capture
+   * durably flags the row as `reconcile_required`, drops the open
+   * tombstone so the file is not eligible for automatic restore, and
+   * returns `true`. The capture composition then refuses the create /
+   * update admission (spec 7.1 fix round 1 C2).
+   */
+  async markTombstonedPathReconcileRequired(normalizedPath: string): Promise<boolean> {
+    const cleanedPath = this.#normalizePathOrNull(normalizedPath);
+    if (cleanedPath === null) {
+      return false;
+    }
+    const localFile = this.#repository.readLocalFileByPath(cleanedPath);
+    if (localFile === null) {
+      return false;
+    }
+    const openTombstoneId = this.#readOpenTombstoneId(localFile.localFileId);
+    if (openTombstoneId === null) {
+      return false;
+    }
+    await this.#lifecycle.recordLifecycleReconcileForLocalFile(localFile.localFileId);
+    return true;
   }
 
   /** Settle all queued rename observations and stop accepting new ones. */
@@ -479,12 +558,13 @@ export class LifecycleCapture {
   }
 
   /**
-   * Persist one rename or move lifecycle event. The freeze of pending
-   * content events is recorded first so no later queue pass selects
-   * the file; the lifecycle event then lands in the same transaction
-   * the lifecycle repository already owns.
+   * Persist one rename or move lifecycle event AND rebind the
+   * `local_files.normalized_path` to the new locator — both inside
+   * the same transaction so a torn rename never leaves a row pointing
+   * at the old path. After the per-path settle, the target file bytes
+   * are fingerprinted and the fingerprint rides along on the operand.
    */
-  async #commitRename(
+  async #commitRenameWithRebind(
     operation: "rename" | "move",
     priorPath: string,
     newPath: string,
@@ -493,8 +573,6 @@ export class LifecycleCapture {
     try {
       localFile = this.#repository.readLocalFileByPath(priorPath);
     } catch (error) {
-      // A closed / unavailable store surfaces as journal_mutation_failed
-      // so the caller treats the unload as a hard fail.
       if (isStoreError(error)) {
         throw journalStoreError("journal_mutation_failed");
       }
@@ -507,24 +585,37 @@ export class LifecycleCapture {
       await this.#flagReconcileRequired().catch(() => undefined);
       return null;
     }
-    await this.#repository.freezePendingForLocalFile(localFile.localFileId);
-    const operands = this.#buildOperands({
-      operation,
-      sourceId: localFile.sourceId,
-      expectedVersionId: localFile.baseVersionId,
-      expectedLocator: priorPath,
-      targetLocator: newPath,
-      tombstoneId: null,
-      predecessorEventId: null,
-    });
-    const result = await this.#lifecycle.recordLifecycleEvent(operands, {
+    // I2: read the target file bytes after the settle and fingerprint
+    // them; the frozen fingerprint rides on the operand.
+    const targetBytes = await this.#vaultReader.readRegularFileBytes(newPath);
+    if (targetBytes === null) {
+      await this.#flagReconcileRequired().catch(() => undefined);
+      return null;
+    }
+    const targetFingerprint = await deriveFrozenFingerprint(targetBytes);
+    const result = await this.#lifecycle.recordLifecycleEventWithFreeze({
+      operands: this.#buildOperands({
+        operation,
+        sourceId: localFile.sourceId,
+        expectedVersionId: localFile.baseVersionId,
+        expectedLocator: priorPath,
+        targetLocator: newPath,
+        tombstoneId: null,
+        predecessorEventId: null,
+        capturedFingerprintSha256: targetFingerprint.sha256,
+        capturedFingerprintSizeBytes: targetFingerprint.sizeBytes,
+        capturedFingerprintMediaType: targetFingerprint.mediaType,
+      }),
       localFile,
+      newPath,
     });
     return {
       operation,
       localFileId: localFile.localFileId,
       eventId: result.eventId,
       predecessorEventId: null,
+      capturedFingerprintSha256: targetFingerprint.sha256,
+      capturedFingerprintSizeBytes: targetFingerprint.sizeBytes,
     };
   }
 
@@ -537,6 +628,9 @@ export class LifecycleCapture {
     readonly targetLocator: string | null;
     readonly tombstoneId: string | null;
     readonly predecessorEventId: string | null;
+    readonly capturedFingerprintSha256?: string;
+    readonly capturedFingerprintSizeBytes?: number;
+    readonly capturedFingerprintMediaType?: string;
   }): LifecycleEventOperands {
     return createLifecycleEventOperands({
       operation: input.operation,
@@ -547,6 +641,9 @@ export class LifecycleCapture {
       tombstoneId: input.tombstoneId,
       policyRevision: this.#policyRevision,
       predecessorEventId: input.predecessorEventId,
+      capturedFingerprintSha256: input.capturedFingerprintSha256,
+      capturedFingerprintSizeBytes: input.capturedFingerprintSizeBytes,
+      capturedFingerprintMediaType: input.capturedFingerprintMediaType,
     });
   }
 
@@ -589,18 +686,24 @@ export class LifecycleCapture {
 
   /** Set the journal `is_reconcile_required` flag durably (spec 6.4). */
   async #flagReconcileRequired(): Promise<void> {
-    const database = this.#repository.lifecycle.database;
-    const read = (sql: string): readonly unknown[] =>
-      database.readAll(sql)[0]?.values[0] ?? [];
     await this.#repository.lifecycle.database.runSerializedMutation(async (session) => {
-      const row = session.readRows("select is_reconcile_required from journal_meta where singleton_key = 1;")[0]?.values[0]?.[0];
-      void read;
+      const row = session.readRows(
+        "select is_reconcile_required from journal_meta where singleton_key = 1;",
+      )[0]?.values[0]?.[0];
       if (row === 0) {
-        session.exec("update journal_meta set is_reconcile_required = 1 where singleton_key = 1;");
+        session.exec(
+          "update journal_meta set is_reconcile_required = 1 where singleton_key = 1;",
+        );
       }
     });
   }
 }
+
+// The class is exported under its concrete name `LifecycleCaptureImpl`
+// to keep the brief's required `LifecycleCapture` port name free for
+// the interface. Callers that need the concrete class reach for
+// `LifecycleCaptureImpl`; consumers that compose against the port
+// import the `LifecycleCapture` interface.
 
 // Re-export to keep the public surface explicit.
 export type { LifecycleJournalOperation } from "./lifecycle-contracts";

@@ -111,6 +111,9 @@ function operandsFor(
     tombstoneId: null,
     policyRevision: 1,
     predecessorEventId: null,
+    capturedFingerprintSha256: null,
+    capturedFingerprintSizeBytes: null,
+    capturedFingerprintMediaType: null,
   };
   return { ...base, ...overrides };
 }
@@ -158,6 +161,7 @@ describe("LifecycleRepository closed vocabulary", () => {
       },
       baseVersionId: null,
       policyRevisionNumber: 1,
+      lastCommittedFingerprint: null,
     };
     await expect(
       lifecycle.recordLifecycleEvent(
@@ -180,6 +184,7 @@ describe("LifecycleRepository closed vocabulary", () => {
       },
       baseVersionId: null,
       policyRevisionNumber: 1,
+      lastCommittedFingerprint: null,
     };
     await expect(
       lifecycle.recordLifecycleEvent(
@@ -191,7 +196,7 @@ describe("LifecycleRepository closed vocabulary", () => {
 });
 
 describe("LifecycleRepository rename + move event insertion in one transaction", () => {
-  it("records a rename event and updates last_locator + lifecycle_state atomically", async () => {
+  it("records a rename event and rebinds normalized_path + lifecycle_state atomically", async () => {
     const { database, repository, lifecycle } = createOpenedJournal();
     await captureAndCommit(repository, "notes/note.md", fingerprintOf("aa"));
     const fileBefore = requireLocalFile(
@@ -203,7 +208,7 @@ describe("LifecycleRepository rename + move event insertion in one transaction",
         expectedLocator: "notes/note.md",
         targetLocator: "notes/renamed.md",
       }),
-      { localFile: fileBefore },
+      { localFile: fileBefore, newPath: "notes/renamed.md" },
     );
 
     expect(result.event.operation).toBe("rename");
@@ -211,17 +216,20 @@ describe("LifecycleRepository rename + move event insertion in one transaction",
     expect(result.event.idempotencyKey).toMatch(UUID_PATTERN);
     expect(result.eventIdempotencyKey).toMatch(UUID_PATTERN);
 
+    // C1: the row now resolves by the new path; the prior path is gone.
+    expect(repository.readLocalFileByPath("notes/note.md")).toBeNull();
     const fileAfter = requireLocalFile(
-      repository.readLocalFileByPath("notes/note.md"),
+      repository.readLocalFileByPath("notes/renamed.md"),
     );
     expect(fileAfter.localFileId).toBe(fileBefore.localFileId);
     const refreshed = database.readAll(
-      "select last_locator, open_tombstone_id, lifecycle_state from local_files where local_file_id = $id".replace(
+      "select normalized_path, last_locator, open_tombstone_id, lifecycle_state from local_files where local_file_id = $id".replace(
         "$id",
         `'${fileBefore.localFileId}'`,
       ),
     );
     expect(refreshed[0]?.values[0]).toEqual([
+      "notes/renamed.md",
       "notes/renamed.md",
       null,
       "rename_pending",
@@ -229,7 +237,7 @@ describe("LifecycleRepository rename + move event insertion in one transaction",
     database.close();
   });
 
-  it("records a move event and updates last_locator to the target", async () => {
+  it("records a move event and rebinds normalized_path to the target", async () => {
     const { database, repository, lifecycle } = createOpenedJournal();
     await captureAndCommit(repository, "notes/movable.md", fingerprintOf("ba"));
     const fileBefore = requireLocalFile(
@@ -241,17 +249,18 @@ describe("LifecycleRepository rename + move event insertion in one transaction",
         expectedLocator: "notes/movable.md",
         targetLocator: "archive/movable.md",
       }),
-      { localFile: fileBefore },
+      { localFile: fileBefore, newPath: "archive/movable.md" },
     );
 
     expect(result.event.operation).toBe("move");
+    expect(repository.readLocalFileByPath("notes/movable.md")).toBeNull();
     const refreshed = database.readAll(
-      "select last_locator, lifecycle_state from local_files where local_file_id = $id".replace(
+      "select normalized_path, last_locator, lifecycle_state from local_files where local_file_id = $id".replace(
         "$id",
         `'${fileBefore.localFileId}'`,
       ),
     );
-    expect(refreshed[0]?.values[0]).toEqual(["archive/movable.md", "move_pending"]);
+    expect(refreshed[0]?.values[0]).toEqual(["archive/movable.md", "archive/movable.md", "move_pending"]);
     database.close();
   });
 
@@ -410,17 +419,25 @@ describe("LifecycleRepository ordered predecessor dependencies and replay", () =
     });
     const first = await lifecycle.recordLifecycleEvent(operands, {
       localFile: file,
+      newPath: "notes/replayable-renamed.md",
     });
     const second = await lifecycle.recordLifecycleEvent(operands, {
       localFile: file,
+      newPath: "notes/replayable-renamed.md",
     });
 
     expect(second.eventId).toBe(first.eventId);
     expect(second.eventIdempotencyKey).toBe(first.eventIdempotencyKey);
     expect(second.event.fingerprint).toEqual(first.event.fingerprint);
+    // C1: the path was rebound on the first record; the prior path is
+    // permanently retired; a replay returns the same event without
+    // re-asserting the rebind.
     expect(
       repository.readLocalFileByPath("notes/replayable.md"),
-    ).not.toBeNull();
+    ).toBeNull();
+    expect(
+      repository.readLocalFileByPath("notes/replayable-renamed.md")?.localFileId,
+    ).toBe(file.localFileId);
   });
 
   it("keeps terminal lifecycle rows queryable forever (no auto-deletion)", async () => {
@@ -458,20 +475,25 @@ describe("LifecycleRepository coalescing prohibition", () => {
         expectedLocator: "notes/no-coalesce.md",
         targetLocator: "notes/no-coalesce-renamed.md",
       }),
-      { localFile: file },
+      { localFile: file, newPath: "notes/no-coalesce-renamed.md" },
     );
     expect(lifecycleEvent.eventId).not.toBe(createEvent.eventId);
     const events = repository.readEventsByLocalFileId(file.localFileId);
     expect(events).toHaveLength(2);
     expect(events.map((entry) => entry.operation)).toEqual(["create", "rename"]);
 
+    // C1: the rename rebound the path; the new capture must use the new
+    // path so the durable row continues to the same local_file_id.
     const coalescableCapture = await repository.recordCapture({
-      normalizedPath: "notes/no-coalesce.md",
+      normalizedPath: "notes/no-coalesce-renamed.md",
       fingerprint: fingerprintOf("2b"),
       policyRevisionNumber: 1,
       admission: "policy_allowed",
     });
     expect(coalescableCapture.outcome).toBe("event_recorded");
+    if (coalescableCapture.outcome === "event_recorded") {
+      expect(coalescableCapture.localFile.localFileId).toBe(file.localFileId);
+    }
     const eventsAfter = repository.readEventsByLocalFileId(file.localFileId);
     expect(eventsAfter).toHaveLength(3);
     expect(eventsAfter.map((entry) => entry.operation)).toEqual(["create", "rename", "update"]);

@@ -6,13 +6,20 @@
  * together in one transaction: the `journal_events` row, the
  * `lifecycle_event_operands` keyed-extension row and the matching
  * `local_files` update (last_locator / open_tombstone_id /
- * lifecycle_state). A throwing operation rolls the entire transaction
- * back so partial writes never reach a verified generation.
+ * lifecycle_state, plus the captured-fingerprint columns and the
+ * normalized_path rebind for `rename`/`move`). A throwing operation
+ * rolls the entire transaction back so partial writes never reach a
+ * verified generation.
  *
  * Coalescing (spec 7.2): lifecycle events MUST NOT coalesce with content
  * events and content events MUST NOT coalesce with lifecycle events — a
  * `create` or `update` capture never replaces a `rename`/`move`/`delete`/
  * `restore` row, and a lifecycle record never replaces a content row.
+ *
+ * Atomic capture (spec 7.1 fix round 1 I1): the lifecycle capture calls
+ * {@link LifecycleRepository.recordLifecycleEventWithFreeze} so the
+ * pending-content freeze, the lifecycle event, and the path rebind all
+ * land in one writer call.
  *
  * Privacy (spec 9): every failure surfaces as a closed `JournalStoreError`
  * reason; the operands carry local-only retention (expected_locator,
@@ -21,7 +28,7 @@
  */
 
 import type { JournalEvent } from "./contracts";
-import { JOURNAL_NON_RETRY_EVENT_STATES, MAX_EVENT_ATTEMPT_HISTORY } from "./contracts";
+import { JOURNAL_NON_RETRY_EVENT_STATES, JOURNAL_PENDING_EVENT_STATES, MAX_EVENT_ATTEMPT_HISTORY } from "./contracts";
 import type { LocalFile } from "./contracts";
 import {
   isLifecycleJournalOperation,
@@ -67,6 +74,14 @@ export interface LifecycleRecordOptions {
   readonly localFile: LocalFile;
   readonly tombstoneId?: string | null;
   readonly initialLifecycleState?: LifecycleLocalFileState;
+  /**
+   * Optional new normalized path: when the operation is `rename` or
+   * `move`, the local-file row's `normalized_path` column is updated to
+   * this value in the SAME transaction as the lifecycle event so a torn
+   * rename never escapes a verified generation (spec 7.1 fix round 1
+   * C1).
+   */
+  readonly newPath?: string;
   /** Test-only escape hatch: throw `journal_mutation_failed` after exec. */
   readonly forceFailureAfterExec?: boolean;
 }
@@ -233,8 +248,10 @@ export class LifecycleRepository {
    * Record one lifecycle event in one transaction: a `journal_events`
    * row, a `lifecycle_event_operands` row keyed by `event_id` and the
    * `local_files` row update (`last_locator`, `open_tombstone_id`,
-   * `lifecycle_state`). On any failure the entire transaction rolls
-   * back, so partial writes never reach a verified generation.
+   * `lifecycle_state`, and for `rename`/`move` the captured-fingerprint
+   * columns + the `normalized_path` rebind). On any failure the entire
+   * transaction rolls back, so partial writes never reach a verified
+   * generation.
    *
    * Idempotency: replaying an existing event with the same
    * `(localFileId, operation, expectedVersionId, expectedLocator,
@@ -246,118 +263,91 @@ export class LifecycleRepository {
     options: LifecycleRecordOptions = { localFile: { localFileId: "" } as LocalFile },
   ): Promise<LifecycleRecordResult> {
     validateOptions(operands, options);
-    const tombstoneId = options.tombstoneId ?? null;
-    const lifecycleState = initialStateFor(
-      operands.operation,
-      options.initialLifecycleState,
+    return this.#database.runSerializedMutation((session) =>
+      this.#recordLifecycleEventInSession(session, {
+        operands,
+        localFile: options.localFile,
+        tombstoneId: options.tombstoneId ?? null,
+        newPath: options.newPath ?? null,
+        forceFailureAfterExec: options.forceFailureAfterExec === true,
+      }),
     );
+  }
 
+  /**
+   * The atomic lifecycle event writer used by the rename / move / delete /
+   * restore capture path (spec 7.1 fix round 1 I1). It runs three
+   * mutations in one transaction:
+   *
+   *   1. freeze every still-pending content event of the tracked file
+   *      as `deferred_lifecycle` so no later queue pass selects it;
+   *   2. insert the `journal_events` row, the `lifecycle_event_operands`
+   *      row and the matching `local_files` update via
+   *      {@link recordLifecycleEventInSession};
+   *   3. write the `local_files.normalized_path` rebind (for
+   *      `rename` / `move`) atomically inside the same writer call.
+   *
+   * A throwing operation rolls back the whole transaction so a torn
+   * rename never escapes a verified generation.
+   */
+  async recordLifecycleEventWithFreeze(
+    input: {
+      readonly operands: LifecycleEventOperands;
+      readonly localFile: LocalFile;
+      readonly tombstoneId?: string | null;
+      readonly newPath?: string | null;
+      readonly forceFailureAfterExec?: boolean;
+    },
+  ): Promise<LifecycleRecordResult> {
     return this.#database.runSerializedMutation((session) => {
-      const read = (sql: string): readonly SqliteQueryResult[] => session.readRows(sql);
-
-      // Idempotency lookup: a replay returns the original event without
-      // a second insert or a second operands row.
-      const replay = this.#findReplay(read, options.localFile.localFileId, operands);
-      if (replay !== null) {
-        return replay;
-      }
-
-      // Predecessor event id, when present, must reference a stored event.
-      if (operands.predecessorEventId !== null) {
-        const predecessor = firstRow(
-          read(
-            `select event_id from journal_events where event_id = ${sqlText(operands.predecessorEventId)};`,
-          ),
-        );
-        if (predecessor === null) {
-          throw journalStoreError("journal_mutation_failed");
-        }
-      }
-
-      const eventId = this.#createId();
-      const idempotencyKey = this.#createId();
-      const createdAt = this.#nowEpochMs();
-      const isFrozen =
-        operands.operation === "rename" ||
-        operands.operation === "move" ||
-        operands.operation === "delete" ||
-        operands.operation === "restore"
-          ? 1
-          : 0;
-
-      session.exec(
-        [
-          "insert into journal_events (event_id, local_file_id, idempotency_key, operation,",
-          "sha256, size_bytes, media_type, state, is_fingerprint_frozen, attempt_count,",
-          "safe_error, created_at_epoch_ms) values (",
-          `${sqlText(eventId)}, ${sqlText(options.localFile.localFileId)},`,
-          `${sqlText(idempotencyKey)},`,
-          `${sqlText(operands.operation)},`,
-          `${sqlText(LIFECYCLE_FINGERPRINT.sha256)},`,
-          `${LIFECYCLE_FINGERPRINT.sizeBytes},`,
-          `${sqlText(LIFECYCLE_FINGERPRINT.mediaType)},`,
-          `'queued',`,
-          `${isFrozen}, 0, null,`,
-          `${createdAt});`,
-        ].join(" "),
+      this.#freezePendingForLocalFileInSession(
+        session,
+        input.localFile.localFileId,
       );
+      return this.#recordLifecycleEventInSession(session, {
+        operands: input.operands,
+        localFile: input.localFile,
+        tombstoneId: input.tombstoneId ?? null,
+        newPath: input.newPath ?? null,
+        forceFailureAfterExec: input.forceFailureAfterExec === true,
+      });
+    });
+  }
 
-      session.exec(
-        [
-          "insert into lifecycle_event_operands (event_id, source_id, expected_version_id,",
-          "expected_locator, target_locator, tombstone_id, policy_revision,",
-          "predecessor_event_id) values (",
-          `${sqlText(eventId)}, ${sqlText(operands.sourceId)},`,
-          `${sqlText(operands.expectedVersionId)},`,
-          `${operands.expectedLocator === null ? "null" : sqlText(operands.expectedLocator)},`,
-          `${operands.targetLocator === null ? "null" : sqlText(operands.targetLocator)},`,
-          `${tombstoneId === null ? "null" : sqlText(tombstoneId)},`,
-          `${operands.policyRevision},`,
-          `${operands.predecessorEventId === null ? "null" : sqlText(operands.predecessorEventId)});`,
-        ].join(" "),
+  /**
+   * Fail-closed reconcile flagger used when a tombstoned path re-appears
+   * with bytes that no longer match the last-committed fingerprint
+   * (spec 7.1 fix round 1 C2). The row's lifecycle state flips to
+   * `reconcile_required`, the open tombstone is cleared so the file is
+   * no longer eligible for automatic restore, and the global
+   * `journal_meta.is_reconcile_required` flag is set so a later pass
+   * knows to recover the row.
+   */
+  async recordLifecycleReconcileForLocalFile(localFileId: string): Promise<void> {
+    if (!isUuid(localFileId)) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    await this.#database.runSerializedMutation((session) => {
+      const existing = firstRow(
+        session.readRows(
+          `select local_file_id from local_files where local_file_id = ${sqlText(localFileId)};`,
+        ),
       );
-
-      const lastLocator =
-        operands.targetLocator ?? operands.expectedLocator ?? null;
-      const newTombstone =
-        operands.operation === "delete" || operands.operation === "restore"
-          ? tombstoneId
-          : null;
+      if (existing === null) {
+        throw journalStoreError("journal_mutation_failed");
+      }
       session.exec(
         [
           "update local_files set",
-          `${lastLocator === null ? "last_locator = null," : `last_locator = ${sqlText(lastLocator)},`}`,
-          `${newTombstone === null ? "open_tombstone_id = null," : `open_tombstone_id = ${sqlText(newTombstone)},`}`,
-          `lifecycle_state = ${sqlText(lifecycleState)}`,
-          `where local_file_id = ${sqlText(options.localFile.localFileId)};`,
+          "lifecycle_state = 'reconcile_required',",
+          "open_tombstone_id = null",
+          `where local_file_id = ${sqlText(localFileId)};`,
         ].join(" "),
       );
-
-      // Test-only transient failure: forces a journal_mutation_failed that
-      // must roll back the journal_events insert, the operands insert and
-      // the local_files update together.
-      if (options.forceFailureAfterExec === true) {
-        throw journalStoreError("journal_mutation_failed");
+      const meta = session.readJournalMeta();
+      if (!meta.isReconcileRequired) {
+        session.writeJournalMeta({ ...meta, isReconcileRequired: true });
       }
-
-      const event: JournalEvent = {
-        eventId,
-        localFileId: options.localFile.localFileId,
-        idempotencyKey,
-        operation: operands.operation,
-        fingerprint: { ...LIFECYCLE_FINGERPRINT },
-        state: "queued",
-        attemptCount: 0,
-        nextEligibleRetryEpochMs: null,
-        safeError: null,
-        operationId: null,
-      };
-      return {
-        event,
-        eventId,
-        eventIdempotencyKey: idempotencyKey,
-        lifecycleState,
-      };
     });
   }
 
@@ -506,6 +496,198 @@ export class LifecycleRepository {
 
   // --- internals ---------------------------------------------------------------------------
 
+  /**
+   * Session-scoped lifecycle-event writer. Lets the atomic writer
+   * ({@link recordLifecycleEventWithFreeze}) chain the freeze + event +
+   * path-rebind inside one transaction.
+   */
+  #recordLifecycleEventInSession(
+    session: SqliteMutationSession,
+    options: {
+      readonly operands: LifecycleEventOperands;
+      readonly localFile: LocalFile;
+      readonly tombstoneId: string | null;
+      readonly newPath: string | null;
+      readonly forceFailureAfterExec: boolean;
+    },
+  ): LifecycleRecordResult {
+    validateOptions(options.operands, {
+      localFile: options.localFile,
+      tombstoneId: options.tombstoneId,
+    });
+    const tombstoneId = options.tombstoneId;
+    const lifecycleState = initialStateFor(
+      options.operands.operation,
+      undefined,
+    );
+
+    const read = (sql: string): readonly SqliteQueryResult[] => session.readRows(sql);
+
+    // Idempotency lookup: a replay returns the original event without
+    // a second insert or a second operands row.
+    const replay = this.#findReplay(read, options.localFile.localFileId, options.operands);
+    if (replay !== null) {
+      return replay;
+    }
+
+    // Predecessor event id, when present, must reference a stored event.
+    if (options.operands.predecessorEventId !== null) {
+      const predecessor = firstRow(
+        read(
+          `select event_id from journal_events where event_id = ${sqlText(options.operands.predecessorEventId)};`,
+        ),
+      );
+      if (predecessor === null) {
+        throw journalStoreError("journal_mutation_failed");
+      }
+    }
+
+    const eventId = this.#createId();
+    const idempotencyKey = this.#createId();
+    const createdAt = this.#nowEpochMs();
+    const isFrozen =
+      options.operands.operation === "rename" ||
+      options.operands.operation === "move" ||
+      options.operands.operation === "delete" ||
+      options.operands.operation === "restore"
+        ? 1
+        : 0;
+
+    session.exec(
+      [
+        "insert into journal_events (event_id, local_file_id, idempotency_key, operation,",
+        "sha256, size_bytes, media_type, state, is_fingerprint_frozen, attempt_count,",
+        "safe_error, created_at_epoch_ms) values (",
+        `${sqlText(eventId)}, ${sqlText(options.localFile.localFileId)},`,
+        `${sqlText(idempotencyKey)},`,
+        `${sqlText(options.operands.operation)},`,
+        `${sqlText(LIFECYCLE_FINGERPRINT.sha256)},`,
+        `${LIFECYCLE_FINGERPRINT.sizeBytes},`,
+        `${sqlText(LIFECYCLE_FINGERPRINT.mediaType)},`,
+        `'queued',`,
+        `${isFrozen}, 0, null,`,
+        `${createdAt});`,
+      ].join(" "),
+    );
+
+    session.exec(
+      [
+        "insert into lifecycle_event_operands (event_id, source_id, expected_version_id,",
+        "expected_locator, target_locator, tombstone_id, policy_revision,",
+        "predecessor_event_id) values (",
+        `${sqlText(eventId)}, ${sqlText(options.operands.sourceId)},`,
+        `${sqlText(options.operands.expectedVersionId)},`,
+        `${options.operands.expectedLocator === null ? "null" : sqlText(options.operands.expectedLocator)},`,
+        `${options.operands.targetLocator === null ? "null" : sqlText(options.operands.targetLocator)},`,
+        `${tombstoneId === null ? "null" : sqlText(tombstoneId)},`,
+        `${options.operands.policyRevision},`,
+        `${options.operands.predecessorEventId === null ? "null" : sqlText(options.operands.predecessorEventId)});`,
+      ].join(" "),
+    );
+
+    const lastLocator =
+      options.operands.targetLocator ?? options.operands.expectedLocator ?? null;
+    const newTombstone =
+      options.operands.operation === "delete" || options.operands.operation === "restore"
+        ? tombstoneId
+        : null;
+    const newPath =
+      options.operands.operation === "rename" || options.operands.operation === "move"
+        ? options.newPath ?? options.operands.targetLocator ?? null
+        : null;
+    const observedOverride =
+      options.operands.operation === "rename" || options.operands.operation === "move"
+        ? {
+            sha256: options.operands.capturedFingerprintSha256,
+            sizeBytes: options.operands.capturedFingerprintSizeBytes,
+            mediaType: options.operands.capturedFingerprintMediaType,
+          }
+        : null;
+    const observedWrite =
+      observedOverride !== null &&
+      observedOverride.sha256 !== null &&
+      observedOverride.sizeBytes !== null &&
+      observedOverride.mediaType !== null
+        ? [
+            `observed_sha256 = ${sqlText(observedOverride.sha256)},`,
+            `observed_size_bytes = ${observedOverride.sizeBytes},`,
+            `observed_media_type = ${sqlText(observedOverride.mediaType)},`,
+          ].join(" ")
+        : "";
+    const pathWrite =
+      newPath === null ? "" : `normalized_path = ${sqlText(newPath)},`;
+    session.exec(
+      [
+        "update local_files set",
+        `${pathWrite}`,
+        `${observedWrite}`,
+        `${lastLocator === null ? "last_locator = null," : `last_locator = ${sqlText(lastLocator)},`}`,
+        `${newTombstone === null ? "open_tombstone_id = null," : `open_tombstone_id = ${sqlText(newTombstone)},`}`,
+        `lifecycle_state = ${sqlText(lifecycleState)}`,
+        `where local_file_id = ${sqlText(options.localFile.localFileId)};`,
+      ].join(" "),
+    );
+
+    if (options.forceFailureAfterExec) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+
+    const event: JournalEvent = {
+      eventId,
+      localFileId: options.localFile.localFileId,
+      idempotencyKey,
+      operation: options.operands.operation,
+      fingerprint: { ...LIFECYCLE_FINGERPRINT },
+      state: "queued",
+      attemptCount: 0,
+      nextEligibleRetryEpochMs: null,
+      safeError: null,
+      operationId: null,
+    };
+    return {
+      event,
+      eventId,
+      eventIdempotencyKey: idempotencyKey,
+      lifecycleState,
+    };
+  }
+
+  /**
+   * Session-scoped variant of the freeze helper: every still-pending
+   * content event (`queued` / `preflight` / `waiting_retry`) of the
+   * tracked file flips to terminal `deferred_lifecycle` inside the
+   * SAME transaction the lifecycle event lands in.
+   */
+  #freezePendingForLocalFileInSession(
+    session: SqliteMutationSession,
+    localFileId: string,
+  ): void {
+    if (!isUuid(localFileId)) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    const existing = firstRow(
+      session.readRows(
+        `select local_file_id from local_files where local_file_id = ${sqlText(localFileId)};`,
+      ),
+    );
+    if (existing === null) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    const pendingStateList = JOURNAL_PENDING_EVENT_STATES.map((state) => sqlText(state)).join(", ");
+    session.exec(
+      [
+        "update journal_events set",
+        "state = 'deferred_lifecycle',",
+        "next_eligible_retry_epoch_ms = null,",
+        "safe_error = 'deferred_lifecycle',",
+        "is_fingerprint_frozen = 1",
+        `where local_file_id = ${sqlText(localFileId)}`,
+        `and state in (${pendingStateList})`,
+        "and operation in ('create', 'update');",
+      ].join(" "),
+    );
+  }
+
   #findReplay(
     read: (sql: string) => readonly SqliteQueryResult[],
     localFileId: string,
@@ -513,7 +695,7 @@ export class LifecycleRepository {
   ): LifecycleRecordResult | null {
     const tombstoneFilter =
       operands.tombstoneId === null ? "is null" : `= ${sqlText(operands.tombstoneId)}`;
-    const row = firstRow(
+    const replayRow = firstRow(
       read(
         [
           `select je.event_id, je.idempotency_key, lf.lifecycle_state`,
@@ -526,22 +708,18 @@ export class LifecycleRepository {
           `and leo.expected_version_id = ${sqlText(operands.expectedVersionId)}`,
           `and ${operands.expectedLocator === null ? "leo.expected_locator is null" : `leo.expected_locator = ${sqlText(operands.expectedLocator)}`}`,
           `and ${operands.targetLocator === null ? "leo.target_locator is null" : `leo.target_locator = ${sqlText(operands.targetLocator)}`}`,
-          `and ${tombstoneFilter.replace(/^leo\./, "leo.")}`,
+          `and leo.tombstone_id ${tombstoneFilter}`,
           `and leo.policy_revision = ${operands.policyRevision}`,
           `and ${operands.predecessorEventId === null ? "leo.predecessor_event_id is null" : `leo.predecessor_event_id = ${sqlText(operands.predecessorEventId)}`}`,
           `order by je.created_at_epoch_ms desc, je.rowid desc`,
           `limit 1;`,
-        ]
-          .join(" ")
-          // The tombstone filter already lives on leo.tombstone_id; rewrite it
-          // explicitly so the closure above matches.
-          .replace(`and ${tombstoneFilter}`, `and leo.tombstone_id ${tombstoneFilter}`),
+        ].join(" "),
       ),
     );
-    if (row === null) {
+    if (replayRow === null) {
       return null;
     }
-    const [eventId, idempotencyKey, lifecycleState] = row;
+    const [eventId, idempotencyKey, lifecycleState] = replayRow;
     if (
       typeof eventId !== "string" ||
       typeof idempotencyKey !== "string" ||

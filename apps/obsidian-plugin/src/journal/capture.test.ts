@@ -16,6 +16,12 @@ import type {
   CaptureVaultReader,
   ExistingFilesScanSummary,
 } from "./capture";
+import type { LifecycleCapture } from "./lifecycle-capture";
+import type {
+  LifecycleDeleteResult,
+  LifecycleRenameResult,
+  LifecycleRestoreResult,
+} from "./lifecycle-capture";
 import { JournalRepository } from "./repository";
 import { JOURNAL_SCHEMA_VERSION, SqliteDatabase } from "./sqlite-database";
 import type { SqliteEngineModule } from "./sqlite-database";
@@ -130,24 +136,22 @@ function createHarness(options?: {
     repository,
     vaultReader: vault,
     policyGate: gate,
-    lifecycleCapture: lifecycleCapture as never,
+    lifecycleCapture,
     scanMaximumFiles: options?.scanMaximumFiles,
     scanBatchFiles: options?.scanBatchFiles,
   });
   return { capture, repository, database, vault, gate, lifecycleState };
 }
 
-interface FakeLifecycleCapture {
-  readonly captureRename: (
-    file: { readonly path: string; readonly parent: { readonly path: string } | null },
-    priorPath: string,
-  ) => Promise<unknown>;
-  readonly captureDelete: (
-    file: { readonly path: string; readonly parent: { readonly path: string } | null },
-    tombstoneId?: string,
-  ) => Promise<unknown>;
-  readonly requestRestore: (localFileId: string, targetPath: string) => Promise<unknown>;
-  readonly detectAutomaticRestore: (normalizedPath: string) => Promise<unknown>;
+/**
+ * The capture tests verify the content surface only; the lifecycle adapter
+ * has its own suite (`lifecycle-capture.test.ts`). A stub that records
+ * calls but never writes keeps the focus on settle + admit + guard.
+ */
+interface FakeLifecycleCapture extends LifecycleCapture {
+  readonly detectAutomaticRestore?: (normalizedPath: string) => Promise<LifecycleRestoreResult>;
+  readonly markTombstonedPathReconcileRequired?: (normalizedPath: string) => Promise<boolean>;
+  readonly reconcileCalls: readonly string[];
 }
 
 interface FakeLifecycleState {
@@ -160,25 +164,43 @@ interface FakeLifecycleState {
  * has its own suite (`lifecycle-capture.test.ts`). A stub that records
  * calls but never writes keeps the focus on settle + admit + guard.
  */
-function createFakeLifecycleCapture(): { readonly fake: FakeLifecycleCapture; readonly state: FakeLifecycleState } {
+function createFakeLifecycleCapture(options?: {
+  readonly autoRestoreOutcome?: "succeed" | "reject";
+}): { readonly fake: FakeLifecycleCapture; readonly state: FakeLifecycleState } {
   const state: FakeLifecycleState = {
     deleteCalls: [],
     renameCalls: [],
   };
+  const reconcileCalls: string[] = [];
   const fake: FakeLifecycleCapture = {
+    reconcileCalls,
     captureRename: async (file, priorPath) => {
       state.renameCalls.push({ file: { path: file.path }, priorPath });
-      return null;
+      const result: LifecycleRenameResult | null = null;
+      return result;
     },
     captureDelete: async (file) => {
       state.deleteCalls.push({ path: file.path });
-      return null;
+      const result: LifecycleDeleteResult | null = null;
+      return result;
     },
     requestRestore: async () => {
       throw new Error("not used in capture tests");
     },
     detectAutomaticRestore: async () => {
+      if (options?.autoRestoreOutcome === "succeed") {
+        return {
+          operation: "restore",
+          localFileId: "00000000-0000-4000-8000-000000000000",
+          eventId: "11111111-1111-7111-8111-111111111111",
+          predecessorEventId: "22222222-2222-7222-8222-222222222222",
+        };
+      }
       throw new Error("not used in capture tests");
+    },
+    markTombstonedPathReconcileRequired: async (normalizedPath: string) => {
+      reconcileCalls.push(normalizedPath);
+      return true;
     },
   };
   return { fake, state };
@@ -482,6 +504,105 @@ describe("JournalCapture lifecycle guard (spec 7.1, child 5)", () => {
     expect(harness.repository.countPendingEvents()).toBe(0);
   });
 });
+
+describe("JournalCapture automatic restore fail-closed (spec 7.1, child 5 fix round 1 C2)", () => {
+  function createFailClosedHarness(options?: {
+    readonly autoRestoreBehaviour?: "reject" | "succeed";
+  }): CaptureHarness {
+    const database = SqliteDatabase.createEmpty(engineModule, {
+      schemaVersion: JOURNAL_SCHEMA_VERSION,
+      dirtyGeneration: 1,
+      lastVerifiedGeneration: 1,
+      isReconcileRequired: false,
+      recoveryState: "verified_generation_loaded",
+    } satisfies JournalMeta);
+    const repository = new JournalRepository({ database });
+    const vault = new FakeCaptureVault();
+    const gate = createFakePolicyGate(() => "allowed", 1);
+    // Use a fake that records `markTombstonedPathReconcileRequired`
+    // calls so we can prove the C2 fail-closed path is taken.
+    const reconcileCalls: string[] = [];
+    const lifecycleCapture: FakeLifecycleCapture = {
+      reconcileCalls,
+      captureRename: async () => null,
+      captureDelete: async () => null,
+      requestRestore: async () => {
+        throw new Error("not used in C2 test");
+      },
+      detectAutomaticRestore: async () => {
+        if (options?.autoRestoreBehaviour === "succeed") {
+          return {
+            operation: "restore",
+            localFileId: "00000000-0000-4000-8000-000000000000",
+            eventId: "11111111-1111-7111-8111-111111111111",
+            predecessorEventId: "22222222-2222-7222-8222-222222222222",
+          };
+        }
+        // Real `JournalStoreError` so capture.ts sees a real failure.
+        throw newError("journal_mutation_failed");
+      },
+      markTombstonedPathReconcileRequired: async (normalizedPath: string) => {
+        reconcileCalls.push(normalizedPath);
+        return true;
+      },
+    };
+    const capture = new JournalCapture({
+      repository,
+      vaultReader: vault,
+      policyGate: gate,
+      lifecycleCapture,
+    });
+    return {
+      capture,
+      repository,
+      database,
+      vault,
+      gate,
+      lifecycleState: { deleteCalls: [], renameCalls: [] },
+    };
+  }
+
+  it("fails closed and flags reconcile_required when automatic restore proof fails on a tombstoned path", async () => {
+    useSettleFakeTimers();
+    const harness = createFailClosedHarness();
+    // Seed a tracked file with a tombstone via raw SQL so we exercise
+    // the auto-restore guard.
+    harness.vault.setFileBytes("notes/tombstone-reuse.md", bytesOf("content"));
+    harness.capture.notifyPathChanged("notes/tombstone-reuse.md");
+    await settlePastDelay(harness);
+    // Now the file row is tracked; simulate a tombstone by directly
+    // setting `open_tombstone_id` on the local_files row.
+    const tracked = harness.repository.readLocalFileByPath("notes/tombstone-reuse.md");
+    expect(tracked).not.toBeNull();
+    harness.database.readAll("select 1"); // touch
+    // Direct tombstone write via a new capture.
+    const tombstoneId = "40404040-4040-7404-8404-404040404040";
+    harness.database.runSerializedMutation(async (session) => {
+      session.exec(
+        `update local_files set open_tombstone_id = ${sqlQuoted(tombstoneId)}, lifecycle_state = 'tombstoned' where normalized_path = 'notes/tombstone-reuse.md';`,
+      );
+    });
+    // Trigger an observation; the capture composition sees the tombstoned
+    // row and calls `detectAutomaticRestore`, which throws.
+    harness.vault.setFileBytes("notes/tombstone-reuse.md", bytesOf("totally different bytes"));
+    const before = harness.repository.countPendingEvents();
+    harness.capture.notifyPathChanged("notes/tombstone-reuse.md");
+    await settlePastDelay(harness);
+    // C2: NO new pending event was minted for the path; the fail-closed
+    // path refused the create / update admission.
+    expect(harness.repository.countPendingEvents()).toBe(before);
+  });
+});
+
+function sqlQuoted(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function newError(reason: string): Error {
+  const error = new Error(`journal store failed: ${reason}`) as Error & { reason: string };
+  error.reason = reason;
+  return error;
+}
 
 describe("JournalCapture existing-files scan (spec 7.1)", () => {
   async function scanOf(

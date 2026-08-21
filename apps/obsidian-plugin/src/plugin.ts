@@ -35,7 +35,7 @@ import { DeviceAuthenticationSettingTab } from "./authentication/settings-tab";
 import { DeviceTokenSession, resolveStartupAction } from "./authentication/token-session";
 import { JournalCapture } from "./journal/capture";
 import type { CaptureVaultReader } from "./journal/capture";
-import { LifecycleCapture } from "./journal/lifecycle-capture";
+import { LifecycleCaptureImpl } from "./journal/lifecycle-capture";
 import type {
   LifecycleVaultReader,
   VaultRenameTarget,
@@ -185,7 +185,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   #policyState: PolicyIntegrityState = "policy_not_initialized";
   #journalPersistence: JournalPersistence | null = null;
   #capture: JournalCapture | null = null;
-  #lifecycleCapture: LifecycleCapture | null = null;
+  #lifecycleCapture: LifecycleCaptureImpl | null = null;
   #queueDriver: JournalQueueDriver | null = null;
   #queueRepository: JournalRepository | null = null;
   #isQueuePassActive = false;
@@ -411,7 +411,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       const repository = new JournalRepository({ database: journalDatabase });
       const vaultReader = this.#createCaptureVaultReader();
       const lifecycleVaultReader = this.#createLifecycleVaultReader(vaultReader);
-      const lifecycleCapture = new LifecycleCapture({
+      const lifecycleCapture = new LifecycleCaptureImpl({
         repository,
         lifecycle: repository.lifecycle,
         vaultReader: lifecycleVaultReader,

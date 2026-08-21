@@ -206,9 +206,11 @@ describe("journal record shapes (spec 6.3)", () => {
       },
       baseVersionId: null,
       policyRevisionNumber: 7,
+      lastCommittedFingerprint: null,
     };
     expect(localFile.sourceId).toBeNull();
     expect(localFile.policyRevisionNumber).toBe(7);
+    expect(localFile.lastCommittedFingerprint).toBeNull();
   });
 
   it("types one journal event with the spec-6.3 fields", () => {

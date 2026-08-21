@@ -32,6 +32,13 @@ import type { SqliteDatabaseEngine, SqliteEngineModule } from "./sqlite-database
  */
 export const LIFECYCLE_SCHEMA_VERSION = JOURNAL_SCHEMA_VERSION;
 
+/**
+ * The Child 5 lifecycle extension schema version (3). The
+ * {@link migrateLifecycleJournalToLastCommittedSchema} function upgrades a
+ * v3 image to the v4 {@link JOURNAL_SCHEMA_VERSION}.
+ */
+export const CHILD_FIVE_SCHEMA_VERSION = 3;
+
 // --- closed lifecycle operations --------------------------------------------------------------
 
 /**
@@ -125,6 +132,13 @@ export function isLifecycleLocalFileState(value: unknown): value is LifecycleLoc
  *   - `predecessorEventId` — ordered predecessor when the lifecycle
  *     event depends on a prior lifecycle event (e.g. `restore` after
  *     `delete`); null when the event has no predecessor.
+ *   - `capturedFingerprintSha256` / `capturedFingerprintSizeBytes` /
+ *     `capturedFingerprintMediaType` — the bytes hash of the target
+ *     file at the moment the lifecycle event was minted (post-settle).
+ *     Only set for `rename` and `move`; nullable otherwise. The durable
+ *     `local_files.normalized_path` is then updated to `targetLocator`
+ *     in the same transaction so a later read resolves by the new
+ *     locator (spec 7.1 fix round 1 C1 + I2).
  */
 export interface LifecycleEventOperands {
   readonly operation: LifecycleJournalOperation;
@@ -135,6 +149,9 @@ export interface LifecycleEventOperands {
   readonly tombstoneId: string | null;
   readonly policyRevision: number;
   readonly predecessorEventId: string | null;
+  readonly capturedFingerprintSha256: string | null;
+  readonly capturedFingerprintSizeBytes: number | null;
+  readonly capturedFingerprintMediaType: string | null;
 }
 
 /**
@@ -149,11 +166,14 @@ export function createLifecycleEventOperands(
     readonly operation: LifecycleJournalOperation;
     readonly sourceId: string;
     readonly expectedVersionId: string;
-    readonly expectedLocator?: string | null;
-    readonly targetLocator?: string | null;
-    readonly tombstoneId?: string | null;
+    readonly expectedLocator?: string | null | undefined;
+    readonly targetLocator?: string | null | undefined;
+    readonly tombstoneId?: string | null | undefined;
     readonly policyRevision: number;
-    readonly predecessorEventId?: string | null;
+    readonly predecessorEventId?: string | null | undefined;
+    readonly capturedFingerprintSha256?: string | null | undefined;
+    readonly capturedFingerprintSizeBytes?: number | null | undefined;
+    readonly capturedFingerprintMediaType?: string | null | undefined;
   },
 ): LifecycleEventOperands {
   if (!isLifecycleJournalOperation(draft.operation)) {
@@ -172,6 +192,16 @@ export function createLifecycleEventOperands(
   ) {
     throw journalStoreError("journal_mutation_failed");
   }
+  const capturedSha = draft.capturedFingerprintSha256 ?? null;
+  const capturedSize = draft.capturedFingerprintSizeBytes ?? null;
+  const capturedMedia = draft.capturedFingerprintMediaType ?? null;
+  if (
+    (capturedSha === null) !== (capturedSize === null) ||
+    (capturedSha === null) !== (capturedMedia === null)
+  ) {
+    // The captured-fingerprint triple must be set together or not at all.
+    throw journalStoreError("journal_mutation_failed");
+  }
   return {
     operation: draft.operation,
     sourceId: draft.sourceId,
@@ -181,6 +211,9 @@ export function createLifecycleEventOperands(
     tombstoneId: draft.tombstoneId ?? null,
     policyRevision: draft.policyRevision,
     predecessorEventId: draft.predecessorEventId ?? null,
+    capturedFingerprintSha256: capturedSha,
+    capturedFingerprintSizeBytes: capturedSize,
+    capturedFingerprintMediaType: capturedMedia,
   };
 }
 
@@ -202,6 +235,16 @@ const LIFECYCLE_MIGRATION_DDL = [
   ");",
   "create index if not exists lifecycle_operands_predecessor_idx",
   "  on lifecycle_event_operands (predecessor_event_id);",
+  `update journal_meta set schema_version = ${CHILD_FIVE_SCHEMA_VERSION} where singleton_key = 1;`,
+  `pragma user_version = ${CHILD_FIVE_SCHEMA_VERSION};`,
+].join("");
+
+// --- Child 5 → Child 5 fix schema migration (v3 → v4) ---------------------------------------
+
+const LAST_COMMITTED_MIGRATION_DDL = [
+  "alter table local_files add column last_committed_sha256 text;",
+  "alter table local_files add column last_committed_size_bytes integer;",
+  "alter table local_files add column last_committed_media_type text;",
   `update journal_meta set schema_version = ${JOURNAL_SCHEMA_VERSION} where singleton_key = 1;`,
   `pragma user_version = ${JOURNAL_SCHEMA_VERSION};`,
 ].join("");
@@ -245,6 +288,38 @@ function childFourJournalImageLooksValid(engine: SqliteDatabaseEngine): boolean 
   }
 }
 
+function lifecycleJournalImageLooksValid(engine: SqliteDatabaseEngine): boolean {
+  try {
+    const metaRows = engine.exec(
+      [
+        "select schema_version from journal_meta where singleton_key = 1;",
+      ].join(" "),
+    );
+    if (metaRows[0]?.values[0] === undefined) {
+      return false;
+    }
+    const tables = engine.exec(
+      "select name from sqlite_master where type = 'table' order by name;",
+    );
+    const tableNames = (tables[0]?.values ?? []).map((row) => row[0]);
+    const required = [
+      "journal_attempts",
+      "journal_events",
+      "journal_meta",
+      "lifecycle_event_operands",
+      "local_files",
+    ];
+    for (const name of required) {
+      if (!(tableNames as readonly unknown[]).includes(name)) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Migrate one Child 4 (`pragma user_version = 2`) journal image to the
  * Child 5 schema in memory. The function returns a fresh v3 image; the
@@ -273,6 +348,47 @@ export function migrateChildFourJournalToLifecycleSchema(
     engine.exec("begin immediate;");
     try {
       engine.exec(LIFECYCLE_MIGRATION_DDL);
+      engine.exec("commit;");
+    } catch (error) {
+      try {
+        engine.exec("rollback;");
+      } catch {
+        // Best-effort rollback: the closed reason below is the answer.
+      }
+      throw error instanceof JournalStoreError
+        ? error
+        : journalStoreError("journal_mutation_failed");
+    }
+    return engine.export();
+  } finally {
+    engine.close();
+  }
+}
+
+/**
+ * Migrate one Child 5 (`pragma user_version = 3`) journal image to the
+ * v4 lifecycle-journal schema in memory. The migration adds the
+ * `last_committed_*` columns to `local_files`; every existing v3 row
+ * reads back with `last_committed_* = null` until the first commit
+ * receipt lands. The input image is never mutated; the function returns
+ * the upgraded image and runs the DDL inside one transaction.
+ */
+export function migrateLifecycleJournalToLastCommittedSchema(
+  engineModule: SqliteEngineModule,
+  image: ArrayLike<number>,
+): Uint8Array {
+  const engine = new engineModule.Database(image);
+  try {
+    const currentVersion = readUserVersion(engine);
+    if (currentVersion !== CHILD_FIVE_SCHEMA_VERSION) {
+      throw journalStoreError("journal_schema_unsupported");
+    }
+    if (!lifecycleJournalImageLooksValid(engine)) {
+      throw journalStoreError("journal_image_invalid");
+    }
+    engine.exec("begin immediate;");
+    try {
+      engine.exec(LAST_COMMITTED_MIGRATION_DDL);
       engine.exec("commit;");
     } catch (error) {
       try {

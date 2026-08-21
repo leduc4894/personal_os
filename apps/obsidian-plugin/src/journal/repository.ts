@@ -234,6 +234,9 @@ const LOCAL_FILE_COLUMNS = [
   "observed_media_type",
   "base_version_id",
   "policy_revision",
+  "last_committed_sha256",
+  "last_committed_size_bytes",
+  "last_committed_media_type",
 ] as const;
 
 const JOURNAL_EVENT_COLUMNS = [
@@ -279,6 +282,9 @@ function parseLocalFileRow(row: readonly unknown[]): LocalFile {
     observedMediaType,
     baseVersionId,
     policyRevision,
+    lastCommittedSha256,
+    lastCommittedSizeBytes,
+    lastCommittedMediaType,
   ] = row;
   if (
     typeof localFileId !== "string" ||
@@ -292,6 +298,16 @@ function parseLocalFileRow(row: readonly unknown[]): LocalFile {
   ) {
     throw journalStoreError("journal_image_invalid");
   }
+  const lastCommittedFingerprint =
+    typeof lastCommittedSha256 === "string" &&
+    typeof lastCommittedSizeBytes === "number" &&
+    typeof lastCommittedMediaType === "string"
+      ? {
+          sha256: lastCommittedSha256,
+          sizeBytes: lastCommittedSizeBytes,
+          mediaType: lastCommittedMediaType,
+        }
+      : null;
   return {
     localFileId,
     normalizedPath,
@@ -303,6 +319,7 @@ function parseLocalFileRow(row: readonly unknown[]): LocalFile {
     },
     baseVersionId,
     policyRevisionNumber: policyRevision,
+    lastCommittedFingerprint,
   };
 }
 
@@ -753,7 +770,10 @@ export class JournalRepository {
    * Persist the canonical receipt of one committed event: the event closes
    * as `committed` and its file takes the server-returned source and base
    * version identities. The observed fingerprint is left untouched — a
-   * successor capture may already have observed newer bytes.
+   * successor capture may already have observed newer bytes — but the
+   * provable `last_committed_*` triple is updated from the event's frozen
+   * fingerprint so the lifecycle capture can verify a later restore
+   * eligibility against bytes the server actually acknowledged.
    */
   async recordCommittedReceipt(input: JournalCommittedReceiptInput): Promise<void> {
     if (
@@ -781,7 +801,10 @@ export class JournalRepository {
         [
           "update local_files set",
           `source_id = ${sqlText(input.sourceId)},`,
-          `base_version_id = ${sqlText(input.baseVersionId)}`,
+          `base_version_id = ${sqlText(input.baseVersionId)},`,
+          `last_committed_sha256 = ${sqlText(event.fingerprint.sha256)},`,
+          `last_committed_size_bytes = ${event.fingerprint.sizeBytes},`,
+          `last_committed_media_type = ${sqlText(event.fingerprint.mediaType)}`,
           `where local_file_id = ${sqlText(event.localFileId)};`,
         ].join(" "),
       );
@@ -791,7 +814,10 @@ export class JournalRepository {
   /**
    * Persist the safe no-op receipt of one `no_change` preflight (spec 7.2,
    * 10.1): the event closes as `no_change` and its file adopts the confirmed
-   * current server base — no bytes were uploaded and nothing retries.
+   * current server base — no bytes were uploaded and nothing retries. The
+   * `last_committed_*` triple is updated from the event's frozen fingerprint
+   * so the lifecycle capture can verify restore eligibility against the
+   * server's acknowledgement.
    */
   async recordNoChangeReceipt(input: JournalCommittedReceiptInput): Promise<void> {
     if (
@@ -819,7 +845,10 @@ export class JournalRepository {
         [
           "update local_files set",
           `source_id = ${sqlText(input.sourceId)},`,
-          `base_version_id = ${sqlText(input.baseVersionId)}`,
+          `base_version_id = ${sqlText(input.baseVersionId)},`,
+          `last_committed_sha256 = ${sqlText(event.fingerprint.sha256)},`,
+          `last_committed_size_bytes = ${event.fingerprint.sizeBytes},`,
+          `last_committed_media_type = ${sqlText(event.fingerprint.mediaType)}`,
           `where local_file_id = ${sqlText(event.localFileId)};`,
         ].join(" "),
       );
