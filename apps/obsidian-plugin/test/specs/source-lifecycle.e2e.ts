@@ -3,6 +3,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { browser } from "@wdio/globals";
 import { onboardLiveDevice } from "../support/live-device-onboarding";
+import {
+  type LiveAcceptancePhaseResultCode,
+  writeLiveAcceptancePhaseStatus,
+} from "../support/live-acceptance-phase-status";
 import { runFromE2eRepositoryRoot } from "../support/repository-subprocess";
 
 /**
@@ -19,6 +23,7 @@ const allowedOrigin = process.env.E2E_ALLOWED_ORIGIN ?? "https://app.ducinvest.c
 const webUsername = process.env.E2E_WEB_USERNAME ?? "duc";
 const passwordFile = process.env.E2E_WEB_PASSWORD_FILE;
 const totpHelper = process.env.E2E_TOTP_HELPER;
+const livePhaseStatusFile = process.env.E2E_LIVE_PHASE_STATUS_FILE;
 const pluginDataPathSuffix = "plugins/knowledge-workspace/data.json";
 const fixtureIdentity = crypto.randomUUID();
 const initialPath = `controlled-lifecycle-${fixtureIdentity}.md`;
@@ -58,6 +63,13 @@ interface JournalLifecycleEvidence {
   readonly committedLifecycleCount: number;
   readonly pendingLifecycleCount: number;
   readonly blockedLifecycleCount: number;
+}
+
+function recordLivePhase(resultCode: LiveAcceptancePhaseResultCode): void {
+  if (livePhaseStatusFile === undefined) {
+    throw new Error("live E2E phase status contract was unavailable");
+  }
+  writeLiveAcceptancePhaseStatus(livePhaseStatusFile, resultCode);
 }
 
 const canonicalEvidenceScript = String.raw`
@@ -497,7 +509,11 @@ describe("source locator and tombstone lifecycle (live server)", () => {
     const missingDatabaseContracts = databaseEnvironmentKeys.filter(
       (key) => process.env[key] === undefined,
     );
-    if (passwordFile === undefined || totpHelper === undefined) {
+    if (
+      passwordFile === undefined ||
+      totpHelper === undefined ||
+      livePhaseStatusFile === undefined
+    ) {
       throw new Error(
         "live E2E environment loader did not provide the credential-file and TOTP-helper contracts",
       );
@@ -512,7 +528,9 @@ describe("source locator and tombstone lifecycle (live server)", () => {
 
   it("preserves source identity across rename move delete and explicit restore", async function () {
     this.timeout(600_000);
+    recordLivePhase("source_lifecycle_scenario_started");
     await onboardFixtureDevice();
+    recordLivePhase("source_lifecycle_onboarding_completed");
     await createFixtureNote();
     await triggerSyncNow();
     const before = await waitForCanonicalEvidence(
@@ -530,6 +548,7 @@ describe("source locator and tombstone lifecycle (live server)", () => {
         evidence.pendingLifecycleCount === 0,
       "initial plugin source mapping did not settle",
     );
+    recordLivePhase("source_lifecycle_initial_sync_completed");
 
     await renameFixtureNote();
     await browser.pause(300);
@@ -541,6 +560,7 @@ describe("source locator and tombstone lifecycle (live server)", () => {
         evidence.locatorHistoryCount === 2,
       "rename did not commit canonically",
     );
+    recordLivePhase("source_lifecycle_rename_completed");
 
     await moveFixtureNote();
     await browser.pause(300);
@@ -552,6 +572,7 @@ describe("source locator and tombstone lifecycle (live server)", () => {
         evidence.locatorHistoryCount === 3,
       "move did not commit canonically",
     );
+    recordLivePhase("source_lifecycle_move_completed");
 
     await deleteFixtureNote();
     await triggerSyncNow();
@@ -563,6 +584,7 @@ describe("source locator and tombstone lifecycle (live server)", () => {
         evidence.openTombstoneCount === 1,
       "delete did not commit canonically",
     );
+    recordLivePhase("source_lifecycle_delete_completed");
 
     await explicitlyRestoreFixtureNote();
     await triggerSyncNow();
@@ -575,6 +597,7 @@ describe("source locator and tombstone lifecycle (live server)", () => {
         evidence.openTombstoneCount === 0,
       "explicit restore did not commit canonically",
     );
+    recordLivePhase("source_lifecycle_restore_completed");
     const finalJournal = await waitForJournalEvidence(
       initialJournal.localFileId,
       (evidence) =>
@@ -583,12 +606,14 @@ describe("source locator and tombstone lifecycle (live server)", () => {
         evidence.blockedLifecycleCount === 0,
       "plugin lifecycle journal did not drain",
     );
+    recordLivePhase("source_lifecycle_journal_drained");
 
     expect(after.sourceId).toBe(before.sourceId);
     expect(after.currentVersionId).toBe(before.currentVersionId);
     expect(finalJournal.sourceId).toBe(before.sourceId);
     expect(finalJournal.currentVersionId).toBe(before.currentVersionId);
     expect(finalJournal.pendingLifecycleCount).toBe(0);
+    recordLivePhase("source_lifecycle_journey_completed");
     console.log(
       "SANITIZED_SOURCE_LIFECYCLE_EVIDENCE",
       JSON.stringify({

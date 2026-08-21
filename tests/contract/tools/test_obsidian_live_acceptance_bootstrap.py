@@ -720,3 +720,151 @@ def test_launcher_settings_reach_totp_policy_and_wdio_children(tmp_path: Path) -
     for child_name in ("policy", "wdio"):
         for name, value in expected_e2e_environment.items():
             assert observed_environments[child_name][name] == value
+
+
+def test_failed_wdio_reports_the_last_closed_lifecycle_phase(tmp_path: Path) -> None:
+    """A closed phase marker distinguishes scenario progress without child output."""
+    password_file = tmp_path / "web-credential-password.key"
+    password_file.write_text(_PASSWORD_SENTINEL, encoding="utf-8")
+    events: list[str] = []
+    status_paths: list[Path] = []
+
+    class PhaseReportingExecutor(FreshDisposableExecutor):
+        def run(
+            self,
+            arguments: Sequence[str],
+            *,
+            environment: Mapping[str, str],
+            cwd: Path,
+            timeout_seconds: float,
+            should_capture: bool,
+        ) -> CommandResult:
+            if "wdio run" in " ".join(arguments):
+                status_file = Path(environment["E2E_LIVE_PHASE_STATUS_FILE"])
+                assert status_file.name == "knowledge-ci-phase-report.obsidian-live-phase.json"
+                status_file.parent.mkdir()
+                status_paths.append(status_file)
+                status_file.write_text(
+                    json.dumps({"result_code": "source_lifecycle_move_completed"}),
+                    encoding="utf-8",
+                )
+                return CommandResult(1, _CHILD_OUTPUT_SENTINEL, _CHILD_OUTPUT_SENTINEL)
+            return super().run(
+                arguments,
+                environment=environment,
+                cwd=cwd,
+                timeout_seconds=timeout_seconds,
+                should_capture=should_capture,
+            )
+
+    output = StringIO()
+    exit_code = run_live_acceptance(
+        LiveAcceptanceConfig(
+            repository_root=tmp_path,
+            project_name="knowledge-ci-phase-report",
+            username="duc",
+            workspace_key="duc-knowledge",
+            server_origin="http://127.0.0.1:8000",
+            allowed_origin="https://app.example.test",
+            plugin_origin="https://api.example.test",
+            password_file=password_file,
+            runtime_environment={"CI": "true", "KNOWLEDGE_ENVIRONMENT": "local"},
+        ),
+        executor=PhaseReportingExecutor(
+            events,
+            {"totp_active": True},
+            is_credential_enrolled=True,
+        ),
+        client_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("active TOTP must not start enrollment")
+        ),
+        output=output,
+    )
+
+    assert exit_code == 1
+    assert json.loads(output.getvalue()) == {
+        "result_code": "obsidian_wdio_failed_after_move",
+        "state": "error",
+    }
+    assert _CHILD_OUTPUT_SENTINEL not in output.getvalue()
+    assert len(status_paths) == 1
+    assert not status_paths[0].exists()
+
+
+@pytest.mark.parametrize(
+    "unsafe_status",
+    (
+        "not-json",
+        json.dumps(
+            {
+                "result_code": "source_lifecycle_move_completed",
+                "diagnostic": _CHILD_OUTPUT_SENTINEL,
+            }
+        ),
+        json.dumps({"result_code": _CHILD_OUTPUT_SENTINEL}),
+    ),
+)
+def test_failed_wdio_maps_malformed_or_unsafe_phase_status_to_generic_code(
+    tmp_path: Path,
+    unsafe_status: str,
+) -> None:
+    """Untrusted marker content is never forwarded through the parent boundary."""
+    password_file = tmp_path / "web-credential-password.key"
+    password_file.write_text(_PASSWORD_SENTINEL, encoding="utf-8")
+
+    class UnsafePhaseExecutor(FreshDisposableExecutor):
+        def run(
+            self,
+            arguments: Sequence[str],
+            *,
+            environment: Mapping[str, str],
+            cwd: Path,
+            timeout_seconds: float,
+            should_capture: bool,
+        ) -> CommandResult:
+            if "wdio run" in " ".join(arguments):
+                status_file = Path(environment["E2E_LIVE_PHASE_STATUS_FILE"])
+                status_file.parent.mkdir()
+                status_file.write_text(
+                    unsafe_status,
+                    encoding="utf-8",
+                )
+                return CommandResult(1, _CHILD_OUTPUT_SENTINEL, _CHILD_OUTPUT_SENTINEL)
+            return super().run(
+                arguments,
+                environment=environment,
+                cwd=cwd,
+                timeout_seconds=timeout_seconds,
+                should_capture=should_capture,
+            )
+
+    output = StringIO()
+    exit_code = run_live_acceptance(
+        LiveAcceptanceConfig(
+            repository_root=tmp_path,
+            project_name="knowledge-ci-unsafe-phase",
+            username="duc",
+            workspace_key="duc-knowledge",
+            server_origin="http://127.0.0.1:8000",
+            allowed_origin="https://app.example.test",
+            plugin_origin="https://api.example.test",
+            password_file=password_file,
+            runtime_environment={"CI": "true", "KNOWLEDGE_ENVIRONMENT": "local"},
+        ),
+        executor=UnsafePhaseExecutor(
+            [],
+            {"totp_active": True},
+            is_credential_enrolled=True,
+        ),
+        client_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("active TOTP must not start enrollment")
+        ),
+        output=output,
+    )
+
+    assert exit_code == 1
+    assert json.loads(output.getvalue()) == {
+        "result_code": "obsidian_wdio_failed",
+        "state": "error",
+    }
+    assert _CHILD_OUTPUT_SENTINEL not in output.getvalue()

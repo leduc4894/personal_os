@@ -50,6 +50,18 @@ _REQUIRED_LAUNCHER_NAMES: Final = frozenset(
 _COMMAND_TIMEOUT_SECONDS: Final = 180.0
 _POLICY_TIMEOUT_SECONDS: Final = 240.0
 _WDIO_TIMEOUT_SECONDS: Final = 900.0
+_WDIO_PHASE_STATUS_MAX_BYTES: Final = 128
+_WDIO_PHASE_FAILURE_CODES: Final[Mapping[str, str]] = {
+    "source_lifecycle_scenario_started": "obsidian_wdio_failed_during_onboarding",
+    "source_lifecycle_onboarding_completed": "obsidian_wdio_failed_after_onboarding",
+    "source_lifecycle_initial_sync_completed": "obsidian_wdio_failed_after_initial_sync",
+    "source_lifecycle_rename_completed": "obsidian_wdio_failed_after_rename",
+    "source_lifecycle_move_completed": "obsidian_wdio_failed_after_move",
+    "source_lifecycle_delete_completed": "obsidian_wdio_failed_after_delete",
+    "source_lifecycle_restore_completed": "obsidian_wdio_failed_after_restore",
+    "source_lifecycle_journal_drained": "obsidian_wdio_failed_after_journal_drain",
+    "source_lifecycle_journey_completed": "obsidian_wdio_failed_after_journey",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +292,35 @@ def _live_child_environment(config: LiveAcceptanceConfig) -> Mapping[str, str]:
     return environment
 
 
+def _wdio_phase_status_path(config: LiveAcceptanceConfig) -> Path:
+    return config.repository_root / ".local" / (f"{config.project_name}.obsidian-live-phase.json")
+
+
+def _remove_wdio_phase_status(status_path: Path) -> None:
+    try:
+        status_path.unlink(missing_ok=True)
+    except OSError:
+        raise LiveAcceptanceFailure("obsidian_wdio_failed") from None
+
+
+def _closed_wdio_failure_code(status_path: Path) -> str:
+    try:
+        if status_path.stat().st_size > _WDIO_PHASE_STATUS_MAX_BYTES:
+            return "obsidian_wdio_failed"
+        document = _parse_json_document(
+            status_path.read_text(encoding="utf-8"),
+            "obsidian_wdio_failed",
+        )
+    except LiveAcceptanceFailure, OSError, UnicodeError:
+        return "obsidian_wdio_failed"
+    if set(document) != {"result_code"}:
+        return "obsidian_wdio_failed"
+    result_code = document.get("result_code")
+    if not isinstance(result_code, str):
+        return "obsidian_wdio_failed"
+    return _WDIO_PHASE_FAILURE_CODES.get(result_code, "obsidian_wdio_failed")
+
+
 def _execute_live_acceptance(
     config: LiveAcceptanceConfig,
     executor: CommandExecutor,
@@ -425,9 +466,11 @@ def _execute_live_acceptance(
     )
     policy_time_step = time_step_of(unix_time_seconds=int(time.time()))
     _wait_for_unused_totp_step(policy_time_step)
-    _run_child(
-        executor,
-        config,
+    wdio_phase_status = _wdio_phase_status_path(config)
+    _remove_wdio_phase_status(wdio_phase_status)
+    wdio_environment = dict(_live_child_environment(config))
+    wdio_environment["E2E_LIVE_PHASE_STATUS_FILE"] = str(wdio_phase_status)
+    wdio_result = executor.run(
         [
             "pnpm",
             "--filter",
@@ -439,10 +482,16 @@ def _execute_live_acceptance(
             "--spec",
             config.wdio_spec,
         ],
-        failure_code="obsidian_wdio_failed",
+        environment=wdio_environment,
+        cwd=config.repository_root,
         timeout_seconds=_WDIO_TIMEOUT_SECONDS,
-        environment=_live_child_environment(config),
+        should_capture=False,
     )
+    if wdio_result.return_code != 0:
+        failure_code = _closed_wdio_failure_code(wdio_phase_status)
+        _remove_wdio_phase_status(wdio_phase_status)
+        raise LiveAcceptanceFailure(failure_code)
+    _remove_wdio_phase_status(wdio_phase_status)
 
 
 def _print_status(output: TextIO, state: str, result_code: str) -> None:
