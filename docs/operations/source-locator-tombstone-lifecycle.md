@@ -252,6 +252,24 @@ references must identify a sanitized operator record; they must never contain
 paths, locator values, content, digests, credentials or tokens. These records
 are mandatory gates, not deferred backlog work.
 
+After the services are ready, use the single guarded Desktop entrypoint:
+
+```powershell
+$env:CI = "true"
+uv run python tools/obsidian_live_acceptance_bootstrap.py --project-name knowledge-ci-<bounded-token>
+```
+
+The entrypoint applies the current migration, creates or replays the canonical
+identity and Web credential, initializes the policy key, and runs
+`.local/e2e-totp-code.py` as a mandatory preflight. The helper produces a code
+only after activation. If it reports that no active credential exists, the
+entrypoint completes TOTP enrollment and activation through the real Web HTTP
+routes, reruns the helper, publishes policy through the existing local helper,
+and only then launches the focused WDIO journey. Do not label the missing
+credential BLOCKED or deferred unless this bootstrap branch itself fails with
+its closed result code. The entrypoint emits status only; do not redirect or
+copy child output into acceptance evidence.
+
 ## Desktop live acceptance record
 
 - Device: WDIO Obsidian Desktop on Windows
