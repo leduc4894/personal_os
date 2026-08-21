@@ -11,6 +11,7 @@
 import { Modal, Platform, Plugin, requestUrl, Setting, TAbstractFile, TFile } from "obsidian";
 
 import { createObsidianPolicyHttpTransport, createObsidianSyncHttpTransport } from "./api/obsidian-api-transport";
+import { createRequestUrlTransport } from "./api/request-url-transport";
 import {
   createDeviceApiTransport,
   parseServerOrigin,
@@ -43,6 +44,8 @@ import type {
 } from "./journal/lifecycle-capture";
 import { JournalQueueDriver } from "./journal/queue-driver";
 import type { QueuePassOutcome, QueuePassSummary } from "./journal/queue-driver";
+import { LifecycleDriverImpl } from "./journal/lifecycle-driver";
+import { createRequestUrlLifecycleApi } from "./journal/lifecycle-api";
 import { createVaultPluginJournalStore, JournalPersistence } from "./journal/persistence";
 import type { JournalFileStore } from "./journal/persistence";
 import { JournalRepository } from "./journal/repository";
@@ -423,6 +426,18 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         policyGate: policySession,
         lifecycleCapture,
       });
+      const lifecycleDriver = new LifecycleDriverImpl({
+        repository,
+        lifecycle: repository.lifecycle,
+        api: createRequestUrlLifecycleApi({
+          baseUrl:
+            parseServerOrigin(this.#settings.server_origin, {
+              allowLoopbackHttp: ALLOW_LOOPBACK_HTTP_ORIGIN,
+            }) ?? "",
+          transport: createRequestUrlTransport((request) => requestUrl(request)),
+          resolveAccessToken: () => session.accessCredential,
+        }),
+      });
       const queueDriver = new JournalQueueDriver({
         repository,
         syncApi: createJournalSyncApi({
@@ -434,6 +449,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           getAccessToken: () => session.accessCredential,
         }),
         fileBytesReader: vaultReader,
+        lifecycleDriver,
         refreshAccessToken: () => session.refresh(),
       });
       this.registerEvent(

@@ -27,8 +27,16 @@
  * the status / attempt projection surface or any diagnostic stream.
  */
 
-import type { JournalEvent } from "./contracts";
-import { JOURNAL_NON_RETRY_EVENT_STATES, JOURNAL_PENDING_EVENT_STATES, MAX_EVENT_ATTEMPT_HISTORY } from "./contracts";
+import type { JournalEvent, JournalEventState, JournalOperation } from "./contracts";
+import {
+  JOURNAL_COALESCABLE_EVENT_STATES,
+  JOURNAL_EVENT_STATES,
+  JOURNAL_NON_RETRY_EVENT_STATES,
+  JOURNAL_OPERATIONS,
+  JOURNAL_PENDING_EVENT_STATES,
+  JOURNAL_SAFE_ERROR_LABELS,
+  MAX_EVENT_ATTEMPT_HISTORY,
+} from "./contracts";
 import type { LocalFile } from "./contracts";
 import {
   isLifecycleJournalOperation,
@@ -64,6 +72,17 @@ export interface LifecycleRepositoryDatabase {
 // --- input and result types ---------------------------------------------------------------
 
 /**
+ * The frozen dispatch bundle one driver pass selects: the closed
+ * `JournalEvent` row plus the matching `LifecycleEventOperands` keyed-
+ * extension row. The lifecycle driver commits this shape to the server
+ * before the durable state moves to `committed`.
+ */
+export interface FrozenLifecycleEvent {
+  readonly event: JournalEvent;
+  readonly operands: LifecycleEventOperands;
+}
+
+/**
  * The configuration of a single lifecycle record call: the local file the
  * event belongs to, the closed tombstone id when the operation is
  * `delete` or `restore`, the initial lifecycle state to write on the
@@ -81,7 +100,7 @@ export interface LifecycleRecordOptions {
    * rename never escapes a verified generation (spec 7.1 fix round 1
    * C1).
    */
-  readonly newPath?: string;
+  readonly newPath?: string | undefined;
   /** Test-only escape hatch: throw `journal_mutation_failed` after exec. */
   readonly forceFailureAfterExec?: boolean;
 }
@@ -130,6 +149,134 @@ function isUuid(value: unknown): value is string {
 
 function firstRow(result: readonly SqliteQueryResult[]): readonly unknown[] | null {
   return result[0]?.values[0] ?? null;
+}
+
+function isNullableUuid(value: unknown): value is string | null {
+  return value === null || (typeof value === "string" && UUID_PATTERN.test(value));
+}
+
+function isNullableText(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function isNullableNonNegativeInteger(value: unknown): value is number | null {
+  return value === null || (typeof value === "number" && Number.isInteger(value) && value >= 0);
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1;
+}
+
+function isClosedStateToken(value: unknown): value is JournalEventState {
+  return (
+    typeof value === "string" &&
+    (JOURNAL_EVENT_STATES as readonly string[]).includes(value)
+  );
+}
+
+function isClosedSafeErrorLabel(value: unknown): value is NonNullable<JournalEvent["safeError"]> {
+  return (
+    typeof value === "string" &&
+    (JOURNAL_SAFE_ERROR_LABELS as readonly string[]).includes(value)
+  );
+}
+
+function parseStoredEventRow(row: readonly unknown[]): JournalEvent {
+  const [
+    eventId,
+    localFileId,
+    idempotencyKey,
+    operation,
+    sha256,
+    sizeBytes,
+    mediaType,
+    state,
+    attemptCount,
+    nextEligibleRetryEpochMs,
+    safeError,
+    operationId,
+  ] = row;
+  if (
+    typeof eventId !== "string" ||
+    !isUuid(eventId) ||
+    typeof localFileId !== "string" ||
+    typeof idempotencyKey !== "string" ||
+    typeof operation !== "string" ||
+    !(JOURNAL_OPERATIONS as readonly string[]).includes(operation) ||
+    typeof sha256 !== "string" ||
+    typeof sizeBytes !== "number" ||
+    !Number.isInteger(sizeBytes) ||
+    sizeBytes < 0 ||
+    typeof mediaType !== "string" ||
+    typeof state !== "string" ||
+    !isClosedStateToken(state) ||
+    typeof attemptCount !== "number" ||
+    !Number.isInteger(attemptCount) ||
+    attemptCount < 0 ||
+    !isNullableNonNegativeInteger(nextEligibleRetryEpochMs) ||
+    (safeError !== null && !isClosedSafeErrorLabel(safeError)) ||
+    (operationId !== null && typeof operationId !== "string")
+  ) {
+    throw journalStoreError("journal_image_invalid");
+  }
+  return {
+    eventId,
+    localFileId,
+    idempotencyKey,
+    operation: operation as JournalOperation,
+    fingerprint: { sha256, sizeBytes, mediaType },
+    state,
+    attemptCount,
+    nextEligibleRetryEpochMs,
+    safeError,
+    operationId,
+  };
+}
+
+function parseLifecycleOperandRow(row: readonly unknown[]): LifecycleEventOperands {
+  const [
+    operation,
+    sourceId,
+    expectedVersionId,
+    expectedLocator,
+    targetLocator,
+    tombstoneId,
+    policyRevision,
+    predecessorEventId,
+  ] = row;
+  if (
+    typeof operation !== "string" ||
+    !isLifecycleJournalOperation(operation) ||
+    typeof sourceId !== "string" ||
+    !isUuid(sourceId) ||
+    typeof expectedVersionId !== "string" ||
+    !isUuid(expectedVersionId) ||
+    !isNullableText(expectedLocator) ||
+    !isNullableText(targetLocator) ||
+    !isNullableUuid(tombstoneId) ||
+    !isPositiveInteger(policyRevision) ||
+    !isNullableUuid(predecessorEventId)
+  ) {
+    throw journalStoreError("journal_image_invalid");
+  }
+  return {
+    operation,
+    sourceId,
+    expectedVersionId,
+    expectedLocator,
+    targetLocator,
+    tombstoneId,
+    policyRevision,
+    predecessorEventId,
+    // The lifecycle_event_operands table does not store the captured
+    // fingerprint; it lives on local_files as observed_* and is only
+    // relevant at capture time (rename/move rebind). The driver reads
+    // the operands row alone, so the captured triple is always null
+    // here.
+    capturedFingerprintSha256: null,
+    capturedFingerprintSizeBytes: null,
+    capturedFingerprintMediaType: null,
+  };
 }
 
 function initialStateFor(
@@ -295,7 +442,7 @@ export class LifecycleRepository {
       readonly operands: LifecycleEventOperands;
       readonly localFile: LocalFile;
       readonly tombstoneId?: string | null;
-      readonly newPath?: string | null;
+      readonly newPath?: string | undefined;
       readonly forceFailureAfterExec?: boolean;
     },
   ): Promise<LifecycleRecordResult> {
@@ -413,6 +560,223 @@ export class LifecycleRepository {
         ].join(" "),
       );
     });
+  }
+
+  /**
+   * Persist the safe receipt of one committed lifecycle event in
+   * one transaction: the event flips to terminal `committed`, the
+   * `local_files.lifecycle_state` advances past the pending state
+   * for the closed operation, and the server-returned tombstone id
+   * (when present) replaces any locally-staged value so the durable
+   * record is exactly what the server acknowledged (spec 19.2
+   * exact-replay rule).
+   *
+   * The last_committed_* columns are intentionally left untouched:
+   * a rename / move / delete / restore does not change file bytes,
+   * so the prior `last_committed_*` triple stays provable for the
+   * next restore-eligibility check.
+   */
+  async recordLifecycleCommittedReceipt(eventId: string): Promise<void> {
+    if (!isUuid(eventId)) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    await this.#database.runSerializedMutation((session) => {
+      const event = firstRow(
+        session.readRows(
+          `select event_id, local_file_id, operation from journal_events where event_id = ${sqlText(eventId)};`,
+        ),
+      );
+      if (event === null) {
+        throw journalStoreError("journal_mutation_failed");
+      }
+      const [storedEventId, localFileId, operation] = event;
+      if (typeof storedEventId !== "string" || typeof localFileId !== "string" || typeof operation !== "string") {
+        throw journalStoreError("journal_query_failed");
+      }
+      if (
+        operation !== "rename" &&
+        operation !== "move" &&
+        operation !== "delete" &&
+        operation !== "restore"
+      ) {
+        throw journalStoreError("journal_mutation_failed");
+      }
+      session.exec(
+        [
+          "update journal_events set state = 'committed',",
+          "next_eligible_retry_epoch_ms = null,",
+          "safe_error = null",
+          `where event_id = ${sqlText(eventId)};`,
+        ].join(" "),
+      );
+      // Lifecycle-state transitions for each closed operation.
+      switch (operation) {
+        case "rename":
+        case "move":
+          session.exec(
+            [
+              "update local_files set",
+              "lifecycle_state = 'active'",
+              `where local_file_id = ${sqlText(localFileId)};`,
+            ].join(" "),
+          );
+          break;
+        case "delete":
+          // Tombstone row stays; the durable local_files row is
+          // pruned by the capture path on tombstone commit.
+          session.exec(
+            [
+              "update local_files set",
+              "lifecycle_state = 'tombstoned'",
+              `where local_file_id = ${sqlText(localFileId)};`,
+            ].join(" "),
+          );
+          break;
+        case "restore":
+          session.exec(
+            [
+              "update local_files set",
+              "lifecycle_state = 'restored'",
+              `where local_file_id = ${sqlText(localFileId)};`,
+            ].join(" "),
+          );
+          break;
+      }
+    });
+  }
+
+  /**
+   * The query the lifecycle driver uses to pick its next eligible
+   * event: the oldest lifecycle row whose retry time has passed (or
+   * with no retry scheduled) and whose predecessor, when one is
+   * declared, is already terminal-success on the server. A
+   * `predecessor_event_id` referencing an event that is missing or
+   * still pending is deferred — the brief requires that the
+   * successor MUST NOT dispatch until the predecessor is
+   * terminal-success.
+   *
+   * Returns the closed `FrozenLifecycleEvent` (event + operands
+   * pair) so the driver can ship both to the wire in one commit;
+   * returns `null` when no eligible lifecycle event exists.
+   */
+  readOldestEligibleLifecycleEvent(
+    nowEpochMs: number,
+  ): FrozenLifecycleEvent | null {
+    if (!isPositiveInteger(nowEpochMs)) {
+      throw journalStoreError("journal_query_failed");
+    }
+    const coalescableStateList = JOURNAL_COALESCABLE_EVENT_STATES.map((state) =>
+      sqlText(state),
+    ).join(", ");
+    const lifecycleOperations = [
+      "rename",
+      "move",
+      "delete",
+      "restore",
+    ].map((value) => sqlText(value)).join(", ");
+    const row = firstRow(
+      this.#database.readAll(
+        [
+          `select je.event_id, je.local_file_id, je.idempotency_key, je.operation,`,
+          `je.sha256, je.size_bytes, je.media_type, je.state, je.attempt_count,`,
+          `je.next_eligible_retry_epoch_ms, je.safe_error, je.operation_id,`,
+          `leo.source_id, leo.expected_version_id,`,
+          `leo.expected_locator, leo.target_locator, leo.tombstone_id,`,
+          `leo.policy_revision, leo.predecessor_event_id`,
+          `from journal_events je`,
+          `join lifecycle_event_operands leo on leo.event_id = je.event_id`,
+          `left join journal_events pe on pe.event_id = leo.predecessor_event_id`,
+          `where je.operation in (${lifecycleOperations})`,
+          `and ((je.state in (${coalescableStateList})`,
+          `and (je.next_eligible_retry_epoch_ms is null`,
+          `or je.next_eligible_retry_epoch_ms <= ${nowEpochMs}))`,
+          `or je.state in ('preflight', 'uploading'))`,
+          `and (leo.predecessor_event_id is null`,
+          `or (pe.state = 'committed'))`,
+          `order by je.created_at_epoch_ms asc, je.rowid asc limit 1;`,
+        ].join(" "),
+      ),
+    );
+    if (row === null) {
+      return null;
+    }
+    const [
+      eventId,
+      localFileId,
+      idempotencyKey,
+      operation,
+      sha256,
+      sizeBytes,
+      mediaType,
+      state,
+      attemptCount,
+      nextEligibleRetryEpochMs,
+      safeError,
+      operationId,
+      sourceId,
+      expectedVersionId,
+      expectedLocator,
+      targetLocator,
+      tombstoneId,
+      policyRevision,
+      predecessorEventId,
+    ] = row;
+    const event = parseStoredEventRow([
+      eventId,
+      localFileId,
+      idempotencyKey,
+      operation,
+      sha256,
+      sizeBytes,
+      mediaType,
+      state,
+      attemptCount,
+      nextEligibleRetryEpochMs,
+      safeError,
+      operationId,
+    ]);
+    const operands = parseLifecycleOperandRow([
+      operation,
+      sourceId,
+      expectedVersionId,
+      expectedLocator,
+      targetLocator,
+      tombstoneId,
+      policyRevision,
+      predecessorEventId,
+    ]);
+    if (operands.operation !== event.operation) {
+      throw journalStoreError("journal_image_invalid");
+    }
+    return { event, operands };
+  }
+
+  /**
+   * Read the keyed operand row of one stored lifecycle event. The
+   * driver uses this to look up the operands after a replay: when the
+   * same `event_id` is selected again, the wire body must carry the
+   * ORIGINAL operands (never a re-derived shape) so the server's
+   * exact-replay contract holds. Returns `null` when no operand row
+   * exists (an event without an operands row is the very condition
+   * the reconcile-required flagger closes).
+   */
+  readLifecycleOperands(eventId: string): LifecycleEventOperands | null {
+    if (!isUuid(eventId)) {
+      throw journalStoreError("journal_query_failed");
+    }
+    const row = firstRow(
+      this.#database.readAll(
+        [
+          "select operation, source_id, expected_version_id, expected_locator,",
+          "target_locator, tombstone_id, policy_revision, predecessor_event_id",
+          `from lifecycle_event_operands where event_id = ${sqlText(eventId)};`,
+        ].join(" "),
+      ),
+    );
+    if (row === null) {
+      return null;
+    }
+    return parseLifecycleOperandRow(row);
   }
 
   /**
