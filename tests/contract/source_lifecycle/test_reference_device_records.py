@@ -1,10 +1,9 @@
 """Sanitized reference-device gate for Child 5 live acceptance.
 
-The Desktop WDIO journey and the physical Mobile matrix are mandatory live
-evidence.  This contract validates only the operator record stored in the
-living operations guide; it cannot replace either observation.  Placeholder,
-failed, incomplete, future-dated, or privacy-unsafe records remain a hard
-failure so Child 5 cannot be closed from automated evidence alone.
+The Desktop WDIO journey remains mandatory live evidence.  Physical Mobile
+evidence may be deferred only through the closed handoff/backlog contract in
+AGENTS.md.  This contract validates operator records; it cannot replace an
+observation or turn a deferred Mobile matrix into a PASS.
 """
 
 from __future__ import annotations
@@ -19,6 +18,10 @@ import pytest
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[3]
 RECORDS_PATH: Final[Path] = (
     REPO_ROOT / "docs" / "operations" / "source-locator-tombstone-lifecycle.md"
+)
+BACKLOG_PATH: Final[Path] = REPO_ROOT / "docs" / "handoff" / "BACKLOG.md"
+HANDOFF_PATH: Final[Path] = (
+    REPO_ROOT / "docs" / "handoff" / "2026-08-20-source-locator-and-tombstone-lifecycle.md"
 )
 
 pytestmark = pytest.mark.device_records
@@ -47,6 +50,16 @@ MOBILE_SCENARIOS: Final[tuple[str, ...]] = (
     "Offline capture and reconnect",
     "Unload and reload",
     "Policy-denied transition",
+)
+MOBILE_DEFERRAL_BACKLOG_KEY: Final = "source-lifecycle-mobile-acceptance"
+MOBILE_DEFERRAL_HANDOFF_REFERENCE: Final = "handoff:source-lifecycle-mobile-deferral"
+MOBILE_DEFERRAL_TRIGGER: Final = "Before Child 6 acceptance closure"
+MOBILE_DEFERRAL_METADATA_LABELS: Final[tuple[str, ...]] = (
+    "Status",
+    "Reason",
+    "Source handoff",
+    "Backlog key",
+    "Implement by",
 )
 
 _SECTION_PATTERN: Final[re.Pattern[str]] = re.compile(
@@ -163,27 +176,85 @@ def _assert_observed_scenarios(
     )
 
 
-def test_reference_device_records_are_complete_passing_and_sanitized() -> None:
-    assert RECORDS_PATH.is_file(), f"live acceptance records are missing: {RECORDS_PATH}"
-    markdown = RECORDS_PATH.read_text(encoding="utf-8")
-    sections = _sections(markdown)
-    for device_class, required_scenarios in (
-        ("Desktop", DESKTOP_SCENARIOS),
-        ("Mobile", MOBILE_SCENARIOS),
-    ):
-        body = sections.get(device_class)
-        assert body, (
-            f"the '{device_class} live acceptance record' section is missing; "
-            "mandatory live evidence cannot be deferred or inferred"
-        )
-        _assert_observed_metadata(device_class, body)
-        _assert_observed_scenarios(device_class, body, required_scenarios)
+def _assert_mobile_deferral(
+    section_body: str,
+    backlog_markdown: str,
+    handoff_markdown: str,
+) -> None:
+    metadata = _metadata(section_body)
+    missing = [label for label in MOBILE_DEFERRAL_METADATA_LABELS if label not in metadata]
+    assert not missing, f"the Mobile deferral is missing metadata: {missing}"
+    assert metadata["Status"] == "DEFERRED"
+    assert metadata["Reason"].strip().lower() not in _FORBIDDEN_PLACEHOLDERS
+    assert metadata["Source handoff"] == MOBILE_DEFERRAL_HANDOFF_REFERENCE
+    assert metadata["Backlog key"] == MOBILE_DEFERRAL_BACKLOG_KEY
+    assert metadata["Implement by"] == MOBILE_DEFERRAL_TRIGGER
 
+    rows = _scenario_rows(section_body)
+    missing_scenarios = [scenario for scenario in MOBILE_SCENARIOS if scenario not in rows]
+    assert not missing_scenarios, f"the Mobile deferral is missing scenarios: {missing_scenarios}"
+    invalid_scenarios = [
+        scenario
+        for scenario in MOBILE_SCENARIOS
+        if rows[scenario] != ("DEFERRED", MOBILE_DEFERRAL_HANDOFF_REFERENCE)
+    ]
+    assert not invalid_scenarios, (
+        "the Mobile record must use only the closed DEFERRED outcome and source "
+        f"handoff reference: {invalid_scenarios}"
+    )
+
+    matching_backlog_rows = [
+        line
+        for line in backlog_markdown.splitlines()
+        if line.startswith("|") and MOBILE_DEFERRAL_BACKLOG_KEY in line
+    ]
+    assert len(matching_backlog_rows) == 1, (
+        "the Mobile deferral requires exactly one matching BACKLOG row"
+    )
+    backlog_cells = [cell.strip() for cell in matching_backlog_rows[0].split("|")[1:-1]]
+    assert len(backlog_cells) == 5
+    assert backlog_cells[3] == MOBILE_DEFERRAL_TRIGGER
+    assert (
+        "(2026-08-20-source-locator-and-tombstone-lifecycle.md#deferred-items)" in backlog_cells[4]
+    )
+    assert MOBILE_DEFERRAL_BACKLOG_KEY in handoff_markdown
+    assert MOBILE_DEFERRAL_HANDOFF_REFERENCE in handoff_markdown
+
+
+def _assert_sanitized_sections(sections: dict[str, str]) -> None:
     for sentinel in _PRIVACY_SENTINELS:
         assert sentinel.search("\n".join(sections.values())) is None, (
             "reference-device records contain a forbidden raw locator, content, "
             "digest, or credential shape"
         )
+
+
+def test_desktop_reference_device_record_is_complete_passing_and_sanitized() -> None:
+    assert RECORDS_PATH.is_file(), f"live acceptance records are missing: {RECORDS_PATH}"
+    markdown = RECORDS_PATH.read_text(encoding="utf-8")
+    sections = _sections(markdown)
+    body = sections.get("Desktop")
+    assert body, "the mandatory 'Desktop live acceptance record' section is missing"
+    _assert_observed_metadata("Desktop", body)
+    _assert_observed_scenarios("Desktop", body, DESKTOP_SCENARIOS)
+    _assert_sanitized_sections(sections)
+
+
+def test_mobile_reference_device_record_is_passing_or_closed_deferred() -> None:
+    markdown = RECORDS_PATH.read_text(encoding="utf-8")
+    sections = _sections(markdown)
+    body = sections.get("Mobile")
+    assert body, "the 'Mobile live acceptance record' section is missing"
+    if _metadata(body).get("Status") == "DEFERRED":
+        _assert_mobile_deferral(
+            body,
+            BACKLOG_PATH.read_text(encoding="utf-8"),
+            HANDOFF_PATH.read_text(encoding="utf-8"),
+        )
+    else:
+        _assert_observed_metadata("Mobile", body)
+        _assert_observed_scenarios("Mobile", body, MOBILE_SCENARIOS)
+    _assert_sanitized_sections(sections)
 
 
 @pytest.mark.parametrize(

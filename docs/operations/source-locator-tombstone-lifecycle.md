@@ -247,10 +247,13 @@ tab or any telemetry.
 Follow [`.local/RESTART.md`](../../.local/RESTART.md) exactly. Use a disposable
 `knowledge-ci-*` project, the repository launchers, both policy workers, Web
 Admin on port 38000 and the existing tunnel. Run the focused WDIO command from
-the plan, then execute the full matrix on a physical Mobile device. Evidence
-references must identify a sanitized operator record; they must never contain
-paths, locator values, content, digests, credentials or tokens. These records
-are mandatory gates, not deferred backlog work.
+the plan. The Desktop journey is a mandatory gate. Execute the full matrix on
+a physical Mobile device when available; if it cannot be run, retain an
+explicit `DEFERRED` record linked to the one matching BACKLOG row and source
+handoff. Never represent deferred Mobile work as observed PASS evidence.
+Evidence references must identify a sanitized operator record or closed
+deferral; they must never contain paths, locator values, content, digests,
+credentials or tokens.
 
 After the services are ready, use the single guarded Desktop entrypoint:
 
@@ -289,19 +292,19 @@ copy child output into acceptance evidence.
 
 ## Mobile live acceptance record
 
-- Device: PENDING
-- App version: PENDING
-- Plugin version: PENDING
-- Recorded at UTC: PENDING
-- Operator: PENDING
+- Status: DEFERRED
+- Reason: No physical Mobile device was available for the Task 12 acceptance matrix.
+- Source handoff: handoff:source-lifecycle-mobile-deferral
+- Backlog key: source-lifecycle-mobile-acceptance
+- Implement by: Before Child 6 acceptance closure
 
 | Scenario | Outcome | Evidence |
 | --- | --- | --- |
-| Tracked rename | NOT RUN | PENDING |
-| Tracked move | NOT RUN | PENDING |
-| Delete | NOT RUN | PENDING |
-| Proven automatic restore | NOT RUN | PENDING |
-| Explicit restore | NOT RUN | PENDING |
-| Offline capture and reconnect | NOT RUN | PENDING |
-| Unload and reload | NOT RUN | PENDING |
-| Policy-denied transition | NOT RUN | PENDING |
+| Tracked rename | DEFERRED | handoff:source-lifecycle-mobile-deferral |
+| Tracked move | DEFERRED | handoff:source-lifecycle-mobile-deferral |
+| Delete | DEFERRED | handoff:source-lifecycle-mobile-deferral |
+| Proven automatic restore | DEFERRED | handoff:source-lifecycle-mobile-deferral |
+| Explicit restore | DEFERRED | handoff:source-lifecycle-mobile-deferral |
+| Offline capture and reconnect | DEFERRED | handoff:source-lifecycle-mobile-deferral |
+| Unload and reload | DEFERRED | handoff:source-lifecycle-mobile-deferral |
+| Policy-denied transition | DEFERRED | handoff:source-lifecycle-mobile-deferral |

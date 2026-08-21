@@ -58,15 +58,19 @@ contain its own SHA.
   scanner sanctions only the three lifecycle API files and exact lifecycle
   route line, the policy scanner matches only exact internal decision
   identifiers, and the HTTP registry enumerates the seven lifecycle codes.
-- No BACKLOG row was added: Desktop and Mobile acceptance are mandatory, not
-  deferrable work.
+- The later user ruling in `AGENTS.md` keeps Desktop mandatory and permits the
+  physical Mobile matrix to defer only through one closed BACKLOG/handoff
+  record. That ruling supersedes the historical Task 12 no-deferral sentence.
 - Operations detail and mutable reference-device records remain in
   [the living runbook](../operations/source-locator-tombstone-lifecycle.md).
 
 ## Deferred items
 
-None. The two incomplete acceptance gates are current blockers, not deferred
-items.
+- `source-lifecycle-mobile-acceptance` /
+  `handoff:source-lifecycle-mobile-deferral`: no physical Mobile device was
+  available for the eight-scenario matrix. The record remains `DEFERRED`, not
+  PASS, and is indexed exactly once in `BACKLOG.md`. Implement by: Before Child
+  6 acceptance closure.
 
 ## Next actions
 
