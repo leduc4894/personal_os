@@ -217,11 +217,15 @@ describe("Obsidian plugin composition root", () => {
     expect(pluginSource).toContain("lifecycleDriver");
   });
 
-  it("injects UUIDv7 identities into the production lifecycle capture", () => {
+  it("injects UUIDv7 identities into the production journal repository and lifecycle capture", () => {
+    const repositoryIndex = pluginSource.indexOf("new JournalRepository(");
+    expect(repositoryIndex).toBeGreaterThanOrEqual(0);
+    const repositoryComposition = pluginSource.slice(repositoryIndex, repositoryIndex + 300);
+    expect(repositoryComposition).toContain("createId: createJournalId");
     const captureIndex = pluginSource.indexOf("new LifecycleCaptureImpl(");
     expect(captureIndex).toBeGreaterThanOrEqual(0);
     const captureComposition = pluginSource.slice(captureIndex, captureIndex + 500);
-    expect(captureComposition).toContain("createId: createUuidv7Factory()");
+    expect(captureComposition).toContain("createId: createJournalId");
   });
 
   it("never logs paths, locators, source IDs, tokens or fingerprints from the restore command", () => {

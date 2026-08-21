@@ -420,14 +420,18 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           return persistence.readAll(sql);
         },
       };
-      const repository = new JournalRepository({ database: journalDatabase });
+      const createJournalId = createUuidv7Factory();
+      const repository = new JournalRepository({
+        database: journalDatabase,
+        createId: createJournalId,
+      });
       const vaultReader = this.#createCaptureVaultReader();
       const lifecycleVaultReader = this.#createLifecycleVaultReader(vaultReader);
       const lifecycleCapture = new LifecycleCaptureImpl({
         repository,
         lifecycle: repository.lifecycle,
         vaultReader: lifecycleVaultReader,
-        createId: createUuidv7Factory(),
+        createId: createJournalId,
         policyRevision: 1,
       });
       const capture = new JournalCapture({
