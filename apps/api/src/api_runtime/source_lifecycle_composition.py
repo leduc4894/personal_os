@@ -24,14 +24,24 @@ behavior through the typed domain errors and the service contract.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Final
 from uuid import UUID, uuid5
 
 from api_runtime.authentication_composition import WebAuthenticationRuntime
-from personal_os.diagnostics.context import DiagnosticContext
-from personal_os.exclusion_policy.contracts import PolicySubject
+from personal_os.diagnostics.context import (
+    DiagnosticContext,
+    create_diagnostic_context,
+    current_diagnostic_context,
+)
+from personal_os.exclusion_policy.contracts import PolicySubject, RawPolicyDecision
+from personal_os.exclusion_policy.enforcement import (
+    PolicyTrustAnchorVerifier,
+    evaluate_policy_decision,
+    parse_verified_policy_revision,
+    policy_not_initialized_error,
+)
 from personal_os.source_lifecycle.commands import (
     SourceLifecycleCommand,
     SourceLifecycleCommitResult,
@@ -50,6 +60,10 @@ from personal_os.source_lifecycle.ports import (
 )
 from personal_os.source_lifecycle.service import SourceLifecycleService
 from personal_os.source_lifecycle.service import _default_clock as _lifecycle_default_clock
+from postgresql_source_store.policy_enforcement import (
+    PostgresqlActivePolicySnapshotSource,
+    PostgresqlPolicySubjectEvidenceSource,
+)
 
 #: Deterministic offline identity namespace and timestamp; tests and the
 #: OpenAPI export use the same values so every render is byte-stable.
@@ -112,6 +126,73 @@ def compose_source_lifecycle_runtime(
         metrics=metrics,
         web_authentication=web_authentication,
     )
+
+
+class PostgresqlSourceLifecyclePolicy:
+    """Evaluate the advisory lifecycle verdict from canonical policy state.
+
+    The lifecycle store performs the transaction-final locked verification.
+    This adapter supplies the pre-transaction verdict that selects projection
+    upserts versus deletes, using the same persisted signed revision and
+    canonical source evidence as the publication policy boundary.
+    """
+
+    def __init__(
+        self,
+        *,
+        snapshot_source: PostgresqlActivePolicySnapshotSource,
+        evidence_source: PostgresqlPolicySubjectEvidenceSource,
+        verifier: PolicyTrustAnchorVerifier,
+        clock: Callable[[], datetime] = _lifecycle_default_clock,
+    ) -> None:
+        self._snapshot_source = snapshot_source
+        self._evidence_source = evidence_source
+        self._verifier = verifier
+        self._clock = clock
+
+    async def evaluate_lifecycle(
+        self,
+        command: SourceLifecycleCommand,
+        device_context: LifecycleDeviceContext,
+    ) -> LifecyclePolicyDecision:
+        context = current_diagnostic_context() or create_diagnostic_context().context
+        material = await self._snapshot_source.load_active_snapshot(
+            device_context.workspace_id, context
+        )
+        if material is None:
+            raise policy_not_initialized_error()
+        canonical_subject = await self._evidence_source.load_subject_evidence(
+            device_context.workspace_id, command.source_id, context
+        )
+        locator = command.target_locator or command.expected_locator
+        subject = replace(
+            canonical_subject
+            if canonical_subject is not None
+            else PolicySubject(
+                workspace_id=device_context.workspace_id,
+                source_id=command.source_id,
+            ),
+            normalized_locator=locator.value if locator is not None else None,
+        )
+        revision = parse_verified_policy_revision(material, verifier=self._verifier)
+        decision = evaluate_policy_decision(
+            revision=revision,
+            subject=subject,
+            evaluated_at=self._clock(),
+        )
+        outcome = {
+            RawPolicyDecision.ALLOWED: LifecyclePolicyOutcome.ALLOWED,
+            RawPolicyDecision.EXCLUDED: LifecyclePolicyOutcome.DENIED,
+            RawPolicyDecision.INDETERMINATE: LifecyclePolicyOutcome.INDETERMINATE,
+        }[decision.raw_decision]
+        return LifecyclePolicyDecision(
+            workspace_id=device_context.workspace_id,
+            outcome=outcome,
+            policy_revision_number=decision.revision_number,
+            subject=subject,
+            expected_locator=command.expected_locator,
+            target_locator=command.target_locator,
+        )
 
 
 # --- the offline composition ------------------------------------------------------------
@@ -334,6 +415,7 @@ __all__ = [
     "OfflineSourceLifecyclePolicy",
     "OfflineSourceLifecycleState",
     "OfflineSourceLifecycleStore",
+    "PostgresqlSourceLifecyclePolicy",
     "SourceLifecycleRuntime",
     "compose_offline_source_lifecycle",
     "compose_source_lifecycle_runtime",

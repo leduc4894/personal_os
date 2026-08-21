@@ -52,12 +52,17 @@ from api_runtime.authentication_crypto import load_authentication_keyring
 from api_runtime.authentication_settings import load_authentication_settings
 from api_runtime.database_lifecycle import DatabaseRuntimeLifecycle
 from api_runtime.exclusion_policy_composition import compose_exclusion_policy
+from api_runtime.exclusion_policy_crypto import TrustAnchorEd25519Verifier
 from api_runtime.exclusion_policy_settings import (
     load_exclusion_policy_signer,
     load_exclusion_policy_signing_settings,
 )
 from api_runtime.server_settings import load_api_server_settings
 from api_runtime.small_file_sync_composition import compose_small_file_sync
+from api_runtime.source_lifecycle_composition import (
+    PostgresqlSourceLifecyclePolicy,
+    compose_source_lifecycle_runtime,
+)
 from personal_os.diagnostics.context import bind_diagnostic_context, create_diagnostic_context
 from personal_os.diagnostics.logging import (
     configure_diagnostics,
@@ -67,7 +72,13 @@ from personal_os.diagnostics.logging import (
 from personal_os.error_contracts.exceptions import ApplicationError
 from personal_os.runtime_configuration.loading import load_runtime_settings
 from personal_os.runtime_configuration.models import ServiceName
+from personal_os.source_lifecycle.metrics import InMemorySourceLifecycleMetrics
 from postgresql_source_store.engine import create_source_store_engine
+from postgresql_source_store.lifecycle_store import PostgresqlSourceLifecycleStore
+from postgresql_source_store.policy_enforcement import (
+    PostgresqlActivePolicySnapshotSource,
+    PostgresqlPolicySubjectEvidenceSource,
+)
 from postgresql_source_store.settings import (
     load_database_runtime_settings,
     read_database_runtime_password,
@@ -152,6 +163,22 @@ def run_server(
                 object_storage_credentials=object_storage_credentials,
                 logger=logger,
             )
+            lifecycle_metrics = InMemorySourceLifecycleMetrics()
+            lifecycle_policy_verifier = TrustAnchorEd25519Verifier()
+            source_lifecycle = compose_source_lifecycle_runtime(
+                store=PostgresqlSourceLifecycleStore(
+                    engine,
+                    policy_verifier=lifecycle_policy_verifier,
+                    metrics=lifecycle_metrics,
+                ),
+                policy=PostgresqlSourceLifecyclePolicy(
+                    snapshot_source=PostgresqlActivePolicySnapshotSource(engine),
+                    evidence_source=PostgresqlPolicySubjectEvidenceSource(engine),
+                    verifier=lifecycle_policy_verifier,
+                ),
+                metrics=lifecycle_metrics,
+                web_authentication=web_authentication,
+            )
 
             @asynccontextmanager
             async def database_lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -185,6 +212,7 @@ def run_server(
                 web_authentication=web_authentication,
                 exclusion_policy=exclusion_policy,
                 small_file_sync=small_file_sync,
+                source_lifecycle=source_lifecycle,
                 event_sink=logger,
                 lifespan=database_lifespan,
             )
