@@ -383,8 +383,8 @@ def downgrade() -> None:
         "operation <> 'upsert' OR source_version_id IS NOT NULL",
         schema=SCHEMA_NAME,
     )
-    op.drop_column("locator_fingerprint", "small_file_upload_operations", schema=SCHEMA_NAME)
-    op.drop_column("normalized_locator", "small_file_upload_operations", schema=SCHEMA_NAME)
+    op.drop_column("small_file_upload_operations", "locator_fingerprint", schema=SCHEMA_NAME)
+    op.drop_column("small_file_upload_operations", "normalized_locator", schema=SCHEMA_NAME)
     op.drop_index(
         "uq_source_tombstones_open_source",
         table_name="source_tombstones",

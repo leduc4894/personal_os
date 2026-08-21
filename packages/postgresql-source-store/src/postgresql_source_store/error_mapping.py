@@ -24,6 +24,7 @@ import sqlalchemy.exc as sa_exc
 
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import ApplicationError, InternalApplicationError
+from personal_os.source_lifecycle.errors import SourceLifecycleError
 from personal_os.sources.errors import SourcePublicationError
 
 #: Deadlock, serialization failure, lock-not-available and query-canceled
@@ -149,7 +150,7 @@ class DatabaseRetryPolicy:
         for attempt in range(1, self.maximum_attempts + 1):
             try:
                 return await operation(attempt)
-            except ApplicationError:
+            except (ApplicationError, SourceLifecycleError):
                 raise
             except Exception as cause:
                 failure_kind = classify_database_failure(cause)

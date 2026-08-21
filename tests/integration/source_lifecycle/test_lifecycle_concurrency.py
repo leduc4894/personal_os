@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid7
 
 import pytest
 from tests.integration.source_lifecycle.conftest import (
@@ -95,7 +95,7 @@ def _command(
 ) -> SourceLifecycleCommand:
     return SourceLifecycleCommand(
         source_id=source.source_id,
-        event_id=event_id if event_id is not None else uuid4(),
+        event_id=event_id if event_id is not None else uuid7(),
         idempotency_key=(
             idempotency_key
             if idempotency_key is not None
@@ -207,7 +207,7 @@ async def test_same_idempotency_key_with_changed_fingerprint_rejects_with_one_au
         expected=NormalizedLocator("notes/old.md"),
         target=NormalizedLocator("notes/new.md"),
         idempotency_key=idempotency_key,
-        event_id=uuid4(),
+        event_id=uuid7(),
     )
     counts_before = await lifecycle_harness.table_row_counts()
 
@@ -248,13 +248,13 @@ async def test_two_devices_racing_for_one_target_locator_only_one_wins(
     )
     target = NormalizedLocator("notes/shared.md")
     command_a = _command(
-        operation=LifecycleOperation.MOVE,
+        operation=LifecycleOperation.RENAME,
         source=first,
         expected=first.initial_locator,
         target=target,
     )
     command_b = _command(
-        operation=LifecycleOperation.MOVE,
+        operation=LifecycleOperation.RENAME,
         source=second,
         expected=second.initial_locator,
         target=target,
@@ -458,6 +458,7 @@ async def test_restore_vs_move_restore_wins_through_tombstone_row_lock(
             assert cause.code in {
                 SourceLifecycleErrorCode.LOCATOR_MISSING,
                 SourceLifecycleErrorCode.TOMBSTONE_CLOSED,
+                SourceLifecycleErrorCode.LOCATOR_CONFLICT,
             }
 
     await asyncio.gather(run_restore(), run_move())

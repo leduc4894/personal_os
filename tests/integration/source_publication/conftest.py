@@ -157,6 +157,15 @@ def _run_alembic_upgrade_head(environment: dict[str, str]) -> None:
         check=False,
     )
     assert result.returncode == 0, "alembic upgrade head failed for the disposable stack"
+    current = subprocess.run(
+        ["uv", "run", "alembic", "current", "--check-heads"],
+        cwd=str(_WORKTREE_ROOT),
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert current.returncode == 0, "disposable stack is not at the Alembic head"
 
 
 def _count_project_resources(project_name: str) -> dict[str, int]:

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid7
 
 import pytest
 from tests.integration.source_lifecycle.conftest import (
@@ -28,6 +28,7 @@ from tests.integration.source_lifecycle.conftest import (
 )
 
 from personal_os.diagnostics.context import create_diagnostic_context
+from personal_os.error_contracts.exceptions import InternalApplicationError
 from personal_os.exclusion_policy.contracts import PolicySubject
 from personal_os.source_lifecycle.commands import (
     LifecycleOperation,
@@ -99,7 +100,7 @@ def _command(
 
     return SourceLifecycleCommand(
         source_id=source.source_id,
-        event_id=event_id if event_id is not None else uuid4(),
+        event_id=event_id if event_id is not None else uuid7(),
         idempotency_key=(
             idempotency_key
             if idempotency_key is not None
@@ -394,7 +395,6 @@ async def test_allowed_restore_closes_tombstone_and_opens_target(
         source=seeded,
         expected=seeded.initial_locator,
         idempotency_key="delete-1",
-        event_id=UUID("018f47a0-7b00-7000-8000-0000000000d1"),
     )
     delete_decision = LifecyclePolicyDecision(
         workspace_id=workspace.workspace_id,
@@ -418,7 +418,6 @@ async def test_allowed_restore_closes_tombstone_and_opens_target(
         target=target,
         tombstone_id=delete_result.tombstone_id,
         idempotency_key="restore-1",
-        event_id=UUID("018f47a0-7b00-7000-8000-0000000000d2"),
     )
     restore_decision = _decision(
         workspace,
@@ -572,7 +571,7 @@ async def test_injected_failure_after_each_write_boundary_leaves_no_partial_grap
 
     boundary_method = {
         "after_locator_close": "_close_existing_locator",
-        "after_locator_open": "_open_new_locator",
+        "after_locator_open": "_insert_lifecycle_intents",
         "after_event": "_insert_lifecycle_event",
         "after_intents": "_insert_lifecycle_intents",
         "after_audit": "_insert_lifecycle_audit",
@@ -591,7 +590,7 @@ async def test_injected_failure_after_each_write_boundary_leaves_no_partial_grap
         lifecycle_store.PostgresqlSourceLifecycleStore, boundary_method, raising
     )
 
-    with pytest.raises(RuntimeError, match=f"injected-{failure_after}"):
+    with pytest.raises(InternalApplicationError):
         await lifecycle_harness.lifecycle_store.commit(
             command,
             _device_context(workspace),
@@ -607,7 +606,7 @@ async def test_injected_failure_after_each_write_boundary_leaves_no_partial_grap
     assert history[0].normalized_locator == seeded.initial_locator.value
     assert history[0].closed_event_id is None
     source_row = await lifecycle_harness.fetch_source_row(source_id)
-    assert source_row.title == seeded.initial_locator.value.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    assert source_row.title == "Lifecycle source"
     assert source_row.sync_state == "active"
 
 

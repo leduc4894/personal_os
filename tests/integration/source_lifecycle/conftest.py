@@ -16,8 +16,10 @@ state shape the real adapter cannot produce.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
-from collections.abc import Iterator
+from asyncio import AbstractEventLoop
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
@@ -43,7 +45,10 @@ from postgresql_source_store.tables import (
     SOURCE_STORE_TABLES,
     audit_events,
     content_objects,
+    devices,
+    projection_intents,
     source_locators,
+    source_tombstones,
     source_versions,
     sources,
     sync_events,
@@ -52,11 +57,23 @@ from postgresql_source_store.tables import (
     workspaces,
 )
 
-pytest_plugins = (
-    "tests.integration.source_publication.conftest",
-    "tests.integration.source_lifecycle.conftest",
-)
 pytestmark = pytest.mark.local_stack
+
+
+def pytest_asyncio_loop_factories(
+    config: pytest.Config, item: pytest.Item
+) -> dict[str, Callable[[], AbstractEventLoop]]:
+    """Run lifecycle async tests on the Windows-compatible selector loop."""
+
+    del config, item
+    return {"selector": asyncio.SelectorEventLoop}
+
+
+@pytest.fixture
+def monkey(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
+    """Preserve the lifecycle suite's established fixture spelling."""
+
+    return monkeypatch
 
 __all__ = [
     "PreflightHarness",
@@ -261,10 +278,8 @@ class LifecycleHarness:
     async def fetch_tombstone(self, source_id: UUID) -> Any:
         async with self._engine.connect() as connection:
             result = await connection.execute(
-                sa.select(
-                    source_locators_audit_columns()
-                )
-                .select_from(sa.table("source_tombstones"))
+                sa.select(*source_locators_audit_columns())
+                .select_from(source_tombstones)
                 .where(source_tombstones_clause(source_id))
             )
             return result.one_or_none()
@@ -289,10 +304,8 @@ class LifecycleHarness:
     async def fetch_intent_rows(self, event_id: UUID) -> list[Any]:
         async with self._engine.connect() as connection:
             result = await connection.execute(
-                sa.select(
-                    projection_intents_columns()
-                )
-                .select_from(sa.table("projection_intents"))
+                sa.select(*projection_intents_columns())
+                .select_from(projection_intents)
                 .where(sync_event_clause(event_id))
                 .order_by(sa.column("projection_kind"))
             )
@@ -338,16 +351,7 @@ class LifecycleHarness:
                 )
             )
             await connection.execute(
-                sa.insert(
-                    sa.table(
-                        "devices",
-                        sa.column("device_id", sa.Uuid()),
-                        sa.column("workspace_id", sa.Uuid()),
-                        sa.column("user_id", sa.Uuid()),
-                        sa.column("device_name", sa.String()),
-                        sa.column("device_kind", sa.Text()),
-                    )
-                ).values(
+                sa.insert(devices).values(
                     device_id=device_id,
                     workspace_id=workspace_id,
                     user_id=owner_user_id,
@@ -398,10 +402,8 @@ class LifecycleHarness:
         )
 
 
-def source_locators_audit_columns() -> Any:
-    from postgresql_source_store.tables import source_tombstones
-
-    return sa.select(
+def source_locators_audit_columns() -> tuple[Any, ...]:
+    return (
         source_tombstones.c.source_tombstone_id,
         source_tombstones.c.workspace_id,
         source_tombstones.c.source_id,
@@ -417,8 +419,6 @@ def source_locators_audit_columns() -> Any:
 
 
 def source_tombstones_clause(source_id: UUID) -> Any:
-    from postgresql_source_store.tables import source_tombstones
-
     return source_tombstones.c.source_id == source_id
 
 
@@ -428,10 +428,8 @@ def sync_event_clause(event_id: UUID) -> Any:
     return projection_intents.c.event_id == event_id
 
 
-def projection_intents_columns() -> Any:
-    from postgresql_source_store.tables import projection_intents
-
-    return sa.select(
+def projection_intents_columns() -> tuple[Any, ...]:
+    return (
         projection_intents.c.projection_intent_id,
         projection_intents.c.event_id,
         projection_intents.c.source_id,

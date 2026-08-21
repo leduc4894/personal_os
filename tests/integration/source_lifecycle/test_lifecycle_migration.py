@@ -26,7 +26,6 @@ from postgresql_source_store.tables import (
     workspaces,
 )
 
-pytest_plugins = ("tests.integration.source_publication.conftest",)
 pytestmark = pytest.mark.local_stack
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -372,5 +371,5 @@ def test_lifecycle_revision_round_trips_active_locator_uniqueness(
         _assert_predecessor_constraints(source_publication_stack, evidence),
         loop_factory=asyncio.SelectorEventLoop,
     )
-    second_upgrade = _alembic("upgrade", _REVISION)
+    second_upgrade = _alembic("upgrade", "head")
     assert second_upgrade.returncode == 0

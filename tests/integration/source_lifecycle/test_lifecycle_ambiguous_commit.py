@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+import psycopg
 import pytest
 from tests.integration.source_lifecycle.conftest import (
     LifecycleHarness,
@@ -26,7 +27,6 @@ from personal_os.source_lifecycle.commands import (
     LifecycleOperation,
     SourceLifecycleCommand,
 )
-from personal_os.source_lifecycle.errors import SourceLifecycleError, SourceLifecycleErrorCode
 from personal_os.source_lifecycle.fingerprint import fingerprint_lifecycle_command
 from personal_os.source_lifecycle.ports import (
     LifecycleDeviceContext,
@@ -149,7 +149,7 @@ async def test_ambiguous_commit_returns_replay_when_evidence_exists(
     async def injected_once(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         state["calls"] += 1
         if state["calls"] == 1:
-            raise RuntimeError("simulated lost acknowledgement")
+            raise psycopg.InterfaceError("simulated lost acknowledgement")
         return await real_commit_once(self, *args, **kwargs)
 
     monkey.setattr(
@@ -174,7 +174,7 @@ async def test_ambiguous_commit_returns_replay_when_evidence_exists(
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_commit_returns_commit_outcome_unknown_when_no_evidence(
+async def test_ambiguous_commit_retries_when_lookup_proves_no_evidence(
     lifecycle_harness: LifecycleHarness,
     monkey: pytest.MonkeyPatch,
 ) -> None:
@@ -206,15 +206,14 @@ async def test_ambiguous_commit_returns_commit_outcome_unknown_when_no_evidence(
     counts_before = await lifecycle_harness.table_row_counts()
 
     # Simulate the same ambiguous failure path with no committed evidence.
+    real_commit_once = lifecycle_store.PostgresqlSourceLifecycleStore._commit_lifecycle_once
     state = {"calls": 0}
 
     async def injected_once(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         state["calls"] += 1
         if state["calls"] == 1:
-            raise RuntimeError("simulated lost acknowledgement without commit")
-        return await lifecycle_store.PostgresqlSourceLifecycleStore._commit_lifecycle_once(
-            self, *args, **kwargs
-        )
+            raise psycopg.InterfaceError("simulated lost acknowledgement without commit")
+        return await real_commit_once(self, *args, **kwargs)
 
     monkey.setattr(
         lifecycle_store.PostgresqlSourceLifecycleStore,
@@ -222,21 +221,20 @@ async def test_ambiguous_commit_returns_commit_outcome_unknown_when_no_evidence(
         injected_once,
     )
 
-    with pytest.raises(SourceLifecycleError) as failure:
-        await lifecycle_harness.lifecycle_store.commit(
-            command,
-            _device_context(workspace),
-            fingerprint,
-            decision,
-            _diagnostic_context(),
-        )
-    assert failure.value.code is SourceLifecycleErrorCode.COMMIT_OUTCOME_UNKNOWN
+    result = await lifecycle_harness.lifecycle_store.commit(
+        command,
+        _device_context(workspace),
+        fingerprint,
+        decision,
+        _diagnostic_context(),
+    )
+    assert result.event_id == command.event_id
     counts_after = await lifecycle_harness.table_row_counts()
     diff = {
         name: counts_after[name] - counts_before[name]
         for name in counts_after
     }
-    assert diff["source_locators"] == 0
-    assert diff["sync_events"] == 0
-    assert diff["projection_intents"] == 0
-    assert diff["audit_events"] == 0
+    assert diff["source_locators"] == 1
+    assert diff["sync_events"] == 1
+    assert diff["projection_intents"] == 2
+    assert diff["audit_events"] == 1
