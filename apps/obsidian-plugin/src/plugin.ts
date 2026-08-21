@@ -8,7 +8,7 @@
  * background sync loop.
  */
 
-import { Modal, Platform, Plugin, requestUrl, Setting, TFile } from "obsidian";
+import { Modal, Platform, Plugin, requestUrl, Setting, TAbstractFile, TFile } from "obsidian";
 
 import { createObsidianPolicyHttpTransport, createObsidianSyncHttpTransport } from "./api/obsidian-api-transport";
 import {
@@ -35,6 +35,12 @@ import { DeviceAuthenticationSettingTab } from "./authentication/settings-tab";
 import { DeviceTokenSession, resolveStartupAction } from "./authentication/token-session";
 import { JournalCapture } from "./journal/capture";
 import type { CaptureVaultReader } from "./journal/capture";
+import { LifecycleCapture } from "./journal/lifecycle-capture";
+import type {
+  LifecycleVaultReader,
+  VaultRenameTarget,
+  VaultTargetFile,
+} from "./journal/lifecycle-capture";
 import { JournalQueueDriver } from "./journal/queue-driver";
 import type { QueuePassOutcome, QueuePassSummary } from "./journal/queue-driver";
 import { createVaultPluginJournalStore, JournalPersistence } from "./journal/persistence";
@@ -179,6 +185,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   #policyState: PolicyIntegrityState = "policy_not_initialized";
   #journalPersistence: JournalPersistence | null = null;
   #capture: JournalCapture | null = null;
+  #lifecycleCapture: LifecycleCapture | null = null;
   #queueDriver: JournalQueueDriver | null = null;
   #queueRepository: JournalRepository | null = null;
   #isQueuePassActive = false;
@@ -319,6 +326,8 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     // the memory credential go away.
     this.#queueDriver?.stop();
     this.#queueDriver = null;
+    this.#lifecycleCapture?.dispose();
+    this.#lifecycleCapture = null;
     this.#capture?.dispose();
     this.#capture = null;
     // Safe unload (spec 11): every journal mutation already persisted its
@@ -401,10 +410,18 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       };
       const repository = new JournalRepository({ database: journalDatabase });
       const vaultReader = this.#createCaptureVaultReader();
+      const lifecycleVaultReader = this.#createLifecycleVaultReader(vaultReader);
+      const lifecycleCapture = new LifecycleCapture({
+        repository,
+        lifecycle: repository.lifecycle,
+        vaultReader: lifecycleVaultReader,
+        policyRevision: 1,
+      });
       const capture = new JournalCapture({
         repository,
         vaultReader,
         policyGate: policySession,
+        lifecycleCapture,
       });
       const queueDriver = new JournalQueueDriver({
         repository,
@@ -437,12 +454,12 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       );
       this.registerEvent(
         this.app.vault.on("delete", (file) => {
-          void capture.notifyPathDeleted(file.path);
+          void capture.notifyPathDeleted(this.#toVaultTargetFile(file));
         }),
       );
       this.registerEvent(
         this.app.vault.on("rename", (file, oldPath) => {
-          void capture.notifyPathRenamed(oldPath, file.path);
+          void capture.notifyPathRenamed(this.#toVaultRenameTarget(file), oldPath);
         }),
       );
       this.addCommand({
@@ -463,6 +480,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       this.#capture = capture;
       this.#queueDriver = queueDriver;
       this.#queueRepository = repository;
+      this.#lifecycleCapture = lifecycleCapture;
       // Plugin load after safe recovery is the first bounded foreground
       // trigger (spec 8): fire-and-forget, never awaited in onload. A
       // reconcile-required journal stops the driver inside the status
@@ -616,6 +634,32 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       },
       listRegularFilePaths: async () =>
         vault.getFiles().map((file) => file.path).sort(),
+    };
+  }
+
+  /**
+   * The narrow read-only Vault slice the lifecycle capture needs
+   * (journal design 6.3, 7.1): just the current bytes of one regular
+   * file for tombstone verification on restore, layered on top of the
+   * capture reader so plugin composition stays in one place.
+   */
+  #createLifecycleVaultReader(captureReader: CaptureVaultReader): LifecycleVaultReader {
+    return {
+      readRegularFileBytes: (normalizedPath) => captureReader.readRegularFileBytes(normalizedPath),
+    };
+  }
+
+  /** Narrow an Obsidian file into the lifecycle capture's rename target. */
+  #toVaultRenameTarget(file: TAbstractFile): VaultRenameTarget {
+    return this.#toVaultTargetFile(file) as VaultRenameTarget;
+  }
+
+  /** Narrow an Obsidian file into the lifecycle capture's delete target. */
+  #toVaultTargetFile(file: TAbstractFile): VaultTargetFile {
+    const parentPath = file.parent?.path ?? null;
+    return {
+      path: file.path,
+      parent: parentPath === null ? null : { path: parentPath },
     };
   }
 

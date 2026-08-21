@@ -670,6 +670,83 @@ export class JournalRepository {
     });
   }
 
+  // --- lifecycle orchestration helpers (child 5) ------------------------------------------------
+
+  /**
+   * Freeze every still-pending content event (`queued` / `preflight` /
+   * `waiting_retry`) of one tracked file as a terminal `deferred_lifecycle`
+   * row, in one transaction. Lifecycle events are never touched: a
+   * `rename` / `move` / `delete` / `restore` row already owns its own
+   * durable identity and must not be replaced by a content freeze.
+   *
+   * The lifecycle capture calls this BEFORE recording a rename / move /
+   * delete so every later queue pass ignores the file's outstanding
+   * content work without ever queuing more.
+   */
+  async freezePendingForLocalFile(localFileId: string): Promise<void> {
+    if (!isUuid(localFileId)) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    await this.#database.runSerializedMutation((session) => {
+      const existing = firstRow(
+        session.readRows(
+          `select local_file_id from local_files where local_file_id = ${sqlText(localFileId)};`,
+        ),
+      );
+      if (existing === null) {
+        throw journalStoreError("journal_mutation_failed");
+      }
+      const pendingStateList = JOURNAL_PENDING_EVENT_STATES.map((state) => sqlText(state)).join(", ");
+      session.exec(
+        [
+          "update journal_events set",
+          "state = 'deferred_lifecycle',",
+          "next_eligible_retry_epoch_ms = null,",
+          "safe_error = 'deferred_lifecycle',",
+          "is_fingerprint_frozen = 1",
+          `where local_file_id = ${sqlText(localFileId)}`,
+          `and state in (${pendingStateList})`,
+          "and operation in ('create', 'update');",
+        ].join(" "),
+      );
+    });
+  }
+
+  /**
+   * Remove one tracked `local_files` row together with every dependent
+   * event / operand row in one transaction. The lifecycle capture calls
+   * this AFTER a tombstone event has been recorded, so the durable
+   * operand row keeps the tombstone reference for restore even though
+   * the local mapping row itself is gone.
+   */
+  async removeLocalMapping(localFileId: string): Promise<void> {
+    if (!isUuid(localFileId)) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    await this.#database.runSerializedMutation((session) => {
+      const existing = firstRow(
+        session.readRows(
+          `select local_file_id from local_files where local_file_id = ${sqlText(localFileId)};`,
+        ),
+      );
+      if (existing === null) {
+        return;
+      }
+      session.exec(
+        `delete from journal_attempts where event_id in (select event_id from journal_events where local_file_id = ${sqlText(localFileId)});`,
+      );
+      session.exec(
+        `delete from lifecycle_event_operands where event_id in (select event_id from journal_events where local_file_id = ${sqlText(localFileId)});`,
+      );
+      session.exec(
+        `delete from journal_events where local_file_id = ${sqlText(localFileId)};`,
+      );
+      session.exec(
+        `delete from local_files where local_file_id = ${sqlText(localFileId)};`,
+      );
+    });
+  }
+
   // --- receipts and attempts (spec 6.3, 7.2) ----------------------------------------------------
 
   /**

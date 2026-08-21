@@ -18,6 +18,7 @@ const ALLOWED_OBSIDIAN_IMPORT_NAMES = new Set([
   "PluginSettingTab",
   "Setting",
   "TFile",
+  "TAbstractFile",
   "Modal",
 ]);
 
