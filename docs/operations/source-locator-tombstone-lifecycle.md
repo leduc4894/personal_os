@@ -257,17 +257,17 @@ are mandatory gates, not deferred backlog work.
 - Device: WDIO Obsidian Desktop on Windows
 - App version: 1.13.7
 - Plugin version: 0.1.0
-- Recorded at UTC: 2026-08-21T14:55:32Z
+- Recorded at UTC: 2026-08-21T15:40:00Z
 - Operator: Codex automated WDIO operator
 
 | Scenario | Outcome | Evidence |
 | --- | --- | --- |
-| Tracked rename | FAIL | Task 12 handoff Desktop gate |
-| Tracked move | NOT REACHED | Task 12 handoff Desktop gate |
-| Delete | NOT REACHED | Task 12 handoff Desktop gate |
-| Explicit restore | NOT REACHED | Task 12 handoff Desktop gate |
-| Stable source and version identity | NOT REACHED | Task 12 handoff Desktop gate |
-| Pending lifecycle drain | NOT REACHED | Task 12 handoff Desktop gate |
+| Tracked rename | NOT REACHED | handoff:desktop-live-gate |
+| Tracked move | NOT REACHED | handoff:desktop-live-gate |
+| Delete | NOT REACHED | handoff:desktop-live-gate |
+| Explicit restore | NOT REACHED | handoff:desktop-live-gate |
+| Stable source and version identity | NOT REACHED | handoff:desktop-live-gate |
+| Pending lifecycle drain | NOT REACHED | handoff:desktop-live-gate |
 
 ## Mobile live acceptance record
 

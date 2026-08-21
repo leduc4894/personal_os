@@ -3,16 +3,19 @@
 ## Status
 
 BLOCKED. Child 5 implementation and automated verification are present, but
-the two mandatory live acceptance gates have not passed. The real Desktop WDIO
-journey reached the authenticated canonical API and received a safe HTTP 422 on
-the rename lifecycle request; move, delete, explicit restore, stable-identity
-and drain assertions were therefore not reached. The physical Mobile matrix
-was not run. Child 5 is not closed and Child 6 must not begin.
+the two mandatory live acceptance gates have not passed. The lifecycle locator
+wire mismatch is fixed and covered by API/OpenAPI/generated-client tests. The
+bounded Desktop invocation reached the real authorization and login routes but
+stopped because its shell omitted required authentication-setting names. A
+corrected canonical helper probe then reported that the fresh disposable
+identity had no active TOTP credential, so a fully configured rerun could not
+begin. The physical Mobile matrix was not run. Child 5 is not closed and Child
+6 must not begin.
 
-Final implementation commit before this handoff: `89e1aef` (`fix: bind source
-lifecycle serve runtime`). The documentation snapshot commit containing this
-file is recorded in the Task 12 report because a commit cannot contain its own
-SHA.
+Final implementation commit before this handoff: `6c79787` (`fix: align source
+lifecycle policy and wire contracts`). The documentation snapshot commit
+containing this file is recorded in the Task 12 report because a commit cannot
+contain its own SHA.
 
 ## Gate status
 
@@ -20,9 +23,11 @@ SHA.
 | --- | --- | --- |
 | Reference-device contract RED | EXPECTED FAIL | Initial run failed because both record sections were absent. After adding honest records, `uv run pytest tests/contract/source_lifecycle/test_reference_device_records.py -m device_records -q` failed with all Desktop scenarios non-PASS; Mobile remains unobserved. |
 | Production lifecycle route regression RED/GREEN | PASS | `test_server_serves_the_source_lifecycle_route` first failed because the route was absent, then passed after composition; server/composition slice: 22 passed. |
-| Stack prerequisite | PASS | `uv run poe stack-status` reported the ordinary local project stopped; a validated disposable `knowledge-ci-*` project reached `stack_ready`. Schema, identity, web credential, TOTP and policy revision setup completed through repository contracts without recording values. |
-| API/Web/workers/tunnel | PASS | API and Web Admin readiness were HTTP 200; both policy workers ran via repository scripts; the existing configured tunnel served both public origins. No new tunnel or DNS change was made. |
-| Desktop WDIO | FAIL | Real Obsidian 1.13.7 / plugin 0.1.0 run exited 1 in 1m38s. Authentication, policy acquisition and initial canonical create passed; rename POST reached `/api/sources/lifecycle-events` and returned safe HTTP 422, leaving lifecycle event count zero. |
+| Stack prerequisite | PARTIAL | The ordinary local project was stopped and a validated disposable `knowledge-ci-*` project reached `stack_ready`. Schema, identity, web credential and policy signer setup completed, but `.local/e2e-totp-code.py` reported the closed `no active totp credential found` prerequisite and policy publication could not complete. |
+| API/Web/workers/tunnel | PASS | API and Web Admin readiness succeeded; both policy workers ran via repository scripts; the existing configured tunnel served both public origins. No new tunnel or DNS change was made. |
+| Desktop WDIO | FAIL | Real Obsidian 1.13.7 / plugin 0.1.0 bounded invocation exited 1 in 1m06s. Device authorization and admin login returned HTTP 200, then the TOTP helper failed with typed missing authentication settings because the invoking shell omitted five required names. With those names corrected, a direct canonical helper probe reported `no active totp credential found`; no lifecycle scenario was reached. |
+| Locator wire interoperability | PASS | RED proved OpenAPI exported locator wrappers while the runtime accepted strings. GREEN: API/OpenAPI 9 passed, plugin serialization 18 passed, generated-client drift check and both TypeScript builds exited 0. |
+| Locked policy race | PASS | The full disposable PostgreSQL race file passed 5 tests; the transaction-locked canonical verdict now selects projection intent operation. |
 | Migration selection | PASS | `uv run pytest tests/unit/migrations/test_source_lifecycle_migration.py tests/integration/source_lifecycle/test_lifecycle_migration.py -q`: 7 passed, 1 deselected. |
 | Lifecycle feature selection | PASS | `uv run pytest tests/unit/source_locators tests/unit/source_lifecycle tests/contract/source_lifecycle tests/integration/source_lifecycle -q`: 70 passed, 53 deselected. Device records require their explicit marker. |
 | Plugin tests | PASS | `pnpm --filter @workspace/obsidian-plugin test`: 31 files, 488 tests passed. |
@@ -41,11 +46,12 @@ SHA.
   application and OpenAPI export supported it. The smallest fix composes the
   PostgreSQL store, canonical signed-policy evaluator, lifecycle metrics and
   authenticated route in the real server graph.
-- The post-fix Desktop 422 is a distinct wire-validation blocker. The generated
-  client currently sends locator wrappers while the backend validator accepts
-  normalized locator strings. That contract mismatch requires its own RED
-  OpenAPI/generated-client regression before correction; it was not guessed
-  around during acceptance.
+- The observed Desktop 422 was traced to the generated locator wrapper versus
+  runtime string mismatch. The OpenAPI contract now publishes nullable strings
+  and the generated client and plugin serialize that same representation.
+- The review rerun does not prove the wire fix live: the fresh disposable
+  identity lacked the active TOTP credential required by the canonical helper,
+  so lifecycle assertions were never reached.
 - No BACKLOG row was added: Desktop and Mobile acceptance are mandatory, not
   deferrable work.
 - Operations detail and mutable reference-device records remain in
@@ -58,9 +64,9 @@ items.
 
 ## Next actions
 
-1. Write a failing API/OpenAPI/generated-client contract proving lifecycle
-   locator fields have one shared wire representation; implement and regenerate
-   the client, then rerun all affected contract and plugin tests.
+1. Enroll an active TOTP credential for the disposable Web identity through the
+   canonical Web Admin flow. Confirm `.local/e2e-totp-code.py` succeeds without
+   recording its output, then run `.local/publish-policy-revision.py`.
 2. Bring the disposable live environment up in the authoritative order:
    `uv run poe stack-status`, `bash .local/serve-local.sh`,
    `pnpm --filter @workspace/web-runtime exec next start --port 38000`,
@@ -77,11 +83,13 @@ items.
 5. Run
    `uv run pytest tests/contract/source_lifecycle/test_reference_device_records.py -m device_records -q`.
    Only a PASS for both records permits Child 5 closure.
+6. Resolve the inherited Ruff format drift, then rerun `uv run poe verify` to
+   exit 0 before closure.
 
 ## Concerns
 
-- Desktop acceptance currently demonstrates an authenticated wire-contract
-  mismatch, not lifecycle success.
+- Desktop acceptance still does not prove the corrected locator wire contract;
+  the latest bounded run stopped at the missing active-TOTP prerequisite.
 - Physical Mobile behavior remains entirely unobserved.
 - Repository-wide format verification is red on pre-existing lifecycle-area
   formatting drift, despite the Task 12 files themselves being formatted.
