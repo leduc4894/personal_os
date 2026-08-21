@@ -125,16 +125,51 @@ describe("Obsidian plugin composition root", () => {
     expect(listenerCount).toBe(4);
   });
 
-  it("registers exactly the two sync commands and no other", () => {
+  it("registers exactly the three safe-source commands and no other", () => {
     expect(pluginSource).toContain('id: "sync-now"');
     expect(pluginSource).toContain('id: "sync-existing-files"');
-    expect(pluginSource.match(/addCommand\(/g)?.length ?? 0).toBe(2);
+    expect(pluginSource).toContain('id: "restore-selected-tombstone"');
+    expect(pluginSource.match(/addCommand\(/g)?.length ?? 0).toBe(3);
     // The bounded snapshot scan runs only through the confirmed command.
     const commandIndex = pluginSource.indexOf("addCommand(");
     const scanCallbackIndex = pluginSource.indexOf("void this.#runExistingFilesScan()");
     expect(scanCallbackIndex).toBeGreaterThan(commandIndex);
     // Startup itself never invokes the scan; only the command callback does.
     expect(pluginSource.match(/void this\.#runExistingFilesScan\(\)/g)?.length ?? 0).toBe(1);
+    // The restore command narrowly routes through the captured
+    // LifecycleCapture port so the brief's hash-verification invariant
+    // and safe-code rejection path remain in one tested module.
+    const restoreCommandIndex = pluginSource.indexOf('id: "restore-selected-tombstone"');
+    const restoreBodyStart = pluginSource.indexOf("{", restoreCommandIndex);
+    const restoreBodyEnd = pluginSource.indexOf("});", restoreBodyStart);
+    const restoreBody = pluginSource.slice(restoreBodyStart, restoreBodyEnd);
+    expect(restoreBody).toContain("#runRestoreSelectedTombstone");
+    expect(restoreBody).not.toContain("setInterval");
+    expect(restoreBody).not.toContain("registerInterval");
+    // The restore composition calls the lifecycle capture port directly.
+    const restoreMethodMatch = pluginSource.match(
+      /async #runRestoreSelectedTombstone\(\): Promise<void> \{[\s\S]*?\n  \}\n/,
+    );
+    expect(restoreMethodMatch?.[0]).toBeTruthy();
+    expect(restoreMethodMatch?.[0]).toContain("requestRestore");
+    expect(restoreMethodMatch?.[0]).toContain("catch");
+    expect(restoreMethodMatch?.[0]).toContain("#refreshSyncStatus");
+  });
+
+  it("Sync now schedules a driver pass without bypassing the one-active-request guarantee", () => {
+    // The Sync now command MUST funnel through the bounded-pass wrapper
+    // so the driver's one-active-request invariant and bounded retry
+    // backoff are preserved.
+    const syncNowIndex = pluginSource.indexOf('id: "sync-now"');
+    const syncNowBodyStart = pluginSource.indexOf("{", syncNowIndex);
+    const syncNowBodyEnd = pluginSource.indexOf("});", syncNowBodyStart);
+    const syncNowBody = pluginSource.slice(syncNowBodyStart, syncNowBodyEnd);
+    expect(syncNowBody).toContain("#runBoundedQueuePass");
+    expect(syncNowBody).not.toContain("requestPass()");
+    expect(syncNowBody).not.toContain("runPass()");
+    // The Sync now callback is fire-and-forget; no awaiting, no synchronous
+    // bookkeeping that could let a user-trigger bypass the bounded backoff.
+    expect(syncNowBody).not.toContain("await ");
   });
 
   it("wires the bounded foreground queue driver behind the sync commands", () => {
@@ -167,6 +202,42 @@ describe("Obsidian plugin composition root", () => {
       pluginSource.indexOf("this.#queueDriver = queueDriver"),
     );
     expect(loadPassIndex).toBeGreaterThan(recoveryIndex);
+  });
+
+  it("wires the lifecycle capture, lifecycle driver and lifecycle api behind the restore command", () => {
+    expect(pluginSource).toContain("new LifecycleCaptureImpl(");
+    expect(pluginSource).toContain("new LifecycleDriverImpl(");
+    expect(pluginSource).toContain("createRequestUrlLifecycleApi(");
+    // The lifecycle capture is composed into the JournalCapture (rename,
+    // move, delete detection) AND stored on the plugin instance so the
+    // explicit restore command can address it through the same port.
+    expect(pluginSource).toContain("#lifecycleCapture");
+    // The capture composes into the queue driver so the foreground pass
+    // interleaves the lifecycle lane ahead of the content lane.
+    expect(pluginSource).toContain("lifecycleDriver");
+  });
+
+  it("never logs paths, locators, source IDs, tokens or fingerprints from the restore command", () => {
+    // The error reporter of the restore command must surface only the
+    // closed safe-code label of the journal store error; the raw failure
+    // (and any underlying locator / source id / fingerprint / token) is
+    // never written to console.
+    const restoreIndex = pluginSource.indexOf('id: "restore-selected-tombstone"');
+    const restoreBodyStart = pluginSource.indexOf("{", restoreIndex);
+    const restoreBodyEnd = pluginSource.indexOf("});", restoreBodyStart);
+    const restoreBody = pluginSource.slice(restoreBodyStart, restoreBodyEnd);
+    expect(restoreBody).not.toContain("console.error");
+    expect(restoreBody).not.toContain("console.log");
+    expect(restoreBody).not.toContain("throw error");
+    expect(restoreBody).not.toContain("requestRestore(error)");
+    // The method body must swallow the lifecycle capture error so the
+    // closed safe-code label is the only thing the surface sees.
+    const restoreMethodMatch = pluginSource.match(
+      /async #runRestoreSelectedTombstone\(\): Promise<void> \{[\s\S]*?\n  \}\n/,
+    );
+    expect(restoreMethodMatch?.[0]).toBeTruthy();
+    expect(restoreMethodMatch?.[0]).not.toContain("console.error");
+    expect(restoreMethodMatch?.[0]).not.toContain("console.log");
   });
 
   it("renders the closed sync status on a small status-bar surface", () => {

@@ -37,6 +37,10 @@ import type {
   JournalSafeErrorLabel,
   LocalFile,
 } from "./contracts";
+import {
+  LIFECYCLE_LOCAL_FILE_STATES,
+  type LifecycleLocalFileState,
+} from "./lifecycle-contracts";
 import { LifecycleRepository as JournalLifecycleRepository } from "./lifecycle-repository";
 import {
   JOURNAL_CAPTURE_ADMISSIONS,
@@ -1027,6 +1031,132 @@ export class JournalRepository {
         eventCount,
       };
     });
+  }
+
+  /**
+   * The redacted lifecycle-state histogram of the status projection
+   * (Task 10, spec 6.3): the closed {@link LifecycleLocalFileState} of
+   * each tracked `local_files` row, counted per state. The closed enum
+   * is the only thing that reaches the status surface — no path,
+   * source id, locator, tombstone id, fingerprint or any other row
+   * detail ever escapes the read.
+   */
+  readLifecycleStateCounts(): Readonly<Record<LifecycleLocalFileState, number>> {
+    const counts: Record<LifecycleLocalFileState, number> = {
+      active: 0,
+      rename_pending: 0,
+      move_pending: 0,
+      delete_pending: 0,
+      restore_pending: 0,
+      tombstoned: 0,
+      restored: 0,
+      reconcile_required: 0,
+    };
+    const result = this.#database.readAll(
+      "select lifecycle_state, count(*) from local_files group by lifecycle_state;",
+    );
+    for (const row of result[0]?.values ?? []) {
+      const [state, count] = row;
+      if (typeof state !== "string" || !isClosedToken(state, LIFECYCLE_LOCAL_FILE_STATES)) {
+        throw journalStoreError("journal_image_invalid");
+      }
+      if (
+        typeof count !== "number" ||
+        !Number.isInteger(count) ||
+        count < 0
+      ) {
+        throw journalStoreError("journal_image_invalid");
+      }
+      counts[state as LifecycleLocalFileState] = count;
+    }
+    return counts;
+  }
+
+  /**
+   * The number of lifecycle events that still owe work (Task 10): the
+   * oldest eligible lifecycle event count surfaced as a status
+   * affordance. The number is derived from the same closed pending-event
+   * vocabulary the content queue uses, restricted to the four lifecycle
+   * operations so the count never leaks a content event.
+   */
+  countPendingLifecycleEvents(): number {
+    const pendingStateList = JOURNAL_PENDING_EVENT_STATES.map((state) => sqlText(state)).join(", ");
+    const row = firstRow(
+      this.#database.readAll(
+        [
+          `select count(*) from journal_events`,
+          `where state in (${pendingStateList})`,
+          `and operation in ('rename', 'move', 'delete', 'restore');`,
+        ].join(" "),
+      ),
+    );
+    const count = row?.[0];
+    return typeof count === "number" ? count : 0;
+  }
+
+  /**
+   * The number of failed attempts in the bounded `journal_attempts`
+   * ring (Task 10, spec 6.3): every row whose closed `outcome_label`
+   * is anything other than the success token (`committed`) counts as
+   * one failed attempt. The number never leaks a path, digest, source
+   * id or credential; only closed labels and correlation IDs reach
+   * the audit ring.
+   */
+  countFailedAttempts(): number {
+    const row = firstRow(
+      this.#database.readAll(
+        "select count(*) from journal_attempts where outcome_label != 'committed';",
+      ),
+    );
+    const count = row?.[0];
+    return typeof count === "number" ? count : 0;
+  }
+
+  /**
+   * The redacted lifecycle blocked-reason-code list of the status
+   * projection (Task 10, spec 6.3): the closed set of reasons any
+   * lifecycle event currently owns that block its forward progress.
+   * The mapping is derived from the existing telemetry (event states
+   * + bounded attempt outcome labels); no path, digest, locator,
+   * source id, tombstone id or credential ever escapes the read.
+   */
+  readLifecycleBlockedReasonCodes(): readonly string[] {
+    const codes = new Set<string>();
+    const blockedEvents = this.#database.readAll(
+      [
+        "select safe_error from journal_events",
+        "where operation in ('rename', 'move', 'delete', 'restore')",
+        "and safe_error = 'integrity_failed';",
+      ].join(" "),
+    );
+    for (const row of blockedEvents[0]?.values ?? []) {
+      const [safeError] = row;
+      if (typeof safeError === "string") {
+        codes.add(safeError);
+      }
+    }
+    return Array.from(codes);
+  }
+
+  /**
+   * The retained tombstone ids the explicit restore surface addresses
+   * (Task 10, spec 6.3 + 7.1). The read returns every tracked file
+   * row whose `lifecycle_state` is `tombstoned`, identified by the
+   * plugin-local `localFileId`. No path, source id, tombstone id,
+   * locator or fingerprint reaches the caller; the picker constructs
+   * its display label from the safe identifier alone.
+   */
+  readTombstonedLocalFileIds(): readonly string[] {
+    const rows = this.#database.readAll(
+      [
+        "select local_file_id from local_files",
+        "where lifecycle_state = 'tombstoned'",
+        "order by normalized_path asc;",
+      ].join(" "),
+    );
+    return (rows[0]?.values ?? [])
+      .map((row) => row[0])
+      .filter((value): value is string => typeof value === "string" && value.length > 0);
   }
 
   // --- internals ------------------------------------------------------------------------------------

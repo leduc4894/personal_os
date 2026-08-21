@@ -492,6 +492,22 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           void this.#runExistingFilesScan();
         },
       });
+      // Explicit restore surface (Task 10, spec 6.3 + 7.1): the user
+      // picks one retained tombstone by its plugin-local id (the only
+      // identity the journal actually retains for the row), confirms a
+      // target path, and the lifecycle capture verifies the bytes hash
+      // against the file's last-committed fingerprint before recording
+      // a restore event. The surface never logs paths, locators, source
+      // ids, tokens or fingerprints — failures surface as the closed
+      // `journal_mutation_failed` safe code and the Sync status is
+      // refreshed so the lifecycle state transitions stay visible.
+      this.addCommand({
+        id: "restore-selected-tombstone",
+        name: "Restore selected tombstone",
+        callback: () => {
+          void this.#runRestoreSelectedTombstone();
+        },
+      });
       this.#journalPersistence = persistence;
       this.#capture = capture;
       this.#queueDriver = queueDriver;
@@ -518,6 +534,117 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       .runExistingFilesScan({ confirm: () => this.#confirmExistingFilesScan() })
       .catch(() => undefined);
     this.#refreshSyncStatus();
+  }
+
+  /**
+   * The explicit-restore command callback (Task 10, spec 6.3 + 7.1):
+   * show the picker for retained tombstones, confirm the target path
+   * with the user and call the lifecycle capture port to validate the
+   * bytes hash and record the restore event. Failures surface as the
+   * closed `journal_mutation_failed` safe code and never reach the
+   * console; the sync status is refreshed on both branches so the
+   * redacted status surface reflects the new lifecycle state.
+   */
+  async #runRestoreSelectedTombstone(): Promise<void> {
+    const lifecycleCapture = this.#lifecycleCapture;
+    const repository = this.#queueRepository;
+    if (lifecycleCapture === null || repository === null) {
+      return;
+    }
+    const selection = await this.#pickTombstonedFile(repository);
+    if (selection === null) {
+      return;
+    }
+    const targetPath = await this.#promptForRestoreTargetPath();
+    if (targetPath === null) {
+      return;
+    }
+    const confirmed = await this.#confirmRestoreRequest(selection, targetPath);
+    if (!confirmed) {
+      return;
+    }
+    try {
+      await lifecycleCapture.requestRestore(selection.localFileId, targetPath);
+    } catch {
+      // The lifecycle capture closes the failure as the closed
+      // `journal_mutation_failed` safe-code; the rejected bytes hash,
+      // missing retained mapping, missing open tombstone or missing
+      // delete predecessor stays local. The sync status refresh is the
+      // single source of truth for the user.
+    }
+    this.#refreshSyncStatus();
+  }
+
+  /**
+   * The narrow picker for retained tombstones. Each candidate carries
+   * only its plugin-local `localFileId` and a short safe label — the
+   * underlying path never reaches the picker text. The picker closes
+   * with `null` when the user dismisses the modal without a choice.
+   */
+  #pickTombstonedFile(
+    repository: JournalRepository,
+  ): Promise<{ readonly localFileId: string; readonly shortLabel: string } | null> {
+    return new Promise((resolve) => {
+      const localFileIds = repository.readTombstonedLocalFileIds();
+      const candidates: readonly { readonly localFileId: string; readonly shortLabel: string }[] =
+        localFileIds.map((localFileId) => ({
+          localFileId,
+          shortLabel: `Tombstone #${localFileId.slice(-8)}`,
+        }));
+      if (candidates.length === 0) {
+        new NoticeModal(
+          this.app,
+          "No retained tombstones",
+          "There are no tombstoned files eligible for restore right now.",
+        ).open();
+        resolve(null);
+        return;
+      }
+      const modal = new SuggestModal<{ readonly localFileId: string; readonly shortLabel: string }>(
+        this.app,
+        candidates,
+        (item) => item.shortLabel,
+      );
+      modal.setPlaceholder("Pick a tombstone to restore");
+      modal.onChooseItem = (item) => resolve(item);
+      modal.onClose = () => resolve(null);
+      modal.open();
+    });
+  }
+
+  /** The narrow text prompt for the restore target path. */
+  #promptForRestoreTargetPath(): Promise<string | null> {
+    return new Promise((resolve) => {
+      const modal = new TextPromptModal(
+        this.app,
+        "Restore target path",
+        "Vault path the restored bytes should occupy (no path is recorded yet).",
+        (value) => resolve(value),
+        () => resolve(null),
+      );
+      modal.open();
+    });
+  }
+
+  /** The narrow confirmation modal of an explicit restore request. */
+  #confirmRestoreRequest(
+    selection: { readonly localFileId: string; readonly shortLabel: string },
+    targetPath: string,
+  ): Promise<boolean> {
+    return new Promise((resolve) => {
+      const modal = new ConfirmModal(
+        this.app,
+        "Confirm restore",
+        [
+          `Restore ${selection.shortLabel} to the chosen Vault path?`,
+          "The bytes hash must match the server-committed content hash or the restore is rejected.",
+        ].join("\n"),
+        () => resolve(true),
+        () => resolve(false),
+      );
+      void targetPath;
+      modal.open();
+    });
   }
 
   /**
@@ -707,5 +834,177 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         });
       },
     };
+  }
+}
+
+// --- task-10 modal helpers (composition only, no behaviour) ---------------------------------
+
+/**
+ * A minimal Obsidian `SuggestModal<T>` reimplementation that the
+ * compose-only plugin layer can carry without depending on the optional
+ * `obsidian.d.ts` augmentation. The picker shows the safe label and
+ * resolves the typed item through {@link SuggestModal.onChooseItem}.
+ */
+class SuggestModal<T> extends Modal {
+  readonly #items: readonly T[];
+  readonly #render: (item: T) => string;
+  #placeholder = "Search…";
+  onChooseItem: (item: T) => void = () => undefined;
+
+  constructor(app: import("obsidian").App, items: readonly T[], render: (item: T) => string) {
+    super(app);
+    this.#items = items;
+    this.#render = render;
+  }
+
+  setPlaceholder(text: string): void {
+    this.#placeholder = text;
+  }
+
+  override onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("p", { text: this.#placeholder });
+    const list = contentEl.createEl("ul");
+    for (const item of this.#items) {
+      const row = list.createEl("li", { text: this.#render(item) });
+      row.style.cursor = "pointer";
+      row.addEventListener("click", () => {
+        this.close();
+        this.onChooseItem(item);
+      });
+    }
+  }
+}
+
+/** A minimal Obsidian `Modal` that resolves to a typed text value or null. */
+class TextPromptModal extends Modal {
+  readonly #title: string;
+  readonly #description: string;
+  readonly #accept: (value: string) => void;
+  readonly #reject: () => void;
+  #inputValue = "";
+
+  constructor(
+    app: import("obsidian").App,
+    title: string,
+    description: string,
+    accept: (value: string) => void,
+    reject: () => void,
+  ) {
+    super(app);
+    this.#title = title;
+    this.#description = description;
+    this.#accept = accept;
+    this.#reject = reject;
+  }
+
+  override onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    this.titleEl.setText(this.#title);
+    contentEl.createEl("p", { text: this.#description });
+    const input = contentEl.createEl("input");
+    input.type = "text";
+    input.style.width = "100%";
+    input.addEventListener("input", () => {
+      this.#inputValue = input.value;
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        this.close();
+        this.#accept(this.#inputValue);
+      }
+    });
+    new Setting(contentEl)
+      .addButton((button) =>
+        button
+          .setButtonText("Restore")
+          .setCta()
+          .onClick(() => {
+            this.close();
+            this.#accept(this.#inputValue);
+          }),
+      )
+      .addButton((button) =>
+        button
+          .setButtonText("Cancel")
+          .onClick(() => {
+            this.close();
+            this.#reject();
+          }),
+      );
+    this.onClose = () => this.#reject();
+  }
+}
+
+/** A minimal two-button confirmation modal that resolves to a boolean. */
+class ConfirmModal extends Modal {
+  readonly #title: string;
+  readonly #body: string;
+  readonly #accept: () => void;
+  readonly #reject: () => void;
+
+  constructor(
+    app: import("obsidian").App,
+    title: string,
+    body: string,
+    accept: () => void,
+    reject: () => void,
+  ) {
+    super(app);
+    this.#title = title;
+    this.#body = body;
+    this.#accept = accept;
+    this.#reject = reject;
+  }
+
+  override onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    this.titleEl.setText(this.#title);
+    contentEl.createEl("p", { text: this.#body });
+    new Setting(contentEl)
+      .addButton((button) =>
+        button
+          .setButtonText("Restore")
+          .setCta()
+          .onClick(() => {
+            this.close();
+            this.#accept();
+          }),
+      )
+      .addButton((button) =>
+        button
+          .setButtonText("Cancel")
+          .onClick(() => {
+            this.close();
+            this.#reject();
+          }),
+      );
+    this.onClose = () => this.#reject();
+  }
+}
+
+/** A minimal read-only notice modal that closes on its own. */
+class NoticeModal extends Modal {
+  readonly #title: string;
+  readonly #body: string;
+
+  constructor(app: import("obsidian").App, title: string, body: string) {
+    super(app);
+    this.#title = title;
+    this.#body = body;
+  }
+
+  override onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    this.titleEl.setText(this.#title);
+    contentEl.createEl("p", { text: this.#body });
+    new Setting(contentEl).addButton((button) =>
+      button.setButtonText("Close").setCta().onClick(() => this.close()),
+    );
   }
 }
