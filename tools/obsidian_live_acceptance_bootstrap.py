@@ -423,6 +423,8 @@ def _execute_live_acceptance(
         timeout_seconds=_POLICY_TIMEOUT_SECONDS,
         environment=_live_child_environment(config),
     )
+    policy_time_step = time_step_of(unix_time_seconds=int(time.time()))
+    _wait_for_unused_totp_step(policy_time_step)
     _run_child(
         executor,
         config,
