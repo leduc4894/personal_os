@@ -35,7 +35,7 @@
 import type { JournalEvent, JournalSafeErrorLabel, LocalFile } from "./contracts";
 import { MAX_FILE_SIZE_BYTES } from "./contracts";
 import { deriveFrozenFingerprint } from "./fingerprint";
-import type { LifecycleDriver } from "./lifecycle-driver";
+import type { LifecycleDriver, LifecycleRunOutcome } from "./lifecycle-driver";
 import type { JournalRepository } from "./repository";
 import type { JournalPreflightOutcome, JournalSyncApi, SmallFileTerminalReceipt } from "./sync-api";
 import { SyncApiError } from "./sync-api";
@@ -214,10 +214,12 @@ export class JournalQueueDriver {
    * Run one bounded pass: the oldest eligible event at a time, one active
    * content request, until the queue drains, the deadline passes, login is
    * required, or the driver stops. When a lifecycle driver is wired in,
-   * the pass interleaves: it first drains one ready lifecycle event
-   * (whose predecessor, when declared, is terminal-success), then
-   * processes one content event. The two lanes never have an active
-   * mutating request in flight at the same time.
+   * the pass interleaves: it first drains the lifecycle lane to IDLE
+   * (spec 19.2 predecessor rule, task 9 fix round 1 I3), then processes
+   * one content event. The two lanes never have an active mutating
+   * request in flight at the same time, and the content lane never
+   * sees a lifecycle event because the lane filter is enforced by
+   * draining the lifecycle lane before each content selection.
    */
   async runPass(): Promise<QueuePassSummary> {
     if (this.#isStopped) {
@@ -233,15 +235,32 @@ export class JournalQueueDriver {
     let passOutcome: QueuePassOutcome = "completed";
     try {
       while (!this.#isStopped && this.#nowEpochMs() < passDeadlineEpochMs) {
-        // Drain one lifecycle event first so a content event whose
-        // predecessor is a queued lifecycle operation does not dispatch
-        // before the predecessor commits.
+        // Drain the lifecycle lane to IDLE before each content-lane
+        // selection. The previous one-call-per-iteration design let
+        // the content lane re-select a queued lifecycle event when
+        // two lifecycle events were queued — the content lane then
+        // tried to send it through the wrong API. Looping until
+        // `runOne` returns "idle" keeps the predecessor rule
+        // deterministic and avoids the lane-crossing dispatch.
         if (this.#lifecycleDriver !== null && !this.#isStopped) {
-          try {
-            await this.#lifecycleDriver.runOne(this.#passAbortController.signal);
-          } catch {
-            // The lifecycle driver swallows its own errors and returns
-            // closed outcomes; a thrown error here is fail-closed.
+          let lifecycleOutcome: LifecycleRunOutcome = "idle";
+          do {
+            try {
+              lifecycleOutcome = await this.#lifecycleDriver.runOne(
+                this.#passAbortController.signal,
+              );
+            } catch {
+              // The lifecycle driver swallows its own errors and
+              // returns closed outcomes; a thrown error here is
+              // fail-closed.
+              break;
+            }
+            if (this.#isStopped || this.#nowEpochMs() >= passDeadlineEpochMs) {
+              break;
+            }
+          } while (lifecycleOutcome === "committed");
+          if (this.#isStopped) {
+            break;
           }
         }
         let continuation: PassContinuation;

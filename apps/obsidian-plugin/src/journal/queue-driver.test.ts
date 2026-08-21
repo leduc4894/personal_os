@@ -32,6 +32,13 @@ import { JournalRepository } from "./repository";
 import { JOURNAL_SCHEMA_VERSION, SqliteDatabase } from "./sqlite-database";
 import type { SqliteEngineModule } from "./sqlite-database";
 import { createJournalSyncApi } from "./sync-api";
+import { LifecycleDriverImpl, type LifecycleApi } from "./lifecycle-driver";
+import { LifecycleApiError, type LifecycleResult } from "./lifecycle-api";
+import { LifecycleRepository } from "./lifecycle-repository";
+import {
+  createLifecycleEventOperands,
+  type LifecycleEventOperands,
+} from "./lifecycle-contracts";
 import type { SyncHttpRequest } from "./sync-api";
 
 /** The real sql.js WebAssembly engine drives every driver test (spec 6.1). */
@@ -959,5 +966,330 @@ describe("queue driver suspension and unload (spec 8)", () => {
     expect(second.outcome).toBe("pass_already_running");
     gate.release?.();
     expect((await first).outcome).toBe("completed");
+  });
+});
+
+// --- queue driver + lifecycle lane separation (task 9 fix round 1 I3) --------------------
+//
+// The queue driver interleaves the lifecycle lane with the content
+// lane: each pass iteration drains the lifecycle lane to idle BEFORE
+// the content lane sees its next event. The fix is required so a
+// content event selection never falls through to a lifecycle event
+// (the content lane does not know how to dispatch a lifecycle event
+// through the lifecycle API).
+
+interface LifecycleHandler {
+  (event: FrozenLifecycleEventForTest): Promise<LifecycleResult>;
+}
+
+interface LifecycleDriverHarness {
+  readonly repository: JournalRepository;
+  readonly lifecycle: LifecycleRepository;
+  readonly driver: JournalQueueDriver;
+  readonly vaultBytes: Map<string, Uint8Array>;
+  readonly lifecycleCommits: FrozenLifecycleEventForTest[];
+  readonly preflightBodies: Record<string, unknown>[];
+  installLifecycleHandler: (handler: LifecycleHandler) => void;
+  installTransport: (
+    handlers: { preflight: PreflightHandler; content?: ContentHandler },
+  ) => ScriptedTransport;
+  /** Seed a tracked file with a committed create so the file has a known source id. */
+  seedTrackedFile: (path: string, bytes: Uint8Array) => Promise<JournalEvent>;
+  recordLifecycleEvent: (
+    operands: LifecycleEventOperands,
+    options?: { tombstoneId?: string | null; newPath?: string },
+  ) => Promise<JournalEvent>;
+  /** Record one content-event capture (create or update). */
+  recordContent: (path: string, bytes: Uint8Array) => Promise<JournalEvent>;
+}
+
+type FrozenLifecycleEventForTest = {
+  readonly event: { readonly eventId: string };
+  readonly operands: { readonly operation: string };
+};
+
+function createHarnessWithLifecycle(): LifecycleDriverHarness {
+  const database = SqliteDatabase.createEmpty(engineModule, {
+    schemaVersion: JOURNAL_SCHEMA_VERSION,
+    dirtyGeneration: 1,
+    lastVerifiedGeneration: 1,
+    isReconcileRequired: false,
+    recoveryState: "verified_generation_loaded",
+  } satisfies JournalMeta);
+  const epochBase = 1_784_000_000_000;
+  const driverClockMs = epochBase;
+  let idCounter = 0;
+  const createId = () => {
+    idCounter += 1;
+    const suffix = String(idCounter).padStart(12, "0");
+    return `00000000-0000-4000-8000-${suffix}`;
+  };
+  const repository = new JournalRepository({
+    database,
+    nowEpochMs: () => driverClockMs,
+    createId,
+  });
+  const lifecycle = new LifecycleRepository({
+    database,
+    nowEpochMs: () => driverClockMs,
+    createId,
+  });
+  const vaultBytes = new Map<string, Uint8Array>();
+  const preflightBodies: Record<string, unknown>[] = [];
+  const lifecycleCommits: FrozenLifecycleEventForTest[] = [];
+  let lifecycleHandler: LifecycleHandler | null = null;
+  let activeTransport: ((request: SyncHttpRequest) => Promise<RawResponse>) | null = null;
+  const syncApi = createJournalSyncApi({
+    transport: (request) => {
+      const transport = activeTransport;
+      if (transport === null) {
+        throw new Error("no transport installed");
+      }
+      return transport(request);
+    },
+    resolveOrigin: () => ORIGIN,
+    getAccessToken: () => ACCESS_TOKEN,
+  });
+  const lifecycleApi: LifecycleApi = {
+    async commit(event) {
+      const frozen: FrozenLifecycleEventForTest = {
+        event: { eventId: event.event.eventId },
+        operands: { operation: event.operands.operation },
+      };
+      lifecycleCommits.push(frozen);
+      if (lifecycleHandler === null) {
+        throw new LifecycleApiError("server_error");
+      }
+      return lifecycleHandler(frozen);
+    },
+  };
+  const lifecycleDriver = new LifecycleDriverImpl({
+    repository,
+    lifecycle,
+    api: lifecycleApi,
+    createCorrelationId: () => `corr-${idCounter}`,
+    randomJitter: () => 0,
+    nowEpochMs: () => driverClockMs,
+  });
+  const driver = new JournalQueueDriver({
+    repository,
+    syncApi,
+    fileBytesReader: {
+      readRegularFileBytes: async (normalizedPath) => vaultBytes.get(normalizedPath) ?? null,
+    },
+    lifecycleDriver,
+    refreshAccessToken: () => Promise.resolve(),
+    nowEpochMs: () => driverClockMs,
+    createCorrelationId: () => `corr-${idCounter}`,
+    randomJitter: () => 0,
+  });
+  return {
+    repository,
+    lifecycle,
+    driver,
+    vaultBytes,
+    lifecycleCommits,
+    preflightBodies,
+    installLifecycleHandler: (handler) => {
+      lifecycleHandler = handler;
+    },
+    installTransport: (handlers) => {
+      const scripted = createScriptedHandlers({
+        ...handlers,
+        preflight: async (body) => {
+          preflightBodies.push(body);
+          return await handlers.preflight(body);
+        },
+      });
+      activeTransport = scripted.transport;
+      return scripted;
+    },
+    seedTrackedFile: async (path, bytes) => {
+      const capture = await repository.recordCapture({
+        normalizedPath: path,
+        fingerprint: await deriveFrozenFingerprint(bytes),
+        policyRevisionNumber: 2,
+        admission: "policy_allowed",
+      });
+      if (capture.outcome !== "event_recorded" && capture.outcome !== "event_coalesced") {
+        throw new Error("expected a recorded capture");
+      }
+      await repository.recordCommittedReceipt({
+        eventId: capture.event.eventId,
+        sourceId: SOURCE_ID,
+        baseVersionId: SOURCE_VERSION_ID,
+      });
+      return capture.event;
+    },
+    recordLifecycleEvent: async (operands, options) => {
+      const lookupPath =
+        operands.expectedLocator ??
+        (operands.operation === "restore" ? operands.targetLocator : null) ??
+        options?.newPath ??
+        null;
+      if (lookupPath === null) {
+        throw new Error("recordLifecycleEvent: missing lookup path");
+      }
+      const file = repository.readLocalFileByPath(lookupPath);
+      if (file === null) {
+        throw new Error(`recordLifecycleEvent: file not found at ${lookupPath}`);
+      }
+      const baseOptions = {
+        localFile: file,
+        tombstoneId: options?.tombstoneId ?? operands.tombstoneId ?? null,
+      };
+      const result =
+        options?.newPath !== undefined
+          ? await lifecycle.recordLifecycleEvent(operands, { ...baseOptions, newPath: options.newPath })
+          : await lifecycle.recordLifecycleEvent(operands, baseOptions);
+      return result.event;
+    },
+    recordContent: async (path, bytes) => {
+      vaultBytes.set(path, bytes);
+      const capture = await repository.recordCapture({
+        normalizedPath: path,
+        fingerprint: await deriveFrozenFingerprint(bytes),
+        policyRevisionNumber: 2,
+        admission: "policy_allowed",
+      });
+      if (capture.outcome !== "event_recorded" && capture.outcome !== "event_coalesced") {
+        throw new Error("expected a recorded capture");
+      }
+      return capture.event;
+    },
+  };
+}
+
+const LIFECYCLE_VERSION_ID = "77777777-7777-4777-8777-777777777777";
+
+describe("queue driver + lifecycle lane separation (task 9 fix round 1 I3, M3)", () => {
+  it("drains the lifecycle lane to idle before the content lane sees its next event", async () => {
+    const harness = createHarnessWithLifecycle();
+    // Seed the file with a committed create so the lifecycle events
+    // can reference its source id and version.
+    const seeded = await harness.seedTrackedFile(
+      "notes/lifecycle-drain.md",
+      new TextEncoder().encode("seed bytes"),
+    );
+    void seeded;
+    // Queue two lifecycle events for the same file — both renames so
+    // no predecessor rule blocks them. The content lane MUST not see
+    // them.
+    const rename1 = await harness.recordLifecycleEvent(
+      createLifecycleEventOperands({
+        operation: "rename",
+        sourceId: SOURCE_ID,
+        expectedVersionId: SOURCE_VERSION_ID,
+        expectedLocator: "notes/lifecycle-drain.md",
+        targetLocator: "notes/lifecycle-drain-renamed.md",
+        policyRevision: 2,
+        predecessorEventId: null,
+      }),
+      { newPath: "notes/lifecycle-drain-renamed.md" },
+    );
+    const rename2 = await harness.recordLifecycleEvent(
+      createLifecycleEventOperands({
+        operation: "rename",
+        sourceId: SOURCE_ID,
+        expectedVersionId: SOURCE_VERSION_ID,
+        expectedLocator: "notes/lifecycle-drain-renamed.md",
+        targetLocator: "notes/lifecycle-drain-renamed-twice.md",
+        policyRevision: 2,
+        predecessorEventId: null,
+      }),
+      { newPath: "notes/lifecycle-drain-renamed-twice.md" },
+    );
+    // Track the lifecycle calls so the test can pin the order.
+    const dispatchedLifecycleIds: string[] = [];
+    harness.installLifecycleHandler(async (event) => {
+      dispatchedLifecycleIds.push(event.event.eventId);
+      return {
+        committedAt: "2026-08-20T00:00:00Z",
+        eventId: event.event.eventId,
+        eventSequence: 1,
+        resultingLocator: null,
+        sourceId: SOURCE_ID,
+        sourceVersionId: LIFECYCLE_VERSION_ID,
+        state: "active",
+        tombstoneId: null,
+      };
+    });
+    // Seed a content event for a separate file so the content lane
+    // has work to do AFTER the lifecycle lane drains.
+    const contentEvent = await harness.recordContent(
+      "notes/content.md",
+      new TextEncoder().encode("content bytes"),
+    );
+    harness.installTransport({
+      preflight: async (body) => {
+        expect(typeof body["event_id"]).toBe("string");
+        return { status: 200, bodyText: SINGLE_PART_BODY };
+      },
+      content: async () => ({ status: 200, bodyText: COMMITTED_RECEIPT }),
+    });
+
+    const summary = await runPass(harness.driver);
+    // The pass completed (the content event committed).
+    expect(summary.outcome).toBe("completed");
+    expect(summary.processedEventCount).toBe(1);
+    // Both lifecycle events were dispatched, in oldest-first order.
+    expect(dispatchedLifecycleIds).toEqual([rename1.eventId, rename2.eventId]);
+    // The lifecycle events are terminal-success.
+    expect(harness.repository.readEvent(rename1.eventId)?.state).toBe("committed");
+    expect(harness.repository.readEvent(rename2.eventId)?.state).toBe("committed");
+    // The content event is the next selection (terminal-success too).
+    expect(harness.repository.readEvent(contentEvent.eventId)?.state).toBe("committed");
+    // The content lane was reached ONCE — it never saw the lifecycle
+    // events (I3 finding: the content lane cannot dispatch a lifecycle
+    // event through the lifecycle API).
+    expect(harness.preflightBodies).toHaveLength(1);
+    expect(harness.preflightBodies[0]?.["event_id"]).toBe(contentEvent.eventId);
+  });
+
+  it("does not call into the content lane when the lifecycle lane has uncommitted events", async () => {
+    const harness = createHarnessWithLifecycle();
+    await harness.seedTrackedFile(
+      "notes/lifecycle-only.md",
+      new TextEncoder().encode("seed bytes"),
+    );
+    await harness.recordLifecycleEvent(
+      createLifecycleEventOperands({
+        operation: "rename",
+        sourceId: SOURCE_ID,
+        expectedVersionId: SOURCE_VERSION_ID,
+        expectedLocator: "notes/lifecycle-only.md",
+        targetLocator: "notes/lifecycle-only-renamed.md",
+        policyRevision: 2,
+        predecessorEventId: null,
+      }),
+      { newPath: "notes/lifecycle-only-renamed.md" },
+    );
+    let lifecycleDispatches = 0;
+    harness.installLifecycleHandler(async () => {
+      lifecycleDispatches += 1;
+      return {
+        committedAt: "2026-08-20T00:00:00Z",
+        eventId: "00000000-0000-4000-8000-000000000000",
+        eventSequence: 1,
+        resultingLocator: null,
+        sourceId: SOURCE_ID,
+        sourceVersionId: LIFECYCLE_VERSION_ID,
+        state: "active",
+        tombstoneId: null,
+      };
+    });
+    const installSpy = harness.installTransport({
+      preflight: async () => {
+        throw new Error("content lane must not run while lifecycle lane is non-idle");
+      },
+      content: async () => {
+        throw new Error("content lane must not run while lifecycle lane is non-idle");
+      },
+    });
+    void installSpy;
+    const summary = await runPass(harness.driver);
+    expect(summary.outcome).toBe("completed");
+    expect(summary.processedEventCount).toBe(0);
+    expect(lifecycleDispatches).toBe(1);
   });
 });
