@@ -2163,7 +2163,7 @@ export type components = {
              * Format: uuid
              */
             readonly event_id: string;
-            readonly expected_locator?: components["schemas"]["NormalizedLocator"] | null;
+            readonly expected_locator?: string | null;
             /**
              * Expected Version Id
              * Format: uuid
@@ -2179,7 +2179,7 @@ export type components = {
              * Format: uuid
              */
             readonly source_id: string;
-            readonly target_locator?: components["schemas"]["NormalizedLocator"] | null;
+            readonly target_locator?: string | null;
             /** Tombstone Id */
             readonly tombstone_id?: string | null;
         };

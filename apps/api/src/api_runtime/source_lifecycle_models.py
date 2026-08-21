@@ -30,6 +30,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.functional_validators import BeforeValidator
+from pydantic.json_schema import WithJsonSchema
 
 from personal_os.diagnostics.events import SafeToken
 from personal_os.error_contracts.codes import ErrorCode
@@ -80,10 +81,12 @@ def _coerce_locator(value: object) -> object:
     raise ValueError("expected a normalized locator string")
 
 
-_LocatorField = Annotated[
-    NormalizedLocator | None,
+_LocatorValue = Annotated[
+    NormalizedLocator,
     BeforeValidator(_coerce_locator),
+    WithJsonSchema({"type": "string"}),
 ]
+_LocatorField = _LocatorValue | None
 
 
 def _coerce_client_timestamp(value: object) -> object:
@@ -163,10 +166,7 @@ class SourceLifecycleEventRequest(BaseModel):
             raise ValueError(
                 f"operation {self.operation.value} must not carry a tombstone_id"
             ) from None
-        if (
-            self.operation is LifecycleOperation.RENAME
-            or self.operation is LifecycleOperation.MOVE
-        ):
+        if self.operation is LifecycleOperation.RENAME or self.operation is LifecycleOperation.MOVE:
             if self.expected_locator is None:
                 raise ValueError(
                     f"operation {self.operation.value} requires expected_locator"
@@ -176,21 +176,15 @@ class SourceLifecycleEventRequest(BaseModel):
                     f"operation {self.operation.value} requires target_locator"
                 ) from None
             if self.expected_locator == self.target_locator:
-                raise ValueError(
-                    "expected_locator and target_locator must differ"
-                ) from None
+                raise ValueError("expected_locator and target_locator must differ") from None
         elif self.operation is LifecycleOperation.DELETE:
             if self.expected_locator is None:
                 raise ValueError("operation delete requires expected_locator") from None
             if self.target_locator is not None:
-                raise ValueError(
-                    "operation delete must not carry target_locator"
-                ) from None
+                raise ValueError("operation delete must not carry target_locator") from None
         else:
             if self.expected_locator is not None:
-                raise ValueError(
-                    "operation restore must not carry expected_locator"
-                ) from None
+                raise ValueError("operation restore must not carry expected_locator") from None
             if self.target_locator is None:
                 raise ValueError("operation restore requires target_locator") from None
             if self.tombstone_id is None:

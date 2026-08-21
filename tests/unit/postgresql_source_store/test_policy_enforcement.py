@@ -193,6 +193,37 @@ def _allowed_decision(command: CreateSourceVersion, revision_number: int) -> Pol
     )
 
 
+def test_source_policy_evidence_query_reads_current_version_object_evidence() -> None:
+    statement = policy_enforcement.policy_subject_evidence_select_statement(_WORKSPACE_ID, uuid4())
+
+    rendered = str(statement)
+    assert "source_versions" in rendered
+    assert "content_objects" in rendered
+    assert "media_type" in rendered
+    assert "byte_size" in rendered
+
+
+def test_source_policy_evidence_hydrates_every_canonical_operand_kind() -> None:
+    source_id = uuid4()
+    subject = policy_enforcement.hydrate_policy_subject_evidence(
+        {
+            "source_type": "markdown",
+            "media_type": "text/markdown",
+            "byte_size": 41,
+        },
+        workspace_id=_WORKSPACE_ID,
+        source_id=source_id,
+    )
+
+    assert subject == PolicySubject(
+        workspace_id=_WORKSPACE_ID,
+        source_id=source_id,
+        source_type=SourceType.MARKDOWN,
+        media_type=CanonicalMediaType.parse("text/markdown"),
+        size_bytes=41,
+    )
+
+
 @pytest.mark.asyncio
 async def test_matching_binding_returns_verified_binding_without_evaluation(
     monkeypatch: pytest.MonkeyPatch,

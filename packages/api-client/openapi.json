@@ -3474,7 +3474,7 @@
           "expected_locator": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/NormalizedLocator"
+                "type": "string"
               },
               {
                 "type": "null"
@@ -3507,7 +3507,7 @@
           "target_locator": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/NormalizedLocator"
+                "type": "string"
               },
               {
                 "type": "null"

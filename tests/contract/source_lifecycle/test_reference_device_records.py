@@ -63,6 +63,9 @@ _TABLE_ROW_PATTERN: Final[re.Pattern[str]] = re.compile(
 _UTC_TIMESTAMP_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"
 )
+_SAFE_EVIDENCE_REFERENCE_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^(?:handoff|operator-record):[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
+)
 _FORBIDDEN_PLACEHOLDERS: Final[frozenset[str]] = frozenset(
     {"", "pending", "not recorded", "todo", "n/a", "unknown", "unavailable"}
 )
@@ -149,6 +152,15 @@ def _assert_observed_scenarios(
     assert not placeholder_evidence, (
         f"the {device_class} record carries placeholder evidence references: {placeholder_evidence}"
     )
+    unsafe_evidence = [
+        scenario
+        for scenario in required_scenarios
+        if _SAFE_EVIDENCE_REFERENCE_PATTERN.fullmatch(rows[scenario][1]) is None
+    ]
+    assert not unsafe_evidence, (
+        f"the {device_class} record requires a closed safe evidence reference for: "
+        f"{unsafe_evidence}"
+    )
 
 
 def test_reference_device_records_are_complete_passing_and_sanitized() -> None:
@@ -172,3 +184,22 @@ def test_reference_device_records_are_complete_passing_and_sanitized() -> None:
             "reference-device records contain a forbidden raw locator, content, "
             "digest, or credential shape"
         )
+
+
+@pytest.mark.parametrize(
+    "unsafe_evidence",
+    (
+        "private/meeting-notes.md",
+        "confidential meeting transcript",
+        "018f47a0-7b00-7000-8000-000000000042",
+    ),
+)
+def test_reference_device_record_rejects_bare_sensitive_evidence(
+    unsafe_evidence: str,
+) -> None:
+    section = "\n".join(
+        f"| {scenario} | PASS | {unsafe_evidence} |" for scenario in DESKTOP_SCENARIOS
+    )
+
+    with pytest.raises(AssertionError, match="safe evidence reference"):
+        _assert_observed_scenarios("Desktop", section, DESKTOP_SCENARIOS)

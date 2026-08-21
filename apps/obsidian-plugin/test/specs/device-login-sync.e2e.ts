@@ -2,6 +2,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { browser } from "@wdio/globals";
+import { onboardLiveDevice } from "../support/live-device-onboarding";
 import { runFromE2eRepositoryRoot } from "../support/repository-subprocess";
 
 /**
@@ -52,27 +53,6 @@ const databaseEnvironmentKeys = [
 let adminSessionCookies: string[] | null = null;
 let adminSessionCsrf: string | null = null;
 let journalDirectoryPath: string | null = null;
-
-function cookiePairsOf(response: Response): string[] {
-  return (response.headers.getSetCookie() ?? []).map((cookie) => cookie.split(";")[0]);
-}
-
-function csrfValueOf(pairs: string[]): string | undefined {
-  return pairs
-    .find((pair) => pair.toLowerCase().includes("csrf"))
-    ?.split("=")
-    .slice(1)
-    .join("=");
-}
-
-interface CreatedGrant {
-  readonly grant_id: string;
-  readonly user_code: string;
-  readonly polling_secret: string;
-  readonly verification_uri: string;
-  readonly expires_in_seconds: number;
-  readonly poll_interval_seconds: number;
-}
 
 interface PolicyStatus {
   readonly active_policy_revision_id: string | null;
@@ -403,49 +383,6 @@ async function readStatusBarText(): Promise<string> {
   );
 }
 
-async function injectPendingGrant(grant: CreatedGrant): Promise<void> {
-  await browser.execute(
-    async (dataPathSuffix: string, pendingGrant: unknown, secretRecord: string) => {
-      const app = (
-        window as unknown as {
-          app: {
-            vault: {
-              configDir: string;
-              adapter: {
-                read: (path: string) => Promise<string>;
-                write: (path: string, data: string) => Promise<void>;
-              };
-            };
-            secretStorage: {
-              setSecret: (key: string, value: string) => Promise<void>;
-            };
-          };
-        }
-      ).app;
-      const dataPath = `${app.vault.configDir}/${dataPathSuffix}`;
-      const current = JSON.parse(await app.vault.adapter.read(dataPath)) as Record<string, unknown>;
-      await app.secretStorage.setSecret("knowledge-workspace-device-credential", secretRecord);
-      await app.vault.adapter.write(
-        dataPath,
-        JSON.stringify({ ...current, pending_grant: pendingGrant }),
-      );
-    },
-    pluginDataPathSuffix,
-    {
-      grant_id: grant.grant_id,
-      user_code: grant.user_code,
-      verification_uri: grant.verification_uri,
-      expires_at_epoch_seconds: Math.floor(Date.now() / 1000) + grant.expires_in_seconds,
-      poll_interval_seconds: grant.poll_interval_seconds,
-    },
-    JSON.stringify({
-      record_version: 1,
-      state: "pending_grant",
-      polling_secret: grant.polling_secret,
-    }),
-  );
-}
-
 async function editFixtureNote(): Promise<void> {
   await browser.execute(async (notePath: string, content: string) => {
     const app = (
@@ -667,11 +604,6 @@ async function enableKnowledgeWorkspacePlugin(): Promise<void> {
   });
 }
 
-async function reloadKnowledgeWorkspacePlugin(): Promise<void> {
-  await disableKnowledgeWorkspacePlugin();
-  await enableKnowledgeWorkspacePlugin();
-}
-
 describe("device login and small-file sync (live server)", () => {
   before(() => {
     if (passwordFile === undefined || totpHelper === undefined) {
@@ -708,99 +640,32 @@ describe("device login and small-file sync (live server)", () => {
   it("completes the device authorization flow and syncs an edited note", async function () {
     this.timeout(480_000);
 
-    const createResponse = await fetch(`${serverOrigin}/api/auth/device-authorizations`, {
-      method: "POST",
-      headers: { "content-type": "application/json", origin: allowedOrigin },
-      body: JSON.stringify({
-        client_instance_id: crypto.randomUUID(),
-        device_name: "e2e-harness",
-        platform_class: "obsidian_desktop",
-        platform_name: "windows",
-        plugin_version: "0.1.0",
-        requested_scope: "obsidian_sync",
-      }),
+    const onboarding = await onboardLiveDevice({
+      serverOrigin,
+      allowedOrigin,
+      webUsername,
+      passwordFile: passwordFile as string,
+      totpHelper: totpHelper as string,
+      pluginDataPathSuffix,
+      deviceName: "e2e-harness",
     });
-    if (createResponse.status !== 200 && createResponse.status !== 201) {
-      throw new Error(`grant creation failed: ${createResponse.status}`);
-    }
-    const created = ((await createResponse.json()) as { data: CreatedGrant }).data;
-    console.log("GRANT_CREATED");
-
-    const password = fs.readFileSync(passwordFile as string, "utf8").trim();
-    const loginResponse = await fetch(`${serverOrigin}/api/auth/login`, {
-      method: "POST",
-      headers: { "content-type": "application/json", origin: allowedOrigin },
-      body: JSON.stringify({ username: webUsername, password }),
-    });
-    if (loginResponse.status !== 200) {
-      throw new Error(`admin login failed: ${loginResponse.status}`);
-    }
-    const loginCookies = cookiePairsOf(loginResponse);
-    const loginCsrf = csrfValueOf(loginCookies);
-
-    const { stdout: totpStdout } = await runFromE2eRepositoryRoot(
-      "uv",
-      ["run", "python", totpHelper],
-      import.meta.url,
-    );
-    const verifyResponse = await fetch(`${serverOrigin}/api/auth/totp/verify`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        origin: allowedOrigin,
-        cookie: loginCookies.join("; "),
-        "x-csrf-token": loginCsrf ?? "",
-      },
-      body: JSON.stringify({ code: totpStdout.trim() }),
-    });
-    console.log("TOTP_VERIFY_STATUS", verifyResponse.status);
-    if (verifyResponse.status !== 200) {
-      throw new Error(`totp verification failed: ${verifyResponse.status}`);
-    }
-    const sessionCookies = cookiePairsOf(verifyResponse);
-    const sessionCsrf = csrfValueOf(sessionCookies);
+    const sessionCookies = [...onboarding.adminSessionCookies];
+    const sessionCsrf = onboarding.adminSessionCsrf;
     adminSessionCookies = sessionCookies;
-    adminSessionCsrf = sessionCsrf ?? "";
-    const approveResponse = await fetch(
-      `${serverOrigin}/api/auth/device-authorizations/${created.grant_id}/approve`,
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          origin: allowedOrigin,
-          cookie: sessionCookies.join("; "),
-          "x-csrf-token": sessionCsrf ?? "",
-        },
-      },
-    );
-    console.log("APPROVE_STATUS", approveResponse.status);
-    if (approveResponse.status !== 200) {
-      throw new Error(`grant approval failed: ${approveResponse.status}`);
-    }
+    adminSessionCsrf = sessionCsrf;
 
     const tmpPolicy = await prepareExtensionExclusionRule(
       sessionCookies,
-      sessionCsrf ?? "",
+      sessionCsrf,
       ".tmp",
     );
     const policyRevision = await publishPreparedPolicy(
       sessionCookies,
-      sessionCsrf ?? "",
+      sessionCsrf,
       tmpPolicy,
     );
     console.log("TMP_POLICY_PUBLISHED", policyRevision > 0);
 
-    await injectPendingGrant(created);
-    await reloadKnowledgeWorkspacePlugin();
-    await browser.pause(5_000);
-
-    let pendingGrantCleared = false;
-    for (let attempt = 0; attempt < 30 && !pendingGrantCleared; attempt += 1) {
-      await browser.pause(1_000);
-      const data = await readPluginData();
-      pendingGrantCleared = data.pending_grant === null || data.pending_grant === undefined;
-    }
-    console.log("PENDING_GRANT_CLEARED", pendingGrantCleared);
     await browser.pause(3_000);
     console.log("STATUS_AFTER_LOGIN", await readStatusBarText());
     journalDirectoryPath = await resolveJournalDirectoryPath();

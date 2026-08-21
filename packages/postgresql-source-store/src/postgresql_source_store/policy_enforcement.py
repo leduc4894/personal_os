@@ -57,14 +57,17 @@ from personal_os.exclusion_policy.metrics import (
     ExclusionPolicyMetrics,
     PolicyBoundary,
 )
+from personal_os.object_storage import CanonicalMediaType
 from personal_os.sources.commands import SourceType
 from personal_os.sources.errors import SourcePublicationError
 from personal_os.sources.fingerprint import SourceVersionCommand
 from postgresql_source_store.engine import apply_transaction_bounds
 from postgresql_source_store.locks import policy_state_lock_statement
 from postgresql_source_store.tables import (
+    content_objects,
     policy_signing_keys,
     source_policies,
+    source_versions,
     sources,
     workspace_policy_state,
 )
@@ -98,12 +101,86 @@ def active_policy_snapshot_select_statement(
     )
 
 
+def policy_subject_evidence_select_statement(
+    workspace_id: UUID, source_id: UUID
+) -> sa.Select[tuple[Any, ...]]:
+    """Build the canonical current-version policy-evidence lookup.
+
+    The source row supplies source type while its authoritative current-version
+    pointer supplies media type and byte size through the immutable content
+    object. Outer joins preserve genuinely absent optional evidence for a
+    source that has no current version; evaluators then return indeterminate
+    for rules that require those fields instead of fabricating values.
+    """
+
+    return (
+        sa.select(
+            sources.c.source_type,
+            content_objects.c.media_type,
+            content_objects.c.byte_size,
+        )
+        .select_from(
+            sources.outerjoin(
+                source_versions,
+                sa.and_(
+                    source_versions.c.source_version_id == sources.c.current_version_id,
+                    source_versions.c.workspace_id == sources.c.workspace_id,
+                    source_versions.c.source_id == sources.c.source_id,
+                ),
+            ).outerjoin(
+                content_objects,
+                content_objects.c.content_object_id == source_versions.c.content_object_id,
+            )
+        )
+        .where(
+            sources.c.workspace_id == workspace_id,
+            sources.c.source_id == source_id,
+        )
+    )
+
+
 def source_type_select_statement(workspace_id: UUID, source_id: UUID) -> sa.Select[tuple[Any, ...]]:
     """Build the workspace-bound stored source-type lookup."""
 
     return sa.select(sources.c.source_type).where(
         sources.c.workspace_id == workspace_id,
         sources.c.source_id == source_id,
+    )
+
+
+def hydrate_policy_subject_evidence(
+    row: Any,
+    *,
+    workspace_id: UUID,
+    source_id: UUID,
+) -> PolicySubject:
+    """Hydrate every canonical policy operand without retaining raw rows."""
+
+    try:
+        source_type = SourceType(str(row["source_type"]))
+        raw_media_type = row["media_type"]
+        raw_byte_size = row["byte_size"]
+        if (raw_media_type is None) != (raw_byte_size is None):
+            raise ValueError("partial current-version policy evidence")
+        media_type = (
+            CanonicalMediaType.parse(str(raw_media_type)) if raw_media_type is not None else None
+        )
+        if raw_byte_size is None:
+            size_bytes = None
+        elif isinstance(raw_byte_size, bool):
+            raise ValueError("byte size must be an integer")
+        else:
+            size_bytes = int(raw_byte_size)
+            if size_bytes < 0:
+                raise ValueError("byte size must be non-negative")
+    except (KeyError, TypeError, ValueError) as cause:
+        raise InternalApplicationError(ErrorCode.INTERNAL_ERROR) from cause
+    return PolicySubject(
+        workspace_id=workspace_id,
+        source_id=source_id,
+        source_type=source_type,
+        media_type=media_type,
+        size_bytes=size_bytes,
     )
 
 
@@ -304,19 +381,16 @@ class PostgresqlPolicySubjectEvidenceSource:
             connection.begin(),
         ):
             await apply_transaction_bounds(connection)
-            result = await connection.execute(source_type_select_statement(workspace_id, source_id))
-            source_type_value = result.scalar_one_or_none()
-        if source_type_value is None:
+            result = await connection.execute(
+                policy_subject_evidence_select_statement(workspace_id, source_id)
+            )
+            row = result.mappings().first()
+        if row is None:
             return None
-        try:
-            source_type = SourceType(str(source_type_value))
-        except ValueError as cause:
-            # Impossible against the CHECK constraint; fail closed as drift.
-            raise InternalApplicationError(ErrorCode.INTERNAL_ERROR) from cause
-        return PolicySubject(
+        return hydrate_policy_subject_evidence(
+            row,
             workspace_id=workspace_id,
             source_id=source_id,
-            source_type=source_type,
         )
 
 
@@ -344,6 +418,8 @@ __all__ = [
     "compose_policy_enforcement",
     "evaluate_locked_policy_decision",
     "hydrate_active_policy_snapshot",
+    "hydrate_policy_subject_evidence",
     "load_locked_active_policy_snapshot",
+    "policy_subject_evidence_select_statement",
     "source_type_select_statement",
 ]

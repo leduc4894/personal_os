@@ -246,8 +246,8 @@ describe("lifecycle-api generated-client path and authentication", () => {
       source_id: SOURCE_ID,
       operation: "rename",
       expected_version_id: VERSION_ID,
-      expected_locator: { value: "folder/note.md" },
-      target_locator: { value: "folder/note-renamed.md" },
+      expected_locator: "folder/note.md",
+      target_locator: "folder/note-renamed.md",
       tombstone_id: null,
       policy_revision: 7,
       client_timestamp: expect.any(String),
@@ -283,7 +283,7 @@ describe("lifecycle-api generated-client path and authentication", () => {
     expect(body.operation).toBe("restore");
     expect(body.tombstone_id).toBe(RESULT_TOMBSTONE_ID);
     expect(body.expected_locator).toBeNull();
-    expect(body.target_locator).toEqual({ value: "folder/note.md" });
+    expect(body.target_locator).toBe("folder/note.md");
   });
 
   it("propagates AbortSignal into the request and maps an aborted request onto network_offline", async () => {

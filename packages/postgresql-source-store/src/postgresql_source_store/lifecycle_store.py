@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Final
 from uuid import UUID, uuid7
@@ -48,7 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.diagnostics.events import EventName
-from personal_os.exclusion_policy.contracts import PolicySubject
+from personal_os.exclusion_policy.contracts import RawPolicyDecision
 from personal_os.exclusion_policy.enforcement import (
     PolicyTrustAnchorVerifier,
     evaluate_policy_decision,
@@ -89,7 +89,9 @@ from postgresql_source_store.locks import (
     source_lock_statement,
 )
 from postgresql_source_store.policy_enforcement import (
+    hydrate_policy_subject_evidence,
     load_locked_active_policy_snapshot,
+    policy_subject_evidence_select_statement,
 )
 from postgresql_source_store.projection_intents import (
     intent_insert_statement as _projection_intent_insert_statement,
@@ -1093,11 +1095,10 @@ class PostgresqlSourceLifecycleStore:
                 tombstone_row=tombstone_row,
             )
             # Re-evaluate the locked policy under the authoritative revision.
-            await self._evaluate_locked_policy(
+            locked_policy_decision = await self._evaluate_locked_policy(
                 connection=connection,
                 command=command,
                 device_context=device_context,
-                policy_decision=policy_decision,
                 active_locator=active_locator,
             )
             # Acquire target locator row lock if needed and confirm availability.
@@ -1107,7 +1108,7 @@ class PostgresqlSourceLifecycleStore:
                 connection=connection,
                 command=command,
                 device_context=device_context,
-                policy_decision=policy_decision,
+                policy_decision=locked_policy_decision,
                 diagnostic_context=diagnostic_context,
                 identities=identities,
                 source_state=source_state,
@@ -1347,36 +1348,12 @@ class PostgresqlSourceLifecycleStore:
         connection: AsyncConnection,
         command: SourceLifecycleCommand,
         device_context: LifecycleDeviceContext,
-        policy_decision: LifecyclePolicyDecision,
         active_locator: NormalizedLocator | None,
-    ) -> None:
-        # Load the locked policy-state row so the authoritative revision
-        # is captured even on the unchanged-revision fast path. Per the
-        # spec, the externally passed verdict is the only authoritative
-        # signal for ``_projection_intent_operation_for`` (delete vs
-        # upsert) — denied or indeterminate rename / move / restore
-        # still commit the truthful canonical locator state. The locked
-        # re-evaluation runs only on revision mismatch; the verdict it
-        # computes is discarded (see ``del decision`` below) and never
-        # flows back to the caller, so it does NOT influence intent
-        # operation selection.
+    ) -> LifecyclePolicyDecision:
+        """Return the transaction-locked verdict that drives projection intents."""
+
         material = await load_locked_active_policy_snapshot(connection, device_context.workspace_id)
         revision = parse_verified_policy_revision(material, verifier=self._policy_verifier)
-        # Fast path: the locked revision matches the externally passed one.
-        # The externally passed verdict is trusted for intent operation
-        # selection; no rejection on DENIED/INDETERMINATE per spec.
-        if (
-            revision.revision_number == policy_decision.policy_revision_number
-            and policy_decision.workspace_id == device_context.workspace_id
-        ):
-            del material, revision
-            return
-        # Slow path: re-evaluate under the locked policy on revision mismatch.
-        # The locked verdict is computed for parity/observability only;
-        # the transition commits regardless of outcome. The verdict is
-        # discarded after evaluation — intent operation selection is
-        # driven exclusively by the externally passed ``policy_decision``
-        # in ``_projection_intent_operation_for``.
         locator_value: str | None
         if command.target_locator is not None:
             locator_value = command.target_locator.value
@@ -1384,9 +1361,18 @@ class PostgresqlSourceLifecycleStore:
             locator_value = active_locator.value
         else:
             locator_value = None
-        subject = PolicySubject(
-            workspace_id=device_context.workspace_id,
-            source_id=command.source_id,
+        evidence_result = await connection.execute(
+            policy_subject_evidence_select_statement(device_context.workspace_id, command.source_id)
+        )
+        evidence_row = evidence_result.mappings().first()
+        if evidence_row is None:
+            raise SourceLifecycleError(SourceLifecycleErrorCode.INPUT_INVALID)
+        subject = replace(
+            hydrate_policy_subject_evidence(
+                evidence_row,
+                workspace_id=device_context.workspace_id,
+                source_id=command.source_id,
+            ),
             normalized_locator=locator_value,
         )
         decision = evaluate_policy_decision(
@@ -1394,13 +1380,19 @@ class PostgresqlSourceLifecycleStore:
             subject=subject,
             evaluated_at=self._clock(),
         )
-        # Bound unused names. The locked verdict is computed but not
-        # retained — the externally passed ``policy_decision`` drives
-        # intent operation selection.
-        del subject
-        del decision
-        del material
-        del revision
+        outcome = {
+            RawPolicyDecision.ALLOWED: LifecyclePolicyOutcome.ALLOWED,
+            RawPolicyDecision.EXCLUDED: LifecyclePolicyOutcome.DENIED,
+            RawPolicyDecision.INDETERMINATE: LifecyclePolicyOutcome.INDETERMINATE,
+        }[decision.raw_decision]
+        return LifecyclePolicyDecision(
+            workspace_id=device_context.workspace_id,
+            outcome=outcome,
+            policy_revision_number=decision.revision_number,
+            subject=subject,
+            expected_locator=command.expected_locator,
+            target_locator=command.target_locator,
+        )
 
     # --- atomic transition ----------------------------------------------
 

@@ -327,17 +327,13 @@ function parseLifecycleResult(data: unknown): LifecycleResult {
 
 // --- the closed body --------------------------------------------------------------------------
 
-type WireNormalizedLocator = components["schemas"]["NormalizedLocator"];
-
 /**
  * Compose the closed wire body for `commitSourceLifecycleEvent`. The
  * fields mirror the openapi `SourceLifecycleEventRequest` schema:
  * workspace / device / user identities are deliberately absent and
- * must NEVER be added here. The returned shape wraps the
- * operation-dependent locator / tombstone fields under their typed
- * `NormalizedLocator` envelopes so the wire contract matches the
- * generated openapi-fetch `OperationRequestBody` type exactly under
- * `exactOptionalPropertyTypes`.
+ * must NEVER be added here. Locator values stay plain normalized strings so
+ * the wire contract matches the backend pre-validator and the generated
+ * openapi-fetch request type exactly under `exactOptionalPropertyTypes`.
  *
  * The optional `tombstoneIdOverride` is the server-confirmed tombstone
  * identity the predecessor's commit returned. When the driver passes
@@ -349,14 +345,6 @@ function buildBody(
   event: FrozenLifecycleEvent,
   tombstoneIdOverride: string | null | undefined,
 ): components["schemas"]["SourceLifecycleEventRequest"] {
-  const expectedLocator: WireNormalizedLocator | null =
-    event.operands.expectedLocator === null
-      ? null
-      : { value: event.operands.expectedLocator };
-  const targetLocator: WireNormalizedLocator | null =
-    event.operands.targetLocator === null
-      ? null
-      : { value: event.operands.targetLocator };
   const tombstoneId =
     tombstoneIdOverride !== undefined ? tombstoneIdOverride : event.operands.tombstoneId;
   return {
@@ -365,8 +353,8 @@ function buildBody(
     source_id: event.operands.sourceId,
     operation: event.operands.operation,
     expected_version_id: event.operands.expectedVersionId,
-    expected_locator: expectedLocator,
-    target_locator: targetLocator,
+    expected_locator: event.operands.expectedLocator,
+    target_locator: event.operands.targetLocator,
     tombstone_id: tombstoneId,
     policy_revision: event.operands.policyRevision,
     client_timestamp: new Date().toISOString(),

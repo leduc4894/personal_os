@@ -36,9 +36,11 @@ from tests.integration.source_lifecycle.conftest import (
     SeededSourceLocator,
     SeededWorkspace,
 )
+from tools.signed_policy_seed import seed_signed_policy
 
 from personal_os.diagnostics.context import create_diagnostic_context
-from personal_os.exclusion_policy.contracts import PolicySubject
+from personal_os.exclusion_policy.contracts import PolicySubject, RuleKind
+from personal_os.exclusion_policy.normalization import normalize_rule
 from personal_os.source_lifecycle.commands import (
     LifecycleOperation,
     SourceLifecycleCommand,
@@ -71,9 +73,7 @@ def _device_context(workspace: SeededWorkspace) -> LifecycleDeviceContext:
     )
 
 
-def _subject(
-    workspace: SeededWorkspace, source_id: UUID, *, locator: str | None
-) -> PolicySubject:
+def _subject(workspace: SeededWorkspace, source_id: UUID, *, locator: str | None) -> PolicySubject:
     return PolicySubject(
         workspace_id=workspace.workspace_id,
         source_id=source_id,
@@ -115,9 +115,7 @@ def _command(
         source_id=source.source_id,
         event_id=event_id if event_id is not None else uuid7(),
         idempotency_key=(
-            idempotency_key
-            if idempotency_key is not None
-            else f"idempotency-{uuid4()}"
+            idempotency_key if idempotency_key is not None else f"idempotency-{uuid4()}"
         ),
         operation=operation,
         expected_version_id=source.current_version_id,
@@ -156,22 +154,10 @@ async def _locked_active_policy_revision(
 
 
 @pytest.mark.asyncio
-async def test_locked_denied_rename_commits_locator_state_with_delete_intents(
+async def test_locked_allowed_rename_overrides_stale_denied_advisory(
     lifecycle_harness: LifecycleHarness,
 ) -> None:
-    """A denied rename still commits the canonical locator transition with delete intents.
-
-    The lifecycle adapter's ``_projection_intent_operation_for`` selects
-    the projection operation strictly from the *externally passed*
-    ``LifecyclePolicyDecision`` (the API advisory verdict). The
-    locked-policy re-evaluation in ``_evaluate_locked_policy`` is a
-    parity/observability load — it computes a verdict on revision
-    mismatch but discards it (``del decision``), so the locked verdict
-    does not influence intent selection. Therefore a denied verdict
-    passed externally selects ``delete`` intents; the canonical
-    locator transition still commits (the rename is truthful per
-    spec rule).
-    """
+    """The locked active policy, not a stale denied advisory, selects upsert."""
 
     workspace = await lifecycle_harness.seed_workspace()
     source_id = uuid4()
@@ -187,9 +173,8 @@ async def test_locked_denied_rename_commits_locator_state_with_delete_intents(
         expected=seeded.initial_locator,
         target=target,
     )
-    # The externally passed verdict is the authoritative signal for
-    # ``_projection_intent_operation_for``. A DENIED verdict makes the
-    # adapter emit ``delete`` intents; ALLOWED would emit ``upsert``.
+    # The advisory verdict is deliberately inconsistent with the empty active
+    # policy. The transaction-locked evaluation is authoritative.
     denied_decision = _decision(
         workspace,
         outcome=LifecyclePolicyOutcome.DENIED,
@@ -212,15 +197,15 @@ async def test_locked_denied_rename_commits_locator_state_with_delete_intents(
     assert active.normalized_locator == target.value
     intents = await lifecycle_harness.fetch_intent_rows(result.event_id)
     for intent in intents:
-        assert intent.operation == "delete"
+        assert intent.operation == "upsert"
         assert intent.source_version_id == seeded.current_version_id
 
 
 @pytest.mark.asyncio
-async def test_locked_indeterminate_move_commits_locator_state_with_delete_intents(
+async def test_locked_allowed_move_overrides_stale_indeterminate_advisory(
     lifecycle_harness: LifecycleHarness,
 ) -> None:
-    """A locked indeterminate verdict still commits the move with delete intents."""
+    """The locked active policy, not an indeterminate advisory, selects upsert."""
 
     workspace = await lifecycle_harness.seed_workspace()
     source_id = uuid4()
@@ -256,17 +241,17 @@ async def test_locked_indeterminate_move_commits_locator_state_with_delete_inten
     assert active.normalized_locator == target.value
     intents = await lifecycle_harness.fetch_intent_rows(result.event_id)
     for intent in intents:
-        assert intent.operation == "delete"
+        assert intent.operation == "upsert"
 
 
-# --- restore race: ALLOWED advisory vs DENIED locked ------------------------
+# --- stale advisory verdicts vs transaction-locked active policy ------------
 
 
 @pytest.mark.asyncio
-async def test_locked_denied_restore_closes_tombstone_and_emits_delete_intents(
+async def test_locked_allowed_restore_overrides_stale_denied_advisory(
     lifecycle_harness: LifecycleHarness,
 ) -> None:
-    """A denied restore still commits the tombstone close and emits delete intents."""
+    """The locked allowed restore closes its tombstone and emits upserts."""
 
     workspace = await lifecycle_harness.seed_workspace()
     source_id = uuid4()
@@ -327,15 +312,15 @@ async def test_locked_denied_restore_closes_tombstone_and_emits_delete_intents(
     assert tombstone.restore_event_id == result.event_id
     intents = await lifecycle_harness.fetch_intent_rows(result.event_id)
     for intent in intents:
-        assert intent.operation == "delete"
+        assert intent.operation == "upsert"
         assert intent.source_version_id == seeded.current_version_id
 
 
 @pytest.mark.asyncio
-async def test_locked_indeterminate_restore_closes_tombstone_and_emits_delete_intents(
+async def test_locked_allowed_restore_overrides_stale_indeterminate_advisory(
     lifecycle_harness: LifecycleHarness,
 ) -> None:
-    """An indeterminate restore still commits the tombstone close and emits delete intents."""
+    """The locked allowed restore overrides an indeterminate advisory."""
 
     workspace = await lifecycle_harness.seed_workspace()
     source_id = uuid4()
@@ -396,7 +381,7 @@ async def test_locked_indeterminate_restore_closes_tombstone_and_emits_delete_in
     assert tombstone.restore_event_id == result.event_id
     intents = await lifecycle_harness.fetch_intent_rows(result.event_id)
     for intent in intents:
-        assert intent.operation == "delete"
+        assert intent.operation == "upsert"
 
 
 # --- policy revision race under the lock --------------------------------------
@@ -422,15 +407,6 @@ async def test_policy_revision_mismatch_uses_locked_revision_for_intent_selectio
         source_id=source_id,
         locator=NormalizedLocator("notes/old.md"),
     )
-    # Bump the locked policy revision after the workspace seed; the API
-    # still passes revision_number=1, so the adapter must re-evaluate.
-    async with lifecycle_harness._engine.begin() as connection:
-        await connection.execute(
-            sa.update(workspace_policy_state)
-            .where(workspace_policy_state.c.workspace_id == workspace.workspace_id)
-            .values(active_revision_number=2)
-        )
-
     target = NormalizedLocator("notes/renamed.md")
     command = _command(
         operation=LifecycleOperation.RENAME,
@@ -446,6 +422,22 @@ async def test_policy_revision_mismatch_uses_locked_revision_for_intent_selectio
         target=target.value,
         policy_revision=1,
     )
+    # The advisory decision was produced against revision 1. Publish a real,
+    # signed revision 2 that denies this source before the transaction obtains
+    # the policy-state row lock; the locked result must drive intent selection.
+    await seed_signed_policy(
+        lifecycle_harness._engine,
+        workspace_id=workspace.workspace_id,
+        published_by_user_id=workspace.owner_user_id,
+        rules=(
+            normalize_rule(
+                uuid4(),
+                RuleKind.EXACT_SOURCE_ID,
+                source_id_operand=source_id,
+                rule_index=0,
+            ),
+        ),
+    )
 
     result = await lifecycle_harness.lifecycle_store.commit(
         command,
@@ -457,9 +449,8 @@ async def test_policy_revision_mismatch_uses_locked_revision_for_intent_selectio
 
     assert result.resulting_locator == target
     # The locked revision is the source of truth (revision_number=2).
-    assert await _locked_active_policy_revision(
-        lifecycle_harness, workspace.workspace_id
-    ) == 2
+    assert await _locked_active_policy_revision(lifecycle_harness, workspace.workspace_id) == 2
     intents = await lifecycle_harness.fetch_intent_rows(result.event_id)
     for intent in intents:
         assert intent.source_version_id == seeded.current_version_id
+        assert intent.operation == "delete"

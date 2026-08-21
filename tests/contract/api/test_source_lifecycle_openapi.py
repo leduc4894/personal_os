@@ -21,6 +21,7 @@ from api_runtime.openapi_export import render_openapi_json
 SNAPSHOT_PATH: Final[Path] = (
     Path(__file__).resolve().parents[3] / "packages" / "api-client" / "openapi.json"
 )
+GENERATED_SCHEMA_PATH: Final[Path] = SNAPSHOT_PATH.parent / "src" / "generated" / "schema.ts"
 
 LIFECYCLE_PATH: Final[str] = "/api/sources/lifecycle-events"
 LIFECYCLE_OPERATION_ID: Final[str] = "commitSourceLifecycleEvent"
@@ -89,6 +90,23 @@ def test_lifecycle_request_schema_rejects_identity_selectors(schema: dict[str, A
     request_schema = schema["components"]["schemas"]["SourceLifecycleEventRequest"]
     forbidden = set(request_schema["properties"]) & FORBIDDEN_REQUEST_SELECTORS
     assert not forbidden, forbidden
+
+
+def test_lifecycle_locator_wire_fields_interoperate_with_generated_client(
+    schema: dict[str, Any],
+) -> None:
+    request_schema = schema["components"]["schemas"]["SourceLifecycleEventRequest"]
+    for member in ("expected_locator", "target_locator"):
+        alternatives = request_schema["properties"][member]["anyOf"]
+        assert {alternative.get("type") for alternative in alternatives} == {
+            "string",
+            "null",
+        }
+        assert all("$ref" not in alternative for alternative in alternatives)
+
+    generated_schema = GENERATED_SCHEMA_PATH.read_text(encoding="utf-8")
+    assert "readonly expected_locator?: string | null;" in generated_schema
+    assert "readonly target_locator?: string | null;" in generated_schema
 
 
 def test_lifecycle_operation_enum_is_closed(schema: dict[str, Any]) -> None:
