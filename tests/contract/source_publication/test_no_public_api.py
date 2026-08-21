@@ -43,6 +43,13 @@ TYPESCRIPT_ROOTS: Final[tuple[Path, ...]] = (
 SANCTIONED_PLUGIN_JOURNAL_ROOT: Final[Path] = (
     REPO_ROOT / "apps" / "obsidian-plugin" / "src" / "journal"
 )
+SANCTIONED_SOURCE_LIFECYCLE_API_FILES: Final[frozenset[Path]] = frozenset(
+    {
+        REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "source_lifecycle_composition.py",
+        REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "source_lifecycle_models.py",
+        REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "source_lifecycle_routes.py",
+    }
+)
 MIGRATIONS_VERSIONS = REPO_ROOT / "migrations" / "versions"
 BASELINE_REVISION: Final[str] = "20260813_01"
 
@@ -76,32 +83,31 @@ PUBLICATION_ENDPOINT_TOKENS: Final[tuple[str, ...]] = (
     "/sources",
 )
 
-#: The sanctioned exclusion-policy Admin surface (exclusion-policy publication
-#: spec section 16) legitimately speaks of policy publications - its routes,
-#: models, compositions, generated clients and OpenAPI declarations. Those
-#: lines are masked before the vocabulary scan so the prohibition keeps its
-#: exact strength against every source-publication surface while the
-#: separately designed policy-publication endpoints remain observable
-#: contract surfaces of their own spec.
-SANCTIONED_POLICY_PUBLICATION_MARKERS: Final[tuple[str, ...]] = (
+#: Exact line markers for separately designed public surfaces. Exclusion-policy
+#: publication markers preserve that Admin contract; the one lifecycle route
+#: marker permits only its canonical endpoint declaration, not arbitrary
+#: ``/sources`` routes. Dedicated lifecycle composition/model modules are
+#: registered separately by exact path below.
+SANCTIONED_SURFACE_LINE_MARKERS: Final[tuple[str, ...]] = (
     "exclusion-policy",
     "exclusion_policy",
     "exact-replay",
     "exact replay",
+    "/api/sources/lifecycle-events",
 )
 
 
-def _masked_sanctioned_policy_lines(source: str) -> str:
-    """Drop the sanctioned exclusion-policy lines from one scanned source."""
+def _masked_sanctioned_surface_lines(source: str) -> str:
+    """Drop exact separately designed surface lines from scanned source."""
     return "\n".join(
         line
         for line in source.splitlines()
-        if not any(marker in line for marker in SANCTIONED_POLICY_PUBLICATION_MARKERS)
+        if not any(marker in line for marker in SANCTIONED_SURFACE_LINE_MARKERS)
     )
 
 
 def _is_sanctioned_policy_surface(path: Path) -> bool:
-    """True for files of the sanctioned exclusion-policy and sync surfaces.
+    """True for exact files of separately designed public surfaces.
 
     Python modules named ``exclusion_policy*`` and TypeScript sources under an
     ``exclusion-policy`` directory are the sanctioned policy surface; modules
@@ -112,16 +118,19 @@ def _is_sanctioned_policy_surface(path: Path) -> bool:
     surface on the Obsidian side: its hand-mirrored wire shapes and receipt
     records carry ``source_version_id`` identity, and its generation
     persistence speaks of publishing verified journal manifests — none of it
-    declares a source-publication endpoint. Both are separately designed
-    contract surfaces of their own specs; every other file is scanned in full
-    with only the marker lines masked, and the OpenAPI endpoint scan below
-    still proves no raw source-publication endpoint reaches any document.
+    declares a source-publication endpoint. The three exact source-lifecycle
+    API modules are likewise the designed lifecycle surface; the general API
+    application stays scanned and only its exact lifecycle route line is
+    masked. Every other file is scanned in full, and the OpenAPI endpoint scan
+    below still proves no raw source-publication endpoint reaches a document.
     """
     if path.name.startswith(("exclusion_policy", "exclusion-policy")):
         return True
     if path.name.startswith(("small_file_sync", "small-file-sync")):
         return True
     if SANCTIONED_PLUGIN_JOURNAL_ROOT in path.parents:
+        return True
+    if path in SANCTIONED_SOURCE_LIFECYCLE_API_FILES:
         return True
     return any(part == "exclusion-policy" for part in path.parts)
 
@@ -222,7 +231,7 @@ def test_api_and_mcp_sources_declare_no_source_publication_route() -> None:
                 ) & _decorator_names(tree)
                 if violating_decorators:
                     offenders.append(f"{path}: decorator {sorted(violating_decorators)}")
-            masked_source = _masked_sanctioned_policy_lines(source)
+            masked_source = _masked_sanctioned_surface_lines(source)
             for token in PUBLICATION_ENDPOINT_TOKENS:
                 if token in masked_source:
                     offenders.append(f"{path}: endpoint token {token!r}")
@@ -239,7 +248,7 @@ def test_generated_typescript_clients_declare_no_source_publication_endpoint() -
                 continue
             if _is_sanctioned_policy_surface(path):
                 continue
-            source = _masked_sanctioned_policy_lines(path.read_text(encoding="utf-8"))
+            source = _masked_sanctioned_surface_lines(path.read_text(encoding="utf-8"))
             for token in PUBLICATION_ENDPOINT_TOKENS:
                 if token in source:
                     offenders.append(f"{path}: endpoint token {token!r}")
@@ -257,9 +266,11 @@ def test_sanction_scope_covers_exactly_the_designed_surfaces() -> None:
 
     The designed exemptions — the ``exclusion_policy*``/``exclusion-policy``
     modules, the ``small_file_sync*``/``small-file-sync`` modules, the plugin
-    journal client directory and ``exclusion-policy`` directories — are the
-    only paths exempt from the endpoint-vocabulary scan. A same-named module
-    anywhere else — a journal directory outside
+    journal client directory, ``exclusion-policy`` directories and the three
+    exact source-lifecycle API modules — are the only paths exempt from the
+    endpoint-vocabulary scan. The general API application remains scanned and
+    receives only exact route-line masking. A same-named module anywhere else
+    — a journal directory outside
     ``apps/obsidian-plugin/src/journal``, a plugin module outside it, a
     server-side journal module, an MCP tool module — stays scanned in full.
     """
@@ -268,6 +279,7 @@ def test_sanction_scope_covers_exactly_the_designed_surfaces() -> None:
         REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "small_file_sync_routes.py",
         REPO_ROOT / "apps" / "obsidian-plugin" / "src" / "journal" / "sync-api.ts",
         REPO_ROOT / "apps" / "obsidian-plugin" / "src" / "exclusion-policy" / "snapshot.ts",
+        *sorted(SANCTIONED_SOURCE_LIFECYCLE_API_FILES),
     )
     for path in sanctioned:
         assert _is_sanctioned_policy_surface(path), (
@@ -279,6 +291,7 @@ def test_sanction_scope_covers_exactly_the_designed_surfaces() -> None:
         REPO_ROOT / "apps" / "obsidian-plugin" / "src" / "api" / "sync-client.ts",
         REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "journal_sync_routes.py",
         REPO_ROOT / "apps" / "mcp" / "src" / "mcp_runtime" / "source_version_tools.py",
+        REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "application.py",
     )
     for path in scanned:
         assert not _is_sanctioned_policy_surface(path), (
@@ -295,9 +308,25 @@ def test_endpoint_vocabulary_scan_detects_a_violating_module_outside_sanction() 
     exemption above can never grow into a blind spot.
     """
     violating_source = 'const endpoint = "/api/source-version";\n'
-    masked = _masked_sanctioned_policy_lines(violating_source)
+    masked = _masked_sanctioned_surface_lines(violating_source)
     caught = [token for token in PUBLICATION_ENDPOINT_TOKENS if token in masked]
     assert caught, "a source-publication endpoint outside the sanctioned surfaces must be detected"
+
+
+def test_lifecycle_route_line_masking_is_exact() -> None:
+    sanctioned = 'app.add_api_route("/api/sources/lifecycle-events", endpoint)\n'
+    assert not [
+        token
+        for token in PUBLICATION_ENDPOINT_TOKENS
+        if token in _masked_sanctioned_surface_lines(sanctioned)
+    ]
+
+    near_miss = 'app.add_api_route("/api/sources/publications", endpoint)\n'
+    assert [
+        token
+        for token in PUBLICATION_ENDPOINT_TOKENS
+        if token in _masked_sanctioned_surface_lines(near_miss)
+    ] == ["publication", "/sources"]
 
 
 def _rendered_endpoint_surface(parsed: object) -> str:
@@ -355,7 +384,7 @@ def test_openapi_documents_declare_no_source_publication_path() -> None:
             parsed = json.loads(path.read_text(encoding="utf-8"))
         else:
             parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
-        rendered = _masked_sanctioned_policy_lines(_rendered_endpoint_surface(parsed))
+        rendered = _masked_sanctioned_surface_lines(_rendered_endpoint_surface(parsed))
         for token in PUBLICATION_ENDPOINT_TOKENS:
             if token in rendered:
                 offenders.append(f"{path}: endpoint token {token!r}")

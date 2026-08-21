@@ -8,7 +8,8 @@
  * background sync loop.
  */
 
-import { Modal, Platform, Plugin, requestUrl, Setting, TAbstractFile, TFile } from "obsidian";
+import { Modal, Platform, Plugin, requestUrl, Setting, TFile } from "obsidian";
+import type { TAbstractFile } from "obsidian";
 
 import { createObsidianPolicyHttpTransport, createObsidianSyncHttpTransport } from "./api/obsidian-api-transport";
 import { createRequestUrlTransport } from "./api/request-url-transport";

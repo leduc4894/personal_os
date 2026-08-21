@@ -95,6 +95,7 @@ ALLOWED_OBSIDIAN_IMPORT_NAMES = frozenset(
         "RequestUrlParam",
         "RequestUrlResponse",
         "Setting",
+        "TAbstractFile",
         "TFile",
         "requestUrl",
     }

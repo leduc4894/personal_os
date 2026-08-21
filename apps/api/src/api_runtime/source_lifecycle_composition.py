@@ -316,10 +316,10 @@ class OfflineSourceLifecycleStore:
         command: SourceLifecycleCommand,
         device_context: LifecycleDeviceContext,
         request_fingerprint: object,
-        policy_decision: LifecyclePolicyDecision,
+        lifecycle_decision: LifecyclePolicyDecision,
         diagnostic_context: DiagnosticContext,
     ) -> SourceLifecycleCommitResult:
-        del device_context, request_fingerprint, policy_decision, diagnostic_context
+        del device_context, request_fingerprint, lifecycle_decision, diagnostic_context
         if self._error is not None:
             raise self._error
         result = self._build_result(command)

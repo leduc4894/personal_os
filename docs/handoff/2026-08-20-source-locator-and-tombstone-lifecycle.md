@@ -34,7 +34,8 @@ contain its own SHA.
 | Plugin type check | PASS | `pnpm --filter @workspace/obsidian-plugin type-check`: exit 0. |
 | Plugin lint | PASS | `pnpm --filter @workspace/obsidian-plugin lint`: exit 0. |
 | Plugin build | PASS | `pnpm --filter @workspace/obsidian-plugin build`: exit 0. |
-| Repository verify | FAIL | The inherited Ruff drift is resolved: 448 Python files are formatted, and format, lint, type, boundary and generated-contract gates pass. `uv run poe verify` now reaches Python tests and stops at 4 non-format contract failures with 3,303 passed, 21 skipped and 397 deselected. The skipped TypeScript test and build stages were run separately and passed. |
+| Lifecycle boundary registries | PASS | The four focused failures were reproduced RED, then the exact Obsidian type import, exact lifecycle API files/route, exact internal-policy identifier grammar and seven lifecycle HTTP status codes were registered without broad scanner exemptions. The four focused nodes passed; all four affected contract files passed 28 tests. |
+| Repository verify | FAIL | Formatting, lint, strict typing, import boundaries, architecture boundaries, generated contracts and Python tests pass; the latest run reported 3,308 passed, 21 skipped and 397 deselected. The full concurrent TypeScript stage remains load-sensitive: the last bounded run stopped when two untouched journal pending-cap tests exceeded their existing 5-second timeout (487 passed, 2 failed). Each initially observed unrelated failure passed immediately in isolation; no out-of-scope timing change was made. |
 | Clean shutdown | PASS | API, Web Admin and both workers were stopped; the exact disposable project was verified and removed. The ordinary local project remained absent. |
 
 ## Rulings and interpretations
@@ -52,6 +53,11 @@ contain its own SHA.
 - The review rerun does not prove the wire fix live: the fresh disposable
   identity lacked the active TOTP credential required by the canonical helper,
   so lifecycle assertions were never reached.
+- The four contract-registry failures predated Task 12. Their registrations are
+  closed: `TAbstractFile` remains a type-only Obsidian import, the publication
+  scanner sanctions only the three lifecycle API files and exact lifecycle
+  route line, the policy scanner matches only exact internal decision
+  identifiers, and the HTTP registry enumerates the seven lifecycle codes.
 - No BACKLOG row was added: Desktop and Mobile acceptance are mandatory, not
   deferrable work.
 - Operations detail and mutable reference-device records remain in
@@ -83,15 +89,15 @@ items.
 5. Run
    `uv run pytest tests/contract/source_lifecycle/test_reference_device_records.py -m device_records -q`.
    Only a PASS for both records permits Child 5 closure.
-6. Adjudicate the four remaining non-format contract failures (Obsidian import
-   allowlist, policy-boundary token scan, publication-route token scan and the
-   closed HTTP-status map), then rerun `uv run poe verify` to exit 0.
+6. Trace and stabilize the two pre-existing journal pending-cap tests under the
+   full concurrent TypeScript workload, then rerun `uv run poe verify` to exit
+   0. Do not weaken their durable-cap assertions merely to extend a timeout.
 
 ## Concerns
 
 - Desktop acceptance still does not prove the corrected locator wire contract;
   the latest bounded run stopped at the missing active-TOTP prerequisite.
 - Physical Mobile behavior remains entirely unobserved.
-- Repository-wide formatting is green. Full verification is now blocked later
-  by four non-format contract assertions that require semantic adjudication,
-  outside the formatting-only follow-up.
+- Repository-wide formatting and the four lifecycle boundary registries are
+  green. Full verification is still blocked by pre-existing, load-sensitive
+  journal pending-cap test timeouts outside the Task 12 diff.
