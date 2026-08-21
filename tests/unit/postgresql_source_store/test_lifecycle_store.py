@@ -53,6 +53,7 @@ from postgresql_source_store.lifecycle_store import (
     LifecycleReplayLookupRow,
     advisory_lock_key_for_locator,
     audit_insert_statement,
+    classify_classification,
     classify_locator_conflict,
     classify_state_mismatch,
     classify_tombstone_conflict,
@@ -641,6 +642,15 @@ def test_classify_locator_conflict_accepts_matching_locator() -> None:
     conflict = classify_locator_conflict(
         expected=NormalizedLocator("notes/old.md"),
         actual=NormalizedLocator("notes/old.md"),
+    )
+    assert conflict is None
+
+
+def test_classify_classification_accepts_root_level_rename() -> None:
+    conflict = classify_classification(
+        operation=LifecycleOperation.RENAME,
+        expected_locator=NormalizedLocator("old.md"),
+        target_locator=NormalizedLocator("new.md"),
     )
     assert conflict is None
 
