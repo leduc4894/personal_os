@@ -1350,14 +1350,16 @@ class PostgresqlSourceLifecycleStore:
         policy_decision: LifecyclePolicyDecision,
         active_locator: NormalizedLocator | None,
     ) -> None:
-        # The locked policy-state row is loaded so the authoritative revision
-        # is captured even on the unchanged-revision fast path. Per the spec,
-        # the externally passed verdict is authoritative for intent operation
-        # selection (delete vs upsert) — denied or indeterminate rename /
-        # move / restore still commit the truthful canonical locator state.
-        # The locked re-evaluation only runs on revision mismatch; its verdict
-        # informs intent operation selection (see ``_projection_intent_operation_for``)
-        # but does NOT reject the transition.
+        # Load the locked policy-state row so the authoritative revision
+        # is captured even on the unchanged-revision fast path. Per the
+        # spec, the externally passed verdict is the only authoritative
+        # signal for ``_projection_intent_operation_for`` (delete vs
+        # upsert) — denied or indeterminate rename / move / restore
+        # still commit the truthful canonical locator state. The locked
+        # re-evaluation runs only on revision mismatch; the verdict it
+        # computes is discarded (see ``del decision`` below) and never
+        # flows back to the caller, so it does NOT influence intent
+        # operation selection.
         material = await load_locked_active_policy_snapshot(connection, device_context.workspace_id)
         revision = parse_verified_policy_revision(material, verifier=self._policy_verifier)
         # Fast path: the locked revision matches the externally passed one.
@@ -1370,9 +1372,11 @@ class PostgresqlSourceLifecycleStore:
             del material, revision
             return
         # Slow path: re-evaluate under the locked policy on revision mismatch.
-        # The verdict only informs intent operation selection; it does NOT
-        # reject — denied or indeterminate transitions still commit the
-        # truthful canonical locator state per spec.
+        # The locked verdict is computed for parity/observability only;
+        # the transition commits regardless of outcome. The verdict is
+        # discarded after evaluation — intent operation selection is
+        # driven exclusively by the externally passed ``policy_decision``
+        # in ``_projection_intent_operation_for``.
         locator_value: str | None
         if command.target_locator is not None:
             locator_value = command.target_locator.value
@@ -1390,7 +1394,9 @@ class PostgresqlSourceLifecycleStore:
             subject=subject,
             evaluated_at=self._clock(),
         )
-        # Bound unused names.
+        # Bound unused names. The locked verdict is computed but not
+        # retained — the externally passed ``policy_decision`` drives
+        # intent operation selection.
         del subject
         del decision
         del material

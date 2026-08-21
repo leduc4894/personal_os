@@ -240,7 +240,7 @@ def test_lifecycle_intent_inserts_never_leak_a_raw_event_id_into_compiled_sql() 
     text = str(compiled)
     assert str(_EVENT_ID_DELETE) not in text
     # The literal close-only operation token ("delete") is never embedded.
-    assert "DELETE" not in text.upper() or "delete" not in text.lower().replace("knowledge", "")
+    assert "delete" not in text.lower()
 
 
 def test_lifecycle_intent_inserts_target_schema_qualified_resource() -> None:

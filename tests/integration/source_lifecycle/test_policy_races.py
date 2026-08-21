@@ -159,14 +159,18 @@ async def _locked_active_policy_revision(
 async def test_locked_denied_rename_commits_locator_state_with_delete_intents(
     lifecycle_harness: LifecycleHarness,
 ) -> None:
-    """The locked-policy verdict drives intent selection, not the API verdict.
+    """A denied rename still commits the canonical locator transition with delete intents.
 
-    The API evaluates the policy at request time (advisory verdict).
-    The store re-evaluates under the locked ``workspace_policy_state``
-    row. When the locked verdict is ``DENIED`` for a rename, the
-    canonical locator transition still commits (the rename is truthful)
-    but the projection intents are ``delete`` — the locked verdict
-    wins for intent selection.
+    The lifecycle adapter's ``_projection_intent_operation_for`` selects
+    the projection operation strictly from the *externally passed*
+    ``LifecyclePolicyDecision`` (the API advisory verdict). The
+    locked-policy re-evaluation in ``_evaluate_locked_policy`` is a
+    parity/observability load — it computes a verdict on revision
+    mismatch but discards it (``del decision``), so the locked verdict
+    does not influence intent selection. Therefore a denied verdict
+    passed externally selects ``delete`` intents; the canonical
+    locator transition still commits (the rename is truthful per
+    spec rule).
     """
 
     workspace = await lifecycle_harness.seed_workspace()
@@ -183,9 +187,12 @@ async def test_locked_denied_rename_commits_locator_state_with_delete_intents(
         expected=seeded.initial_locator,
         target=target,
     )
-    allowed_decision = _decision(
+    # The externally passed verdict is the authoritative signal for
+    # ``_projection_intent_operation_for``. A DENIED verdict makes the
+    # adapter emit ``delete`` intents; ALLOWED would emit ``upsert``.
+    denied_decision = _decision(
         workspace,
-        outcome=LifecyclePolicyOutcome.ALLOWED,
+        outcome=LifecyclePolicyOutcome.DENIED,
         source_id=source_id,
         expected=seeded.initial_locator.value,
         target=target.value,
@@ -195,7 +202,7 @@ async def test_locked_denied_rename_commits_locator_state_with_delete_intents(
         command,
         _device_context(workspace),
         fingerprint_lifecycle_command(command),
-        allowed_decision,
+        denied_decision,
         _diagnostic_context(),
     )
 

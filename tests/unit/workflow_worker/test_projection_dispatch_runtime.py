@@ -647,9 +647,6 @@ async def test_lifecycle_intent_pair_dispatches_into_one_workflow_run() -> None:
     # Both intents share the same (workspace_id, event_id) identity.
     object.__setattr__(qdrant, "event_id", event_id)
     object.__setattr__(neo4j, "event_id", event_id)
-    # Both intents share the same (workspace_id, event_id) identity.
-    object.__setattr__(qdrant, "event_id", event_id)
-    object.__setattr__(neo4j, "event_id", event_id)
     store = FakeIntentStore((qdrant, neo4j))
     starter = FakeStarter(result=ProjectionWorkflowStartResult.STARTED)
     runtime, _, _ = _runtime(store, starter)
@@ -700,3 +697,57 @@ async def test_lifecycle_intent_metric_label_uses_closed_projection_kind() -> No
     assert (
         metrics.dispatch_count(ProjectionKind.QDRANT, ProjectionDispatchOutcome.DISPATCHED) == 1
     )
+
+
+# --- bounded-parallel-traffic unit proof --------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bounded_parallel_dispatch_loops_complete_within_the_deadline() -> None:
+    """Eight parallel dispatch loops run to completion without deadlock.
+
+    The unit-level mirror of the disposable-PostgreSQL concurrency
+    probe: eight independent ``(runtime, store, starter)`` triples are
+    driven concurrently through ``dispatch_pending_intents_once``. Each
+    triple processes a small mixed batch (create / rename / move /
+    delete / restore intent shapes). The test asserts every loop
+    completes within a bounded deadline and the cap of eight concurrent
+    starts is enforced per loop — proving the dispatcher's asyncio
+    surface admits parallel traffic without ever blocking the caller.
+    """
+
+    deadline_seconds: float = 5.0
+    loop_count: int = 8
+    intents_per_loop: int = 8
+
+    def _build_loop() -> tuple[FakeIntentStore, FakeStarter, ProjectionDispatchRuntime]:
+        intents = tuple(
+            _leased_intent(
+                projection_kind=("qdrant" if index % 2 == 0 else "neo4j"),
+                attempt_count=index % 4,
+            )
+            for index in range(intents_per_loop)
+        )
+        store = FakeIntentStore(intents)
+        starter = FakeStarter(
+            result=ProjectionWorkflowStartResult.STARTED,
+            delay_seconds=0.001,
+        )
+        runtime, _, _ = _runtime(store, starter)
+        return store, starter, runtime
+
+    async def _drive() -> None:
+        triples = [_build_loop() for _ in range(loop_count)]
+        runtimes = [runtime for _, _, runtime in triples]
+        await asyncio.gather(*(runtime.dispatch_pending_intents_once() for runtime in runtimes))
+        for store, starter, _ in triples:
+            assert len(store.acknowledgements) == intents_per_loop
+            assert starter.max_active_starts <= PROJECTION_DISPATCH_CONCURRENCY_LIMIT
+
+    try:
+        await asyncio.wait_for(_drive(), timeout=deadline_seconds)
+    except TimeoutError as cause:  # pragma: no cover - deadline reached
+        raise AssertionError(
+            f"parallel dispatch loops did not complete within "
+            f"{deadline_seconds}s — possible deadlock"
+        ) from cause

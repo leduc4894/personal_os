@@ -173,7 +173,14 @@ async def test_restore_target_reads_the_same_lifecycle_counts(
 async def test_snapshot_replay_events_include_lifecycle_event_types(
     lifecycle_harness: LifecycleHarness,
 ) -> None:
-    """The snapshot's ``sync_events`` rows cover the lifecycle event vocabulary."""
+    """The snapshot's ``sync_events`` rows cover the lifecycle event vocabulary.
+
+    The snapshot's ``sync_events`` table must include a row for every
+    lifecycle event type the adapter writes (``create`` / ``rename`` /
+    ``move`` / ``delete`` / ``restore``). The seed inserts one row of
+    each event type directly so the contract is verified without
+    exercising the full lifecycle transaction machinery.
+    """
 
     workspace = await lifecycle_harness.seed_workspace()
     source_id = uuid4()
@@ -182,10 +189,38 @@ async def test_snapshot_replay_events_include_lifecycle_event_types(
         source_id=source_id,
         locator=NormalizedLocator("notes/old.md"),
     )
+    # Seed one sync_events row of each lifecycle event_type against the
+    # same source_id so the snapshot's replay surface covers the full
+    # vocabulary. The seed bypasses the adapter — the contract under
+    # test is the snapshot's coverage, not the adapter's writes.
+    seeded_event_types = (
+        "create",
+        "rename",
+        "move",
+        "delete",
+        "restore",
+    )
+    async with lifecycle_harness._engine.begin() as connection:
+        for event_type_index, event_type in enumerate(seeded_event_types):
+            await connection.execute(
+                sa.insert(sync_events).values(
+                    event_id=uuid4(),
+                    workspace_id=workspace.workspace_id,
+                    source_id=source_id,
+                    device_id=workspace.device_id,
+                    committed_version_id=seeded.current_version_id,
+                    base_version_id=None,
+                    idempotency_key=f"snapshot-eventtype-{event_type_index}-{uuid4().hex[:8]}",
+                    request_fingerprint=("0" * 64),
+                    event_type=event_type,
+                    client_timestamp=datetime.now(UTC),
+                )
+            )
     snapshot_store = PostgresqlBackupSnapshotStore(lifecycle_harness._engine)
     async with snapshot_store.open_quiesced_snapshot(_utc_now()) as snapshot:
-        # The seeded fixture inserted exactly one 'create' sync event.
-        assert snapshot.table_counts["sync_events"] >= 1
+        # The seeded fixture plus the four extra event-type rows give
+        # five sync_events entries for this source.
+        assert snapshot.table_counts["sync_events"] >= len(seeded_event_types)
         assert snapshot.table_counts["source_locators"] >= 1
     async with lifecycle_harness._engine.connect() as connection:
         event_types = set(
@@ -199,9 +234,9 @@ async def test_snapshot_replay_events_include_lifecycle_event_types(
             .scalars()
             .all()
         )
-    assert "create" in event_types
-    # The seeded seed_active_source_with_locator helper created exactly one
-    # event of the lifecycle vocabulary persisted by the snapshot.
+    # Every lifecycle vocabulary row survived the canonical snapshot.
+    for expected in seeded_event_types:
+        assert expected in event_types, expected
     assert seeded.current_version_id is not None
 
 
