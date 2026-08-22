@@ -93,6 +93,13 @@ describe("ConnectionState closed set (spec 19)", () => {
         hasActiveCredential: true,
       }),
     ).toEqual({ canLogin: false, canOpenBrowser: true, canCancel: true, canDisconnect: true });
+
+    expect(
+      resolveAuthenticationControls("revoked", {
+        hasPendingGrant: false,
+        hasActiveCredential: false,
+      }),
+    ).toEqual({ canLogin: true, canOpenBrowser: false, canCancel: false, canDisconnect: false });
   });
 });
 
