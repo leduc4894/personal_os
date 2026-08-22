@@ -481,8 +481,10 @@ async function createSession(bindings: SessionBindings): Promise<Session> {
       }
       if (summary.outcome !== "pass_already_running") {
         lastQueuePassOutcome = summary.outcome;
-      }
-      if (summary.outcome === "retry_scheduled" || summary.outcome === "login_required") {
+        // Fix round 3 mirror: arm after EVERY pass that actually ran —
+        // a completed pass can still leave parked retry work behind
+        // (lifecycle-lane retryable failure). The armer no-ops when no
+        // pending row carries a retry deadline.
         armScheduledRetryPassTrigger();
       }
       passSummaries.push(summary);
@@ -490,11 +492,12 @@ async function createSession(bindings: SessionBindings): Promise<Session> {
     },
   });
 
-  // The plugin's one-shot scheduled retry trigger mirror (fix round 2 D4):
-  // a pass that ends retry_scheduled or login_required arms ONE timer at
-  // the earliest pending retry deadline plus a small safety margin; the
-  // timer's single firing requests one bounded dispatcher pass. At most
-  // one timer is outstanding; unload cancels it.
+  // The plugin's one-shot scheduled retry trigger mirror (fix round 2 D4,
+  // widened in fix round 3): every pass that actually ran arms ONE timer
+  // at the earliest pending retry deadline plus a small safety margin; the
+  // timer's single firing requests one bounded dispatcher pass. The armer
+  // no-ops when no pending row carries a retry deadline. At most one timer
+  // is outstanding; unload cancels it.
   const SCHEDULED_RETRY_PASS_SAFETY_MARGIN_MS = 250;
   let scheduledRetryPassTimer: ReturnType<typeof setTimeout> | null = null;
   let scheduledRetryPassTargetEpochMs: number | null = null;
@@ -1051,6 +1054,90 @@ describe("automatic vault convergence after rename + edit", () => {
     expect(restarted.syncServer.publications).toBe(publicationsBefore + 1);
     expect(restarted.repository.countPendingEvents()).toBe(0);
     expect(restarted.statusText()).toBe("Ready");
+  });
+
+  it("arms the one-shot retry trigger after a completed pass that parked a lifecycle retry", async () => {
+    const { session } = await createConvergedFixture();
+    await renameNoteSettledOnly(session, "notes/alpha.md", "notes/alpha-renamed.md");
+    // ONE transient 5xx on the rename's lifecycle commit; the content lane
+    // has nothing queued, so the pass ends `completed` — the stranded
+    // shape fix round 3 closes.
+    session.lifecycleServer.nextResponse = () => ({ status: 500, code: "internal_error" });
+    await session.dispatcher.request();
+
+    const alphaRename = session.eventsOf("notes/alpha-renamed.md").at(-1);
+    expect(alphaRename?.state).toBe("waiting_retry");
+    expect(alphaRename?.safeError).toBe("server_error");
+    expect(session.passSummaries.at(-1)?.outcome).toBe("completed");
+    // The COMPLETED pass still armed the one-shot scheduled trigger at the
+    // parked retry's deadline plus the safety margin: stranded parked work
+    // recovers by itself, no unrelated trigger needed.
+    expect(session.scheduledRetryPass.isArmed()).toBe(true);
+    expect(session.scheduledRetryPass.targetEpochMs()).toBe(
+      (alphaRename?.nextEligibleRetryEpochMs ?? 0) + 250,
+    );
+    // The server is healthy again: the timer's single firing drains the
+    // parked retry and the queue converges.
+    session.lifecycleServer.nextResponse = null;
+    session.advanceClock(2_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await session.awaitScheduledRetryPass();
+    expect(session.newestEventStateOf("notes/alpha-renamed.md")).toBe("committed");
+    expect(session.repository.countPendingEvents()).toBe(0);
+    expect(session.scheduledRetryPass.isArmed()).toBe(false);
+    expect(session.statusText()).toBe("Ready");
+  });
+
+  it("keeps the deferral marker when a rename terminally fails server-side (fail-closed)", async () => {
+    const { bindings, session } = await createConvergedFixture();
+    const encoder = new TextEncoder();
+    const publicationsBefore = session.syncServer.publications;
+
+    // The pending edit exists when the rename freezes it …
+    await captureEdit(session, "notes/alpha.md", encoder.encode("alpha content v2"));
+    await renameNoteSettledOnly(session, "notes/alpha.md", "notes/alpha-renamed.md");
+    // … and the server-side verdict is a TERMINAL conflict (409): the
+    // rename closes blocked_conflict. The D7 release runs only on a
+    // committed rename receipt — a terminally-failed rename KEEPS the
+    // deferral marker, and repair stays owned by child 6.
+    session.lifecycleServer.nextResponse = () => ({
+      status: 409,
+      code: "source_version_conflict",
+    });
+    await triggerModifyPass(session);
+    const renameEvent = session
+      .eventsOf("notes/alpha-renamed.md")
+      .find((event) => event.operation === "rename");
+    expect(renameEvent?.state).toBe("blocked_conflict");
+    const deferred = session
+      .eventsOf("notes/alpha-renamed.md")
+      .find((event) => event.operation === "update");
+    expect(deferred?.state).toBe("deferred_lifecycle");
+
+    // The capture surface still refuses the path: no new event can exist …
+    const eventsBefore = session.eventsOf("notes/alpha-renamed.md").length;
+    await captureEdit(session, "notes/alpha-renamed.md", encoder.encode("alpha content v3"));
+    await triggerModifyPass(session);
+    expect(session.eventsOf("notes/alpha-renamed.md")).toHaveLength(eventsBefore);
+    expect(session.syncServer.publications).toBe(publicationsBefore);
+
+    // … and a full restart skips the path too (the snapshot refuses it,
+    // no pending rows exist, no pass runs) — the fail-closed guidance is
+    // preserved until child 6 repairs the journal.
+    await session.unload();
+    const restarted = await createSession({ ...bindings, isRestart: true });
+    restarted.requestStartup();
+    await restarted.awaitAutomaticWork();
+    expect(restarted.snapshotResults).toEqual([
+      { outcome: "completed", queuedEventCount: 0 },
+    ]);
+    expect(restarted.passSummaries.length).toBe(0);
+    expect(
+      restarted
+        .eventsOf("notes/alpha-renamed.md")
+        .find((event) => event.operation === "update")?.state,
+    ).toBe("deferred_lifecycle");
+    expect(restarted.syncServer.publications).toBe(publicationsBefore);
   });
 
   it("parks queued renames retryable when the restart pass races the credential (no terminal kill)", async () => {

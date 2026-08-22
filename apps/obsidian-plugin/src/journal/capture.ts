@@ -200,13 +200,14 @@ export class JournalCapture {
   /**
    * Queue one create/modify observation (spec 7.1): the path settles alone
    * for the frozen delay — a later observation restarts that one timer —
-   * and only the settled read is admitted. Paths already deferred by a
-   * lifecycle guard are never re-captured. The returned promise resolves
-   * once this observation's settled admission is durable (superseded
-   * observations of the same path resolve with the one shared admission),
-   * or immediately when nothing will be admitted — the hook a Vault-event
-   * listener uses to trigger the following queue pass after the event it
-   * caused exists in the journal. Never rejects.
+   * and only the settled read is admitted. Paths currently deferred by a
+   * lifecycle guard are refused until the owning rename/move commits
+   * server-side and releases the guard (fix round 2 D7). The returned
+   * promise resolves once this observation's settled admission is durable
+   * (superseded observations of the same path resolve with the one shared
+   * admission), or immediately when nothing will be admitted — the hook a
+   * Vault-event listener uses to trigger the following queue pass after
+   * the event it caused exists in the journal. Never rejects.
    */
   notifyPathChanged(path: string): Promise<void> {
     if (this.#isDisposed) {
@@ -305,7 +306,10 @@ export class JournalCapture {
    * The explicit `Sync existing files` pass (spec 7.1): the user confirms
    * first, then one bounded snapshot is processed in bounded batches
    * through the same admission path as settled events. Lifecycle-deferred
-   * paths are excluded from the snapshot until child 5 owns the transition.
+   * paths are excluded from the snapshot until their owning rename/move
+   * commits server-side (which deletes the marker rows and releases the
+   * path for re-admission — fix round 2 D7); a terminally-failed rename
+   * keeps the exclusion fail-closed.
    */
   async runExistingFilesScan(options: {
     readonly confirm: () => Promise<boolean>;
@@ -522,8 +526,13 @@ export class JournalCapture {
       if (!isPendingEventState(event.state)) {
         continue;
       }
-      // Terminal from here on: the row keeps its evidence and is never
-      // selected by a later queue pass (spec 7.1, 7.2).
+      // Terminal from here on: the frozen event never reached the server,
+      // so no later queue pass may select it. When the owning rename/move
+      // later COMMITS server-side, the lifecycle repository deletes these
+      // `deferred_lifecycle` rows in the same transaction as the committed
+      // receipt (fix round 2 D7), releasing the path for re-admission; a
+      // terminally-failed rename keeps the marker fail-closed (child 6
+      // owns repair).
       await this.#repository.markEventTerminal(
         event.eventId,
         "deferred_lifecycle",
@@ -536,7 +545,10 @@ export class JournalCapture {
    * Whether a path is lifecycle-deferred: guarded in this session, or
    * durably carrying a `deferred_lifecycle` event in the journal. Such a
    * path is never re-captured and excluded from the snapshot scan until
-   * child 5 owns the transition.
+   * the owning rename/move commits server-side — that commit deletes the
+   * marker rows and releases the path for re-admission (fix round 2 D7).
+   * A terminally-failed rename keeps the marker (fail-closed, child 6
+   * owns repair).
    */
   #isLifecycleDeferredPath(normalizedPath: string): boolean {
     if (this.#lifecycleGuardedPaths.has(normalizedPath)) {

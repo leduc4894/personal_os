@@ -591,19 +591,25 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           }
           // The pass follows the settled admission (250 ms settle re-reads the
           // bytes): running it at event time would find an empty journal.
-          void capture.notifyPathChanged(file.path).then(() => {
-            void boundedQueuePassDispatcher.request();
-          });
+          void capture.notifyPathChanged(file.path).then(
+            () => {
+              void boundedQueuePassDispatcher.request();
+            },
+            () => undefined,
+          );
           }),
         );
         this.registerEvent(
           this.app.vault.on("modify", (file) => {
-          if (!this.#canCaptureVaultChanges()) {
-            return;
-          }
-          void capture.notifyPathChanged(file.path).then(() => {
-            void boundedQueuePassDispatcher.request();
-          });
+            if (!this.#canCaptureVaultChanges()) {
+              return;
+            }
+            void capture.notifyPathChanged(file.path).then(
+              () => {
+                void boundedQueuePassDispatcher.request();
+              },
+              () => undefined,
+            );
           }),
         );
         this.registerEvent(
@@ -806,12 +812,13 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       // flag; a trigger that found a running pass leaves it untouched.
       this.#isQueuePassActive = false;
       this.#lastQueuePassOutcome = summary.outcome;
-    }
-    if (summary.outcome === "retry_scheduled" || summary.outcome === "login_required") {
-      // Fix round 2 D4: the failed event now sits in bounded backoff with
-      // no automatic follow-up (fix round 1's no-overtake discipline), and
-      // with the manual sync commands removed no surface would ever drain
-      // it again — arm the one-shot scheduled retry trigger.
+      // Fix round 3 (extending fix round 2 D4): arm after EVERY pass end,
+      // not only retry/login ends. A `completed` pass can still leave
+      // parked work behind — a lifecycle-lane retryable failure (for
+      // example one 5xx) parks its event in bounded backoff while the
+      // content lane drains or idles. The armer no-ops when no pending
+      // row carries a retry deadline, so unconditional arming costs
+      // nothing otherwise.
       this.#armScheduledRetryPassTrigger();
     }
     this.#refreshSyncStatus();
@@ -819,16 +826,18 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   }
 
   /**
-   * The bounded one-shot scheduled retry trigger (fix round 2 D4): arm ONE
-   * cancellable timer at the earliest pending retry deadline (plus a small
-   * safety margin) whose single firing requests one bounded queue pass
-   * through the same dispatcher every other trigger uses. This mirrors the
+   * The bounded one-shot scheduled retry trigger (fix round 2 D4, widened
+   * in fix round 3): after any pass that actually ran, arm ONE cancellable
+   * timer at the earliest pending retry deadline (plus a small safety
+   * margin) whose single firing requests one bounded queue pass through
+   * the same dispatcher every other trigger uses. This mirrors the
    * already-reviewed `deadline_reached` serial follow-up: the PASS stays
-   * bounded and trigger-driven; only the trigger is scheduled. At most one
-   * timer is outstanding (an already-earlier target keeps the existing
-   * timer, a sooner target re-arms it), unload cancels it, and this is
-   * never a repeating daemon loop. No `JournalQueueDriver` failure
-   * semantics change — the no-overtake discipline of fix round 1 stays.
+   * bounded and trigger-driven; only the trigger is scheduled. The armer
+   * no-ops when no pending row carries a retry deadline. At most one timer
+   * is outstanding (an already-earlier target keeps the existing timer, a
+   * sooner target re-arms it), unload cancels it, and this is never a
+   * repeating daemon loop. No `JournalQueueDriver` failure semantics
+   * change — the no-overtake discipline of fix round 1 stays.
    */
   #armScheduledRetryPassTrigger(): void {
     const repository = this.#queueRepository;
