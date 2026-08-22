@@ -578,18 +578,35 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         );
         this.registerEvent(
           this.app.vault.on("delete", (file) => {
-          if (!this.#canCaptureVaultChanges()) {
-            return;
-          }
-          void capture.notifyPathDeleted(this.#toVaultTargetFile(file));
+            if (!this.#canCaptureVaultChanges()) {
+              return;
+            }
+            // The pass follows the recorded delete intent exactly like the
+            // create/modify listeners: without a trigger of its own the
+            // queued lifecycle event would sit undelivered until an
+            // unrelated surface happened to run a pass.
+            void capture.notifyPathDeleted(this.#toVaultTargetFile(file)).then(
+              () => {
+                void boundedQueuePassDispatcher.request();
+              },
+              () => undefined,
+            );
           }),
         );
         this.registerEvent(
           this.app.vault.on("rename", (file, oldPath) => {
-          if (!this.#canCaptureVaultChanges()) {
-            return;
-          }
-          void capture.notifyPathRenamed(this.#toVaultRenameTarget(file), oldPath);
+            if (!this.#canCaptureVaultChanges()) {
+              return;
+            }
+            // Same discipline as delete: the rename's settle delay is
+            // applied inside the lifecycle capture, and the settled
+            // capture is followed by one bounded queue pass.
+            void capture.notifyPathRenamed(this.#toVaultRenameTarget(file), oldPath).then(
+              () => {
+                void boundedQueuePassDispatcher.request();
+              },
+              () => undefined,
+            );
           }),
         );
         automaticSnapshotCoordinator.request("startup");

@@ -235,6 +235,35 @@ describe("Obsidian plugin composition root", () => {
     expect(coordinatorBody).toContain("await boundedQueuePassDispatcher.request()");
   });
 
+  it("chains a bounded queue pass after the settled rename and delete listener captures", () => {
+    // Fix round 2 D1: rename and delete listeners MUST chain the same
+    // fire-and-forget dispatcher request the create/modify listeners
+    // chain. Without it, recorded lifecycle events sit `queued` forever —
+    // no surface of their own ever drains them.
+    const listenerBody = (marker: string): string => {
+      const index = pluginSource.indexOf(marker);
+      expect(index).toBeGreaterThanOrEqual(0);
+      const nextRegistration = pluginSource.indexOf(
+        "this.registerEvent(",
+        index + marker.length,
+      );
+      return pluginSource.slice(index, nextRegistration === -1 ? index + 700 : nextRegistration);
+    };
+    const renameBody = listenerBody('this.app.vault.on("rename"');
+    expect(renameBody).toContain("notifyPathRenamed");
+    expect(renameBody.indexOf("notifyPathRenamed")).toBeLessThan(renameBody.indexOf(".then("));
+    expect(renameBody).toContain("void boundedQueuePassDispatcher.request();");
+    const deleteBody = listenerBody('this.app.vault.on("delete"');
+    expect(deleteBody).toContain("notifyPathDeleted");
+    expect(deleteBody.indexOf("notifyPathDeleted")).toBeLessThan(deleteBody.indexOf(".then("));
+    expect(deleteBody).toContain("void boundedQueuePassDispatcher.request();");
+    // Exactly the four vault listeners own the fire-and-forget request;
+    // the coordinator's awaited request stays the only other trigger.
+    expect(pluginSource.match(/void boundedQueuePassDispatcher\.request\(\);/g)?.length ?? 0).toBe(
+      4,
+    );
+  });
+
   it("wires the lifecycle capture, lifecycle driver and lifecycle api behind the restore command", () => {
     expect(pluginSource).toContain("new LifecycleCaptureImpl(");
     expect(pluginSource).toContain("new LifecycleDriverImpl(");

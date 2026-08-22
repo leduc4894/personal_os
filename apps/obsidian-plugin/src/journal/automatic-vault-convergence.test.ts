@@ -597,8 +597,16 @@ async function drainMicrotasks(): Promise<void> {
   }
 }
 
-/** The rename listener sequence: notify, respect the settle delay, no pass. */
-async function renameNote(session: Session, priorPath: string, newPath: string): Promise<void> {
+/**
+ * The rename listener's capture half: notify, respect the settle delay, no
+ * pass. Scenarios use this to model a rename whose pass trigger was lost
+ * (for example a raced unload) while keeping the durable event recorded.
+ */
+async function renameNoteSettledOnly(
+  session: Session,
+  priorPath: string,
+  newPath: string,
+): Promise<void> {
   session.vault.rename(priorPath, newPath);
   const slash = newPath.lastIndexOf("/");
   const parentPath = slash === -1 ? "" : newPath.slice(0, slash);
@@ -608,6 +616,15 @@ async function renameNote(session: Session, priorPath: string, newPath: string):
   );
   await vi.advanceTimersByTimeAsync(FILE_SETTLE_DELAY_MS + 50);
   await settled;
+}
+
+/**
+ * The rename listener sequence (fix round 2 D1 mirror): the settled capture
+ * is followed by exactly one bounded dispatcher pass, fire-and-forget.
+ */
+async function renameNote(session: Session, priorPath: string, newPath: string): Promise<void> {
+  await renameNoteSettledOnly(session, priorPath, newPath);
+  await session.dispatcher.request();
 }
 
 /** The modify listener's capture half: settle + admit, no pass yet. */
@@ -676,10 +693,35 @@ describe("automatic vault convergence after rename + edit", () => {
     expect(session.statusText()).toBe("Ready");
   });
 
-  it("drains the queued renames and commits the edit when a healthy pass follows the edit", async () => {
+  it("drains renames through the rename listener's own queue pass trigger", async () => {
     const { session } = await createConvergedFixture();
+    const passesBefore = session.passSummaries.length;
+
+    // The full rename listener sequence: settled capture + its own bounded
+    // pass. No edit and no manual trigger is involved.
     await renameNote(session, "notes/alpha.md", "notes/alpha-renamed.md");
     await renameNote(session, "notes/beta.md", "notes/beta-renamed.md");
+
+    // Each settled rename recording is followed by a pass that drains the
+    // lifecycle lane: the durable rename events never sit queued.
+    expect(session.passSummaries.length).toBeGreaterThan(passesBefore);
+    expect(session.lifecycleServer.requestBodies).toHaveLength(2);
+    expect(session.lifecycleServer.requestBodies.map((body) => body["operation"])).toEqual([
+      "rename",
+      "rename",
+    ]);
+    expect(session.repository.readLocalFileByPath("notes/alpha.md")).toBeNull();
+    expect(session.newestEventStateOf("notes/alpha-renamed.md")).toBe("committed");
+    expect(session.newestEventStateOf("notes/beta-renamed.md")).toBe("committed");
+    expect(session.repository.countPendingEvents()).toBe(0);
+    expect(session.repository.countPendingLifecycleEvents()).toBe(0);
+    expect(session.statusText()).toBe("Ready");
+  });
+
+  it("drains the queued renames and commits the edit when a healthy pass follows the edit", async () => {
+    const { session } = await createConvergedFixture();
+    await renameNoteSettledOnly(session, "notes/alpha.md", "notes/alpha-renamed.md");
+    await renameNoteSettledOnly(session, "notes/beta.md", "notes/beta-renamed.md");
 
     // The modify listener sequence: capture the edit, then request one pass.
     await captureEdit(
@@ -710,8 +752,8 @@ describe("automatic vault convergence after rename + edit", () => {
 
   it("drains after restart when a pending content edit also exists (the snapshot coalesces it)", async () => {
     const { bindings, session } = await createConvergedFixture();
-    await renameNote(session, "notes/alpha.md", "notes/alpha-renamed.md");
-    await renameNote(session, "notes/beta.md", "notes/beta-renamed.md");
+    await renameNoteSettledOnly(session, "notes/alpha.md", "notes/alpha-renamed.md");
+    await renameNoteSettledOnly(session, "notes/beta.md", "notes/beta-renamed.md");
     // The live "edit never synced" state: the edit event exists but its
     // pass trigger was lost (raced unload), so it sits queued alongside the
     // two queued renames — three pending journal events.
@@ -748,8 +790,8 @@ describe("automatic vault convergence after rename + edit", () => {
 
   it("keeps a queued rename in the lifecycle lane after one retryable lifecycle failure (no lane crossing)", async () => {
     const { session } = await createConvergedFixture();
-    await renameNote(session, "notes/alpha.md", "notes/alpha-renamed.md");
-    await renameNote(session, "notes/beta.md", "notes/beta-renamed.md");
+    await renameNoteSettledOnly(session, "notes/alpha.md", "notes/alpha-renamed.md");
+    await renameNoteSettledOnly(session, "notes/beta.md", "notes/beta-renamed.md");
     const alphaRename = session.eventsOf("notes/alpha-renamed.md").at(-1);
     const betaRename = session.eventsOf("notes/beta-renamed.md").at(-1);
     expect(alphaRename?.operation).toBe("rename");
@@ -798,8 +840,8 @@ describe("automatic vault convergence after rename + edit", () => {
 
   it("parks queued renames retryable when the restart pass races the credential (no terminal kill)", async () => {
     const { bindings, session } = await createConvergedFixture();
-    await renameNote(session, "notes/alpha.md", "notes/alpha-renamed.md");
-    await renameNote(session, "notes/beta.md", "notes/beta-renamed.md");
+    await renameNoteSettledOnly(session, "notes/alpha.md", "notes/alpha-renamed.md");
+    await renameNoteSettledOnly(session, "notes/beta.md", "notes/beta-renamed.md");
     await captureEdit(
       session,
       "notes/gamma.md",
