@@ -812,14 +812,24 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       // flag; a trigger that found a running pass leaves it untouched.
       this.#isQueuePassActive = false;
       this.#lastQueuePassOutcome = summary.outcome;
-      // Fix round 3 (extending fix round 2 D4): arm after EVERY pass end,
-      // not only retry/login ends. A `completed` pass can still leave
-      // parked work behind — a lifecycle-lane retryable failure (for
-      // example one 5xx) parks its event in bounded backoff while the
-      // content lane drains or idles. The armer no-ops when no pending
-      // row carries a retry deadline, so unconditional arming costs
-      // nothing otherwise.
-      this.#armScheduledRetryPassTrigger();
+      if (summary.outcome !== "stopped") {
+        // Fix round 3 (extending fix round 2 D4): arm after every pass
+        // end that actually ran work, not only retry/login ends. A
+        // `completed` pass can still leave parked work behind — a
+        // lifecycle-lane retryable failure (for example one 5xx) parks
+        // its event in bounded backoff while the content lane drains or
+        // idles. The armer no-ops when no pending row carries a retry
+        // deadline, so unconditional arming costs nothing otherwise.
+        //
+        // Fix round 4 (busy-loop closure): a `stopped` pass end is the
+        // one exclusion. The dispatcher is not stopped (only unload
+        // stops it), so a stopped-pass timer would fire into the stopped
+        // driver, produce another stopped pass, re-arm at a possibly-
+        // past deadline (`setTimeout(0)`), and self-sustain for as long
+        // as the stopping condition persists — for example a
+        // reconcile-required journal with a parked retry row.
+        this.#armScheduledRetryPassTrigger();
+      }
     }
     this.#refreshSyncStatus();
     return summary;
@@ -827,17 +837,21 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
 
   /**
    * The bounded one-shot scheduled retry trigger (fix round 2 D4, widened
-   * in fix round 3): after any pass that actually ran, arm ONE cancellable
+   * in fix round 3, stopped-exclusion added in fix round 4): after any
+   * pass that actually ran and did not end `stopped`, arm ONE cancellable
    * timer at the earliest pending retry deadline (plus a small safety
    * margin) whose single firing requests one bounded queue pass through
    * the same dispatcher every other trigger uses. This mirrors the
    * already-reviewed `deadline_reached` serial follow-up: the PASS stays
    * bounded and trigger-driven; only the trigger is scheduled. The armer
-   * no-ops when no pending row carries a retry deadline. At most one timer
-   * is outstanding (an already-earlier target keeps the existing timer, a
-   * sooner target re-arms it), unload cancels it, and this is never a
-   * repeating daemon loop. No `JournalQueueDriver` failure semantics
-   * change — the no-overtake discipline of fix round 1 stays.
+   * no-ops when no pending row carries a retry deadline. A `stopped` pass
+   * end never arms: the dispatcher is not stopped (only unload stops it),
+   * so a stopped-pass timer would fire into the stopped driver and
+   * self-sustain at a past deadline. At most one timer is outstanding
+   * (an already-earlier target keeps the existing timer, a sooner target
+   * re-arms it), unload cancels it, and this is never a repeating daemon
+   * loop. No `JournalQueueDriver` failure semantics change — the
+   * no-overtake discipline of fix round 1 stays.
    */
   #armScheduledRetryPassTrigger(): void {
     const repository = this.#queueRepository;

@@ -245,21 +245,32 @@ describe("Obsidian plugin composition root", () => {
     // timer at the earliest pending retry deadline plus a small safety
     // margin; its single firing requests one bounded queue pass. Never a
     // repeating daemon loop, and unload cancels the outstanding timer.
+    //
+    // Fix round 4 (busy-loop closure): a `stopped` pass end is the ONE
+    // further exclusion. The dispatcher is not stopped (only unload
+    // stops it), so a stopped-pass timer would fire into the stopped
+    // driver, produce another stopped pass, re-arm at a possibly-past
+    // deadline (`setTimeout(0)`), and self-sustain (~250 passes/sec)
+    // while the stopping condition persists — for example a
+    // reconcile-required journal with a parked retry row.
     const passWrapperIndex = pluginSource.indexOf(
       "async #runBoundedQueuePass(): Promise<QueuePassSummary>",
     );
     expect(passWrapperIndex).toBeGreaterThanOrEqual(0);
-    const wrapperBody = pluginSource.slice(passWrapperIndex, passWrapperIndex + 1_400);
-    // The armer runs inside the only guard that matters: the invocation
+    const wrapperBody = pluginSource.slice(passWrapperIndex, passWrapperIndex + 2_600);
+    // The armer runs inside the only guards that matter: the invocation
     // that actually ran the pass (never a `pass_already_running`
-    // bystander).
+    // bystander) and never a `stopped` pass end.
     const ranGuardIndex = wrapperBody.indexOf('summary.outcome !== "pass_already_running"');
     expect(ranGuardIndex).toBeGreaterThanOrEqual(0);
+    const stoppedGuardIndex = wrapperBody.indexOf('summary.outcome !== "stopped"');
+    expect(stoppedGuardIndex).toBeGreaterThan(ranGuardIndex);
     expect(wrapperBody.indexOf("#armScheduledRetryPassTrigger()")).toBeGreaterThan(
-      ranGuardIndex,
+      stoppedGuardIndex,
     );
-    // Arming is NOT gated on any specific pass outcome: no
-    // retry_scheduled/login_required special-casing remains.
+    // Arming is NOT gated on any other specific pass outcome:
+    // completed / retry_scheduled / login_required / deadline_reached
+    // all still arm.
     expect(wrapperBody).not.toContain('summary.outcome === "retry_scheduled"');
     expect(wrapperBody).not.toContain('summary.outcome === "login_required"');
     const triggerIndex = pluginSource.indexOf("#armScheduledRetryPassTrigger(): void");

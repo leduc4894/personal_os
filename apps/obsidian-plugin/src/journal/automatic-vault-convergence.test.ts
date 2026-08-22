@@ -473,6 +473,13 @@ async function createSession(bindings: SessionBindings): Promise<Session> {
   };
   const dispatcher = new CoalescingQueuePassDispatcher({
     runPass: async (): Promise<QueuePassSummary> => {
+      // The plugin's #runBoundedQueuePass refreshes the status BEFORE the
+      // pass; a reconcile-required projection stops the driver there, so
+      // any later trigger returns a `stopped` pass while the journal (and
+      // any parked retry rows) persist.
+      if (persistence.isReconcileRequired) {
+        queueDriver.stop();
+      }
       let summary: QueuePassSummary;
       try {
         summary = await queueDriver.requestPass();
@@ -481,11 +488,18 @@ async function createSession(bindings: SessionBindings): Promise<Session> {
       }
       if (summary.outcome !== "pass_already_running") {
         lastQueuePassOutcome = summary.outcome;
-        // Fix round 3 mirror: arm after EVERY pass that actually ran —
-        // a completed pass can still leave parked retry work behind
-        // (lifecycle-lane retryable failure). The armer no-ops when no
-        // pending row carries a retry deadline.
-        armScheduledRetryPassTrigger();
+        if (summary.outcome !== "stopped") {
+          // Fix round 3 mirror: arm after every pass that actually ran
+          // work — a completed pass can still leave parked retry work
+          // behind (lifecycle-lane retryable failure). The armer no-ops
+          // when no pending row carries a retry deadline.
+          //
+          // Fix round 4 mirror: a `stopped` pass end never arms — the
+          // dispatcher is not stopped (only unload stops it), so a
+          // stopped-pass timer would fire into the stopped driver and
+          // self-sustain (the reconcile-required busy loop).
+          armScheduledRetryPassTrigger();
+        }
       }
       passSummaries.push(summary);
       return summary;
@@ -1086,6 +1100,46 @@ describe("automatic vault convergence after rename + edit", () => {
     expect(session.repository.countPendingEvents()).toBe(0);
     expect(session.scheduledRetryPass.isArmed()).toBe(false);
     expect(session.statusText()).toBe("Ready");
+  });
+
+  it("never arms the retry trigger from a stopped pass (no stopped-driver busy loop)", async () => {
+    const { session } = await createConvergedFixture();
+    const encoder = new TextEncoder();
+    // One parked content retry whose deadline is ALREADY in the past —
+    // the busy-loop fuel (a past deadline arms `setTimeout(0)`).
+    await captureEdit(session, "notes/gamma.md", encoder.encode("gamma content edited"));
+    const editEventId =
+      session
+        .eventsOf("notes/gamma.md")
+        .find((event) => event.operation === "update")?.eventId ?? "";
+    expect(editEventId).not.toBe("");
+    await session.repository.markEventPreflightStarted(editEventId);
+    await session.repository.markEventWaitingRetry(editEventId, "server_error", 1);
+
+    // The journal turns durably reconcile-required while the parked retry
+    // row persists — exactly the finding's shape. The trigger's status
+    // refresh stops the driver, so the pass ends `stopped`.
+    const gammaLocalFileId =
+      session.repository.readLocalFileByPath("notes/gamma.md")?.localFileId ?? "";
+    expect(gammaLocalFileId).not.toBe("");
+    await session.repository.lifecycle.recordLifecycleReconcileForLocalFile(
+      gammaLocalFileId,
+    );
+    expect(session.persistence.isReconcileRequired).toBe(true);
+
+    const passesBefore = session.passSummaries.length;
+    await session.dispatcher.request();
+    expect(session.passSummaries.at(-1)?.outcome).toBe("stopped");
+
+    // The stopped pass must NOT arm the one-shot trigger: the dispatcher
+    // itself is not stopped (only unload stops it), so an armed timer
+    // would fire into the stopped driver, produce another stopped pass,
+    // re-arm at the past deadline (`setTimeout(0)`), and self-sustain.
+    expect(session.scheduledRetryPass.isArmed()).toBe(false);
+    await vi.advanceTimersByTimeAsync(5);
+    await vi.advanceTimersByTimeAsync(5);
+    expect(session.passSummaries.length).toBe(passesBefore + 1);
+    expect(session.repository.readEvent(editEventId)?.state).toBe("waiting_retry");
   });
 
   it("keeps the deferral marker when a rename terminally fails server-side (fail-closed)", async () => {
