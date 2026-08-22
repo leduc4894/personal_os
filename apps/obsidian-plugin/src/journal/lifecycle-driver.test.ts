@@ -625,6 +625,45 @@ describe("lifecycle driver non-retryable conflict and integrity (spec 12)", () =
   });
 });
 
+describe("lifecycle driver login_required parking (spec 8, 12)", () => {
+  it("parks login_required as waiting_retry under the login_required label instead of killing the event", async () => {
+    const harness = createHarness({ randomJitter: () => 0 });
+    await harness.seedTrackedFile("notes/login-park.md");
+    const recorded = await harness.recordLifecycle(
+      createLifecycleEventOperands({
+        operation: "rename",
+        sourceId: SOURCE_ID,
+        expectedVersionId: VERSION_ID,
+        expectedLocator: "notes/login-park.md",
+        targetLocator: "notes/login-park-renamed.md",
+        policyRevision: 1,
+        predecessorEventId: null,
+      }),
+      { newPath: "notes/login-park-renamed.md" },
+    );
+    harness.api.install(async () => {
+      throw new LifecycleApiError("login_required");
+    });
+    const outcome = await harness.driver.runOne(activeSignal());
+    // The closed run outcome tells the queue pass to end login_required.
+    expect(outcome).toBe("login_required");
+    // The event is PARKED retryable — never terminal blocked_conflict.
+    const parked = harness.repository.readEvent(recorded.event.eventId);
+    expect(parked?.state).toBe("waiting_retry");
+    expect(parked?.safeError).toBe("login_required");
+    expect(parked?.nextEligibleRetryEpochMs).not.toBeNull();
+    expect(parked?.attemptCount).toBe(1);
+
+    // Same discipline as the content lane: once the retry time passes the
+    // event dispatches and commits — a startup credential race never
+    // destroys the queued rename.
+    harness.advanceClock((parked?.nextEligibleRetryEpochMs ?? 0) + 1);
+    harness.api.install(async () => committedResult());
+    expect(await harness.driver.runOne(activeSignal())).toBe("committed");
+    expect(harness.repository.readEvent(recorded.event.eventId)?.state).toBe("committed");
+  });
+});
+
 // --- cancellation and unload -----------------------------------------------------------
 
 describe("lifecycle driver cancellation and unload (spec 19.2, 12)", () => {

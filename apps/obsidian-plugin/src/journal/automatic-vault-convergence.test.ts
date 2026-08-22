@@ -795,4 +795,55 @@ describe("automatic vault convergence after rename + edit", () => {
     expect(session.repository.countPendingEvents()).toBe(1);
     expect(session.statusText()).toBe("Offline — queued (1)");
   });
+
+  it("parks queued renames retryable when the restart pass races the credential (no terminal kill)", async () => {
+    const { bindings, session } = await createConvergedFixture();
+    await renameNote(session, "notes/alpha.md", "notes/alpha-renamed.md");
+    await renameNote(session, "notes/beta.md", "notes/beta-renamed.md");
+    await captureEdit(
+      session,
+      "notes/gamma.md",
+      new TextEncoder().encode("gamma content edited"),
+    );
+    expect(session.repository.countPendingEvents()).toBe(3);
+
+    // Restart BEFORE the fire-and-forget token refresh minted an access
+    // credential: the startup snapshot's pass runs with a null credential.
+    await session.unload();
+    const restarted = await createSession({
+      ...bindings,
+      isRestart: true,
+      initialAccessToken: null,
+    });
+    restarted.requestStartup();
+    await restarted.awaitAutomaticWork();
+
+    // The snapshot still counted the diverging edit and requested the pass …
+    expect(restarted.snapshotResults).toEqual([
+      { outcome: "completed", queuedEventCount: 1 },
+    ]);
+    // … the lifecycle adapter rejected pre-HTTP on the missing credential
+    // and the driver PARKED the first rename retryable under the
+    // login_required safe label — never terminal blocked_conflict — with
+    // zero requests reaching the server, and the pass ended login_required
+    // before the content lane dispatched anything.
+    expect(restarted.passSummaries.at(-1)?.outcome).toBe("login_required");
+    expect(restarted.lifecycleServer.requestBodies).toHaveLength(0);
+    const alphaRename = restarted
+      .eventsOf("notes/alpha-renamed.md")
+      .find((event) => event.operation === "rename");
+    expect(alphaRename?.state).toBe("waiting_retry");
+    expect(alphaRename?.safeError).toBe("login_required");
+    // The second rename and the edit survive untouched, waiting for a
+    // trigger under a valid credential.
+    const betaRename = restarted
+      .eventsOf("notes/beta-renamed.md")
+      .find((event) => event.operation === "rename");
+    expect(betaRename?.state).toBe("queued");
+    const editEvent = restarted
+      .eventsOf("notes/gamma.md")
+      .find((event) => event.operation === "update");
+    expect(editEvent?.state).toBe("queued");
+    expect(restarted.syncServer.preflightBodies).toHaveLength(3);
+  });
 });

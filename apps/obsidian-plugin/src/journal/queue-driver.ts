@@ -268,6 +268,7 @@ export class JournalQueueDriver {
         // tried to send it through the wrong API. Looping until
         // `runOne` returns "idle" keeps the predecessor rule
         // deterministic and avoids the lane-crossing dispatch.
+        let lifecycleLoginRequired = false;
         if (this.#lifecycleDriver !== null && !this.#isStopped) {
           let lifecycleOutcome: LifecycleRunOutcome = "idle";
           do {
@@ -284,8 +285,21 @@ export class JournalQueueDriver {
             if (this.#isStopped || this.#nowEpochMs() >= passDeadlineEpochMs) {
               break;
             }
+            if (lifecycleOutcome === "login_required") {
+              // The lifecycle lane parked its event retryable under the
+              // `login_required` safe label: every later lane would face
+              // the same missing credential, so the pass ends
+              // `login_required` now (spec 8, 12) and the whole queue
+              // survives untouched for the next credential.
+              lifecycleLoginRequired = true;
+              break;
+            }
           } while (lifecycleOutcome === "committed");
           if (this.#isStopped) {
+            break;
+          }
+          if (lifecycleLoginRequired) {
+            passEndReason = "end_login_required";
             break;
           }
         }

@@ -1382,4 +1382,53 @@ describe("queue driver + lifecycle lane separation (task 9 fix round 1 I3, M3)",
     expect(summary.processedEventCount).toBe(0);
     expect(lifecycleDispatches).toBe(1);
   });
+
+  it("ends the pass login_required when the lifecycle lane cannot authenticate, parking the rename retryable", async () => {
+    const harness = createHarnessWithLifecycle();
+    await harness.seedTrackedFile(
+      "notes/lifecycle-login.md",
+      new TextEncoder().encode("seed bytes"),
+    );
+    const rename = await harness.recordLifecycleEvent(
+      createLifecycleEventOperands({
+        operation: "rename",
+        sourceId: SOURCE_ID,
+        expectedVersionId: SOURCE_VERSION_ID,
+        expectedLocator: "notes/lifecycle-login.md",
+        targetLocator: "notes/lifecycle-login-renamed.md",
+        policyRevision: 2,
+        predecessorEventId: null,
+      }),
+      { newPath: "notes/lifecycle-login-renamed.md" },
+    );
+    harness.installLifecycleHandler(async () => {
+      throw new LifecycleApiError("login_required");
+    });
+    // A queued content event must stay UNTOUCHED: the pass ends at the
+    // lifecycle login verdict instead of dispatching content without a
+    // credential.
+    const contentEvent = await harness.recordContent(
+      "notes/lifecycle-login-content.md",
+      new TextEncoder().encode("content bytes"),
+    );
+    harness.installTransport({
+      preflight: async () => {
+        throw new Error("content lane must not run after a lifecycle login_required verdict");
+      },
+      content: async () => {
+        throw new Error("content lane must not run after a lifecycle login_required verdict");
+      },
+    });
+
+    const summary = await runPass(harness.driver);
+    expect(summary.outcome).toBe("login_required");
+    // The rename is parked retryable under the login_required safe label —
+    // never terminal blocked_conflict with zero server contact.
+    const parked = harness.repository.readEvent(rename.eventId);
+    expect(parked?.state).toBe("waiting_retry");
+    expect(parked?.safeError).toBe("login_required");
+    // The content lane never dispatched: the queued edit survives intact.
+    expect(harness.preflightBodies).toHaveLength(0);
+    expect(harness.repository.readEvent(contentEvent.eventId)?.state).toBe("queued");
+  });
 });

@@ -25,9 +25,14 @@
  * backoff persisted on `journal_attempts.next_attempt_at`. Conflict
  * (409), integrity (422) and 5xx integrity outcomes are
  * non-retryable; they close the event as `blocked_conflict` or
- * `integrity_failed`. The `login_required` failure is non-retryable
- * in the same sense: it falls through as `blocked` so the queue
- * surfaces the credential need to the user.
+ * `integrity_failed` — terminal conflict verdicts are reserved for
+ * actual server-side conflict responses. The `login_required` failure
+ * (including the pre-HTTP missing credential of a startup refresh
+ * race) PARKS the event retryable as `waiting_retry` under the
+ * `login_required` safe label — the same discipline as the content
+ * lane — and reports `login_required` so the queue pass ends with the
+ * credential need surfaced and the queue survives untouched for the
+ * next login.
  *
  * Cancellation / unload: the driver owns one internal
  * {@link AbortController}; `dispose()` aborts it and every in-flight
@@ -97,8 +102,18 @@ export interface LifecycleApi {
   ): Promise<LifecycleResult>;
 }
 
-/** The closed bounded-pass outcome vocabulary. */
-export type LifecycleRunOutcome = "idle" | "committed" | "blocked" | "retry";
+/**
+ * The closed bounded-pass outcome vocabulary. `login_required` marks a
+ * run that PARKED its event retryable under the `login_required` safe
+ * label: the queue pass must end with its own `login_required` outcome
+ * so the credential need surfaces while the durable intent survives.
+ */
+export type LifecycleRunOutcome =
+  | "idle"
+  | "committed"
+  | "blocked"
+  | "retry"
+  | "login_required";
 
 /**
  * The lifecycle driver port the queue composition consumes. The
@@ -284,11 +299,16 @@ export class LifecycleDriverImpl implements LifecycleDriver {
         await this.#closeTerminal(frozen.event.eventId, "integrity_failed", correlationId);
         return "blocked";
       case "login_required":
-        // Login is required: persist as a terminal non-retryable
-        // state so the queue surfaces the credential need to the
-        // user.
-        await this.#closeTerminal(frozen.event.eventId, "blocked_conflict", correlationId);
-        return "blocked";
+        // Login is required (including the pre-HTTP missing credential
+        // of a startup refresh race): PARK the event retryable under the
+        // `login_required` safe label — the same discipline as the
+        // content lane — and report the closed `login_required` outcome
+        // so the queue pass ends login_required. A terminal
+        // `blocked_conflict` verdict is reserved for actual server-side
+        // conflict responses and must never destroy a durable lifecycle
+        // intent without any server contact.
+        await this.#scheduleRetry(frozen.event.eventId, "login_required", correlationId);
+        return "login_required";
       case "network_offline":
       case "network_timeout":
       case "network_rate_limited":
