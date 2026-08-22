@@ -149,17 +149,19 @@ describe("Obsidian plugin composition root", () => {
     expect(listenerIndex).toBeGreaterThan(layoutReadyIndex);
   });
 
-  it("registers exactly the three safe-source commands and no other", () => {
-    expect(pluginSource).toContain('id: "sync-now"');
-    expect(pluginSource).toContain('id: "sync-existing-files"');
+  it("removes manual sync commands and requests startup convergence", () => {
+    expect(pluginSource).toContain("AutomaticSnapshotCoordinator");
+    expect(pluginSource).not.toContain('id: "sync-now"');
+    expect(pluginSource).not.toContain('id: "sync-existing-files"');
     expect(pluginSource).toContain('id: "restore-selected-tombstone"');
-    expect(pluginSource.match(/addCommand\(/g)?.length ?? 0).toBe(3);
-    // The bounded snapshot scan runs only through the confirmed command.
-    const commandIndex = pluginSource.indexOf("addCommand(");
-    const scanCallbackIndex = pluginSource.indexOf("void this.#runExistingFilesScan()");
-    expect(scanCallbackIndex).toBeGreaterThan(commandIndex);
-    // Startup itself never invokes the scan; only the command callback does.
-    expect(pluginSource.match(/void this\.#runExistingFilesScan\(\)/g)?.length ?? 0).toBe(1);
+    expect(pluginSource.match(/addCommand\(/g)?.length ?? 0).toBe(1);
+    expect(pluginSource).not.toContain("#runExistingFilesScan");
+    expect(pluginSource).not.toContain("#drainExistingFilesScanQueue");
+    expect(pluginSource).not.toContain("#confirmExistingFilesScan");
+    expect(pluginSource).toContain('automaticSnapshotCoordinator.request("startup")');
+    const lastListenerIndex = pluginSource.lastIndexOf("this.registerEvent(");
+    const startupRequestIndex = pluginSource.indexOf('automaticSnapshotCoordinator.request("startup")');
+    expect(startupRequestIndex).toBeGreaterThan(lastListenerIndex);
     // The restore command narrowly routes through the captured
     // LifecycleCapture port so the brief's hash-verification invariant
     // and safe-code rejection path remain in one tested module.
@@ -180,64 +182,49 @@ describe("Obsidian plugin composition root", () => {
     expect(restoreMethodMatch?.[0]).toContain("#refreshSyncStatus");
   });
 
-  it("Sync now schedules a driver pass without bypassing the one-active-request guarantee", () => {
-    // The Sync now command MUST funnel through the bounded-pass wrapper
-    // so the driver's one-active-request invariant and bounded retry
-    // backoff are preserved.
-    const syncNowIndex = pluginSource.indexOf('id: "sync-now"');
-    const syncNowBodyStart = pluginSource.indexOf("{", syncNowIndex);
-    const syncNowBodyEnd = pluginSource.indexOf("});", syncNowBodyStart);
-    const syncNowBody = pluginSource.slice(syncNowBodyStart, syncNowBodyEnd);
-    expect(syncNowBody).toContain("#runBoundedQueuePass");
-    expect(syncNowBody).not.toContain("requestPass()");
-    expect(syncNowBody).not.toContain("runPass()");
-    // The Sync now callback is fire-and-forget; no awaiting, no synchronous
-    // bookkeeping that could let a user-trigger bypass the bounded backoff.
-    expect(syncNowBody).not.toContain("await ");
+  it("requests policy convergence only after onboarding trust succeeds", () => {
+    const trustIndex = pluginSource.indexOf("await policySession.adoptOnboardingTrust()");
+    const requestIndex = pluginSource.indexOf('this.#requestAutomaticSnapshot("policy_accepted")');
+    expect(trustIndex).toBeGreaterThanOrEqual(0);
+    expect(requestIndex).toBeGreaterThan(trustIndex);
   });
 
-  it("drains newly admitted existing-file scan work through the bounded queue driver", () => {
-    const scanMethodMatch = pluginSource.match(
-      /async #runExistingFilesScan\(\): Promise<void> \{[\s\S]*?\n  \}\n/,
-    );
-    expect(scanMethodMatch?.[0]).toBeTruthy();
-    const scanMethod = scanMethodMatch?.[0] ?? "";
-    expect(scanMethod.indexOf("runExistingFilesScan")).toBeLessThan(
-      scanMethod.indexOf("void this.#drainExistingFilesScanQueue()"),
-    );
-  });
-
-  it("wires the bounded foreground queue driver behind the sync commands", () => {
+  it("wires automatic snapshots through the safe capture and bounded queue seams", () => {
     expect(pluginSource).toContain("new JournalQueueDriver(");
+    expect(pluginSource).toContain("new AutomaticSnapshotCoordinator(");
     expect(pluginSource).toContain("createJournalSyncApi(");
     expect(pluginSource).toContain("createObsidianSyncHttpTransport");
     // The driver runs over the SAME read-only vault reader as capture and
     // refreshes through the existing device token session.
     expect(pluginSource).toContain("fileBytesReader: vaultReader");
     expect(pluginSource).toContain("refreshAccessToken: () => session.refresh()");
-    // Every pass trigger funnels through the single bounded-pass wrapper so
-    // the status projection sees the active pass and each pass outcome.
+    // Vault events retain their settled-event queue trigger; automatic
+    // snapshots await the exact same bounded wrapper rather than bypassing
+    // the one-active-request queue driver.
     const triggerCount = pluginSource.match(/void this\.#runBoundedQueuePass\(\)/g)?.length ?? 0;
-    expect(triggerCount).toBe(4); // load, create listener, modify listener, Sync now
+    expect(triggerCount).toBe(2); // create and modify listeners
     expect(pluginSource).not.toContain("queueDriver.requestPass()");
     // A Vault event's pass runs only after its own settled admission landed
     // (the 250 ms settle re-reads bytes); an event-time pass would find the
     // journal still empty and leave the event pending until the next trigger.
     expect(pluginSource.match(/notifyPathChanged\(file\.path\)\.then\(/g)?.length ?? 0).toBe(2);
-    // The post-scan drain alone awaits the wrapper to retry after an
-    // already-running onboarding pass yields.
+    // The automatic coordinator's dispatcher owns the only awaited queue
+    // request, preserving the existing bounded wrapper.
     expect(pluginSource.match(/await this\.#runBoundedQueuePass\(/g)?.length ?? 0).toBe(1);
     // A Vault event triggers one bounded pass alongside capture.
     const createListenerIndex = pluginSource.indexOf('this.app.vault.on("create"');
     const passIndex = pluginSource.indexOf("void this.#runBoundedQueuePass()");
     expect(passIndex).toBeGreaterThan(createListenerIndex);
-    // Plugin load after recovery is the first trigger, fire-and-forget.
+    // Startup convergence is requested only after recovery and listener
+    // installation, never by a direct foreground pass.
     const recoveryIndex = pluginSource.indexOf("await persistence.open()");
-    const loadPassIndex = pluginSource.indexOf(
-      "void this.#runBoundedQueuePass();",
-      pluginSource.indexOf("this.#queueDriver = queueDriver"),
-    );
-    expect(loadPassIndex).toBeGreaterThan(recoveryIndex);
+    const coordinatorIndex = pluginSource.indexOf("new AutomaticSnapshotCoordinator(");
+    expect(coordinatorIndex).toBeGreaterThan(recoveryIndex);
+    const coordinatorBody = pluginSource.slice(coordinatorIndex, coordinatorIndex + 900);
+    expect(coordinatorBody).toContain("#canCaptureVaultChanges()");
+    expect(coordinatorBody).toContain('snapshot.kind === "reconcile_required"');
+    expect(coordinatorBody).toContain("capture.runAutomaticSnapshot()");
+    expect(coordinatorBody).toContain("await this.#runBoundedQueuePass()");
   });
 
   it("wires the lifecycle capture, lifecycle driver and lifecycle api behind the restore command", () => {
@@ -410,11 +397,13 @@ describe("Obsidian plugin composition root", () => {
   });
 
   it("stops the queue driver, disposes listeners and attempts the journal flush before closing", () => {
+    const automaticStopIndex = pluginSource.indexOf("this.#automaticSnapshotCoordinator?.stop()");
     const stopIndex = pluginSource.indexOf("this.#queueDriver?.stop()");
     const disposeIndex = pluginSource.indexOf("this.#capture?.dispose()");
     const flushIndex = pluginSource.indexOf("this.#journalPersistence?.attemptFinalFlush()");
     const closeIndex = pluginSource.indexOf("this.#journalPersistence?.close()");
-    expect(stopIndex).toBeGreaterThanOrEqual(0);
+    expect(automaticStopIndex).toBeGreaterThanOrEqual(0);
+    expect(stopIndex).toBeGreaterThan(automaticStopIndex);
     expect(disposeIndex).toBeGreaterThan(stopIndex);
     expect(flushIndex).toBeGreaterThan(disposeIndex);
     expect(closeIndex).toBeGreaterThan(flushIndex);

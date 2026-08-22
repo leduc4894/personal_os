@@ -37,6 +37,8 @@ import { DeviceAuthenticationSettingTab } from "./authentication/settings-tab";
 import { DeviceTokenSession, resolveStartupAction } from "./authentication/token-session";
 import { JournalCapture } from "./journal/capture";
 import type { CaptureVaultReader } from "./journal/capture";
+import { AutomaticSnapshotCoordinator } from "./journal/automatic-snapshot";
+import type { AutomaticSnapshotReason } from "./journal/automatic-snapshot";
 import { LifecycleCaptureImpl } from "./journal/lifecycle-capture";
 import type {
   LifecycleVaultReader,
@@ -195,6 +197,8 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   #lifecycleCapture: LifecycleCaptureImpl | null = null;
   #queueDriver: JournalQueueDriver | null = null;
   #queueRepository: JournalRepository | null = null;
+  #automaticSnapshotCoordinator: AutomaticSnapshotCoordinator | null = null;
+  #hasAcceptedOnboardingPolicy = false;
   #isQueuePassActive = false;
   #lastQueuePassOutcome: QueuePassOutcome | null = null;
   #syncStatusBarItem: HTMLElement | null = null;
@@ -265,6 +269,11 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         // delays the Connected state until this has completed, preventing a
         // capture from being fail-closed against an uninitialised policy.
         await policySession.adoptOnboardingTrust();
+        if (this.#automaticSnapshotCoordinator === null) {
+          this.#hasAcceptedOnboardingPolicy = true;
+          return;
+        }
+        this.#requestAutomaticSnapshot("policy_accepted");
       },
     });
     this.#session = session;
@@ -336,9 +345,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   }
 
   override onunload(): void {
-    // The queue driver stops FIRST (spec 8): no new pass starts and every
-    // late in-flight requestUrl result is discarded before the journal and
-    // the memory credential go away.
+    // Stop snapshot scheduling before its capture and dispatch resources are
+    // released; the bounded queue driver then rejects late network results.
+    this.#automaticSnapshotCoordinator?.stop();
+    this.#automaticSnapshotCoordinator = null;
     this.#queueDriver?.stop();
     this.#queueDriver = null;
     this.#lifecycleCapture?.dispose();
@@ -386,6 +396,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     return this.#policyState === "policy_ready" || this.#policyState === "policy_offline_cached";
   }
 
+  #requestAutomaticSnapshot(reason: AutomaticSnapshotReason): void {
+    this.#automaticSnapshotCoordinator?.request(reason);
+  }
+
   async #persistSettings(): Promise<void> {
     // Merge into the single plugin-data document so the versioned policy
     // cache record survives settings persistence (spec 18 storage adapter).
@@ -408,7 +422,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
    * Composition-only journal capture and queue wiring (journal design 7.1,
    * 8): load the vendored engine, run journal recovery, then — and only
    * then — register the Vault listeners, the bounded foreground queue
-   * driver and the two sync commands. Every behavior lives in the tested
+   * driver and the restore command. Every behavior lives in the tested
    * `./journal` modules; this method only binds real adapters.
    */
   async #startJournalCapture(): Promise<void> {
@@ -480,6 +494,32 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         lifecycleDriver,
         refreshAccessToken: () => session.refresh(),
       });
+      const automaticSnapshotCoordinator = new AutomaticSnapshotCoordinator({
+        runSnapshot: async () => {
+          if (!this.#canCaptureVaultChanges()) {
+            return { outcome: "skipped", queuedEventCount: 0 };
+          }
+          const snapshot = this.#projectSyncStatus();
+          if (snapshot === null || snapshot.kind === "reconcile_required") {
+            return { outcome: "stopped", queuedEventCount: 0 };
+          }
+          const summary = await capture.runAutomaticSnapshot();
+          this.#refreshSyncStatus();
+          return {
+            outcome: summary.outcome === "completed" ? "completed" : "stopped",
+            queuedEventCount: summary.queuedEventCount,
+          };
+        },
+        requestQueuePass: async () => {
+          await this.#runBoundedQueuePass();
+        },
+      });
+      this.#journalPersistence = persistence;
+      this.#capture = capture;
+      this.#queueDriver = queueDriver;
+      this.#queueRepository = repository;
+      this.#lifecycleCapture = lifecycleCapture;
+      this.#automaticSnapshotCoordinator = automaticSnapshotCoordinator;
       this.app.workspace.onLayoutReady(() => {
         this.registerEvent(
           this.app.vault.on("create", (file) => {
@@ -519,20 +559,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           void capture.notifyPathRenamed(this.#toVaultRenameTarget(file), oldPath);
           }),
         );
-      });
-      this.addCommand({
-        id: "sync-now",
-        name: "Sync now",
-        callback: () => {
-          void this.#runBoundedQueuePass();
-        },
-      });
-      this.addCommand({
-        id: "sync-existing-files",
-        name: "Sync existing files",
-        callback: () => {
-          void this.#runExistingFilesScan();
-        },
+        automaticSnapshotCoordinator.request("startup");
+        if (this.#hasAcceptedOnboardingPolicy) {
+          automaticSnapshotCoordinator.request("policy_accepted");
+        }
       });
       // Explicit restore surface (Task 10, spec 6.3 + 7.1): the user
       // picks one retained tombstone by its plugin-local id (the only
@@ -551,50 +581,9 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           void this.#runRestoreSelectedTombstone();
         },
       });
-      this.#journalPersistence = persistence;
-      this.#capture = capture;
-      this.#queueDriver = queueDriver;
-      this.#queueRepository = repository;
-      this.#lifecycleCapture = lifecycleCapture;
-      // Plugin load after safe recovery is the first bounded foreground
-      // trigger (spec 8): fire-and-forget, never awaited in onload. A
-      // reconcile-required journal stops the driver inside the status
-      // refresh before this pass can start (spec 11).
-      void this.#runBoundedQueuePass();
     } catch {
       // Engine or recovery failure is fail-closed: no capture surface is
       // registered and Vault editing is never touched.
-    }
-  }
-
-  /** The one confirmed command callback; the scan itself is task-4 capture. */
-  async #runExistingFilesScan(): Promise<void> {
-    const capture = this.#capture;
-    if (capture === null || !this.#canCaptureVaultChanges()) {
-      return;
-    }
-    const summary = await capture
-      .runExistingFilesScan({ confirm: () => this.#confirmExistingFilesScan() })
-      .catch(() => null);
-    // A confirmed snapshot records newly allowed files as queued work only
-    // after its asynchronous scan ends. Drain that work here so an operator
-    // does not have to race a separate Sync now command against the scan.
-    if (summary?.outcome === "completed" && summary.processedFileCount > 0) {
-      void this.#drainExistingFilesScanQueue();
-    }
-    this.#refreshSyncStatus();
-  }
-
-  async #drainExistingFilesScanQueue(): Promise<void> {
-    for (let attempt = 0; attempt < 60; attempt += 1) {
-      const pass = await this.#runBoundedQueuePass();
-      if (pass.outcome !== "pass_already_running") {
-        return;
-      }
-      // The scan may finish while the post-onboarding pass is still draining
-      // the journal it saw before the scan. Retry in bounded foreground
-      // intervals so the snapshot rows cannot be stranded behind that pass.
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 250));
     }
   }
 
@@ -711,11 +700,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   }
 
   /**
-   * The single foreground pass trigger (spec 8, 11): plugin load, a Vault
-   * event and `Sync now` all funnel through here, so the status projection
-   * sees the active pass and every finished pass outcome. The trigger
-   * itself is never awaited — onload, the Vault listeners and the command
-   * callbacks stay synchronous and fire-and-forget.
+   * The single bounded queue-pass wrapper (spec 8, 11): settled Vault events
+   * and automatic snapshots funnel through here, so the status projection
+   * sees the active pass and every finished pass outcome. Only the automatic
+   * snapshot dispatcher awaits it; listeners remain fire-and-forget.
    */
   async #runBoundedQueuePass(): Promise<QueuePassSummary> {
     const driver = this.#queueDriver;
@@ -803,41 +791,6 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       hasAccessCredential: this.#session?.accessCredential != null,
       isQueuePassActive: this.#isQueuePassActive,
       lastQueuePassOutcome: this.#lastQueuePassOutcome,
-    });
-  }
-
-  /**
-   * The confirmation modal of `Sync existing files` (journal design 7.1):
-   * nothing is queued until the user confirms. The message stays free of
-   * paths and any other Vault detail.
-   */
-  #confirmExistingFilesScan(): Promise<boolean> {
-    return new Promise<boolean>((resolve) => {
-      const modal = new Modal(this.app);
-      modal.titleEl.setText("Sync existing files");
-      modal.contentEl.createEl("p", {
-        text: "Queue the current regular Vault files (each at most 16 MiB) for sync in bounded batches?",
-      });
-      new Setting(modal.contentEl)
-        .addButton((button) =>
-          button
-            .setButtonText("Sync")
-            .setCta()
-            .onClick(() => {
-              modal.close();
-              resolve(true);
-            }),
-        )
-        .addButton((button) =>
-          button
-            .setButtonText("Cancel")
-            .onClick(() => {
-              modal.close();
-              resolve(false);
-            }),
-        );
-      modal.onClose = () => resolve(false);
-      modal.open();
     });
   }
 
