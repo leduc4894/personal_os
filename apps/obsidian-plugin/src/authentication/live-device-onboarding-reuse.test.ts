@@ -24,4 +24,10 @@ describe("live device onboarding support", () => {
     expect(source).toContain(".listCommands()");
     expect(source).toContain('command.id === "knowledge-workspace:sync-now"');
   });
+
+  it("does not reuse a one-time TOTP code when a live journey reauthorizes", () => {
+    const source = fs.readFileSync(path.resolve(SUPPORT_PATH), "utf8");
+    expect(source).toContain("previousVerifiedTotpCode");
+    expect(source).toContain("readFreshTotpCode");
+  });
 });

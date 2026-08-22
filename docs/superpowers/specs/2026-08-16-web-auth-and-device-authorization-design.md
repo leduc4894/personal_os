@@ -104,7 +104,8 @@ Web device list.
    one account.
 6. Require recent password re-authentication for device approval; require TOTP
    too when TOTP is active.
-7. Make TOTP optional and offer a skippable enrollment after the first login.
+7. Make TOTP optional and opt-in from Security; password-only login proceeds
+   without an enrollment prompt.
 8. Support both one-use recovery codes and an emergency internal CLI.
 9. Let a normal Web password change revoke other Web sessions while keeping
    approved plugin devices.
@@ -382,10 +383,10 @@ Web password change requires recent re-auth and the new password. It:
 
 ### 10.1 Enrollment
 
-TOTP is optional. After the first successful password-only login, the session
-response asks the Web client to offer a skippable enrollment. Dismissal is
-recorded so every login does not interrupt the user; Security continues to
-show the optional control.
+TOTP is optional. After a successful password-only login, the Web client
+continues directly to the authenticated application without starting an
+enrollment. Security exposes the optional enrollment control when the user
+chooses to enable it.
 
 `POST /api/auth/totp/enrollments` accepts one strict discriminated action.
 `start` follows the enrollment flow below and requires recent
@@ -953,7 +954,8 @@ URLs.
 ### 18.1 Login
 
 The page supports password, TOTP and recovery-code steps, generic failure,
-bounded retry guidance and the skippable first-login TOTP offer.
+and bounded retry guidance. Optional TOTP enrollment is initiated from
+Security, not presented during password-only login.
 
 ### 18.2 Device approval
 

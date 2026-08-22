@@ -258,11 +258,13 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         }),
       nowEpochMs: () => Date.now(),
       onStateChange: (state, detail) => this.#setConnectionState(state, detail),
-      onExchange: (exchange) => {
+      onExchange: async (exchange) => {
         session.adoptExchange(exchange);
         // Initial policy trust exists ONLY immediately after the
-        // authenticated onboarding exchange (spec 13.2).
-        void policySession.adoptOnboardingTrust().catch(() => undefined);
+        // authenticated onboarding exchange (spec 13.2). The controller
+        // delays the Connected state until this has completed, preventing a
+        // capture from being fail-closed against an uninitialised policy.
+        await policySession.adoptOnboardingTrust();
       },
     });
     this.#session = session;
@@ -373,6 +375,17 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     this.#refreshSyncStatus();
   }
 
+  /**
+   * A Vault event is actionable only after the plugin has a verified policy
+   * snapshot (or its previously verified offline cache). Obsidian emits
+   * create/modify notifications while restoring an existing Vault at plugin
+   * load; treating those as fresh captures would silently become a full-Vault
+   * scan and fail closed at revision 0 before onboarding can establish trust.
+   */
+  #canCaptureVaultChanges(): boolean {
+    return this.#policyState === "policy_ready" || this.#policyState === "policy_offline_cached";
+  }
+
   async #persistSettings(): Promise<void> {
     // Merge into the single plugin-data document so the versioned policy
     // cache record survives settings persistence (spec 18 storage adapter).
@@ -467,32 +480,46 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         lifecycleDriver,
         refreshAccessToken: () => session.refresh(),
       });
-      this.registerEvent(
-        this.app.vault.on("create", (file) => {
+      this.app.workspace.onLayoutReady(() => {
+        this.registerEvent(
+          this.app.vault.on("create", (file) => {
+          if (!this.#canCaptureVaultChanges()) {
+            return;
+          }
           // The pass follows the settled admission (250 ms settle re-reads the
           // bytes): running it at event time would find an empty journal.
           void capture.notifyPathChanged(file.path).then(() => {
             void this.#runBoundedQueuePass();
           });
-        }),
-      );
-      this.registerEvent(
-        this.app.vault.on("modify", (file) => {
+          }),
+        );
+        this.registerEvent(
+          this.app.vault.on("modify", (file) => {
+          if (!this.#canCaptureVaultChanges()) {
+            return;
+          }
           void capture.notifyPathChanged(file.path).then(() => {
             void this.#runBoundedQueuePass();
           });
-        }),
-      );
-      this.registerEvent(
-        this.app.vault.on("delete", (file) => {
+          }),
+        );
+        this.registerEvent(
+          this.app.vault.on("delete", (file) => {
+          if (!this.#canCaptureVaultChanges()) {
+            return;
+          }
           void capture.notifyPathDeleted(this.#toVaultTargetFile(file));
-        }),
-      );
-      this.registerEvent(
-        this.app.vault.on("rename", (file, oldPath) => {
+          }),
+        );
+        this.registerEvent(
+          this.app.vault.on("rename", (file, oldPath) => {
+          if (!this.#canCaptureVaultChanges()) {
+            return;
+          }
           void capture.notifyPathRenamed(this.#toVaultRenameTarget(file), oldPath);
-        }),
-      );
+          }),
+        );
+      });
       this.addCommand({
         id: "sync-now",
         name: "Sync now",
@@ -543,13 +570,32 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   /** The one confirmed command callback; the scan itself is task-4 capture. */
   async #runExistingFilesScan(): Promise<void> {
     const capture = this.#capture;
-    if (capture === null) {
+    if (capture === null || !this.#canCaptureVaultChanges()) {
       return;
     }
-    await capture
+    const summary = await capture
       .runExistingFilesScan({ confirm: () => this.#confirmExistingFilesScan() })
-      .catch(() => undefined);
+      .catch(() => null);
+    // A confirmed snapshot records newly allowed files as queued work only
+    // after its asynchronous scan ends. Drain that work here so an operator
+    // does not have to race a separate Sync now command against the scan.
+    if (summary?.outcome === "completed" && summary.processedFileCount > 0) {
+      void this.#drainExistingFilesScanQueue();
+    }
     this.#refreshSyncStatus();
+  }
+
+  async #drainExistingFilesScanQueue(): Promise<void> {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const pass = await this.#runBoundedQueuePass();
+      if (pass.outcome !== "pass_already_running") {
+        return;
+      }
+      // The scan may finish while the post-onboarding pass is still draining
+      // the journal it saw before the scan. Retry in bounded foreground
+      // intervals so the snapshot rows cannot be stranded behind that pass.
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 250));
+    }
   }
 
   /**
@@ -671,10 +717,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
    * itself is never awaited — onload, the Vault listeners and the command
    * callbacks stay synchronous and fire-and-forget.
    */
-  async #runBoundedQueuePass(): Promise<void> {
+  async #runBoundedQueuePass(): Promise<QueuePassSummary> {
     const driver = this.#queueDriver;
     if (driver === null) {
-      return;
+      return { outcome: "completed", processedEventCount: 0 };
     }
     this.#isQueuePassActive = true;
     this.#refreshSyncStatus();
@@ -693,6 +739,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       this.#lastQueuePassOutcome = summary.outcome;
     }
     this.#refreshSyncStatus();
+    return summary;
   }
 
   /**

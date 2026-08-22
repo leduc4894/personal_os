@@ -856,4 +856,29 @@ describe("JournalRepository status histogram (spec 11)", () => {
     const histogram = repository.readEventStateErrorCounts();
     expect(histogram).toEqual([{ state: "queued", safeError: null, eventCount: 3 }]);
   });
+
+  it("omits a superseded terminal policy block from the current status histogram", async () => {
+    const { repository } = createOpenedJournal();
+    await repository.recordCapture({
+      normalizedPath: "notes/re-admitted.md",
+      fingerprint: fingerprintOf("a1"),
+      policyRevisionNumber: 1,
+      admission: "excluded_policy",
+    });
+
+    const successor = await repository.recordCapture({
+      normalizedPath: "notes/re-admitted.md",
+      fingerprint: fingerprintOf("b2"),
+      policyRevisionNumber: 2,
+      admission: "policy_allowed",
+    });
+    if (successor.outcome === "capture_refused") {
+      throw new Error("expected the policy-allowed successor to be recorded");
+    }
+
+    expect(repository.readEventStateErrorCounts()).toEqual([
+      { state: "queued", safeError: null, eventCount: 1 },
+    ]);
+    expect(repository.readEventsByLocalFileId(successor.localFile.localFileId)).toHaveLength(2);
+  });
 });

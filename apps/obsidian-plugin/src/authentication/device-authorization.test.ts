@@ -309,6 +309,55 @@ describe("DeviceAuthorizationController polling", () => {
     ]);
   });
 
+  it("does not report connected until asynchronous exchange work has completed", async () => {
+    const harness = createHarness();
+    harness.transport.createGrant.mockResolvedValue(GRANT_DATA);
+    harness.transport.pollGrant.mockResolvedValue(EXCHANGE_DATA);
+    let completeExchange!: () => void;
+    const exchangeWork = new Promise<void>((resolve) => {
+      completeExchange = resolve;
+    });
+    harness.onExchange.mockImplementation(
+      () => exchangeWork,
+    );
+
+    const loginPromise = harness.controller.login();
+    await harness.timeline.releaseOneDelay();
+    await Promise.resolve();
+
+    expect(harness.states).toEqual(["requesting_authorization", "waiting_for_approval"]);
+
+    completeExchange();
+    await loginPromise;
+
+    expect(harness.states).toEqual([
+      "requesting_authorization",
+      "waiting_for_approval",
+      "connected",
+    ]);
+  });
+
+  it("reports offline and retains the credential when exchange work fails", async () => {
+    const harness = createHarness();
+    harness.transport.createGrant.mockResolvedValue(GRANT_DATA);
+    harness.transport.pollGrant.mockResolvedValue(EXCHANGE_DATA);
+    harness.onExchange.mockRejectedValue(new Error("policy bootstrap failed"));
+
+    const loginPromise = harness.controller.login();
+    await harness.timeline.releaseOneDelay();
+    await loginPromise;
+
+    expect(harness.states).toEqual([
+      "requesting_authorization",
+      "waiting_for_approval",
+      "offline",
+    ]);
+    expect(JSON.parse(harness.stored.get(DEVICE_CREDENTIAL_RECORD_NAME) ?? "{}")).toMatchObject({
+      state: "active",
+      refresh_credential: NEXT_REFRESH_CREDENTIAL,
+    });
+  });
+
   it("tombstones a denied grant and clears the settings reference", async () => {
     const harness = createHarness();
     harness.transport.createGrant.mockResolvedValue(GRANT_DATA);
@@ -556,7 +605,10 @@ describe("crash-window reconciliation of the pending reference", () => {
       pending_rotation_id: null,
     });
     expect(harness.transport.pollGrant).not.toHaveBeenCalled();
-    expect(harness.states).toEqual(["connected"]);
+    // An active refresh credential is not an active access credential.  The
+    // startup refresh in the plugin owns the transition to `connected` once
+    // it has obtained an in-memory access credential.
+    expect(harness.states).toEqual(["refresh_required"]);
   });
 
   it("drops a stale pending reference over a cleared record and reports not_connected", async () => {

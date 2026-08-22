@@ -10,6 +10,12 @@ export const LIVE_ACCEPTANCE_PHASE_RESULT_CODES = [
   "source_lifecycle_restore_completed",
   "source_lifecycle_journal_drained",
   "source_lifecycle_journey_completed",
+  "policy_recovery_scenario_started",
+  "policy_recovery_block_observed",
+  "policy_recovery_allowed_reauthorization_completed",
+  "policy_recovery_existing_scan_started",
+  "policy_recovery_journal_recovered",
+  "policy_recovery_journey_completed",
 ] as const;
 
 export type LiveAcceptancePhaseResultCode =

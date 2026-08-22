@@ -3,6 +3,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { browser } from "@wdio/globals";
 import { onboardLiveDevice } from "../support/live-device-onboarding";
+import {
+  type LiveAcceptancePhaseResultCode,
+  writeLiveAcceptancePhaseStatus,
+} from "../support/live-acceptance-phase-status";
 import { runFromE2eRepositoryRoot } from "../support/repository-subprocess";
 
 /**
@@ -27,17 +31,25 @@ const allowedOrigin = process.env.E2E_ALLOWED_ORIGIN ?? "https://app.ducinvest.c
 const webUsername = process.env.E2E_WEB_USERNAME ?? "duc";
 const passwordFile = process.env.E2E_WEB_PASSWORD_FILE;
 const totpHelper = process.env.E2E_TOTP_HELPER;
+const livePhaseStatusFile = process.env.E2E_LIVE_PHASE_STATUS_FILE;
 const pluginDataPathSuffix = "plugins/knowledge-workspace/data.json";
 const fixtureNonce = crypto.randomUUID();
 const fixtureNotePath = `controlled-live-${crypto.randomUUID()}.md`;
+const policyRecoveryNotePath = `controlled-policy-recovery-${crypto.randomUUID()}.md`;
 const claimedResumeNotePath = `controlled-claimed-resume-${crypto.randomUUID()}.md`;
 const irrelevantFolderPrefix = `irrelevant-policy-${crypto.randomUUID()}`;
 const fixtureNoteContent = `# Test note\n\nUpdated by the live login journey.\n${fixtureNonce}\n`;
+const policyRecoveryNoteContent =
+  `# Policy recovery note\n\nRe-admitted only by an explicit existing-files scan.\n${fixtureNonce}\n`;
 const claimedResumeHeader = `# Controlled claimed resume\n\n${fixtureNonce}\n`;
 const claimedResumeNoteContent =
   claimedResumeHeader +
   "x".repeat(1024 * 1024 - Buffer.byteLength(claimedResumeHeader));
 const fixtureDeclaredSha256 = crypto.createHash("sha256").update(fixtureNoteContent).digest("hex");
+const policyRecoveryDeclaredSha256 = crypto
+  .createHash("sha256")
+  .update(policyRecoveryNoteContent)
+  .digest("hex");
 const claimedResumeDeclaredSha256 = crypto
   .createHash("sha256")
   .update(claimedResumeNoteContent)
@@ -53,6 +65,12 @@ const databaseEnvironmentKeys = [
 let adminSessionCookies: string[] | null = null;
 let adminSessionCsrf: string | null = null;
 let journalDirectoryPath: string | null = null;
+
+function recordLivePhase(resultCode: LiveAcceptancePhaseResultCode): void {
+  if (livePhaseStatusFile !== undefined) {
+    writeLiveAcceptancePhaseStatus(livePhaseStatusFile, resultCode);
+  }
+}
 
 interface PolicyStatus {
   readonly active_policy_revision_id: string | null;
@@ -405,6 +423,28 @@ async function editFixtureNote(): Promise<void> {
   }, fixtureNotePath, fixtureNoteContent);
 }
 
+async function editPolicyRecoveryNote(): Promise<void> {
+  await browser.execute(async (notePath: string, content: string) => {
+    const app = (
+      window as unknown as {
+        app: {
+          vault: {
+            getAbstractFileByPath: (path: string) => unknown;
+            create: (path: string, content: string) => Promise<void>;
+            modify: (file: unknown, content: string) => Promise<void>;
+          };
+        };
+      }
+    ).app;
+    const file = app.vault.getAbstractFileByPath(notePath);
+    if (file === null) {
+      await app.vault.create(notePath, content);
+      return;
+    }
+    await app.vault.modify(file, content);
+  }, policyRecoveryNotePath, policyRecoveryNoteContent);
+}
+
 async function editFixtureNoteForClaimedResume(): Promise<void> {
   await browser.execute(async (notePath: string, content: string) => {
     const app = (
@@ -573,6 +613,35 @@ async function triggerSyncNow(): Promise<void> {
   });
 }
 
+async function triggerConfirmedExistingFilesSync(): Promise<void> {
+  await browser.execute(() => {
+    const app = (
+      window as unknown as {
+        app: { commands: { executeCommandById: (id: string) => void } };
+      }
+    ).app;
+    app.commands.executeCommandById("knowledge-workspace:sync-existing-files");
+  });
+  const confirmation = await browser.$(".modal-container button.mod-cta");
+  await confirmation.waitForClickable({ timeout: 10_000 });
+  await confirmation.click();
+}
+
+async function waitForStatusText(
+  accepts: (statusText: string) => boolean,
+  failureMessage: string,
+): Promise<string> {
+  let lastStatusText = "";
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    lastStatusText = await readStatusBarText();
+    if (accepts(lastStatusText)) {
+      return lastStatusText;
+    }
+    await browser.pause(1_000);
+  }
+  throw new Error(`${failureMessage}: ${lastStatusText}`);
+}
+
 async function disableKnowledgeWorkspacePlugin(): Promise<void> {
   await browser.execute(async () => {
     const app = (
@@ -639,6 +708,7 @@ describe("device login and small-file sync (live server)", () => {
 
   it("completes the device authorization flow and syncs an edited note", async function () {
     this.timeout(480_000);
+    recordLivePhase("policy_recovery_scenario_started");
 
     const onboarding = await onboardLiveDevice({
       serverOrigin,
@@ -700,6 +770,110 @@ describe("device login and small-file sync (live server)", () => {
       throw new Error("server did not commit exactly one canonical publication");
     }
     console.log("SANITIZED_JOURNAL_EVIDENCE", JSON.stringify(initialJournalEvidence));
+
+    // Regression: a note captured under a blocking policy must remain
+    // auditable, but an authorized re-login followed by the explicit
+    // `Sync existing files` command must append an allowed successor and
+    // clear the user-facing policy-blocked state for that note.
+    const markdownPolicy = await prepareExtensionExclusionRule(
+      sessionCookies,
+      sessionCsrf,
+      ".md",
+    );
+    const markdownPolicyRevision = await publishPreparedPolicy(
+      sessionCookies,
+      sessionCsrf,
+      markdownPolicy,
+    );
+    await onboardLiveDevice({
+      serverOrigin,
+      allowedOrigin,
+      webUsername,
+      passwordFile: passwordFile as string,
+      totpHelper: totpHelper as string,
+      pluginDataPathSuffix,
+      deviceName: "e2e-policy-recovery-blocked",
+    });
+    await editPolicyRecoveryNote();
+    const blockedJournalEvidence = await waitForJournalEvidence(
+      policyRecoveryNotePath,
+      (evidence) =>
+        evidence.excludedPolicyCount === 1 &&
+        evidence.committedCount === 0 &&
+        evidence.pendingCount === 0,
+      "controlled note was not blocked under the markdown policy",
+    );
+    console.log("SANITIZED_POLICY_BLOCKED_EVIDENCE", JSON.stringify(blockedJournalEvidence));
+    const policyBlockedStatus = await waitForStatusText(
+      (statusText) => statusText.includes("Policy blocked"),
+      "blocked note did not render the policy-blocked status",
+    );
+    console.log("STATUS_AFTER_POLICY_BLOCK", policyBlockedStatus);
+    recordLivePhase("policy_recovery_block_observed");
+
+    const restoredTmpPolicy = await prepareExtensionExclusionRule(
+      sessionCookies,
+      sessionCsrf,
+      ".tmp",
+    );
+    const restoredTmpPolicyRevision = await publishPreparedPolicy(
+      sessionCookies,
+      sessionCsrf,
+      restoredTmpPolicy,
+    );
+    if (restoredTmpPolicyRevision <= markdownPolicyRevision) {
+      throw new Error("restored policy revision did not advance");
+    }
+    await onboardLiveDevice({
+      serverOrigin,
+      allowedOrigin,
+      webUsername,
+      passwordFile: passwordFile as string,
+      totpHelper: totpHelper as string,
+      pluginDataPathSuffix,
+      deviceName: "e2e-policy-recovery-allowed",
+    });
+    recordLivePhase("policy_recovery_allowed_reauthorization_completed");
+    const recoveryBaseline = await readServerPublicationEvidence(policyRecoveryDeclaredSha256);
+    if (recoveryBaseline.operationCount !== 0) {
+      throw new Error("policy-recovery publication identity was not unique before scan");
+    }
+    await triggerConfirmedExistingFilesSync();
+    recordLivePhase("policy_recovery_existing_scan_started");
+    const recoveredPolicyJournalEvidence = await waitForJournalEvidence(
+      policyRecoveryNotePath,
+      (evidence) =>
+        evidence.committedCount === 1 &&
+        evidence.pendingCount === 0 &&
+        evidence.mappedCount === 1 &&
+        evidence.excludedPolicyCount === 1,
+      "existing-files scan did not re-admit the previously blocked note",
+    );
+    recordLivePhase("policy_recovery_journal_recovered");
+    const recoveredPolicyServerEvidence = await readServerPublicationEvidence(
+      policyRecoveryDeclaredSha256,
+    );
+    if (
+      recoveredPolicyServerEvidence.sourceCount !== 1 ||
+      recoveredPolicyServerEvidence.sourceVersionCount !== 1 ||
+      recoveredPolicyServerEvidence.syncEventCount !== 1 ||
+      recoveredPolicyServerEvidence.operationCount !== 1 ||
+      recoveredPolicyServerEvidence.committedOperationCount !== 1 ||
+      recoveredPolicyServerEvidence.exactOperationPublicationCount !== 1 ||
+      recoveredPolicyServerEvidence.receivingUnpublishedOperationCount !== 0
+    ) {
+      throw new Error("re-admitted note did not commit exactly once on the server");
+    }
+    const recoveredStatus = await waitForStatusText(
+      (statusText) => !statusText.includes("Policy blocked"),
+      "policy-blocked status did not clear after re-admission",
+    );
+    console.log(
+      "SANITIZED_POLICY_RECOVERY_EVIDENCE",
+      JSON.stringify({ journal: recoveredPolicyJournalEvidence, server: recoveredPolicyServerEvidence }),
+    );
+    console.log("STATUS_AFTER_POLICY_RECOVERY", recoveredStatus);
+    recordLivePhase("policy_recovery_journey_completed");
 
     const data = await readPluginData();
     console.log("PENDING_GRANT_FINAL", data.pending_grant === null ? "cleared" : "still-pending");

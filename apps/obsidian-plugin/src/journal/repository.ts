@@ -1004,13 +1004,25 @@ export class JournalRepository {
   }
 
   /**
-   * The redacted event histogram of the status projection (spec 11): counts
-   * grouped by closed event state and closed safe error label — never a
-   * path, digest, credential or any other row detail.
+   * The redacted event histogram of the status projection (spec 11): every
+   * pending row plus the latest terminal row for each local file, grouped by
+   * closed state and closed safe error label. A later capture supersedes an
+   * earlier terminal outcome for status purposes while that immutable audit
+   * evidence remains in the journal — never a path, digest, credential or
+   * any other row detail.
    */
   readEventStateErrorCounts(): readonly JournalEventStateErrorCount[] {
     const result = this.#database.readAll(
-      "select state, safe_error, count(*) from journal_events group by state, safe_error;",
+      [
+        "select current_event.state, current_event.safe_error, count(*) from journal_events current_event",
+        "where current_event.state in ('queued', 'preflight', 'uploading', 'waiting_retry')",
+        "or not exists (",
+        "select 1 from journal_events successor_event",
+        "where successor_event.local_file_id = current_event.local_file_id",
+        "and successor_event.rowid > current_event.rowid",
+        ")",
+        "group by current_event.state, current_event.safe_error;",
+      ].join(" "),
     );
     return (result[0]?.values ?? []).map((row) => {
       const [state, safeError, eventCount] = row;

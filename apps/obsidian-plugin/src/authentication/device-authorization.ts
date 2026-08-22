@@ -52,7 +52,12 @@ export interface DeviceAuthorizationControllerDeps {
   readonly delay: Delay;
   readonly nowEpochMs: EpochMsClock;
   readonly onStateChange: (state: ConnectionState, detail: string | null) => void;
-  readonly onExchange: (exchange: DeviceGrantExchangeWireData) => void;
+  /**
+   * Completes any authenticated-session work that must finish before this
+   * device is usable. The policy trust bootstrap uses this boundary so a
+   * connected device never captures files against an uninitialised policy.
+   */
+  readonly onExchange: (exchange: DeviceGrantExchangeWireData) => void | Promise<void>;
 }
 
 export class DeviceAuthorizationController {
@@ -159,7 +164,8 @@ export class DeviceAuthorizationController {
    * is cleared, and a tombstone commits before the reference is cleared, so
    * a crash in either gap leaves a stale reference that must never destroy
    * the committed record. An active record keeps its credential and reports
-   * connected; a cleared (or absent) record drops the stale reference and
+   * requires a refresh before it can report connected; a cleared (or absent)
+   * record drops the stale reference and
    * reports not_connected. Pending records belong to the resume path.
    */
   async reconcileCrashWindow(): Promise<void> {
@@ -176,7 +182,10 @@ export class DeviceAuthorizationController {
         this.#deps.settings.secret_record_name = this.#deps.recordName;
         await this.#deps.persistSettings();
       }
-      this.#deps.onStateChange("connected", null);
+      // The durable record holds only a refresh credential.  The startup
+      // refresh owns the later transition to Connected after it has obtained
+      // the memory-only access credential needed for sync.
+      this.#deps.onStateChange("refresh_required", null);
       return;
     }
     const referenceIsStale =
@@ -303,7 +312,15 @@ export class DeviceAuthorizationController {
       this.#deps.settings.pending_grant = null;
       this.#deps.settings.secret_record_name = this.#deps.recordName;
       await this.#deps.persistSettings();
-      this.#deps.onExchange(exchange);
+      try {
+        await this.#deps.onExchange(exchange);
+      } catch {
+        // The active refresh credential remains safely stored for a later
+        // retry, but a device without a verified policy snapshot must not be
+        // presented as ready to capture or sync content.
+        this.#deps.onStateChange("offline", null);
+        return;
+      }
       this.#deps.onStateChange("connected", null);
       return;
     }

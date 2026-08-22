@@ -96,6 +96,8 @@ describe("Obsidian plugin composition root", () => {
     const onboardingTrustIndex = pluginSource.indexOf("adoptOnboardingTrust");
     expect(exchangeIndex).toBeGreaterThanOrEqual(0);
     expect(onboardingTrustIndex).toBeGreaterThan(exchangeIndex);
+    expect(pluginSource).toContain("await policySession.adoptOnboardingTrust()");
+    expect(pluginSource).not.toContain("void policySession.adoptOnboardingTrust()");
     // Policy refresh happens only after a successful token refresh.
     const refreshIndex = pluginSource.indexOf("session.refresh");
     const policyRefreshIndex = pluginSource.indexOf("policySession.refresh");
@@ -123,6 +125,28 @@ describe("Obsidian plugin composition root", () => {
     expect(listenerIndex).toBeGreaterThan(recoveryIndex);
     const listenerCount = pluginSource.match(/registerEvent\(/g)?.length ?? 0;
     expect(listenerCount).toBe(4);
+  });
+
+  it("does not admit startup Vault events before a verified policy is available", () => {
+    expect(pluginSource).toContain("#canCaptureVaultChanges");
+    const createListenerIndex = pluginSource.indexOf('this.app.vault.on("create"');
+    const createListenerBody = pluginSource.slice(createListenerIndex, createListenerIndex + 700);
+    const modifyListenerIndex = pluginSource.indexOf('this.app.vault.on("modify"');
+    const modifyListenerBody = pluginSource.slice(modifyListenerIndex, modifyListenerIndex + 700);
+    expect(createListenerBody.indexOf("#canCaptureVaultChanges()")).toBeLessThan(
+      createListenerBody.indexOf("notifyPathChanged"),
+    );
+    expect(modifyListenerBody.indexOf("#canCaptureVaultChanges()")).toBeLessThan(
+      modifyListenerBody.indexOf("notifyPathChanged"),
+    );
+  });
+
+  it("binds Vault listeners only after Obsidian has finished restoring the layout", () => {
+    const recoveryIndex = pluginSource.indexOf("await persistence.open()");
+    const layoutReadyIndex = pluginSource.indexOf("this.app.workspace.onLayoutReady");
+    expect(layoutReadyIndex).toBeGreaterThan(recoveryIndex);
+    const listenerIndex = pluginSource.indexOf('this.app.vault.on("create"');
+    expect(listenerIndex).toBeGreaterThan(layoutReadyIndex);
   });
 
   it("registers exactly the three safe-source commands and no other", () => {
@@ -172,6 +196,17 @@ describe("Obsidian plugin composition root", () => {
     expect(syncNowBody).not.toContain("await ");
   });
 
+  it("drains newly admitted existing-file scan work through the bounded queue driver", () => {
+    const scanMethodMatch = pluginSource.match(
+      /async #runExistingFilesScan\(\): Promise<void> \{[\s\S]*?\n  \}\n/,
+    );
+    expect(scanMethodMatch?.[0]).toBeTruthy();
+    const scanMethod = scanMethodMatch?.[0] ?? "";
+    expect(scanMethod.indexOf("runExistingFilesScan")).toBeLessThan(
+      scanMethod.indexOf("void this.#drainExistingFilesScanQueue()"),
+    );
+  });
+
   it("wires the bounded foreground queue driver behind the sync commands", () => {
     expect(pluginSource).toContain("new JournalQueueDriver(");
     expect(pluginSource).toContain("createJournalSyncApi(");
@@ -189,8 +224,9 @@ describe("Obsidian plugin composition root", () => {
     // (the 250 ms settle re-reads bytes); an event-time pass would find the
     // journal still empty and leave the event pending until the next trigger.
     expect(pluginSource.match(/notifyPathChanged\(file\.path\)\.then\(/g)?.length ?? 0).toBe(2);
-    // The wrapper itself is never awaited by onload, a listener or a command.
-    expect(pluginSource.match(/await this\.#runBoundedQueuePass\(/g)?.length ?? 0).toBe(0);
+    // The post-scan drain alone awaits the wrapper to retry after an
+    // already-running onboarding pass yields.
+    expect(pluginSource.match(/await this\.#runBoundedQueuePass\(/g)?.length ?? 0).toBe(1);
     // A Vault event triggers one bounded pass alongside capture.
     const createListenerIndex = pluginSource.indexOf('this.app.vault.on("create"');
     const passIndex = pluginSource.indexOf("void this.#runBoundedQueuePass()");

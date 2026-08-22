@@ -296,6 +296,27 @@ describe("DeviceTokenSession self-disconnect (spec 14.2)", () => {
     expect(harness.settings.secret_record_name).toBe(DEVICE_CREDENTIAL_RECORD_NAME);
     expect(harness.states[harness.states.length - 1]).toBe("offline");
   });
+
+  it("clears an already-invalid credential when self-revoke reports it", async () => {
+    const harness = createSessionHarness();
+    harness.transport.revokeCurrent.mockRejectedValue(
+      new DeviceAuthError("device_credential_invalid", {
+        status: 401,
+        message: "credential is no longer valid",
+      }),
+    );
+
+    await harness.session.disconnect();
+
+    expect(JSON.parse(harness.stored.get(DEVICE_CREDENTIAL_RECORD_NAME) ?? "{}")).toEqual({
+      record_version: 1,
+      state: "cleared",
+      cleared_reason: "self_disconnect",
+    });
+    expect(harness.settings.secret_record_name).toBeNull();
+    expect(harness.session.accessCredential).toBeNull();
+    expect(harness.states[harness.states.length - 1]).toBe("not_connected");
+  });
 });
 
 describe("resolveStartupAction", () => {

@@ -3,6 +3,9 @@ import * as fs from "node:fs";
 import { browser } from "@wdio/globals";
 import { runFromE2eRepositoryRoot } from "./repository-subprocess";
 
+const TOTP_CODE_PATTERN = /^[0-9]{6}$/;
+let previousVerifiedTotpCode: string | null = null;
+
 interface CreatedGrant {
   readonly grant_id: string;
   readonly user_code: string;
@@ -37,6 +40,32 @@ function csrfValueOf(pairs: readonly string[]): string | undefined {
     ?.split("=")
     .slice(1)
     .join("=");
+}
+
+/**
+ * The live server treats a TOTP value as one-time within its time step. A
+ * regression journey may authorize more than one test device in succession,
+ * so wait locally for the helper to advance rather than replaying the value
+ * that the preceding authorization already consumed. Codes stay in memory and
+ * are never logged.
+ */
+async function readFreshTotpCode(totpHelper: string): Promise<string> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const { stdout } = await runFromE2eRepositoryRoot(
+      "uv",
+      ["run", "python", totpHelper],
+      import.meta.url,
+    );
+    const candidate = stdout.trim();
+    if (!TOTP_CODE_PATTERN.test(candidate)) {
+      throw new Error("TOTP helper produced an invalid code");
+    }
+    if (candidate !== previousVerifiedTotpCode) {
+      return candidate;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+  }
+  throw new Error("TOTP helper did not advance to an unused code");
 }
 
 async function injectPendingGrant(
@@ -131,23 +160,34 @@ export async function onboardLiveDevice(
   }
   const loginCookies = cookiePairsOf(loginResponse);
   const loginCsrf = csrfValueOf(loginCookies) ?? "";
-  const { stdout: totpStdout } = await runFromE2eRepositoryRoot(
-    "uv",
-    ["run", "python", options.totpHelper],
-    import.meta.url,
-  );
-  const verifyResponse = await fetch(`${options.serverOrigin}/api/auth/totp/verify`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      origin: options.allowedOrigin,
-      cookie: loginCookies.join("; "),
-      "x-csrf-token": loginCsrf,
-    },
-    body: JSON.stringify({ code: totpStdout.trim() }),
-  });
-  if (!verifyResponse.ok) {
-    throw new Error(`TOTP verification failed: ${verifyResponse.status}`);
+  let verifyResponse: Response | null = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const totpCode = await readFreshTotpCode(options.totpHelper);
+    verifyResponse = await fetch(`${options.serverOrigin}/api/auth/totp/verify`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: options.allowedOrigin,
+        cookie: loginCookies.join("; "),
+        "x-csrf-token": loginCsrf,
+      },
+      body: JSON.stringify({ code: totpCode }),
+    });
+    if (verifyResponse.ok) {
+      previousVerifiedTotpCode = totpCode;
+      break;
+    }
+    // The guarded bootstrap may have consumed this time-step's code in a
+    // separate process immediately before WDIO begins. Treat only its closed
+    // replay response as an instruction to wait for the next helper value;
+    // every other failure remains visible to the journey.
+    if (verifyResponse.status !== 401) {
+      throw new Error(`TOTP verification failed: ${verifyResponse.status}`);
+    }
+    previousVerifiedTotpCode = totpCode;
+  }
+  if (verifyResponse === null || !verifyResponse.ok) {
+    throw new Error(`TOTP verification failed: ${verifyResponse?.status ?? 0}`);
   }
   const sessionCookies = cookiePairsOf(verifyResponse);
   const sessionCsrf = csrfValueOf(sessionCookies) ?? "";

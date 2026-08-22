@@ -139,6 +139,7 @@ class LiveAcceptanceConfig:
     policy_helper: str = ".local/publish-policy-revision.py"
     wdio_spec: str = "test/specs/source-lifecycle.e2e.ts"
     policy_key_file_name: str = "policy_signing_b.pem"
+    keep_wdio_phase_status: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -489,9 +490,11 @@ def _execute_live_acceptance(
     )
     if wdio_result.return_code != 0:
         failure_code = _closed_wdio_failure_code(wdio_phase_status)
-        _remove_wdio_phase_status(wdio_phase_status)
+        if not config.keep_wdio_phase_status:
+            _remove_wdio_phase_status(wdio_phase_status)
         raise LiveAcceptanceFailure(failure_code)
-    _remove_wdio_phase_status(wdio_phase_status)
+    if not config.keep_wdio_phase_status:
+        _remove_wdio_phase_status(wdio_phase_status)
 
 
 def _print_status(output: TextIO, state: str, result_code: str) -> None:
@@ -551,6 +554,8 @@ def build_live_acceptance_config(
     project_name: str,
     server_origin: str,
     plugin_origin: str,
+    wdio_spec: str = "test/specs/source-lifecycle.e2e.ts",
+    keep_wdio_phase_status: bool = False,
     environ: Mapping[str, str],
 ) -> LiveAcceptanceConfig:
     """Load non-secret runtime names from the authoritative local launcher."""
@@ -575,6 +580,8 @@ def build_live_acceptance_config(
         server_origin=server_origin,
         allowed_origin=launcher_exports["KNOWLEDGE_AUTH_ALLOWED_ORIGIN"],
         plugin_origin=plugin_origin,
+        wdio_spec=wdio_spec,
+        keep_wdio_phase_status=keep_wdio_phase_status,
         password_file=secret_root / "web-credential-password.key",
         runtime_environment=runtime_environment,
         policy_key_file_name=launcher_exports["KNOWLEDGE_POLICY_SIGNING_KEY_FILE"],
@@ -588,6 +595,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--project-name", required=True)
     parser.add_argument("--server-origin", default="http://127.0.0.1:8000")
     parser.add_argument("--plugin-origin", default="https://api.ducinvest.com")
+    parser.add_argument(
+        "--wdio-spec",
+        choices=(
+            "test/specs/source-lifecycle.e2e.ts",
+            "test/specs/device-login-sync.e2e.ts",
+        ),
+        default="test/specs/source-lifecycle.e2e.ts",
+    )
+    parser.add_argument("--keep-wdio-phase-status", action="store_true")
     return parser
 
 
@@ -600,6 +616,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             project_name=cast(str, arguments.project_name),
             server_origin=cast(str, arguments.server_origin),
             plugin_origin=cast(str, arguments.plugin_origin),
+            wdio_spec=cast(str, arguments.wdio_spec),
+            keep_wdio_phase_status=bool(arguments.keep_wdio_phase_status),
             environ=os.environ,
         )
     except LiveAcceptanceFailure as failure:

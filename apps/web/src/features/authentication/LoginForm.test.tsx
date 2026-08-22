@@ -153,37 +153,20 @@ describe("LoginForm", () => {
     await waitFor(() => expect(replaceMock).toHaveBeenCalledWith("/admin/devices"));
   });
 
-  it("offers the skippable first-login TOTP enrollment after an active login", async () => {
+  it("redirects an active password-only login without starting a TOTP enrollment", async () => {
     const user = userEvent.setup();
-    server.use(mockApi("post", "/api/auth/login", () => sessionResponse("active")));
-    server.use(mockApi("post", "/api/auth/totp/enrollments", () => totpEnrollmentResponse()));
-    const { container } = render(
-      <LoginForm client={createTestClient()} sessionStore={createAuthenticationSessionStore()} />,
-    );
-    await submitPassword(user);
-    expect(await screen.findByText("JBSWY3DPEHPK3PXP")).toBeInTheDocument();
-    expect(container.querySelector("svg")).not.toBeNull();
-    expect(replaceMock).not.toHaveBeenCalled();
-  });
-
-  it("dismisses the first-login offer and redirects without enrollment", async () => {
-    const user = userEvent.setup();
-    const seenBodies: string[] = [];
-    let enrollmentsCallCount = 0;
+    const enrollmentRequests: string[] = [];
     server.use(mockApi("post", "/api/auth/login", () => sessionResponse("active")));
     server.use(
       mockApi("post", "/api/auth/totp/enrollments", async ({ request }) => {
-        enrollmentsCallCount += 1;
-        seenBodies.push(await request.text());
-        // The first call probes the offer; the skip click submits the dismissal.
-        return enrollmentsCallCount === 1 ? totpEnrollmentResponse() : dismissedEnrollmentResponse();
+        enrollmentRequests.push(await request.text());
+        return totpEnrollmentResponse();
       }),
     );
     render(<LoginForm client={createTestClient()} sessionStore={createAuthenticationSessionStore()} />);
     await submitPassword(user);
-    await user.click(await screen.findByRole("button", { name: "Skip for now" }));
     await waitFor(() => expect(replaceMock).toHaveBeenCalledWith("/admin/devices"));
-    expect(seenBodies).toEqual(['{"action":"start"}', '{"action":"dismiss_initial_offer"}']);
+    expect(enrollmentRequests).toEqual([]);
   });
 
   it("requires TOTP replacement after recovery-code login without offering a skip", async () => {
@@ -205,7 +188,8 @@ describe("LoginForm", () => {
 
   it("clears one-time enrollment values when navigation continues", async () => {
     const user = userEvent.setup();
-    server.use(mockApi("post", "/api/auth/login", () => sessionResponse("active")));
+    server.use(mockApi("post", "/api/auth/login", () => sessionResponse("pending_totp")));
+    server.use(mockApi("post", "/api/auth/totp/recovery", () => recoveryLimitedResponse()));
     server.use(mockApi("post", "/api/auth/totp/enrollments", () => totpEnrollmentResponse()));
     server.use(
       mockApi("post", "/api/auth/totp/enrollments/e26e0f1c-9884-4d84-a2c3-9d64a0b1f001/verify", () =>
@@ -214,6 +198,9 @@ describe("LoginForm", () => {
     );
     render(<LoginForm client={createTestClient()} sessionStore={createAuthenticationSessionStore()} />);
     await submitPassword(user);
+    await user.click(await screen.findByRole("button", { name: "Use a recovery code instead" }));
+    await user.type(await screen.findByLabelText("Recovery code"), "ABCD-EFGH-IJKL");
+    await user.click(screen.getByRole("button", { name: "Continue with recovery code" }));
     await user.type(await screen.findByLabelText("Verification code"), "123456");
     await user.click(screen.getByRole("button", { name: "Activate" }));
     expect(await screen.findByText("ABCD-EFGH-IJKL")).toBeInTheDocument();

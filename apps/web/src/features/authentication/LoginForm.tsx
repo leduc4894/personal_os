@@ -17,7 +17,7 @@ import {
 import { rateLimitedRetryMessage } from "./rate-limit-copy";
 import { TotpChallenge, TotpEnrollmentOffer } from "./TotpChallenge";
 
-type LoginStep = "password" | "challenge" | "initial-offer" | "replacement" | "recovery-codes";
+type LoginStep = "password" | "challenge" | "replacement" | "recovery-codes";
 
 export interface LoginFormProps {
   client?: AuthenticationClient;
@@ -26,8 +26,9 @@ export interface LoginFormProps {
 
 /**
  * The interactive login state machine: password, optional TOTP challenge,
- * recovery-limited replacement, the skippable first-login TOTP offer and the
- * one-time recovery-code reveal. Every secret stays in component memory.
+ * recovery-limited replacement, and the one-time recovery-code reveal. New
+ * password-only sessions proceed directly; TOTP remains opt-in from Security.
+ * Every secret stays in component memory.
  */
 export function LoginForm({
   client = createBrowserAuthenticationClient(),
@@ -131,12 +132,6 @@ export function LoginForm({
       return;
     }
     sessionStore.setSession(session);
-    const offer = await client.startTotpEnrollment();
-    if (offer.ok && offer.data.enrollment !== null && offer.data.enrollment !== undefined) {
-      setEnrollment(offer.data.enrollment);
-      setStep("initial-offer");
-      return;
-    }
     completeLogin(session);
   }
 
@@ -166,7 +161,7 @@ export function LoginForm({
     );
   }
 
-  if ((step === "initial-offer" || step === "replacement") && enrollment !== null) {
+  if (step === "replacement" && enrollment !== null) {
     return (
       <>
         {step === "replacement" && (
@@ -177,14 +172,7 @@ export function LoginForm({
           enrollment={enrollment}
           requireCompletion={step === "replacement"}
           onCompleted={handleEnrollmentCompleted}
-          onSkipped={
-            step === "initial-offer"
-              ? () => {
-                  clearOneTimeValues();
-                  router.replace("/admin/devices");
-                }
-              : undefined
-          }
+          onSkipped={undefined}
         />
       </>
     );

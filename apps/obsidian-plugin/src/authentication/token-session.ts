@@ -148,10 +148,10 @@ export class DeviceTokenSession {
   }
 
   /**
-   * Self-disconnect (spec 14.2): the server revoke happens FIRST, and only a
-   * confirmed response replaces the record with the verified tombstone and
-   * clears the settings reference and the in-memory access credential. Any
-   * failure keeps the local record so the user can retry online.
+   * Self-disconnect (spec 14.2): the server revoke happens FIRST. A confirmed
+   * response or a terminal credential response replaces the record with the
+   * verified tombstone and clears the settings reference and the in-memory
+   * access credential. Transient failures keep the local record for retry.
    */
   async disconnect(): Promise<void> {
     const record = readDeviceSecretRecord(this.#deps.secretStore, this.#deps.recordName);
@@ -161,7 +161,16 @@ export class DeviceTokenSession {
     try {
       await this.#deps.transport.revokeCurrent(record.refresh_credential);
     } catch (error) {
-      if ((error as { code?: string } | null)?.code === "network_unavailable") {
+      const code = (error as { code?: string } | null)?.code;
+      if (
+        code === "device_credential_invalid" ||
+        code === "device_revoked" ||
+        code === "device_token_reuse_detected"
+      ) {
+        await this.#clearTerminalRecord("self_disconnect", "not_connected");
+        return;
+      }
+      if (code === "network_unavailable") {
         this.#deps.onStateChange("offline", null);
       }
       throw error;
