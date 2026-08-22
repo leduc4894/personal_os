@@ -13,6 +13,7 @@ import type { ConnectionState } from "./contracts";
 import type { LifecycleStateCounts, LifecycleBlockedReasonCode } from "../journal/status";
 import { LIFECYCLE_LOCAL_FILE_STATES } from "../journal/lifecycle-contracts";
 import type { LifecycleLocalFileState } from "../journal/lifecycle-contracts";
+import type { LocalNoteSyncState, LocalNoteSyncStatus } from "../journal/note-status";
 
 export interface DeviceAuthenticationSnapshot {
   readonly connectionState: ConnectionState;
@@ -40,6 +41,8 @@ export interface DeviceAuthenticationSnapshot {
   readonly failedAttemptCount: number;
   /** Closed blocked reason codes observed on the journal; empty when none. */
   readonly lifecycleBlockedReasonCodes: readonly LifecycleBlockedReasonCode[];
+  /** Local-only per-note statuses; paths must never leave this settings tab. */
+  readonly localNoteSyncStatuses: readonly LocalNoteSyncStatus[];
 }
 
 export interface DeviceAuthenticationTabView {
@@ -95,6 +98,12 @@ export class DeviceAuthenticationSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Lifecycle blockers")
       .setDesc(lifecycleBlockedReasonCodesDescription(snapshot));
+
+    // Vault paths are intentionally limited to this local settings surface.
+    // The aggregate sync status and status bar remain redacted.
+    new Setting(containerEl)
+      .setName("Sync status by note")
+      .setDesc(renderLocalNoteSyncStatusList(snapshot.localNoteSyncStatuses));
 
     new Setting(containerEl)
       .setName("Server origin")
@@ -213,6 +222,38 @@ function lifecycleBlockedReasonCodesDescription(snapshot: DeviceAuthenticationSn
 }
 
 /**
+ * Render the local-only current-note list in normalized-path order. Paths are
+ * supplied solely by the device journal and this string must not be reused by
+ * telemetry, HTTP, logs, or the redacted status bar.
+ */
+export function renderLocalNoteSyncStatusList(
+  statuses: readonly LocalNoteSyncStatus[],
+): string {
+  if (statuses.length === 0) {
+    return "No note sync statuses are available on this device";
+  }
+  return [...statuses]
+    .sort((left, right) => left.normalizedPath.localeCompare(right.normalizedPath))
+    .map(renderLocalNoteSyncStatus)
+    .join("\n");
+}
+
+function renderLocalNoteSyncStatus(status: LocalNoteSyncStatus): string {
+  const line = `${status.normalizedPath} — ${LOCAL_NOTE_SYNC_STATE_LABEL[status.state]}`;
+  if (status.state === "retrying") {
+    return `${line} · Retry at: ${status.retryAtEpochMs ?? "unavailable"}${renderClosedReason(status.reason)}`;
+  }
+  if (status.state === "policy_blocked") {
+    return `${line} · Policy revision: ${status.policyRevisionNumber ?? "unknown"}${renderClosedReason(status.reason)}`;
+  }
+  return line;
+}
+
+function renderClosedReason(reason: LocalNoteSyncStatus["reason"]): string {
+  return reason === null ? "" : ` · Reason: ${reason}`;
+}
+
+/**
  * The closed vocab-to-display mapping of {@link LifecycleLocalFileState}.
  * The closed enum is the only source of labels; the plugin never renders
  * any path, locator, source ID, tombstone id or fingerprint.
@@ -226,4 +267,14 @@ const LIFECYCLE_STATE_LABEL: Readonly<Record<LifecycleLocalFileState, string>> =
   tombstoned: "Tombstoned",
   restored: "Restored",
   reconcile_required: "Reconcile required",
+};
+
+const LOCAL_NOTE_SYNC_STATE_LABEL: Readonly<Record<LocalNoteSyncState, string>> = {
+  synced: "Synced",
+  queued: "Queued",
+  syncing: "Syncing",
+  retrying: "Retrying",
+  policy_blocked: "Policy blocked",
+  conflict: "Conflict",
+  reconcile_required: "Reconciliation required",
 };

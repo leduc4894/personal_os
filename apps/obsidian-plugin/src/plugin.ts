@@ -58,6 +58,7 @@ import type { JournalFileStore } from "./journal/persistence";
 import { JournalRepository } from "./journal/repository";
 import { ConfirmModal, SuggestModal, TextPromptModal } from "./restore-modals";
 import type { JournalEventStateErrorCount, JournalRepositoryDatabase } from "./journal/repository";
+import type { LocalNoteSyncStatus } from "./journal/note-status";
 import {
   projectJournalSyncStatus,
   renderJournalSyncStatusText,
@@ -301,6 +302,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           pendingLifecycleEventCount: syncStatus?.pendingLifecycleEventCount ?? 0,
           failedAttemptCount: syncStatus?.failedAttemptCount ?? 0,
           lifecycleBlockedReasonCodes: syncStatus?.lifecycleBlockedReasonCodes ?? [],
+          localNoteSyncStatuses: this.#readLocalNoteSyncStatuses(),
         };
       },
       setServerOrigin: (origin) => {
@@ -824,6 +826,18 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       isQueuePassActive: this.#isQueuePassActive,
       lastQueuePassOutcome: this.#lastQueuePassOutcome,
     });
+  }
+
+  /**
+   * Read note paths exclusively for the local settings tab. This deliberately
+   * remains outside the redacted aggregate/status-bar projection.
+   */
+  #readLocalNoteSyncStatuses(): readonly LocalNoteSyncStatus[] {
+    try {
+      return this.#queueRepository?.readLocalNoteSyncStatuses() ?? [];
+    } catch {
+      return [];
+    }
   }
 
   /**

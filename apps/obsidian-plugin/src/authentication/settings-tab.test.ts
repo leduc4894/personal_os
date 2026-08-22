@@ -1,5 +1,20 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("obsidian", () => ({
+  PluginSettingTab: class {
+    display(): void {
+      return undefined;
+    }
+  },
+  Setting: class {
+    setName(): this {
+      return this;
+    }
+  },
+}));
+
+import { renderLocalNoteSyncStatusList } from "./settings-tab";
 
 const tabPath = new URL("./settings-tab.ts", import.meta.url);
 const tabSource = readFileSync(tabPath, "utf8");
@@ -111,5 +126,56 @@ describe("DeviceAuthenticationSettingTab source contract", () => {
     ]) {
       expect(tabSource).not.toContain(forbiddenText);
     }
+  });
+});
+
+describe("renderLocalNoteSyncStatusList", () => {
+  it("renders every closed current-note state with fixed labels", () => {
+    const rendered = renderLocalNoteSyncStatusList([
+      { normalizedPath: "g.md", state: "synced", policyRevisionNumber: 4, retryAtEpochMs: null, reason: null },
+      { normalizedPath: "f.md", state: "queued", policyRevisionNumber: 4, retryAtEpochMs: null, reason: null },
+      { normalizedPath: "e.md", state: "syncing", policyRevisionNumber: 4, retryAtEpochMs: null, reason: null },
+      { normalizedPath: "d.md", state: "retrying", policyRevisionNumber: 4, retryAtEpochMs: 1_750_000_000_000, reason: "network_offline" },
+      { normalizedPath: "c.md", state: "policy_blocked", policyRevisionNumber: 12, retryAtEpochMs: null, reason: "excluded_policy" },
+      { normalizedPath: "b.md", state: "conflict", policyRevisionNumber: 4, retryAtEpochMs: null, reason: "blocked_conflict" },
+      { normalizedPath: "a.md", state: "reconcile_required", policyRevisionNumber: 4, retryAtEpochMs: null, reason: "integrity_failed" },
+    ]);
+
+    expect(rendered).toContain("a.md — Reconciliation required");
+    expect(rendered).toContain("b.md — Conflict");
+    expect(rendered).toContain("c.md — Policy blocked · Policy revision: 12 · Reason: excluded_policy");
+    expect(rendered).toContain("d.md — Retrying · Retry at: 1750000000000 · Reason: network_offline");
+    expect(rendered).toContain("e.md — Syncing");
+    expect(rendered).toContain("f.md — Queued");
+    expect(rendered).toContain("g.md — Synced");
+  });
+
+  it("sorts note statuses by normalized path without mutating the supplied snapshot", () => {
+    const statuses = [
+      { normalizedPath: "zeta.md", state: "synced" as const, policyRevisionNumber: 1, retryAtEpochMs: null, reason: null },
+      { normalizedPath: "alpha.md", state: "queued" as const, policyRevisionNumber: 1, retryAtEpochMs: null, reason: null },
+    ];
+
+    expect(renderLocalNoteSyncStatusList(statuses)).toBe("alpha.md — Queued\nzeta.md — Synced");
+    expect(statuses.map((status) => status.normalizedPath)).toEqual(["zeta.md", "alpha.md"]);
+  });
+
+  it("renders a local empty state when the current device tracks no notes", () => {
+    expect(renderLocalNoteSyncStatusList([])).toBe("No note sync statuses are available on this device");
+  });
+
+  it("shows a policy block with only its revision and closed reason details", () => {
+    const rendered = renderLocalNoteSyncStatusList([
+      {
+        normalizedPath: "notes/local-only.md",
+        state: "policy_blocked",
+        policyRevisionNumber: 12,
+        retryAtEpochMs: null,
+        reason: "excluded_policy",
+      },
+    ]);
+
+    expect(rendered).toBe("notes/local-only.md — Policy blocked · Policy revision: 12 · Reason: excluded_policy");
+    expect(rendered).not.toContain("Retry at");
   });
 });
