@@ -502,6 +502,35 @@ def _print_status(output: TextIO, state: str, result_code: str) -> None:
     output.write("\n")
 
 
+def _write_final_result(config: LiveAcceptanceConfig, state: str, result_code: str) -> None:
+    """Atomically retain the closed outcome after every guarded run."""
+    phase_path = _wdio_phase_status_path(config)
+    phase_code: str | None = None
+    try:
+        document = _parse_json_document(
+            phase_path.read_text(encoding="utf-8"),
+            "obsidian_wdio_failed",
+        )
+        candidate = document.get("result_code")
+        if set(document) == {"result_code"} and isinstance(candidate, str):
+            phase_code = candidate
+    except (LiveAcceptanceFailure, OSError, UnicodeError):
+        pass
+    result_path = config.repository_root / ".local" / (
+        f"{config.project_name}.obsidian-live-result.json"
+    )
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = result_path.with_suffix(".tmp")
+    temporary_path.write_text(
+        json.dumps(
+            {"result_code": result_code, "state": state, "wdio_phase": phase_code},
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    os.replace(temporary_path, result_path)
+
+
 def run_live_acceptance(
     config: LiveAcceptanceConfig,
     *,
@@ -513,11 +542,14 @@ def run_live_acceptance(
     try:
         _execute_live_acceptance(config, executor, client_factory)
     except LiveAcceptanceFailure as failure:
+        _write_final_result(config, "error", failure.result_code)
         _print_status(output, "error", failure.result_code)
         return 1
     except Exception:
+        _write_final_result(config, "error", "live_acceptance_internal_error")
         _print_status(output, "error", "live_acceptance_internal_error")
         return 1
+    _write_final_result(config, "complete", "obsidian_live_acceptance_passed")
     _print_status(output, "complete", "obsidian_live_acceptance_passed")
     return 0
 

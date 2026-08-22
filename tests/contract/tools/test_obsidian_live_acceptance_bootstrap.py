@@ -192,6 +192,12 @@ def test_fresh_disposable_bootstrap_activates_totp_before_live_journey(
     )
 
     assert exit_code == 0
+    result_path = tmp_path / ".local" / "knowledge-ci-live-acceptance.obsidian-live-result.json"
+    assert json.loads(result_path.read_text(encoding="utf-8")) == {
+        "result_code": "obsidian_live_acceptance_passed",
+        "state": "complete",
+        "wdio_phase": None,
+    }
     assert events == [
         "stack_ready",
         "migration_applied",

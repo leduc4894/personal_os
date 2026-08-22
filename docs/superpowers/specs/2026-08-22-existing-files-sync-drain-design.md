@@ -49,3 +49,5 @@ retaining existing status projection behavior.
 - Status no longer contains `Policy blocked`.
 - WDIO retains a closed phase artifact until the launcher records final pass
   or failure, so a background process cannot lose its verdict.
+- The launcher atomically retains `.local/<project>.obsidian-live-result.json`
+  for both pass and failure; cleanup is an explicit operator action.
