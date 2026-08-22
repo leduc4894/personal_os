@@ -56,10 +56,10 @@ export function resolveAuthenticationControls(
 ): AuthenticationControls {
   return {
     canLogin:
-      (state === "not_connected" ||
-        state === "configuration_invalid" ||
-        state === "revoked") &&
-      !facts.hasActiveCredential,
+      !facts.hasActiveCredential &&
+      !facts.hasPendingGrant &&
+      state !== "requesting_authorization" &&
+      state !== "waiting_for_approval",
     canOpenBrowser: facts.hasPendingGrant,
     canCancel: facts.hasPendingGrant,
     canDisconnect: facts.hasActiveCredential,

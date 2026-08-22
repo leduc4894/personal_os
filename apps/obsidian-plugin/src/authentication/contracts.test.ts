@@ -100,6 +100,13 @@ describe("ConnectionState closed set (spec 19)", () => {
         hasActiveCredential: false,
       }),
     ).toEqual({ canLogin: true, canOpenBrowser: false, canCancel: false, canDisconnect: false });
+
+    expect(
+      resolveAuthenticationControls("refresh_required", {
+        hasPendingGrant: false,
+        hasActiveCredential: false,
+      }),
+    ).toEqual({ canLogin: true, canOpenBrowser: false, canCancel: false, canDisconnect: false });
   });
 });
 
