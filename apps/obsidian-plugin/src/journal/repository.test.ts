@@ -881,4 +881,38 @@ describe("JournalRepository status histogram (spec 11)", () => {
     ]);
     expect(repository.readEventsByLocalFileId(successor.localFile.localFileId)).toHaveLength(2);
   });
+
+  it("reads the latest local note state rather than historical policy audit evidence", async () => {
+    const { repository } = createOpenedJournal();
+    const excluded = await repository.recordCapture({
+      normalizedPath: "notes/current-status.md",
+      fingerprint: fingerprintOf("c1"),
+      policyRevisionNumber: 1,
+      admission: "excluded_policy",
+    });
+    if (excluded.outcome === "capture_refused") {
+      throw new Error("expected excluded audit evidence");
+    }
+    const successor = await repository.recordCapture({
+      normalizedPath: "notes/current-status.md",
+      fingerprint: fingerprintOf("d2"),
+      policyRevisionNumber: 2,
+      admission: "policy_allowed",
+    });
+    if (successor.outcome === "capture_refused") {
+      throw new Error("expected a policy-allowed successor");
+    }
+    await repository.recordCommittedReceipt({
+      eventId: successor.event.eventId,
+      sourceId: "44444444-4444-4444-8444-444444444444",
+      baseVersionId: "55555555-5555-4555-8555-555555555555",
+    });
+
+    const statuses = repository.readLocalNoteSyncStatuses();
+    expect(statuses).toContainEqual(
+      expect.objectContaining({ normalizedPath: "notes/current-status.md", state: "synced" }),
+    );
+    const aggregateTelemetry = JSON.stringify(repository.readEventStateErrorCounts());
+    expect(aggregateTelemetry).not.toContain("notes/current-status.md");
+  });
 });

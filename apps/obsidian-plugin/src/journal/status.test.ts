@@ -343,6 +343,14 @@ describe("sync status projection (spec 11)", () => {
     expect(snapshot.blockers).toEqual(["excluded_policy"]);
   });
 
+  it("does not project a policy blocker from an empty aggregate bucket", () => {
+    const snapshot = projectJournalSyncStatus(
+      projectInput({ eventStateErrorCounts: [stateCountRow("excluded_policy", "excluded_policy", 0)] }),
+    );
+    expect(snapshot.kind).toBe("ready");
+    expect(snapshot.blockers).toEqual([]);
+  });
+
   it("exposes each blocker condition from the journal histogram", () => {
     const snapshot = projectJournalSyncStatus(
       projectInput({
@@ -441,6 +449,35 @@ describe("sync status projection (spec 11)", () => {
 // --- the real journal behind the projection ---------------------------------------------------
 
 describe("sync status over the real journal (spec 11)", () => {
+  it("shows ready rather than an older policy block after a successor commits", async () => {
+    const repository = createEmptyRepository();
+    await captureBytes(
+      repository,
+      "notes/current.md",
+      new TextEncoder().encode("excluded first"),
+      "excluded_policy",
+    );
+    const successor = await captureBytes(
+      repository,
+      "notes/current.md",
+      new TextEncoder().encode("allowed successor"),
+    );
+    await repository.recordCommittedReceipt({
+      eventId: successor.eventId,
+      sourceId: SOURCE_ID,
+      baseVersionId: SOURCE_VERSION_ID,
+    });
+
+    expect(repository.readLocalNoteSyncStatuses()).toContainEqual(
+      expect.objectContaining({ normalizedPath: "notes/current.md", state: "synced" }),
+    );
+    expect(
+      projectJournalSyncStatus(
+        projectInput({ eventStateErrorCounts: repository.readEventStateErrorCounts() }),
+      ).kind,
+    ).toBe("ready");
+  });
+
   it("projects from the repository histogram after real journal outcomes", async () => {
     const repository = createEmptyRepository();
     const allowedEvent = await captureBytes(

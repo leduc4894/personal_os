@@ -212,7 +212,7 @@ export function projectJournalSyncStatus(input: JournalSyncStatusInput): Journal
     if (row.state === "waiting_retry" && row.safeError !== null) {
       hasNetworkRetryPending ||= NETWORK_RETRY_SAFE_ERRORS.has(row.safeError);
     }
-    hasPolicyBlockedEvents ||= row.state === "excluded_policy";
+    hasPolicyBlockedEvents ||= row.state === "excluded_policy" && row.eventCount > 0;
   }
 
   const blockers: JournalSyncBlocker[] = [];

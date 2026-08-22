@@ -55,6 +55,10 @@ import {
   MAX_PENDING_EVENTS,
 } from "./contracts";
 import { isFrozenFingerprintShape } from "./fingerprint";
+import {
+  projectLocalNoteSyncStatus,
+  type LocalNoteSyncStatus,
+} from "./note-status";
 import { journalStoreError } from "./sqlite-database";
 import type { SqliteMutationSession, SqliteQueryResult } from "./sqlite-database";
 
@@ -395,6 +399,51 @@ function parseJournalAttemptRow(row: readonly unknown[]): JournalAttempt {
     outcomeLabel: outcomeLabel as JournalSafeErrorLabel,
     requestCorrelationId,
   };
+}
+
+/** Parse one latest-event join row before passing only closed fields to the local UI projection. */
+function parseLocalNoteSyncStatusRow(
+  row: readonly unknown[],
+  isReconcileRequired: boolean,
+): LocalNoteSyncStatus {
+  const [
+    normalizedPath,
+    policyRevisionNumber,
+    observedSha256,
+    observedSizeBytes,
+    observedMediaType,
+    ...eventRow
+  ] = row;
+  if (
+    typeof normalizedPath !== "string" ||
+    typeof policyRevisionNumber !== "number" ||
+    !Number.isInteger(policyRevisionNumber) ||
+    policyRevisionNumber < 0 ||
+    typeof observedSha256 !== "string" ||
+    typeof observedSizeBytes !== "number" ||
+    !Number.isInteger(observedSizeBytes) ||
+    observedSizeBytes < 0 ||
+    typeof observedMediaType !== "string"
+  ) {
+    throw journalStoreError("journal_image_invalid");
+  }
+  const latestEvent = eventRow[0] === null
+    ? null
+    : parseJournalEventRow(eventRow);
+  if (latestEvent === null && eventRow.some((value) => value !== null)) {
+    throw journalStoreError("journal_image_invalid");
+  }
+  return projectLocalNoteSyncStatus({
+    normalizedPath,
+    policyRevisionNumber,
+    observedFingerprint: {
+      sha256: observedSha256,
+      sizeBytes: observedSizeBytes,
+      mediaType: observedMediaType,
+    },
+    latestEvent,
+    isReconcileRequired,
+  });
 }
 
 /** Strip the internal freeze marker from the public event shape. */
@@ -1004,19 +1053,17 @@ export class JournalRepository {
   }
 
   /**
-   * The redacted event histogram of the status projection (spec 11): every
-   * pending row plus the latest terminal row for each local file, grouped by
-   * closed state and closed safe error label. A later capture supersedes an
-   * earlier terminal outcome for status purposes while that immutable audit
-   * evidence remains in the journal — never a path, digest, credential or
-   * any other row detail.
+   * The redacted event histogram of the status projection (spec 11): the
+   * newest row for each local file, grouped by closed state and closed safe
+   * error label. A later capture supersedes every predecessor outcome for
+   * current status purposes while immutable audit evidence remains in the
+   * journal — never a path, digest, credential or other row detail.
    */
   readEventStateErrorCounts(): readonly JournalEventStateErrorCount[] {
     const result = this.#database.readAll(
       [
         "select current_event.state, current_event.safe_error, count(*) from journal_events current_event",
-        "where current_event.state in ('queued', 'preflight', 'uploading', 'waiting_retry')",
-        "or not exists (",
+        "where not exists (",
         "select 1 from journal_events successor_event",
         "where successor_event.local_file_id = current_event.local_file_id",
         "and successor_event.rowid > current_event.rowid",
@@ -1043,6 +1090,41 @@ export class JournalRepository {
         eventCount,
       };
     });
+  }
+
+  /**
+   * The current local-only status of every tracked note, in deterministic
+   * normalized-path order. The newest journal event is selected per local
+   * file; immutable predecessor events remain available through audit reads
+   * but cannot become a present UI blocker or reach aggregate status.
+   */
+  readLocalNoteSyncStatuses(): readonly LocalNoteSyncStatus[] {
+    const reconcileRow = firstRow(
+      this.#database.readAll(
+        "select is_reconcile_required from journal_meta where singleton_key = 1;",
+      ),
+    );
+    const isReconcileRequired = reconcileRow?.[0];
+    if (isReconcileRequired !== 0 && isReconcileRequired !== 1) {
+      throw journalStoreError("journal_image_invalid");
+    }
+    const result = this.#database.readAll(
+      [
+        "select local_file.normalized_path, local_file.policy_revision,",
+        "local_file.observed_sha256, local_file.observed_size_bytes, local_file.observed_media_type,",
+        `current_event.${JOURNAL_EVENT_COLUMNS.join(", current_event.")}`,
+        "from local_files local_file",
+        "left join journal_events current_event on current_event.rowid = (",
+        "select candidate_event.rowid from journal_events candidate_event",
+        "where candidate_event.local_file_id = local_file.local_file_id",
+        "order by candidate_event.rowid desc limit 1",
+        ")",
+        "order by local_file.normalized_path asc;",
+      ].join(" "),
+    );
+    return (result[0]?.values ?? []).map((row) =>
+      parseLocalNoteSyncStatusRow(row, isReconcileRequired === 1),
+    );
   }
 
   /**
