@@ -110,15 +110,20 @@ export const SYNC_BLOCKER_GUIDANCE_TEXT: Readonly<Record<JournalSyncBlocker, str
 };
 
 /**
- * The safe error labels that mean "queued work is waiting on the network"
- * (spec 12): an event in `waiting_retry` under one of these labels projects
- * to `Offline — queued`, not to a healthy ready state.
+ * The safe error labels that mean "queued work is waiting" (spec 12): an
+ * event in `waiting_retry` under one of these labels projects to
+ * `Offline — queued`, not to a healthy ready state. Besides the four
+ * network labels this includes `login_required` — the credential need
+ * parks the event for a later pass, so while the work waits (even with a
+ * credential present again) the surface keeps saying work is waiting
+ * instead of rendering `Ready` with a count while nothing syncs.
  */
-const NETWORK_RETRY_SAFE_ERRORS: ReadonlySet<string> = new Set([
+const WAITING_RETRY_SAFE_ERRORS: ReadonlySet<string> = new Set([
   "network_offline",
   "network_timeout",
   "network_rate_limited",
   "server_error",
+  "login_required",
 ]);
 
 // --- the closed input and output ------------------------------------------------------------------
@@ -203,14 +208,14 @@ const ZERO_LIFECYCLE_STATE_COUNTS: LifecycleStateCounts = LIFECYCLE_LOCAL_FILE_S
  */
 export function projectJournalSyncStatus(input: JournalSyncStatusInput): JournalSyncStatusSnapshot {
   let pendingEventCount = 0;
-  let hasNetworkRetryPending = false;
+  let hasWaitingRetryPending = false;
   let hasPolicyBlockedEvents = false;
   for (const row of input.eventStateErrorCounts) {
     if ((JOURNAL_PENDING_EVENT_STATES as readonly string[]).includes(row.state)) {
       pendingEventCount += row.eventCount;
     }
     if (row.state === "waiting_retry" && row.safeError !== null) {
-      hasNetworkRetryPending ||= NETWORK_RETRY_SAFE_ERRORS.has(row.safeError);
+      hasWaitingRetryPending ||= WAITING_RETRY_SAFE_ERRORS.has(row.safeError);
     }
     hasPolicyBlockedEvents ||= row.state === "excluded_policy" && row.eventCount > 0;
   }
@@ -242,7 +247,7 @@ export function projectJournalSyncStatus(input: JournalSyncStatusInput): Journal
       ? "login_required"
       : input.isQueuePassActive
         ? "syncing"
-        : hasNetworkRetryPending
+        : hasWaitingRetryPending
           ? "offline_queued"
           : hasPolicyBlockedEvents
             ? "policy_blocked"

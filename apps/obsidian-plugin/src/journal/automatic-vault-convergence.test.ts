@@ -845,5 +845,12 @@ describe("automatic vault convergence after rename + edit", () => {
       .find((event) => event.operation === "update");
     expect(editEvent?.state).toBe("queued");
     expect(restarted.syncServer.preflightBodies).toHaveLength(3);
+
+    // The background refresh completes a moment later: the status bar must
+    // render the honest waiting surface — `Offline — queued` with the
+    // pending count — instead of a healthy `Ready` while nothing syncs.
+    restarted.credentialState.token = ACCESS_TOKEN;
+    expect(restarted.repository.countPendingEvents()).toBe(3);
+    expect(restarted.statusText()).toBe("Offline — queued (3)");
   });
 });

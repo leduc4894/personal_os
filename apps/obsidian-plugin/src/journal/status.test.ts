@@ -301,7 +301,11 @@ describe("sync status projection (spec 11)", () => {
     expect(snapshot.pendingEventCount).toBe(3);
   });
 
-  it("does not treat non-network retries as offline", () => {
+  it("renders a login_required waiting-retry as offline — queued even with a credential present", () => {
+    // A `waiting_retry(login_required)` row means queued work is WAITING
+    // (the event parks for a later pass under a valid credential); the
+    // surface must never render a healthy ready state with a count while
+    // nothing syncs.
     const snapshot = projectJournalSyncStatus(
       projectInput({
         eventStateErrorCounts: [stateCountRow("waiting_retry", "login_required")],
@@ -309,7 +313,7 @@ describe("sync status projection (spec 11)", () => {
         lastQueuePassOutcome: "completed",
       }),
     );
-    expect(snapshot.kind).toBe("ready");
+    expect(snapshot.kind).toBe("offline_queued");
     expect(snapshot.pendingEventCount).toBe(1);
   });
 
