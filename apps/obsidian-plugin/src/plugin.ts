@@ -537,9 +537,25 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
             return { outcome: "stopped", queuedEventCount: 0 };
           }
           this.#refreshSyncStatus();
+          // Pre-existing pending work still owes a pass even when the scan
+          // itself recorded nothing: a rename/move changes no bytes, so the
+          // scan's own admission count is lifecycle-blind. Surface the
+          // repository's post-snapshot pending count (which includes
+          // lifecycle rows) whenever it exceeds the scan's own admission
+          // count, so a restart with only pending lifecycle work still
+          // requests its queue pass. The scan's own count is never lowered.
+          let queuedEventCount = summary.queuedEventCount;
+          try {
+            queuedEventCount = Math.max(
+              summary.queuedEventCount,
+              repository.countPendingEvents(),
+            );
+          } catch {
+            // An unreadable journal keeps the scan's own count (fail-closed).
+          }
           return {
             outcome: summary.outcome === "completed" ? "completed" : "stopped",
-            queuedEventCount: summary.queuedEventCount,
+            queuedEventCount,
           };
         },
         requestQueuePass: async () => {

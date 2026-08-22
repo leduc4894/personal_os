@@ -488,9 +488,21 @@ async function createSession(bindings: SessionBindings): Promise<Session> {
         if (signal.aborted) {
           return { outcome: "stopped", queuedEventCount: 0 };
         }
+        // The plugin wrapper's pending-count fallback (fix round 2 D2
+        // mirror): pre-existing pending rows (lifecycle included) still
+        // owe a pass even when the scan's own admission count is zero.
+        let queuedEventCount = summary.queuedEventCount;
+        try {
+          queuedEventCount = Math.max(
+            summary.queuedEventCount,
+            repository.countPendingEvents(),
+          );
+        } catch {
+          // An unreadable journal keeps the scan's own count.
+        }
         const result: AutomaticSnapshotResult = {
           outcome: summary.outcome === "completed" ? "completed" : "stopped",
-          queuedEventCount: summary.queuedEventCount,
+          queuedEventCount,
         };
         snapshotResults.push(result);
         return result;
@@ -750,6 +762,37 @@ describe("automatic vault convergence after rename + edit", () => {
     expect(session.statusText()).toBe("Ready");
   });
 
+  it("drains lifecycle-only pending work after restart (the startup snapshot counts it)", async () => {
+    const { bindings, session } = await createConvergedFixture();
+    await renameNoteSettledOnly(session, "notes/alpha.md", "notes/alpha-renamed.md");
+    await renameNoteSettledOnly(session, "notes/beta.md", "notes/beta-renamed.md");
+    expect(session.repository.countPendingEvents()).toBe(2);
+
+    // Full Obsidian restart: unload, then a fresh composition over the SAME
+    // durable journal, same vault, same server memories.
+    await session.unload();
+    const restarted = await createSession({ ...bindings, isRestart: true });
+    restarted.requestStartup();
+    await restarted.awaitAutomaticWork();
+
+    // The scan itself records nothing (renames change no bytes, every
+    // fingerprint still matches its last-committed triple), but the
+    // snapshot wrapper surfaces the two pre-existing pending lifecycle
+    // rows through the repository's pending count …
+    expect(restarted.snapshotResults).toEqual([
+      { outcome: "completed", queuedEventCount: 2 },
+    ]);
+    // … so the coordinator requests the one pass that drains the
+    // lifecycle lane: the restart never strands queued renames.
+    expect(restarted.passSummaries.length).toBe(1);
+    expect(restarted.lifecycleServer.requestBodies).toHaveLength(2);
+    expect(restarted.newestEventStateOf("notes/alpha-renamed.md")).toBe("committed");
+    expect(restarted.newestEventStateOf("notes/beta-renamed.md")).toBe("committed");
+    expect(restarted.repository.countPendingEvents()).toBe(0);
+    expect(restarted.repository.countPendingLifecycleEvents()).toBe(0);
+    expect(restarted.statusText()).toBe("Ready");
+  });
+
   it("drains after restart when a pending content edit also exists (the snapshot coalesces it)", async () => {
     const { bindings, session } = await createConvergedFixture();
     await renameNoteSettledOnly(session, "notes/alpha.md", "notes/alpha-renamed.md");
@@ -771,10 +814,12 @@ describe("automatic vault convergence after rename + edit", () => {
     await restarted.awaitAutomaticWork();
 
     // The snapshot re-admits gamma, its bytes diverge from the committed
-    // fingerprint, the queued edit coalesces — the scan counts one queued
-    // event and requests the one pass that drains everything.
+    // fingerprint, the queued edit coalesces — and the wrapper surfaces
+    // every pre-existing pending row (the two queued renames included),
+    // so the reported count covers all three and requests the one pass
+    // that drains everything.
     expect(restarted.snapshotResults).toEqual([
-      { outcome: "completed", queuedEventCount: 1 },
+      { outcome: "completed", queuedEventCount: 3 },
     ]);
     expect(restarted.passSummaries.at(-1)).toEqual({
       outcome: "completed",
@@ -860,9 +905,11 @@ describe("automatic vault convergence after rename + edit", () => {
     restarted.requestStartup();
     await restarted.awaitAutomaticWork();
 
-    // The snapshot still counted the diverging edit and requested the pass …
+    // The snapshot still counted the diverging edit (and surfaced every
+    // pre-existing pending row through the wrapper's pending count) and
+    // requested the pass …
     expect(restarted.snapshotResults).toEqual([
-      { outcome: "completed", queuedEventCount: 1 },
+      { outcome: "completed", queuedEventCount: 3 },
     ]);
     // … the lifecycle adapter rejected pre-HTTP on the missing credential
     // and the driver PARKED the first rename retryable under the

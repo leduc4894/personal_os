@@ -228,11 +228,30 @@ describe("Obsidian plugin composition root", () => {
     const recoveryIndex = pluginSource.indexOf("await persistence.open()");
     const coordinatorIndex = pluginSource.indexOf("new AutomaticSnapshotCoordinator(");
     expect(coordinatorIndex).toBeGreaterThan(recoveryIndex);
-    const coordinatorBody = pluginSource.slice(coordinatorIndex, coordinatorIndex + 1400);
+    const coordinatorBody = pluginSource.slice(coordinatorIndex, coordinatorIndex + 2400);
     expect(coordinatorBody).toContain("#canCaptureVaultChanges()");
     expect(coordinatorBody).toContain('snapshot.kind === "reconcile_required"');
     expect(coordinatorBody).toContain("capture.runAutomaticSnapshot({ signal })");
     expect(coordinatorBody).toContain("await boundedQueuePassDispatcher.request()");
+  });
+
+  it("counts pre-existing pending events when the automatic snapshot requests its queue pass", () => {
+    // Fix round 2 D2: the coordinator requests a pass only from the
+    // snapshot's queued-event count, and the scan's own admission count is
+    // lifecycle-blind (a rename changes no bytes, so admission records
+    // nothing). The wrapper MUST surface the repository's post-snapshot
+    // pending count — which includes lifecycle rows — whenever it exceeds
+    // the scan's own admission count, or a restart with only pending
+    // lifecycle work runs no pass at all.
+    const coordinatorIndex = pluginSource.indexOf("new AutomaticSnapshotCoordinator(");
+    expect(coordinatorIndex).toBeGreaterThanOrEqual(0);
+    const coordinatorBody = pluginSource.slice(coordinatorIndex, coordinatorIndex + 2_400);
+    expect(coordinatorBody).toContain("capture.runAutomaticSnapshot({ signal })");
+    expect(coordinatorBody).toContain("repository.countPendingEvents()");
+    // The pending count may only RAISE the reported count, never lower the
+    // scan's own admission count.
+    expect(coordinatorBody).toContain("Math.max(");
+    expect(coordinatorBody).toContain("summary.queuedEventCount,");
   });
 
   it("chains a bounded queue pass after the settled rename and delete listener captures", () => {
