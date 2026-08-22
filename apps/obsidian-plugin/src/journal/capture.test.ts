@@ -112,12 +112,21 @@ interface CaptureHarness {
   readonly lifecycleState: FakeLifecycleState;
 }
 
+interface AutomaticSnapshotTestHarness {
+  captureUnderPolicy(
+    normalizedPath: string,
+    admission: "excluded_policy",
+  ): Promise<void>;
+  allowMarkdown(): void;
+  eventsFor(normalizedPath: string): readonly ReturnType<JournalRepository["readEventsByLocalFileId"]>[number][];
+}
+
 function createHarness(options?: {
   readonly policyRevisionNumber?: number;
   readonly decide?: (subject: CapturePolicySubject) => PolicyOutcome;
   readonly scanMaximumFiles?: number;
   readonly scanBatchFiles?: number;
-}): CaptureHarness {
+}): CaptureHarness & AutomaticSnapshotTestHarness {
   const database = SqliteDatabase.createEmpty(engineModule, {
     schemaVersion: JOURNAL_SCHEMA_VERSION,
     dirtyGeneration: 1,
@@ -127,8 +136,12 @@ function createHarness(options?: {
   } satisfies JournalMeta);
   const repository = new JournalRepository({ database });
   const vault = new FakeCaptureVault();
+  const policyOutcomes = new Map<string, PolicyOutcome>();
   const gate = createFakePolicyGate(
-    options?.decide ?? (() => "allowed"),
+    (subject) =>
+      (typeof subject.normalizedLocator === "string"
+        ? policyOutcomes.get(subject.normalizedLocator)
+        : undefined) ?? options?.decide?.(subject) ?? "allowed",
     options?.policyRevisionNumber ?? 1,
   );
   const { fake: lifecycleCapture, state: lifecycleState } = createFakeLifecycleCapture();
@@ -140,7 +153,26 @@ function createHarness(options?: {
     scanMaximumFiles: options?.scanMaximumFiles,
     scanBatchFiles: options?.scanBatchFiles,
   });
-  return { capture, repository, database, vault, gate, lifecycleState };
+  return {
+    capture,
+    repository,
+    database,
+    vault,
+    gate,
+    lifecycleState,
+    async captureUnderPolicy(normalizedPath, admission): Promise<void> {
+      policyOutcomes.set(normalizedPath, admission === "excluded_policy" ? "excluded" : "allowed");
+      vault.setFileBytes(normalizedPath, bytesOf(`fixture ${normalizedPath}`));
+      await capture.runAutomaticSnapshot();
+    },
+    allowMarkdown(): void {
+      policyOutcomes.clear();
+    },
+    eventsFor(normalizedPath) {
+      const localFile = repository.readLocalFileByPath(normalizedPath);
+      return localFile === null ? [] : repository.readEventsByLocalFileId(localFile.localFileId);
+    },
+  };
 }
 
 /**
@@ -681,6 +713,111 @@ describe("JournalCapture existing-files scan (spec 7.1)", () => {
   it("pins the default scan bounds to the frozen queue ceilings", () => {
     expect(EXISTING_FILES_SCAN_MAXIMUM_FILES).toBe(10_000);
     expect(EXISTING_FILES_SCAN_BATCH_FILES).toBeGreaterThan(0);
+  });
+});
+
+describe("JournalCapture automatic snapshot admission", () => {
+  it("creates an allowed queued successor after a prior policy block", async () => {
+    const harness = createHarness();
+    await harness.captureUnderPolicy("notes/recovered.md", "excluded_policy");
+    harness.allowMarkdown();
+    const result = await harness.capture.runAutomaticSnapshot();
+    expect(result.queuedEventCount).toBe(1);
+    expect(harness.eventsFor("notes/recovered.md").map((event) => event.state)).toEqual([
+      "excluded_policy", "queued",
+    ]);
+  });
+
+  it("queues one create for a new allowed note", async () => {
+    const harness = createHarness();
+    harness.vault.setFileBytes("notes/new.md", bytesOf("new note"));
+
+    const result = await harness.capture.runAutomaticSnapshot();
+
+    expect(result).toMatchObject({ outcome: "completed", queuedEventCount: 1 });
+    expect(harness.eventsFor("notes/new.md").map((event) => event.operation)).toEqual(["create"]);
+    expect(harness.eventsFor("notes/new.md").map((event) => event.state)).toEqual(["queued"]);
+  });
+
+  it("queues one update for a changed committed note", async () => {
+    const harness = createHarness();
+    harness.vault.setFileBytes("notes/changed.md", bytesOf("first version"));
+    await harness.capture.runAutomaticSnapshot();
+    const firstEvent = harness.eventsFor("notes/changed.md")[0];
+    if (firstEvent === undefined) {
+      throw new Error("expected initial queued event");
+    }
+    await harness.repository.recordCommittedReceipt({
+      eventId: firstEvent.eventId,
+      sourceId: "00000000-0000-4000-8000-000000000001",
+      baseVersionId: "00000000-0000-4000-8000-000000000002",
+    });
+    harness.vault.setFileBytes("notes/changed.md", bytesOf("second version"));
+
+    const result = await harness.capture.runAutomaticSnapshot();
+
+    expect(result.queuedEventCount).toBe(1);
+    expect(harness.eventsFor("notes/changed.md").map((event) => event.operation)).toEqual([
+      "create", "update",
+    ]);
+    expect(harness.eventsFor("notes/changed.md").map((event) => event.state)).toEqual([
+      "committed", "queued",
+    ]);
+  });
+
+  it("queues no content event for an unchanged committed note", async () => {
+    const harness = createHarness();
+    harness.vault.setFileBytes("notes/unchanged.md", bytesOf("committed bytes"));
+    await harness.capture.runAutomaticSnapshot();
+    const initialEvent = harness.eventsFor("notes/unchanged.md")[0];
+    if (initialEvent === undefined) {
+      throw new Error("expected initial queued event");
+    }
+    await harness.repository.recordCommittedReceipt({
+      eventId: initialEvent.eventId,
+      sourceId: "00000000-0000-4000-8000-000000000003",
+      baseVersionId: "00000000-0000-4000-8000-000000000004",
+    });
+
+    const result = await harness.capture.runAutomaticSnapshot();
+
+    expect(result.queuedEventCount).toBe(0);
+    expect(harness.eventsFor("notes/unchanged.md").map((event) => event.state)).toEqual(["committed"]);
+  });
+
+  it("records only terminal audit evidence for a currently excluded note", async () => {
+    const harness = createHarness({ decide: () => "excluded" });
+    harness.vault.setFileBytes("notes/excluded.md", bytesOf("denied bytes"));
+
+    const result = await harness.capture.runAutomaticSnapshot();
+
+    expect(result.queuedEventCount).toBe(0);
+    expect(harness.eventsFor("notes/excluded.md").map((event) => event.state)).toEqual([
+      "excluded_policy",
+    ]);
+  });
+
+  it("creates no content event for a lifecycle-deferred path", async () => {
+    const harness = createHarness();
+    harness.vault.setFileBytes("notes/deferred.md", bytesOf("first version"));
+    await harness.capture.runAutomaticSnapshot();
+    const initialEvent = harness.eventsFor("notes/deferred.md")[0];
+    if (initialEvent === undefined) {
+      throw new Error("expected initial queued event");
+    }
+    await harness.repository.markEventTerminal(
+      initialEvent.eventId,
+      "deferred_lifecycle",
+      "deferred_lifecycle",
+    );
+    harness.vault.setFileBytes("notes/deferred.md", bytesOf("later version"));
+
+    const result = await harness.capture.runAutomaticSnapshot();
+
+    expect(result.queuedEventCount).toBe(0);
+    expect(harness.eventsFor("notes/deferred.md").map((event) => event.state)).toEqual([
+      "deferred_lifecycle",
+    ]);
   });
 });
 

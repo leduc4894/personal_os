@@ -13,13 +13,12 @@
  * under is persisted on the journal row (the server re-evaluates policy
  * itself and never trusts that value).
  *
- * An existing Vault is never scanned because the plugin loaded: the
- * `Sync existing files` snapshot scan runs only after an explicit
- * confirmation and processes a bounded snapshot in bounded batches through
- * the same admission path. Lifecycle notifications (rename / move /
- * delete) are routed through the {@link LifecycleCapture} (Child 5 task
- * 8); the create / update surface here only keeps the settle + admit
- * pipe and the session-scoped guard set.
+ * Explicit `Sync existing files` scanning remains confirmation-gated, while
+ * automatic reconciliation runs the same bounded snapshot through the same
+ * admission path. Lifecycle notifications (rename / move / delete) are
+ * routed through the {@link LifecycleCapture} (Child 5 task 8); the create /
+ * update surface here only keeps the settle + admit pipe and the
+ * session-scoped guard set.
  *
  * Privacy (spec 2, 9): this module owns no transport and never moves bytes
  * out of the device. Bytes are read, fingerprinted and dropped; journal rows
@@ -28,7 +27,12 @@
 
 import { normalizePolicyLocator } from "../exclusion-policy/evaluator";
 import type { CapturePolicyEvaluation, CapturePolicySubject } from "../exclusion-policy/policy-session";
-import type { JournalCaptureAdmission, JournalEventState, LocalFile } from "./contracts";
+import type {
+  ExistingFilesScanSummary,
+  JournalCaptureAdmission,
+  JournalEventState,
+  LocalFile,
+} from "./contracts";
 import {
   FILE_SETTLE_DELAY_MS,
   JOURNAL_PENDING_EVENT_STATES,
@@ -42,7 +46,9 @@ import type {
   VaultRenameTarget,
   VaultTargetFile,
 } from "./lifecycle-capture";
-import type { JournalRepository } from "./repository";
+import type { JournalCaptureResult, JournalRepository } from "./repository";
+
+export type { ExistingFilesScanSummary } from "./contracts";
 
 // --- frozen scan bounds (spec 7.1) --------------------------------------------------------
 
@@ -78,14 +84,6 @@ export interface CapturePolicyGate {
   evaluateForCapture(subject: CapturePolicySubject): CapturePolicyEvaluation;
 }
 
-/** The closed summary of one `Sync existing files` pass: counts only (spec 9). */
-export interface ExistingFilesScanSummary {
-  readonly outcome: "cancelled" | "completed";
-  readonly processedFileCount: number;
-  readonly skippedFileCount: number;
-  readonly isTruncated: boolean;
-}
-
 export interface JournalCaptureOptions {
   readonly repository: JournalRepository;
   readonly vaultReader: CaptureVaultReader;
@@ -117,8 +115,28 @@ function cancelledSummary(): ExistingFilesScanSummary {
     outcome: "cancelled",
     processedFileCount: 0,
     skippedFileCount: 0,
+    queuedEventCount: 0,
     isTruncated: false,
   };
+}
+
+function stoppedSummary(): ExistingFilesScanSummary {
+  return {
+    outcome: "stopped",
+    processedFileCount: 0,
+    skippedFileCount: 0,
+    queuedEventCount: 0,
+    isTruncated: false,
+  };
+}
+
+function fingerprintsMatch(left: LocalFile["lastCommittedFingerprint"], right: LocalFile["observedFingerprint"]): boolean {
+  return (
+    left !== null &&
+    left.sha256 === right.sha256 &&
+    left.sizeBytes === right.sizeBytes &&
+    left.mediaType === right.mediaType
+  );
 }
 
 function isStoreError(error: unknown): error is JournalStoreError {
@@ -298,6 +316,23 @@ export class JournalCapture {
     if (!(await options.confirm())) {
       return cancelledSummary();
     }
+    return this.#captureSnapshot();
+  }
+
+  /**
+   * Reconcile current Vault bytes without user confirmation. This is the
+   * automatic coordinator's narrow operation: it preserves every bounded,
+   * deterministic admission invariant of the explicit snapshot path.
+   */
+  async runAutomaticSnapshot(): Promise<ExistingFilesScanSummary> {
+    if (this.#isDisposed) {
+      return stoppedSummary();
+    }
+    return this.#captureSnapshot();
+  }
+
+  /** Enumerate and admit one deterministic bounded regular-file snapshot. */
+  async #captureSnapshot(): Promise<ExistingFilesScanSummary> {
     const snapshotPaths = await this.#vaultReader.listRegularFilePaths();
     const normalizedSnapshotPaths = [
       ...new Set(snapshotPaths.map((path) => this.#normalizePathOrNull(path)).filter(
@@ -308,6 +343,7 @@ export class JournalCapture {
     const isTruncated = boundedPaths.length < normalizedSnapshotPaths.length;
     let processedFileCount = 0;
     let skippedFileCount = 0;
+    let queuedEventCount = 0;
     for (let offset = 0; offset < boundedPaths.length; offset += this.#scanBatchFiles) {
       const batchPaths = boundedPaths.slice(offset, offset + this.#scanBatchFiles);
       for (const normalizedPath of batchPaths) {
@@ -316,14 +352,27 @@ export class JournalCapture {
           continue;
         }
         try {
-          await this.#admitNormalizedPath(normalizedPath);
+          const captureResult = await this.#admitNormalizedPath(normalizedPath);
           processedFileCount += 1;
+          if (
+            captureResult !== null &&
+            (captureResult.outcome === "event_recorded" || captureResult.outcome === "event_coalesced") &&
+            captureResult.event.state === "queued"
+          ) {
+            queuedEventCount += 1;
+          }
         } catch {
           skippedFileCount += 1;
         }
       }
     }
-    return { outcome: "completed", processedFileCount, skippedFileCount, isTruncated };
+    return {
+      outcome: "completed",
+      processedFileCount,
+      skippedFileCount,
+      queuedEventCount,
+      isTruncated,
+    };
   }
 
   /** Stop all settling and release the session guard set (unload/suspend). */
@@ -359,9 +408,9 @@ export class JournalCapture {
    * behaviour because a successful re-bind of the prior source would
    * silently drop the delete intent.
    */
-  async #admitNormalizedPath(normalizedPath: string): Promise<void> {
+  async #admitNormalizedPath(normalizedPath: string): Promise<JournalCaptureResult | null> {
     if (this.#isLifecycleDeferredPath(normalizedPath)) {
-      return;
+      return null;
     }
     const trackedFile = this.#repository.readLocalFileByPath(normalizedPath);
     // Automatic restore: only attempted when the local mapping is
@@ -393,7 +442,7 @@ export class JournalCapture {
           );
           this.#lifecycleGuardedPaths.add(normalizedPath);
         }
-        return;
+        return null;
       }
     }
     const contentBytes = await this.#vaultReader.readRegularFileBytes(normalizedPath);
@@ -404,7 +453,7 @@ export class JournalCapture {
         this.#lifecycleGuardedPaths.add(normalizedPath);
         await this.#deferTrackedFile(trackedFile);
       }
-      return;
+      return null;
     }
     const fingerprint = await deriveFrozenFingerprint(contentBytes);
     const evaluation = this.#policyGate.evaluateForCapture({
@@ -419,7 +468,10 @@ export class JournalCapture {
         : evaluation.decision.enforced === "allowed"
           ? "policy_allowed"
           : "excluded_policy";
-    await this.#repository.recordCapture({
+    if (admission === "policy_allowed" && fingerprintsMatch(trackedFile?.lastCommittedFingerprint ?? null, fingerprint)) {
+      return null;
+    }
+    return this.#repository.recordCapture({
       normalizedPath,
       fingerprint,
       policyRevisionNumber: evaluation.revisionNumber,

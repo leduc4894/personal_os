@@ -30,6 +30,20 @@ export const MAX_JOURNAL_SIZE_BYTES = 64 * 1024 * 1024;
 export const FILE_SETTLE_DELAY_MS = 250;
 
 /**
+ * The closed, redacted outcome of a bounded Vault snapshot capture. Explicit
+ * scans may be cancelled before enumeration; automatic snapshots stop when
+ * capture has been disposed. Only newly recorded or coalesced queued content
+ * rows count as dispatchable work.
+ */
+export interface ExistingFilesScanSummary {
+  readonly outcome: "completed" | "cancelled" | "stopped";
+  readonly processedFileCount: number;
+  readonly skippedFileCount: number;
+  readonly queuedEventCount: number;
+  readonly isTruncated: boolean;
+}
+
+/**
  * Most recent attempts retained per event in the bounded `journal_attempts`
  * ring (spec 6.3): older rows are pruned inside the same transaction, so the
  * audit trail stays closed and bounded.
