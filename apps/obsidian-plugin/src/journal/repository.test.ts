@@ -889,6 +889,28 @@ describe("JournalRepository content-lane selection excludes lifecycle rows (lane
   });
 });
 
+describe("JournalRepository pending retry deadline reads (scheduled retry trigger)", () => {
+  it("reads the earliest scheduled retry deadline among pending events only", async () => {
+    const { repository } = createOpenedJournal();
+    expect(repository.readEarliestPendingRetryEpochMs()).toBeNull();
+    const first = await captureAllowed(repository, "notes/retry-deadline-first.md", fingerprintOf("91"));
+    const second = await captureAllowed(repository, "notes/retry-deadline-second.md", fingerprintOf("92"));
+    // Queued rows carry no retry deadline yet: nothing to schedule from.
+    expect(repository.readEarliestPendingRetryEpochMs()).toBeNull();
+
+    await repository.markEventPreflightStarted(first.event.eventId);
+    await repository.markEventWaitingRetry(first.event.eventId, "network_offline", 5_000);
+    await repository.markEventPreflightStarted(second.event.eventId);
+    await repository.markEventWaitingRetry(second.event.eventId, "login_required", 3_000);
+    expect(repository.readEarliestPendingRetryEpochMs()).toBe(3_000);
+
+    // Terminal rows leave the pending set entirely; the earliest pending
+    // deadline wins.
+    await repository.markEventTerminal(second.event.eventId, "excluded_policy", "excluded_policy");
+    expect(repository.readEarliestPendingRetryEpochMs()).toBe(5_000);
+  });
+});
+
 describe("JournalRepository status histogram (spec 11)", () => {
   it("counts events by closed state and closed safe error label only", async () => {
     const { repository } = createOpenedJournal();

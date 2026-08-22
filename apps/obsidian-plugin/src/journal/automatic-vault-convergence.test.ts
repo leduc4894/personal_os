@@ -136,6 +136,8 @@ class SyncServerDouble {
   readonly currentVersions = new Map<string, string>();
   readonly preflightBodies: Record<string, unknown>[] = [];
   readonly receivedDigests: string[] = [];
+  /** Injectable per-call preflight failure script, mirroring the lifecycle double. */
+  nextPreflightResponse: ((callIndex: number) => LifecycleScriptedResponse | null) | null = null;
   publications = 0;
   #counter = 0;
 
@@ -143,6 +145,10 @@ class SyncServerDouble {
     body: Record<string, unknown>,
   ): Promise<{ status: number; bodyText: string }> {
     this.preflightBodies.push(body);
+    const scripted = this.nextPreflightResponse?.(this.preflightBodies.length - 1) ?? null;
+    if (scripted !== null && scripted.status !== 200) {
+      return { status: scripted.status, bodyText: syncErrorBody(scripted.code) };
+    }
     const identity = `${body["event_id"]}:${body["idempotency_key"]}`;
     const frozen = this.identityTerminals.get(identity);
     if (frozen !== undefined) {
@@ -338,6 +344,16 @@ interface Session {
   readonly vault: FakeVault;
   readonly syncServer: SyncServerDouble;
   readonly lifecycleServer: LifecycleServerDouble;
+  /**
+   * The plugin's one-shot scheduled retry trigger mirror (fix round 2 D4):
+   * whether the timer is armed and for which deadline.
+   */
+  readonly scheduledRetryPass: {
+    isArmed(): boolean;
+    targetEpochMs(): number | null;
+  };
+  /** Resolve once the armed trigger fired and its bounded pass settled. */
+  awaitScheduledRetryPass(): Promise<void>;
   advanceClock(milliseconds: number): void;
   /** The rendered status-bar text under the plugin's exact projection. */
   statusText(): string;
@@ -466,10 +482,57 @@ async function createSession(bindings: SessionBindings): Promise<Session> {
       if (summary.outcome !== "pass_already_running") {
         lastQueuePassOutcome = summary.outcome;
       }
+      if (summary.outcome === "retry_scheduled" || summary.outcome === "login_required") {
+        armScheduledRetryPassTrigger();
+      }
       passSummaries.push(summary);
       return summary;
     },
   });
+
+  // The plugin's one-shot scheduled retry trigger mirror (fix round 2 D4):
+  // a pass that ends retry_scheduled or login_required arms ONE timer at
+  // the earliest pending retry deadline plus a small safety margin; the
+  // timer's single firing requests one bounded dispatcher pass. At most
+  // one timer is outstanding; unload cancels it.
+  const SCHEDULED_RETRY_PASS_SAFETY_MARGIN_MS = 250;
+  let scheduledRetryPassTimer: ReturnType<typeof setTimeout> | null = null;
+  let scheduledRetryPassTargetEpochMs: number | null = null;
+  let scheduledRetryPassWork: Promise<void> = Promise.resolve();
+  function armScheduledRetryPassTrigger(): void {
+    let earliestRetryEpochMs: number | null = null;
+    try {
+      earliestRetryEpochMs = repository.readEarliestPendingRetryEpochMs();
+    } catch {
+      return;
+    }
+    if (earliestRetryEpochMs === null) {
+      return;
+    }
+    const targetEpochMs = earliestRetryEpochMs + SCHEDULED_RETRY_PASS_SAFETY_MARGIN_MS;
+    if (
+      scheduledRetryPassTargetEpochMs !== null &&
+      scheduledRetryPassTargetEpochMs <= targetEpochMs
+    ) {
+      return;
+    }
+    if (scheduledRetryPassTimer !== null) {
+      clearTimeout(scheduledRetryPassTimer);
+    }
+    scheduledRetryPassTargetEpochMs = targetEpochMs;
+    scheduledRetryPassTimer = setTimeout(() => {
+      scheduledRetryPassTimer = null;
+      scheduledRetryPassTargetEpochMs = null;
+      scheduledRetryPassWork = dispatcher.request();
+    }, Math.max(0, targetEpochMs - clock.ms));
+  }
+  function clearScheduledRetryPassTrigger(): void {
+    if (scheduledRetryPassTimer !== null) {
+      clearTimeout(scheduledRetryPassTimer);
+      scheduledRetryPassTimer = null;
+    }
+    scheduledRetryPassTargetEpochMs = null;
+  }
 
   const snapshotResults: AutomaticSnapshotResult[] = [];
   const snapshotWork: Promise<void>[] = [];
@@ -552,6 +615,11 @@ async function createSession(bindings: SessionBindings): Promise<Session> {
     syncServer,
     lifecycleServer,
     credentialState,
+    scheduledRetryPass: {
+      isArmed: () => scheduledRetryPassTimer !== null,
+      targetEpochMs: () => scheduledRetryPassTargetEpochMs,
+    },
+    awaitScheduledRetryPass: () => scheduledRetryPassWork,
     advanceClock: (milliseconds: number) => {
       clock.ms += milliseconds;
     },
@@ -584,6 +652,7 @@ async function createSession(bindings: SessionBindings): Promise<Session> {
       await drainMicrotasks();
     },
     unload: async (): Promise<void> => {
+      clearScheduledRetryPassTrigger();
       await coordinator.stop();
       await dispatcher.stop();
       queueDriver.stop();
@@ -883,6 +952,45 @@ describe("automatic vault convergence after rename + edit", () => {
     expect(session.statusText()).toBe("Offline — queued (1)");
   });
 
+  it("drains a parked content retry through the one-shot scheduled retry trigger", async () => {
+    const { session } = await createConvergedFixture();
+    // ONE transient 5xx on the edit's content preflight only.
+    const preflightCallsBefore = session.syncServer.preflightBodies.length;
+    session.syncServer.nextPreflightResponse = (callIndex) =>
+      callIndex === preflightCallsBefore ? { status: 500, code: "internal_error" } : null;
+    await captureEdit(
+      session,
+      "notes/gamma.md",
+      new TextEncoder().encode("gamma content edited"),
+    );
+    await triggerModifyPass(session);
+
+    // The pass ends retry_scheduled with the edit parked in bounded
+    // backoff (the no-overtake discipline of fix round 1 stays) …
+    const editEvent = session
+      .eventsOf("notes/gamma.md")
+      .find((event) => event.operation === "update");
+    expect(editEvent?.state).toBe("waiting_retry");
+    expect(editEvent?.safeError).toBe("server_error");
+    expect(session.passSummaries.at(-1)?.outcome).toBe("retry_scheduled");
+    // … which armed the plugin-level one-shot scheduled trigger at the
+    // parked event's retry deadline plus the safety margin (fix round 2
+    // D4): exactly one outstanding timer, never a repeating loop.
+    expect(session.scheduledRetryPass.isArmed()).toBe(true);
+    expect(session.scheduledRetryPass.targetEpochMs()).toBe(
+      (editEvent?.nextEligibleRetryEpochMs ?? 0) + 250,
+    );
+    // Once the deadline passes the single timer fires ONE bounded pass
+    // that commits the parked edit — no manual command, no daemon.
+    session.advanceClock(2_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await session.awaitScheduledRetryPass();
+    expect(session.newestEventStateOf("notes/gamma.md")).toBe("committed");
+    expect(session.repository.countPendingEvents()).toBe(0);
+    expect(session.scheduledRetryPass.isArmed()).toBe(false);
+    expect(session.statusText()).toBe("Ready");
+  });
+
   it("parks queued renames retryable when the restart pass races the credential (no terminal kill)", async () => {
     const { bindings, session } = await createConvergedFixture();
     await renameNoteSettledOnly(session, "notes/alpha.md", "notes/alpha-renamed.md");
@@ -941,5 +1049,21 @@ describe("automatic vault convergence after rename + edit", () => {
     restarted.credentialState.token = ACCESS_TOKEN;
     expect(restarted.repository.countPendingEvents()).toBe(3);
     expect(restarted.statusText()).toBe("Offline — queued (3)");
+
+    // The one-shot scheduled retry trigger (fix round 2 D4) was armed by
+    // the login_required pass end; once the credential returned and the
+    // parked rename's backoff elapsed, its single firing drains
+    // everything — the live post-restart `Ready (n)` strand recovers
+    // with no user action.
+    expect(restarted.scheduledRetryPass.isArmed()).toBe(true);
+    restarted.advanceClock(2_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await restarted.awaitScheduledRetryPass();
+    expect(restarted.newestEventStateOf("notes/alpha-renamed.md")).toBe("committed");
+    expect(restarted.newestEventStateOf("notes/beta-renamed.md")).toBe("committed");
+    expect(restarted.newestEventStateOf("notes/gamma.md")).toBe("committed");
+    expect(restarted.repository.countPendingEvents()).toBe(0);
+    expect(restarted.scheduledRetryPass.isArmed()).toBe(false);
+    expect(restarted.statusText()).toBe("Ready");
   });
 });

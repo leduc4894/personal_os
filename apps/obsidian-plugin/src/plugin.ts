@@ -81,6 +81,14 @@ import type { PolicyIntegrityState } from "./exclusion-policy/contracts";
  */
 const ALLOW_LOOPBACK_HTTP_ORIGIN = false;
 
+/**
+ * The small safety margin the one-shot scheduled retry trigger adds on top
+ * of the earliest pending retry deadline (fix round 2 D4), so the timer
+ * never fires while the parked event is still one clock tick shy of
+ * eligibility.
+ */
+const SCHEDULED_RETRY_PASS_SAFETY_MARGIN_MS = 250;
+
 const DEFAULT_DEVICE_NAME = "Obsidian vault";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -208,6 +216,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   #isQueuePassActive = false;
   #lastQueuePassOutcome: QueuePassOutcome | null = null;
   #syncStatusBarItem: HTMLElement | null = null;
+  /** The one-shot scheduled retry trigger's outstanding timer (fix round 2 D4). */
+  #scheduledRetryPassTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The deadline the outstanding timer fires at, or null when disarmed. */
+  #scheduledRetryPassTargetEpochMs: number | null = null;
 
   override async onload(): Promise<void> {
     this.#settings = normalizeSettings(await this.loadData());
@@ -357,6 +369,8 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     // Stop and await the two coordinators before closing the journal. The
     // capture receives the snapshot abort signal, while the queue driver is
     // stopped immediately so its active request exits without mutating late.
+    // The one-shot scheduled retry trigger never outlives the plugin.
+    this.#clearScheduledRetryPassTrigger();
     const automaticSnapshotStop = this.#automaticSnapshotCoordinator?.stop() ?? Promise.resolve();
     this.#automaticSnapshotCoordinator = null;
     const boundedQueuePassStop = this.#boundedQueuePassDispatcher?.stop() ?? Promise.resolve();
@@ -793,8 +807,68 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       this.#isQueuePassActive = false;
       this.#lastQueuePassOutcome = summary.outcome;
     }
+    if (summary.outcome === "retry_scheduled" || summary.outcome === "login_required") {
+      // Fix round 2 D4: the failed event now sits in bounded backoff with
+      // no automatic follow-up (fix round 1's no-overtake discipline), and
+      // with the manual sync commands removed no surface would ever drain
+      // it again — arm the one-shot scheduled retry trigger.
+      this.#armScheduledRetryPassTrigger();
+    }
     this.#refreshSyncStatus();
     return summary;
+  }
+
+  /**
+   * The bounded one-shot scheduled retry trigger (fix round 2 D4): arm ONE
+   * cancellable timer at the earliest pending retry deadline (plus a small
+   * safety margin) whose single firing requests one bounded queue pass
+   * through the same dispatcher every other trigger uses. This mirrors the
+   * already-reviewed `deadline_reached` serial follow-up: the PASS stays
+   * bounded and trigger-driven; only the trigger is scheduled. At most one
+   * timer is outstanding (an already-earlier target keeps the existing
+   * timer, a sooner target re-arms it), unload cancels it, and this is
+   * never a repeating daemon loop. No `JournalQueueDriver` failure
+   * semantics change — the no-overtake discipline of fix round 1 stays.
+   */
+  #armScheduledRetryPassTrigger(): void {
+    const repository = this.#queueRepository;
+    if (repository === null) {
+      return;
+    }
+    let earliestRetryEpochMs: number | null = null;
+    try {
+      earliestRetryEpochMs = repository.readEarliestPendingRetryEpochMs();
+    } catch {
+      // An unreadable journal arms nothing (fail-closed).
+      return;
+    }
+    if (earliestRetryEpochMs === null) {
+      return;
+    }
+    const targetEpochMs = earliestRetryEpochMs + SCHEDULED_RETRY_PASS_SAFETY_MARGIN_MS;
+    if (
+      this.#scheduledRetryPassTargetEpochMs !== null &&
+      this.#scheduledRetryPassTargetEpochMs <= targetEpochMs
+    ) {
+      // The outstanding timer already fires no later than this target.
+      return;
+    }
+    this.#clearScheduledRetryPassTrigger();
+    this.#scheduledRetryPassTargetEpochMs = targetEpochMs;
+    this.#scheduledRetryPassTimer = setTimeout(() => {
+      this.#scheduledRetryPassTimer = null;
+      this.#scheduledRetryPassTargetEpochMs = null;
+      void this.#boundedQueuePassDispatcher?.request();
+    }, Math.max(0, targetEpochMs - Date.now()));
+  }
+
+  /** Cancel the outstanding scheduled retry timer (unload / re-arm). */
+  #clearScheduledRetryPassTrigger(): void {
+    if (this.#scheduledRetryPassTimer !== null) {
+      clearTimeout(this.#scheduledRetryPassTimer);
+      this.#scheduledRetryPassTimer = null;
+    }
+    this.#scheduledRetryPassTargetEpochMs = null;
   }
 
   /**

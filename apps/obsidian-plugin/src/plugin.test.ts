@@ -235,6 +235,41 @@ describe("Obsidian plugin composition root", () => {
     expect(coordinatorBody).toContain("await boundedQueuePassDispatcher.request()");
   });
 
+  it("arms one cancellable scheduled retry pass after retry_scheduled or login_required pass ends", () => {
+    // Fix round 2 D4: a pass that ends `retry_scheduled` or
+    // `login_required` leaves its failed event in bounded backoff and —
+    // with the manual sync commands removed — no surface would ever
+    // drain it again. The plugin arms ONE cancellable timer at the
+    // earliest pending retry deadline plus a small safety margin; its
+    // single firing requests one bounded queue pass. Never a repeating
+    // daemon loop, and unload cancels the outstanding timer.
+    const passWrapperIndex = pluginSource.indexOf(
+      "async #runBoundedQueuePass(): Promise<QueuePassSummary>",
+    );
+    expect(passWrapperIndex).toBeGreaterThanOrEqual(0);
+    const wrapperBody = pluginSource.slice(passWrapperIndex, passWrapperIndex + 1_400);
+    expect(wrapperBody).toContain('summary.outcome === "retry_scheduled"');
+    expect(wrapperBody).toContain('summary.outcome === "login_required"');
+    expect(wrapperBody).toContain("#armScheduledRetryPassTrigger()");
+    const triggerIndex = pluginSource.indexOf("#armScheduledRetryPassTrigger(): void");
+    expect(triggerIndex).toBeGreaterThanOrEqual(0);
+    const triggerBody = pluginSource.slice(triggerIndex, triggerIndex + 2_400);
+    expect(triggerBody).toContain("repository.readEarliestPendingRetryEpochMs()");
+    expect(triggerBody).toContain("SCHEDULED_RETRY_PASS_SAFETY_MARGIN_MS");
+    expect(triggerBody).toContain("setTimeout");
+    expect(triggerBody).toContain("clearTimeout");
+    // At most ONE outstanding timer: an already-earlier target keeps the
+    // existing timer, a sooner target re-arms it.
+    expect(triggerBody).toContain("#scheduledRetryPassTargetEpochMs");
+    // The timer's single firing requests one bounded pass through the
+    // same dispatcher every other trigger uses.
+    expect(triggerBody).toContain("void this.#boundedQueuePassDispatcher?.request()");
+    // Unload cancels the outstanding timer before the coordinators stop.
+    const unloadIndex = pluginSource.indexOf("override onunload(): void");
+    const unloadBody = pluginSource.slice(unloadIndex, unloadIndex + 900);
+    expect(unloadBody).toContain("#clearScheduledRetryPassTrigger()");
+  });
+
   it("counts pre-existing pending events when the automatic snapshot requests its queue pass", () => {
     // Fix round 2 D2: the coordinator requests a pass only from the
     // snapshot's queued-event count, and the scan's own admission count is

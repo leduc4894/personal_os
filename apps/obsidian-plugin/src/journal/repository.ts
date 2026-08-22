@@ -1066,6 +1066,35 @@ export class JournalRepository {
   }
 
   /**
+   * The earliest scheduled retry deadline among pending events, or null
+   * when no pending event waits on a retry time (a `queued` row is
+   * immediately eligible and carries no deadline). The plugin's one-shot
+   * scheduled retry trigger uses this deadline — plus a small safety
+   * margin — to time the single follow-up pass it arms after a pass ends
+   * `retry_scheduled` or `login_required`.
+   */
+  readEarliestPendingRetryEpochMs(): number | null {
+    const pendingStateList = JOURNAL_PENDING_EVENT_STATES.map((state) => sqlText(state)).join(", ");
+    const row = firstRow(
+      this.#database.readAll(
+        [
+          "select min(next_eligible_retry_epoch_ms) from journal_events",
+          `where state in (${pendingStateList})`,
+          "and next_eligible_retry_epoch_ms is not null;",
+        ].join(" "),
+      ),
+    );
+    const earliest = row?.[0];
+    if (earliest === null || earliest === undefined) {
+      return null;
+    }
+    if (typeof earliest !== "number" || !Number.isInteger(earliest) || earliest < 0) {
+      throw journalStoreError("journal_image_invalid");
+    }
+    return earliest;
+  }
+
+  /**
    * The redacted event histogram of the status projection (spec 11): the
    * newest row for each local file, grouped by closed state and closed safe
    * error label. A later capture supersedes every predecessor outcome for
