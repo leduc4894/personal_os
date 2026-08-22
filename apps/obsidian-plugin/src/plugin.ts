@@ -37,7 +37,11 @@ import { DeviceAuthenticationSettingTab } from "./authentication/settings-tab";
 import { DeviceTokenSession, resolveStartupAction } from "./authentication/token-session";
 import { JournalCapture } from "./journal/capture";
 import type { CaptureVaultReader } from "./journal/capture";
-import { AutomaticSnapshotCoordinator } from "./journal/automatic-snapshot";
+import {
+  AutomaticSnapshotCoordinator,
+  CoalescingQueuePassDispatcher,
+  refreshVerifiedPolicyAndRequestSnapshot,
+} from "./journal/automatic-snapshot";
 import type { AutomaticSnapshotReason } from "./journal/automatic-snapshot";
 import { LifecycleCaptureImpl } from "./journal/lifecycle-capture";
 import type {
@@ -198,7 +202,8 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   #queueDriver: JournalQueueDriver | null = null;
   #queueRepository: JournalRepository | null = null;
   #automaticSnapshotCoordinator: AutomaticSnapshotCoordinator | null = null;
-  #hasAcceptedOnboardingPolicy = false;
+  #boundedQueuePassDispatcher: CoalescingQueuePassDispatcher | null = null;
+  #pendingAutomaticSnapshotReason: AutomaticSnapshotReason | null = null;
   #isQueuePassActive = false;
   #lastQueuePassOutcome: QueuePassOutcome | null = null;
   #syncStatusBarItem: HTMLElement | null = null;
@@ -269,10 +274,6 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         // delays the Connected state until this has completed, preventing a
         // capture from being fail-closed against an uninitialised policy.
         await policySession.adoptOnboardingTrust();
-        if (this.#automaticSnapshotCoordinator === null) {
-          this.#hasAcceptedOnboardingPolicy = true;
-          return;
-        }
         this.#requestAutomaticSnapshot("policy_accepted");
       },
     });
@@ -333,7 +334,13 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         // Policy keyset/snapshot are fetched only AFTER a successful token
         // refresh (spec 18), still fire-and-forget and never awaited here.
         void session.refresh()
-          .then(() => policySession.refresh())
+          .then(() =>
+            refreshVerifiedPolicyAndRequestSnapshot({
+              readAcceptedRevisionNumber: () => policySession.acceptedState?.revisionNumber ?? null,
+              refresh: () => policySession.refresh(),
+              requestSnapshot: (reason) => this.#requestAutomaticSnapshot(reason),
+            }),
+          )
           .catch(() => undefined);
       }
     }
@@ -345,16 +352,25 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   }
 
   override onunload(): void {
-    // Stop snapshot scheduling before its capture and dispatch resources are
-    // released; the bounded queue driver then rejects late network results.
-    this.#automaticSnapshotCoordinator?.stop();
+    // Stop and await the two coordinators before closing the journal. The
+    // capture receives the snapshot abort signal, while the queue driver is
+    // stopped immediately so its active request exits without mutating late.
+    const automaticSnapshotStop = this.#automaticSnapshotCoordinator?.stop() ?? Promise.resolve();
     this.#automaticSnapshotCoordinator = null;
+    const boundedQueuePassStop = this.#boundedQueuePassDispatcher?.stop() ?? Promise.resolve();
+    this.#boundedQueuePassDispatcher = null;
     this.#queueDriver?.stop();
-    this.#queueDriver = null;
     this.#lifecycleCapture?.dispose();
-    this.#lifecycleCapture = null;
     this.#capture?.dispose();
-    this.#capture = null;
+    const captureQuiescence = this.#capture?.whenIdle() ?? Promise.resolve();
+    void Promise.all([automaticSnapshotStop, boundedQueuePassStop, captureQuiescence]).then(() => {
+      this.#releaseJournalResources();
+    });
+    this.#controller?.stop();
+    this.#session?.clearMemoryAccess();
+  }
+
+  #releaseJournalResources(): void {
     // Safe unload (spec 11): every journal mutation already persisted its
     // own verified generation, so the final flush attempt is synchronous
     // and bounded — it records whether a commit is still in flight and
@@ -363,10 +379,11 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     this.#journalPersistence?.attemptFinalFlush();
     this.#journalPersistence?.close();
     this.#journalPersistence = null;
+    this.#queueDriver = null;
+    this.#lifecycleCapture = null;
+    this.#capture = null;
     this.#queueRepository = null;
     this.#syncStatusBarItem = null;
-    this.#controller?.stop();
-    this.#session?.clearMemoryAccess();
   }
 
   #resolveHasActiveCredential(secretStore: SecretStorageRecordAdapter): boolean {
@@ -397,7 +414,12 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   }
 
   #requestAutomaticSnapshot(reason: AutomaticSnapshotReason): void {
-    this.#automaticSnapshotCoordinator?.request(reason);
+    const coordinator = this.#automaticSnapshotCoordinator;
+    if (coordinator === null) {
+      this.#pendingAutomaticSnapshotReason = reason;
+      return;
+    }
+    coordinator.request(reason);
   }
 
   async #persistSettings(): Promise<void> {
@@ -494,16 +516,24 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         lifecycleDriver,
         refreshAccessToken: () => session.refresh(),
       });
+      const boundedQueuePassDispatcher = new CoalescingQueuePassDispatcher({
+        runPass: async () => {
+          await this.#runBoundedQueuePass();
+        },
+      });
       const automaticSnapshotCoordinator = new AutomaticSnapshotCoordinator({
-        runSnapshot: async () => {
-          if (!this.#canCaptureVaultChanges()) {
+        runSnapshot: async (signal) => {
+          if (signal.aborted || !this.#canCaptureVaultChanges()) {
             return { outcome: "skipped", queuedEventCount: 0 };
           }
           const snapshot = this.#projectSyncStatus();
           if (snapshot === null || snapshot.kind === "reconcile_required") {
             return { outcome: "stopped", queuedEventCount: 0 };
           }
-          const summary = await capture.runAutomaticSnapshot();
+          const summary = await capture.runAutomaticSnapshot({ signal });
+          if (signal.aborted) {
+            return { outcome: "stopped", queuedEventCount: 0 };
+          }
           this.#refreshSyncStatus();
           return {
             outcome: summary.outcome === "completed" ? "completed" : "stopped",
@@ -511,7 +541,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           };
         },
         requestQueuePass: async () => {
-          await this.#runBoundedQueuePass();
+          await boundedQueuePassDispatcher.request();
         },
       });
       this.#journalPersistence = persistence;
@@ -520,6 +550,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       this.#queueRepository = repository;
       this.#lifecycleCapture = lifecycleCapture;
       this.#automaticSnapshotCoordinator = automaticSnapshotCoordinator;
+      this.#boundedQueuePassDispatcher = boundedQueuePassDispatcher;
       this.app.workspace.onLayoutReady(() => {
         this.registerEvent(
           this.app.vault.on("create", (file) => {
@@ -529,7 +560,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           // The pass follows the settled admission (250 ms settle re-reads the
           // bytes): running it at event time would find an empty journal.
           void capture.notifyPathChanged(file.path).then(() => {
-            void this.#runBoundedQueuePass();
+            void boundedQueuePassDispatcher.request();
           });
           }),
         );
@@ -539,7 +570,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
             return;
           }
           void capture.notifyPathChanged(file.path).then(() => {
-            void this.#runBoundedQueuePass();
+            void boundedQueuePassDispatcher.request();
           });
           }),
         );
@@ -560,8 +591,9 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           }),
         );
         automaticSnapshotCoordinator.request("startup");
-        if (this.#hasAcceptedOnboardingPolicy) {
-          automaticSnapshotCoordinator.request("policy_accepted");
+        if (this.#pendingAutomaticSnapshotReason !== null) {
+          automaticSnapshotCoordinator.request(this.#pendingAutomaticSnapshotReason);
+          this.#pendingAutomaticSnapshotReason = null;
         }
       });
       // Explicit restore surface (Task 10, spec 6.3 + 7.1): the user

@@ -103,6 +103,13 @@ describe("Obsidian plugin composition root", () => {
     const policyRefreshIndex = pluginSource.indexOf("policySession.refresh");
     expect(refreshIndex).toBeGreaterThanOrEqual(0);
     expect(policyRefreshIndex).toBeGreaterThan(refreshIndex);
+    const refreshFlowIndex = pluginSource.indexOf("void session.refresh()");
+    const revisionRefreshIndex = pluginSource.indexOf(
+      "refreshVerifiedPolicyAndRequestSnapshot",
+      refreshFlowIndex,
+    );
+    expect(revisionRefreshIndex).toBeGreaterThan(refreshFlowIndex);
+    expect(revisionRefreshIndex).toBeLessThan(policyRefreshIndex);
   });
 
   it("persists the policy cache inside the single plugin-data document", () => {
@@ -192,6 +199,7 @@ describe("Obsidian plugin composition root", () => {
   it("wires automatic snapshots through the safe capture and bounded queue seams", () => {
     expect(pluginSource).toContain("new JournalQueueDriver(");
     expect(pluginSource).toContain("new AutomaticSnapshotCoordinator(");
+    expect(pluginSource).toContain("new CoalescingQueuePassDispatcher(");
     expect(pluginSource).toContain("createJournalSyncApi(");
     expect(pluginSource).toContain("createObsidianSyncHttpTransport");
     // The driver runs over the SAME read-only vault reader as capture and
@@ -202,7 +210,7 @@ describe("Obsidian plugin composition root", () => {
     // snapshots await the exact same bounded wrapper rather than bypassing
     // the one-active-request queue driver.
     const triggerCount = pluginSource.match(/void this\.#runBoundedQueuePass\(\)/g)?.length ?? 0;
-    expect(triggerCount).toBe(2); // create and modify listeners
+    expect(triggerCount).toBe(0);
     expect(pluginSource).not.toContain("queueDriver.requestPass()");
     // A Vault event's pass runs only after its own settled admission landed
     // (the 250 ms settle re-reads bytes); an event-time pass would find the
@@ -210,21 +218,21 @@ describe("Obsidian plugin composition root", () => {
     expect(pluginSource.match(/notifyPathChanged\(file\.path\)\.then\(/g)?.length ?? 0).toBe(2);
     // The automatic coordinator's dispatcher owns the only awaited queue
     // request, preserving the existing bounded wrapper.
-    expect(pluginSource.match(/await this\.#runBoundedQueuePass\(/g)?.length ?? 0).toBe(1);
+    expect(pluginSource).toContain("await boundedQueuePassDispatcher.request()");
     // A Vault event triggers one bounded pass alongside capture.
     const createListenerIndex = pluginSource.indexOf('this.app.vault.on("create"');
-    const passIndex = pluginSource.indexOf("void this.#runBoundedQueuePass()");
+    const passIndex = pluginSource.indexOf("void boundedQueuePassDispatcher.request()");
     expect(passIndex).toBeGreaterThan(createListenerIndex);
     // Startup convergence is requested only after recovery and listener
     // installation, never by a direct foreground pass.
     const recoveryIndex = pluginSource.indexOf("await persistence.open()");
     const coordinatorIndex = pluginSource.indexOf("new AutomaticSnapshotCoordinator(");
     expect(coordinatorIndex).toBeGreaterThan(recoveryIndex);
-    const coordinatorBody = pluginSource.slice(coordinatorIndex, coordinatorIndex + 900);
+    const coordinatorBody = pluginSource.slice(coordinatorIndex, coordinatorIndex + 1400);
     expect(coordinatorBody).toContain("#canCaptureVaultChanges()");
     expect(coordinatorBody).toContain('snapshot.kind === "reconcile_required"');
-    expect(coordinatorBody).toContain("capture.runAutomaticSnapshot()");
-    expect(coordinatorBody).toContain("await this.#runBoundedQueuePass()");
+    expect(coordinatorBody).toContain("capture.runAutomaticSnapshot({ signal })");
+    expect(coordinatorBody).toContain("await boundedQueuePassDispatcher.request()");
   });
 
   it("wires the lifecycle capture, lifecycle driver and lifecycle api behind the restore command", () => {
@@ -407,6 +415,9 @@ describe("Obsidian plugin composition root", () => {
     expect(disposeIndex).toBeGreaterThan(stopIndex);
     expect(flushIndex).toBeGreaterThan(disposeIndex);
     expect(closeIndex).toBeGreaterThan(flushIndex);
+    expect(pluginSource).toContain(
+      "Promise.all([automaticSnapshotStop, boundedQueuePassStop, captureQuiescence])",
+    );
     // Unload never awaits async journal work; the flush attempt stays
     // synchronous and bounded.
     expect(pluginSource).not.toContain("await this.#capture");

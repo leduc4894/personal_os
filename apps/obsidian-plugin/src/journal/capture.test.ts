@@ -819,6 +819,27 @@ describe("JournalCapture automatic snapshot admission", () => {
       "deferred_lifecycle",
     ]);
   });
+
+  it("stops an automatic snapshot without admitting a file after cancellation", async () => {
+    const harness = createHarness();
+    const contentBytes = bytesOf("cancelled snapshot");
+    harness.vault.setFileBytes("notes/cancelled.md", contentBytes);
+    const pendingRead = { release: null as (() => void) | null };
+    vi.spyOn(harness.vault, "readRegularFileBytes").mockImplementationOnce(async () =>
+      await new Promise<Uint8Array>((resolve) => {
+        pendingRead.release = () => resolve(contentBytes);
+      }),
+    );
+    const controller = new AbortController();
+
+    const snapshot = harness.capture.runAutomaticSnapshot({ signal: controller.signal });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    controller.abort();
+    pendingRead.release?.();
+
+    await expect(snapshot).resolves.toMatchObject({ outcome: "stopped", queuedEventCount: 0 });
+    expect(harness.eventsFor("notes/cancelled.md")).toEqual([]);
+  });
 });
 
 describe("JournalCapture module safety", () => {

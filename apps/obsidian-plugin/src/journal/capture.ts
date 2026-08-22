@@ -324,16 +324,22 @@ export class JournalCapture {
    * automatic coordinator's narrow operation: it preserves every bounded,
    * deterministic admission invariant of the explicit snapshot path.
    */
-  async runAutomaticSnapshot(): Promise<ExistingFilesScanSummary> {
-    if (this.#isDisposed) {
+  async runAutomaticSnapshot(options: { readonly signal?: AbortSignal } = {}): Promise<ExistingFilesScanSummary> {
+    if (this.#isSnapshotStopped(options.signal)) {
       return stoppedSummary();
     }
-    return this.#captureSnapshot();
+    return this.#captureSnapshot(options.signal);
   }
 
   /** Enumerate and admit one deterministic bounded regular-file snapshot. */
-  async #captureSnapshot(): Promise<ExistingFilesScanSummary> {
+  async #captureSnapshot(signal?: AbortSignal): Promise<ExistingFilesScanSummary> {
+    if (this.#isSnapshotStopped(signal)) {
+      return stoppedSummary();
+    }
     const snapshotPaths = await this.#vaultReader.listRegularFilePaths();
+    if (this.#isSnapshotStopped(signal)) {
+      return stoppedSummary();
+    }
     const normalizedSnapshotPaths = [
       ...new Set(snapshotPaths.map((path) => this.#normalizePathOrNull(path)).filter(
         (normalizedPath): normalizedPath is string => normalizedPath !== null,
@@ -347,12 +353,18 @@ export class JournalCapture {
     for (let offset = 0; offset < boundedPaths.length; offset += this.#scanBatchFiles) {
       const batchPaths = boundedPaths.slice(offset, offset + this.#scanBatchFiles);
       for (const normalizedPath of batchPaths) {
+        if (this.#isSnapshotStopped(signal)) {
+          return stoppedSummary();
+        }
         if (this.#isLifecycleDeferredPath(normalizedPath)) {
           skippedFileCount += 1;
           continue;
         }
         try {
-          const captureResult = await this.#admitNormalizedPath(normalizedPath);
+          const captureResult = await this.#admitNormalizedPath(normalizedPath, signal);
+          if (this.#isSnapshotStopped(signal)) {
+            return stoppedSummary();
+          }
           processedFileCount += 1;
           if (
             captureResult !== null &&
@@ -408,7 +420,13 @@ export class JournalCapture {
    * behaviour because a successful re-bind of the prior source would
    * silently drop the delete intent.
    */
-  async #admitNormalizedPath(normalizedPath: string): Promise<JournalCaptureResult | null> {
+  async #admitNormalizedPath(
+    normalizedPath: string,
+    signal?: AbortSignal,
+  ): Promise<JournalCaptureResult | null> {
+    if (this.#isSnapshotStopped(signal)) {
+      return null;
+    }
     if (this.#isLifecycleDeferredPath(normalizedPath)) {
       return null;
     }
@@ -446,6 +464,9 @@ export class JournalCapture {
       }
     }
     const contentBytes = await this.#vaultReader.readRegularFileBytes(normalizedPath);
+    if (this.#isSnapshotStopped(signal)) {
+      return null;
+    }
     if (contentBytes === null) {
       // The file vanished between event and read: a tracked file becomes
       // deferred_lifecycle; an untracked path is simply gone (spec 7.1).
@@ -456,6 +477,9 @@ export class JournalCapture {
       return null;
     }
     const fingerprint = await deriveFrozenFingerprint(contentBytes);
+    if (this.#isSnapshotStopped(signal)) {
+      return null;
+    }
     const evaluation = this.#policyGate.evaluateForCapture({
       sourceId: trackedFile?.sourceId ?? null,
       normalizedLocator: normalizedPath,
@@ -477,6 +501,10 @@ export class JournalCapture {
       policyRevisionNumber: evaluation.revisionNumber,
       admission,
     });
+  }
+
+  #isSnapshotStopped(signal?: AbortSignal): boolean {
+    return this.#isDisposed || signal?.aborted === true;
   }
 
   /** Defer every still-pending event of one tracked path (spec 7.1). */
