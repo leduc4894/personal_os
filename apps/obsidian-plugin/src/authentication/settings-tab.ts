@@ -233,9 +233,23 @@ export function renderLocalNoteSyncStatusList(
     return "No note sync statuses are available on this device";
   }
   return [...statuses]
-    .sort((left, right) => left.normalizedPath.localeCompare(right.normalizedPath))
+    .sort(compareNormalizedPathsByCodeUnit)
     .map(renderLocalNoteSyncStatus)
     .join("\n");
+}
+
+/** Match the journal's deterministic normalized-path ordinal ordering. */
+function compareNormalizedPathsByCodeUnit(
+  left: LocalNoteSyncStatus,
+  right: LocalNoteSyncStatus,
+): number {
+  if (left.normalizedPath < right.normalizedPath) {
+    return -1;
+  }
+  if (left.normalizedPath > right.normalizedPath) {
+    return 1;
+  }
+  return 0;
 }
 
 function renderLocalNoteSyncStatus(status: LocalNoteSyncStatus): string {

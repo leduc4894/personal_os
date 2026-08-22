@@ -160,6 +160,15 @@ describe("renderLocalNoteSyncStatusList", () => {
     expect(statuses.map((status) => status.normalizedPath)).toEqual(["zeta.md", "alpha.md"]);
   });
 
+  it("keeps non-ASCII paths in fixed code-unit order regardless of host locale", () => {
+    const rendered = renderLocalNoteSyncStatusList([
+      { normalizedPath: "äther.md", state: "synced", policyRevisionNumber: 1, retryAtEpochMs: null, reason: null },
+      { normalizedPath: "zeta.md", state: "queued", policyRevisionNumber: 1, retryAtEpochMs: null, reason: null },
+    ]);
+
+    expect(rendered).toBe("zeta.md — Queued\näther.md — Synced");
+  });
+
   it("renders a local empty state when the current device tracks no notes", () => {
     expect(renderLocalNoteSyncStatusList([])).toBe("No note sync statuses are available on this device");
   });
