@@ -797,31 +797,31 @@ describe("queue driver retry backoff (spec 8, 12)", () => {
   }, 10_000);
 
   it("keeps the pass bounded by its deadline", async () => {
-    const harness = createHarness({ passDeadlineMs: 40, useWallClock: true });
+    const harness = createHarness({ passDeadlineMs: 10 });
     await captureBytes(harness, "notes/slow-one.md", new TextEncoder().encode("slow one"));
     await captureBytes(harness, "notes/slow-two.md", new TextEncoder().encode("slow two"));
-    const delay = (milliseconds: number) =>
-      new Promise<void>((resolve) => {
-        setTimeout(resolve, milliseconds);
-      });
     let preflightCalls = 0;
+    let contentCalls = 0;
     harness.installTransport({
       preflight: async () => {
         preflightCalls += 1;
-        await delay(30);
+        // The clock crosses the deadline while the preflight is in flight,
+        // so the pass must refuse the content request that follows.
+        harness.advanceClock(11);
         return { status: 200, bodyText: SINGLE_PART_BODY };
       },
       content: async () => {
-        await delay(30);
+        contentCalls += 1;
         return { status: 200, bodyText: COMMITTED_RECEIPT };
       },
     });
     const summary = await runPass(harness.driver);
     expect(summary.outcome).toBe("deadline_reached");
     expect(preflightCalls).toBe(1);
+    expect(contentCalls).toBe(0);
     expect(QUEUE_PASS_DEADLINE_MS).toBe(60_000);
     expect(QUEUE_REQUEST_TIMEOUT_MS).toBe(30_000);
-  }, 10_000);
+  });
 
   it("automatically continues eligible queued work after a pass deadline", async () => {
     const harness = createHarness({ passDeadlineMs: 10 });
@@ -843,6 +843,72 @@ describe("queue driver retry backoff (spec 8, 12)", () => {
     await dispatcher.request();
 
     expect(preflightCalls).toBe(3);
+    expect(harness.repository.countPendingEvents()).toBe(0);
+  });
+
+  it("does not start a follow-up pass after a retryable failure at the deadline", async () => {
+    const harness = createHarness({ passDeadlineMs: 10 });
+    const failedEvent = await captureBytes(
+      harness,
+      "notes/deadline-fail-one.md",
+      new TextEncoder().encode("one"),
+    );
+    await captureBytes(harness, "notes/deadline-fail-two.md", new TextEncoder().encode("two"));
+    let preflightCalls = 0;
+    const scripted = harness.installTransport({
+      preflight: async (body) => {
+        preflightCalls += 1;
+        if (body["normalized_locator"] === "notes/deadline-fail-one.md") {
+          harness.advanceClock(11);
+          throw new Error("socket gone");
+        }
+        return { status: 200, bodyText: SINGLE_PART_BODY };
+      },
+    });
+    const dispatcher = new CoalescingQueuePassDispatcher({
+      runPass: () => harness.driver.runPass(),
+    });
+
+    await dispatcher.request();
+
+    expect(preflightCalls).toBe(1);
+    expect(scripted.contentRequests).toHaveLength(0);
+    const retried = harness.repository.readEvent(failedEvent.eventId);
+    expect(retried?.state).toBe("waiting_retry");
+    expect(retried?.nextEligibleRetryEpochMs).toBeGreaterThan(harness.nowEpochMs());
+    const laterEvent = eventsOfPath(harness, "notes/deadline-fail-two.md")[0];
+    expect(laterEvent?.state).toBe("queued");
+  });
+
+  it("ends the pass with retry_scheduled when a retryable failure stays inside the deadline", async () => {
+    const harness = createHarness();
+    const event = await captureBytes(harness, "notes/retry-inside.md", new TextEncoder().encode("retry inside"));
+    harness.installTransport({
+      preflight: async () => {
+        throw new Error("socket gone");
+      },
+    });
+
+    const summary = await runPass(harness.driver);
+
+    expect(summary.outcome).toBe("retry_scheduled");
+    expect(summary.processedEventCount).toBe(1);
+    expect(harness.repository.readEvent(event.eventId)?.state).toBe("waiting_retry");
+  });
+
+  it("reports completed, not deadline_reached, when the deadline passes without remaining eligible work", async () => {
+    const harness = createHarness({ passDeadlineMs: 10 });
+    await captureBytes(harness, "notes/deadline-terminal.md", new TextEncoder().encode("terminal"));
+    harness.installTransport({
+      preflight: async () => {
+        harness.advanceClock(11);
+        return { status: 200, bodyText: successBody({ outcome: "excluded" }) };
+      },
+    });
+
+    const summary = await runPass(harness.driver);
+
+    expect(summary.outcome).toBe("completed");
     expect(harness.repository.countPendingEvents()).toBe(0);
   });
 });

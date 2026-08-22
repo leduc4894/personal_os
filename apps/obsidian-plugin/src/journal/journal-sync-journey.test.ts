@@ -393,7 +393,8 @@ describe("journal sync journeys over the durable stack", () => {
     await captureBytes(harness, "notes/offline-b.md", encoder.encode("offline content b"));
 
     const offlinePass = await harness.driver.runPass();
-    expect(offlinePass.outcome).toBe("completed");
+    // The retryable offline failure owns the pass end reason (fix round 1).
+    expect(offlinePass.outcome).toBe("retry_scheduled");
     expect(eventsOfPath(harness, "notes/offline-a.md").map((event) => event.state)).toEqual([
       "waiting_retry",
     ]);
@@ -433,7 +434,8 @@ describe("journal sync journeys over the durable stack", () => {
     harness.server.dropResponses = true;
 
     const droppedPass = await harness.driver.runPass();
-    expect(droppedPass.outcome).toBe("completed");
+    // The lost response ends as a retryable failure, not a drained pass.
+    expect(droppedPass.outcome).toBe("retry_scheduled");
     // The server committed exactly once even though its response was lost.
     expect(harness.server.publications).toBe(1);
     expect(harness.repository.readEvent(event.eventId)?.state).toBe("waiting_retry");

@@ -89,12 +89,17 @@ export interface QueueVaultFileReader {
   readRegularFileBytes(normalizedPath: string): Promise<Uint8Array | null>;
 }
 
-/** One bounded pass refresh outcome; closed vocabulary. */
+/**
+ * One bounded pass refresh outcome; closed vocabulary. `retry_scheduled`
+ * marks a pass ended by a retryable failure: the failed event sits in
+ * bounded backoff, so such a pass is never continuable automatically.
+ */
 export type QueuePassOutcome =
   | "completed"
   | "deadline_reached"
   | "stopped"
   | "login_required"
+  | "retry_scheduled"
   | "pass_already_running";
 
 /** The closed summary of one bounded pass: an outcome and a count only. */
@@ -131,7 +136,21 @@ export interface JournalQueueDriverOptions {
   readonly requestTimeoutMs?: number | undefined;
 }
 
-type PassContinuation = "continue" | "end_pass";
+/**
+ * Why one processed event ended the pass. Only the natural deadline
+ * boundary stays continuable by the dispatcher: failure, retry and
+ * journal-failure exits must never trigger an automatic follow-up pass,
+ * because the failed event sits in bounded backoff while a later queued
+ * event would otherwise be sent out of order.
+ */
+type PassEndReason =
+  | "end_stopped"
+  | "end_deadline_boundary"
+  | "end_login_required"
+  | "end_retry_scheduled"
+  | "end_journal_failure";
+
+type PassContinuation = "continue" | PassEndReason;
 
 /** The per-pass credential budget: at most one refresh, one login verdict. */
 interface RefreshBudget {
@@ -218,13 +237,14 @@ export class JournalQueueDriver {
   /**
    * Run one bounded pass: the oldest eligible event at a time, one active
    * content request, until the queue drains, the deadline passes, login is
-   * required, or the driver stops. When a lifecycle driver is wired in,
-   * the pass interleaves: it first drains the lifecycle lane to IDLE
-   * (spec 19.2 predecessor rule, task 9 fix round 1 I3), then processes
-   * one content event. The two lanes never have an active mutating
-   * request in flight at the same time, and the content lane never
-   * sees a lifecycle event because the lane filter is enforced by
-   * draining the lifecycle lane before each content selection.
+   * required, a retryable failure ends the pass with `retry_scheduled`, or
+   * the driver stops. When a lifecycle driver is wired in, the pass
+   * interleaves: it first drains the lifecycle lane to IDLE (spec 19.2
+   * predecessor rule, task 9 fix round 1 I3), then processes one content
+   * event. The two lanes never have an active mutating request in flight at
+   * the same time, and the content lane never sees a lifecycle event
+   * because the lane filter is enforced by draining the lifecycle lane
+   * before each content selection.
    */
   async runPass(): Promise<QueuePassSummary> {
     if (this.#isStopped) {
@@ -238,6 +258,7 @@ export class JournalQueueDriver {
     const refreshBudget: RefreshBudget = { hasRefreshed: false, requiresLogin: false };
     let processedEventCount = 0;
     let passOutcome: QueuePassOutcome = "completed";
+    let passEndReason: PassEndReason | null = null;
     try {
       while (!this.#isStopped && this.#nowEpochMs() < passDeadlineEpochMs) {
         // Drain the lifecycle lane to IDLE before each content-lane
@@ -277,29 +298,80 @@ export class JournalQueueDriver {
           continuation = await this.#processEvent(event, passDeadlineEpochMs, refreshBudget);
         } catch {
           // A journal failure mid-pass fails closed: the pass ends with the
-          // journal as the durable truth and never crashes its trigger.
+          // journal as the durable truth and never crashes its trigger. The
+          // failure endures — no deadline conversion, no automatic follow-up.
+          passEndReason = "end_journal_failure";
           break;
         }
         processedEventCount += 1;
-        if (continuation === "end_pass") {
-          passOutcome = refreshBudget.requiresLogin ? "login_required" : "completed";
+        if (continuation !== "continue") {
+          passEndReason = continuation;
           break;
         }
       }
       if (this.#isStopped) {
         passOutcome = "stopped";
-      } else if (
-        passOutcome === "completed" &&
-        this.#nowEpochMs() >= passDeadlineEpochMs
-      ) {
-        // A deadline is a bounded-pass boundary, not proof that the durable
-        // queue drained. The dispatcher uses this closed outcome to start a
-        // fresh bounded pass without waiting for another external trigger.
-        passOutcome = "deadline_reached";
+      } else {
+        switch (passEndReason) {
+          case "end_login_required":
+            passOutcome = "login_required";
+            break;
+          case "end_retry_scheduled":
+            // The retryable failure owns the pass end reason even when it
+            // happens exactly at the deadline: the failed event is in
+            // bounded backoff, so an automatic follow-up pass would only
+            // pick a LATER queued event and break the failure discipline.
+            passOutcome = "retry_scheduled";
+            break;
+          case "end_journal_failure":
+            // Keep the closed summary a journal failure produced before any
+            // deadline conversion; it must never become continuable.
+            passOutcome = refreshBudget.requiresLogin ? "login_required" : "completed";
+            break;
+          case "end_deadline_boundary":
+            // The deadline guard inside the content stream: a natural
+            // deadline boundary whose `uploading` event stays eligible, so
+            // the pass remains continuable while eligible work remains.
+            passOutcome = this.#hasEligibleEventNow() ? "deadline_reached" : "completed";
+            break;
+          case null:
+            // While-condition exit (a natural deadline boundary) or a
+            // drained queue. A deadline is a bounded-pass boundary, not
+            // proof that the durable queue drained; the dispatcher uses
+            // this closed outcome to start a fresh bounded pass without
+            // waiting for another external trigger — but only when the
+            // deadline actually passed AND eligible work still remains.
+            if (
+              this.#nowEpochMs() >= passDeadlineEpochMs &&
+              this.#hasEligibleEventNow()
+            ) {
+              passOutcome = "deadline_reached";
+            }
+            break;
+          case "end_stopped":
+            // Stop guards land here only when the after-loop `stopped`
+            // handling above did not already cover them; kept exhaustive.
+            passOutcome = "stopped";
+            break;
+        }
       }
       return { outcome: passOutcome, processedEventCount };
     } finally {
       this.#isPassRunning = false;
+    }
+  }
+
+  /**
+   * Fail-closed eligibility re-probe for the deadline conversion: the pass
+   * may report `deadline_reached` only when an eligible event still remains.
+   * A throwing journal means no follow-up pass, and the probe never escapes
+   * `runPass`.
+   */
+  #hasEligibleEventNow(): boolean {
+    try {
+      return this.#repository.readOldestEligibleEvent(this.#nowEpochMs()) !== null;
+    } catch {
+      return false;
     }
   }
 
@@ -323,7 +395,7 @@ export class JournalQueueDriver {
         refreshBudget,
       );
       if (this.#isStopped) {
-        return "end_pass";
+        return "end_stopped";
       }
       switch (outcome.outcome) {
         case "excluded":
@@ -351,7 +423,7 @@ export class JournalQueueDriver {
       }
     } catch (error) {
       if (this.#isStopped) {
-        return "end_pass";
+        return "end_stopped";
       }
       let failure = error;
       const resumeOperationId = this.#claimedResumeOperationId(event, error);
@@ -366,7 +438,7 @@ export class JournalQueueDriver {
           );
         } catch (resumeError) {
           if (this.#isStopped) {
-            return "end_pass";
+            return "end_stopped";
           }
           failure = resumeError;
         }
@@ -398,8 +470,13 @@ export class JournalQueueDriver {
   ): Promise<PassContinuation> {
     // The operation handle lands before the content request it guards.
     await this.#repository.markEventUploading(event.eventId, operationId);
-    if (this.#isStopped || this.#isPastDeadline(passDeadlineEpochMs)) {
-      return "end_pass";
+    if (this.#isStopped) {
+      return "end_stopped";
+    }
+    if (this.#isPastDeadline(passDeadlineEpochMs)) {
+      // A natural deadline boundary: the `uploading` event stays eligible
+      // unconditionally, so the pass remains continuable by the dispatcher.
+      return "end_deadline_boundary";
     }
 
     const localFile = this.#repository.readLocalFileByLocalFileId(event.localFileId);
@@ -434,7 +511,7 @@ export class JournalQueueDriver {
       refreshBudget,
     );
     if (this.#isStopped) {
-      return "end_pass";
+      return "end_stopped";
     }
     await this.#persistCommittedReceipt(event.eventId, receipt);
     return "continue";
@@ -558,7 +635,7 @@ export class JournalQueueDriver {
         // queue untouched beyond the safe retry state (spec 8, 12).
         refreshBudget.requiresLogin = true;
         await this.#scheduleRetry(eventId, "login_required", correlationId);
-        return "end_pass";
+        return "end_login_required";
       case "blocked_size":
         await this.#closeTerminal(eventId, "blocked_size", "blocked_size", correlationId);
         return "continue";
@@ -572,10 +649,13 @@ export class JournalQueueDriver {
       case "operation_retry_required":
       default: {
         // Retryable: keep the event with bounded jittered backoff and end
-        // this pass — every later event would face the same condition.
+        // this pass — every later event would face the same condition. The
+        // closed `retry_scheduled` outcome preserves that end reason even
+        // when the deadline passes simultaneously, so no automatic
+        // follow-up pass may send a later queued event meanwhile.
         const safeError = this.#safeRetryLabel(kind);
         await this.#scheduleRetry(eventId, safeError, correlationId);
-        return "end_pass";
+        return "end_retry_scheduled";
       }
     }
   }
