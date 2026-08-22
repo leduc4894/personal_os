@@ -520,7 +520,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       });
       const boundedQueuePassDispatcher = new CoalescingQueuePassDispatcher({
         runPass: async () => {
-          await this.#runBoundedQueuePass();
+          return await this.#runBoundedQueuePass();
         },
       });
       const automaticSnapshotCoordinator = new AutomaticSnapshotCoordinator({

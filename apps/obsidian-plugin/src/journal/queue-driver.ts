@@ -90,7 +90,12 @@ export interface QueueVaultFileReader {
 }
 
 /** One bounded pass refresh outcome; closed vocabulary. */
-export type QueuePassOutcome = "completed" | "stopped" | "login_required" | "pass_already_running";
+export type QueuePassOutcome =
+  | "completed"
+  | "deadline_reached"
+  | "stopped"
+  | "login_required"
+  | "pass_already_running";
 
 /** The closed summary of one bounded pass: an outcome and a count only. */
 export interface QueuePassSummary {
@@ -283,6 +288,14 @@ export class JournalQueueDriver {
       }
       if (this.#isStopped) {
         passOutcome = "stopped";
+      } else if (
+        passOutcome === "completed" &&
+        this.#nowEpochMs() >= passDeadlineEpochMs
+      ) {
+        // A deadline is a bounded-pass boundary, not proof that the durable
+        // queue drained. The dispatcher uses this closed outcome to start a
+        // fresh bounded pass without waiting for another external trigger.
+        passOutcome = "deadline_reached";
       }
       return { outcome: passOutcome, processedEventCount };
     } finally {

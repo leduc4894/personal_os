@@ -1,3 +1,5 @@
+import type { QueuePassSummary } from "./queue-driver";
+
 export type AutomaticSnapshotReason = "startup" | "policy_accepted" | "policy_revision_advanced";
 
 export interface AutomaticSnapshotResult {
@@ -11,7 +13,7 @@ export interface AutomaticSnapshotRunner {
 }
 
 export interface CoalescingQueuePassRunner {
-  runPass(): Promise<void>;
+  runPass(): Promise<QueuePassSummary>;
 }
 
 /**
@@ -55,7 +57,10 @@ export class CoalescingQueuePassDispatcher {
   async #drain(): Promise<void> {
     while (!this.#isStopped && this.#hasFollowUpPass) {
       this.#hasFollowUpPass = false;
-      await this.#runner.runPass();
+      const summary = await this.#runner.runPass();
+      if (!this.#isStopped && summary.outcome === "deadline_reached") {
+        this.#hasFollowUpPass = true;
+      }
     }
   }
 }

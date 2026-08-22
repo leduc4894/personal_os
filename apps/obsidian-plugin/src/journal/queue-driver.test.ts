@@ -17,6 +17,7 @@ import { readFileSync } from "node:fs";
 import initSqlJs from "sql.js";
 import { beforeAll, describe, expect, it } from "vitest";
 
+import { CoalescingQueuePassDispatcher } from "./automatic-snapshot";
 import type { JournalEvent, JournalMeta } from "./contracts";
 import { deriveFrozenFingerprint } from "./fingerprint";
 import {
@@ -816,11 +817,34 @@ describe("queue driver retry backoff (spec 8, 12)", () => {
       },
     });
     const summary = await runPass(harness.driver);
-    expect(summary.outcome).toBe("completed");
+    expect(summary.outcome).toBe("deadline_reached");
     expect(preflightCalls).toBe(1);
     expect(QUEUE_PASS_DEADLINE_MS).toBe(60_000);
     expect(QUEUE_REQUEST_TIMEOUT_MS).toBe(30_000);
   }, 10_000);
+
+  it("automatically continues eligible queued work after a pass deadline", async () => {
+    const harness = createHarness({ passDeadlineMs: 10 });
+    await captureBytes(harness, "notes/deadline-one.md", new TextEncoder().encode("one"));
+    await captureBytes(harness, "notes/deadline-two.md", new TextEncoder().encode("two"));
+    await captureBytes(harness, "notes/deadline-three.md", new TextEncoder().encode("three"));
+    let preflightCalls = 0;
+    harness.installTransport({
+      preflight: async () => {
+        preflightCalls += 1;
+        harness.advanceClock(11);
+        return { status: 200, bodyText: successBody({ outcome: "excluded" }) };
+      },
+    });
+    const dispatcher = new CoalescingQueuePassDispatcher({
+      runPass: () => harness.driver.runPass(),
+    });
+
+    await dispatcher.request();
+
+    expect(preflightCalls).toBe(3);
+    expect(harness.repository.countPendingEvents()).toBe(0);
+  });
 });
 
 // --- one refresh maximum per pass and queue preservation --------------------------------------------------

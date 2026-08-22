@@ -114,6 +114,7 @@ describe("AutomaticSnapshotCoordinator", () => {
             firstPass.release = resolve;
           });
         }
+        return { outcome: "completed", processedEventCount: 0 };
       },
     });
 
