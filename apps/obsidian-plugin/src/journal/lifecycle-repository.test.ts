@@ -460,6 +460,89 @@ describe("LifecycleRepository ordered predecessor dependencies and replay", () =
   });
 });
 
+describe("LifecycleRepository deferral release on rename/move commit (fix round 2 D7)", () => {
+  it("releases the durable lifecycle-deferral marker in the rename commit transaction", async () => {
+    const { repository, lifecycle } = createOpenedJournal();
+    await captureAndCommit(repository, "notes/deferred-note.md", fingerprintOf("b1"));
+    // A still-pending content edit exists when the rename freezes it.
+    const pending = await repository.recordCapture({
+      normalizedPath: "notes/deferred-note.md",
+      fingerprint: fingerprintOf("b2"),
+      policyRevisionNumber: 1,
+      admission: "policy_allowed",
+    });
+    if (pending.outcome === "capture_refused") {
+      throw new Error("expected a recorded capture");
+    }
+    const file = requireLocalFile(repository.readLocalFileByPath("notes/deferred-note.md"));
+    const rename = await lifecycle.recordLifecycleEventWithFreeze({
+      operands: operandsFor("rename", {
+        expectedLocator: "notes/deferred-note.md",
+        targetLocator: "notes/deferred-note-renamed.md",
+      }),
+      localFile: file,
+      newPath: "notes/deferred-note-renamed.md",
+    });
+    // The freeze flipped the pending content op terminal deferred_lifecycle
+    // — the durable marker the capture guard reads.
+    const deferred = repository.readEvent(pending.event.eventId);
+    expect(deferred?.state).toBe("deferred_lifecycle");
+    expect(deferred?.safeError).toBe("deferred_lifecycle");
+
+    // The server-side rename commit releases the marker IN THE SAME
+    // TRANSACTION that records the committed receipt: the guard can never
+    // refuse the path forever.
+    await lifecycle.recordLifecycleCommittedReceipt(rename.eventId);
+    expect(repository.readEvent(pending.event.eventId)).toBeNull();
+    expect(repository.readEvent(rename.eventId)?.state).toBe("committed");
+    // The rebound row survives the release; only the deferral marker rows
+    // are cleared.
+    const fileAfter = repository.readLocalFileByPath("notes/deferred-note-renamed.md");
+    expect(fileAfter?.sourceId).not.toBeNull();
+  });
+
+  it("keeps deferral markers for files whose rename has not committed", async () => {
+    const { repository, lifecycle } = createOpenedJournal();
+    await captureAndCommit(repository, "notes/deferred-other.md", fingerprintOf("b3"));
+    const pending = await repository.recordCapture({
+      normalizedPath: "notes/deferred-other.md",
+      fingerprint: fingerprintOf("b4"),
+      policyRevisionNumber: 1,
+      admission: "policy_allowed",
+    });
+    if (pending.outcome === "capture_refused") {
+      throw new Error("expected a recorded capture");
+    }
+    const file = requireLocalFile(repository.readLocalFileByPath("notes/deferred-other.md"));
+    const rename = await lifecycle.recordLifecycleEventWithFreeze({
+      operands: operandsFor("rename", {
+        expectedLocator: "notes/deferred-other.md",
+        targetLocator: "notes/deferred-other-renamed.md",
+      }),
+      localFile: file,
+      newPath: "notes/deferred-other-renamed.md",
+    });
+    // A DIFFERENT file's rename commit must not release this file's
+    // deferral marker: the release is scoped to the committed event's own
+    // local file.
+    await captureAndCommit(repository, "notes/deferred-unrelated.md", fingerprintOf("b5"));
+    const unrelated = requireLocalFile(
+      repository.readLocalFileByPath("notes/deferred-unrelated.md"),
+    );
+    const unrelatedRename = await lifecycle.recordLifecycleEventWithFreeze({
+      operands: operandsFor("rename", {
+        expectedLocator: "notes/deferred-unrelated.md",
+        targetLocator: "notes/deferred-unrelated-renamed.md",
+      }),
+      localFile: unrelated,
+      newPath: "notes/deferred-unrelated-renamed.md",
+    });
+    await lifecycle.recordLifecycleCommittedReceipt(unrelatedRename.eventId);
+    void rename;
+    expect(repository.readEvent(pending.event.eventId)?.state).toBe("deferred_lifecycle");
+  });
+});
+
 describe("LifecycleRepository coalescing prohibition", () => {
   it("never replaces a content event with a lifecycle event or vice-versa", async () => {
     const { repository, lifecycle } = createOpenedJournal();

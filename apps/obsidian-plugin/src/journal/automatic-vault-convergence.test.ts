@@ -991,6 +991,68 @@ describe("automatic vault convergence after rename + edit", () => {
     expect(session.statusText()).toBe("Ready");
   });
 
+  it("re-admits a frozen edit after its rename commits (durable deferral release)", async () => {
+    const { session } = await createConvergedFixture();
+    const encoder = new TextEncoder();
+    const publicationsBefore = session.syncServer.publications;
+
+    // The user saves note A (its queued update event exists), then renames
+    // the SAME note: the rename transaction freezes the still-pending
+    // content event as terminal deferred_lifecycle.
+    await captureEdit(session, "notes/alpha.md", encoder.encode("alpha content v2"));
+    await renameNoteSettledOnly(session, "notes/alpha.md", "notes/alpha-renamed.md");
+    await triggerModifyPass(session);
+
+    // The rename drained; its SERVER-SIDE COMMIT released the durable
+    // deferral marker in the same transaction (fix round 2 D7): the frozen
+    // edit row is gone and the capture guard no longer refuses the path.
+    expect(
+      session.eventsOf("notes/alpha-renamed.md").find((event) => event.operation === "update"),
+    ).toBeUndefined();
+    expect(session.newestEventStateOf("notes/alpha-renamed.md")).toBe("committed");
+    expect(session.lifecycleServer.requestBodies).toHaveLength(1);
+    expect(session.syncServer.publications).toBe(publicationsBefore);
+
+    // The user edits the renamed note again: the modify surface admits the
+    // path and the edit syncs — the note can never fall out of content
+    // sync just because a rename once froze it.
+    await captureEdit(session, "notes/alpha-renamed.md", encoder.encode("alpha content v3"));
+    await triggerModifyPass(session);
+    expect(session.newestEventStateOf("notes/alpha-renamed.md")).toBe("committed");
+    expect(session.syncServer.publications).toBe(publicationsBefore + 1);
+    expect(session.repository.countPendingEvents()).toBe(0);
+    expect(session.statusText()).toBe("Ready");
+  });
+
+  it("re-admits a frozen edit through the restart snapshot after its rename commits", async () => {
+    const { bindings, session } = await createConvergedFixture();
+    const encoder = new TextEncoder();
+    const publicationsBefore = session.syncServer.publications;
+
+    // The frozen edit's bytes (v2) are still on disk when the rename
+    // commits and releases the deferral marker — no further edit happens.
+    await captureEdit(session, "notes/alpha.md", encoder.encode("alpha content v2"));
+    await renameNoteSettledOnly(session, "notes/alpha.md", "notes/alpha-renamed.md");
+    await triggerModifyPass(session);
+    expect(session.newestEventStateOf("notes/alpha-renamed.md")).toBe("committed");
+
+    // A full restart cannot strand the diverging bytes either: the release
+    // is durable, so the startup snapshot re-admits the path (v2 bytes
+    // diverge from the last-committed v1 fingerprint) and its pass syncs.
+    await session.unload();
+    const restarted = await createSession({ ...bindings, isRestart: true });
+    restarted.requestStartup();
+    await restarted.awaitAutomaticWork();
+    expect(restarted.snapshotResults).toEqual([
+      { outcome: "completed", queuedEventCount: 1 },
+    ]);
+    expect(restarted.passSummaries.length).toBe(1);
+    expect(restarted.newestEventStateOf("notes/alpha-renamed.md")).toBe("committed");
+    expect(restarted.syncServer.publications).toBe(publicationsBefore + 1);
+    expect(restarted.repository.countPendingEvents()).toBe(0);
+    expect(restarted.statusText()).toBe("Ready");
+  });
+
   it("parks queued renames retryable when the restart pass races the credential (no terminal kill)", async () => {
     const { bindings, session } = await createConvergedFixture();
     await renameNoteSettledOnly(session, "notes/alpha.md", "notes/alpha-renamed.md");

@@ -665,6 +665,32 @@ export class LifecycleRepository {
               `where local_file_id = ${sqlText(localFileId)};`,
             ].join(" "),
           );
+          // Fix round 2 D7: the rename/move committed server-side, so the
+          // durable lifecycle-deferral marker — the terminal
+          // `deferred_lifecycle` content rows the capture freeze created —
+          // is released IN THIS TRANSACTION. Without the release the
+          // capture guard (`any deferred_lifecycle row of the file`)
+          // refuses the path forever and no automatic surface can ever
+          // re-sync the note's content. The released rows' bounded attempt
+          // audit goes with them (the same cleanup
+          // `removeLocalMapping` applies). After the release, the next
+          // snapshot/modify re-admits the path when its bytes diverge
+          // from the last-committed fingerprint.
+          session.exec(
+            [
+              "delete from journal_attempts where event_id in (",
+              "select event_id from journal_events",
+              `where local_file_id = ${sqlText(localFileId)}`,
+              "and state = 'deferred_lifecycle');",
+            ].join(" "),
+          );
+          session.exec(
+            [
+              "delete from journal_events",
+              `where local_file_id = ${sqlText(localFileId)}`,
+              "and state = 'deferred_lifecycle';",
+            ].join(" "),
+          );
           break;
         case "delete":
           // Tombstone row stays; the durable local_files row is
