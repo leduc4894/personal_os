@@ -968,10 +968,20 @@ export class JournalRepository {
   }
 
   /**
-   * The oldest event one queue pass may select (spec 8): the earliest
-   * `queued`/`waiting_retry` row whose retry time has passed, where an event
-   * left in `preflight`/`uploading` by an interrupted pass stays eligible
-   * for the exact same-identity replay of spec 10.3.
+   * The oldest CONTENT event one queue pass may select (spec 8): the
+   * earliest `queued`/`waiting_retry` row whose retry time has passed,
+   * where an event left in `preflight`/`uploading` by an interrupted pass
+   * stays eligible for the exact same-identity replay of spec 10.3.
+   *
+   * Lane discipline: rows carrying lifecycle operands (`rename`, `move`,
+   * `delete`, `restore`) are NEVER selected here — their placeholder
+   * zeros fingerprint belongs to the lifecycle dispatch lane, and a
+   * content-lane dispatch of such a row would terminally destroy the
+   * lifecycle intent through the content re-fingerprint check. The
+   * lifecycle lane selects through its own
+   * {@link JournalLifecycleRepository.readOldestEligibleLifecycleEvent}
+   * selector; this exclusion is enforced structurally with a `NOT
+   * EXISTS` probe on `lifecycle_event_operands` (no schema change).
    */
   readOldestEligibleEvent(nowEpochMs: number): JournalEvent | null {
     if (!isNonNegativeInteger(nowEpochMs)) {
@@ -986,6 +996,9 @@ export class JournalRepository {
           "and (next_eligible_retry_epoch_ms is null",
           `or next_eligible_retry_epoch_ms <= ${nowEpochMs}))`,
           "or state in ('preflight', 'uploading'))",
+          "and not exists (",
+          "select 1 from lifecycle_event_operands content_lane_exclusion",
+          "where content_lane_exclusion.event_id = journal_events.event_id)",
           "order by created_at_epoch_ms asc, rowid asc limit 1;",
         ].join(" "),
       ),

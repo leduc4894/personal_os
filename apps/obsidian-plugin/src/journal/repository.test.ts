@@ -820,6 +820,75 @@ describe("JournalRepository queue selection and upload transitions (spec 8)", ()
   });
 });
 
+describe("JournalRepository content-lane selection excludes lifecycle rows (lane discipline)", () => {
+  it("never selects a queued or retry-waiting lifecycle event even when it is the oldest pending row", async () => {
+    const { repository } = createOpenedJournal();
+    // One tracked file whose committed create gives the rename operands a
+    // real source identity to carry.
+    const committed = await captureAllowed(repository, "notes/lane-note.md", fingerprintOf("85"));
+    await repository.recordCommittedReceipt({
+      eventId: committed.event.eventId,
+      sourceId: "11111111-1111-4111-8111-111111111111",
+      baseVersionId: "22222222-2222-4222-8222-222222222222",
+    });
+    const trackedFile = repository.readLocalFileByPath("notes/lane-note.md");
+    expect(trackedFile).not.toBeNull();
+    if (trackedFile === null) {
+      throw new Error("expected a tracked file row");
+    }
+
+    // The queued rename is the OLDEST pending journal row …
+    const rename = await repository.lifecycle.recordLifecycleEvent(
+      {
+        operation: "rename",
+        sourceId: "11111111-1111-4111-8111-111111111111",
+        expectedVersionId: "22222222-2222-4222-8222-222222222222",
+        expectedLocator: "notes/lane-note.md",
+        targetLocator: "notes/lane-note-renamed.md",
+        tombstoneId: null,
+        policyRevision: 1,
+        predecessorEventId: null,
+        capturedFingerprintSha256: null,
+        capturedFingerprintSizeBytes: null,
+        capturedFingerprintMediaType: null,
+      },
+      { localFile: trackedFile, newPath: "notes/lane-note-renamed.md" },
+    );
+    expect(rename.event.state).toBe("queued");
+    // … and one LATER queued content event of another file exists.
+    const content = await captureAllowed(repository, "notes/lane-content.md", fingerprintOf("86"));
+
+    // The content lane must select the CONTENT row, never the lifecycle
+    // row with its placeholder zeros fingerprint.
+    const nowEpochMs = 2_000_000_000_000;
+    expect(repository.readOldestEligibleEvent(nowEpochMs)?.eventId).toBe(content.event.eventId);
+
+    // The exclusion is state-uniform: a retry-waiting lifecycle row stays
+    // out of the content lane once its retry time has passed.
+    await repository.markEventPreflightStarted(rename.event.eventId);
+    await repository.markEventWaitingRetry(rename.event.eventId, "server_error", 1);
+    expect(repository.readOldestEligibleEvent(nowEpochMs)?.eventId).toBe(content.event.eventId);
+
+    // The lifecycle lane still owns the lifecycle row through its own
+    // selector (the exclusion never starves the lifecycle lane).
+    const frozen = repository.lifecycle.readOldestEligibleLifecycleEvent(nowEpochMs);
+    expect(frozen?.event.eventId).toBe(rename.event.eventId);
+  });
+
+  it("selects the oldest content event when only content rows are pending", async () => {
+    const { repository } = createOpenedJournal();
+    const first = await captureAllowed(repository, "notes/lane-first.md", fingerprintOf("87"));
+    const second = await captureAllowed(repository, "notes/lane-second.md", fingerprintOf("88"));
+    expect(repository.readOldestEligibleEvent(2_000_000_000_000)?.eventId).toBe(
+      first.event.eventId,
+    );
+    await repository.markEventTerminal(first.event.eventId, "excluded_policy", "excluded_policy");
+    expect(repository.readOldestEligibleEvent(2_000_000_000_000)?.eventId).toBe(
+      second.event.eventId,
+    );
+  });
+});
+
 describe("JournalRepository status histogram (spec 11)", () => {
   it("counts events by closed state and closed safe error label only", async () => {
     const { repository } = createOpenedJournal();
