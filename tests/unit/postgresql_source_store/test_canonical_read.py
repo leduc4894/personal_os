@@ -200,9 +200,54 @@ def test_lookup_statement_selects_the_pointer_consistency_columns() -> None:
         "object_key",
         "byte_size",
         "media_type",
+        "normalized_locator",
     }
 
 
 def test_lookup_statement_filters_by_both_workspace_and_source() -> None:
     compiled = str(current_reference_lookup_statement(UUID(int=0), UUID(int=1)).compile())
-    assert compiled.count("LEFT OUTER JOIN") == 2
+    assert compiled.count("LEFT OUTER JOIN") == 3
+
+
+# --- current locator evidence for the read-boundary policy subject ---------------
+
+
+def test_lookup_statement_joins_the_current_open_locator_evidence() -> None:
+    """The read lookup carries the source's open locator for policy rules.
+
+    Locator-dependent rules (extension, folder-prefix, path-glob) evaluate on
+    update preflights exactly as they do at the authorize boundary, so the
+    joined lookup must surface the one open ``source_locators`` row instead of
+    leaving the read-boundary subject locator-free (the gap behind the live
+    ``exclusion_policy_indeterminate`` 403 on the first-ever update preflight).
+    """
+
+    statement = current_reference_lookup_statement(_WORKSPACE_ID, _SOURCE_ID)
+    compiled = str(statement.compile())
+    assert "knowledge.source_locators" in compiled
+    # sources -> versions -> content objects -> the one open locator row.
+    assert compiled.count("LEFT OUTER JOIN") == 3
+    columns = {column.key for column in statement.exported_columns}
+    assert "normalized_locator" in columns
+
+
+def test_read_boundary_subject_carries_the_open_locator_evidence() -> None:
+    """The hydrated reference plus the joined locator build the policy subject."""
+
+    from postgresql_source_store.canonical_read import build_canonical_read_policy_subject
+
+    reference = hydrate_canonical_source_reference(_reference_row())
+    subject = build_canonical_read_policy_subject(reference, "notes/synced-note.md")
+    assert subject.workspace_id == _WORKSPACE_ID
+    assert subject.source_id == _SOURCE_ID
+    assert subject.normalized_locator == "notes/synced-note.md"
+    assert subject.source_type is not None
+    assert subject.source_type.value == "markdown"
+    assert subject.media_type is not None
+    assert subject.media_type.value == "text/markdown"
+    assert subject.size_bytes == 42
+
+    # A source whose locator history has no open row keeps genuinely absent
+    # locator evidence (None), never a fabricated value.
+    absent = build_canonical_read_policy_subject(reference, None)
+    assert absent.normalized_locator is None

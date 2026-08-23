@@ -5,9 +5,11 @@
 ``resolve_current`` runs one ``READ COMMITTED`` transaction with the pinned
 ``SET LOCAL`` bounds: a single schema-qualified, parameter-bound ``SELECT``
 from ``sources`` left-joined through ``source_versions`` (on
-``sources.current_version_id``) and ``content_objects`` (on
-``source_versions.content_object_id``), filtered by both ``workspace_id`` and
-``source_id`` — so a source owned by another workspace is indistinguishable
+``sources.current_version_id``), ``content_objects`` (on
+``source_versions.content_object_id``) and the source's one open
+``source_locators`` row (the locator evidence of the read-boundary policy
+subject), filtered by both ``workspace_id`` and ``source_id`` — so a source
+owned by another workspace is indistinguishable
 from a missing one and nothing about the owning tenant is disclosed.
 
 The pure :func:`hydrate_canonical_source_reference` fails closed on every
@@ -55,7 +57,12 @@ from personal_os.sources.reading import (
 from postgresql_source_store.engine import apply_transaction_bounds
 from postgresql_source_store.error_mapping import map_database_failure
 from postgresql_source_store.policy_enforcement import evaluate_locked_policy_decision
-from postgresql_source_store.tables import content_objects, source_versions, sources
+from postgresql_source_store.tables import (
+    content_objects,
+    source_locators,
+    source_versions,
+    sources,
+)
 
 #: The only source states whose current reference may be read.
 ACCEPTED_READ_SOURCE_STATES: Final[frozenset[str]] = frozenset({"active", "stored_not_indexed"})
@@ -69,7 +76,11 @@ def current_reference_lookup_statement(
     The left joins keep the ``sources`` row visible when no current version or
     content object is attached, so a pending or dangling-pointer source reaches
     the fail-closed hydration instead of masquerading as a missing source.
-    Every selected column is labeled with the exact hydration row key.
+    The source's one open ``source_locators`` row (at most one exists per
+    source by the partial unique index on the open history) joins the same way,
+    so the read-boundary policy subject carries the current locator evidence
+    that locator-dependent rules require. Every selected column is labeled
+    with the exact hydration row key.
     """
     return (
         sa.select(
@@ -87,6 +98,7 @@ def current_reference_lookup_statement(
             content_objects.c.object_key.label("object_key"),
             content_objects.c.byte_size.label("byte_size"),
             content_objects.c.media_type.label("media_type"),
+            source_locators.c.normalized_locator.label("normalized_locator"),
         )
         .select_from(sources)
         .outerjoin(
@@ -96,6 +108,14 @@ def current_reference_lookup_statement(
         .outerjoin(
             content_objects,
             content_objects.c.content_object_id == source_versions.c.content_object_id,
+        )
+        .outerjoin(
+            source_locators,
+            sa.and_(
+                source_locators.c.workspace_id == sources.c.workspace_id,
+                source_locators.c.source_id == sources.c.source_id,
+                source_locators.c.closed_at.is_(None),
+            ),
         )
         .where(
             sources.c.workspace_id == workspace_id,
@@ -181,6 +201,29 @@ def hydrate_canonical_source_reference(row: Mapping[str, Any]) -> CanonicalSourc
     )
 
 
+def build_canonical_read_policy_subject(
+    reference: CanonicalSourceReference, normalized_locator: str | None
+) -> PolicySubject:
+    """Build the read-boundary policy subject with the current locator evidence.
+
+    The hydrated reference supplies the pointer-consistent type, media and
+    size evidence; the joined open locator supplies the locator evidence that
+    locator-dependent rules (extension, folder-prefix, path-glob) require, so
+    they evaluate definitively at this boundary exactly as they do at the
+    authorize boundary. A source with no open locator row keeps genuinely
+    absent locator evidence instead of a fabricated value.
+    """
+
+    return PolicySubject(
+        workspace_id=reference.workspace_id,
+        source_id=reference.source_id,
+        normalized_locator=normalized_locator,
+        source_type=reference.source_type,
+        media_type=reference.expected_object.media_type,
+        size_bytes=reference.expected_object.size_bytes,
+    )
+
+
 class PostgresqlCanonicalSourceReadStore:
     """Read-only canonical current-reference store over the PostgreSQL baseline.
 
@@ -223,17 +266,16 @@ class PostgresqlCanonicalSourceReadStore:
                         ErrorCode.SOURCE_NOT_FOUND,
                         safe_details={"source_id": command.source_id},
                     )
-                reference = hydrate_canonical_source_reference(row._mapping)
+                row_mapping = row._mapping
+                reference = hydrate_canonical_source_reference(row_mapping)
                 # Spec 14: the policy recheck shares the read transaction that
                 # resolves the source state, so the pointer cannot move and a
                 # policy revision cannot activate between resolution and the
-                # authorization decision.
-                subject = PolicySubject(
-                    workspace_id=reference.workspace_id,
-                    source_id=reference.source_id,
-                    source_type=reference.source_type,
-                    media_type=reference.expected_object.media_type,
-                    size_bytes=reference.expected_object.size_bytes,
+                # authorization decision. The subject carries the joined open
+                # locator so locator-dependent rules evaluate definitively
+                # here instead of failing as indeterminate.
+                subject = build_canonical_read_policy_subject(
+                    reference, row_mapping["normalized_locator"]
                 )
                 await evaluate_locked_policy_decision(
                     connection,

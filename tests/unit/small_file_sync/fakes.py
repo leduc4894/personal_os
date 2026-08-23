@@ -567,12 +567,15 @@ class FakeCurrentSourceStore:
 
     ``reference`` is the resolved current version of the update target, or
     ``None`` to model a source whose canonical current pointer is missing
-    (the read store raises the typed read-state error).
+    (the read store raises the typed read-state error). ``resolve_error``
+    models the durable read boundary's locked policy recheck raising one
+    typed exclusion-policy failure while resolving the current source.
     """
 
     ledger: CallLedger
     reference: CanonicalSourceReference | None
     resolve_calls: list[UUID] = field(default_factory=list)
+    resolve_error: Exception | None = None
 
     async def resolve_current(
         self, command: ReadCurrentSourceCommand, diagnostic_context: DiagnosticContext
@@ -580,6 +583,8 @@ class FakeCurrentSourceStore:
         del diagnostic_context
         self.ledger.record(CURRENT_SOURCES_RESOLVE)
         self.resolve_calls.append(command.source_id)
+        if self.resolve_error is not None:
+            raise self.resolve_error
         if self.reference is None:
             raise CanonicalReadStateError(source_id=command.source_id)
         return self.reference

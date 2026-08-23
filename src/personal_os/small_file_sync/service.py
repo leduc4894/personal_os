@@ -393,7 +393,10 @@ class SmallFileSyncService:
         current base whose committed digest equals the declared digest is the
         safe ``no_change`` receipt: the operation is reserved and the
         confirmed current base frozen as its terminal result so a lost
-        response replays the exact no-op.
+        response replays the exact no-op. A typed policy failure raised by
+        the read boundary's locked recheck is the same terminal ``excluded``
+        outcome the authorize boundary produces (spec 9/10.1) — it never
+        escapes as an error envelope the route would answer with 403.
         """
 
         update_source_id = preflight.source_id
@@ -414,6 +417,14 @@ class SmallFileSyncService:
                 preflight.operation, SmallFilePreflightOutcome.CONFLICT, started_at
             )
             return SmallFilePreflightResult(outcome=SmallFilePreflightOutcome.CONFLICT)
+        except ExclusionPolicyError:
+            # The read boundary's transaction-final recheck denied or could
+            # not decide the subject: the preflight outcome contract stays
+            # total over policy errors with the typed ``excluded`` outcome.
+            self._record_preflight(
+                preflight.operation, SmallFilePreflightOutcome.EXCLUDED, started_at
+            )
+            return SmallFilePreflightResult(outcome=SmallFilePreflightOutcome.EXCLUDED)
         if reference.source_version_id != update_base_version_id:
             self._record_preflight(
                 preflight.operation, SmallFilePreflightOutcome.CONFLICT, started_at

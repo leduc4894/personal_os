@@ -2,16 +2,17 @@
 
 Proves the normative flows of spec 10.1-10.3 against the REAL publication
 service over recording fakes: server-side policy denial before any operation
-store or object-store access, exact preflight replay of a frozen terminal
-result, pending same-identity reservation with token rotation, payload
-substitution rejection, create reservation without a source insert, stale and
-missing update bases as durable conflicts, the frozen no-change receipt,
-content-integrity failures that never publish, response-loss replay on both
-paths, exactly one canonical publication under concurrent receives, expiry
-and the server-owned size ceiling before any spool, and the closed durable
-title/type derivation for creates. Assertions use only ledger strings,
-closed enums, counts and value equality — never locator, digest, token or
-payload sentinels.
+store or object-store access, read-boundary policy failures on the update base
+mapping to the same terminal ``excluded`` outcome, exact preflight replay of a
+frozen terminal result, pending same-identity reservation with token rotation,
+payload substitution rejection, create reservation without a source insert,
+stale and missing update bases as durable conflicts, the frozen no-change
+receipt, content-integrity failures that never publish, response-loss replay on
+both paths, exactly one canonical publication under concurrent receives,
+expiry and the server-owned size ceiling before any spool, and the closed
+durable title/type derivation for creates. Assertions use only ledger
+strings, closed enums, counts and value equality — never locator, digest,
+token or payload sentinels.
 """
 
 from __future__ import annotations
@@ -48,7 +49,10 @@ from tests.unit.small_file_sync.fakes import (
 
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import ApplicationError
-from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
+from personal_os.exclusion_policy.enforcement import (
+    AllowedPolicyRevisionBinding,
+    policy_indeterminate_error,
+)
 from personal_os.exclusion_policy.errors import ExclusionPolicyError
 from personal_os.object_storage import CanonicalMediaType, ContentDigest
 from personal_os.small_file_sync.contracts import (
@@ -261,6 +265,74 @@ class TestPreflightUpdateBase:
 
         assert result.outcome is SmallFilePreflightOutcome.SINGLE_PART_UPLOAD
         assert result.operation_token is not None
+
+
+class TestPreflightUpdateBasePolicy:
+    """Read-boundary policy failures map to the excluded preflight outcome.
+
+    The canonical-read boundary re-evaluates the active policy while it
+    resolves the update base (spec 14.2). Its typed exclusion-policy failure
+    — an indeterminate subject over locator-dependent rules exactly like the
+    live extension-rule incident, or a definite denial — must surface as the
+    same 200 ``excluded`` preflight outcome the authorize boundary produces
+    (spec 9/10.1), never as an escaping error the route envelope would
+    answer with a 403 the plugin parks as ``login_required``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_read_boundary_indeterminate_maps_to_excluded_without_reservation(
+        self,
+    ) -> None:
+        preflight = build_update_preflight(source_id=uuid4(), base_version_id=uuid4())
+        reference = build_current_reference(preflight, content_digest=ContentDigest.parse("c" * 64))
+        harness = build_service_harness(current_reference=reference)
+        harness.current_sources.resolve_error = policy_indeterminate_error()
+
+        result = await harness.service.preflight(
+            preflight=preflight,
+            device_context=build_device_context(),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert result.outcome is SmallFilePreflightOutcome.EXCLUDED
+        assert result.terminal_result is None
+        assert result.operation_token is None
+        assert result.expires_at is None
+        assert STORE_RESERVE_OPERATION not in harness.ledger.entries
+        assert PUBLICATION_COMMIT_UPDATE not in harness.ledger.entries
+        assert CURRENT_SOURCES_RESOLVE in harness.ledger.entries
+        assert (
+            harness.metrics.preflight_count(
+                SmallFileOperation.UPDATE, SmallFilePreflightOutcome.EXCLUDED
+            )
+            == 1
+        )
+
+    @pytest.mark.asyncio
+    async def test_read_boundary_denial_maps_to_excluded_without_reservation(self) -> None:
+        preflight = build_update_preflight(source_id=uuid4(), base_version_id=uuid4())
+        reference = build_current_reference(preflight, content_digest=ContentDigest.parse("c" * 64))
+        harness = build_service_harness(current_reference=reference)
+        harness.current_sources.resolve_error = ExclusionPolicyError(
+            ErrorCode.EXCLUSION_POLICY_DENIED
+        )
+
+        result = await harness.service.preflight(
+            preflight=preflight,
+            device_context=build_device_context(),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert result.outcome is SmallFilePreflightOutcome.EXCLUDED
+        assert result.terminal_result is None
+        assert STORE_RESERVE_OPERATION not in harness.ledger.entries
+        assert PUBLICATION_COMMIT_UPDATE not in harness.ledger.entries
+        assert (
+            harness.metrics.preflight_count(
+                SmallFileOperation.UPDATE, SmallFilePreflightOutcome.EXCLUDED
+            )
+            == 1
+        )
 
 
 class TestPreflightNoChange:
