@@ -23,7 +23,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import type { FrozenLifecycleEvent } from "./lifecycle-repository";
 import { LifecycleApiError, type LifecycleResult } from "./lifecycle-api";
 import type { LifecycleApi } from "./lifecycle-driver";
-import { LifecycleDriverImpl, RETRY_BACKOFF_INITIAL_MS, RETRY_BACKOFF_MAXIMUM_MS } from "./lifecycle-driver";
+import { LifecycleDriverImpl, RETRY_BACKOFF_INITIAL_MS, RETRY_BACKOFF_MAXIMUM_MS, computeLifecycleRetryBackoffMs } from "./lifecycle-driver";
 import type { JournalEvent, LocalFile } from "./contracts";
 import { JournalRepository } from "./repository";
 import {
@@ -541,6 +541,40 @@ describe("lifecycle driver bounded jittered retry (spec 8, 12)", () => {
     expect(stored?.nextEligibleRetryEpochMs).toBeGreaterThanOrEqual(before + 1_000);
     expect(stored?.nextEligibleRetryEpochMs).toBeLessThanOrEqual(before + RETRY_BACKOFF_MAXIMUM_MS);
   });
+
+  it("returns whole milliseconds for untidy jitter so the retry epoch stays an integer", () => {
+    // The sibling of the queue-lane fix: production constructs the
+    // lifecycle driver with the real Math.random seam (no randomJitter
+    // passed in plugin.ts), whose untidy fractions make the jitter
+    // product a float (1000*0.25*0.123456789 = 30.864...). A fractional
+    // backoff reaches markEventWaitingRetry as a non-integer
+    // nextEligibleRetryEpochMs — rejected by argument validation as
+    // journal_mutation_failed, so no lifecycle retry park ever landed.
+    // Every offline fixture used tidy jitter (0/1) whose product happened
+    // to be an integer — the same offline blind spot as the queue lane.
+    const untidyFirst = computeLifecycleRetryBackoffMs(1, () => 0.123456789);
+    const untidySecond = computeLifecycleRetryBackoffMs(2, () => 0.777777);
+    const untidyThird = computeLifecycleRetryBackoffMs(3, () => 0.3333333);
+    expect(Number.isInteger(untidyFirst)).toBe(true);
+    expect(Number.isInteger(untidySecond)).toBe(true);
+    expect(Number.isInteger(untidyThird)).toBe(true);
+    expect(untidyFirst).toBe(1_031);
+    expect(untidySecond).toBe(2_389);
+    expect(untidyThird).toBe(4_333);
+  });
+
+  it("never lets rounding push the backoff past the five-minute cap", () => {
+    // Attempt 9 sits at 256000ms; jitter 0.6874999 lands the unrounded
+    // sum at 299999.9936 — rounding must give exactly the cap, never
+    // above it, whatever the round/min order.
+    const nearCap = computeLifecycleRetryBackoffMs(9, () => 0.6874999);
+    expect(nearCap).toBe(RETRY_BACKOFF_MAXIMUM_MS);
+    expect(nearCap).toBeLessThanOrEqual(RETRY_BACKOFF_MAXIMUM_MS);
+    // Above the cap the pre-round minimum already clamps; rounding an
+    // exact integer cap is the cap.
+    expect(computeLifecycleRetryBackoffMs(9, () => 0.9999999)).toBe(RETRY_BACKOFF_MAXIMUM_MS);
+    expect(computeLifecycleRetryBackoffMs(12, () => 0.123456789)).toBe(RETRY_BACKOFF_MAXIMUM_MS);
+  });
 });
 
 // --- non-retryable conflict / integrity -------------------------------------------------
@@ -661,6 +695,43 @@ describe("lifecycle driver login_required parking (spec 8, 12)", () => {
     harness.api.install(async () => committedResult());
     expect(await harness.driver.runOne(activeSignal())).toBe("committed");
     expect(harness.repository.readEvent(recorded.event.eventId)?.state).toBe("committed");
+  });
+
+  it("parks login_required with an integer retry epoch under untidy jitter", async () => {
+    // The exact production shape that never worked on the lifecycle
+    // lane: the real Math.random seam yields untidy fractions, the
+    // computed backoff is fractional, and markEventWaitingRetry's
+    // argument validation rejects the non-integer
+    // nextEligibleRetryEpochMs with journal_mutation_failed — the park
+    // throws out of runOne and the event never reaches waiting_retry.
+    const harness = createHarness({ randomJitter: () => 0.123456789 });
+    await harness.seedTrackedFile("notes/login-park-untidy.md");
+    const recorded = await harness.recordLifecycle(
+      createLifecycleEventOperands({
+        operation: "rename",
+        sourceId: SOURCE_ID,
+        expectedVersionId: VERSION_ID,
+        expectedLocator: "notes/login-park-untidy.md",
+        targetLocator: "notes/login-park-untidy-renamed.md",
+        policyRevision: 1,
+        predecessorEventId: null,
+      }),
+      { newPath: "notes/login-park-untidy-renamed.md" },
+    );
+    harness.api.install(async () => {
+      throw new LifecycleApiError("login_required");
+    });
+    const before = harness.nowEpochMs();
+    const outcome = await harness.driver.runOne(activeSignal());
+
+    expect(outcome).toBe("login_required");
+    const parked = harness.repository.readEvent(recorded.event.eventId);
+    expect(parked?.state).toBe("waiting_retry");
+    expect(parked?.safeError).toBe("login_required");
+    expect(parked?.nextEligibleRetryEpochMs).not.toBeNull();
+    expect(Number.isInteger(parked?.nextEligibleRetryEpochMs)).toBe(true);
+    // round(1000 + 1000 * 0.25 * 0.123456789) = round(1030.864...) = 1031.
+    expect(parked?.nextEligibleRetryEpochMs).toBe(before + 1_031);
   });
 });
 

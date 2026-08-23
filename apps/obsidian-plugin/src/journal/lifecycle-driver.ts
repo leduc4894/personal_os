@@ -68,6 +68,16 @@ export const RETRY_BACKOFF_JITTER_FRACTION = 0.25;
  * capped at five minutes, plus a bounded jitter fraction of the
  * delay, capped again. The injected randomness keeps tests
  * deterministic.
+ *
+ * The result is rounded to a whole millisecond BEFORE the outer cap (the
+ * sibling of the queue-lane fix): production runs this lane with the real
+ * `Math.random` seam, whose untidy fractions make the jitter product a
+ * float, and a fractional backoff would reach
+ * `markEventWaitingRetry` as a non-integer `nextEligibleRetryEpochMs` —
+ * rejected by its argument validation as `journal_mutation_failed`, so
+ * no lifecycle retry park would ever land. `Math.min` applied after
+ * `Math.round` keeps the rounded result from ever exceeding the
+ * five-minute ceiling.
  */
 export function computeLifecycleRetryBackoffMs(
   attemptCount: number,
@@ -82,7 +92,7 @@ export function computeLifecycleRetryBackoffMs(
     RETRY_BACKOFF_INITIAL_MS * 2 ** exponent,
   );
   const jitterMs = exponentialDelayMs * RETRY_BACKOFF_JITTER_FRACTION * randomJitter();
-  return Math.min(RETRY_BACKOFF_MAXIMUM_MS, exponentialDelayMs + jitterMs);
+  return Math.min(RETRY_BACKOFF_MAXIMUM_MS, Math.round(exponentialDelayMs + jitterMs));
 }
 
 // --- ports and outcomes ----------------------------------------------------------------
