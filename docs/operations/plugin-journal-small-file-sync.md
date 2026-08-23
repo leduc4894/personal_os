@@ -4,8 +4,9 @@ Operator contract for the Obsidian plugin journal and the authenticated
 small-file sync flow (`apps/obsidian-plugin/src/journal`,
 `src/personal_os/small_file_sync`, the two `/api/sync` and `/api/uploads`
 routes in `apps/api/src/api_runtime`, and the durable
-`small_file_upload_operations` store). This guide covers startup, queue
-state, safe diagnostics, recovery, the two born-terminal blocks and the
+`small_file_upload_operations` store). This guide covers startup,
+automatic convergence, queue state, safe diagnostics, the local
+note-status list, recovery, the two born-terminal blocks and the
 operator evidence procedure. The wire contract lives in
 `tests/fixtures/small_file_sync/wire-golden.json` (one corpus, replayed by
 both languages); the HTTP posture and error registry live in
@@ -24,26 +25,78 @@ Plugin load runs strictly in this order (journal design 7.1, 8):
    failed recovery fails closed: no capture listener, no queue driver, and
    Vault editing is never touched.
 3. Only after recovery succeeds: Vault listeners, the bounded foreground
-   queue driver, the `Sync now` / `Sync existing files` commands, and one
-   fire-and-forget first pass.
+   queue driver, and the automatic snapshot coordinator are installed,
+   and the `startup` snapshot trigger fires once. There are no manual
+   sync commands: `Sync now` and `Sync existing files` were removed when
+   convergence became automatic (next section).
 
 Nothing syncs before a credential exists: with no device credential the
 status shows Login required and the journal keeps capturing locally.
+
+## Automatic convergence
+
+Convergence is automatic: no command, confirmation modal or manual rescan
+exists. The plugin schedules one bounded automatic snapshot when all of
+these hold:
+
+1. journal recovery completed without `reconcile_required`;
+2. a verified policy snapshot is available (`policy_ready` or a verified
+   offline cache); and
+3. one of three triggers fired: plugin startup, an authenticated
+   onboarding accepted a policy snapshot, or the accepted policy revision
+   advanced.
+
+Triggers arriving while a snapshot runs coalesce into exactly one
+follow-up snapshot; snapshots never run concurrently, the coordinator is
+not a polling daemon, and the snapshot itself performs no network request.
+
+The snapshot enumerates regular Vault files in deterministic path order
+through the same `JournalCapture` admission path as a settled edit event:
+an untracked allowed file records a queued `create`; a tracked file whose
+observed fingerprint differs from the committed fingerprint records a
+queued `update`; an unchanged committed file records nothing; an excluded
+file records terminal `excluded_policy` audit evidence; a file with prior
+terminal `excluded_policy` evidence under a now-allowing verified policy
+records an allowed successor event while the old row stays immutable
+audit evidence; lifecycle-deferred paths keep their lifecycle guard.
+Existing per-file and batch bounds apply, and reaching the queue or
+journal limits sets the existing `reconcile_required` stop — the snapshot
+never drops or rewrites a journal row.
+
+Every snapshot that queued an event requests the bounded queue driver
+below. Vault rename and delete events request a pass directly through the
+same dispatcher, so pending lifecycle work ships without a command.
 
 ## Queue state
 
 The journal event lifecycle (`queued -> preflight -> uploading ->
 committed | no_change`, `waiting_retry` re-entering `queued`) is driven by
-one bounded foreground pass per trigger (plugin load, a Vault event,
-`Sync now`). One pass holds at most one active content request, ends at its
-deadline, before plugin unload or mobile suspension, and never recurses.
-Retryable conditions (offline, timeout, rate limited, server error) return
-the event to bounded jittered backoff (1 s initial, 5 min ceiling) with the
-SAME event and idempotency identity, so the server's exact replay either
-returns the original receipt or reopens the flow. The five terminal states
-below never retry automatically. An interrupted pass needs no operator
-action: the journal is the durable truth and the next trigger resumes
-through ordinary eligibility.
+one bounded foreground pass per trigger (plugin load, a Vault event, an
+automatic snapshot admission, or the one-shot scheduled retry trigger).
+One pass holds at most one active content request, ends at its deadline
+(60 s), before plugin unload or mobile suspension, and never recurses.
+A pass that ends at its deadline while an eligible event remains returns
+`deadline_reached` and the dispatcher starts exactly one serial follow-up
+pass, so a large backlog drains without operator action. A retryable
+failure ends the pass as `retry_scheduled`: the failed event sits in
+bounded jittered backoff (1 s initial, 5 min ceiling) with the SAME event
+and idempotency identity, so the server's exact replay either returns the
+original receipt or reopens the flow. After every pass that actually ran
+(and did not end `stopped`) the plugin arms ONE cancellable scheduled
+trigger at the earliest pending retry deadline plus a small safety
+margin; its single firing requests one ordinary bounded pass. This
+trigger is plugin-level wiring, not a daemon loop: at most one timer is
+outstanding and unload cancels it. The five terminal states below never
+retry automatically. The lifecycle lane drains through the same bounded
+passes, interleaved ahead of the next content event for the same file.
+An interrupted pass needs no operator action: the journal is the durable
+truth and the next trigger resumes through ordinary eligibility.
+
+There is no manual sync command. The plugin's command palette registers
+only `Run sync self-check` and `Copy sync diagnostics` — closed-token
+diagnostics owned by `docs/operations/sync-error-tracing.md` — and
+`Restore selected tombstone`, the single remaining explicit lifecycle
+command, covered by `docs/operations/source-locator-tombstone-lifecycle.md`.
 
 ## Server upload-operation claim and expiry
 
@@ -64,8 +117,9 @@ match `receiving`, token hash, workspace/device/event/idempotency identity,
 declared content fields, and the rebound policy revision; expiry is not part of
 that terminal fence. Consequently a receive that crossed the deadline cannot
 publish canonical state and then lose terminalization to a rotated row. After
-a lost response, run `Sync now`; the exact token resumes, canonical publication
-idempotency replays, and the single terminal receipt is frozen. Operators do
+a lost response no operator action is needed: the next automatic pass resumes
+the exact token, canonical publication idempotency replays, and the single
+terminal receipt is frozen. Operators do
 not edit operation rows or extend deadlines manually.
 
 The plugin still preflights every retry. A matching deny/indeterminate policy
@@ -78,8 +132,11 @@ invalidates a token after the operation reached `receiving`.
 
 ## Safe diagnostics
 
-The only diagnostic surfaces are the plugin status bar text and the
-settings snapshot: the six closed status values (counts and closed labels
+The diagnostic surfaces are the plugin status bar text, the settings
+snapshot, and the closed-token diagnostics trail surfaced by the `Run
+sync self-check` and `Copy sync diagnostics` commands (owned by
+`docs/operations/sync-error-tracing.md`). The status surfaces carry the
+six closed status values (counts and closed labels
 only) plus the per-blocker guidance lines. Journal records, thrown errors
 and attempts carry closed safe labels and opaque correlation IDs — never a
 path, digest, token, credential, provider detail or library exception. The
@@ -88,6 +145,36 @@ provider detail, and diagnostics follow
 `docs/operations/api-runtime-contract.md`. If an operator needs more than
 the status bar shows, the answer is the scenario table below — never a
 log of Vault content.
+
+## Note sync status (local-only)
+
+The settings Sync status tab renders one current row per note
+(`Sync status by note`), projected from the newest journal event and the
+current local-file mapping. Each note holds exactly one of seven closed
+states (`LocalNoteSyncState` in `apps/obsidian-plugin/src/journal/note-status.ts`):
+
+| State | Meaning |
+| --- | --- |
+| Synced | latest event committed or no-change and the current fingerprint matches |
+| Queued | eligible queued work exists; upload starts automatically |
+| Syncing | preflight or upload is active |
+| Retrying | retryable failure pending; retry time and closed reason shown |
+| Policy blocked | latest relevant event is terminal `excluded_policy` |
+| Conflict | latest relevant event is terminal `blocked_conflict` |
+| Reconciliation required | journal or mapping requires repair; automatic sync is stopped |
+
+An older terminal `excluded_policy` row stops being the note's current
+state once a successor event exists, so the list never reports a stale
+policy block after re-admission; audit history stays queryable locally
+but is never presented as a current blocker.
+
+A note's normalized Vault path renders ONLY in this local settings list,
+because the list exists to identify notes on the user's own device.
+Paths never appear in the status bar, telemetry, logs, HTTP status
+payloads or test artifacts. Automatic retry needs no operator action: a
+Retrying row carries its own retry deadline, the one-shot scheduled
+trigger (Queue state above) resumes it, and a reconnecting device simply
+lets the next pass commit.
 
 ## Recovery generation selection
 
@@ -147,7 +234,8 @@ locator-only but irrelevant to this file, the server reauthorizes only the
 claimed row's policy revision and the plugin resumes the exact persisted token
 to one canonical publication and one terminal receipt. The transient 403 may
 briefly render **Login required** because of the closed client mapping, but the
-credential is untouched: run one more pass (or `Sync now`); do not re-login or
+credential is untouched: the next automatic pass re-preflights and settles the
+event; do not re-login or
 classify every policy change as exclusion.
 Publishing and rotating policies is covered by
 `docs/operations/exclusion-policy-publication.md`; revoking a device is

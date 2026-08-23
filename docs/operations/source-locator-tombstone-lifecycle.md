@@ -12,13 +12,20 @@ The operator surface is small and deliberately redacted:
   the pending count.
 - One **settings tab** with the same closed status, the closed blocker
   guidance and the sync settings.
-- Three **commands**: `Sync now`, `Sync existing files` and
-  `Restore selected tombstone`.
+- One lifecycle **command**: `Restore selected tombstone` — the only
+  remaining explicit lifecycle command. The former `Sync now` and
+  `Sync existing files` commands were removed: convergence is automatic
+  (see `docs/operations/plugin-journal-small-file-sync.md`).
+- Two diagnostics **commands** (`Run sync self-check`,
+  `Copy sync diagnostics`) are owned by the sync-error-tracing runbook
+  (`docs/operations/sync-error-tracing.md`); they never touch lifecycle
+  state.
 
 Every other surface (logs, telemetry, error messages, command labels)
 is restricted to the closed enum vocabulary of spec 11 and Child 5.
 No path, locator, source ID, token, fingerprint or remote URL is ever
-rendered.
+rendered, with one sanctioned exception: the local-only
+`Sync status by note` settings list (see "Redacted diagnostics" below).
 
 Live setup details (launcher, stack secrets, restart sequence) live at
 [`.local/RESTART.md`](../../.local/RESTART.md) — never copy them here.
@@ -41,7 +48,10 @@ The closed `LifecycleLocalFileState` enum has exactly eight values:
 A pending lifecycle state blocks other writes to the same file but does NOT
 block the device's foreground pass: the bounded queue interleaves the
 content lane and the lifecycle lane so a rename / move / delete /
-restore commits before the next content event for the same file.
+restore commits before the next content event for the same file. Vault
+rename and delete events request a bounded pass directly, and the
+lifecycle lane drains through the same trigger-driven passes as the
+content lane — no command is needed to ship pending lifecycle work.
 
 The closed blocked reason codes surface the **why** a lifecycle event
 is stuck:
@@ -130,8 +140,9 @@ When `reconcile_required` appears:
 
 1. The status refresh stops the queue driver. The foreground pass
    never starts.
-2. No user action can bypass the stop. The `Sync now` command and the
-   Vault listeners both funnel through the same wrapper; the driver
+2. No user action can bypass the stop. The Vault listeners, the
+   automatic snapshot coordinator and the scheduled retry trigger all
+   funnel through the same dispatcher; the driver
    returns `stopped` until child 6 repairs the journal.
 3. The settings tab repeats the closed `reconcile_required` guidance
    line — "Sync stopped: journal reconciliation is required before
@@ -200,9 +211,12 @@ ONLY the closed enum vocabulary. Specifically:
   queue-preserving browser login, child-6 repair of a
   `reconcile_required` journal).
 - **Settings sync status tab** — the closed redacted lifecycle-state
-  histogram (counts only) and the closed blocked reason codes list.
-- **Command names** — `Sync now`, `Sync existing files`, `Restore
-  selected tombstone`.
+  histogram (counts only) and the closed blocked reason codes list. The
+  per-note `Sync status by note` list renders local Vault paths on-device
+  only; that surface is owned by
+  `docs/operations/plugin-journal-small-file-sync.md`.
+- **Command names** — `Restore selected tombstone`, plus the two
+  diagnostics commands listed in the operator surface above.
 - **Picker labels** — `Tombstone #abcd1234` (last 8 chars of the
   plugin-local file id). The underlying path is never shown.
 - **Notice and confirmation modals** — "No retained tombstones", "Pick
@@ -211,7 +225,10 @@ ONLY the closed enum vocabulary. Specifically:
 
 What the user **does not** see — never, anywhere on the surface:
 
-- Vault paths, including the file name and any parent directories.
+- Vault paths, including the file name and any parent directories. The
+  single sanctioned exception is the local-only `Sync status by note`
+  settings list (see above), which renders the user's own paths on-device
+  and never lets them leave the device.
 - Locator text (`expected_locator`, `target_locator`,
   `last_locator`).
 - Source IDs, base version IDs, predecessor event IDs.
@@ -232,8 +249,8 @@ tab or any telemetry.
 ## Linked references
 
 - Plugin composition (`apps/obsidian-plugin/src/plugin.ts` and
-  `apps/obsidian-plugin/README.md`) — composition wiring and the three
-  command surface.
+  `apps/obsidian-plugin/README.md`) — composition wiring, the automatic
+  snapshot coordinator and the command surface.
 - Lifecycle contracts (`apps/obsidian-plugin/src/journal/lifecycle-contracts.ts`)
   — the closed `LifecycleLocalFileState` enum and the operand record.
 - Status projection (`apps/obsidian-plugin/src/journal/status.ts`) —
