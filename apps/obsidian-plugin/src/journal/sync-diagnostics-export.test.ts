@@ -247,6 +247,10 @@ describe("deriveSyncStopReasonTokens", () => {
       deriveSyncStopReasonTokens([
         trailEntry("pass_outcome", 1, ["completed"]),
         trailEntry("wire_failure", 2, [envelopeRequestId(REQUEST_ID)]),
+        // A self_check verdict (sync error tracing task 3) is never a stop
+        // reason, not even the unreachable-origin one.
+        trailEntry("self_check", 3, ["origin_unreachable", "network_offline"]),
+        trailEntry("trail_reset", 4, []),
       ]),
     ).toEqual([]);
     expect(deriveSyncStopReasonTokens([])).toEqual([]);

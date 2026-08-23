@@ -162,10 +162,12 @@ describe("Obsidian plugin composition root", () => {
     expect(pluginSource).not.toContain('id: "sync-now"');
     expect(pluginSource).not.toContain('id: "sync-existing-files"');
     expect(pluginSource).toContain('id: "restore-selected-tombstone"');
-    // Sync error tracing task 2 adds the ONE sanitized export command; the
-    // restore command stays the only other explicit surface.
+    // Sync error tracing task 2 adds the ONE sanitized export command and
+    // task 3 the ONE bounded self-check command; the restore command stays
+    // the only other explicit surface.
     expect(pluginSource).toContain('id: "copy-sync-diagnostics"');
-    expect(pluginSource.match(/addCommand\(/g)?.length ?? 0).toBe(2);
+    expect(pluginSource).toContain('id: "run-sync-self-check"');
+    expect(pluginSource.match(/addCommand\(/g)?.length ?? 0).toBe(3);
     expect(pluginSource).not.toContain("#runExistingFilesScan");
     expect(pluginSource).not.toContain("#drainExistingFilesScanQueue");
     expect(pluginSource).not.toContain("#confirmExistingFilesScan");
@@ -529,6 +531,49 @@ describe("Obsidian plugin composition root", () => {
     expect(builderBody).toContain("readEntries()");
     expect(builderBody).toContain("readAppendFailureCount()");
     expect(builderBody).not.toContain("console.");
+  });
+
+  it("registers the bounded sync self-check command with closed verdicts only (sync error tracing task 3)", () => {
+    expect(pluginSource).toContain('id: "run-sync-self-check"');
+    expect(pluginSource).toContain('"Run sync self-check"');
+    const commandIndex = pluginSource.indexOf('id: "run-sync-self-check"');
+    const commandBody = pluginSource.slice(commandIndex, commandIndex + 300);
+    expect(commandBody).toContain("#runSyncSelfCheck");
+    const methodMatch = pluginSource.match(
+      /async #runSyncSelfCheck\(\): Promise<void> \{[\s\S]*?\n  \}\n/,
+    );
+    expect(methodMatch?.[0]).toBeTruthy();
+    const methodBody = methodMatch?.[0] ?? "";
+    // The pure runner owns every verdict; the summary notice renders ONLY
+    // its closed-token line.
+    expect(methodBody).toContain("runSyncSelfCheck");
+    expect(methodBody).toContain("renderSyncSelfCheckSummaryText");
+    expect(methodBody).toContain("new Notice");
+    // The self-check holds NO sync-mutating capability: no preflight
+    // request, no queue pass, no policy read, no journal surface, no
+    // logging surface.
+    expect(methodBody).not.toContain("preflight");
+    expect(methodBody).not.toContain("requestPass");
+    expect(methodBody).not.toContain("policySession");
+    expect(methodBody).not.toContain("queueDriver");
+    expect(methodBody).not.toContain("repository");
+    expect(methodBody).not.toContain("console.");
+    // The credential verdict is the boolean presence only — the token value
+    // never enters the self-check.
+    expect(methodBody).toContain("accessCredential != null");
+    // The probe reuses the existing requestUrl transport seam toward the
+    // SAME resolved origin the sync client uses; the runner bounds it with
+    // its short timeout and runs it exactly once (no retry loop here).
+    expect(methodBody).toContain("createObsidianPolicyHttpTransport");
+    expect(methodBody).toContain("parseServerOrigin");
+    expect(methodBody).toContain("/api/health/live");
+    expect(methodBody).not.toContain("setInterval");
+    expect(methodBody).not.toContain("registerInterval");
+    // The trail port plus the boolean reader plus the one probe are the
+    // runner's entire capability surface.
+    expect(methodBody).toContain("const trail = this.#diagnosticTrail");
+    expect(methodBody).toContain("hasAccessCredential:");
+    expect(methodBody).toContain("probeOrigin:");
   });
 
   it("carries the trail tail, counts and derived stop reasons on the settings snapshot (sync error tracing task 2)", () => {

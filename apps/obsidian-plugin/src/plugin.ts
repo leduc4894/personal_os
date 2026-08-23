@@ -76,6 +76,7 @@ import {
   renderSyncDiagnosticsExportBlock,
 } from "./journal/sync-diagnostics-export";
 import { createJournalSyncApi } from "./journal/sync-api";
+import { renderSyncSelfCheckSummaryText, runSyncSelfCheck } from "./journal/sync-self-check";
 import { createUuidv7Factory } from "./journal/uuidv7";
 import { PolicySession } from "./exclusion-policy/policy-session";
 import type { PolicyCacheAdapter } from "./exclusion-policy/policy-cache";
@@ -372,6 +373,20 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       name: "Copy sync diagnostics",
       callback: () => {
         void this.#copySyncDiagnostics();
+      },
+    });
+
+    // Sync error tracing task 3: the bounded self-check localizes the
+    // failing layer — trail persist, credential presence, origin
+    // reachability — with closed verdict tokens only. Every step appends a
+    // `self_check` trail entry, nothing mutates sync state (no journal
+    // event, no preflight, no policy read), and the one origin probe runs
+    // under a short bounded timeout with no retry loop.
+    this.addCommand({
+      id: "run-sync-self-check",
+      name: "Run sync self-check",
+      callback: () => {
+        void this.#runSyncSelfCheck();
       },
     });
 
@@ -894,6 +909,49 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       trailAppendFailureCount: this.#diagnosticTrail?.readAppendFailureCount() ?? 0,
       trailTail: trailEntries.slice(-SYNC_DIAGNOSTICS_TRAIL_TAIL_ENTRY_LIMIT),
     });
+  }
+
+  /**
+   * The run-sync-self-check command callback (sync error tracing task 3):
+   * execute the three closed-verdict steps — trail append-and-persist
+   * probe, credential presence, origin reachability — and show the
+   * one-line summary in a notice. The composition holds no sync-mutating
+   * capability: the pure runner receives only the trail port, the boolean
+   * credential-presence reader and one liveness GET through the existing
+   * requestUrl transport seam toward the SAME resolved origin the sync
+   * client uses. Any outcome — including an unreachable or hanging origin —
+   * closes as a verdict token; no hostname, status number or response text
+   * ever reaches the notice.
+   */
+  async #runSyncSelfCheck(): Promise<void> {
+    const trail = this.#diagnosticTrail;
+    if (trail === null) {
+      // The journal stack failed closed at load: there is no trail to probe
+      // and no sync surface to diagnose beyond that fact.
+      new Notice("Sync self-check unavailable: journal not running on this device.");
+      return;
+    }
+    const transport = createObsidianPolicyHttpTransport();
+    const summary = await runSyncSelfCheck({
+      trail,
+      hasAccessCredential: () => this.#session?.accessCredential != null,
+      probeOrigin: async () => {
+        const origin =
+          parseServerOrigin(this.#settings.server_origin, {
+            allowLoopbackHttp: ALLOW_LOOPBACK_HTTP_ORIGIN,
+          }) ?? "";
+        if (origin === "") {
+          // No configured (or parseable) origin: the probe cannot be sent,
+          // so the origin is simply not reachable. The verdict stays closed.
+          throw new Error("origin unconfigured");
+        }
+        // The side-effect-free liveness route: any settled HTTP answer —
+        // whatever its status — proves the origin reachable, and the status
+        // and body never enter a verdict.
+        await transport({ url: `${origin}/api/health/live`, headers: {} });
+      },
+    });
+    new Notice(renderSyncSelfCheckSummaryText(summary), 10_000);
   }
 
   /**

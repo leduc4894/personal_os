@@ -21,6 +21,7 @@ import {
   MAX_SYNC_DIAGNOSTICS_TRAIL_ENTRIES,
   MAX_SYNC_DIAGNOSTICS_TRAIL_TOKENS_PER_ENTRY,
   SYNC_DIAGNOSTICS_TRAIL_FILE_NAME,
+  SYNC_SELF_CHECK_VERDICT_TOKENS,
   createSyncDiagnosticsTrail,
   envelopeRequestId,
 } from "./sync-diagnostics-trail";
@@ -292,6 +293,45 @@ describe("sync diagnostics trail write serialization", () => {
   });
 });
 
+// --- the self_check kind and verdict tokens (sync error tracing task 3) ------------------------------
+
+describe("sync diagnostics trail self_check entries", () => {
+  it("persists and reloads self_check entries carrying the fixed verdict tokens", async () => {
+    const store = new FakeTrailFileStore();
+    const trail = await createLoadedTrail(store);
+    await trail.append({ kind: "self_check", tokens: ["trail_probe"] });
+    await trail.append({ kind: "self_check", tokens: ["trail_persist_ok"] });
+    await trail.append({ kind: "self_check", tokens: ["credential_present"] });
+    await trail.append({ kind: "self_check", tokens: ["origin_reachable"] });
+    await trail.append({
+      kind: "self_check",
+      tokens: ["origin_unreachable", "network_offline"],
+    });
+    const reloaded = await createLoadedTrail(store);
+    expect(
+      reloaded.readEntries().map((entry) => [entry.kind, ...entry.tokens]),
+    ).toEqual([
+      ["self_check", "trail_probe"],
+      ["self_check", "trail_persist_ok"],
+      ["self_check", "credential_present"],
+      ["self_check", "origin_reachable"],
+      ["self_check", "origin_unreachable", "network_offline"],
+    ]);
+  });
+
+  it("pins the fixed self-check verdict token vocabulary", () => {
+    expect(SYNC_SELF_CHECK_VERDICT_TOKENS).toEqual([
+      "trail_probe",
+      "trail_persist_ok",
+      "trail_persist_failed",
+      "credential_present",
+      "credential_absent",
+      "origin_reachable",
+      "origin_unreachable",
+    ]);
+  });
+});
+
 // --- the type-level closed vocabulary ----------------------------------------------------------------
 
 describe("sync diagnostics trail closed vocabulary (type level)", () => {
@@ -319,6 +359,18 @@ describe("sync diagnostics trail closed vocabulary (type level)", () => {
       kind: "wire_failure",
       tokens: ["server_error", envelopeRequestId(REQUEST_ID)],
     });
+    // The fixed self-check verdicts DO type-check as self_check tokens,
+    // including the reused sync network kinds.
+    await trail.append({ kind: "self_check", tokens: ["trail_persist_ok"] });
+    await trail.append({
+      kind: "self_check",
+      tokens: ["origin_unreachable", "network_timeout"],
+    });
+    trail.append({
+      kind: "self_check",
+      // @ts-expect-error a free-form verdict must not enter a self_check entry
+      tokens: ["the trail is fine"],
+    }).catch(() => undefined);
   });
 });
 

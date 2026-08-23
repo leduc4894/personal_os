@@ -6,7 +6,8 @@
  * timestamp and a bounded list of tokens drawn ONLY from the existing
  * closed vocabularies (`QueuePassOutcome`, `JournalSafeErrorLabel`,
  * `JournalStoreErrorReason`, `SyncApiFailureKind` labels,
- * `LifecycleRunOutcome`) plus the one opaque envelope request id. A
+ * `LifecycleRunOutcome`) plus the one opaque envelope request id and the
+ * fixed self-check verdict tokens of the `self_check` kind. A
  * free-form string cannot enter an entry at the type level, and the
  * sidecar parser rejects any token that is not a closed snake_case token
  * or a well-formed request id record.
@@ -54,6 +55,7 @@ export const SYNC_DIAGNOSTIC_KINDS = [
   "journal_failure",
   "publish_failure",
   "trail_reset",
+  "self_check",
 ] as const;
 
 export type SyncDiagnosticKind = (typeof SYNC_DIAGNOSTIC_KINDS)[number];
@@ -70,7 +72,27 @@ export type SyncDiagnosticClosedToken =
   | JournalSafeErrorLabel
   | JournalStoreErrorReason
   | SyncApiFailureKind
-  | LifecycleRunOutcome;
+  | LifecycleRunOutcome
+  | SyncSelfCheckVerdictToken;
+
+/**
+ * The fixed self-check verdict tokens (sync error tracing task 3): the
+ * trail-persist probe outcome, the boolean credential-presence verdict and
+ * the origin-reachability verdict. The network label that may ride along
+ * with `origin_unreachable` stays in the sync failure vocabulary
+ * (`network_offline`, `network_timeout`) instead of being duplicated here.
+ */
+export const SYNC_SELF_CHECK_VERDICT_TOKENS = [
+  "trail_probe",
+  "trail_persist_ok",
+  "trail_persist_failed",
+  "credential_present",
+  "credential_absent",
+  "origin_reachable",
+  "origin_unreachable",
+] as const;
+
+export type SyncSelfCheckVerdictToken = (typeof SYNC_SELF_CHECK_VERDICT_TOKENS)[number];
 
 /**
  * The brand that keeps the opaque envelope request id out of the closed
