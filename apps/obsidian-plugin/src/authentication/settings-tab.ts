@@ -41,6 +41,19 @@ export interface DeviceAuthenticationSnapshot {
   readonly failedAttemptCount: number;
   /** Closed blocked reason codes observed on the journal; empty when none. */
   readonly lifecycleBlockedReasonCodes: readonly LifecycleBlockedReasonCode[];
+  /**
+   * Fix round 5 diagnostics: the closed `JournalStoreErrorReason` tokens of
+   * the journal failures the queue pass loop's fail-closed catch swallowed,
+   * newest last (bounded, in-memory only). Empty when none were observed.
+   */
+  readonly lastJournalFailureReasons: readonly string[];
+  /**
+   * Fix round 5 diagnostics: the total generation-publish failure count and
+   * the last bounded closed reason tokens (the file-store/publish path),
+   * newest last. Zero/empty when every publish verified.
+   */
+  readonly generationPublishFailureCount: number;
+  readonly lastGenerationPublishFailureReasons: readonly string[];
   /** Local-only per-note statuses; paths must never leave this settings tab. */
   readonly localNoteSyncStatuses: readonly LocalNoteSyncStatus[];
 }
@@ -98,6 +111,20 @@ export class DeviceAuthenticationSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Lifecycle blockers")
       .setDesc(lifecycleBlockedReasonCodesDescription(snapshot));
+
+    // Fix round 5: the closed-token diagnostics of swallowed journal
+    // failures and generation-publish failures — the surface that makes
+    // environmental commit failures (the live park mystery) diagnosable.
+    // Closed vocabulary only: no raw error text, path, digest or content.
+    new Setting(containerEl)
+      .setName("Journal store diagnostics")
+      .setDesc(
+        renderJournalStoreDiagnosticsLine({
+          lastJournalFailureReasons: snapshot.lastJournalFailureReasons,
+          generationPublishFailureCount: snapshot.generationPublishFailureCount,
+          lastGenerationPublishFailureReasons: snapshot.lastGenerationPublishFailureReasons,
+        }),
+      );
 
     // Vault paths are intentionally limited to this local settings surface.
     // The aggregate sync status and status bar remain redacted.
@@ -219,6 +246,38 @@ function lifecycleBlockedReasonCodesDescription(snapshot: DeviceAuthenticationSn
     return "No lifecycle blockers observed";
   }
   return [...snapshot.lifecycleBlockedReasonCodes].join(", ");
+}
+
+/**
+ * Render the journal store diagnostics line (fix round 5): the closed
+ * `JournalStoreErrorReason` tokens of swallowed pass-loop journal failures
+ * plus the generation-publish failure count and its last closed reasons.
+ * Closed vocabulary only — the line never carries a raw error message,
+ * path, digest, credential or journal content.
+ */
+export function renderJournalStoreDiagnosticsLine(input: {
+  readonly lastJournalFailureReasons: readonly string[];
+  readonly generationPublishFailureCount: number;
+  readonly lastGenerationPublishFailureReasons: readonly string[];
+}): string {
+  if (
+    input.lastJournalFailureReasons.length === 0 &&
+    input.generationPublishFailureCount === 0
+  ) {
+    return "No journal store failures observed.";
+  }
+  const parts: string[] = [];
+  if (input.lastJournalFailureReasons.length > 0) {
+    parts.push(`Pass failures: ${input.lastJournalFailureReasons.join(", ")}`);
+  }
+  if (input.generationPublishFailureCount > 0) {
+    const reasons = input.lastGenerationPublishFailureReasons.join(", ");
+    parts.push(
+      `Generation publish failures: ${input.generationPublishFailureCount}` +
+        (reasons.length > 0 ? ` (${reasons})` : ""),
+    );
+  }
+  return parts.join("\n");
 }
 
 /**

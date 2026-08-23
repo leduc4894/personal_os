@@ -397,6 +397,67 @@ describe("JournalPersistence generation protocol and retention (spec 6.2)", () =
   });
 });
 
+describe("JournalPersistence generation-publish failure diagnostics (fix round 5)", () => {
+  it("counts generation publish failures and keeps the last closed reasons", async () => {
+    const store = new InMemoryJournalFileStore();
+    const journal = await openedPersistence(store);
+    expect(journal.readGenerationPublishFailureSummary()).toEqual({ count: 0, lastReasons: [] });
+
+    let failuresLeft = 2;
+    const originalWriteBinary = store.writeBinary.bind(store);
+    store.writeBinary = async (fileName: string, data: ArrayBuffer): Promise<void> => {
+      if (failuresLeft > 0 && fileName.startsWith(JOURNAL_GENERATION_FILE_PREFIX)) {
+        failuresLeft -= 1;
+        throw new Error("adapter write failed");
+      }
+      await originalWriteBinary(fileName, data);
+    };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await expect(journal.commitGeneration(() => undefined)).rejects.toMatchObject({
+        reason: "journal_generation_write_failed",
+      });
+    }
+    expect(journal.readGenerationPublishFailureSummary()).toEqual({
+      count: 2,
+      lastReasons: ["journal_generation_write_failed", "journal_generation_write_failed"],
+    });
+
+    // A healthy publish afterwards keeps the recorded failures untouched.
+    await journal.commitGeneration(() => undefined);
+    expect(journal.readGenerationPublishFailureSummary()).toEqual({
+      count: 2,
+      lastReasons: ["journal_generation_write_failed", "journal_generation_write_failed"],
+    });
+    journal.close();
+  });
+
+  it("bounds the publish-failure reason ring at five while the count keeps growing", async () => {
+    const store = new InMemoryJournalFileStore();
+    const journal = await openedPersistence(store);
+    store.writeBinary = async (fileName: string): Promise<void> => {
+      if (fileName.startsWith(JOURNAL_GENERATION_FILE_PREFIX)) {
+        throw new Error("adapter write failed");
+      }
+      return undefined;
+    };
+    for (let attempt = 0; attempt < 7; attempt += 1) {
+      await expect(journal.commitGeneration(() => undefined)).rejects.toMatchObject({
+        reason: "journal_generation_write_failed",
+      });
+    }
+    const summary = journal.readGenerationPublishFailureSummary();
+    expect(summary.count).toBe(7);
+    expect(summary.lastReasons).toEqual([
+      "journal_generation_write_failed",
+      "journal_generation_write_failed",
+      "journal_generation_write_failed",
+      "journal_generation_write_failed",
+      "journal_generation_write_failed",
+    ]);
+    journal.close();
+  });
+});
+
 describe("JournalPersistence recovery notification buffer (spec 6.1)", () => {
   it("buffers distinct vault paths during recovery and drains them once", async () => {
     const store = new InMemoryJournalFileStore();

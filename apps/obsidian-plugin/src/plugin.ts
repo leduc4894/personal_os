@@ -297,6 +297,11 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     this.#settingTab = new DeviceAuthenticationSettingTab(this.app, this, {
       getSnapshot: () => {
         const syncStatus = this.#projectSyncStatus();
+        // Fix round 5: the closed-token journal diagnostics of the two
+        // swallowed-failure surfaces (pass-loop journal failures and
+        // generation publish failures) reach the settings tab here.
+        const generationPublishFailures =
+          this.#journalPersistence?.readGenerationPublishFailureSummary() ?? null;
         return {
           connectionState: this.#connectionState,
           statusDetail: this.#statusDetail,
@@ -314,6 +319,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           pendingLifecycleEventCount: syncStatus?.pendingLifecycleEventCount ?? 0,
           failedAttemptCount: syncStatus?.failedAttemptCount ?? 0,
           lifecycleBlockedReasonCodes: syncStatus?.lifecycleBlockedReasonCodes ?? [],
+          lastJournalFailureReasons: this.#queueDriver?.readJournalFailureReasons() ?? [],
+          generationPublishFailureCount: generationPublishFailures?.count ?? 0,
+          lastGenerationPublishFailureReasons:
+            generationPublishFailures?.lastReasons ?? [],
           localNoteSyncStatuses: this.#readLocalNoteSyncStatuses(),
         };
       },

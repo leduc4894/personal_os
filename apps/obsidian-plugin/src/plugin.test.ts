@@ -455,6 +455,23 @@ describe("Obsidian plugin composition root", () => {
     expect(projectionBody).toContain("lifecycleBlockedReasonCodes:");
   });
 
+  it("surfaces the journal store diagnostics through the settings snapshot (fix round 5)", () => {
+    // The live park mystery (repro-park-not-landing.md): markEventWaitingRetry
+    // commits never landed on the user's machine while sibling mutations
+    // published fine, and runPass's bare catch discarded the closed reason.
+    // The settings snapshot must surface BOTH closed-token diagnostic
+    // surfaces: the queue driver's journal-failure ring and the
+    // persistence generation-publish failure counter/ring.
+    const snapshotIndex = pluginSource.indexOf("getSnapshot: () => {");
+    expect(snapshotIndex).toBeGreaterThanOrEqual(0);
+    const snapshotBody = pluginSource.slice(snapshotIndex, snapshotIndex + 1_800);
+    expect(snapshotBody).toContain("readJournalFailureReasons()");
+    expect(snapshotBody).toContain("lastJournalFailureReasons:");
+    expect(snapshotBody).toContain("readGenerationPublishFailureSummary()");
+    expect(snapshotBody).toContain("generationPublishFailureCount:");
+    expect(snapshotBody).toContain("lastGenerationPublishFailureReasons:");
+  });
+
   it("folds the lifecycle state histogram onto the settings snapshot", () => {
     // Fix round 1 I1: the settings snapshot holds the same four lifecycle
     // fields so the settings tab can render the histogram and the blocked

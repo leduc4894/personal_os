@@ -27,6 +27,7 @@ import type { JournalMeta, JournalRecoveryState } from "./contracts";
 import {
   JOURNAL_SCHEMA_VERSION,
   JournalStoreError,
+  type JournalStoreErrorReason,
   journalStoreError,
   SqliteDatabase,
 } from "./sqlite-database";
@@ -246,6 +247,13 @@ export interface JournalPersistenceOptions {
  * recovered working database, the verified generation chain and the single
  * serialized commit queue through which every durable mutation flows.
  */
+/**
+ * The bounded number of closed publish-failure reason tokens kept in
+ * memory (fix round 5). The count itself is unbounded; only the token
+ * ring is bounded.
+ */
+const MAX_GENERATION_PUBLISH_FAILURE_REASONS = 5;
+
 export class JournalPersistence {
   readonly #fileStore: JournalFileStore;
   readonly #engineModule: SqliteEngineModule;
@@ -254,6 +262,15 @@ export class JournalPersistence {
   #verifiedGeneration: VerifiedJournalGeneration | null = null;
   #priorVerifiedGeneration: VerifiedJournalGeneration | null = null;
   #isReconcileRequired = false;
+  /**
+   * Fix round 5 diagnostics: the bounded in-memory record of generation
+   * PUBLISH failures (the file-store/publish path after a committed
+   * transaction). Closed reason tokens only — the live torn-publish
+   * investigation needed exactly this surface to discriminate
+   * environmental write failures from code defects.
+   */
+  #generationPublishFailureCount = 0;
+  readonly #generationPublishFailureReasons: JournalStoreErrorReason[] = [];
   #hasRecoveryBufferOverflowed = false;
   #inFlightCommitCount = 0;
   readonly #bufferedVaultPaths = new Set<string>();
@@ -611,8 +628,42 @@ export class JournalPersistence {
       });
       return operationResult;
     });
-    await this.#publishGeneration(nextGenerationNumber);
+    try {
+      await this.#publishGeneration(nextGenerationNumber);
+    } catch (error) {
+      this.#recordGenerationPublishFailure(error);
+      throw error;
+    }
     return result;
+  }
+
+  /**
+   * The closed-token view of generation publish failures (fix round 5):
+   * the total count plus the last bounded reason tokens, newest last.
+   * In-memory only; closed vocabulary only.
+   */
+  readGenerationPublishFailureSummary(): {
+    readonly count: number;
+    readonly lastReasons: readonly JournalStoreErrorReason[];
+  } {
+    return {
+      count: this.#generationPublishFailureCount,
+      lastReasons: [...this.#generationPublishFailureReasons],
+    };
+  }
+
+  /** Record one publish failure's closed reason, if it has one. */
+  #recordGenerationPublishFailure(error: unknown): void {
+    if (!(error instanceof JournalStoreError)) {
+      return;
+    }
+    this.#generationPublishFailureCount += 1;
+    this.#generationPublishFailureReasons.push(error.reason);
+    if (
+      this.#generationPublishFailureReasons.length > MAX_GENERATION_PUBLISH_FAILURE_REASONS
+    ) {
+      this.#generationPublishFailureReasons.shift();
+    }
   }
 
   /**

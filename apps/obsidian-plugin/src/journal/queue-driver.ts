@@ -42,6 +42,7 @@ import { MAX_FILE_SIZE_BYTES } from "./contracts";
 import { deriveFrozenFingerprint } from "./fingerprint";
 import type { LifecycleDriver, LifecycleRunOutcome } from "./lifecycle-driver";
 import type { JournalRepository } from "./repository";
+import { JournalStoreError, type JournalStoreErrorReason } from "./sqlite-database";
 import type { JournalPreflightOutcome, JournalSyncApi, SmallFileTerminalReceipt } from "./sync-api";
 import { SyncApiError } from "./sync-api";
 
@@ -157,6 +158,15 @@ type PassEndReason =
 
 type PassContinuation = "continue" | PassEndReason;
 
+/**
+ * The bounded in-memory ring of closed journal-failure reason tokens (fix
+ * round 5): the pass loop's fail-closed catch used to discard the closed
+ * `JournalStoreErrorReason` entirely, making environmental commit failures
+ * (the live park mystery) undiagnosable by design. Closed tokens only —
+ * never a raw error message, path, digest or credential.
+ */
+const MAX_JOURNAL_FAILURE_REASON_HISTORY = 5;
+
 /** The per-pass credential budget: at most one refresh, one login verdict. */
 interface RefreshBudget {
   hasRefreshed: boolean;
@@ -195,6 +205,7 @@ export class JournalQueueDriver {
   readonly #requestTimeoutMs: number;
   #isStopped = false;
   #isPassRunning = false;
+  readonly #journalFailureReasons: JournalStoreErrorReason[] = [];
 
   constructor(options: JournalQueueDriverOptions) {
     this.#repository = options.repository;
@@ -366,10 +377,13 @@ export class JournalQueueDriver {
             break;
           }
           continuation = await this.#processEvent(event, passDeadlineEpochMs, refreshBudget);
-        } catch {
+        } catch (error) {
           // A journal failure mid-pass fails closed: the pass ends with the
           // journal as the durable truth and never crashes its trigger. The
           // failure endures — no deadline conversion, no automatic follow-up.
+          // Fix round 5: the swallowed error's closed reason token lands in
+          // the bounded diagnostic ring so the failure is diagnosable.
+          this.#recordJournalFailureReason(error);
           passEndReason = "end_journal_failure";
           break;
         }
@@ -428,6 +442,26 @@ export class JournalQueueDriver {
       return { outcome: passOutcome, processedEventCount };
     } finally {
       this.#isPassRunning = false;
+    }
+  }
+
+  /**
+   * The bounded closed-token view of the journal failures the pass loop's
+   * fail-closed catch swallowed (fix round 5). Newest last; at most
+   * {@link MAX_JOURNAL_FAILURE_REASON_HISTORY} tokens; in-memory only.
+   */
+  readJournalFailureReasons(): readonly JournalStoreErrorReason[] {
+    return [...this.#journalFailureReasons];
+  }
+
+  /** Record one swallowed journal failure's closed reason, if it has one. */
+  #recordJournalFailureReason(error: unknown): void {
+    if (!(error instanceof JournalStoreError)) {
+      return;
+    }
+    this.#journalFailureReasons.push(error.reason);
+    if (this.#journalFailureReasons.length > MAX_JOURNAL_FAILURE_REASON_HISTORY) {
+      this.#journalFailureReasons.shift();
     }
   }
 

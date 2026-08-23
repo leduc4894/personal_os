@@ -14,7 +14,7 @@ vi.mock("obsidian", () => ({
   },
 }));
 
-import { renderLocalNoteSyncStatusList } from "./settings-tab";
+import { renderJournalStoreDiagnosticsLine, renderLocalNoteSyncStatusList } from "./settings-tab";
 
 const tabPath = new URL("./settings-tab.ts", import.meta.url);
 const tabSource = readFileSync(tabPath, "utf8");
@@ -126,6 +126,33 @@ describe("DeviceAuthenticationSettingTab source contract", () => {
     ]) {
       expect(tabSource).not.toContain(forbiddenText);
     }
+  });
+});
+
+describe("renderJournalStoreDiagnosticsLine (fix round 5)", () => {
+  it("renders an observed empty state", () => {
+    expect(
+      renderJournalStoreDiagnosticsLine({
+        lastJournalFailureReasons: [],
+        generationPublishFailureCount: 0,
+        lastGenerationPublishFailureReasons: [],
+      }),
+    ).toContain("No journal store failures observed.");
+  });
+
+  it("renders the closed reason tokens and the publish-failure count only", () => {
+    const line = renderJournalStoreDiagnosticsLine({
+      lastJournalFailureReasons: ["journal_mutation_failed", "journal_query_failed"],
+      generationPublishFailureCount: 3,
+      lastGenerationPublishFailureReasons: ["journal_generation_write_failed"],
+    });
+    expect(line).toContain("journal_mutation_failed, journal_query_failed");
+    expect(line).toContain("3");
+    expect(line).toContain("journal_generation_write_failed");
+    // Closed vocabulary only: no raw error text, path, digest or content
+    // ever reaches the line.
+    expect(line).not.toContain("Error:");
+    expect(line).not.toContain("notes/");
   });
 });
 

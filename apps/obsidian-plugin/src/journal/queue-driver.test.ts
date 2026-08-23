@@ -30,7 +30,7 @@ import {
 } from "./queue-driver";
 import type { QueuePassSummary } from "./queue-driver";
 import { JournalRepository } from "./repository";
-import { JOURNAL_SCHEMA_VERSION, SqliteDatabase } from "./sqlite-database";
+import { JOURNAL_SCHEMA_VERSION, journalStoreError, SqliteDatabase } from "./sqlite-database";
 import type { SqliteEngineModule } from "./sqlite-database";
 import { createJournalSyncApi } from "./sync-api";
 import { LifecycleDriverImpl, type LifecycleApi } from "./lifecycle-driver";
@@ -977,6 +977,98 @@ describe("queue driver credential handling (spec 8, 12)", () => {
     expect(firstStored?.safeError).toBe("login_required");
     expect(harness.repository.readEvent(second.eventId)?.state).toBe("queued");
     expect(harness.repository.countPendingEvents()).toBe(2);
+  });
+
+  it("parks an edge 403 with a non-API HTML body under server_error and ends the pass retry_scheduled (fix round 5)", async () => {
+    const harness = createHarness();
+    const event = await captureBytes(harness, "notes/edge-403.md", new TextEncoder().encode("edge blocked"));
+    harness.installTransport({
+      preflight: async () => ({
+        status: 403,
+        bodyText: "<!DOCTYPE html><html><body>Blocked by the edge firewall.</body></html>",
+      }),
+    });
+
+    const summary = await runPass(harness.driver);
+    // A wire failure, not a login verdict: the pass ends retry_scheduled
+    // and the event sits in bounded network backoff — the queue survives
+    // instead of starving behind a false login_required park.
+    expect(summary.outcome).toBe("retry_scheduled");
+    const stored = harness.repository.readEvent(event.eventId);
+    expect(stored?.state).toBe("waiting_retry");
+    expect(stored?.safeError).toBe("server_error");
+    expect(stored?.nextEligibleRetryEpochMs).not.toBeNull();
+    expect(harness.refreshCalls.count).toBe(0);
+    expect(harness.repository.countPendingEvents()).toBe(1);
+  });
+
+  it("keeps a genuine API 403 envelope as a login_required park with no refresh", async () => {
+    const harness = createHarness();
+    const event = await captureBytes(harness, "notes/api-403.md", new TextEncoder().encode("api denied"));
+    harness.installTransport({
+      preflight: async () => ({
+        status: 403,
+        bodyText: errorBody("authorization_scope_denied"),
+      }),
+    });
+
+    const summary = await runPass(harness.driver);
+    expect(summary.outcome).toBe("login_required");
+    const stored = harness.repository.readEvent(event.eventId);
+    expect(stored?.state).toBe("waiting_retry");
+    expect(stored?.safeError).toBe("login_required");
+    // The content lane refreshes only access_expired (401): a genuine API
+    // 403 login verdict never attempts a refresh — the 401 discipline of
+    // the neighboring tests is untouched.
+    expect(harness.refreshCalls.count).toBe(0);
+  });
+});
+
+// --- journal-failure diagnostics (fix round 5) -----------------------------------------------------------
+
+describe("queue driver journal-failure diagnostics (fix round 5)", () => {
+  it("records the closed store-error reason of a mid-pass journal failure", async () => {
+    const harness = createHarness();
+    await captureBytes(harness, "notes/journal-failure.md", new TextEncoder().encode("failure bytes"));
+    harness.installTransport({
+      preflight: async () => ({ status: 200, bodyText: SINGLE_PART_BODY }),
+    });
+    expect(harness.driver.readJournalFailureReasons()).toEqual([]);
+    // The pass loop's bare catch (end_journal_failure) used to swallow the
+    // closed reason entirely — the live park mystery was undiagnosable by
+    // design.
+    harness.repository.readOldestEligibleEvent = () => {
+      throw journalStoreError("journal_query_failed");
+    };
+    const summary = await runPass(harness.driver);
+    expect(summary.outcome).toBe("completed");
+    expect(harness.driver.readJournalFailureReasons()).toEqual(["journal_query_failed"]);
+  });
+
+  it("keeps only the last five reasons and records nothing for non-store errors", async () => {
+    const harness = createHarness();
+    await captureBytes(harness, "notes/journal-failure-bound.md", new TextEncoder().encode("bound bytes"));
+    harness.installTransport({
+      preflight: async () => ({ status: 200, bodyText: SINGLE_PART_BODY }),
+    });
+    harness.repository.readOldestEligibleEvent = () => {
+      throw journalStoreError("journal_store_unavailable");
+    };
+    for (let passIndex = 0; passIndex < 7; passIndex += 1) {
+      await runPass(harness.driver);
+    }
+    harness.repository.readOldestEligibleEvent = () => {
+      throw new Error("not a journal store error");
+    };
+    await runPass(harness.driver);
+    // Bounded at five, closed tokens only: a non-store error adds nothing.
+    expect(harness.driver.readJournalFailureReasons()).toEqual([
+      "journal_store_unavailable",
+      "journal_store_unavailable",
+      "journal_store_unavailable",
+      "journal_store_unavailable",
+      "journal_store_unavailable",
+    ]);
   });
 });
 
