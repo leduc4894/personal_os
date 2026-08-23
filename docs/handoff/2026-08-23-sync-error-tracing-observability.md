@@ -207,3 +207,42 @@ mystery M1 — it is the one open item (§6, one BACKLOG row).**
 - Lifecycle operator surface:
   `docs/operations/source-locator-tombstone-lifecycle.md`
 - Deferred-minor index: `docs/handoff/BACKLOG.md`
+
+---
+
+# Session close-out addendum (2026-08-23 ~23:50 local)
+
+Branch head at closure: `f2e1f6e`. No uncommitted implementation work (the locator-conflict fix dispatch was cancelled before writing code; verify with `git status` + the SDD ledger's final entry).
+
+## What the system just proved live
+
+The observability stack built by this plan diagnosed and closed a two-day production stall end-to-end: durable trail + request_id correlation + closed-token diagnostics named four stacked root causes, each fixed, reviewed, and verified on the live vault:
+
+1. **Fractional retry backoff** (`792cbe8` queue lane, `580e20d` lifecycle lane): backoff products were fractional ms; `markEventWaitingRetry` requires a non-negative integer — no park ever landed in production. Fixed by rounding; live retry curve verified (attempt 16, exponential spacing — first time ever).
+2. **Update-preflight policy evidence** (`c065ddc`): the canonical-read subject lacked `normalized_locator`, making the extension rule indeterminate (403); the raise also escaped the excluded-outcome mapping. Fixed both; the first-ever update preflight returned 200.
+3. **Update receive binding** (`c7894b4`): the durable update reservation persisted the raw locator; the bound update operation contract forbids it — post-claim ValueError classified as closed `internal_error` 500 on every retry. Fixed reserve- and hydrate-side; the two-day-stuck event committed 2026-08-23 15:59 UTC and its duplicate resolved `no_change`.
+4. **Style normalization** (`f2e1f6e`): parenthesized exception tuples — later established as PEP 758 (pinned py314) style equivalence, NOT corruption; zero semantic change, AST-identical per review.
+
+Live journal at closure: 52 committed, 9 no_change, 1 integrity_failed (superseded edit — correct), 2 events parked `waiting_retry` retrying safely.
+
+## Open item (single next code action)
+
+**Surface locator conflicts as typed create rejections.** Two live creates (a 3-byte note and the user's later test note) deterministically fail publication because a foreign ACTIVE locator occupies their path (a rename artifact): `_insert_initial_locator` violates `uq_source_locators_active_workspace_path`; SQLSTATE 23505 is misclassified as retryable `SOURCE_COMMIT_OUTCOME_UNKNOWN` (error_mapping.py else-branch) while the operation row stays `receiving` (interleaved 409s). Fix per `.superpowers/sdd/2026-08-23-sync-error-tracing-observability/repro-commit-outcome-unknown.md`: pre-check the active locator under the create transition's lock in `_create_transition` and raise the typed non-retryable `SOURCE_LOCATOR_CONFLICT` (already 409-mapped at codes.py:725 / api_contracts/errors.py:161) so the plugin parks `blocked_conflict` honestly. TDD brief embedded in the SDD ledger's final entry; RED shape = the investigation's scratch repro.
+
+## Rulings and corrections recorded
+
+- The "compromised toolchain / corrupted modules" narrative was WRONG: the project pins Python 3.14 (PEP 758 — `except A, B:` is valid, AST-identical); the pinned ruff writes that form BY DESIGN. No venv reinstall needed; the user's WIP `tools/obsidian_live_acceptance_bootstrap.py` needs NO repair.
+- PENDING STYLE DECISION: pinned ruff `format --check` wants to re-strip the restored parentheses on 8 files — the repo must decide (accept PEP 758 comma style vs constrain the formatter) or the next `poe python-format` run will undo `f2e1f6e`. BACKLOG row required.
+- The `python`/`py_compile` on PATH is 3.12 — never use it as a gate for this repo (uv runs 3.14).
+
+## Local environment state
+
+- WSL/Docker was shut down at closure to relieve RAM (user machine at 95%); stack containers stopped, data persists in volumes. Bring back per `.local/RESTART.md`: Docker Desktop -> `uv run poe stack-up` -> `bash .local/serve-local.sh` -> two `.local/run-worker.sh` workers -> cloudflared tunnel.
+- Hyper-V port wandering permanently fixed earlier this session: persistent port reservations for all stack ports (`.local/reserve-stack-ports.ps1`, documented in `.local/RESTART.md`).
+- Two parked plugin events retry-fail harmlessly in backoff until the stack returns; they converge or park `blocked_conflict` after the open item ships.
+
+## Evidence index
+
+- SDD ledger: `.superpowers/sdd/2026-08-23-sync-error-tracing-observability/progress.md` (full session narrative)
+- Reports in the same directory: `repro-real-journal-file.md`, `repro-park-not-landing.md`, `repro-policy-indeterminate.md`, `repro-commit-outcome-unknown.md`, `m2-fix-report.md`, `publish-update-fix-report.md`
+- Live evidence: the user's diagnostics exports (trail tails quoted in the ledger), API structured logs (request-id joined), sanitized journal generation reads.
