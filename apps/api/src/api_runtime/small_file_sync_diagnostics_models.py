@@ -21,10 +21,10 @@ class SmallFileRejectionRecordData(BaseModel):
     """One recent rejection of the bounded diagnostics ring.
 
     The closed error code mirrors the domain error registry, the timestamp is
-    an epoch-millisecond integer and the operation label stands in for the
-    route-template token — the metrics layer sits below the correlation
-    plumbing that owns route templates, and the two sync routes derive their
-    operation label from the same request.
+    an epoch-millisecond integer and the closed operation label stands in for
+    the design's route-template token: the metrics layer sits below the
+    correlation plumbing that owns route templates, so the label localizes
+    the rejecting operation without claiming route equivalence.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
