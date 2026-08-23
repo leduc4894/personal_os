@@ -108,7 +108,37 @@ Host A giám sát heartbeat của Host B và Host B giám sát Host A. Tuy vậy
 
 Warnings gồm elevated latency/error rate, provider throttling, cache degradation, reconcile drift và backup verification age.
 
-## 7. Retention
+## 7. Device diagnostics (plugin)
+
+Tầng thiết bị (Obsidian plugin) là nơi người dùng gặp lỗi trước tiên và không
+có service nào chạy thường trực; observability của nó là pattern closed-token
+tại chỗ, không phụ thuộc stack Phần 1:
+
+- **Durable sync diagnostics trail**: ring 128 entry `{kind, atEpochMs, tokens}`
+  chỉ chứa nhãn đóng (`QueuePassOutcome`, `JournalSafeErrorLabel`,
+  `JournalStoreErrorReason`, sync failure kinds, lifecycle outcomes, server
+  envelope error codes, opaque `request_id`), persist qua restart qua sidecar
+  `sync-diagnostics-trail.json` qua vault adapter; hỏng thì reset + ghi
+  `trail_reset`. Trail observe-only: không đổi semantics sync, append
+  fire-and-forget, không bao giờ chặn pass.
+- **Wire correlation**: mọi wire failure mang `request_id` từ response envelope
+  (UUID-gated) để join với access observation của API; nâng cấp tự nhiên là đọc
+  header `traceparent` (W3C) API đã trả.
+- **Self-check command**: probe tuần tự (trail persist, credential presence,
+  origin reachability qua `/api/health/live`) với verdict đóng; không đụng
+  sync state.
+- **Export command**: khối sanitized (status, blockers, counts, trail tail)
+  chỉ gồm nhãn đóng + ISO timestamp — clipboard/modal, không path/hostname/secret.
+- **Admin sync-rejection route**: `GET /api/admin/sync/rejections` trả counters
+  + ring 50 rejection gần nhất (`error_code`, `at_epoch_ms`, `operation`) sau
+  admin auth.
+- **Luật nền**: mọi closed error path mới phải surface reason token tới
+  trail/settings — không nuốt im lặng (khởi nguồn: bug park 2 ngày ẩn sau
+  `journal_mutation_failed` bị catch bỏ qua).
+
+Runbook vận hành: `docs/operations/sync-error-tracing.md`.
+
+## 8. Retention
 
 ```text
 Prometheus   30 days
@@ -120,7 +150,7 @@ Docker logs   3 days, size-rotated
 
 Cardinality, ingestion rate và disk watermark có dashboards riêng. Retention được giảm trước khi tăng disk nếu dữ liệu cũ không còn operational value.
 
-## 8. Dashboards
+## 9. Dashboards
 
 - System overview và host capacity.
 - Sync health và canonical integrity.

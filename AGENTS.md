@@ -96,6 +96,7 @@ Quy ước theo ngôn ngữ và artifact:
 - Mọi AI write bên ngoài phải qua proposal, policy, diff và approval.
 - Không log raw content, query, vector, token, secret hoặc dữ liệu nhạy cảm.
 - External call phải có timeout, bounded retry, error mapping và metrics.
+- Mọi path lỗi đóng mới phải surface reason token của nó tới một nơi đọc được (trail chẩn đoán, status, settings hoặc log đóng) — không được nuốt im lặng lý do lỗi (theo `docs/15-OBSERVABILITY_AND_ALERTING.md`).
 
 ## Chất lượng và thay đổi
 

@@ -45,6 +45,7 @@ Mỗi domain package chứa contracts, service, repository ports và errors củ
 - Mỗi schema change có Alembic migration + upgrade/downgrade test.
 - Mỗi workflow idempotent và có retry/failure tests.
 - Mỗi API contract change cập nhật OpenAPI, generated client, tests và docs.
+- Mỗi domain/phase plan mới đi kèm một task diagnostics surface: mọi closed error path của domain đó surface reason token (trail/settings/log đóng) ngay khi code land, không trì hoãn đến Phase 10 (pattern chuẩn: `docs/15-OBSERVABILITY_AND_ALERTING.md` §Device diagnostics).
 - External call có timeout, bounded retry, error mapping và metrics.
 - Không log raw content/query/vector/secret.
 - Không thêm đường chạy ngoài target contracts hoặc model giả làm sai lệch acceptance.
@@ -296,7 +297,7 @@ Implement one vertical slice at a time: PDF native text, image/scanned PDF OCR, 
 Deliverables:
 
 1. Two-host Compose manifests and private networking.
-2. Alloy/Prometheus/Grafana/Loki/Tempo/Alertmanager configs.
+2. Alloy/Prometheus/Grafana/Loki/Tempo/Alertmanager configs theo `docs/15-OBSERVABILITY_AND_ALERTING.md` (stack authority; Phase 2 device diagnostics đã có từ child 6).
 3. Sentry errors-only integration and scrubber tests.
 4. Backup manifests, restore automation and runbooks.
 5. Capacity/retrieval/indexing benchmarks.
