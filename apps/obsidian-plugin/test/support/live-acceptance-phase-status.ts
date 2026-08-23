@@ -16,6 +16,10 @@ export const LIVE_ACCEPTANCE_PHASE_RESULT_CODES = [
   "policy_recovery_existing_scan_started",
   "policy_recovery_journal_recovered",
   "policy_recovery_journey_completed",
+  "automatic_existing_note_committed",
+  "automatic_new_note_committed",
+  "automatic_policy_successor_committed",
+  "automatic_convergence_journey_completed",
 ] as const;
 
 export type LiveAcceptancePhaseResultCode =
@@ -33,6 +37,24 @@ export function writeLiveAcceptancePhaseStatus(
   fs.writeFileSync(
     statusFile,
     JSON.stringify({ result_code: resultCode }),
+    { encoding: "utf8", mode: 0o600 },
+  );
+}
+
+export function writeLiveAcceptanceDiagnostic(
+  statusFile: string,
+  diagnostic: Record<string, number>,
+): void {
+  const safeEntries = Object.entries(diagnostic);
+  if (
+    safeEntries.length === 0 ||
+    safeEntries.some(([, value]) => !Number.isSafeInteger(value) || value < 0)
+  ) {
+    throw new Error("live acceptance diagnostic was invalid");
+  }
+  fs.writeFileSync(
+    `${statusFile}.diagnostic.json`,
+    JSON.stringify(diagnostic),
     { encoding: "utf8", mode: 0o600 },
   );
 }

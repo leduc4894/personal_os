@@ -61,6 +61,16 @@ _WDIO_PHASE_FAILURE_CODES: Final[Mapping[str, str]] = {
     "source_lifecycle_restore_completed": "obsidian_wdio_failed_after_restore",
     "source_lifecycle_journal_drained": "obsidian_wdio_failed_after_journal_drain",
     "source_lifecycle_journey_completed": "obsidian_wdio_failed_after_journey",
+    "automatic_existing_note_committed": (
+        "obsidian_wdio_failed_after_automatic_existing_note_commit"
+    ),
+    "automatic_new_note_committed": "obsidian_wdio_failed_after_automatic_new_note_commit",
+    "automatic_policy_successor_committed": (
+        "obsidian_wdio_failed_after_automatic_policy_successor_commit"
+    ),
+    "automatic_convergence_journey_completed": (
+        "obsidian_wdio_failed_after_automatic_convergence_journey"
+    ),
 }
 
 
@@ -300,6 +310,9 @@ def _wdio_phase_status_path(config: LiveAcceptanceConfig) -> Path:
 def _remove_wdio_phase_status(status_path: Path) -> None:
     try:
         status_path.unlink(missing_ok=True)
+        status_path.with_name(f"{status_path.name}.diagnostic.json").unlink(
+            missing_ok=True
+        )
     except OSError:
         raise LiveAcceptanceFailure("obsidian_wdio_failed") from None
 

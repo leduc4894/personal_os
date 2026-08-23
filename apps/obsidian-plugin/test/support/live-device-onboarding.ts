@@ -23,6 +23,8 @@ export interface LiveDeviceOnboardingOptions {
   readonly totpHelper: string;
   readonly pluginDataPathSuffix: string;
   readonly deviceName: string;
+  /** A reauthorization is usable only after this accepted policy revision is cached. */
+  readonly minimumPolicyRevision?: number;
 }
 
 export interface LiveDeviceOnboardingResult {
@@ -211,7 +213,7 @@ export async function onboardLiveDevice(
   await reloadKnowledgeWorkspacePlugin();
   for (let attempt = 0; attempt < 30; attempt += 1) {
     await browser.pause(1_000);
-    const isPending = await browser.execute(async (dataPathSuffix: string) => {
+    const onboardingState = await browser.execute(async (dataPathSuffix: string) => {
       const app = (
         window as unknown as {
           app: {
@@ -224,20 +226,37 @@ export async function onboardLiveDevice(
       ).app;
       const raw = await app.vault.adapter.read(`${app.vault.configDir}/${dataPathSuffix}`);
       const data = JSON.parse(raw) as Record<string, unknown>;
-      return data["pending_grant"] !== null && data["pending_grant"] !== undefined;
+      const cachedPolicy = data["policy_cache"];
+      const revisionNumber =
+        typeof cachedPolicy === "object" && cachedPolicy !== null && !Array.isArray(cachedPolicy)
+          ? (cachedPolicy as Record<string, unknown>)["revision_number"]
+          : null;
+      return {
+        isPending: data["pending_grant"] !== null && data["pending_grant"] !== undefined,
+        revisionNumber: typeof revisionNumber === "number" && Number.isInteger(revisionNumber)
+          ? revisionNumber
+          : null,
+      };
     }, options.pluginDataPathSuffix);
-    if (!isPending) {
-      const isJournalReady = await browser.execute(() => {
+    const hasRequiredPolicy =
+      options.minimumPolicyRevision === undefined ||
+      (onboardingState.revisionNumber !== null &&
+        onboardingState.revisionNumber >= options.minimumPolicyRevision);
+    if (!onboardingState.isPending && hasRequiredPolicy) {
+      const isJournalReady = await browser.execute(async () => {
         const app = (
           window as unknown as {
             app: {
-              commands: { listCommands: () => Array<{ id: string }> };
+              vault: {
+                configDir: string;
+                adapter: { exists: (path: string) => Promise<boolean> };
+              };
             };
           }
         ).app;
-        return app.commands
-          .listCommands()
-          .some((command) => command.id === "knowledge-workspace:sync-now");
+        return app.vault.adapter.exists(
+          `${app.vault.configDir}/plugins/knowledge-workspace/journal.manifest.json`,
+        );
       });
       if (isJournalReady) {
         return {

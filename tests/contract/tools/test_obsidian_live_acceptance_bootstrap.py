@@ -728,7 +728,33 @@ def test_launcher_settings_reach_totp_policy_and_wdio_children(tmp_path: Path) -
             assert observed_environments[child_name][name] == value
 
 
-def test_failed_wdio_reports_the_last_closed_lifecycle_phase(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("phase_code", "expected_failure_code"),
+    (
+        ("source_lifecycle_move_completed", "obsidian_wdio_failed_after_move"),
+        (
+            "automatic_existing_note_committed",
+            "obsidian_wdio_failed_after_automatic_existing_note_commit",
+        ),
+        (
+            "automatic_new_note_committed",
+            "obsidian_wdio_failed_after_automatic_new_note_commit",
+        ),
+        (
+            "automatic_policy_successor_committed",
+            "obsidian_wdio_failed_after_automatic_policy_successor_commit",
+        ),
+        (
+            "automatic_convergence_journey_completed",
+            "obsidian_wdio_failed_after_automatic_convergence_journey",
+        ),
+    ),
+)
+def test_failed_wdio_reports_the_last_closed_lifecycle_phase(
+    tmp_path: Path,
+    phase_code: str,
+    expected_failure_code: str,
+) -> None:
     """A closed phase marker distinguishes scenario progress without child output."""
     password_file = tmp_path / "web-credential-password.key"
     password_file.write_text(_PASSWORD_SENTINEL, encoding="utf-8")
@@ -751,7 +777,11 @@ def test_failed_wdio_reports_the_last_closed_lifecycle_phase(tmp_path: Path) -> 
                 status_file.parent.mkdir()
                 status_paths.append(status_file)
                 status_file.write_text(
-                    json.dumps({"result_code": "source_lifecycle_move_completed"}),
+                    json.dumps({"result_code": phase_code}),
+                    encoding="utf-8",
+                )
+                status_file.with_name(f"{status_file.name}.diagnostic.json").write_text(
+                    json.dumps({"committedCount": 1}),
                     encoding="utf-8",
                 )
                 return CommandResult(1, _CHILD_OUTPUT_SENTINEL, _CHILD_OUTPUT_SENTINEL)
@@ -789,12 +819,15 @@ def test_failed_wdio_reports_the_last_closed_lifecycle_phase(tmp_path: Path) -> 
 
     assert exit_code == 1
     assert json.loads(output.getvalue()) == {
-        "result_code": "obsidian_wdio_failed_after_move",
+        "result_code": expected_failure_code,
         "state": "error",
     }
     assert _CHILD_OUTPUT_SENTINEL not in output.getvalue()
     assert len(status_paths) == 1
     assert not status_paths[0].exists()
+    assert not status_paths[0].with_name(
+        f"{status_paths[0].name}.diagnostic.json"
+    ).exists()
 
 
 @pytest.mark.parametrize(

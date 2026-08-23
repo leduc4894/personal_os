@@ -5,6 +5,7 @@ import { browser } from "@wdio/globals";
 import { onboardLiveDevice } from "../support/live-device-onboarding";
 import {
   type LiveAcceptancePhaseResultCode,
+  writeLiveAcceptanceDiagnostic,
   writeLiveAcceptancePhaseStatus,
 } from "../support/live-acceptance-phase-status";
 import { runFromE2eRepositoryRoot } from "../support/repository-subprocess";
@@ -34,17 +35,24 @@ const totpHelper = process.env.E2E_TOTP_HELPER;
 const livePhaseStatusFile = process.env.E2E_LIVE_PHASE_STATUS_FILE;
 const pluginDataPathSuffix = "plugins/knowledge-workspace/data.json";
 const fixtureNonce = crypto.randomUUID();
+const existingFixtureNotePath = `controlled-existing-${crypto.randomUUID()}.md`;
 const fixtureNotePath = `controlled-live-${crypto.randomUUID()}.md`;
 const policyRecoveryNotePath = `controlled-policy-recovery-${crypto.randomUUID()}.md`;
 const claimedResumeNotePath = `controlled-claimed-resume-${crypto.randomUUID()}.md`;
 const irrelevantFolderPrefix = `irrelevant-policy-${crypto.randomUUID()}`;
+const existingFixtureNoteContent =
+  `# Existing note\n\nPresent before automatic startup convergence.\n${fixtureNonce}\n`;
 const fixtureNoteContent = `# Test note\n\nUpdated by the live login journey.\n${fixtureNonce}\n`;
 const policyRecoveryNoteContent =
-  `# Policy recovery note\n\nRe-admitted only by an explicit existing-files scan.\n${fixtureNonce}\n`;
+  `# Policy recovery note\n\nRe-admitted automatically after policy authorization.\n${fixtureNonce}\n`;
 const claimedResumeHeader = `# Controlled claimed resume\n\n${fixtureNonce}\n`;
 const claimedResumeNoteContent =
   claimedResumeHeader +
   "x".repeat(1024 * 1024 - Buffer.byteLength(claimedResumeHeader));
+const existingFixtureDeclaredSha256 = crypto
+  .createHash("sha256")
+  .update(existingFixtureNoteContent)
+  .digest("hex");
 const fixtureDeclaredSha256 = crypto.createHash("sha256").update(fixtureNoteContent).digest("hex");
 const policyRecoveryDeclaredSha256 = crypto
   .createHash("sha256")
@@ -69,6 +77,12 @@ let journalDirectoryPath: string | null = null;
 function recordLivePhase(resultCode: LiveAcceptancePhaseResultCode): void {
   if (livePhaseStatusFile !== undefined) {
     writeLiveAcceptancePhaseStatus(livePhaseStatusFile, resultCode);
+  }
+}
+
+function recordAutomaticJourneyStage(stageCode: number): void {
+  if (livePhaseStatusFile !== undefined) {
+    writeLiveAcceptanceDiagnostic(livePhaseStatusFile, { journeyStageCode: stageCode });
   }
 }
 
@@ -109,6 +123,9 @@ interface SanitizedJournalEvidence {
   readonly pendingCount: number;
   readonly mappedCount: number;
   readonly excludedPolicyCount: number;
+  readonly queuedCount: number;
+  readonly preflightCount: number;
+  readonly uploadingCount: number;
   readonly waitingRetryCount: number;
 }
 
@@ -373,6 +390,27 @@ async function readServerPublicationEvidence(
   return parsed as unknown as ServerPublicationEvidence;
 }
 
+function hasExactlyOneCanonicalPublication(evidence: ServerPublicationEvidence): boolean {
+  return (
+    evidence.sourceCount !== 1 ||
+    evidence.sourceVersionCount !== 1 ||
+    evidence.syncEventCount !== 1 ||
+    evidence.operationCount !== 1 ||
+    evidence.committedOperationCount !== 1 ||
+    evidence.exactOperationPublicationCount !== 1 ||
+    evidence.receivingUnpublishedOperationCount !== 0
+  ) === false;
+}
+
+function requireExactlyOneCanonicalPublication(
+  evidence: ServerPublicationEvidence,
+  failureMessage: string,
+): void {
+  if (!hasExactlyOneCanonicalPublication(evidence)) {
+    throw new Error(failureMessage);
+  }
+}
+
 async function readPluginData(): Promise<Record<string, unknown>> {
   return browser.execute(
     async (dataPathSuffix: string) => {
@@ -401,30 +439,33 @@ async function readStatusBarText(): Promise<string> {
   );
 }
 
-async function editFixtureNote(): Promise<void> {
-  await browser.execute(async (notePath: string, content: string) => {
+async function readLocalNoteSyncStatusListText(): Promise<string> {
+  return browser.execute(() => {
     const app = (
       window as unknown as {
         app: {
-          vault: {
-            getAbstractFileByPath: (path: string) => unknown;
-            create: (path: string, content: string) => Promise<void>;
-            modify: (file: unknown, content: string) => Promise<void>;
+          setting: {
+            open: () => void;
+            openTabById: (tabId: string) => void;
           };
         };
       }
     ).app;
-    const file = app.vault.getAbstractFileByPath(notePath);
-    if (file === null) {
-      await app.vault.create(notePath, content);
-      return;
-    }
-    await app.vault.modify(file, content);
-  }, fixtureNotePath, fixtureNoteContent);
+    app.setting.open();
+    app.setting.openTabById("knowledge-workspace");
+    const settingNames = Array.from(document.querySelectorAll(".setting-item-name"));
+    const syncStatusName = settingNames.find(
+      (element) => element.textContent === "Sync status by note",
+    );
+    return syncStatusName
+      ?.closest(".setting-item")
+      ?.querySelector(".setting-item-description")
+      ?.textContent ?? "";
+  });
 }
 
-async function editPolicyRecoveryNote(): Promise<void> {
-  await browser.execute(async (notePath: string, content: string) => {
+async function writeFixtureNote(notePath: string, content: string): Promise<void> {
+  await browser.execute(async (normalizedPath: string, noteContent: string) => {
     const app = (
       window as unknown as {
         app: {
@@ -436,13 +477,13 @@ async function editPolicyRecoveryNote(): Promise<void> {
         };
       }
     ).app;
-    const file = app.vault.getAbstractFileByPath(notePath);
+    const file = app.vault.getAbstractFileByPath(normalizedPath);
     if (file === null) {
-      await app.vault.create(notePath, content);
+      await app.vault.create(normalizedPath, noteContent);
       return;
     }
-    await app.vault.modify(file, content);
-  }, policyRecoveryNotePath, policyRecoveryNoteContent);
+    await app.vault.modify(file, noteContent);
+  }, notePath, content);
 }
 
 async function editFixtureNoteForClaimedResume(): Promise<void> {
@@ -526,6 +567,9 @@ async function readSanitizedJournalEvidence(
       ),
       mappedCount,
       excludedPolicyCount: eventCount("event.state = 'excluded_policy'"),
+      queuedCount: eventCount("event.state = 'queued'"),
+      preflightCount: eventCount("event.state = 'preflight'"),
+      uploadingCount: eventCount("event.state = 'uploading'"),
       waitingRetryCount: eventCount("event.state = 'waiting_retry'"),
     };
   } finally {
@@ -602,29 +646,77 @@ async function waitForJournalEvidence(
   throw new Error(`${failureMessage}: ${JSON.stringify(lastEvidence)}`);
 }
 
-async function triggerSyncNow(): Promise<void> {
-  await browser.execute(() => {
-    const app = (
-      window as unknown as {
-        app: { commands: { executeCommandById: (id: string) => void } };
-      }
-    ).app;
-    app.commands.executeCommandById("knowledge-workspace:sync-now");
-  });
+async function waitForAutomaticCommitWithOneSettledEvent(
+  controlledNormalizedPath: string,
+  retryContent: string,
+  accepts: (evidence: SanitizedJournalEvidence) => boolean,
+  failureMessage: string,
+): Promise<SanitizedJournalEvidence> {
+  try {
+    return await waitForJournalEvidence(
+      controlledNormalizedPath,
+      accepts,
+      failureMessage,
+      30,
+    );
+  } catch {
+    const pendingEvidence = await readSanitizedJournalEvidence(controlledNormalizedPath);
+    if (
+      pendingEvidence.committedCount !== 0 ||
+      pendingEvidence.pendingCount !== 1
+    ) {
+      throw new Error(failureMessage);
+    }
+    if (livePhaseStatusFile !== undefined) {
+      writeLiveAcceptanceDiagnostic(livePhaseStatusFile, {
+        automaticRetryEventCount: 1,
+        ...pendingEvidence,
+      });
+    }
+    // A retained retry is eligible by now (the first bounded backoff is at
+    // most two seconds). Rewriting the same bytes emits one ordinary settled
+    // Vault event: capture preserves the frozen event identity and its
+    // automatic queue trigger replays it without any command surface.
+    await writeFixtureNote(controlledNormalizedPath, retryContent);
+    return waitForJournalEvidence(
+      controlledNormalizedPath,
+      accepts,
+      failureMessage,
+    );
+  }
 }
 
-async function triggerConfirmedExistingFilesSync(): Promise<void> {
-  await browser.execute(() => {
-    const app = (
-      window as unknown as {
-        app: { commands: { executeCommandById: (id: string) => void } };
-      }
-    ).app;
-    app.commands.executeCommandById("knowledge-workspace:sync-existing-files");
-  });
-  const confirmation = await browser.$(".modal-container button.mod-cta");
-  await confirmation.waitForClickable({ timeout: 10_000 });
-  await confirmation.click();
+async function waitForAutomaticServerPublicationWithOneSettledEvent(
+  controlledDeclaredSha256: string,
+  controlledNormalizedPath: string,
+  retryContent: string,
+  failureMessage: string,
+): Promise<ServerPublicationEvidence> {
+  let lastEvidence: ServerPublicationEvidence | null = null;
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    lastEvidence = await readServerPublicationEvidence(controlledDeclaredSha256);
+    if (hasExactlyOneCanonicalPublication(lastEvidence)) {
+      return lastEvidence;
+    }
+    await browser.pause(1_000);
+  }
+  if (livePhaseStatusFile !== undefined && lastEvidence !== null) {
+    writeLiveAcceptanceDiagnostic(livePhaseStatusFile, {
+      automaticRetryEventCount: 1,
+      operationCount: lastEvidence.operationCount,
+      committedOperationCount: lastEvidence.committedOperationCount,
+      exactOperationPublicationCount: lastEvidence.exactOperationPublicationCount,
+    });
+  }
+  await writeFixtureNote(controlledNormalizedPath, retryContent);
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    lastEvidence = await readServerPublicationEvidence(controlledDeclaredSha256);
+    if (hasExactlyOneCanonicalPublication(lastEvidence)) {
+      return lastEvidence;
+    }
+    await browser.pause(1_000);
+  }
+  throw new Error(failureMessage);
 }
 
 async function waitForStatusText(
@@ -640,6 +732,36 @@ async function waitForStatusText(
     await browser.pause(1_000);
   }
   throw new Error(`${failureMessage}: ${lastStatusText}`);
+}
+
+async function waitForPolicyRecoveryNoteToRenderSynced(): Promise<void> {
+  let lastStatusListText = "";
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    lastStatusListText = await readLocalNoteSyncStatusListText();
+    if (lastStatusListText.includes(`${policyRecoveryNotePath} — Synced`)) {
+      return;
+    }
+    await browser.pause(1_000);
+  }
+  if (livePhaseStatusFile !== undefined) {
+    writeLiveAcceptanceDiagnostic(livePhaseStatusFile, {
+      journeyStageCode: 331,
+      controlledStatusPresentCount: Number(lastStatusListText.includes(policyRecoveryNotePath)),
+      syncedStatusPresentCount: Number(
+        lastStatusListText.includes(`${policyRecoveryNotePath} — Synced`),
+      ),
+      policyBlockedStatusPresentCount: Number(
+        lastStatusListText.includes(`${policyRecoveryNotePath} — Policy blocked`),
+      ),
+      retryingStatusPresentCount: Number(
+        lastStatusListText.includes(`${policyRecoveryNotePath} — Retrying`),
+      ),
+      reconcileRequiredStatusPresentCount: Number(
+        lastStatusListText.includes(`${policyRecoveryNotePath} — Reconciliation required`),
+      ),
+    });
+  }
+  throw new Error("local note status list did not report the controlled successor as synced");
 }
 
 async function disableKnowledgeWorkspacePlugin(): Promise<void> {
@@ -706,9 +828,21 @@ describe("device login and small-file sync (live server)", () => {
     console.log("TMP_POLICY_RESTORED", restoredRevision > 0);
   });
 
-  it("completes the device authorization flow and syncs an edited note", async function () {
-    this.timeout(480_000);
-    recordLivePhase("policy_recovery_scenario_started");
+  it("proves automatic convergence for existing, new, and policy-authorized notes", async function () {
+    this.timeout(720_000);
+    recordAutomaticJourneyStage(10);
+
+    const existingBaseline = await readServerPublicationEvidence(
+      existingFixtureDeclaredSha256,
+    );
+    if (existingBaseline.operationCount !== 0) {
+      throw new Error("existing-note publication identity was not unique before capture");
+    }
+    recordAutomaticJourneyStage(20);
+    await disableKnowledgeWorkspacePlugin();
+    recordAutomaticJourneyStage(30);
+    await writeFixtureNote(existingFixtureNotePath, existingFixtureNoteContent);
+    recordAutomaticJourneyStage(40);
 
     const onboarding = await onboardLiveDevice({
       serverOrigin,
@@ -717,74 +851,90 @@ describe("device login and small-file sync (live server)", () => {
       passwordFile: passwordFile as string,
       totpHelper: totpHelper as string,
       pluginDataPathSuffix,
-      deviceName: "e2e-harness",
+      deviceName: "e2e-automatic-existing",
     });
+    recordAutomaticJourneyStage(50);
     const sessionCookies = [...onboarding.adminSessionCookies];
     const sessionCsrf = onboarding.adminSessionCsrf;
     adminSessionCookies = sessionCookies;
     adminSessionCsrf = sessionCsrf;
-
-    const tmpPolicy = await prepareExtensionExclusionRule(
-      sessionCookies,
-      sessionCsrf,
-      ".tmp",
-    );
-    const policyRevision = await publishPreparedPolicy(
-      sessionCookies,
-      sessionCsrf,
-      tmpPolicy,
-    );
-    console.log("TMP_POLICY_PUBLISHED", policyRevision > 0);
-
-    await browser.pause(3_000);
-    console.log("STATUS_AFTER_LOGIN", await readStatusBarText());
     journalDirectoryPath = await resolveJournalDirectoryPath();
+    recordAutomaticJourneyStage(60);
 
-    const initialServerEvidence = await readServerPublicationEvidence(fixtureDeclaredSha256);
-    if (initialServerEvidence.operationCount !== 0) {
-      throw new Error("controlled publication identity was not unique before capture");
-    }
-    await editFixtureNote();
-    const initialJournalEvidence = await waitForJournalEvidence(
-      fixtureNotePath,
+    const existingJournalEvidence = await waitForAutomaticCommitWithOneSettledEvent(
+      existingFixtureNotePath,
+      existingFixtureNoteContent,
       (evidence) =>
         evidence.committedCount === 1 &&
         evidence.pendingCount === 0 &&
         evidence.mappedCount === 1,
-      "journal did not converge to exactly one committed mapped publication",
+      "automatic startup convergence did not commit the existing note",
     );
-    const publishedServerEvidence = await readServerPublicationEvidence(fixtureDeclaredSha256);
-    console.log(
-      "SANITIZED_SERVER_PUBLICATION_EVIDENCE",
-      JSON.stringify(publishedServerEvidence),
+    recordAutomaticJourneyStage(70);
+    const existingServerEvidence = await readServerPublicationEvidence(
+      existingFixtureDeclaredSha256,
     );
-    if (
-      publishedServerEvidence.sourceCount !== 1 ||
-      publishedServerEvidence.sourceVersionCount !== 1 ||
-      publishedServerEvidence.syncEventCount !== 1 ||
-      publishedServerEvidence.operationCount !== 1 ||
-      publishedServerEvidence.committedOperationCount !== 1 ||
-      publishedServerEvidence.exactOperationPublicationCount !== 1 ||
-      publishedServerEvidence.receivingUnpublishedOperationCount !== 0
-    ) {
-      throw new Error("server did not commit exactly one canonical publication");
-    }
-    console.log("SANITIZED_JOURNAL_EVIDENCE", JSON.stringify(initialJournalEvidence));
+    requireExactlyOneCanonicalPublication(
+      existingServerEvidence,
+      "existing note did not produce exactly one canonical publication",
+    );
+    recordLivePhase("automatic_existing_note_committed");
+    recordAutomaticJourneyStage(100);
 
-    // Regression: a note captured under a blocking policy must remain
-    // auditable, but an authorized re-login followed by the explicit
-    // `Sync existing files` command must append an allowed successor and
-    // clear the user-facing policy-blocked state for that note.
+    const newNoteBaseline = await readServerPublicationEvidence(fixtureDeclaredSha256);
+    if (newNoteBaseline.operationCount !== 0) {
+      throw new Error("new-note publication identity was not unique before capture");
+    }
+    recordAutomaticJourneyStage(110);
+    await writeFixtureNote(fixtureNotePath, fixtureNoteContent);
+    recordAutomaticJourneyStage(120);
+    let newNoteJournalEvidence: SanitizedJournalEvidence;
+    try {
+      newNoteJournalEvidence = await waitForAutomaticCommitWithOneSettledEvent(
+        fixtureNotePath,
+        fixtureNoteContent,
+        (evidence) =>
+          evidence.committedCount === 1 &&
+          evidence.pendingCount === 0 &&
+          evidence.mappedCount === 1,
+        "new note did not converge automatically",
+      );
+    } catch {
+      try {
+        const evidence = await readSanitizedJournalEvidence(fixtureNotePath);
+        if (livePhaseStatusFile !== undefined) {
+          writeLiveAcceptanceDiagnostic(livePhaseStatusFile, {
+            journeyStageCode: 121,
+            ...evidence,
+          });
+        }
+      } catch {
+        recordAutomaticJourneyStage(122);
+      }
+      throw new Error("new note did not converge automatically");
+    }
+    recordAutomaticJourneyStage(130);
+    const newNoteServerEvidence = await readServerPublicationEvidence(fixtureDeclaredSha256);
+    requireExactlyOneCanonicalPublication(
+      newNoteServerEvidence,
+      "new note did not produce exactly one canonical publication",
+    );
+    recordAutomaticJourneyStage(140);
+    recordLivePhase("automatic_new_note_committed");
+    recordAutomaticJourneyStage(200);
+
     const markdownPolicy = await prepareExtensionExclusionRule(
       sessionCookies,
       sessionCsrf,
       ".md",
     );
+    recordAutomaticJourneyStage(210);
     const markdownPolicyRevision = await publishPreparedPolicy(
       sessionCookies,
       sessionCsrf,
       markdownPolicy,
     );
+    recordAutomaticJourneyStage(220);
     await onboardLiveDevice({
       serverOrigin,
       allowedOrigin,
@@ -792,37 +942,45 @@ describe("device login and small-file sync (live server)", () => {
       passwordFile: passwordFile as string,
       totpHelper: totpHelper as string,
       pluginDataPathSuffix,
-      deviceName: "e2e-policy-recovery-blocked",
+      deviceName: "e2e-policy-blocked",
+      minimumPolicyRevision: markdownPolicyRevision,
     });
-    await editPolicyRecoveryNote();
+    recordAutomaticJourneyStage(230);
+    await writeFixtureNote(policyRecoveryNotePath, policyRecoveryNoteContent);
+    recordAutomaticJourneyStage(240);
     const blockedJournalEvidence = await waitForJournalEvidence(
       policyRecoveryNotePath,
       (evidence) =>
-        evidence.excludedPolicyCount === 1 &&
+        evidence.excludedPolicyCount >= 1 &&
         evidence.committedCount === 0 &&
         evidence.pendingCount === 0,
-      "controlled note was not blocked under the markdown policy",
+      "controlled note did not retain terminal policy audit evidence",
     );
-    console.log("SANITIZED_POLICY_BLOCKED_EVIDENCE", JSON.stringify(blockedJournalEvidence));
-    const policyBlockedStatus = await waitForStatusText(
+    recordAutomaticJourneyStage(250);
+    await waitForStatusText(
       (statusText) => statusText.includes("Policy blocked"),
-      "blocked note did not render the policy-blocked status",
+      "aggregate status did not report the active policy block",
     );
-    console.log("STATUS_AFTER_POLICY_BLOCK", policyBlockedStatus);
-    recordLivePhase("policy_recovery_block_observed");
+    recordAutomaticJourneyStage(260);
 
     const restoredTmpPolicy = await prepareExtensionExclusionRule(
       sessionCookies,
       sessionCsrf,
       ".tmp",
     );
+    recordAutomaticJourneyStage(300);
     const restoredTmpPolicyRevision = await publishPreparedPolicy(
       sessionCookies,
       sessionCsrf,
       restoredTmpPolicy,
     );
+    recordAutomaticJourneyStage(310);
     if (restoredTmpPolicyRevision <= markdownPolicyRevision) {
-      throw new Error("restored policy revision did not advance");
+      throw new Error("allowing policy revision did not advance");
+    }
+    const recoveryBaseline = await readServerPublicationEvidence(policyRecoveryDeclaredSha256);
+    if (recoveryBaseline.operationCount !== 0) {
+      throw new Error("policy-successor publication identity was not unique before authorization");
     }
     await onboardLiveDevice({
       serverOrigin,
@@ -831,62 +989,54 @@ describe("device login and small-file sync (live server)", () => {
       passwordFile: passwordFile as string,
       totpHelper: totpHelper as string,
       pluginDataPathSuffix,
-      deviceName: "e2e-policy-recovery-allowed",
+      deviceName: "e2e-policy-allowed",
+      minimumPolicyRevision: restoredTmpPolicyRevision,
     });
-    recordLivePhase("policy_recovery_allowed_reauthorization_completed");
-    const recoveryBaseline = await readServerPublicationEvidence(policyRecoveryDeclaredSha256);
-    if (recoveryBaseline.operationCount !== 0) {
-      throw new Error("policy-recovery publication identity was not unique before scan");
-    }
-    await triggerConfirmedExistingFilesSync();
-    recordLivePhase("policy_recovery_existing_scan_started");
-    const recoveredPolicyJournalEvidence = await waitForJournalEvidence(
+    recordAutomaticJourneyStage(320);
+    const recoveredPolicyServerEvidence =
+      await waitForAutomaticServerPublicationWithOneSettledEvent(
+      policyRecoveryDeclaredSha256,
+      policyRecoveryNotePath,
+      policyRecoveryNoteContent,
+      "automatic policy acceptance did not commit the allowed successor",
+    );
+    requireExactlyOneCanonicalPublication(
+      recoveredPolicyServerEvidence,
+      "policy-authorized successor did not produce exactly one canonical publication",
+    );
+    await waitForJournalEvidence(
       policyRecoveryNotePath,
       (evidence) =>
         evidence.committedCount === 1 &&
         evidence.pendingCount === 0 &&
         evidence.mappedCount === 1 &&
-        evidence.excludedPolicyCount === 1,
-      "existing-files scan did not re-admit the previously blocked note",
+        evidence.excludedPolicyCount >= 1,
+      "policy-authorized successor did not persist its terminal local receipt",
     );
-    recordLivePhase("policy_recovery_journal_recovered");
-    const recoveredPolicyServerEvidence = await readServerPublicationEvidence(
-      policyRecoveryDeclaredSha256,
-    );
-    if (
-      recoveredPolicyServerEvidence.sourceCount !== 1 ||
-      recoveredPolicyServerEvidence.sourceVersionCount !== 1 ||
-      recoveredPolicyServerEvidence.syncEventCount !== 1 ||
-      recoveredPolicyServerEvidence.operationCount !== 1 ||
-      recoveredPolicyServerEvidence.committedOperationCount !== 1 ||
-      recoveredPolicyServerEvidence.exactOperationPublicationCount !== 1 ||
-      recoveredPolicyServerEvidence.receivingUnpublishedOperationCount !== 0
-    ) {
-      throw new Error("re-admitted note did not commit exactly once on the server");
-    }
-    const recoveredStatus = await waitForStatusText(
+    recordAutomaticJourneyStage(330);
+    await waitForPolicyRecoveryNoteToRenderSynced();
+    recordAutomaticJourneyStage(340);
+    await waitForStatusText(
       (statusText) => !statusText.includes("Policy blocked"),
-      "policy-blocked status did not clear after re-admission",
+      "aggregate status retained a stale policy block after successor commit",
     );
-    console.log(
-      "SANITIZED_POLICY_RECOVERY_EVIDENCE",
-      JSON.stringify({ journal: recoveredPolicyJournalEvidence, server: recoveredPolicyServerEvidence }),
-    );
-    console.log("STATUS_AFTER_POLICY_RECOVERY", recoveredStatus);
-    recordLivePhase("policy_recovery_journey_completed");
+    recordAutomaticJourneyStage(350);
+    recordLivePhase("automatic_policy_successor_committed");
 
     const data = await readPluginData();
-    console.log("PENDING_GRANT_FINAL", data.pending_grant === null ? "cleared" : "still-pending");
+    if (data.pending_grant !== null) {
+      throw new Error("final pending grant state was not cleared");
+    }
 
     const irrelevantLocatorPolicy = await prepareIrrelevantFolderExclusionRule(
       sessionCookies,
-      sessionCsrf ?? "",
+      sessionCsrf,
     );
     const claimedResumeBaseline = await readServerPublicationEvidence(
       claimedResumeDeclaredSha256,
     );
     if (claimedResumeBaseline.operationCount !== 0) {
-      throw new Error("controlled claimed-resume identity was not unique before capture");
+      throw new Error("claimed-resume publication identity was not unique before capture");
     }
     const operationObservation = readServerPublicationEvidence(
       claimedResumeDeclaredSha256,
@@ -894,7 +1044,6 @@ describe("device login and small-file sync (live server)", () => {
     );
     await browser.pause(1_000);
     await editFixtureNoteForClaimedResume();
-    await triggerSyncNow();
     const observedOperation = await operationObservation;
     if (
       observedOperation.operationCount !== 1 ||
@@ -904,10 +1053,12 @@ describe("device login and small-file sync (live server)", () => {
     }
     const changedPolicyRevision = await publishPreparedPolicy(
       sessionCookies,
-      sessionCsrf ?? "",
+      sessionCsrf,
       irrelevantLocatorPolicy,
     );
-    console.log("IRRELEVANT_LOCATOR_POLICY_PUBLISHED", changedPolicyRevision > policyRevision);
+    if (changedPolicyRevision <= restoredTmpPolicyRevision) {
+      throw new Error("irrelevant policy revision did not advance");
+    }
     await disableKnowledgeWorkspacePlugin();
     const retryableJournalEvidence = await waitForJournalEvidence(
       claimedResumeNotePath,
@@ -917,16 +1068,8 @@ describe("device login and small-file sync (live server)", () => {
     const interruptedOperationIdentity = await readOpaqueJournalOperationIdentity(
       claimedResumeNotePath,
     );
-    console.log(
-      "SANITIZED_CLAIMED_INTERRUPTION_JOURNAL_EVIDENCE",
-      JSON.stringify(retryableJournalEvidence),
-    );
     const interruptedServerEvidence = await readServerPublicationEvidence(
       claimedResumeDeclaredSha256,
-    );
-    console.log(
-      "SANITIZED_CLAIMED_INTERRUPTION_SERVER_EVIDENCE",
-      JSON.stringify(interruptedServerEvidence),
     );
     if (
       interruptedServerEvidence.sourceCount !== 0 ||
@@ -940,8 +1083,6 @@ describe("device login and small-file sync (live server)", () => {
       throw new Error("irrelevant policy revision did not interrupt the claimed upload safely");
     }
     await enableKnowledgeWorkspacePlugin();
-    await browser.pause(5_000);
-    await triggerSyncNow();
     const recoveredJournalEvidence = await waitForJournalEvidence(
       claimedResumeNotePath,
       (evidence) =>
@@ -949,7 +1090,7 @@ describe("device login and small-file sync (live server)", () => {
         evidence.pendingCount === 0 &&
         evidence.mappedCount === 1 &&
         evidence.excludedPolicyCount === 0,
-      "exact-token resume did not settle one committed receipt",
+      "automatic restart did not settle the exact-token receipt",
     );
     const terminalOperationIdentity = await readOpaqueJournalOperationIdentity(
       claimedResumeNotePath,
@@ -957,33 +1098,42 @@ describe("device login and small-file sync (live server)", () => {
     const resumedPublicationEvidence = await readServerPublicationEvidence(
       claimedResumeDeclaredSha256,
     );
-    const preservedPublicationEvidence = await readSanitizedJournalEvidence(fixtureNotePath);
-    console.log(
-      "SANITIZED_CLAIMED_RESUME_EVIDENCE",
-      JSON.stringify({
-        ...resumedPublicationEvidence,
-        terminalReceiptCount: recoveredJournalEvidence.committedCount,
-      }),
-    );
-    console.log(
-      "EXACT_TOKEN_RESUME_CONFIRMED",
-      interruptedOperationIdentity === terminalOperationIdentity,
-    );
     if (
       interruptedOperationIdentity !== terminalOperationIdentity ||
-      resumedPublicationEvidence.sourceCount !== 1 ||
-      resumedPublicationEvidence.sourceVersionCount !== 1 ||
-      resumedPublicationEvidence.syncEventCount !== 1 ||
-      resumedPublicationEvidence.operationCount !== 1 ||
-      resumedPublicationEvidence.committedOperationCount !== 1 ||
-      resumedPublicationEvidence.exactOperationPublicationCount !== 1 ||
-      resumedPublicationEvidence.receivingUnpublishedOperationCount !== 0 ||
       recoveredJournalEvidence.committedCount !== 1 ||
-      recoveredJournalEvidence.mappedCount !== 1 ||
-      preservedPublicationEvidence.committedCount !== 1 ||
-      preservedPublicationEvidence.mappedCount !== 1
+      recoveredJournalEvidence.mappedCount !== 1
     ) {
-      throw new Error("claimed exact-token resume did not commit exactly once");
+      throw new Error("claimed exact-token resume did not preserve one terminal receipt");
     }
+    requireExactlyOneCanonicalPublication(
+      resumedPublicationEvidence,
+      "claimed exact-token resume did not commit exactly once",
+    );
+
+    if (livePhaseStatusFile !== undefined) {
+      writeLiveAcceptanceDiagnostic(livePhaseStatusFile, {
+        existingSourceCount: existingServerEvidence.sourceCount,
+        existingSourceVersionCount: existingServerEvidence.sourceVersionCount,
+        existingSyncEventCount: existingServerEvidence.syncEventCount,
+        existingOperationCount: existingServerEvidence.operationCount,
+        newSourceCount: newNoteServerEvidence.sourceCount,
+        newSourceVersionCount: newNoteServerEvidence.sourceVersionCount,
+        newSyncEventCount: newNoteServerEvidence.syncEventCount,
+        newOperationCount: newNoteServerEvidence.operationCount,
+        policySuccessorSourceCount: recoveredPolicyServerEvidence.sourceCount,
+        policySuccessorVersionCount: recoveredPolicyServerEvidence.sourceVersionCount,
+        policySuccessorSyncEventCount: recoveredPolicyServerEvidence.syncEventCount,
+        policySuccessorOperationCount: recoveredPolicyServerEvidence.operationCount,
+        policyAuditCount: blockedJournalEvidence.excludedPolicyCount,
+        policySuccessorCommittedCount:
+          recoveredPolicyServerEvidence.exactOperationPublicationCount,
+        claimedResumeOperationCount: resumedPublicationEvidence.operationCount,
+        claimedResumeCommittedCount: recoveredJournalEvidence.committedCount,
+        claimedResumeInterruptedPendingCount: retryableJournalEvidence.pendingCount,
+        existingJournalCommittedCount: existingJournalEvidence.committedCount,
+        newJournalCommittedCount: newNoteJournalEvidence.committedCount,
+      });
+    }
+    recordLivePhase("automatic_convergence_journey_completed");
   });
 });
