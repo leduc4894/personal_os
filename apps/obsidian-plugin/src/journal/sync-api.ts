@@ -49,8 +49,12 @@ export type SyncHttpTransport = (request: SyncHttpRequest) => Promise<SyncHttpRe
  * The closed failure vocabulary of the sync client, mirroring the spec-12
  * retry matrix: the four retryable network conditions, the two credential
  * conditions the driver resolves through its one-per-pass refresh, and the
- * two terminal integrity/size rejections. `operation_retry_required` covers
- * the server's closed upload-operation failures. Its safe resume flag
+ * terminal integrity/size/conflict rejections. `blocked_conflict` carries
+ * the server's typed, non-retryable business-conflict verdicts — the
+ * create-time `source_locator_conflict` (a bound path already owned by a
+ * foreign ACTIVE locator) — so the queue parks the event instead of
+ * retrying a verdict that can never succeed. `operation_retry_required`
+ * covers the server's closed upload-operation failures. Its safe resume flag
  * distinguishes a claimed receive from an unknown or expired token without
  * widening the cross-language failure vocabulary.
  */
@@ -62,6 +66,7 @@ export const SYNC_API_FAILURE_KINDS = [
   "access_expired",
   "login_required",
   "blocked_size",
+  "blocked_conflict",
   "integrity_failed",
   "operation_retry_required",
 ] as const;
@@ -232,6 +237,11 @@ function mapWireFailure(status: number, code: string | null, requestId: string |
   switch (code) {
     case "small_file_size_limit_exceeded":
       return syncApiError("blocked_size", false, requestId, code);
+    case "source_locator_conflict":
+      // The server's typed create rejection (fix round 2026-08-23): the
+      // bound path is already owned by a foreign ACTIVE locator — a
+      // permanent business conflict, never a retryable condition.
+      return syncApiError("blocked_conflict", false, requestId, code);
     case "small_file_content_integrity_failed":
     case "small_file_operation_identity_mismatch":
       return syncApiError("integrity_failed", false, requestId, code);

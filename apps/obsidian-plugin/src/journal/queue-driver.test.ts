@@ -540,6 +540,43 @@ describe("queue driver outcome mapping (spec 10.1 table, 12)", () => {
     await runPass(harness.driver);
     expect(harness.repository.readEvent(event.eventId)?.state).toBe("integrity_failed");
   });
+
+  it("closes a locator-conflict upload rejection as blocked_conflict and moves the queue on", async () => {
+    // The server's typed create rejection (fix round 2026-08-23): a create
+    // whose bound path already has a foreign ACTIVE locator answers the
+    // content upload with 409 `source_locator_conflict` — a permanent,
+    // non-retryable verdict. Before the wire mapping existed, that closed
+    // code fell to the retryable `server_error` default and parked the event
+    // in `waiting_retry` under the `server_error` label while every pass
+    // retried the same deterministic conflict (the live stuck-event loop).
+    const harness = createHarness();
+    const conflicted = await captureBytes(harness, "notes/owned-path.md", new TextEncoder().encode("owned"));
+    const follower = await captureBytes(harness, "notes/follower.md", new TextEncoder().encode("follower"));
+    const scripted = harness.installTransport({
+      preflight: async (body) =>
+        body["normalized_locator"] === "notes/owned-path.md"
+          ? { status: 200, bodyText: SINGLE_PART_BODY }
+          : { status: 200, bodyText: successBody({ outcome: "excluded" }) },
+      content: async () => ({ status: 409, bodyText: errorBody("source_locator_conflict") }),
+    });
+    const summary = await runPass(harness.driver);
+
+    const stored = harness.repository.readEvent(conflicted.eventId);
+    expect(stored?.state).toBe("blocked_conflict");
+    expect(stored?.safeError).toBe("blocked_conflict");
+    expect(harness.repository.readEventAttemptHistory(conflicted.eventId).at(-1)?.outcomeLabel).toBe(
+      "blocked_conflict",
+    );
+    // The queue moved on: the follower event was reached in the same pass
+    // instead of the whole pass ending behind a retryable verdict.
+    expect(scripted.preflightBodies.map((body) => body["normalized_locator"])).toEqual([
+      "notes/owned-path.md",
+      "notes/follower.md",
+    ]);
+    expect(harness.repository.readEvent(follower.eventId)?.state).toBe("excluded_policy");
+    expect(summary.outcome).toBe("completed");
+    expect(summary.processedEventCount).toBe(2);
+  });
 });
 
 // --- client re-fingerprint before send ----------------------------------------------------------------

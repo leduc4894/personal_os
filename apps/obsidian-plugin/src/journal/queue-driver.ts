@@ -912,6 +912,13 @@ export class JournalQueueDriver {
       case "blocked_size":
         await this.#closeTerminal(eventId, "blocked_size", "blocked_size", correlationId);
         return "continue";
+      case "blocked_conflict":
+        // The server's typed, non-retryable business-conflict verdict (for
+        // example the create-time `source_locator_conflict`): park the event
+        // terminally so the queue moves on instead of retrying a verdict
+        // that can never succeed.
+        await this.#closeTerminal(eventId, "blocked_conflict", "blocked_conflict", correlationId);
+        return "continue";
       case "integrity_failed":
         await this.#closeTerminal(eventId, "integrity_failed", "integrity_failed", correlationId);
         return "continue";

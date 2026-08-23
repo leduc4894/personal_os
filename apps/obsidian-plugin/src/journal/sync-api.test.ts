@@ -299,6 +299,10 @@ describe("journal sync api failure mapping (spec 12)", () => {
     [404, "small_file_operation_not_found", "operation_retry_required"],
     [410, "small_file_operation_expired", "operation_retry_required"],
     [409, "small_file_upload_state_invalid", "operation_retry_required"],
+    // The server's typed create rejection (fix round 2026-08-23): a create
+    // whose bound path already has a foreign ACTIVE locator is a permanent
+    // business conflict — terminal, never retried.
+    [409, "source_locator_conflict", "blocked_conflict"],
     [422, "small_file_preflight_invalid", "server_error"],
     [418, null, "server_error"],
   ])(
@@ -361,6 +365,7 @@ describe("journal sync api failure mapping (spec 12)", () => {
       "access_expired",
       "login_required",
       "blocked_size",
+      "blocked_conflict",
       "integrity_failed",
       "operation_retry_required",
     ]);
