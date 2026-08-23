@@ -12,9 +12,9 @@ The operator surface is small and deliberately redacted:
 
 - One **sidecar ring** (`sync-diagnostics-trail.json`, inside the Vault's
   plugin directory) holding at most 128 durable closed-token entries.
-- Two **commands**: `Run sync self-check` and `Copy sync diagnostics`
-  (alongside the pre-existing `Sync now`, `Sync existing files` and
-  `Restore selected tombstone` commands).
+- Two **commands**: `Run sync self-check` and `Copy sync diagnostics`,
+  alongside the `Restore selected tombstone` command — exactly these
+  three commands are registered in the plugin's command palette.
 - One **settings section**: `Sync diagnostics trail`.
 - One **admin route**: `GET /api/admin/sync/rejections` on the API, behind
   the strict Web Admin session gate.
@@ -62,9 +62,10 @@ The closed token vocabularies are exactly the existing sync vocabularies:
   `journal_generation_write_failed`, `journal_manifest_invalid`,
   `journal_not_open`.
 - `JournalSafeErrorLabel` (pass/event outcomes):
-  `excluded_policy`, `blocked_size`, `blocked_conflict`,
-  `deferred_lifecycle`, `integrity_failed`, `reconcile_required`,
-  `committed`.
+  `network_offline`, `network_timeout`, `network_rate_limited`,
+  `server_error`, `login_required`, `excluded_policy`, `blocked_size`,
+  `blocked_conflict`, `deferred_lifecycle`, `integrity_failed`,
+  `reconcile_required`, `committed`.
 - `LifecycleRunOutcome`: `idle`, `committed`, `blocked`, `retry`,
   `login_required`.
 - Self-check verdicts: `trail_probe`, `trail_persist_ok`,
