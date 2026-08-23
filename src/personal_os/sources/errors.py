@@ -75,6 +75,7 @@ class SourcePublicationError(ApplicationError):
             ErrorCode.SOURCE_EVENT_IDENTITY_MISMATCH,
             ErrorCode.SOURCE_VERIFIED_RECEIPT_STALE,
             ErrorCode.SOURCE_CONTENT_OBJECT_CONFLICT,
+            ErrorCode.SOURCE_LOCATOR_CONFLICT,
             ErrorCode.SOURCE_CONCURRENCY_BUSY,
             ErrorCode.SOURCE_CONCURRENCY_INVARIANT_FAILED,
             ErrorCode.SOURCE_COMMIT_OUTCOME_UNKNOWN,

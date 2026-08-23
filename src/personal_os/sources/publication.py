@@ -88,7 +88,7 @@ MAXIMUM_RECEIPT_AGE: Final[timedelta] = timedelta(minutes=5)
 _RECEIPT_AGE_RULE_REASON: Final = RECEIPT_STALE_REASONS[0]
 
 #: Registry error code -> business-rejection metric label (spec section 14).
-#: The nine business rejections of spec section 10.3 in their registry-code
+#: The ten business rejections of spec section 10.3 in their registry-code
 #: form; concurrency/dependency codes are retryable outcomes, not audited
 #: business rejections, so they carry no rejection label.
 REJECTION_REASON_BY_ERROR_CODE: Final[Mapping[ErrorCode, PublicationRejectionReason]] = (
@@ -113,6 +113,7 @@ REJECTION_REASON_BY_ERROR_CODE: Final[Mapping[ErrorCode, PublicationRejectionRea
             ErrorCode.SOURCE_CONTENT_OBJECT_CONFLICT: (
                 PublicationRejectionReason.SOURCE_CONTENT_OBJECT_CONFLICT
             ),
+            ErrorCode.SOURCE_LOCATOR_CONFLICT: PublicationRejectionReason.SOURCE_LOCATOR_CONFLICT,
         }
     )
 )

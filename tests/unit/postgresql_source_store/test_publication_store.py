@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any, Final, cast
 from uuid import UUID, uuid4
 
+import psycopg
 import pytest
+import sqlalchemy.exc as sa_exc
+from sqlalchemy.dialects import postgresql as sa_postgresql
 from tests.unit.sources.fakes import (
     build_committed_result,
     build_create_command,
@@ -15,16 +20,18 @@ from tests.unit.sources.fakes import (
     build_verified_receipt,
 )
 
-from personal_os.error_contracts.codes import ErrorCode
+from personal_os.error_contracts.codes import ErrorCategory, ErrorCode
 from personal_os.exclusion_policy.contracts import PolicySubject
 from personal_os.exclusion_policy.enforcement import (
     AllowedPolicyRevisionBinding,
     PublicationPolicyEvidence,
 )
+from personal_os.object_storage import VerifiedObjectReceipt
+from personal_os.source_locators.values import NormalizedLocator
 from personal_os.sources.commands import CreateSourceVersion
 from personal_os.sources.errors import SourcePublicationError
 from personal_os.sources.fingerprint import compute_request_fingerprint
-from personal_os.sources.results import SourceVersionPublicationResult
+from personal_os.sources.results import PublicationOutcome, SourceVersionPublicationResult
 from postgresql_source_store import publication_store
 from postgresql_source_store.publication_store import PostgresqlSourcePublicationStore
 
@@ -393,6 +400,340 @@ async def test_durable_publication_store_carries_bound_locator_into_locked_guard
     assert captured_subjects[0].workspace_id == command.workspace_id
     assert captured_subjects[0].source_id == command.source_id
     assert store.order == ["subject", "policy", "transition"]
+
+
+# --- durable create transition over a scripted engine -----------------------------
+
+
+_ACTIVE_LOCATOR_CONSTRAINT: Final[str] = "uq_source_locators_active_workspace_path"
+_COMMIT_VERIFIED_AT: Final[datetime] = datetime(2026, 8, 23, 16, 0, 0, tzinfo=UTC)
+_PG_DIALECT: Final[Any] = sa_postgresql.dialect()
+
+
+def _unique_violation(constraint_name: str, table_name: str) -> sa_exc.IntegrityError:
+    """The SQLAlchemy-wrapped psycopg 23505 the scripted table raises."""
+
+    return sa_exc.IntegrityError(
+        f"INSERT INTO knowledge.{table_name} ...",
+        {},
+        psycopg.errors.UniqueViolation(
+            f"duplicate key value violates unique constraint {constraint_name!r}"
+        ),
+    )
+
+
+class _CreateScriptedResult:
+    """Minimal async result double for one scripted create-transition statement."""
+
+    def __init__(
+        self,
+        *,
+        scalar: object | None = None,
+        row: object | None = None,
+        rowcount: int = 0,
+    ) -> None:
+        self._scalar = scalar
+        self._row = row
+        self.rowcount = rowcount
+
+    def scalar_one_or_none(self) -> object | None:
+        return self._scalar
+
+    def one_or_none(self) -> object | None:
+        return self._row
+
+    def one(self) -> object:
+        assert self._row is not None, "scripted result must program exactly one row"
+        return self._row
+
+
+class _CreateScriptedConnection:
+    """Connection double serving the durable create transition's statements.
+
+    The double models only the canonical state the create's bound initial
+    locator depends on: the foreign owner of an ACTIVE locator at the command's
+    bound path (``closed_event_id IS NULL`` under the partial unique index),
+    and whether the initial-locator INSERT itself violates that index. Every
+    other table accepts the write; the content-object reuse lookup returns a
+    row matching the receipt exactly; the guarded pointer update matches one
+    row; the create event returns sequence 1.
+    """
+
+    def __init__(
+        self,
+        receipt: VerifiedObjectReceipt,
+        *,
+        foreign_active_locator_source_id: UUID | None,
+        locator_insert_violates: bool,
+        sources_insert_violates: bool = False,
+    ) -> None:
+        self._receipt = receipt
+        self._foreign_active_locator_source_id = foreign_active_locator_source_id
+        self._locator_insert_violates = locator_insert_violates
+        self._sources_insert_violates = sources_insert_violates
+        self.locator_prechecks = 0
+        self.locator_inserts = 0
+        self.audit_rows: list[tuple[str | None, str | None]] = []
+
+    def begin(self) -> _AsyncContext:
+        return _AsyncContext(None)
+
+    async def execute(self, statement: object) -> object:
+        visit_name = statement.__visit_name__  # type: ignore[attr-defined]
+        if visit_name in {"text", "textclause"}:
+            # Transaction bounds and the transaction-scoped advisory locks.
+            return _CreateScriptedResult()
+        compiled = str(statement.compile(dialect=_PG_DIALECT))  # type: ignore[attr-defined]
+        if visit_name == "select":
+            if "FROM knowledge.source_locators" in compiled:
+                self.locator_prechecks += 1
+                return _CreateScriptedResult(scalar=self._foreign_active_locator_source_id)
+            if "FROM knowledge.sources" in compiled:
+                # ``_select_source_workspace_id``: the global primary key is free.
+                return _CreateScriptedResult(scalar=None)
+            if "FROM knowledge.content_objects" in compiled:
+                return _CreateScriptedResult(
+                    row=SimpleNamespace(
+                        content_object_id=uuid4(),
+                        object_key=self._receipt.object_key.value,
+                        byte_size=self._receipt.size_bytes,
+                        media_type=self._receipt.media_type.value,
+                    )
+                )
+            raise AssertionError(f"unexpected select: {compiled}")
+        if visit_name == "insert":
+            if "INTO knowledge.source_locators" in compiled:
+                self.locator_inserts += 1
+                if self._locator_insert_violates:
+                    raise _unique_violation(_ACTIVE_LOCATOR_CONSTRAINT, "source_locators")
+                return _CreateScriptedResult()
+            if "INTO knowledge.sources" in compiled:
+                if self._sources_insert_violates:
+                    raise _unique_violation("pk_sources", "sources")
+                return _CreateScriptedResult()
+            if "INTO knowledge.audit_events" in compiled:
+                params = statement.compile(dialect=_PG_DIALECT).params  # type: ignore[attr-defined]
+                self.audit_rows.append(
+                    (params.get("action"), params.get("reason_code")),
+                )
+                return _CreateScriptedResult()
+            # Pending source, version 1, create event and projection intents.
+            if "INTO knowledge.sync_events" in compiled:
+                return _CreateScriptedResult(
+                    row=SimpleNamespace(
+                        event_sequence=1,
+                        committed_at=datetime(2026, 8, 23, 16, 0, 0, tzinfo=UTC),
+                    )
+                )
+            return _CreateScriptedResult()
+        if visit_name == "update":
+            # The guarded active-pointer transition matches exactly one row.
+            return _CreateScriptedResult(rowcount=1)
+        raise AssertionError(f"unexpected statement kind: {visit_name}")
+
+
+class _CreateTransitionStore(PostgresqlSourcePublicationStore):
+    """Store double driving the real durable ``_create_transition``.
+
+    The locked prefix's trusted-context seam is overridden exactly like
+    :class:`_ControlledStore` (active workspace, valid actor, replay miss); a
+    create builds its policy subject without database access, so everything
+    from :meth:`_create_transition` onward runs as the durable code over the
+    scripted connection. With ``with_operation_fence`` the small-file operation
+    fence wraps the transition exactly as the receive path wires it.
+    """
+
+    def __init__(
+        self,
+        command: CreateSourceVersion,
+        receipt: VerifiedObjectReceipt,
+        *,
+        foreign_active_locator_source_id: UUID | None,
+        locator_insert_violates: bool,
+        sources_insert_violates: bool = False,
+        with_operation_fence: bool = False,
+    ) -> None:
+        self.connection = _CreateScriptedConnection(
+            receipt,
+            foreign_active_locator_source_id=foreign_active_locator_source_id,
+            locator_insert_violates=locator_insert_violates,
+            sources_insert_violates=sources_insert_violates,
+        )
+        self.order: list[str] = []
+        fence = _RecordingOperationFence(self.order) if with_operation_fence else None
+        super().__init__(
+            cast(Any, _Engine(self.connection)),
+            policy_verifier=_AcceptingVerifier(),
+            small_file_operation_store=cast(Any, fence) if fence is not None else None,
+            small_file_bound_operation=cast(Any, object()) if fence is not None else None,
+        )
+
+    async def _select_workspace_is_active(self, connection: object, workspace_id: UUID) -> bool:
+        del connection, workspace_id
+        return True
+
+    async def _is_actor_valid(self, connection: object, command: object) -> bool:
+        del connection, command
+        return True
+
+    async def _resolve_identity(
+        self,
+        connection: object,
+        command: object,
+        request_fingerprint: object,
+    ) -> tuple[None, None]:
+        del connection, command, request_fingerprint
+        return None, None
+
+
+def _allow_locked_publication_policy(monkeypatch: pytest.MonkeyPatch, workspace_id: UUID) -> None:
+    async def authorize_locked(*args: object, **kwargs: object) -> AllowedPolicyRevisionBinding:
+        del args, kwargs
+        return AllowedPolicyRevisionBinding(workspace_id, 7)
+
+    monkeypatch.setattr(
+        publication_store,
+        "authorize_locked_publication_policy",
+        authorize_locked,
+        raising=False,
+    )
+
+
+async def _commit_create(
+    store: _CreateTransitionStore, command: CreateSourceVersion
+) -> SourceVersionPublicationResult:
+    receipt = build_verified_receipt(command.expected_object, _COMMIT_VERIFIED_AT)
+    return await store.commit_create(
+        command,
+        compute_request_fingerprint(command),
+        receipt,
+        build_diagnostic_context(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_at_foreign_active_locator_rejects_typed_before_the_locator_insert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A create at a foreign ACTIVE locator path is the typed locator conflict.
+
+    The live stuck event (2026-08-23): the bound path already has an ACTIVE
+    ``source_locators`` row owned by a different source, so the initial-locator
+    INSERT deterministically violates the partial unique index
+    ``uq_source_locators_active_workspace_path``. The durable transition must
+    reject with the typed, non-retryable ``source_locator_conflict`` under the
+    same locks, BEFORE the INSERT — never let the constraint violation escape
+    as the retryable ``source_commit_outcome_unknown`` loop that leaves the
+    bound operation row fenced in ``receiving`` forever.
+    """
+
+    command = build_create_command(initial_locator=NormalizedLocator("notes/conflicted.md"))
+    _allow_locked_publication_policy(monkeypatch, command.workspace_id)
+    store = _CreateTransitionStore(
+        command,
+        build_verified_receipt(command.expected_object, _COMMIT_VERIFIED_AT),
+        foreign_active_locator_source_id=uuid4(),
+        locator_insert_violates=True,
+        with_operation_fence=True,
+    )
+
+    with pytest.raises(SourcePublicationError) as raised:
+        await _commit_create(store, command)
+
+    assert raised.value.error_code is ErrorCode.SOURCE_LOCATOR_CONFLICT
+    assert raised.value.is_retryable is False
+    assert raised.value.category is ErrorCategory.CONFLICT
+    # The guarded pre-check fired inside the locked transition: the locator
+    # INSERT (and its unique violation) is never reached.
+    assert store.connection.locator_prechecks == 1
+    assert store.connection.locator_inserts == 0
+    # The standalone rejection audit carries the closed reason token.
+    assert store.connection.audit_rows == [
+        ("source.version_publish_rejected", "source_locator_conflict")
+    ]
+    # The bound operation row follows the existing typed-rejection pattern: the
+    # fence is acquired, no terminal result is recorded, and no new state is
+    # invented — the row stays ``receiving`` for the client's typed 409.
+    assert store.order == ["operation_fence"]
+
+
+@pytest.mark.asyncio
+async def test_create_at_free_locator_path_publishes_the_bound_locator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuinely free bound path still publishes through the locator INSERT."""
+
+    command = build_create_command(initial_locator=NormalizedLocator("notes/free.md"))
+    _allow_locked_publication_policy(monkeypatch, command.workspace_id)
+    store = _CreateTransitionStore(
+        command,
+        build_verified_receipt(command.expected_object, _COMMIT_VERIFIED_AT),
+        foreign_active_locator_source_id=None,
+        locator_insert_violates=False,
+    )
+
+    result = await _commit_create(store, command)
+
+    assert result.outcome is PublicationOutcome.PUBLISHED
+    assert result.source_id == command.source_id
+    assert result.content_version == 1
+    assert store.connection.locator_prechecks == 1
+    assert store.connection.locator_inserts == 1
+    # Only the in-transaction success audit exists; no rejection was written.
+    assert store.connection.audit_rows == [("source.version_published", None)]
+
+
+@pytest.mark.asyncio
+async def test_locator_free_create_skips_the_locator_guard_entirely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A create without a bound initial locator never consults the locator table."""
+
+    command = build_create_command()
+    assert command.initial_locator is None
+    _allow_locked_publication_policy(monkeypatch, command.workspace_id)
+    store = _CreateTransitionStore(
+        command,
+        build_verified_receipt(command.expected_object, _COMMIT_VERIFIED_AT),
+        foreign_active_locator_source_id=uuid4(),
+        locator_insert_violates=True,
+    )
+
+    result = await _commit_create(store, command)
+
+    assert result.outcome is PublicationOutcome.PUBLISHED
+    assert store.connection.locator_prechecks == 0
+    assert store.connection.locator_inserts == 0
+
+
+@pytest.mark.asyncio
+async def test_foreign_unique_violation_keeps_the_outcome_unknown_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the active-locator constraint is translated; other 23505s are not.
+
+    A unique violation from a different constraint in the same create
+    transaction must keep crossing the boundary as the retryable
+    ``source_commit_outcome_unknown`` (the classification contract of
+    ``error_mapping``): the typed conflict is scoped strictly to the guarded
+    locator pre-check, never to SQLSTATE 23505 at large.
+    """
+
+    command = build_create_command(initial_locator=NormalizedLocator("notes/owner-clash.md"))
+    _allow_locked_publication_policy(monkeypatch, command.workspace_id)
+    store = _CreateTransitionStore(
+        command,
+        build_verified_receipt(command.expected_object, _COMMIT_VERIFIED_AT),
+        foreign_active_locator_source_id=uuid4(),
+        locator_insert_violates=True,
+        sources_insert_violates=True,
+    )
+
+    with pytest.raises(SourcePublicationError) as raised:
+        await _commit_create(store, command)
+
+    assert raised.value.error_code is ErrorCode.SOURCE_COMMIT_OUTCOME_UNKNOWN
+    assert raised.value.is_retryable is True
 
 
 _MISSING: Final[object] = object()

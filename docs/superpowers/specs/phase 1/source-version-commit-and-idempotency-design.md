@@ -510,7 +510,10 @@ event_identity_mismatch
 actor_invalid
 verified_receipt_stale
 content_object_metadata_conflict
+source_locator_conflict
 ```
+
+`source_locator_conflict` rejects a small-file create whose bound initial locator collides with a foreign ACTIVE locator: the guarded pre-check inside the create's locked transition (2026-08-23) raises the typed, non-retryable `source_locator_conflict` (HTTP 409) before the locator insert, so the partial unique active-locator index violation never surfaces as a retryable outcome-unknown loop. The index remains the race-only final arbiter.
 
 Malformed input before a trusted actor boundary produces only registered diagnostics. If PostgreSQL cannot write audit, the service reports database failure and never claims audit exists.
 
@@ -606,8 +609,11 @@ Add closed registry codes:
 | `source_concurrency_busy` | dependency | yes | source_id |
 | `source_concurrency_invariant_failed` | integrity | no | source_id |
 | `source_commit_outcome_unknown` | dependency | yes | source_id |
+| `source_locator_conflict` | conflict | no | (none) |
 | `projection_dispatch_unavailable` | dependency | yes | projection_kind |
 | `projection_intent_contract_invalid` | integrity | no | projection_kind |
+
+`source_locator_conflict` is the pre-registered lifecycle locator-conflict code, also carried by the publication exception since 2026-08-23: a small-file create whose bound initial locator collides with a foreign ACTIVE locator rejects with it (HTTP 409, non-retryable) from the guarded pre-check inside the create's locked transition, before the locator insert. Its registry definition admits no safe detail field; the rejected source identity rides the diagnostic event fields and the rejection audit row.
 
 Safe messages are fixed. Receipt-stale is not generally retryable because retrying the same stale value cannot succeed; the application must reverify.
 

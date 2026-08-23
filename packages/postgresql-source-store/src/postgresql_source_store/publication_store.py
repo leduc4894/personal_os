@@ -24,6 +24,8 @@ source advisory lock. The create then performs
 the global source-existence rejection, the exact content-object
 upsert/select/compare, the pending source, version 1 with a null parent, the
 guarded active-pointer transition, the create event with a null base, the
+guarded active-locator conflict rejection for a bound locator whose path a
+foreign ACTIVE locator already holds, the initial locator insert, the
 two upsert intents and the succeeded audit. The update selects the
 source/current-version/current-object rows ``FOR UPDATE``, accepts only
 ``active`` and ``stored_not_indexed`` sources, compares the requested base
@@ -118,6 +120,7 @@ REASON_EVENT_IDENTITY_MISMATCH: Final[str] = "event_identity_mismatch"
 REASON_ACTOR_INVALID: Final[str] = "actor_invalid"
 REASON_SOURCE_ALREADY_EXISTS: Final[str] = "source_already_exists"
 REASON_CONTENT_OBJECT_CONFLICT: Final[str] = "content_object_metadata_conflict"
+REASON_SOURCE_LOCATOR_CONFLICT: Final[str] = "source_locator_conflict"
 
 #: Audit constants for the in-transaction success audit of a changed create.
 SUCCESS_AUDIT_ACTION: Final[str] = "source.version_published"
@@ -837,7 +840,13 @@ class PostgresqlSourcePublicationStore:
 
         The initial ``source_locators`` row lands AFTER the create event and
         BEFORE the projection intents and the succeeded audit, so a duplicate
-        active locator rejection rolls the whole create graph back.
+        active locator rejection rolls the whole create graph back. A bound
+        locator whose path already has a foreign ACTIVE locator is rejected by
+        the guarded pre-check before that insert — the typed, non-retryable
+        ``source_locator_conflict`` (a permanent business conflict for this
+        event's identity) instead of the unclassified integrity violation the
+        partial unique index would raise, which the caller must never see as a
+        retryable outcome-unknown loop.
         """
         if await self._select_source_workspace_id(connection, command.source_id) is not None:
             # ``source_id`` is a global primary key: any existing row, in the
@@ -889,6 +898,23 @@ class PostgresqlSourcePublicationStore:
             connection, command, request_fingerprint, identities.source_version_id
         )
         if command.initial_locator is not None:
+            conflicting_locator_source_id = await self._select_foreign_active_locator_source_id(
+                connection, command, command.initial_locator
+            )
+            if conflicting_locator_source_id is not None:
+                # Same transaction and advisory locks as the insert itself:
+                # the pre-check shares the transition's locking discipline, so
+                # no separate lookup window exists between check and insert.
+                # The registry admits no safe detail field for this code; the
+                # rejected source identity rides the audit row's target and
+                # the diagnostic event fields instead.
+                return (
+                    _PendingRejection(
+                        reason_code=REASON_SOURCE_LOCATOR_CONFLICT,
+                        error=SourcePublicationError(ErrorCode.SOURCE_LOCATOR_CONFLICT),
+                    ),
+                    None,
+                )
             await self._insert_initial_locator(
                 connection,
                 command,
@@ -1365,6 +1391,31 @@ class PostgresqlSourcePublicationStore:
         )
         return result.scalar_one_or_none()
 
+    async def _select_foreign_active_locator_source_id(
+        self, connection: AsyncConnection, command: CreateSourceVersion, locator: NormalizedLocator
+    ) -> UUID | None:
+        """Select the foreign owner of an ACTIVE locator at the create's bound path.
+
+        Mirrors the partial unique active-locator index
+        ``(workspace_id, normalized_locator) WHERE closed_event_id IS NULL``:
+        any such row owned by a different source makes the bound initial
+        locator a permanent business conflict for this create's identity, so
+        the guarded pre-check inside the locked transition rejects with the
+        typed, non-retryable conflict before the insert. The index remains the
+        final arbiter for the residual two-simultaneous-creates race (the
+        loser's violation surfaces as before and the next sanctioned retry
+        finds the winner's row here).
+        """
+        result = await connection.execute(
+            sa.select(source_locators.c.source_id).where(
+                source_locators.c.workspace_id == command.workspace_id,
+                source_locators.c.normalized_locator == locator.value,
+                source_locators.c.closed_event_id.is_(None),
+                source_locators.c.source_id != command.source_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def _insert_content_object(
         self,
         connection: AsyncConnection,
@@ -1419,7 +1470,10 @@ class PostgresqlSourcePublicationStore:
         event; the display locator mirrors the canonical normalized value
         until the lifecycle mutates it. The unique active locator index
         raises a constraint violation if the same workspace already has an
-        active locator at the same path, rolling the whole create back.
+        active locator at the same path, rolling the whole create back; the
+        foreign-active case is normally caught first by the guarded pre-check
+        in :meth:`_create_transition`, which rejects with the typed conflict
+        so the index violation stays the race-only final arbiter.
         """
         await connection.execute(
             sa.insert(source_locators).values(

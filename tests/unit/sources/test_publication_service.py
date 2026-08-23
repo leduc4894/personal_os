@@ -10,7 +10,7 @@ retries versus fresh service invocations.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Final
+from typing import Any, Final, cast
 
 import pytest
 from tests.unit.sources.fakes import (
@@ -45,11 +45,13 @@ from personal_os.exclusion_policy.enforcement import (
 )
 from personal_os.exclusion_policy.errors import ExclusionPolicyError
 from personal_os.object_storage import ContentDigest, ExpectedObject, VerifiedObjectReceipt
+from personal_os.source_locators.values import NormalizedLocator
 from personal_os.sources import (
     PublicationOperation,
     PublicationRejectionReason,
     SourceVersionPublicationService,
 )
+from personal_os.sources.commands import CreateSourceVersion
 from personal_os.sources.errors import SourcePublicationError
 from personal_os.sources.fingerprint import compute_request_fingerprint
 from personal_os.sources.metrics import (
@@ -159,6 +161,114 @@ async def test_retryable_publication_failure_is_not_recorded_as_a_rejection() ->
         "source_id",
         "event_id",
     }
+
+
+class _LocatorConflictCommitStore:
+    """Store double whose locked create rejects with the typed locator conflict.
+
+    Models the durable store's guarded pre-check: the replay preflight proves
+    absence (the conflicting ACTIVE locator belongs to a foreign source, so no
+    retry could ever hydrate a replay), and the locked create transition
+    rejects with the typed, non-retryable ``source_locator_conflict`` before
+    the initial-locator INSERT.
+    """
+
+    async def resolve_committed(
+        self,
+        command: object,
+        request_fingerprint: object,
+        diagnostic_context: object,
+    ) -> None:
+        del command, request_fingerprint, diagnostic_context
+        return None
+
+    async def commit_create(
+        self,
+        command: CreateSourceVersion,
+        request_fingerprint: object,
+        receipt: object,
+        diagnostic_context: object,
+        *,
+        preflight_decision: object = None,
+    ) -> SourceVersionPublicationResult:
+        del command, request_fingerprint, receipt, diagnostic_context, preflight_decision
+        # The registry admits no safe detail field for this code: the rejected
+        # source identity rides the diagnostic event fields and the audit row.
+        raise SourcePublicationError(ErrorCode.SOURCE_LOCATOR_CONFLICT)
+
+    async def commit_update(
+        self,
+        command: object,
+        request_fingerprint: object,
+        receipt: object,
+        diagnostic_context: object,
+        *,
+        preflight_decision: object = None,
+    ) -> SourceVersionPublicationResult:
+        del command, request_fingerprint, receipt, diagnostic_context, preflight_decision
+        raise AssertionError("update path is not under test")
+
+
+@pytest.mark.asyncio
+async def test_locator_conflict_rejection_is_a_registered_business_rejection() -> None:
+    """The typed locator conflict crosses the service as the audited rejection.
+
+    The stuck live loop proved the same deterministic conflict emitted as the
+    retryable ``source_version_publish_failed`` event; once the durable store
+    rejects with the typed conflict, the service must record the closed
+    rejection reason and emit ``source_version_publish_rejected`` with
+    ``is_retryable=false`` — the client's signal to park the event instead of
+    retrying forever.
+    """
+
+    diagnostics = RecordingDiagnosticSink()
+    expected = build_expected_object()
+    receipt = build_verified_receipt(expected, _PUBLICATION_START)
+    metrics = InMemorySourcePublicationMetrics()
+    service = SourceVersionPublicationService(
+        store=cast(Any, _LocatorConflictCommitStore()),
+        object_store=FakeCanonicalObjectStore(
+            ledger=CallLedger(),
+            resolve_receipts=[receipt],
+            store_receipt=receipt,
+        ),
+        metrics=metrics,
+        clock=SequencedUtcClock(moments=[_PUBLICATION_START, _PUBLICATION_START]),
+        policy_guard=AllowingPolicyGuard(ledger=CallLedger()),
+        diagnostics=diagnostics,
+    )
+    command = build_create_command(
+        expected,
+        initial_locator=NormalizedLocator("notes/conflicted.md"),
+    )
+
+    with pytest.raises(SourcePublicationError) as raised:
+        await service.publish_create(
+            command=command,
+            stream=ProbedByteStream([b"canonical-bytes"]),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+    assert raised.value.error_code is ErrorCode.SOURCE_LOCATOR_CONFLICT
+    assert raised.value.is_retryable is False
+
+    assert [event_name for event_name, _ in diagnostics.events] == [
+        EventName.SOURCE_VERSION_PUBLISH_REJECTED
+    ]
+    fields = diagnostics.events[0][1]
+    assert fields["error_code"] == ErrorCode.SOURCE_LOCATOR_CONFLICT
+    assert fields["is_retryable"] is False
+    assert fields["reason_code"] == PublicationRejectionReason.SOURCE_LOCATOR_CONFLICT
+    assert (
+        metrics.rejection_count(
+            PublicationOperation.CREATE, PublicationRejectionReason.SOURCE_LOCATOR_CONFLICT
+        )
+        == 1
+    )
+    assert (
+        metrics.publication_count(PublicationOperation.CREATE, PublicationMetricOutcome.REJECTED)
+        == 1
+    )
 
 
 @pytest.mark.asyncio

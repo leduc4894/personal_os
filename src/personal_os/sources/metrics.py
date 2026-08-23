@@ -62,6 +62,7 @@ class PublicationRejectionReason(StrEnum):
     SOURCE_EVENT_IDENTITY_MISMATCH = "source_event_identity_mismatch"
     SOURCE_VERIFIED_RECEIPT_STALE = "source_verified_receipt_stale"
     SOURCE_CONTENT_OBJECT_CONFLICT = "source_content_object_conflict"
+    SOURCE_LOCATOR_CONFLICT = "source_locator_conflict"
 
 
 class TransactionRetryReason(StrEnum):

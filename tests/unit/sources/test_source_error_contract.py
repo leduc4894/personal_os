@@ -1,6 +1,6 @@
 """Closed source-publication error contract: codes, categories and safe details.
 
-Asserts the exact fourteen-code registry set, the fixed category and retryability
+Asserts the exact fifteen-code registry set, the fixed category and retryability
 map, the exact per-code safe-detail allowlists, disjoint closed code sets for
 the two typed exception classes and rejection of arbitrary strings, raw
 commands and value objects as safe details.
@@ -38,6 +38,7 @@ SOURCE_ERROR_CODES = {
     "source_concurrency_busy",
     "source_concurrency_invariant_failed",
     "source_commit_outcome_unknown",
+    "source_locator_conflict",
     "projection_dispatch_unavailable",
     "projection_intent_contract_invalid",
 }
@@ -66,6 +67,7 @@ def test_source_error_registry_category_and_retryability_are_fixed() -> None:
         "source_concurrency_busy": (ErrorCategory.DEPENDENCY, True),
         "source_concurrency_invariant_failed": (ErrorCategory.INTEGRITY, False),
         "source_commit_outcome_unknown": (ErrorCategory.DEPENDENCY, True),
+        "source_locator_conflict": (ErrorCategory.CONFLICT, False),
         "projection_dispatch_unavailable": (ErrorCategory.DEPENDENCY, True),
         "projection_intent_contract_invalid": (ErrorCategory.INTEGRITY, False),
     }
@@ -92,6 +94,7 @@ def test_source_error_registry_category_and_retryability_are_fixed() -> None:
         ("source_concurrency_busy", frozenset({"source_id"})),
         ("source_concurrency_invariant_failed", frozenset({"source_id"})),
         ("source_commit_outcome_unknown", frozenset({"source_id"})),
+        ("source_locator_conflict", frozenset()),
         ("projection_dispatch_unavailable", frozenset({"projection_kind"})),
         ("projection_intent_contract_invalid", frozenset({"projection_kind"})),
     ],
@@ -101,7 +104,7 @@ def test_source_error_safe_detail_allowlists_are_exact(value: str, allowed: froz
 
 
 def test_publication_and_dispatch_code_sets_are_closed_and_disjoint() -> None:
-    assert len(SourcePublicationError.allowed_codes) == 12
+    assert len(SourcePublicationError.allowed_codes) == 13
     assert len(ProjectionDispatchError.allowed_codes) == 2
     assert not SourcePublicationError.allowed_codes & ProjectionDispatchError.allowed_codes
     assert SourcePublicationError.allowed_codes <= frozenset(ErrorCode)

@@ -83,6 +83,7 @@ def test_label_vocabularies_are_closed_enums() -> None:
         "source_event_identity_mismatch",
         "source_verified_receipt_stale",
         "source_content_object_conflict",
+        "source_locator_conflict",
     }
     assert {member.value for member in ProjectionDispatchErrorCode} == {
         "projection_dispatch_unavailable",
