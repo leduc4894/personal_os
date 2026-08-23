@@ -17,6 +17,11 @@ import type {
   VaultAdapterSurface,
 } from "./persistence";
 import type { SqliteEngineModule } from "./sqlite-database";
+import type {
+  SyncDiagnosticsTrail,
+  SyncDiagnosticsTrailAppendInput,
+  SyncDiagnosticTrailEntry,
+} from "./sync-diagnostics-trail";
 
 /** The real sql.js WebAssembly engine drives the whole generation protocol. */
 let engineModule: SqliteEngineModule;
@@ -596,6 +601,69 @@ describe("JournalPersistence unload flush attempt (spec 11)", () => {
     gate.releaseOperation?.();
     await commit;
     expect(journal.attemptFinalFlush()).toBe("final_generation_current");
+    journal.close();
+  });
+});
+
+// --- diagnostics trail wiring (sync error tracing task 1) -----------------------------------------
+
+/** The in-memory diagnostics trail recorder of the publish-failure seam test. */
+class RecordingDiagnosticsTrail implements SyncDiagnosticsTrail {
+  readonly entries: SyncDiagnosticTrailEntry[] = [];
+
+  async load(): Promise<void> {
+    // The persistence layer never loads the trail; the composition root does.
+  }
+
+  append(input: SyncDiagnosticsTrailAppendInput): Promise<void> {
+    this.entries.push({ kind: input.kind, atEpochMs: 0, tokens: [...input.tokens] });
+    return Promise.resolve();
+  }
+
+  readEntries(): readonly SyncDiagnosticTrailEntry[] {
+    return [...this.entries];
+  }
+
+  readAppendFailureCount(): number {
+    return 0;
+  }
+}
+
+describe("JournalPersistence diagnostics trail wiring (sync error tracing task 1)", () => {
+  it("records publish_failure with the closed reason when a generation publish fails", async () => {
+    const store = new InMemoryJournalFileStore();
+    const diagnosticTrail = new RecordingDiagnosticsTrail();
+    const journal = new JournalPersistence({
+      fileStore: store,
+      engineModule,
+      diagnosticTrail,
+    });
+    await journal.open();
+    // A healthy publish records nothing on the trail.
+    await journal.commitGeneration(() => undefined);
+    expect(diagnosticTrail.entries).toEqual([]);
+
+    const originalWriteBinary = store.writeBinary.bind(store);
+    store.writeBinary = async (fileName: string, data: ArrayBuffer): Promise<void> => {
+      if (fileName.startsWith(JOURNAL_GENERATION_FILE_PREFIX)) {
+        throw new Error("adapter write failed");
+      }
+      await originalWriteBinary(fileName, data);
+    };
+    await expect(journal.commitGeneration(() => undefined)).rejects.toMatchObject({
+      reason: "journal_generation_write_failed",
+    });
+
+    // The trail mirrors the fix-round-5 counter: one publish_failure entry
+    // carrying the closed reason token, nothing else.
+    expect(diagnosticTrail.entries).toEqual([
+      { kind: "publish_failure", atEpochMs: 0, tokens: ["journal_generation_write_failed"] },
+    ]);
+
+    // The trail never acts: a recovered store publishes the next generation.
+    store.writeBinary = originalWriteBinary;
+    await journal.commitGeneration(() => undefined);
+    expect(journal.verifiedGenerationNumber).toBe(3);
     journal.close();
   });
 });

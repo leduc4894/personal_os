@@ -41,6 +41,11 @@ import {
   type LifecycleEventOperands,
 } from "./lifecycle-contracts";
 import type { SyncHttpRequest } from "./sync-api";
+import type {
+  SyncDiagnosticsTrail,
+  SyncDiagnosticsTrailAppendInput,
+  SyncDiagnosticTrailEntry,
+} from "./sync-diagnostics-trail";
 
 /** The real sql.js WebAssembly engine drives every driver test (spec 6.1). */
 let engineModule: SqliteEngineModule;
@@ -167,9 +172,41 @@ function createScriptedHandlers(handlers: {
   };
 }
 
+/**
+ * The in-memory diagnostics trail recorder of the seam-wiring tests: every
+ * append lands synchronously so the tests can pin the closed tokens of each
+ * recorded entry without a file store.
+ */
+class RecordingDiagnosticsTrail implements SyncDiagnosticsTrail {
+  readonly entries: SyncDiagnosticTrailEntry[] = [];
+  readonly #appendBehavior: () => Promise<void>;
+
+  constructor(appendBehavior: () => Promise<void> = () => Promise.resolve()) {
+    this.#appendBehavior = appendBehavior;
+  }
+
+  async load(): Promise<void> {
+    // The driver never loads the trail; the composition root does.
+  }
+
+  append(input: SyncDiagnosticsTrailAppendInput): Promise<void> {
+    this.entries.push({ kind: input.kind, atEpochMs: 0, tokens: [...input.tokens] });
+    return this.#appendBehavior();
+  }
+
+  readEntries(): readonly SyncDiagnosticTrailEntry[] {
+    return [...this.entries];
+  }
+
+  readAppendFailureCount(): number {
+    return 0;
+  }
+}
+
 interface DriverHarness {
   readonly repository: JournalRepository;
   readonly driver: JournalQueueDriver;
+  readonly diagnosticTrail: RecordingDiagnosticsTrail;
   readonly vaultBytes: Map<string, Uint8Array>;
   readonly refreshCalls: { count: number };
   setRefreshImplementation: (implementation: () => Promise<void>) => void;
@@ -184,6 +221,7 @@ function createHarness(options?: {
   readonly requestTimeoutMs?: number;
   readonly passDeadlineMs?: number;
   readonly useWallClock?: boolean;
+  readonly diagnosticTrailAppendBehavior?: () => Promise<void>;
 }): DriverHarness {
   const database = SqliteDatabase.createEmpty(engineModule, {
     schemaVersion: JOURNAL_SCHEMA_VERSION,
@@ -223,6 +261,7 @@ function createHarness(options?: {
     resolveOrigin: () => ORIGIN,
     getAccessToken: () => accessToken,
   });
+  const diagnosticTrail = new RecordingDiagnosticsTrail(options?.diagnosticTrailAppendBehavior);
   const driver = new JournalQueueDriver({
     repository,
     syncApi,
@@ -238,10 +277,12 @@ function createHarness(options?: {
     randomJitter: () => 0,
     requestTimeoutMs: options?.requestTimeoutMs,
     passDeadlineMs: options?.passDeadlineMs,
+    diagnosticTrail,
   });
   return {
     repository,
     driver,
+    diagnosticTrail,
     vaultBytes,
     refreshCalls,
     setRefreshImplementation: (implementation) => {
@@ -1068,6 +1109,122 @@ describe("queue driver journal-failure diagnostics (fix round 5)", () => {
       "journal_store_unavailable",
       "journal_store_unavailable",
       "journal_store_unavailable",
+    ]);
+  });
+});
+
+// --- diagnostics trail wiring (sync error tracing task 1) ---------------------------------------------------
+
+describe("queue driver diagnostics trail wiring (sync error tracing task 1)", () => {
+  it("records wire_failure with the failure kind and pass_outcome when an edge 403 HTML page fails the pass", async () => {
+    const harness = createHarness();
+    const event = await captureBytes(harness, "notes/edge-403.md", new TextEncoder().encode("edge"));
+    harness.installTransport({
+      preflight: async () => ({
+        status: 403,
+        bodyText: "<!DOCTYPE html><html><body>blocked by the edge</body></html>",
+      }),
+    });
+
+    const summary = await runPass(harness.driver);
+
+    expect(summary.outcome).toBe("retry_scheduled");
+    expect(harness.repository.readEvent(event.eventId)?.safeError).toBe("server_error");
+    // The trail mirrors the pass exactly: one wire failure entry (the closed
+    // failure kind; the HTML body carries no envelope request id) followed
+    // by the pass outcome entry.
+    expect(harness.diagnosticTrail.entries.map((entry) => entry.kind)).toEqual([
+      "wire_failure",
+      "pass_outcome",
+    ]);
+    expect(harness.diagnosticTrail.entries[0]?.tokens).toEqual(["server_error"]);
+    expect(harness.diagnosticTrail.entries[1]?.tokens).toEqual(["retry_scheduled"]);
+  });
+
+  it("records journal_failure with the closed reason of a mid-pass store error", async () => {
+    const harness = createHarness();
+    await captureBytes(harness, "notes/trail-store-error.md", new TextEncoder().encode("store"));
+    harness.installTransport({
+      preflight: async () => ({ status: 200, bodyText: SINGLE_PART_BODY }),
+    });
+    harness.repository.readOldestEligibleEvent = () => {
+      throw journalStoreError("journal_query_failed");
+    };
+
+    const summary = await runPass(harness.driver);
+
+    expect(summary.outcome).toBe("completed");
+    expect(harness.diagnosticTrail.entries.map((entry) => entry.kind)).toEqual([
+      "journal_failure",
+      "pass_outcome",
+    ]);
+    expect(harness.diagnosticTrail.entries[0]?.tokens).toEqual(["journal_query_failed"]);
+    expect(harness.diagnosticTrail.entries[1]?.tokens).toEqual(["completed"]);
+  });
+
+  it("carries the envelope request id on a wire failure the server envelope answered", async () => {
+    const harness = createHarness();
+    await captureBytes(harness, "notes/api-403-trail.md", new TextEncoder().encode("denied"));
+    harness.installTransport({
+      preflight: async () => ({
+        status: 403,
+        bodyText: errorBody("authorization_scope_denied"),
+      }),
+    });
+
+    const summary = await runPass(harness.driver);
+
+    expect(summary.outcome).toBe("login_required");
+    const wireFailure = harness.diagnosticTrail.entries[0];
+    expect(wireFailure?.kind).toBe("wire_failure");
+    // The failing envelope's opaque request id joins the client trail to the
+    // server-side log of the same rejected request.
+    expect(wireFailure?.tokens).toEqual([
+      "login_required",
+      { requestId: "66666666-6666-4666-8666-666666666666" },
+    ]);
+  });
+
+  it("samples the envelope request id into the pass outcome entry on the success path", async () => {
+    const harness = createHarness();
+    await captureBytes(harness, "notes/trail-success.md", new TextEncoder().encode("success"));
+    harness.installTransport({
+      preflight: async () => ({ status: 200, bodyText: SINGLE_PART_BODY }),
+      content: async () => ({ status: 200, bodyText: COMMITTED_RECEIPT }),
+    });
+
+    const summary = await runPass(harness.driver);
+
+    expect(summary.outcome).toBe("completed");
+    // No wire failure happened; the single pass outcome entry carries the
+    // sampled request id of the pass's last successful request outcome.
+    expect(harness.diagnosticTrail.entries).toHaveLength(1);
+    expect(harness.diagnosticTrail.entries[0]?.kind).toBe("pass_outcome");
+    expect(harness.diagnosticTrail.entries[0]?.tokens).toEqual([
+      "completed",
+      { requestId: "66666666-6666-4666-8666-666666666666" },
+    ]);
+  });
+
+  it("never blocks the pass on a stalled trail append", async () => {
+    const harness = createHarness({
+      diagnosticTrailAppendBehavior: () => new Promise<void>(() => undefined),
+    });
+    await captureBytes(harness, "notes/stalled-trail.md", new TextEncoder().encode("stalled"));
+    harness.installTransport({
+      preflight: async () => ({
+        status: 403,
+        bodyText: "<html>edge block</html>",
+      }),
+    });
+
+    // The stalled append must not block or break the pass: the driver calls
+    // the trail fire-and-forget and the pass still ends retry_scheduled.
+    const summary = await runPass(harness.driver);
+    expect(summary.outcome).toBe("retry_scheduled");
+    expect(harness.diagnosticTrail.entries.map((entry) => entry.kind)).toEqual([
+      "wire_failure",
+      "pass_outcome",
     ]);
   });
 });

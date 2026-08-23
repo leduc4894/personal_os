@@ -45,6 +45,11 @@ import type { JournalRepository } from "./repository";
 import { JournalStoreError, type JournalStoreErrorReason } from "./sqlite-database";
 import type { JournalPreflightOutcome, JournalSyncApi, SmallFileTerminalReceipt } from "./sync-api";
 import { SyncApiError } from "./sync-api";
+import type {
+  SyncDiagnosticsTrail,
+  SyncDiagnosticToken,
+} from "./sync-diagnostics-trail";
+import { envelopeRequestId } from "./sync-diagnostics-trail";
 
 // --- frozen bounds (spec 8) -----------------------------------------------------------------------
 
@@ -140,6 +145,13 @@ export interface JournalQueueDriverOptions {
   readonly passDeadlineMs?: number | undefined;
   /** Request timeout override; defaults to {@link QUEUE_REQUEST_TIMEOUT_MS}. */
   readonly requestTimeoutMs?: number | undefined;
+  /**
+   * The optional durable diagnostics trail. The driver appends
+   * fire-and-forget and the trail never rejects, so the trail observes
+   * wire failures, journal failures and pass outcomes without ever
+   * blocking or breaking the sync path.
+   */
+  readonly diagnosticTrail?: SyncDiagnosticsTrail | undefined;
 }
 
 /**
@@ -203,6 +215,9 @@ export class JournalQueueDriver {
   readonly #randomJitter: () => number;
   readonly #passDeadlineMs: number;
   readonly #requestTimeoutMs: number;
+  readonly #diagnosticTrail: SyncDiagnosticsTrail | null;
+  /** The pass's last successful request outcome's envelope request id. */
+  #lastPassWireRequestId: string | null = null;
   #isStopped = false;
   #isPassRunning = false;
   readonly #journalFailureReasons: JournalStoreErrorReason[] = [];
@@ -219,6 +234,7 @@ export class JournalQueueDriver {
     this.#randomJitter = options.randomJitter ?? (() => Math.random());
     this.#passDeadlineMs = options.passDeadlineMs ?? QUEUE_PASS_DEADLINE_MS;
     this.#requestTimeoutMs = options.requestTimeoutMs ?? QUEUE_REQUEST_TIMEOUT_MS;
+    this.#diagnosticTrail = options.diagnosticTrail ?? null;
   }
 
   /** Whether the driver was stopped for unload/suspension and runs nothing new. */
@@ -270,6 +286,7 @@ export class JournalQueueDriver {
       return { outcome: "pass_already_running", processedEventCount: 0 };
     }
     this.#isPassRunning = true;
+    this.#lastPassWireRequestId = null;
     const passDeadlineEpochMs = this.#nowEpochMs() + this.#passDeadlineMs;
     const refreshBudget: RefreshBudget = { hasRefreshed: false, requiresLogin: false };
     let processedEventCount = 0;
@@ -383,7 +400,10 @@ export class JournalQueueDriver {
           // failure endures — no deadline conversion, no automatic follow-up.
           // Fix round 5: the swallowed error's closed reason token lands in
           // the bounded diagnostic ring so the failure is diagnosable.
+          // Sync error tracing task 1: the same closed reason also lands on
+          // the durable trail as a `journal_failure` entry.
           this.#recordJournalFailureReason(error);
+          this.#recordJournalFailureTrailEntry(error);
           passEndReason = "end_journal_failure";
           break;
         }
@@ -441,6 +461,13 @@ export class JournalQueueDriver {
       }
       return { outcome: passOutcome, processedEventCount };
     } finally {
+      // Sync error tracing task 1: every pass that actually ran appends ONE
+      // `pass_outcome` entry to the durable trail — the closed outcome plus
+      // the sampled envelope request id of the pass's last successful
+      // request outcome (the success-path correlation to server logs). The
+      // append is fire-and-forget: a stalled or failing trail must never
+      // delay or break the pass.
+      this.#recordPassOutcomeTrailEntry(passOutcome);
       this.#isPassRunning = false;
     }
   }
@@ -463,6 +490,51 @@ export class JournalQueueDriver {
     if (this.#journalFailureReasons.length > MAX_JOURNAL_FAILURE_REASON_HISTORY) {
       this.#journalFailureReasons.shift();
     }
+  }
+
+  /**
+   * Append one `journal_failure` trail entry with the swallowed store
+   * error's closed reason (sync error tracing task 1). Closed tokens only;
+   * fire-and-forget, never blocking the pass.
+   */
+  #recordJournalFailureTrailEntry(error: unknown): void {
+    if (!(error instanceof JournalStoreError)) {
+      return;
+    }
+    void this.#diagnosticTrail?.append({ kind: "journal_failure", tokens: [error.reason] });
+  }
+
+  /**
+   * Append one `wire_failure` trail entry for one failed wire request
+   * outcome (sync error tracing task 1): the closed failure kind, plus the
+   * failing envelope's opaque request id when the server sent one. A local
+   * (non-wire) failure records nothing.
+   */
+  #recordWireFailureTrailEntry(error: unknown): void {
+    if (this.#diagnosticTrail === null || !(error instanceof SyncApiError)) {
+      return;
+    }
+    const tokens: SyncDiagnosticToken[] = [error.kind];
+    if (error.requestId !== null) {
+      tokens.push(envelopeRequestId(error.requestId));
+    }
+    void this.#diagnosticTrail.append({ kind: "wire_failure", tokens });
+  }
+
+  /**
+   * Append one `pass_outcome` trail entry (sync error tracing task 1): the
+   * closed pass outcome plus the sampled request id of the pass's last
+   * successful request outcome, when the server sent one.
+   */
+  #recordPassOutcomeTrailEntry(outcome: QueuePassOutcome): void {
+    if (this.#diagnosticTrail === null) {
+      return;
+    }
+    const tokens: SyncDiagnosticToken[] = [outcome];
+    if (this.#lastPassWireRequestId !== null) {
+      tokens.push(envelopeRequestId(this.#lastPassWireRequestId));
+    }
+    void this.#diagnosticTrail.append({ kind: "pass_outcome", tokens });
   }
 
   /**
@@ -657,9 +729,22 @@ export class JournalQueueDriver {
       if (this.#isStopped) {
         throw error;
       }
-      return await this.#raceTimeout(issue(), timeoutMs);
+      const retried = await this.#raceTimeout(issue(), timeoutMs);
+      this.#sampleSuccessfulWireRequestId();
+      return retried;
     }
+    this.#sampleSuccessfulWireRequestId();
     return firstAttempt;
+  }
+
+  /**
+   * Sample the envelope request id of the request outcome that just
+   * settled successfully (sync error tracing task 1). The pass holds at
+   * most one active request, so the accessor is unambiguous here; failure
+   * outcomes carry their own id on the thrown error instead.
+   */
+  #sampleSuccessfulWireRequestId(): void {
+    this.#lastPassWireRequestId = this.#syncApi.readLastEnvelopeRequestId();
   }
 
   #raceTimeout<T>(request: Promise<T>, timeoutMs: number): Promise<T> {
@@ -732,6 +817,10 @@ export class JournalQueueDriver {
     refreshBudget: RefreshBudget,
   ): Promise<PassContinuation> {
     const kind = syncFailureKind(error);
+    // Sync error tracing task 1: every failed wire request outcome lands on
+    // the durable trail with its closed kind label (and the failing
+    // envelope's request id) before the ordinary retry/terminal handling.
+    this.#recordWireFailureTrailEntry(error);
     switch (kind) {
       case "access_expired":
       case "login_required":

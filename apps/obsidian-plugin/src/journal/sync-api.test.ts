@@ -418,6 +418,61 @@ describe("journal sync api failure mapping (spec 12)", () => {
   });
 });
 
+// --- envelope request id correlation (sync error tracing task 1) ----------------------------------
+
+describe("journal sync api envelope request id correlation (sync error tracing task 1)", () => {
+  it("exposes the envelope request id of a successful outcome", async () => {
+    const transport = createRecordingTransport(async () => ({
+      status: 200,
+      bodyText: successBody({ outcome: "excluded" }),
+    }));
+    const api = createApi(transport);
+    expect(api.readLastEnvelopeRequestId()).toBeNull();
+    await api.preflightJournalEvent(PREFLIGHT_INPUT);
+    expect(api.readLastEnvelopeRequestId()).toBe("66666666-6666-4666-8666-666666666666");
+  });
+
+  it("carries the envelope request id on the mapped failure", async () => {
+    const transport = createRecordingTransport(async () => ({
+      status: 403,
+      bodyText: errorBody("authorization_scope_denied"),
+    }));
+    const api = createApi(transport);
+    const failure = await api
+      .preflightJournalEvent(PREFLIGHT_INPUT)
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      kind: "login_required",
+      requestId: "66666666-6666-4666-8666-666666666666",
+    });
+    expect(api.readLastEnvelopeRequestId()).toBe("66666666-6666-4666-8666-666666666666");
+  });
+
+  it("keeps a non-uuid or absent request id out of the correlation surface", async () => {
+    const foreignBody = JSON.stringify({
+      data: { outcome: "excluded" },
+      error: null,
+      request_id: "opaque-free-form",
+      warnings: [],
+    });
+    const transport = createRecordingTransport(async () => ({ status: 200, bodyText: foreignBody }));
+    const api = createApi(transport);
+    await api.preflightJournalEvent(PREFLIGHT_INPUT);
+    expect(api.readLastEnvelopeRequestId()).toBeNull();
+
+    const htmlTransport = createRecordingTransport(async () => ({
+      status: 403,
+      bodyText: "<html>edge block</html>",
+    }));
+    const htmlApi = createApi(htmlTransport);
+    const failure = await htmlApi
+      .preflightJournalEvent(PREFLIGHT_INPUT)
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({ kind: "server_error", requestId: null });
+    expect(htmlApi.readLastEnvelopeRequestId()).toBeNull();
+  });
+});
+
 // --- the raw requestUrl adapter --------------------------------------------------------------------
 
 describe("raw requestUrl sync transport adapter", () => {

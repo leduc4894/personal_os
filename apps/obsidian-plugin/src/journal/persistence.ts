@@ -36,6 +36,7 @@ import type {
   SqliteMutationSession,
   SqliteQueryResult,
 } from "./sqlite-database";
+import type { SyncDiagnosticsTrail } from "./sync-diagnostics-trail";
 
 // --- frozen file vocabulary and buffer bound (spec 6.1, 6.2) --------------------------
 
@@ -240,6 +241,12 @@ export type JournalFinalFlushOutcome = "final_generation_current" | "commit_in_f
 export interface JournalPersistenceOptions {
   readonly fileStore: JournalFileStore;
   readonly engineModule: SqliteEngineModule;
+  /**
+   * The optional durable diagnostics trail. Generation publish failures
+   * append one closed-reason `publish_failure` entry fire-and-forget; the
+   * trail never blocks or alters the publish protocol.
+   */
+  readonly diagnosticTrail?: SyncDiagnosticsTrail | undefined;
 }
 
 /**
@@ -257,6 +264,7 @@ const MAX_GENERATION_PUBLISH_FAILURE_REASONS = 5;
 export class JournalPersistence {
   readonly #fileStore: JournalFileStore;
   readonly #engineModule: SqliteEngineModule;
+  readonly #diagnosticTrail: SyncDiagnosticsTrail | null;
   #database: SqliteDatabase | null = null;
   #recoveryState: JournalRecoveryState | null = null;
   #verifiedGeneration: VerifiedJournalGeneration | null = null;
@@ -279,6 +287,7 @@ export class JournalPersistence {
   constructor(options: JournalPersistenceOptions) {
     this.#fileStore = options.fileStore;
     this.#engineModule = options.engineModule;
+    this.#diagnosticTrail = options.diagnosticTrail ?? null;
   }
 
   /**
@@ -664,6 +673,10 @@ export class JournalPersistence {
     ) {
       this.#generationPublishFailureReasons.shift();
     }
+    // Sync error tracing task 1: the same closed reason also lands on the
+    // durable trail as a `publish_failure` entry — fire-and-forget, so the
+    // trail never blocks or alters the publish protocol.
+    void this.#diagnosticTrail?.append({ kind: "publish_failure", tokens: [error.reason] });
   }
 
   /**

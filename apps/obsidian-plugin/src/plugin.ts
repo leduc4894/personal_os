@@ -68,6 +68,7 @@ import {
 import type { JournalSyncStatusSnapshot, LifecycleBlockedReasonCode } from "./journal/status";
 import type { LifecycleStateCounts } from "./journal/status";
 import { loadVendoredSqliteEngine } from "./journal/sqlite-database";
+import { createSyncDiagnosticsTrail } from "./journal/sync-diagnostics-trail";
 import { createJournalSyncApi } from "./journal/sync-api";
 import { createUuidv7Factory } from "./journal/uuidv7";
 import { PolicySession } from "./exclusion-policy/policy-session";
@@ -482,9 +483,21 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       const engineModule = await loadVendoredSqliteEngine({
         wasmBinary: await this.#readJournalEngineWasmBinary(),
       });
+      // Sync error tracing task 1: the durable closed-token diagnostics
+      // trail persists one JSON sidecar (`sync-diagnostics-trail.json`)
+      // through the SAME Vault plugin-directory store as the journal. It
+      // loads (and resets, when corrupt) BEFORE any seam can append, then
+      // feeds both the persistence publish-failure tap and the queue
+      // driver wire/pass taps. The trail only observes: appends are
+      // fire-and-forget and never block the sync path.
+      const diagnosticTrail = createSyncDiagnosticsTrail({
+        fileStore: this.createJournalFileStore(),
+      });
+      await diagnosticTrail.load();
       const persistence = new JournalPersistence({
         fileStore: this.createJournalFileStore(),
         engineModule,
+        diagnosticTrail,
       });
       await persistence.open();
       const journalDatabase: JournalRepositoryDatabase = {
@@ -540,6 +553,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         fileBytesReader: vaultReader,
         lifecycleDriver,
         refreshAccessToken: () => session.refresh(),
+        diagnosticTrail,
       });
       const boundedQueuePassDispatcher = new CoalescingQueuePassDispatcher({
         runPass: async () => {

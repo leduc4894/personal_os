@@ -71,25 +71,36 @@ export type SyncApiFailureKind = (typeof SYNC_API_FAILURE_KINDS)[number];
 /**
  * One mapped sync failure: a closed kind and a static message. The message
  * never carries the URL, status, registry code, credential or any response
- * text, so a thrown error is redacted by construction.
+ * text, so a thrown error is redacted by construction. The one extra fact
+ * a failure may carry is the server envelope's opaque `requestId` —
+ * present only when the failing body parsed as the canonical envelope and
+ * the id is UUID-shaped — so the client-side diagnostics trail can join a
+ * failure to the server-side log of the same request.
  */
 export class SyncApiError extends Error {
   readonly kind: SyncApiFailureKind;
   readonly canResumeClaimedOperation: boolean;
+  readonly requestId: string | null;
 
-  constructor(kind: SyncApiFailureKind, canResumeClaimedOperation = false) {
+  constructor(
+    kind: SyncApiFailureKind,
+    canResumeClaimedOperation = false,
+    requestId: string | null = null,
+  ) {
     super(`sync api failed: ${kind}`);
     this.name = "SyncApiError";
     this.kind = kind;
     this.canResumeClaimedOperation = canResumeClaimedOperation;
+    this.requestId = requestId;
   }
 }
 
 function syncApiError(
   kind: SyncApiFailureKind,
   canResumeClaimedOperation = false,
+  requestId: string | null = null,
 ): SyncApiError {
-  return new SyncApiError(kind, canResumeClaimedOperation);
+  return new SyncApiError(kind, canResumeClaimedOperation, requestId);
 }
 
 // --- hand-mirrored wire shapes (spec 10.1, 10.3) --------------------------------------------------
@@ -144,32 +155,42 @@ const OPERATION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,128}$/;
 interface WireEnvelope {
   readonly data: unknown;
   readonly error: { readonly code: unknown } | null;
+  readonly request_id?: unknown;
+}
+
+/** The envelope's opaque request id, only when it is UUID-shaped. */
+function envelopeRequestId(value: unknown): string | null {
+  return typeof value === "string" && UUID_PATTERN.test(value) ? value : null;
 }
 
 /**
  * Parse one canonical response envelope. A malformed body and a body with
  * neither outcome both fail closed as the retryable `server_error`; an
- * error envelope maps through the closed status/code table.
+ * error envelope maps through the closed status/code table. The envelope's
+ * UUID-shaped `request_id` is threaded out alongside the outcome (and onto
+ * the mapped failure) for diagnostics correlation — no wire format change,
+ * the member already exists on every canonical response.
  */
-function parseEnvelope(status: number, bodyText: string): { data: unknown } {
+function parseEnvelope(status: number, bodyText: string): { data: unknown; requestId: string | null } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(bodyText);
   } catch {
-    throw mapWireFailure(status, null);
+    throw mapWireFailure(status, null, null);
   }
   if (typeof parsed !== "object" || parsed === null) {
-    throw mapWireFailure(status, null);
+    throw mapWireFailure(status, null, null);
   }
   const envelope = parsed as Partial<WireEnvelope>;
+  const requestId = envelopeRequestId(envelope.request_id);
   if (envelope.error !== null && envelope.error !== undefined) {
     const code = typeof envelope.error.code === "string" ? envelope.error.code : null;
-    throw mapWireFailure(status, code);
+    throw mapWireFailure(status, code, requestId);
   }
   if (envelope.data === null || envelope.data === undefined) {
-    throw mapWireFailure(status, null);
+    throw mapWireFailure(status, null, requestId);
   }
-  return { data: envelope.data };
+  return { data: envelope.data, requestId };
 }
 
 /**
@@ -177,9 +198,9 @@ function parseEnvelope(status: number, bodyText: string): { data: unknown } {
  * and codes fail safe onto the retryable `server_error`, never onto a
  * terminal state: an unmapped failure must not silently drop queued work.
  */
-function mapWireFailure(status: number, code: string | null): SyncApiError {
+function mapWireFailure(status: number, code: string | null, requestId: string | null): SyncApiError {
   if (status === 401) {
-    return syncApiError("access_expired");
+    return syncApiError("access_expired", false, requestId);
   }
   if (status === 403) {
     // Fix round 5 (finding A): a genuine API 403 carries the canonical
@@ -191,24 +212,26 @@ function mapWireFailure(status: number, code: string | null): SyncApiError {
     // the queue backs off and survives instead of parking the oldest
     // event under a false login_required and starving every pass behind
     // it.
-    return code === null ? syncApiError("server_error") : syncApiError("login_required");
+    return code === null
+      ? syncApiError("server_error", false, requestId)
+      : syncApiError("login_required", false, requestId);
   }
   if (status === 429) {
-    return syncApiError("network_rate_limited");
+    return syncApiError("network_rate_limited", false, requestId);
   }
   switch (code) {
     case "small_file_size_limit_exceeded":
-      return syncApiError("blocked_size");
+      return syncApiError("blocked_size", false, requestId);
     case "small_file_content_integrity_failed":
     case "small_file_operation_identity_mismatch":
-      return syncApiError("integrity_failed");
+      return syncApiError("integrity_failed", false, requestId);
     case "small_file_operation_not_found":
     case "small_file_operation_expired":
-      return syncApiError("operation_retry_required");
+      return syncApiError("operation_retry_required", false, requestId);
     case "small_file_upload_state_invalid":
-      return syncApiError("operation_retry_required", true);
+      return syncApiError("operation_retry_required", true, requestId);
     default:
-      return syncApiError("server_error");
+      return syncApiError("server_error", false, requestId);
   }
 }
 
@@ -249,6 +272,12 @@ export interface JournalSyncApiOptions {
 export interface JournalSyncApi {
   preflightJournalEvent(input: JournalEventPreflightInput): Promise<JournalPreflightOutcome>;
   uploadSmallFileContent(input: SmallFileContentUploadInput): Promise<SmallFileTerminalReceipt>;
+  /**
+   * The last parsed envelope's opaque request id, when it carried one. The
+   * driver samples this after each settled request — it holds at most one
+   * active request, so the value is never ambiguous at the sample point.
+   */
+  readLastEnvelopeRequestId(): string | null;
 }
 
 /**
@@ -259,6 +288,7 @@ export interface JournalSyncApi {
  */
 export function createJournalSyncApi(options: JournalSyncApiOptions): JournalSyncApi {
   const { transport, resolveOrigin, getAccessToken } = options;
+  let lastEnvelopeRequestId: string | null = null;
 
   function requireAccessToken(): string {
     const accessToken = getAccessToken();
@@ -275,10 +305,19 @@ export function createJournalSyncApi(options: JournalSyncApiOptions): JournalSyn
     } catch {
       throw syncApiError("network_offline");
     }
-    return parseEnvelope(response.status, response.bodyText);
+    try {
+      const parsed = parseEnvelope(response.status, response.bodyText);
+      lastEnvelopeRequestId = parsed.requestId;
+      return parsed;
+    } catch (error) {
+      lastEnvelopeRequestId = error instanceof SyncApiError ? error.requestId : null;
+      throw error;
+    }
   }
 
   return {
+    readLastEnvelopeRequestId: () => lastEnvelopeRequestId,
+
     async preflightJournalEvent(input): Promise<JournalPreflightOutcome> {
       const accessToken = requireAccessToken();
       const wireBody: Record<string, unknown> = {

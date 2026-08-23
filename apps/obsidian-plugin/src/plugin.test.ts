@@ -455,6 +455,30 @@ describe("Obsidian plugin composition root", () => {
     expect(projectionBody).toContain("lifecycleBlockedReasonCodes:");
   });
 
+  it("composes the durable diagnostics trail into the journal seams (sync error tracing task 1)", () => {
+    // One trail sidecar (`sync-diagnostics-trail.json`) lives in the Vault
+    // plugin directory through the SAME journal file store port, loads (and
+    // resets, when corrupt) before any seam can append, and feeds BOTH the
+    // persistence publish-failure tap and the queue driver wire/pass taps.
+    const trailIndex = pluginSource.indexOf("createSyncDiagnosticsTrail(");
+    expect(trailIndex).toBeGreaterThanOrEqual(0);
+    const trailComposition = pluginSource.slice(trailIndex, trailIndex + 200);
+    expect(trailComposition).toContain("this.createJournalFileStore()");
+    expect(pluginSource).toContain("await diagnosticTrail.load()");
+    const persistenceIndex = pluginSource.indexOf("new JournalPersistence({");
+    expect(persistenceIndex).toBeGreaterThan(trailIndex);
+    expect(pluginSource.slice(persistenceIndex, persistenceIndex + 220)).toContain(
+      "diagnosticTrail",
+    );
+    const driverIndex = pluginSource.indexOf("new JournalQueueDriver({");
+    expect(driverIndex).toBeGreaterThan(persistenceIndex);
+    expect(pluginSource.slice(driverIndex, driverIndex + 700)).toContain("diagnosticTrail");
+    // The corrupt-sidecar reset precedes every seam that appends.
+    const loadIndex = pluginSource.indexOf("await diagnosticTrail.load()");
+    expect(loadIndex).toBeGreaterThan(trailIndex);
+    expect(loadIndex).toBeLessThan(persistenceIndex);
+  });
+
   it("surfaces the journal store diagnostics through the settings snapshot (fix round 5)", () => {
     // The live park mystery (repro-park-not-landing.md): markEventWaitingRetry
     // commits never landed on the user's machine while sibling mutations
