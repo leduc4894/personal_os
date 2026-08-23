@@ -86,7 +86,7 @@ async def fetch_latest_keyset_payloads(engine: AsyncEngine) -> list[bytes]:
         raise
     except ApplicationError:
         raise
-    except sa_exc.OperationalError, sa_exc.TimeoutError:
+    except (sa_exc.OperationalError, sa_exc.TimeoutError):
         raise DatabaseMigrationError(ErrorCode.DATABASE_CONNECTION_UNAVAILABLE) from None
     except sa_exc.SQLAlchemyError:
         raise DatabaseMigrationError(ErrorCode.DATABASE_SCHEMA_CONTRACT_INVALID) from None

@@ -150,7 +150,7 @@ class DatabaseRetryPolicy:
         for attempt in range(1, self.maximum_attempts + 1):
             try:
                 return await operation(attempt)
-            except ApplicationError, SourceLifecycleError:
+            except (ApplicationError, SourceLifecycleError):
                 raise
             except Exception as cause:
                 failure_kind = classify_database_failure(cause)

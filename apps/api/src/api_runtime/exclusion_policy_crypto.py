@@ -115,7 +115,7 @@ class Ed25519PolicyVerifier(PolicySignatureVerifier):
             return False
         try:
             Ed25519PublicKey.from_public_bytes(public_key_bytes).verify(signature, message)
-        except InvalidSignature, ValueError:
+        except (InvalidSignature, ValueError):
             return False
         return True
 
@@ -138,6 +138,6 @@ class TrustAnchorEd25519Verifier:
             return False
         try:
             Ed25519PublicKey.from_public_bytes(public_key_bytes).verify(signature_bytes, message)
-        except InvalidSignature, ValueError:
+        except (InvalidSignature, ValueError):
             return False
         return True

@@ -63,7 +63,7 @@ class PostgresqlReadinessProbe:
             raise
         except DatabaseMigrationError:
             raise
-        except SQLAlchemyOperationalError, SQLAlchemyTimeoutError:
+        except (SQLAlchemyOperationalError, SQLAlchemyTimeoutError):
             raise DatabaseMigrationError(ErrorCode.DATABASE_CONNECTION_UNAVAILABLE) from None
         except SQLAlchemyError:
             raise DatabaseMigrationError(ErrorCode.DATABASE_SCHEMA_CONTRACT_INVALID) from None

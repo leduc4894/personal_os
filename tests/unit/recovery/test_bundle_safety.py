@@ -97,7 +97,7 @@ def _assert_verify_rejected(bundle_root: Path, *, reason: str) -> None:
 def _try_symlink_or_skip(target: Path, link: Path) -> None:
     try:
         os.symlink(target, link)
-    except OSError, NotImplementedError:
+    except (OSError, NotImplementedError):
         pytest.skip("symlink creation is unavailable on this platform")
 
 

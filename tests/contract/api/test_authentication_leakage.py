@@ -664,7 +664,7 @@ def _scan_files(root: Path, excluded_directory_names: frozenset[str]) -> list[tu
             continue
         try:
             scanned.append((path, path.read_text(encoding="utf-8")))
-        except UnicodeDecodeError, OSError:
+        except (UnicodeDecodeError, OSError):
             continue
     return scanned
 

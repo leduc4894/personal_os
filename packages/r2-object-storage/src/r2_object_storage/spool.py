@@ -429,7 +429,7 @@ class SpoolManager:
 
         try:
             await asyncio.wait_for(acquire_when_available(), timeout=deadline - self._clock())
-        except TimeoutError, _AdmissionWindowExpired:
+        except (TimeoutError, _AdmissionWindowExpired):
             raise ObjectStorageError(ErrorCode.OBJECT_STORAGE_BUSY) from None
 
     async def _release_admission(

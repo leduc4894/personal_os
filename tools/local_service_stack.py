@@ -520,7 +520,7 @@ def load_image_lock(image_lock_path: Path) -> tuple[ImageLockEntry, ...]:
     """Parse and strictly validate the local-stack immutable image lock."""
     try:
         loaded: object = yaml.safe_load(image_lock_path.read_text(encoding="utf-8"))
-    except OSError, UnicodeError, yaml.YAMLError:
+    except (OSError, UnicodeError, yaml.YAMLError):
         raise StackFailure(StackExitCode.CONTRACT, "image_lock_invalid") from None
     if not isinstance(loaded, dict):
         raise StackFailure(StackExitCode.CONTRACT, "image_lock_invalid")
@@ -551,7 +551,7 @@ def validate_image_lock(paths: StackPaths) -> tuple[ImageLockEntry, ...]:
     entries = load_image_lock(paths.image_lock)
     try:
         loaded: object = yaml.safe_load(paths.compose_file.read_text(encoding="utf-8"))
-    except OSError, UnicodeError, yaml.YAMLError:
+    except (OSError, UnicodeError, yaml.YAMLError):
         raise StackFailure(StackExitCode.CONTRACT, "image_lock_mismatch") from None
     if not isinstance(loaded, dict):
         raise StackFailure(StackExitCode.CONTRACT, "image_lock_mismatch")
@@ -787,7 +787,7 @@ def bootstrap_secret_set(
             with suppress(OSError):
                 installed_file.unlink()
         raise
-    except OSError, ValueError:
+    except (OSError, ValueError):
         for installed_file in reversed(installed_files):
             with suppress(OSError):
                 installed_file.unlink()
@@ -2481,11 +2481,11 @@ def _read_stack_status(
 def _parse_compose_ps(raw_status: str) -> list[dict[str, object]]:
     try:
         loaded: object = json.loads(raw_status)
-    except json.JSONDecodeError, TypeError:
+    except (json.JSONDecodeError, TypeError):
         loaded_rows: list[object] = []
         try:
             loaded_rows = [json.loads(line) for line in raw_status.splitlines() if line.strip()]
-        except json.JSONDecodeError, TypeError:
+        except (json.JSONDecodeError, TypeError):
             raise StackFailure(StackExitCode.READINESS, "stack_status_invalid") from None
         loaded = loaded_rows
     if isinstance(loaded, dict):
@@ -2601,7 +2601,7 @@ def _validate_secret_directory_location(paths: StackPaths) -> Path:
     try:
         resolved_secret_directory = expected_directory.resolve(strict=False)
         resolved_secret_directory.relative_to(repository_root)
-    except OSError, ValueError:
+    except (OSError, ValueError):
         raise StackFailure(StackExitCode.INTERNAL, "invalid_secret_directory") from None
     if resolved_secret_directory != expected_directory:
         raise StackFailure(StackExitCode.INTERNAL, "invalid_secret_directory")
@@ -2740,7 +2740,7 @@ def _is_current_windows_user_owner(path: Path) -> bool:
                     kernel32.LocalFree(security_descriptor)
         finally:
             kernel32.CloseHandle(token)
-    except AttributeError, OSError, TypeError:
+    except (AttributeError, OSError, TypeError):
         return False
 
 
@@ -2750,7 +2750,7 @@ def _validate_complete_secret_contents(secret_directory: Path) -> None:
             filename: (secret_directory / filename).read_text(encoding="ascii")
             for filename in _SECRET_FILENAMES
         }
-    except OSError, UnicodeError:
+    except (OSError, UnicodeError):
         raise StackFailure(StackExitCode.CONTRACT, "invalid_secret_set") from None
 
     has_valid_passwords = all(

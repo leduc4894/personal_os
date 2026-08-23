@@ -149,7 +149,7 @@ def _normalize_level(levelno: int) -> DiagnosticLevel:
 def _validate_dependency_logger_name(name: str) -> SafeToken:
     try:
         return SafeToken.parse(name)
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return _UNKNOWN_DEPENDENCY
 
 
