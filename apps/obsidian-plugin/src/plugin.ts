@@ -8,7 +8,7 @@
  * background sync loop.
  */
 
-import { Modal, Platform, Plugin, requestUrl, Setting, TFile } from "obsidian";
+import { Modal, Notice, Platform, Plugin, requestUrl, Setting, TFile } from "obsidian";
 import type { TAbstractFile } from "obsidian";
 
 import { createObsidianPolicyHttpTransport, createObsidianSyncHttpTransport } from "./api/obsidian-api-transport";
@@ -56,7 +56,7 @@ import { createRequestUrlLifecycleApi } from "./journal/lifecycle-api";
 import { createVaultPluginJournalStore, JournalPersistence } from "./journal/persistence";
 import type { JournalFileStore } from "./journal/persistence";
 import { JournalRepository } from "./journal/repository";
-import { ConfirmModal, SuggestModal, TextPromptModal } from "./restore-modals";
+import { ConfirmModal, PreformattedTextModal, SuggestModal, TextPromptModal } from "./restore-modals";
 import type { JournalEventStateErrorCount, JournalRepositoryDatabase } from "./journal/repository";
 import type { LocalNoteSyncStatus } from "./journal/note-status";
 import {
@@ -69,6 +69,12 @@ import type { JournalSyncStatusSnapshot, LifecycleBlockedReasonCode } from "./jo
 import type { LifecycleStateCounts } from "./journal/status";
 import { loadVendoredSqliteEngine } from "./journal/sqlite-database";
 import { createSyncDiagnosticsTrail } from "./journal/sync-diagnostics-trail";
+import type { SyncDiagnosticsTrail } from "./journal/sync-diagnostics-trail";
+import {
+  SYNC_DIAGNOSTICS_TRAIL_TAIL_ENTRY_LIMIT,
+  deriveSyncStopReasonTokens,
+  renderSyncDiagnosticsExportBlock,
+} from "./journal/sync-diagnostics-export";
 import { createJournalSyncApi } from "./journal/sync-api";
 import { createUuidv7Factory } from "./journal/uuidv7";
 import { PolicySession } from "./exclusion-policy/policy-session";
@@ -211,6 +217,12 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   #lifecycleCapture: LifecycleCaptureImpl | null = null;
   #queueDriver: JournalQueueDriver | null = null;
   #queueRepository: JournalRepository | null = null;
+  /**
+   * The durable diagnostics trail (sync error tracing task 1): retained on
+   * the plugin so the settings snapshot and the copy-sync-diagnostics
+   * export can read the tail, the counts and the derived stop reasons.
+   */
+  #diagnosticTrail: SyncDiagnosticsTrail | null = null;
   #automaticSnapshotCoordinator: AutomaticSnapshotCoordinator | null = null;
   #boundedQueuePassDispatcher: CoalescingQueuePassDispatcher | null = null;
   #pendingAutomaticSnapshotReason: AutomaticSnapshotReason | null = null;
@@ -303,6 +315,11 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         // generation publish failures) reach the settings tab here.
         const generationPublishFailures =
           this.#journalPersistence?.readGenerationPublishFailureSummary() ?? null;
+        // Sync error tracing task 2: the durable trail feeds the settings
+        // snapshot here — the derived closed stop-reason tokens, the tail
+        // (last five entries), the total entry count and the bounded
+        // append-failure counter. Closed tokens and timestamps only.
+        const trailEntries = this.#diagnosticTrail?.readEntries() ?? [];
         return {
           connectionState: this.#connectionState,
           statusDetail: this.#statusDetail,
@@ -324,6 +341,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           generationPublishFailureCount: generationPublishFailures?.count ?? 0,
           lastGenerationPublishFailureReasons:
             generationPublishFailures?.lastReasons ?? [],
+          syncStopReasonTokens: deriveSyncStopReasonTokens(trailEntries),
+          trailTailEntries: trailEntries.slice(-SYNC_DIAGNOSTICS_TRAIL_TAIL_ENTRY_LIMIT),
+          trailEntryCount: trailEntries.length,
+          trailAppendFailureCount: this.#diagnosticTrail?.readAppendFailureCount() ?? 0,
           localNoteSyncStatuses: this.#readLocalNoteSyncStatuses(),
         };
       },
@@ -341,6 +362,18 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       disconnect: () => session.disconnect(),
     });
     this.addSettingTab(this.#settingTab);
+
+    // Sync error tracing task 2: the one-action sanitized export. The block
+    // is built ONLY from closed tokens, counts and ISO timestamps by the
+    // pure renderer; the clipboard carries it out, and a read-only
+    // preformatted modal is the fallback when the clipboard is unavailable.
+    this.addCommand({
+      id: "copy-sync-diagnostics",
+      name: "Copy sync diagnostics",
+      callback: () => {
+        void this.#copySyncDiagnostics();
+      },
+    });
 
     // The settings tab is registered before any bounded startup work so the
     // spec-19 affordances (Cancel pending login, Open browser again) stay
@@ -409,6 +442,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     this.#lifecycleCapture = null;
     this.#capture = null;
     this.#queueRepository = null;
+    this.#diagnosticTrail = null;
     this.#syncStatusBarItem = null;
   }
 
@@ -494,6 +528,9 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         fileStore: this.createJournalFileStore(),
       });
       await diagnosticTrail.load();
+      // Retained so the settings snapshot and the copy-sync-diagnostics
+      // export can read the trail without re-creating the sidecar port.
+      this.#diagnosticTrail = diagnosticTrail;
       const persistence = new JournalPersistence({
         fileStore: this.createJournalFileStore(),
         engineModule,
@@ -806,6 +843,56 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       );
       void targetPath;
       modal.open();
+    });
+  }
+
+  /**
+   * The copy-sync-diagnostics command callback (sync error tracing task 2):
+   * build the sanitized export block — closed tokens, counts and ISO
+   * timestamps only — and place it on the clipboard. When the clipboard is
+   * unavailable or rejects the write, the SAME block is shown in a
+   * read-only preformatted modal. The block never reaches a console, a
+   * log or any other surface.
+   */
+  async #copySyncDiagnostics(): Promise<void> {
+    const block = this.#buildSyncDiagnosticsExportBlock();
+    const clipboard = navigator.clipboard;
+    if (clipboard !== undefined) {
+      try {
+        await clipboard.writeText(block);
+        new Notice("Sync diagnostics copied to the clipboard.");
+        return;
+      } catch {
+        // The clipboard refused the write: fall through to the read-only
+        // modal fallback below with the same sanitized block.
+      }
+    }
+    new PreformattedTextModal(this.app, "Sync diagnostics", block).open();
+  }
+
+  /**
+   * The closed input assembly of the sanitized export block: the current
+   * status snapshot line, the settings journal-store diagnostics inputs,
+   * the aggregate trail counts and the trail tail. Every source is an
+   * already-redacted closed surface; the builder adds no raw value.
+   */
+  #buildSyncDiagnosticsExportBlock(): string {
+    const syncStatus = this.#projectSyncStatus();
+    const generationPublishFailures =
+      this.#journalPersistence?.readGenerationPublishFailureSummary() ?? null;
+    const trailEntries = this.#diagnosticTrail?.readEntries() ?? [];
+    return renderSyncDiagnosticsExportBlock({
+      syncStatusLine: syncStatus === null ? null : renderJournalSyncStatusText(syncStatus),
+      syncBlockerGuidance:
+        syncStatus === null ? [] : [...syncBlockerGuidanceLines(syncStatus)],
+      journalStoreDiagnostics: {
+        lastJournalFailureReasons: this.#queueDriver?.readJournalFailureReasons() ?? [],
+        generationPublishFailureCount: generationPublishFailures?.count ?? 0,
+        lastGenerationPublishFailureReasons: generationPublishFailures?.lastReasons ?? [],
+      },
+      trailEntryCount: trailEntries.length,
+      trailAppendFailureCount: this.#diagnosticTrail?.readAppendFailureCount() ?? 0,
+      trailTail: trailEntries.slice(-SYNC_DIAGNOSTICS_TRAIL_TAIL_ENTRY_LIMIT),
     });
   }
 

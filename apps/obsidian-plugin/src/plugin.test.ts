@@ -20,6 +20,7 @@ const ALLOWED_OBSIDIAN_IMPORT_NAMES = new Set([
   "TFile",
   "TAbstractFile",
   "Modal",
+  "Notice",
 ]);
 
 function extractObsidianImportNames(source: string): string[] {
@@ -161,7 +162,10 @@ describe("Obsidian plugin composition root", () => {
     expect(pluginSource).not.toContain('id: "sync-now"');
     expect(pluginSource).not.toContain('id: "sync-existing-files"');
     expect(pluginSource).toContain('id: "restore-selected-tombstone"');
-    expect(pluginSource.match(/addCommand\(/g)?.length ?? 0).toBe(1);
+    // Sync error tracing task 2 adds the ONE sanitized export command; the
+    // restore command stays the only other explicit surface.
+    expect(pluginSource).toContain('id: "copy-sync-diagnostics"');
+    expect(pluginSource.match(/addCommand\(/g)?.length ?? 0).toBe(2);
     expect(pluginSource).not.toContain("#runExistingFilesScan");
     expect(pluginSource).not.toContain("#drainExistingFilesScanQueue");
     expect(pluginSource).not.toContain("#confirmExistingFilesScan");
@@ -488,12 +492,63 @@ describe("Obsidian plugin composition root", () => {
     // persistence generation-publish failure counter/ring.
     const snapshotIndex = pluginSource.indexOf("getSnapshot: () => {");
     expect(snapshotIndex).toBeGreaterThanOrEqual(0);
-    const snapshotBody = pluginSource.slice(snapshotIndex, snapshotIndex + 1_800);
+    // The window grew with the trail snapshot fields (sync error tracing
+    // task 2); the pinned fix-round-5 reads must stay inside it.
+    const snapshotBody = pluginSource.slice(snapshotIndex, snapshotIndex + 2_600);
     expect(snapshotBody).toContain("readJournalFailureReasons()");
     expect(snapshotBody).toContain("lastJournalFailureReasons:");
     expect(snapshotBody).toContain("readGenerationPublishFailureSummary()");
     expect(snapshotBody).toContain("generationPublishFailureCount:");
     expect(snapshotBody).toContain("lastGenerationPublishFailureReasons:");
+  });
+
+  it("registers the copy sync diagnostics command with a clipboard write and a modal fallback (sync error tracing task 2)", () => {
+    expect(pluginSource).toContain('id: "copy-sync-diagnostics"');
+    expect(pluginSource).toContain('"Copy sync diagnostics"');
+    // The block is built ONLY by the pure closed-vocabulary renderer.
+    expect(pluginSource).toContain("renderSyncDiagnosticsExportBlock");
+    const commandIndex = pluginSource.indexOf('id: "copy-sync-diagnostics"');
+    const commandBody = pluginSource.slice(commandIndex, commandIndex + 300);
+    expect(commandBody).toContain("#copySyncDiagnostics");
+    const methodIndex = pluginSource.indexOf("#copySyncDiagnostics(): Promise<void>");
+    expect(methodIndex).toBeGreaterThanOrEqual(0);
+    const methodBody = pluginSource.slice(methodIndex, methodIndex + 1_400);
+    expect(methodBody).toContain("navigator.clipboard");
+    expect(methodBody).toContain("writeText");
+    // The clipboard-unavailable branch shows the SAME sanitized block in a
+    // read-only modal; the block never reaches a console or a log.
+    expect(methodBody).toContain("PreformattedTextModal");
+    expect(methodBody).not.toContain("console.");
+    // The builder reads only the closed snapshot surfaces.
+    const builderIndex = pluginSource.indexOf("#buildSyncDiagnosticsExportBlock(): string");
+    expect(builderIndex).toBeGreaterThanOrEqual(0);
+    const builderBody = pluginSource.slice(builderIndex, builderIndex + 1_600);
+    expect(builderBody).toContain("#projectSyncStatus()");
+    expect(builderBody).toContain("readJournalFailureReasons()");
+    expect(builderBody).toContain("readGenerationPublishFailureSummary()");
+    expect(builderBody).toContain("readEntries()");
+    expect(builderBody).toContain("readAppendFailureCount()");
+    expect(builderBody).not.toContain("console.");
+  });
+
+  it("carries the trail tail, counts and derived stop reasons on the settings snapshot (sync error tracing task 2)", () => {
+    const snapshotIndex = pluginSource.indexOf("getSnapshot: () => {");
+    expect(snapshotIndex).toBeGreaterThanOrEqual(0);
+    const snapshotBody = pluginSource.slice(snapshotIndex, snapshotIndex + 3_000);
+    expect(snapshotBody).toContain("deriveSyncStopReasonTokens");
+    expect(snapshotBody).toContain("syncStopReasonTokens:");
+    expect(snapshotBody).toContain("trailTailEntries:");
+    expect(snapshotBody).toContain("trailEntryCount:");
+    expect(snapshotBody).toContain("trailAppendFailureCount:");
+  });
+
+  it("retains the diagnostics trail for the export and settings surfaces and clears it on release", () => {
+    expect(pluginSource).toContain("#diagnosticTrail");
+    expect(pluginSource).toContain("this.#diagnosticTrail = diagnosticTrail;");
+    const releaseIndex = pluginSource.indexOf("#releaseJournalResources(): void");
+    expect(releaseIndex).toBeGreaterThanOrEqual(0);
+    const releaseBody = pluginSource.slice(releaseIndex, releaseIndex + 900);
+    expect(releaseBody).toContain("this.#diagnosticTrail = null");
   });
 
   it("folds the lifecycle state histogram onto the settings snapshot", () => {

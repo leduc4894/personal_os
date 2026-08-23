@@ -4,6 +4,7 @@ type MockListener = (event: { readonly key?: string; preventDefault(): void }) =
 
 interface MockElementRecord {
   readonly tag: string;
+  readonly text: string | undefined;
   readonly element: { value: string };
   readonly listeners: Map<string, MockListener>;
 }
@@ -29,9 +30,14 @@ vi.mock("obsidian", () => {
       this.value = "";
     }
 
-    createEl(tag: string): MockElement {
+    createEl(tag: string, options?: { readonly text?: string }): MockElement {
       const element = new MockElement();
-      mockState.elements.push({ tag, element, listeners: element.listeners });
+      mockState.elements.push({
+        tag,
+        text: options?.text,
+        element,
+        listeners: element.listeners,
+      });
       return element;
     }
 
@@ -99,7 +105,7 @@ vi.mock("obsidian", () => {
   return { Modal, Setting };
 });
 
-import { ConfirmModal, SuggestModal, TextPromptModal } from "./restore-modals";
+import { ConfirmModal, PreformattedTextModal, SuggestModal, TextPromptModal } from "./restore-modals";
 
 function settleOnce<T>(read: () => T, write: (value: T) => void, value: T): void {
   if (read() === "pending") {
@@ -177,5 +183,30 @@ describe("explicit restore modal settlement", () => {
 
     expect(outcome).toBe("accepted");
     expect(dispatchCount).toBe(1);
+  });
+});
+
+describe("preformatted text modal settlement (clipboard-unavailable fallback)", () => {
+  beforeEach(() => {
+    mockState.elements.length = 0;
+    mockState.buttons.length = 0;
+  });
+
+  it("renders the sanitized block verbatim in one preformatted element with a close button", () => {
+    // Sync error tracing task 2: the clipboard-unavailable fallback shows
+    // the SAME sanitized block the clipboard path would have written —
+    // closed tokens, counts and timestamps only, never altered or wrapped.
+    const block = [
+      "obsidian_sync_diagnostics_export/v1",
+      "Status: Ready (3)",
+      "Trail tail (last 5):",
+      "2026-07-13T00:00:00.000Z · wire_failure · server_error",
+    ].join("\n");
+    const modal = new PreformattedTextModal({} as never, "Sync diagnostics", block);
+    modal.open();
+
+    const pre = mockState.elements.find((element) => element.tag === "pre");
+    expect(pre?.text).toBe(block);
+    expect(mockState.buttons.some((button) => button.text === "Close")).toBe(true);
   });
 });

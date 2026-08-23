@@ -108,6 +108,27 @@ describe("DeviceAuthenticationSettingTab source contract", () => {
     }
   });
 
+  it("renders the durable sync diagnostics trail section (sync error tracing task 2)", () => {
+    // The settings snapshot must accept the four trail fields and the tab
+    // must render them through the closed renderer: the derived stop-reason
+    // tokens, the total entry count, the bounded append-failure counter and
+    // the last five trail entries. Closed tokens and timestamps only.
+    expect(tabSource).toContain("Sync diagnostics trail");
+    expect(tabSource).toContain("renderSyncDiagnosticsTrailSection");
+    expect(tabSource).toContain("syncStopReasonTokens");
+    expect(tabSource).toContain("trailTailEntries");
+    expect(tabSource).toContain("trailEntryCount");
+    expect(tabSource).toContain("trailAppendFailureCount");
+    // Reject any path-leaking pattern in the new section's description
+    // builder: the render is closed tokens, counts and timestamps only.
+    const sectionIndex = tabSource.indexOf("Sync diagnostics trail");
+    expect(sectionIndex).toBeGreaterThanOrEqual(0);
+    const sectionSnippet = tabSource.slice(sectionIndex, sectionIndex + 700);
+    for (const forbidden of [".md", "notes/", "at1.", "secret", "https://"]) {
+      expect(sectionSnippet).not.toContain(forbidden);
+    }
+  });
+
   it("offers no control implying automatic full-Vault upload", () => {
     for (const forbiddenLabel of ["Sync all", "Upload all", "Sync everything", "Upload everything"]) {
       expect(tabSource).not.toContain(forbiddenLabel);

@@ -14,6 +14,16 @@ import type { LifecycleStateCounts, LifecycleBlockedReasonCode } from "../journa
 import { LIFECYCLE_LOCAL_FILE_STATES } from "../journal/lifecycle-contracts";
 import type { LifecycleLocalFileState } from "../journal/lifecycle-contracts";
 import type { LocalNoteSyncState, LocalNoteSyncStatus } from "../journal/note-status";
+import type { SyncDiagnosticTrailEntry } from "../journal/sync-diagnostics-trail";
+import {
+  renderJournalStoreDiagnosticsLine,
+  renderSyncDiagnosticsTrailSection,
+} from "../journal/sync-diagnostics-export";
+
+// The journal-store diagnostics line moved to its closed home beside the
+// trail renderers (sync error tracing task 2); the re-export keeps this
+// module's published surface unchanged.
+export { renderJournalStoreDiagnosticsLine } from "../journal/sync-diagnostics-export";
 
 export interface DeviceAuthenticationSnapshot {
   readonly connectionState: ConnectionState;
@@ -54,6 +64,18 @@ export interface DeviceAuthenticationSnapshot {
    */
   readonly generationPublishFailureCount: number;
   readonly lastGenerationPublishFailureReasons: readonly string[];
+  /**
+   * Sync error tracing task 2: the closed stop-reason tokens derived from
+   * the durable diagnostics trail (the newest closed token of each failure
+   * kind), empty when no failure was recorded.
+   */
+  readonly syncStopReasonTokens: readonly string[];
+  /** The durable trail's bounded entry view, oldest first (the tail). */
+  readonly trailTailEntries: readonly SyncDiagnosticTrailEntry[];
+  /** The total durable trail entry count. */
+  readonly trailEntryCount: number;
+  /** The bounded count of swallowed trail append/persist failures. */
+  readonly trailAppendFailureCount: number;
   /** Local-only per-note statuses; paths must never leave this settings tab. */
   readonly localNoteSyncStatuses: readonly LocalNoteSyncStatus[];
 }
@@ -123,6 +145,21 @@ export class DeviceAuthenticationSettingTab extends PluginSettingTab {
           lastJournalFailureReasons: snapshot.lastJournalFailureReasons,
           generationPublishFailureCount: snapshot.generationPublishFailureCount,
           lastGenerationPublishFailureReasons: snapshot.lastGenerationPublishFailureReasons,
+        }),
+      );
+
+    // Sync error tracing task 2: the durable trail surface — the derived
+    // closed stop-reason tokens, the total entry count, the bounded
+    // append-failure counter and the last five entries. Closed tokens,
+    // counts and timestamps only.
+    new Setting(containerEl)
+      .setName("Sync diagnostics trail")
+      .setDesc(
+        renderSyncDiagnosticsTrailSection({
+          stopReasonTokens: snapshot.syncStopReasonTokens,
+          totalEntryCount: snapshot.trailEntryCount,
+          appendFailureCount: snapshot.trailAppendFailureCount,
+          entries: snapshot.trailTailEntries,
         }),
       );
 
@@ -246,38 +283,6 @@ function lifecycleBlockedReasonCodesDescription(snapshot: DeviceAuthenticationSn
     return "No lifecycle blockers observed";
   }
   return [...snapshot.lifecycleBlockedReasonCodes].join(", ");
-}
-
-/**
- * Render the journal store diagnostics line (fix round 5): the closed
- * `JournalStoreErrorReason` tokens of swallowed pass-loop journal failures
- * plus the generation-publish failure count and its last closed reasons.
- * Closed vocabulary only — the line never carries a raw error message,
- * path, digest, credential or journal content.
- */
-export function renderJournalStoreDiagnosticsLine(input: {
-  readonly lastJournalFailureReasons: readonly string[];
-  readonly generationPublishFailureCount: number;
-  readonly lastGenerationPublishFailureReasons: readonly string[];
-}): string {
-  if (
-    input.lastJournalFailureReasons.length === 0 &&
-    input.generationPublishFailureCount === 0
-  ) {
-    return "No journal store failures observed.";
-  }
-  const parts: string[] = [];
-  if (input.lastJournalFailureReasons.length > 0) {
-    parts.push(`Pass failures: ${input.lastJournalFailureReasons.join(", ")}`);
-  }
-  if (input.generationPublishFailureCount > 0) {
-    const reasons = input.lastGenerationPublishFailureReasons.join(", ");
-    parts.push(
-      `Generation publish failures: ${input.generationPublishFailureCount}` +
-        (reasons.length > 0 ? ` (${reasons})` : ""),
-    );
-  }
-  return parts.join("\n");
 }
 
 /**

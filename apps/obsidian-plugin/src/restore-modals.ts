@@ -151,3 +151,30 @@ export class ConfirmModal extends Modal {
     this.onClose = () => this.#reject();
   }
 }
+
+/**
+ * A read-only preformatted text modal (the clipboard-unavailable fallback
+ * of the copy-sync-diagnostics command): one title, one verbatim
+ * preformatted body and a close button. The body is the already-sanitized
+ * closed-vocabulary block; the modal never alters, wraps or records it.
+ */
+export class PreformattedTextModal extends Modal {
+  readonly #title: string;
+  readonly #body: string;
+
+  constructor(app: import("obsidian").App, title: string, body: string) {
+    super(app);
+    this.#title = title;
+    this.#body = body;
+  }
+
+  override onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    this.titleEl.setText(this.#title);
+    contentEl.createEl("pre", { text: this.#body });
+    new Setting(contentEl).addButton((button) =>
+      button.setButtonText("Close").setCta().onClick(() => this.close()),
+    );
+  }
+}
