@@ -98,7 +98,8 @@ export class AutomaticSnapshotCoordinator {
     this.#runner = runner;
   }
 
-  request(_reason: AutomaticSnapshotReason): void {
+  request(reason: AutomaticSnapshotReason): void {
+    void reason;
     if (this.#isStopped) return;
     this.#hasFollowUpSnapshot = true;
     if (this.#drainPromise === null) {

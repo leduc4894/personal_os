@@ -26,7 +26,6 @@ function createCoordinatorHarness(): CoordinatorHarness {
   let snapshotCallCount = 0;
   let queuePassCallCount = 0;
   let isFirstSnapshotBlocked = false;
-  let firstSnapshotResult: AutomaticSnapshotResult | null = null;
   let releaseFirstSnapshot: ((result: AutomaticSnapshotResult) => void) | null = null;
 
   const runner: SnapshotRunnerHarness = {
