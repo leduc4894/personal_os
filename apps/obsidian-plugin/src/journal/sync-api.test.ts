@@ -448,6 +448,43 @@ describe("journal sync api envelope request id correlation (sync error tracing t
     expect(api.readLastEnvelopeRequestId()).toBe("66666666-6666-4666-8666-666666666666");
   });
 
+  it("carries the closed server error code on a login_required-class 403 envelope", async () => {
+    // Diagnostic round U1: round 5's discrimination already PARSED the
+    // envelope's error.code to tell an API 403 from an edge 403 but
+    // discarded it. The closed code string now threads onto the mapped
+    // failure (alongside the request id) so the diagnostics trail can name
+    // WHICH server registry code rejected the request.
+    const transport = createRecordingTransport(async () => ({
+      status: 403,
+      bodyText: errorBody("exclusion_policy_denied"),
+    }));
+    const failure = await createApi(transport)
+      .preflightJournalEvent(PREFLIGHT_INPUT)
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      kind: "login_required",
+      wireErrorCode: "exclusion_policy_denied",
+      requestId: "66666666-6666-4666-8666-666666666666",
+    });
+  });
+
+  it("keeps the wire error code null when the failing body is not the API envelope", async () => {
+    // The edge HTML 403 carries no closed error code: nothing extra threads
+    // onto the failure (the kind token already says server_error).
+    const transport = createRecordingTransport(async () => ({
+      status: 403,
+      bodyText: "<!DOCTYPE html><html><body>edge block</body></html>",
+    }));
+    const failure = await createApi(transport)
+      .preflightJournalEvent(PREFLIGHT_INPUT)
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      kind: "server_error",
+      wireErrorCode: null,
+      requestId: null,
+    });
+  });
+
   it("keeps a non-uuid or absent request id out of the correlation surface", async () => {
     const foreignBody = JSON.stringify({
       data: { outcome: "excluded" },

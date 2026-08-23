@@ -6,11 +6,14 @@
  * timestamp and a bounded list of tokens drawn ONLY from the existing
  * closed vocabularies (`QueuePassOutcome`, `JournalSafeErrorLabel`,
  * `JournalStoreErrorReason`, `SyncApiFailureKind` labels,
- * `LifecycleRunOutcome`) plus the one opaque envelope request id and the
- * fixed self-check verdict tokens of the `self_check` kind. A
- * free-form string cannot enter an entry at the type level, and the
- * sidecar parser rejects any token that is not a closed snake_case token
- * or a well-formed request id record.
+ * `LifecycleRunOutcome`) plus the one opaque envelope request id, the
+ * server envelope error-code tokens (SERVER ENVELOPE CODES: the server
+ * error registry's closed `error.code` vocabulary, admitted by the closed
+ * snake_case shape only through {@link envelopeErrorCode} — the plugin
+ * mirrors no registry client-side) and the fixed self-check verdict
+ * tokens of the `self_check` kind. A free-form string cannot enter an
+ * entry at the type level, and the sidecar parser rejects any token that
+ * is not a closed snake_case token or a well-formed request id record.
  *
  * The trail persists as ONE JSON sidecar (`sync-diagnostics-trail.json`)
  * through the journal file store port bound to the Vault's plugin
@@ -137,6 +140,21 @@ export interface SyncDiagnosticRequestIdToken {
 /** Wrap one server envelope request id as the opaque trail token. */
 export function envelopeRequestId(requestId: string): SyncDiagnosticRequestIdToken {
   return { requestId } as SyncDiagnosticRequestIdToken;
+}
+
+/**
+ * Wrap one server envelope error code as the closed trail token, or answer
+ * null when the code is not shaped like a closed snake_case token
+ * (diagnostic round U1). These tokens are SERVER ENVELOPE CODES — the
+ * server error registry's closed `error.code` vocabulary — not a
+ * client-side union: the plugin mirrors no registry, so the trail boundary
+ * whitelists them by the existing `CLOSED_TOKEN_PATTERN` shape only,
+ * exactly like the sidecar load path does for every closed token. A
+ * non-conforming code (challenge text, path-shaped or free-form values)
+ * records nothing.
+ */
+export function envelopeErrorCode(code: string): SyncDiagnosticClosedToken | null {
+  return CLOSED_TOKEN_PATTERN.test(code) ? (code as SyncDiagnosticClosedToken) : null;
 }
 
 /** One token of a trail entry: a closed token or the opaque request id. */

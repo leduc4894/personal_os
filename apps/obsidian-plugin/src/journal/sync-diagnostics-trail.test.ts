@@ -23,6 +23,7 @@ import {
   SYNC_DIAGNOSTICS_TRAIL_FILE_NAME,
   SYNC_SELF_CHECK_VERDICT_TOKENS,
   createSyncDiagnosticsTrail,
+  envelopeErrorCode,
   envelopeRequestId,
 } from "./sync-diagnostics-trail";
 
@@ -328,6 +329,44 @@ describe("sync diagnostics trail self_check entries", () => {
       "credential_absent",
       "origin_reachable",
       "origin_unreachable",
+    ]);
+  });
+});
+
+// --- the server envelope error-code tokens (diagnostic round U1) ---------------------------------------
+
+describe("sync diagnostics trail envelope error-code tokens (diagnostic round U1)", () => {
+  it("admits a server envelope code by shape and nulls a non-conforming code", () => {
+    // These tokens are SERVER envelope codes: the server registry's closed
+    // error-code vocabulary (snake_case strings), not a client-side union.
+    // The trail boundary whitelists them by the existing closed-token shape
+    // only — anything else records nothing.
+    expect(envelopeErrorCode("exclusion_policy_denied")).toBe("exclusion_policy_denied");
+    expect(envelopeErrorCode("authorization_scope_denied")).toBe("authorization_scope_denied");
+    expect(envelopeErrorCode("Just a moment...")).toBeNull();
+    expect(envelopeErrorCode("edge/challenge fragment")).toBeNull();
+    expect(envelopeErrorCode("")).toBeNull();
+  });
+
+  it("round-trips a server envelope code token through the sidecar as a string token", async () => {
+    const store = new FakeTrailFileStore();
+    const trail = await createLoadedTrail(store);
+    const codeToken = envelopeErrorCode("authorization_scope_denied");
+    if (codeToken === null) {
+      throw new Error("expected a closed code token");
+    }
+    await trail.append({
+      kind: "wire_failure",
+      tokens: ["login_required", codeToken, envelopeRequestId(REQUEST_ID)],
+    });
+
+    const reloaded = await createLoadedTrail(store);
+    // The code survives the reload as a plain closed string token, validated
+    // by the same sidecar CLOSED_TOKEN_PATTERN guard as every other token.
+    expect(reloaded.readEntries()[0]?.tokens).toEqual([
+      "login_required",
+      "authorization_scope_denied",
+      { requestId: REQUEST_ID },
     ]);
   });
 });

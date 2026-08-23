@@ -1178,11 +1178,58 @@ describe("queue driver diagnostics trail wiring (sync error tracing task 1)", ()
     const wireFailure = harness.diagnosticTrail.entries[0];
     expect(wireFailure?.kind).toBe("wire_failure");
     // The failing envelope's opaque request id joins the client trail to the
-    // server-side log of the same rejected request.
+    // server-side log of the same rejected request — and, since diagnostic
+    // round U1, the parsed closed server error code rides between them.
     expect(wireFailure?.tokens).toEqual([
       "login_required",
+      "authorization_scope_denied",
       { requestId: "66666666-6666-4666-8666-666666666666" },
     ]);
+  });
+
+  it("carries the closed server error code token on a login_required wire failure (diagnostic round U1)", async () => {
+    const harness = createHarness();
+    await captureBytes(harness, "notes/api-403-code.md", new TextEncoder().encode("denied code"));
+    harness.installTransport({
+      preflight: async () => ({
+        status: 403,
+        bodyText: errorBody("exclusion_policy_denied"),
+      }),
+    });
+
+    const summary = await runPass(harness.driver);
+
+    expect(summary.outcome).toBe("login_required");
+    const wireFailure = harness.diagnosticTrail.entries[0];
+    expect(wireFailure?.kind).toBe("wire_failure");
+    // The parsed server envelope code lands as one additional closed token
+    // between the kind and the request id: the registry code that rejected
+    // the request, whitelisted at the trail boundary by shape only.
+    expect(wireFailure?.tokens).toEqual([
+      "login_required",
+      "exclusion_policy_denied",
+      { requestId: "66666666-6666-4666-8666-666666666666" },
+    ]);
+  });
+
+  it("records no code token on an edge HTML wire failure", async () => {
+    const harness = createHarness();
+    await captureBytes(harness, "notes/edge-403-code.md", new TextEncoder().encode("edge"));
+    harness.installTransport({
+      preflight: async () => ({
+        status: 403,
+        bodyText: "<html>edge block</html>",
+      }),
+    });
+
+    const summary = await runPass(harness.driver);
+
+    expect(summary.outcome).toBe("retry_scheduled");
+    const wireFailure = harness.diagnosticTrail.entries[0];
+    expect(wireFailure?.kind).toBe("wire_failure");
+    // No envelope, no closed code: the kind token already says server_error
+    // and nothing extra is recorded.
+    expect(wireFailure?.tokens).toEqual(["server_error"]);
   });
 
   it("samples the envelope request id into the pass outcome entry on the success path", async () => {

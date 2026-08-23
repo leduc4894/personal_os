@@ -71,27 +71,35 @@ export type SyncApiFailureKind = (typeof SYNC_API_FAILURE_KINDS)[number];
 /**
  * One mapped sync failure: a closed kind and a static message. The message
  * never carries the URL, status, registry code, credential or any response
- * text, so a thrown error is redacted by construction. The one extra fact
- * a failure may carry is the server envelope's opaque `requestId` —
- * present only when the failing body parsed as the canonical envelope and
- * the id is UUID-shaped — so the client-side diagnostics trail can join a
- * failure to the server-side log of the same request.
+ * text, so a thrown error is redacted by construction. Two extra facts a
+ * failure may carry, both only when the failing body parsed as the canonical
+ * envelope: the envelope's opaque `requestId` (when the id is UUID-shaped)
+ * so the client-side diagnostics trail can join a failure to the server-side
+ * log of the same request, and the envelope's closed error-code string
+ * `wireErrorCode` (diagnostic round U1) naming WHICH server registry code
+ * rejected the request — round 5's discrimination already parsed it to tell
+ * an API 403 from an edge 403, and now it survives the mapping instead of
+ * being discarded. The code stays out of the static message; the diagnostics
+ * trail boundary whitelists it by shape before it is ever recorded.
  */
 export class SyncApiError extends Error {
   readonly kind: SyncApiFailureKind;
   readonly canResumeClaimedOperation: boolean;
   readonly requestId: string | null;
+  readonly wireErrorCode: string | null;
 
   constructor(
     kind: SyncApiFailureKind,
     canResumeClaimedOperation = false,
     requestId: string | null = null,
+    wireErrorCode: string | null = null,
   ) {
     super(`sync api failed: ${kind}`);
     this.name = "SyncApiError";
     this.kind = kind;
     this.canResumeClaimedOperation = canResumeClaimedOperation;
     this.requestId = requestId;
+    this.wireErrorCode = wireErrorCode;
   }
 }
 
@@ -99,8 +107,9 @@ function syncApiError(
   kind: SyncApiFailureKind,
   canResumeClaimedOperation = false,
   requestId: string | null = null,
+  wireErrorCode: string | null = null,
 ): SyncApiError {
-  return new SyncApiError(kind, canResumeClaimedOperation, requestId);
+  return new SyncApiError(kind, canResumeClaimedOperation, requestId, wireErrorCode);
 }
 
 // --- hand-mirrored wire shapes (spec 10.1, 10.3) --------------------------------------------------
@@ -200,7 +209,7 @@ function parseEnvelope(status: number, bodyText: string): { data: unknown; reque
  */
 function mapWireFailure(status: number, code: string | null, requestId: string | null): SyncApiError {
   if (status === 401) {
-    return syncApiError("access_expired", false, requestId);
+    return syncApiError("access_expired", false, requestId, code);
   }
   if (status === 403) {
     // Fix round 5 (finding A): a genuine API 403 carries the canonical
@@ -211,27 +220,28 @@ function mapWireFailure(status: number, code: string | null, requestId: string |
     // not a login verdict: map it onto the retryable `server_error` so
     // the queue backs off and survives instead of parking the oldest
     // event under a false login_required and starving every pass behind
-    // it.
+    // it. Diagnostic round U1: the parsed code is no longer discarded —
+    // it threads onto the mapped failure for the diagnostics trail.
     return code === null
-      ? syncApiError("server_error", false, requestId)
-      : syncApiError("login_required", false, requestId);
+      ? syncApiError("server_error", false, requestId, code)
+      : syncApiError("login_required", false, requestId, code);
   }
   if (status === 429) {
-    return syncApiError("network_rate_limited", false, requestId);
+    return syncApiError("network_rate_limited", false, requestId, code);
   }
   switch (code) {
     case "small_file_size_limit_exceeded":
-      return syncApiError("blocked_size", false, requestId);
+      return syncApiError("blocked_size", false, requestId, code);
     case "small_file_content_integrity_failed":
     case "small_file_operation_identity_mismatch":
-      return syncApiError("integrity_failed", false, requestId);
+      return syncApiError("integrity_failed", false, requestId, code);
     case "small_file_operation_not_found":
     case "small_file_operation_expired":
-      return syncApiError("operation_retry_required", false, requestId);
+      return syncApiError("operation_retry_required", false, requestId, code);
     case "small_file_upload_state_invalid":
-      return syncApiError("operation_retry_required", true, requestId);
+      return syncApiError("operation_retry_required", true, requestId, code);
     default:
-      return syncApiError("server_error", false, requestId);
+      return syncApiError("server_error", false, requestId, code);
   }
 }
 

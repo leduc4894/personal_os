@@ -50,7 +50,7 @@ import type {
   SyncDiagnosticToken,
   SyncEventStateToken,
 } from "./sync-diagnostics-trail";
-import { envelopeRequestId } from "./sync-diagnostics-trail";
+import { envelopeErrorCode, envelopeRequestId } from "./sync-diagnostics-trail";
 
 // --- frozen bounds (spec 8) -----------------------------------------------------------------------
 
@@ -541,13 +541,24 @@ export class JournalQueueDriver {
    * Append one `wire_failure` trail entry for one failed wire request
    * outcome (sync error tracing task 1): the closed failure kind, plus the
    * failing envelope's opaque request id when the server sent one. A local
-   * (non-wire) failure records nothing.
+   * (non-wire) failure records nothing. Diagnostic round U1: when the
+   * failing body parsed as the canonical envelope, its closed server error
+   * code rides along as one additional closed token between the kind and
+   * the request id — whitelisted at the trail boundary by shape only, so a
+   * null code (an edge HTML body) or a non-conforming code records nothing
+   * extra.
    */
   #recordWireFailureTrailEntry(error: unknown): void {
     if (this.#diagnosticTrail === null || !(error instanceof SyncApiError)) {
       return;
     }
     const tokens: SyncDiagnosticToken[] = [error.kind];
+    if (error.wireErrorCode !== null) {
+      const errorCodeToken = envelopeErrorCode(error.wireErrorCode);
+      if (errorCodeToken !== null) {
+        tokens.push(errorCodeToken);
+      }
+    }
     if (error.requestId !== null) {
       tokens.push(envelopeRequestId(error.requestId));
     }
