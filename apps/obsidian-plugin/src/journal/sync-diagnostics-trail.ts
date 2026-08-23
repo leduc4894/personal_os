@@ -73,7 +73,34 @@ export type SyncDiagnosticClosedToken =
   | JournalStoreErrorReason
   | SyncApiFailureKind
   | LifecycleRunOutcome
-  | SyncSelfCheckVerdictToken;
+  | SyncSelfCheckVerdictToken
+  | SyncEventStateToken;
+
+/**
+ * The closed row-state tokens a `journal_failure` entry may carry when a
+ * retry park fails (sync error tracing park diagnosis round): each
+ * `state_*` token names the closed journal event state the parked row read
+ * back in AT the failure moment, with the two closed fallback tokens
+ * `row_absent` (the read-back answered null or itself threw) and
+ * `reason_unknown` (the park error carried no closed store reason).
+ */
+export const SYNC_EVENT_STATE_TOKENS = [
+  "state_queued",
+  "state_waiting_retry",
+  "state_preflight",
+  "state_uploading",
+  "state_blocked_conflict",
+  "state_excluded_policy",
+  "state_blocked_size",
+  "state_deferred_lifecycle",
+  "state_integrity_failed",
+  "state_committed",
+  "state_no_change",
+  "row_absent",
+  "reason_unknown",
+] as const;
+
+export type SyncEventStateToken = (typeof SYNC_EVENT_STATE_TOKENS)[number];
 
 /**
  * The fixed self-check verdict tokens (sync error tracing task 3): the

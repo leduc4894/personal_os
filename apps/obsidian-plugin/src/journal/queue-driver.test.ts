@@ -18,7 +18,7 @@ import initSqlJs from "sql.js";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { CoalescingQueuePassDispatcher } from "./automatic-snapshot";
-import type { JournalEvent, JournalMeta } from "./contracts";
+import type { JournalEvent, JournalMeta, JournalSafeErrorLabel } from "./contracts";
 import { deriveFrozenFingerprint } from "./fingerprint";
 import {
   JournalQueueDriver,
@@ -1222,6 +1222,104 @@ describe("queue driver diagnostics trail wiring (sync error tracing task 1)", ()
     // the trail fire-and-forget and the pass still ends retry_scheduled.
     const summary = await runPass(harness.driver);
     expect(summary.outcome).toBe("retry_scheduled");
+    expect(harness.diagnosticTrail.entries.map((entry) => entry.kind)).toEqual([
+      "wire_failure",
+      "pass_outcome",
+    ]);
+  });
+});
+
+// --- retry-park failure state capture (sync error tracing park diagnosis round) ------------------------------
+
+describe("queue driver retry-park failure state capture (sync error tracing park diagnosis round)", () => {
+  it("captures the closed reason and the terminal row state when a retry park fails", async () => {
+    const harness = createHarness();
+    await captureBytes(harness, "notes/park-terminal.md", new TextEncoder().encode("park"));
+    harness.installTransport({
+      preflight: async () => ({
+        status: 403,
+        bodyText: errorBody("authorization_scope_denied"),
+      }),
+    });
+    // The live-mystery shape: the row is flipped into a terminal state while
+    // the park runs, so the REAL mutation's non-terminal guard throws the
+    // closed `journal_mutation_failed` reason from pure in-memory data —
+    // exactly what the live machine parks-fail with while the offline
+    // reproduction of the same journal bytes parks cleanly.
+    const originalPark = harness.repository.markEventWaitingRetry.bind(harness.repository);
+    harness.repository.markEventWaitingRetry = async (
+      eventId: string,
+      safeError: JournalSafeErrorLabel,
+      nextEligibleRetryEpochMs: number,
+    ) => {
+      await harness.repository.markEventTerminal(eventId, "blocked_conflict", "blocked_conflict");
+      return originalPark(eventId, safeError, nextEligibleRetryEpochMs);
+    };
+
+    const summary = await runPass(harness.driver);
+
+    // Pass semantics are unchanged: the rethrown park error still ends the
+    // pass fail-closed (login_required because the wire verdict set it).
+    expect(summary.outcome).toBe("login_required");
+    expect(harness.driver.readJournalFailureReasons()).toEqual(["journal_mutation_failed"]);
+    // The trail mirrors the pass: the wire failure, then the NEW park-site
+    // entry carrying the closed reason AND the row state read back at the
+    // throw moment, then the pre-existing pass-loop journal_failure tap.
+    expect(harness.diagnosticTrail.entries.map((entry) => entry.kind)).toEqual([
+      "wire_failure",
+      "journal_failure",
+      "journal_failure",
+      "pass_outcome",
+    ]);
+    expect(harness.diagnosticTrail.entries[1]?.tokens).toEqual([
+      "journal_mutation_failed",
+      "state_blocked_conflict",
+    ]);
+    expect(harness.diagnosticTrail.entries[2]?.tokens).toEqual(["journal_mutation_failed"]);
+  });
+
+  it("captures row_absent when the parked row is gone at the failure moment", async () => {
+    const harness = createHarness();
+    await captureBytes(harness, "notes/park-absent.md", new TextEncoder().encode("absent"));
+    harness.installTransport({
+      preflight: async () => ({
+        status: 403,
+        bodyText: errorBody("authorization_scope_denied"),
+      }),
+    });
+    harness.repository.markEventWaitingRetry = () => {
+      // The row exists for the park's initial read but answers null when the
+      // failure capture reads it back.
+      harness.repository.readEvent = () => null;
+      throw journalStoreError("journal_mutation_failed");
+    };
+
+    const summary = await runPass(harness.driver);
+
+    expect(summary.outcome).toBe("login_required");
+    const parkEntry = harness.diagnosticTrail.entries.find(
+      (entry) => entry.tokens.includes("row_absent"),
+    );
+    expect(parkEntry?.kind).toBe("journal_failure");
+    expect(parkEntry?.tokens).toEqual(["journal_mutation_failed", "row_absent"]);
+  });
+
+  it("records no journal_failure entry when the retry park succeeds", async () => {
+    const harness = createHarness();
+    await captureBytes(harness, "notes/park-healthy.md", new TextEncoder().encode("healthy"));
+    harness.installTransport({
+      preflight: async () => ({
+        status: 403,
+        bodyText: errorBody("authorization_scope_denied"),
+      }),
+    });
+
+    const summary = await runPass(harness.driver);
+
+    // Control: a healthy park adds no journal_failure entry — the pass keeps
+    // the plain login_required wire failure and pass outcome.
+    expect(summary.outcome).toBe("login_required");
+    expect(harness.driver.readJournalFailureReasons()).toEqual([]);
     expect(harness.diagnosticTrail.entries.map((entry) => entry.kind)).toEqual([
       "wire_failure",
       "pass_outcome",

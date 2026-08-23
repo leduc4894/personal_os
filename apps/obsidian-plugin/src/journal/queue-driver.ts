@@ -37,7 +37,7 @@
  * reaches a thrown error, a journal row or a diagnostic surface.
  */
 
-import type { JournalEvent, JournalSafeErrorLabel, LocalFile } from "./contracts";
+import type { JournalEvent, JournalEventState, JournalSafeErrorLabel, LocalFile } from "./contracts";
 import { MAX_FILE_SIZE_BYTES } from "./contracts";
 import { deriveFrozenFingerprint } from "./fingerprint";
 import type { LifecycleDriver, LifecycleRunOutcome } from "./lifecycle-driver";
@@ -48,6 +48,7 @@ import { SyncApiError } from "./sync-api";
 import type {
   SyncDiagnosticsTrail,
   SyncDiagnosticToken,
+  SyncEventStateToken,
 } from "./sync-diagnostics-trail";
 import { envelopeRequestId } from "./sync-diagnostics-trail";
 
@@ -193,6 +194,38 @@ function syncFailureKind(error: unknown): string | null {
 
 function canResumeClaimedOperation(error: unknown): boolean {
   return (error as { canResumeClaimedOperation?: unknown } | null)?.canResumeClaimedOperation === true;
+}
+
+/**
+ * The fixed switch of the park-failure state capture (sync error tracing
+ * park diagnosis round): one closed journal event state maps to exactly one
+ * closed `state_*` trail token. No free-form strings.
+ */
+function journalEventStateToken(state: JournalEventState): SyncEventStateToken {
+  switch (state) {
+    case "queued":
+      return "state_queued";
+    case "waiting_retry":
+      return "state_waiting_retry";
+    case "preflight":
+      return "state_preflight";
+    case "uploading":
+      return "state_uploading";
+    case "blocked_conflict":
+      return "state_blocked_conflict";
+    case "excluded_policy":
+      return "state_excluded_policy";
+    case "blocked_size":
+      return "state_blocked_size";
+    case "deferred_lifecycle":
+      return "state_deferred_lifecycle";
+    case "integrity_failed":
+      return "state_integrity_failed";
+    case "committed":
+      return "state_committed";
+    case "no_change":
+      return "state_no_change";
+  }
 }
 
 // --- the driver ----------------------------------------------------------------------------------------
@@ -885,11 +918,57 @@ export class JournalQueueDriver {
       requestCorrelationId: correlationId,
     });
     const nextAttemptCount = event.attemptCount + 1;
-    await this.#repository.markEventWaitingRetry(
-      eventId,
-      safeError,
-      this.#nowEpochMs() + computeRetryBackoffMs(nextAttemptCount, this.#randomJitter),
-    );
+    try {
+      await this.#repository.markEventWaitingRetry(
+        eventId,
+        safeError,
+        this.#nowEpochMs() + computeRetryBackoffMs(nextAttemptCount, this.#randomJitter),
+      );
+    } catch (error) {
+      // Park failure state capture (sync error tracing park diagnosis
+      // round): the park is pure in-memory SQL, yet on the live machine it
+      // throws the closed `journal_mutation_failed` reason while the offline
+      // reproduction over the same journal bytes parks cleanly — so the
+      // in-memory row state at the throw moment must differ. Capture it
+      // BEFORE rethrowing; the rethrow itself is unchanged, so the pass
+      // still fails closed through the pass-loop catch (ring entry and the
+      // pre-existing journal_failure tap) with identical pass semantics.
+      this.#recordParkFailureTrailEntry(eventId, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Append one `journal_failure` trail entry from the retry-park throw site
+   * (sync error tracing park diagnosis round): the park error's closed store
+   * reason — or the closed `reason_unknown` token for a non-store error —
+   * plus the closed state token of the row read back AT the failure moment,
+   * where a null or throwing read-back records `row_absent`. Closed tokens
+   * only; fire-and-forget, never blocking the pass.
+   */
+  #recordParkFailureTrailEntry(eventId: string, error: unknown): void {
+    if (this.#diagnosticTrail === null) {
+      return;
+    }
+    const reasonToken: SyncDiagnosticToken =
+      error instanceof JournalStoreError ? error.reason : "reason_unknown";
+    void this.#diagnosticTrail.append({
+      kind: "journal_failure",
+      tokens: [reasonToken, this.#readEventStateTokenAtFailure(eventId)],
+    });
+  }
+
+  /** The parked row's closed state token read back at the failure moment. */
+  #readEventStateTokenAtFailure(eventId: string): SyncEventStateToken {
+    try {
+      const event = this.#repository.readEvent(eventId);
+      if (event === null) {
+        return "row_absent";
+      }
+      return journalEventStateToken(event.state);
+    } catch {
+      return "row_absent";
+    }
   }
 
   async #closeTerminal(
