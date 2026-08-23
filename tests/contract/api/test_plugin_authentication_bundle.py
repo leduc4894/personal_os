@@ -85,10 +85,15 @@ SQLJS_BUNDLED_MODULE_PATH_PREFIX = f"{SQLJS_PACKAGE_NAME}/dist/"
 _ESBUILD_MODULE_MARKER_PATTERN = re.compile(r"^// (\S*/\S*)$", re.MULTILINE)
 
 # The closed Obsidian import surface (values or erasable types) of spec 19.
+# ``Notice`` is a deliberate spec-19 closed-surface addition by the sync error
+# tracing design (2026-08-23): the UI notice surface of the two diagnostics
+# commands (``Copy sync diagnostics``, ``Run sync self-check``). The addition
+# is mirrored in the plugin-side import scan of ``src/plugin.test.ts``.
 ALLOWED_OBSIDIAN_IMPORT_NAMES = frozenset(
     {
         "App",
         "Modal",
+        "Notice",
         "Platform",
         "Plugin",
         "PluginSettingTab",

@@ -1028,9 +1028,11 @@ child never claims to remove a SecretStorage key. It relies only on the
 documented vault-local key/value boundary and makes no claim that Obsidian uses
 an operating-system keychain or provides filesystem-level encryption.
 
-The plugin uses only `requestUrl`, `Platform`, `SecretStorage`, settings and
-browser-opening APIs through narrow adapters. Static tests prohibit Node.js,
-Electron and `FileSystemAdapter` imports at module load time.
+The plugin uses only `requestUrl`, `Platform`, `SecretStorage`, settings,
+modal and notice UI, and browser-opening APIs through narrow adapters
+(notice UI added 2026-08-23 as the closed surface of the sync diagnostics
+commands). Static tests prohibit Node.js, Electron and `FileSystemAdapter`
+imports at module load time.
 
 ## 20. Security and privacy
 
