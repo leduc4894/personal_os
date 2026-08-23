@@ -310,9 +310,7 @@ def _wdio_phase_status_path(config: LiveAcceptanceConfig) -> Path:
 def _remove_wdio_phase_status(status_path: Path) -> None:
     try:
         status_path.unlink(missing_ok=True)
-        status_path.with_name(f"{status_path.name}.diagnostic.json").unlink(
-            missing_ok=True
-        )
+        status_path.with_name(f"{status_path.name}.diagnostic.json").unlink(missing_ok=True)
     except OSError:
         raise LiveAcceptanceFailure("obsidian_wdio_failed") from None
 
@@ -527,10 +525,10 @@ def _write_final_result(config: LiveAcceptanceConfig, state: str, result_code: s
         candidate = document.get("result_code")
         if set(document) == {"result_code"} and isinstance(candidate, str):
             phase_code = candidate
-    except (LiveAcceptanceFailure, OSError, UnicodeError):
+    except LiveAcceptanceFailure, OSError, UnicodeError:
         pass
-    result_path = config.repository_root / ".local" / (
-        f"{config.project_name}.obsidian-live-result.json"
+    result_path = (
+        config.repository_root / ".local" / (f"{config.project_name}.obsidian-live-result.json")
     )
     result_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = result_path.with_suffix(".tmp")

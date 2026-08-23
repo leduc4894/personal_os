@@ -43,7 +43,7 @@ def _resolve_client_request_id(value: str | None) -> tuple[UUID | None, bool]:
         return None, False
     try:
         parsed = UUID(value)
-    except (ValueError, AttributeError, TypeError):
+    except ValueError, AttributeError, TypeError:
         return None, True
     if str(parsed) != value:
         return None, True

@@ -825,9 +825,7 @@ def test_failed_wdio_reports_the_last_closed_lifecycle_phase(
     assert _CHILD_OUTPUT_SENTINEL not in output.getvalue()
     assert len(status_paths) == 1
     assert not status_paths[0].exists()
-    assert not status_paths[0].with_name(
-        f"{status_paths[0].name}.diagnostic.json"
-    ).exists()
+    assert not status_paths[0].with_name(f"{status_paths[0].name}.diagnostic.json").exists()
 
 
 @pytest.mark.parametrize(
