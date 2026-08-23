@@ -75,6 +75,14 @@ export const RETRY_BACKOFF_JITTER_FRACTION = 0.25;
  * The exponential retry schedule of spec 8: `initial * 2^(attempt-1)`
  * capped at five minutes, plus a bounded jitter fraction of the delay,
  * capped again. The injected randomness keeps tests deterministic.
+ *
+ * The result is rounded to a whole millisecond BEFORE the outer cap: with
+ * the real `Math.random` seam the jitter product is a float, and a
+ * fractional backoff would reach `markEventWaitingRetry` as a
+ * non-integer `nextEligibleRetryEpochMs` — rejected by its argument
+ * validation as `journal_mutation_failed`, so no retry park would ever
+ * land. `Math.min` applied after `Math.round` keeps the rounded result
+ * from ever exceeding the five-minute ceiling.
  */
 export function computeRetryBackoffMs(
   attemptCount: number,
@@ -89,7 +97,7 @@ export function computeRetryBackoffMs(
     RETRY_BACKOFF_INITIAL_MS * 2 ** exponent,
   );
   const jitterMs = exponentialDelayMs * RETRY_BACKOFF_JITTER_FRACTION * randomJitter();
-  return Math.min(RETRY_BACKOFF_MAXIMUM_MS, exponentialDelayMs + jitterMs);
+  return Math.min(RETRY_BACKOFF_MAXIMUM_MS, Math.round(exponentialDelayMs + jitterMs));
 }
 
 // --- ports and summaries -----------------------------------------------------------------------------

@@ -223,6 +223,7 @@ function createHarness(options?: {
   readonly passDeadlineMs?: number;
   readonly useWallClock?: boolean;
   readonly diagnosticTrailAppendBehavior?: () => Promise<void>;
+  readonly randomJitter?: () => number;
 }): DriverHarness {
   const database = SqliteDatabase.createEmpty(engineModule, {
     schemaVersion: JOURNAL_SCHEMA_VERSION,
@@ -275,7 +276,7 @@ function createHarness(options?: {
     },
     nowEpochMs: driverNowEpochMs,
     createCorrelationId: () => `corr-${(correlationCounter += 1)}`,
-    randomJitter: () => 0,
+    randomJitter: options?.randomJitter ?? (() => 0),
     requestTimeoutMs: options?.requestTimeoutMs,
     passDeadlineMs: options?.passDeadlineMs,
     diagnosticTrail,
@@ -802,6 +803,38 @@ describe("queue driver retry backoff (spec 8, 12)", () => {
     expect(RETRY_BACKOFF_INITIAL_MS).toBe(1_000);
   });
 
+  it("returns whole milliseconds for untidy jitter so the retry epoch stays an integer", () => {
+    // The real `Math.random` seam yields untidy fractions whose jitter
+    // product is a float (1000*0.25*0.123456789 = 30.864...), and a
+    // fractional backoff reaches `markEventWaitingRetry` as a
+    // non-integer nextEligibleRetryEpochMs — rejected by argument
+    // validation as journal_mutation_failed. Every offline fixture used
+    // tidy jitter values (0/0.5/1) whose products happened to be
+    // integers, which is why this never failed before.
+    const untidyFirst = computeRetryBackoffMs(1, () => 0.123456789);
+    const untidySecond = computeRetryBackoffMs(2, () => 0.777777);
+    const untidyThird = computeRetryBackoffMs(3, () => 0.3333333);
+    expect(Number.isInteger(untidyFirst)).toBe(true);
+    expect(Number.isInteger(untidySecond)).toBe(true);
+    expect(Number.isInteger(untidyThird)).toBe(true);
+    expect(untidyFirst).toBe(1_031);
+    expect(untidySecond).toBe(2_389);
+    expect(untidyThird).toBe(4_333);
+  });
+
+  it("never lets rounding push the backoff past the five-minute cap", () => {
+    // Attempt 9 sits at 256000ms; jitter 0.6874999 lands the unrounded
+    // sum at 299999.9936 — rounding must give exactly the cap, never
+    // above it, whatever the round/min order.
+    const nearCap = computeRetryBackoffMs(9, () => 0.6874999);
+    expect(nearCap).toBe(RETRY_BACKOFF_MAXIMUM_MS);
+    expect(nearCap).toBeLessThanOrEqual(RETRY_BACKOFF_MAXIMUM_MS);
+    // Above the cap the pre-round minimum already clamps; rounding an
+    // exact integer cap is the cap.
+    expect(computeRetryBackoffMs(9, () => 0.9999999)).toBe(RETRY_BACKOFF_MAXIMUM_MS);
+    expect(computeRetryBackoffMs(12, () => 0.123456789)).toBe(RETRY_BACKOFF_MAXIMUM_MS);
+  });
+
   it("grows the schedule across consecutive failing passes", async () => {
     const harness = createHarness();
     const event = await captureBytes(harness, "notes/growing.md", new TextEncoder().encode("growing"));
@@ -1063,6 +1096,33 @@ describe("queue driver credential handling (spec 8, 12)", () => {
     // 403 login verdict never attempts a refresh — the 401 discipline of
     // the neighboring tests is untouched.
     expect(harness.refreshCalls.count).toBe(0);
+  });
+
+  it("parks an API 403 login_required verdict with an integer retry epoch under untidy jitter", async () => {
+    // The exact production shape that never worked: the real Math.random
+    // seam yields untidy fractions, the computed backoff is fractional,
+    // and markEventWaitingRetry's argument validation rejects the
+    // non-integer nextEligibleRetryEpochMs with journal_mutation_failed
+    // — so no retry park ever landed and the event stayed in preflight.
+    const harness = createHarness({ randomJitter: () => 0.123456789 });
+    const event = await captureBytes(harness, "notes/api-403-untidy.md", new TextEncoder().encode("untidy denied"));
+    harness.installTransport({
+      preflight: async () => ({
+        status: 403,
+        bodyText: errorBody("authorization_scope_denied"),
+      }),
+    });
+
+    const summary = await runPass(harness.driver);
+
+    expect(summary.outcome).toBe("login_required");
+    const stored = harness.repository.readEvent(event.eventId);
+    expect(stored?.state).toBe("waiting_retry");
+    expect(stored?.safeError).toBe("login_required");
+    expect(stored?.nextEligibleRetryEpochMs).not.toBeNull();
+    expect(Number.isInteger(stored?.nextEligibleRetryEpochMs)).toBe(true);
+    // round(1000 + 1000 * 0.25 * 0.123456789) = round(1030.864...) = 1031.
+    expect(stored?.nextEligibleRetryEpochMs).toBe(1_784_000_000_000 + 1_031);
   });
 });
 
