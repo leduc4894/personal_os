@@ -19,7 +19,10 @@ create's bound initial locator evidence (the transient ``normalized_locator``
 and the retained lowercase ``locator_fingerprint`` digest) lands with the
 reservation so the receive binding can carry it under the locked publication
 transaction; the raw locator is cleared on terminal transition while the
-digest remains for exact replay. An expired pending row is invalid for
+digest remains for exact replay. An update reservation persists only the
+digest of the preflight's declared locator — the raw column stays NULL,
+because an update's locator is preflight policy evidence, never bound
+publication evidence the receive contract could carry. An expired pending row is invalid for
 continuation and may be re-reserved with a fresh token and extended deadline.
 Once a receive claims the row, that ``receiving`` claim retains its
 token/revision fence across the reservation deadline: exact-token retries may
@@ -747,8 +750,13 @@ def _bound_operation_from_row(
         declared_media_type = CanonicalMediaType.parse(row.declared_media_type)
     except ValueError:
         raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID) from None
+    # The raw locator column is the create's bound initial-locator evidence;
+    # an update row never surfaces one (its locator was preflight policy
+    # evidence only), so a stale raw value on an update row — the shape the
+    # reservation wrote before that rule — hydrates as genuinely absent while
+    # the retained digest still fences replay identity.
     normalized_locator: NormalizedLocator | None = None
-    if row.normalized_locator is not None:
+    if row.normalized_locator is not None and operation is SmallFileOperation.CREATE:
         try:
             normalized_locator = NormalizedLocator(row.normalized_locator)
         except ValueError:
@@ -1121,15 +1129,20 @@ class PostgresqlSmallFileUploadOperationStore:
                     else None
                 )
                 expires_at = compute_upload_operation_expiry(self._clock())
-                # A create binds its preflight locator to the durable row so
-                # the receive binding and the publication guard can carry it
-                # under the locked transaction. An update preflight never
-                # carries a locator; the preflight.normalized_locator is the
-                # authoritative source.
-                initial_locator = preflight.normalized_locator
+                # The raw ``normalized_locator`` column is the create's bound
+                # initial-locator evidence the receive binding carries into the
+                # publication transaction; an update's locator is preflight
+                # policy evidence only, so the reservation persists just the
+                # one-way digest — the declared locator's replay identity —
+                # and binds the raw column to NULL for updates.
+                initial_locator: NormalizedLocator | None = None
+                if preflight.operation is SmallFileOperation.CREATE:
+                    initial_locator = preflight.normalized_locator
                 initial_locator_fingerprint: str | None = None
-                if initial_locator is not None:
-                    initial_locator_fingerprint = compute_locator_fingerprint(initial_locator)
+                if preflight.normalized_locator is not None:
+                    initial_locator_fingerprint = compute_locator_fingerprint(
+                        preflight.normalized_locator
+                    )
                 await connection.execute(
                     operation_insert_statement(
                         operation_id=self._identity_generator(),

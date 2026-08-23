@@ -13,7 +13,7 @@ transaction behavior is integration territory (disposable stack).
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -688,3 +688,209 @@ def test_bound_operation_comparison_rejects_digest_mismatch() -> None:
     )
 
     assert not _bound_matches_row(row, bound)
+
+
+# --- durable update receive over the real binding path ---------------------------
+
+
+class _ScriptedResult:
+    """Minimal async result double for one scripted statement execution."""
+
+    def __init__(self, *, mapping: dict[str, Any] | None = None, rowcount: int = 0) -> None:
+        self._mapping = mapping
+        self.rowcount = rowcount
+
+    def mappings(self) -> _ScriptedResult:
+        return self
+
+    def one_or_none(self) -> dict[str, Any] | None:
+        return self._mapping
+
+
+class _ReceiveScriptedConnection:
+    """Connection double serving one durable operation-row view by token."""
+
+    def __init__(self, row: dict[str, Any]) -> None:
+        self._row = row
+        self.claim_executed = False
+
+    def begin(self) -> _ScriptedBegin:
+        return _ScriptedBegin()
+
+    async def execute(self, statement: Any) -> _ScriptedResult:
+        visit_name = statement.__visit_name__
+        if visit_name == "select":
+            compiled = str(statement.compile())
+            if "operation_token_hash" in compiled:
+                return _ScriptedResult(mapping=self._row)
+            raise AssertionError(f"unexpected select: {compiled}")
+        if visit_name == "update":
+            self.claim_executed = True
+            return _ScriptedResult(rowcount=1)
+        if visit_name in {"text", "textclause"}:
+            return _ScriptedResult()
+        raise AssertionError(f"unexpected statement kind: {visit_name}")
+
+
+class _ScriptedBegin:
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        return None
+
+
+class _ReceiveScriptedEngine:
+    def __init__(self, connection: _ReceiveScriptedConnection) -> None:
+        self._connection = connection
+
+    def connect(self) -> _ReceiveScriptedContext:
+        return _ReceiveScriptedContext(self._connection)
+
+
+class _ReceiveScriptedContext:
+    def __init__(self, connection: _ReceiveScriptedConnection) -> None:
+        self._connection = connection
+
+    async def __aenter__(self) -> _ReceiveScriptedConnection:
+        return self._connection
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        return None
+
+
+def _durable_update_row_with_persisted_locator(
+    preflight: SmallFilePreflight, device_context: SmallFileDeviceContext
+) -> dict[str, Any]:
+    """One claimed update row carrying the update preflight's locator evidence.
+
+    This is the exact durable geometry the live first-ever update produced:
+    the reservation persisted both the raw ``normalized_locator`` the update
+    preflight declared and its retained digest, because the update preflight
+    evaluates locator policy evidence server-side.
+    """
+
+    return {
+        "operation_id": uuid4(),
+        "operation_token_hash": "c" * 64,
+        "workspace_id": device_context.workspace_id,
+        "device_id": device_context.device_id,
+        "event_id": preflight.event_id,
+        "idempotency_key": preflight.idempotency_key.value,
+        "operation_kind": SmallFileOperation.UPDATE.value,
+        "declared_sha256": preflight.sha256.hexadecimal,
+        "declared_size_bytes": preflight.size_bytes,
+        "declared_media_type": preflight.media_type.value,
+        "policy_revision_number": _POLICY_REVISION_NUMBER,
+        "reserved_source_id": None,
+        "update_source_id": preflight.source_id,
+        "update_base_version_id": preflight.base_version_id,
+        "normalized_locator": preflight.normalized_locator.value
+        if preflight.normalized_locator is not None
+        else None,
+        "locator_fingerprint": compute_locator_fingerprint(preflight.normalized_locator)
+        if preflight.normalized_locator is not None
+        else None,
+        "state": "pending",
+        "safe_error_code": None,
+        "result_kind": None,
+        "result_source_id": None,
+        "result_source_version_id": None,
+        "result_content_version": None,
+        "result_committed_at": None,
+        "expires_at": datetime.now(UTC) + timedelta(seconds=UPLOAD_OPERATION_EXPIRY_SECONDS),
+    }
+
+
+@pytest.mark.asyncio
+async def test_receive_binding_ignores_persisted_raw_locator_on_update_rows() -> None:
+    """A claimed update row binds without its raw locator (the live 500).
+
+    The durable reservation persisted the update preflight's raw locator, so
+    hydrating it onto the receive binding violated the closed
+    ``BoundSmallFileOperation`` contract (an update must never carry a
+    normalized locator). The ``ValueError`` escaped as the registry's closed
+    ``internal_error`` and every content-upload retry answered HTTP 500. The
+    binding must surface only the retained digest for an update row.
+    """
+
+    device_context = _device_context()
+    preflight = _preflight(
+        operation=SmallFileOperation.UPDATE, source_id=uuid4(), base_version_id=uuid4()
+    )
+    assert preflight.normalized_locator is not None
+    connection = _ReceiveScriptedConnection(
+        _durable_update_row_with_persisted_locator(preflight, device_context)
+    )
+    store = PostgresqlSmallFileUploadOperationStore(
+        cast(Any, _ReceiveScriptedEngine(connection)), clock=lambda: datetime.now(UTC)
+    )
+
+    bound = await store.resolve_bound_operation(
+        UploadOperationToken("B" * 43), device_context, cast(Any, object())
+    )
+
+    assert bound.operation is SmallFileOperation.UPDATE
+    assert bound.normalized_locator is None
+    assert bound.locator_fingerprint == compute_locator_fingerprint(preflight.normalized_locator)
+    assert bound.update_source_id == preflight.source_id
+    assert bound.update_base_version_id == preflight.base_version_id
+    assert connection.claim_executed is True
+
+
+class _ReserveScriptedConnection:
+    """Connection double serving an empty identity view and the insert."""
+
+    def __init__(self) -> None:
+        self.insert_statement: Any = None
+
+    def begin(self) -> _ScriptedBegin:
+        return _ScriptedBegin()
+
+    async def execute(self, statement: Any) -> _ScriptedResult:
+        visit_name = statement.__visit_name__
+        if visit_name == "select":
+            return _ScriptedResult(mapping=None)
+        if visit_name == "insert":
+            self.insert_statement = statement
+            return _ScriptedResult(rowcount=1)
+        if visit_name in {"text", "textclause"}:
+            return _ScriptedResult()
+        raise AssertionError(f"unexpected statement kind: {visit_name}")
+
+
+@pytest.mark.asyncio
+async def test_reservation_persists_only_the_locator_digest_for_update_preflights() -> None:
+    """An update reservation never persists the raw locator column.
+
+    The raw locator column is the create's bound initial-locator evidence the
+    receive binding carries into the publication transaction; an update's
+    locator is preflight policy evidence only, so the reservation retains the
+    one-way digest (the replay identity of the declared locator) and binds
+    ``normalized_locator`` to NULL.
+    """
+
+    device_context = _device_context()
+    preflight = _preflight(
+        operation=SmallFileOperation.UPDATE, source_id=uuid4(), base_version_id=uuid4()
+    )
+    assert preflight.normalized_locator is not None
+    connection = _ReserveScriptedConnection()
+    store = PostgresqlSmallFileUploadOperationStore(
+        cast(Any, _ReceiveScriptedEngine(connection)), clock=lambda: datetime.now(UTC)
+    )
+
+    operation = await store.reserve_operation(
+        preflight,
+        device_context,
+        _policy_binding(device_context, _POLICY_REVISION_NUMBER),
+        cast(Any, object()),
+    )
+
+    assert operation.operation_token is not None
+    assert connection.insert_statement is not None
+    params = connection.insert_statement.compile(dialect=postgresql.dialect()).params
+    assert params["normalized_locator"] is None
+    assert params["locator_fingerprint"] == compute_locator_fingerprint(
+        preflight.normalized_locator
+    )

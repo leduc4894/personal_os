@@ -402,3 +402,165 @@ def test_policy_published_between_preflight_and_publication_reevaluates_bound_lo
     # The snapshot source served one extra load since the publication guard
     # reevaluates the current policy under the locked prefix.
     assert changed_revision == harness.snapshot_source.revision_number
+
+
+# --- the first-ever update receive over the real policy seam ----------------------
+
+
+_EDITED_CONTENT: Final[bytes] = b"# guarded small-file content, edited\n"
+_EDITED_DIGEST: Final[str] = sha256(_EDITED_CONTENT).hexdigest()
+
+
+def _aware_base_committed_at() -> Any:
+    from datetime import UTC, datetime
+
+    return datetime(2026, 8, 23, 12, 0, 0, tzinfo=UTC)
+
+
+def _update_body(
+    *, source_id: UUID, base_version_id: UUID, digest: str, size_bytes: int
+) -> dict[str, Any]:
+    """One update preflight body shaped exactly like the plugin client's."""
+
+    return {
+        "event_id": str(uuid4()),
+        "idempotency_key": str(uuid4()),
+        "operation": "update",
+        "local_file_id": str(uuid4()),
+        "source_id": str(source_id),
+        "base_version_id": str(base_version_id),
+        "normalized_locator": _OPEN_LOCATOR,
+        "sha256": digest,
+        "size_bytes": size_bytes,
+        "media_type": _MEDIA_TYPE,
+        "policy_revision": 2,
+    }
+
+
+def _seeded_current_reference(
+    body: dict[str, Any], *, source_version_id: UUID, digest: str, content_version: int
+) -> Any:
+    from personal_os.object_storage import (
+        CanonicalMediaType,
+        ContentDigest,
+        ExpectedObject,
+    )
+    from personal_os.sources.commands import SourceType
+    from personal_os.sources.reading import CanonicalSourceReference
+
+    return CanonicalSourceReference(
+        workspace_id=uuid4(),
+        source_id=UUID(str(body["source_id"])),
+        source_version_id=source_version_id,
+        content_version=content_version,
+        source_type=SourceType.MARKDOWN,
+        expected_object=ExpectedObject(
+            content_digest=ContentDigest.parse(digest),
+            size_bytes=int(body["size_bytes"]),
+            media_type=CanonicalMediaType.parse(str(body["media_type"])),
+        ),
+        committed_at=_aware_base_committed_at(),
+    )
+
+
+def test_first_ever_update_publishes_over_the_real_policy_seam(
+    policy_harness: SmallFileWireHarness,
+) -> None:
+    """The create-then-edit journey commits the update, never a 500.
+
+    The update preflight carries the note's locator (locator policy evidence
+    the server evaluates); the reservation must bind only the locator digest,
+    so the receive binding hydrates without the raw locator and the real
+    publication gateway publishes version 2 through the real enforcement
+    service. This is the exact live journey that previously answered every
+    content upload with the closed ``internal_error`` 500.
+    """
+
+    harness = policy_harness
+    create_data = dict(
+        harness.upload(_single_part_token(harness, _create_body(_OPEN_LOCATOR)), _CONTENT).json()[
+            "data"
+        ]
+    )
+    assert create_data["result_kind"] == "committed"
+    source_id = UUID(str(create_data["source_id"]))
+    base_version_id = UUID(str(create_data["source_version_id"]))
+
+    body = _update_body(
+        source_id=source_id,
+        base_version_id=base_version_id,
+        digest=_EDITED_DIGEST,
+        size_bytes=len(_EDITED_CONTENT),
+    )
+    harness.sync_state.current_reference = _seeded_current_reference(
+        body,
+        source_version_id=base_version_id,
+        digest=_CONTENT_DIGEST,
+        content_version=1,
+    )
+    token = _single_part_token(harness, body)
+
+    response = harness.upload(token, _EDITED_CONTENT)
+    assert response.status_code == 200, response.text
+    updated = dict(response.json()["data"])
+    assert updated["result_kind"] == "committed"
+    assert updated["source_id"] == str(source_id)
+    assert updated["content_version"] == 2
+    assert harness.sync_state.publication_commits == 2
+
+    exact_replay = harness.upload(token, _EDITED_CONTENT)
+    assert exact_replay.status_code == 200, exact_replay.text
+    assert dict(exact_replay.json()["data"]) == updated
+    assert harness.sync_state.publication_commits == 2
+
+
+def test_update_publication_under_changed_extension_revision_fails_closed(
+    policy_harness: SmallFileWireHarness,
+) -> None:
+    """A locator-only revision keeps the update publication fail-closed.
+
+    The pinned publication-boundary semantics: the update publication subject
+    carries no locator, so the extension rule cannot reach a definite verdict
+    there and the guard answers the closed indeterminate denial — 403, never
+    a 500, nothing published. The next preflight — whose subject does carry
+    the note's locator — settles on the definite ``excluded`` outcome.
+    """
+
+    harness = policy_harness
+    assert harness.snapshot_source is not None
+    create_data = dict(
+        harness.upload(_single_part_token(harness, _create_body(_OPEN_LOCATOR)), _CONTENT).json()[
+            "data"
+        ]
+    )
+    assert create_data["result_kind"] == "committed"
+    source_id = UUID(str(create_data["source_id"]))
+    base_version_id = UUID(str(create_data["source_version_id"]))
+
+    body = _update_body(
+        source_id=source_id,
+        base_version_id=base_version_id,
+        digest=_EDITED_DIGEST,
+        size_bytes=len(_EDITED_CONTENT),
+    )
+    harness.sync_state.current_reference = _seeded_current_reference(
+        body,
+        source_version_id=base_version_id,
+        digest=_CONTENT_DIGEST,
+        content_version=1,
+    )
+    token = _single_part_token(harness, body)
+    accepted_revision = harness.sync_state.rows[-1].policy_revision_number
+    harness.snapshot_source.publish_rules((excluding_extension_rule(".md"),))
+    assert harness.snapshot_source.revision_number > accepted_revision
+
+    response = harness.upload(token, _EDITED_CONTENT)
+    assert response.status_code == 403, response.text
+    assert response.json()["error"]["code"] == "exclusion_policy_indeterminate"
+    assert harness.sync_state.publication_commits == 1
+    assert harness.sync_state.published_source_ids == {source_id}
+
+    replay = harness.preflight(body)
+    assert replay.status_code == 200, replay.text
+    assert dict(replay.json()["data"]) == {"outcome": "excluded"}
+    assert harness.sync_state.publication_commits == 1
