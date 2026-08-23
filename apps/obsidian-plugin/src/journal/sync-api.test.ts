@@ -285,6 +285,10 @@ describe("journal sync api failure mapping (spec 12)", () => {
     [401, "device_credential_invalid", "access_expired"],
     [401, null, "access_expired"],
     [403, "authorization_scope_denied", "login_required"],
+    // Fix round 5 (finding A): a 403 whose body does NOT parse as the API
+    // envelope with a closed error code (an edge/middleware block page) is
+    // a wire failure, not a login verdict — the retryable server_error.
+    [403, null, "server_error"],
     [429, "authentication_rate_limited", "network_rate_limited"],
     [429, null, "network_rate_limited"],
     [500, "internal_error", "server_error"],
@@ -309,6 +313,35 @@ describe("journal sync api failure mapping (spec 12)", () => {
       });
     },
   );
+
+  it("maps an edge 403 with an HTML challenge body onto the retryable server_error", async () => {
+    // Fix round 5 (finding A): the live plugin syncs through a Cloudflare
+    // tunnel whose edge intermittently answers 403 with a NON-API HTML
+    // challenge/block page. That is a transient wire failure — mapping it
+    // onto login_required parked the oldest event under a false login
+    // verdict and killed every pass (the whole queue starved behind it).
+    const htmlBody = [
+      "<!DOCTYPE html><html><head><title>Just a moment...</title></head>",
+      "<body>You are being blocked by the edge firewall.</body></html>",
+    ].join("");
+    const transport = createRecordingTransport(async () => ({
+      status: 403,
+      bodyText: htmlBody,
+    }));
+    await expect(createApi(transport).preflightJournalEvent(PREFLIGHT_INPUT)).rejects.toMatchObject({
+      kind: "server_error",
+    });
+  });
+
+  it("keeps a genuine API 403 envelope (parsed, closed code) as login_required", async () => {
+    const transport = createRecordingTransport(async () => ({
+      status: 403,
+      bodyText: errorBody("authorization_scope_denied"),
+    }));
+    await expect(createApi(transport).preflightJournalEvent(PREFLIGHT_INPUT)).rejects.toMatchObject({
+      kind: "login_required",
+    });
+  });
 
   it("maps a thrown transport onto network_offline", async () => {
     const transport: SyncHttpTransport = async () => {

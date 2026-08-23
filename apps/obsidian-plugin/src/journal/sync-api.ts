@@ -182,7 +182,16 @@ function mapWireFailure(status: number, code: string | null): SyncApiError {
     return syncApiError("access_expired");
   }
   if (status === 403) {
-    return syncApiError("login_required");
+    // Fix round 5 (finding A): a genuine API 403 carries the canonical
+    // envelope with a closed error code (parseEnvelope passes it through
+    // here). A 403 whose body does NOT parse as that envelope — an
+    // edge/middleware block page (an HTML challenge, or JSON without the
+    // error member) in front of the API — is a transient wire failure,
+    // not a login verdict: map it onto the retryable `server_error` so
+    // the queue backs off and survives instead of parking the oldest
+    // event under a false login_required and starving every pass behind
+    // it.
+    return code === null ? syncApiError("server_error") : syncApiError("login_required");
   }
   if (status === 429) {
     return syncApiError("network_rate_limited");
