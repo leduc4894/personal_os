@@ -1079,6 +1079,8 @@ interface LifecycleDriverHarness {
   readonly vaultBytes: Map<string, Uint8Array>;
   readonly lifecycleCommits: FrozenLifecycleEventForTest[];
   readonly preflightBodies: Record<string, unknown>[];
+  /** The refresh-seam call counter (the shared per-pass budget). */
+  readonly refreshCalls: { count: number };
   installLifecycleHandler: (handler: LifecycleHandler) => void;
   installTransport: (
     handlers: { preflight: PreflightHandler; content?: ContentHandler },
@@ -1127,6 +1129,7 @@ function createHarnessWithLifecycle(): LifecycleDriverHarness {
   const vaultBytes = new Map<string, Uint8Array>();
   const preflightBodies: Record<string, unknown>[] = [];
   const lifecycleCommits: FrozenLifecycleEventForTest[] = [];
+  const refreshCalls = { count: 0 };
   let lifecycleHandler: LifecycleHandler | null = null;
   let activeTransport: ((request: SyncHttpRequest) => Promise<RawResponse>) | null = null;
   const syncApi = createJournalSyncApi({
@@ -1168,7 +1171,10 @@ function createHarnessWithLifecycle(): LifecycleDriverHarness {
       readRegularFileBytes: async (normalizedPath) => vaultBytes.get(normalizedPath) ?? null,
     },
     lifecycleDriver,
-    refreshAccessToken: () => Promise.resolve(),
+    refreshAccessToken: () => {
+      refreshCalls.count += 1;
+      return Promise.resolve();
+    },
     nowEpochMs: () => driverClockMs,
     createCorrelationId: () => `corr-${idCounter}`,
     randomJitter: () => 0,
@@ -1180,6 +1186,7 @@ function createHarnessWithLifecycle(): LifecycleDriverHarness {
     vaultBytes,
     lifecycleCommits,
     preflightBodies,
+    refreshCalls,
     installLifecycleHandler: (handler) => {
       lifecycleHandler = handler;
     },
@@ -1383,13 +1390,13 @@ describe("queue driver + lifecycle lane separation (task 9 fix round 1 I3, M3)",
     expect(lifecycleDispatches).toBe(1);
   });
 
-  it("ends the pass login_required when the lifecycle lane cannot authenticate, parking the rename retryable", async () => {
+  it("ends the pass login_required after the SECOND lifecycle login verdict, parking the renames retryable", async () => {
     const harness = createHarnessWithLifecycle();
     await harness.seedTrackedFile(
       "notes/lifecycle-login.md",
       new TextEncoder().encode("seed bytes"),
     );
-    const rename = await harness.recordLifecycleEvent(
+    const firstRename = await harness.recordLifecycleEvent(
       createLifecycleEventOperands({
         operation: "rename",
         sourceId: SOURCE_ID,
@@ -1401,12 +1408,27 @@ describe("queue driver + lifecycle lane separation (task 9 fix round 1 I3, M3)",
       }),
       { newPath: "notes/lifecycle-login-renamed.md" },
     );
+    // A SECOND eligible lifecycle row: the post-refresh retry dispatches
+    // it, and the server rejects the rotated credential again — only the
+    // SECOND login verdict ends the pass (fix round 4's discipline; a
+    // single refreshable verdict no longer does).
+    const secondRename = await harness.recordLifecycleEvent(
+      createLifecycleEventOperands({
+        operation: "rename",
+        sourceId: SOURCE_ID,
+        expectedVersionId: SOURCE_VERSION_ID,
+        expectedLocator: "notes/lifecycle-login-renamed.md",
+        targetLocator: "notes/lifecycle-login-twice.md",
+        policyRevision: 2,
+        predecessorEventId: null,
+      }),
+      { newPath: "notes/lifecycle-login-twice.md" },
+    );
     harness.installLifecycleHandler(async () => {
       throw new LifecycleApiError("login_required");
     });
     // A queued content event must stay UNTOUCHED: the pass ends at the
-    // lifecycle login verdict instead of dispatching content without a
-    // credential.
+    // second lifecycle login verdict instead of dispatching content.
     const contentEvent = await harness.recordContent(
       "notes/lifecycle-login-content.md",
       new TextEncoder().encode("content bytes"),
@@ -1422,13 +1444,151 @@ describe("queue driver + lifecycle lane separation (task 9 fix round 1 I3, M3)",
 
     const summary = await runPass(harness.driver);
     expect(summary.outcome).toBe("login_required");
-    // The rename is parked retryable under the login_required safe label —
-    // never terminal blocked_conflict with zero server contact.
-    const parked = harness.repository.readEvent(rename.eventId);
-    expect(parked?.state).toBe("waiting_retry");
-    expect(parked?.safeError).toBe("login_required");
+    // The refresh budget was consumed once (the retry that met the second
+    // verdict), never twice.
+    expect(harness.refreshCalls.count).toBe(1);
+    // Both renames are parked retryable under the login_required safe
+    // label — never terminal blocked_conflict with zero server contact.
+    for (const renameEvent of [firstRename, secondRename]) {
+      const parked = harness.repository.readEvent(renameEvent.eventId);
+      expect(parked?.state).toBe("waiting_retry");
+      expect(parked?.safeError).toBe("login_required");
+    }
     // The content lane never dispatched: the queued edit survives intact.
     expect(harness.preflightBodies).toHaveLength(0);
     expect(harness.repository.readEvent(contentEvent.eventId)?.state).toBe("queued");
+  });
+
+  it("refreshes once and retries the lifecycle dispatch after a login_required verdict (fix round 4)", async () => {
+    const harness = createHarnessWithLifecycle();
+    const seeded = await harness.seedTrackedFile(
+      "notes/lifecycle-refresh.md",
+      new TextEncoder().encode("seed bytes"),
+    );
+    void seeded;
+    const firstRename = await harness.recordLifecycleEvent(
+      createLifecycleEventOperands({
+        operation: "rename",
+        sourceId: SOURCE_ID,
+        expectedVersionId: SOURCE_VERSION_ID,
+        expectedLocator: "notes/lifecycle-refresh.md",
+        targetLocator: "notes/lifecycle-refresh-renamed.md",
+        policyRevision: 2,
+        predecessorEventId: null,
+      }),
+      { newPath: "notes/lifecycle-refresh-renamed.md" },
+    );
+    // A SECOND eligible lifecycle row: the post-refresh retry dispatches
+    // it (the first rename parks on the login verdict and waits out its
+    // own backoff).
+    const secondRename = await harness.recordLifecycleEvent(
+      createLifecycleEventOperands({
+        operation: "rename",
+        sourceId: SOURCE_ID,
+        expectedVersionId: SOURCE_VERSION_ID,
+        expectedLocator: "notes/lifecycle-refresh-renamed.md",
+        targetLocator: "notes/lifecycle-refresh-twice.md",
+        policyRevision: 2,
+        predecessorEventId: null,
+      }),
+      { newPath: "notes/lifecycle-refresh-twice.md" },
+    );
+    // The lifecycle endpoint rejects the credential until the pass's
+    // refresh seam has rotated it.
+    harness.installLifecycleHandler(async () => {
+      if (harness.refreshCalls.count === 0) {
+        throw new LifecycleApiError("login_required");
+      }
+      return {
+        committedAt: "2026-08-20T00:00:00Z",
+        eventId: "00000000-0000-4000-8000-000000000000",
+        eventSequence: 1,
+        resultingLocator: null,
+        sourceId: SOURCE_ID,
+        sourceVersionId: LIFECYCLE_VERSION_ID,
+        state: "active",
+        tombstoneId: null,
+      };
+    });
+    const contentEvent = await harness.recordContent(
+      "notes/lifecycle-refresh-content.md",
+      new TextEncoder().encode("content bytes"),
+    );
+    harness.installTransport({
+      preflight: async () => ({ status: 200, bodyText: SINGLE_PART_BODY }),
+      content: async () => ({ status: 200, bodyText: COMMITTED_RECEIPT }),
+    });
+
+    const summary = await runPass(harness.driver);
+    // The retry committed the second rename and the drain continued; the
+    // content lane processed its event under the rotated credential.
+    expect(summary.outcome).toBe("completed");
+    expect(summary.processedEventCount).toBe(1);
+    // Exactly ONE refresh through the shared per-pass budget.
+    expect(harness.refreshCalls.count).toBe(1);
+    // The first rename is parked retryable under login_required; the
+    // second rename committed on the retried dispatch.
+    const parkedFirst = harness.repository.readEvent(firstRename.eventId);
+    expect(parkedFirst?.state).toBe("waiting_retry");
+    expect(parkedFirst?.safeError).toBe("login_required");
+    expect(harness.repository.readEvent(secondRename.eventId)?.state).toBe("committed");
+    expect(harness.repository.readEvent(contentEvent.eventId)?.state).toBe("committed");
+  });
+
+  it("shares the refresh budget with the content lane: no second refresh after the lifecycle retry", async () => {
+    const harness = createHarnessWithLifecycle();
+    const seeded = await harness.seedTrackedFile(
+      "notes/lifecycle-budget.md",
+      new TextEncoder().encode("seed bytes"),
+    );
+    void seeded;
+    const rename = await harness.recordLifecycleEvent(
+      createLifecycleEventOperands({
+        operation: "rename",
+        sourceId: SOURCE_ID,
+        expectedVersionId: SOURCE_VERSION_ID,
+        expectedLocator: "notes/lifecycle-budget.md",
+        targetLocator: "notes/lifecycle-budget-renamed.md",
+        policyRevision: 2,
+        predecessorEventId: null,
+      }),
+      { newPath: "notes/lifecycle-budget-renamed.md" },
+    );
+    harness.installLifecycleHandler(async () => {
+      if (harness.refreshCalls.count === 0) {
+        throw new LifecycleApiError("login_required");
+      }
+      return {
+        committedAt: "2026-08-20T00:00:00Z",
+        eventId: "00000000-0000-4000-8000-000000000000",
+        eventSequence: 1,
+        resultingLocator: null,
+        sourceId: SOURCE_ID,
+        sourceVersionId: LIFECYCLE_VERSION_ID,
+        state: "active",
+        tombstoneId: null,
+      };
+    });
+    const contentEvent = await harness.recordContent(
+      "notes/lifecycle-budget-content.md",
+      new TextEncoder().encode("content bytes"),
+    );
+    // The content endpoint still answers 401 (mapped to access_expired):
+    // the budget the lifecycle retry consumed means the content lane
+    // CANNOT refresh again this pass — the second 401 ends the pass
+    // login_required.
+    harness.installTransport({
+      preflight: async () => ({ status: 401, bodyText: errorBody("device_credential_invalid") }),
+    });
+
+    const summary = await runPass(harness.driver);
+    expect(summary.outcome).toBe("login_required");
+    expect(harness.refreshCalls.count).toBe(1);
+    const parkedRename = harness.repository.readEvent(rename.eventId);
+    expect(parkedRename?.state).toBe("waiting_retry");
+    expect(parkedRename?.safeError).toBe("login_required");
+    const parkedContent = harness.repository.readEvent(contentEvent.eventId);
+    expect(parkedContent?.state).toBe("waiting_retry");
+    expect(parkedContent?.safeError).toBe("login_required");
   });
 });

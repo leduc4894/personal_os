@@ -24,7 +24,12 @@
  * Credentials (spec 8): one pass refreshes the access credential at most
  * once; a second 401, a revoked family or a failed refresh ends the pass
  * with `login_required` while the queue survives untouched for the next
- * login. `excluded_policy`, `blocked_size`, `blocked_conflict`,
+ * login. The SAME per-pass budget covers both lanes (fix round 4): the
+ * lifecycle drain's `login_required` verdict consumes the budget, rotates
+ * the credential and retries its dispatch once before ending the pass —
+ * the lane runs first, so without this the content lane's requests (and
+ * with them the only refresh seam) would never run while lifecycle work
+ * stays pending. `excluded_policy`, `blocked_size`, `blocked_conflict`,
  * `deferred_lifecycle` and `integrity_failed` never retry automatically.
  *
  * Privacy (spec 9): the driver emits closed outcome labels and opaque
@@ -287,12 +292,63 @@ export class JournalQueueDriver {
             }
             if (lifecycleOutcome === "login_required") {
               // The lifecycle lane parked its event retryable under the
-              // `login_required` safe label: every later lane would face
-              // the same missing credential, so the pass ends
-              // `login_required` now (spec 8, 12) and the whole queue
-              // survives untouched for the next credential.
-              lifecycleLoginRequired = true;
-              break;
+              // `login_required` safe label. This lane runs FIRST, so
+              // ending the pass here would also starve the content lane's
+              // requests — and with them the pass's only credential
+              // refresh (fix round 4: a stale server-rejected 401 or a
+              // missing access credential funnels into this verdict, and
+              // with pending lifecycle work every pass died here while
+              // `refreshAccessToken` never fired — an infinite stall that
+              // recovered only through an external rotation). Give the
+              // shared one-per-pass refresh budget (spec 8) its chance:
+              // consume it, rotate the credential once, and retry the
+              // lifecycle dispatch ONCE. The budget is shared with the
+              // content lane, which simply cannot refresh again this
+              // pass.
+              if (refreshBudget.hasRefreshed) {
+                // A second login verdict with the budget spent: keep the
+                // park-and-end-pass semantics (second-401 discipline).
+                lifecycleLoginRequired = true;
+                break;
+              }
+              refreshBudget.hasRefreshed = true;
+              let didRefresh = false;
+              try {
+                await this.#refreshAccessToken();
+                didRefresh = true;
+              } catch {
+                refreshBudget.requiresLogin = true;
+              }
+              if (this.#isStopped) {
+                break;
+              }
+              if (!didRefresh) {
+                // The refresh itself failed: the parked event stays
+                // retryable and the pass ends login_required with the
+                // queue preserved for the next login.
+                lifecycleLoginRequired = true;
+                break;
+              }
+              try {
+                lifecycleOutcome = await this.#lifecycleDriver.runOne(
+                  this.#passAbortController.signal,
+                );
+              } catch {
+                break;
+              }
+              if (this.#isStopped || this.#nowEpochMs() >= passDeadlineEpochMs) {
+                break;
+              }
+              if (lifecycleOutcome === "login_required") {
+                // The rotated credential was rejected again: the retry's
+                // own dispatch parked its event; end the pass
+                // login_required (second-401 discipline).
+                lifecycleLoginRequired = true;
+                break;
+              }
+              // A committed retry — or any other closed outcome — falls
+              // through to the normal drain discipline below (the while
+              // condition decides whether the drain continues).
             }
           } while (lifecycleOutcome === "committed");
           if (this.#isStopped) {

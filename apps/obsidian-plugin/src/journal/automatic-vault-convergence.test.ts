@@ -1234,12 +1234,16 @@ describe("automatic vault convergence after rename + edit", () => {
       .find((event) => event.operation === "rename");
     expect(alphaRename?.state).toBe("waiting_retry");
     expect(alphaRename?.safeError).toBe("login_required");
-    // The second rename and the edit survive untouched, waiting for a
-    // trigger under a valid credential.
+    // The pass's one refresh attempt could not mint a credential in time,
+    // so the retried dispatch parked the SECOND rename under the same
+    // safe label (fix round 4's second-verdict discipline) — retryable,
+    // never terminal. The edit survives untouched, waiting for a trigger
+    // under a valid credential.
     const betaRename = restarted
       .eventsOf("notes/beta-renamed.md")
       .find((event) => event.operation === "rename");
-    expect(betaRename?.state).toBe("queued");
+    expect(betaRename?.state).toBe("waiting_retry");
+    expect(betaRename?.safeError).toBe("login_required");
     const editEvent = restarted
       .eventsOf("notes/gamma.md")
       .find((event) => event.operation === "update");
