@@ -2,9 +2,12 @@
 
 The factory composes exactly two health routes plus the five session/password
 routes, six TOTP/recovery routes, seven browser device-authorization and
-device-token routes and two Admin device routes of the injected
-web-authentication runtime and the local/test-only OpenAPI document route,
-registers the four envelope exception handlers,
+device-token routes, two Admin device routes of the injected
+web-authentication runtime, the optional runtime-gated exclusion-policy,
+small-file sync and source-lifecycle route sets — including the read-only
+sync rejection diagnostics Admin route of the small-file-sync runtime — and
+the local/test-only OpenAPI document route, registers the four envelope
+exception handlers,
 strips FastAPI's default validation-error response from the generated
 document (the shared handler emits the canonical error envelope instead),
 declares the dedicated device Bearer schemes of spec 16 the routes have not
@@ -71,6 +74,10 @@ from api_runtime.request_context import ASGIApp as CorrelationApp
 from api_runtime.request_context import RequestContextMiddleware
 from api_runtime.session_routes import create_session_route_endpoints
 from api_runtime.small_file_sync_composition import SmallFileSyncRuntime
+from api_runtime.small_file_sync_diagnostics_models import SmallFileRejectionDiagnosticsData
+from api_runtime.small_file_sync_diagnostics_routes import (
+    create_sync_diagnostics_admin_route_endpoints,
+)
 from api_runtime.small_file_sync_models import (
     SmallFilePreflightData,
     SmallFileTerminalResultData,
@@ -206,6 +213,7 @@ def create_api_application(
         _register_exclusion_policy_routes(app, web_authentication, exclusion_policy)
     if small_file_sync is not None:
         _register_small_file_sync_routes(app, web_authentication, small_file_sync)
+        _register_sync_diagnostics_admin_route(app, web_authentication, small_file_sync)
     if source_lifecycle is not None:
         _register_source_lifecycle_routes(app, web_authentication, source_lifecycle)
     _classify_openapi_route(app)
@@ -584,6 +592,30 @@ def _register_small_file_sync_routes(
                 },
             }
         },
+    )
+
+
+def _register_sync_diagnostics_admin_route(
+    app: FastAPI,
+    web_authentication: WebAuthenticationRuntime,
+    small_file_sync: SmallFileSyncRuntime,
+) -> None:
+    """Register the closed sync diagnostics Admin route.
+
+    The route carries its manually assigned semantic operation id and the
+    envelope response model of its strict closed payload; the active-session
+    dependency of the Web Admin surface lives in the endpoint factory, and
+    the payload carries only closed tokens, counts and epoch timestamps.
+    """
+    endpoints = create_sync_diagnostics_admin_route_endpoints(
+        web_authentication=web_authentication, small_file_sync=small_file_sync
+    )
+    app.add_api_route(
+        "/api/admin/sync/rejections",
+        endpoints.get_rejection_diagnostics,
+        methods=["GET"],
+        operation_id="getSyncRejectionDiagnostics",
+        response_model=ApiEnvelope[SmallFileRejectionDiagnosticsData],
     )
 
 

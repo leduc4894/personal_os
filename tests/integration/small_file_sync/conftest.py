@@ -496,16 +496,19 @@ def policy_wire_harness() -> Iterator[SmallFileWireHarness]:
         clock=clock,
         enforcement=enforcement,
     )
+    sync_metrics = InMemorySmallFileSyncMetrics()
     service = SmallFileSyncService(
         operation_store=OfflineSmallFileUploadOperationStore(sync_state, clock),
         policy_guard=PolicyEnforcementSmallFileGuard(enforcement=enforcement),
         publication_gateway=publication_gateway,
         object_store=object_store,
         current_sources=OfflineCurrentSourceStore(sync_state),
-        metrics=InMemorySmallFileSyncMetrics(),
+        metrics=sync_metrics,
         clock=clock,
     )
-    application = _build_application(SmallFileSyncRuntime(service=service))
+    application = _build_application(
+        SmallFileSyncRuntime(service=service, rejection_diagnostics=sync_metrics)
+    )
     with TestClient(
         application,
         base_url=ORIGIN,

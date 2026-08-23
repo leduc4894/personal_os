@@ -10,6 +10,7 @@ metric labels that never accept identifiers.
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
@@ -578,6 +579,98 @@ def test_in_memory_metrics_reject_open_text_labels_and_bad_durations() -> None:
         recorder.record_rejection(
             operation=SmallFileOperation.CREATE,
             reason_code="small_file_size_limit_exceeded",  # type: ignore[arg-type]
+        )
+
+
+# --- bounded rejection diagnostics ring (sync observability task 4) ---------------------
+
+
+class _SteppingEpochClock:
+    """Deterministic epoch-ms seam: every call advances by one millisecond."""
+
+    def __init__(self, first_epoch_ms: int = 1_800_000_000_000) -> None:
+        self._next_epoch_ms = first_epoch_ms
+
+    def __call__(self) -> int:
+        current = self._next_epoch_ms
+        self._next_epoch_ms += 1
+        return current
+
+
+def test_rejection_ring_retains_only_the_last_fifty_closed_records() -> None:
+    recorder = InMemorySmallFileSyncMetrics(epoch_ms_clock=_SteppingEpochClock())
+    reasons = [
+        SmallFileRejectionReason.SMALL_FILE_OPERATION_EXPIRED,
+        SmallFileRejectionReason.SMALL_FILE_OPERATION_IDENTITY_MISMATCH,
+    ]
+    for index in range(60):
+        recorder.record_rejection(
+            operation=SmallFileOperation.UPDATE if index % 2 else SmallFileOperation.CREATE,
+            reason_code=reasons[index % 2],
+        )
+    diagnostics = recorder.rejection_diagnostics()
+    recent = diagnostics.recent_rejections
+    assert len(recent) == 50
+    # The oldest ten records were evicted; the ring starts at the eleventh.
+    assert recent[0].error_code is reasons[10 % 2]
+    assert recent[0].at_epoch_ms == 1_800_000_000_010
+    assert recent[-1].at_epoch_ms == 1_800_000_000_059
+    # Timestamps stay strictly increasing and every record carries exactly the
+    # closed members: error code, epoch timestamp and operation label.
+    assert [record.at_epoch_ms for record in recent] == sorted(
+        record.at_epoch_ms for record in recent
+    )
+    for record in recent:
+        assert set(asdict(record)) == {"error_code", "at_epoch_ms", "operation"}
+
+
+def test_rejection_diagnostics_snapshot_counters_and_isolation() -> None:
+    recorder = InMemorySmallFileSyncMetrics(epoch_ms_clock=_SteppingEpochClock())
+    recorder.record_rejection(
+        operation=SmallFileOperation.CREATE,
+        reason_code=SmallFileRejectionReason.SMALL_FILE_OPERATION_NOT_FOUND,
+    )
+    recorder.record_rejection(
+        operation=SmallFileOperation.CREATE,
+        reason_code=SmallFileRejectionReason.SMALL_FILE_OPERATION_NOT_FOUND,
+    )
+    recorder.record_rejection(
+        operation=SmallFileOperation.UPDATE,
+        reason_code=SmallFileRejectionReason.SMALL_FILE_UPLOAD_STATE_INVALID,
+    )
+    diagnostics = recorder.rejection_diagnostics()
+    assert dict(diagnostics.rejection_counters) == {
+        (
+            SmallFileOperation.CREATE,
+            SmallFileRejectionReason.SMALL_FILE_OPERATION_NOT_FOUND,
+        ): 2,
+        (
+            SmallFileOperation.UPDATE,
+            SmallFileRejectionReason.SMALL_FILE_UPLOAD_STATE_INVALID,
+        ): 1,
+    }
+    assert len(diagnostics.recent_rejections) == 3
+
+    # A later rejection never mutates a snapshot already taken.
+    recorder.record_rejection(
+        operation=SmallFileOperation.UPDATE,
+        reason_code=SmallFileRejectionReason.SMALL_FILE_UPLOAD_STATE_INVALID,
+    )
+    assert (
+        dict(diagnostics.rejection_counters)[
+            (SmallFileOperation.UPDATE, SmallFileRejectionReason.SMALL_FILE_UPLOAD_STATE_INVALID)
+        ]
+        == 1
+    )
+    assert len(diagnostics.recent_rejections) == 3
+
+
+def test_rejection_ring_timestamps_reject_a_broken_epoch_clock() -> None:
+    recorder = InMemorySmallFileSyncMetrics(epoch_ms_clock=lambda: -1)
+    with pytest.raises(ValueError, match="non-negative integer"):
+        recorder.record_rejection(
+            operation=SmallFileOperation.CREATE,
+            reason_code=SmallFileRejectionReason.SMALL_FILE_OPERATION_EXPIRED,
         )
 
 

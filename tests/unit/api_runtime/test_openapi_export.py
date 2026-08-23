@@ -128,6 +128,7 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
         "/api/auth/device-tokens/revoke-current",
         "/api/admin/devices",
         "/api/admin/devices/{device_id}/revoke",
+        "/api/admin/sync/rejections",
         "/api/admin/exclusion-policy",
         "/api/admin/exclusion-policy/draft",
         "/api/admin/exclusion-policy/previews",
@@ -201,6 +202,10 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
     assert (
         document["paths"]["/api/admin/devices/{device_id}/revoke"]["post"]["operationId"]
         == "revokeAdminDevice"
+    )
+    assert (
+        document["paths"]["/api/admin/sync/rejections"]["get"]["operationId"]
+        == "getSyncRejectionDiagnostics"
     )
 
 

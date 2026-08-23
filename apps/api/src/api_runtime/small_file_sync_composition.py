@@ -78,7 +78,8 @@ from personal_os.small_file_sync.contracts import (
 from personal_os.small_file_sync.errors import SmallFileSyncError
 from personal_os.small_file_sync.metrics import (
     InMemorySmallFileSyncMetrics,
-    SmallFileSyncMetrics,
+    SmallFileRejectionDiagnosticsSource,
+    SmallFileSyncMetricsWithRejectionDiagnostics,
 )
 from personal_os.small_file_sync.ports import (
     SmallFileBoundOperation,
@@ -127,12 +128,15 @@ _COMMITTED_STATE: Final[str] = "committed"
 class SmallFileSyncRuntime:
     """One composed small-file sync runtime the sync routes consume.
 
-    ``aclose`` is the serve graph's disposal hook — closing the R2 client and
-    its spool reservations on shutdown; the offline graph owns no resource
-    and leaves it unset.
+    ``rejection_diagnostics`` exposes the metrics sink's read side — the
+    closed rejection counters and bounded ring — for the Web Admin
+    diagnostics route. ``aclose`` is the serve graph's disposal hook —
+    closing the R2 client and its spool reservations on shutdown; the
+    offline graph owns no resource and leaves it unset.
     """
 
     service: SmallFileSyncService
+    rejection_diagnostics: SmallFileRejectionDiagnosticsSource
     aclose: Callable[[], Awaitable[None]] | None = None
 
 
@@ -347,6 +351,7 @@ def compose_small_file_sync(
         logger=logger,
     )
     operation_store = PostgresqlSmallFileUploadOperationStore(engine, clock=default_utc_clock)
+    metrics = InMemorySmallFileSyncMetrics()
     publication_gateway = BoundPolicySmallFilePublicationGateway(
         store=PostgresqlSourcePublicationStore(engine, policy_verifier=verifier),
         object_store=object_store,
@@ -362,10 +367,12 @@ def compose_small_file_sync(
         publication_gateway=publication_gateway,
         object_store=object_store,
         current_sources=PostgresqlCanonicalSourceReadStore(engine, policy_verifier=verifier),
-        metrics=InMemorySmallFileSyncMetrics(),
+        metrics=metrics,
         clock=default_utc_clock,
     )
-    return SmallFileSyncRuntime(service=service, aclose=object_store.close)
+    return SmallFileSyncRuntime(
+        service=service, rejection_diagnostics=metrics, aclose=object_store.close
+    )
 
 
 class OfflineSmallFileClock:
@@ -939,12 +946,13 @@ class OfflineSourcePublicationStore:
 def compose_offline_small_file_sync(
     *,
     state: OfflineSmallFileSyncState | None = None,
-    metrics: SmallFileSyncMetrics | None = None,
+    metrics: SmallFileSyncMetricsWithRejectionDiagnostics | None = None,
 ) -> SmallFileSyncRuntime:
     """Build the deterministic offline small-file sync runtime."""
 
     offline_state = state if state is not None else OfflineSmallFileSyncState()
     clock = OfflineSmallFileClock(offline_state)
+    recorder = metrics if metrics is not None else InMemorySmallFileSyncMetrics()
     object_store = OfflineCanonicalObjectStore(offline_state, clock)
     publication_store = OfflineSourcePublicationStore(offline_state, clock)
     publication_gateway = _OfflineSmallFilePublicationGateway(
@@ -959,10 +967,10 @@ def compose_offline_small_file_sync(
         publication_gateway=publication_gateway,
         object_store=object_store,
         current_sources=OfflineCurrentSourceStore(offline_state),
-        metrics=metrics if metrics is not None else InMemorySmallFileSyncMetrics(),
+        metrics=recorder,
         clock=clock,
     )
-    return SmallFileSyncRuntime(service=service)
+    return SmallFileSyncRuntime(service=service, rejection_diagnostics=recorder)
 
 
 __all__ = [

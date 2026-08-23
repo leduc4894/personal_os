@@ -48,6 +48,7 @@ ROUTE_OPERATION_IDS: dict[str, dict[str, str]] = {
     "/api/auth/device-tokens/revoke-current": {"post": "revokeCurrentDeviceToken"},
     "/api/admin/devices": {"get": "listAdminDevices"},
     "/api/admin/devices/{device_id}/revoke": {"post": "revokeAdminDevice"},
+    "/api/admin/sync/rejections": {"get": "getSyncRejectionDiagnostics"},
     "/api/admin/exclusion-policy": {"get": "getExclusionPolicyStatus"},
     "/api/admin/exclusion-policy/draft": {"put": "replaceExclusionPolicyDraft"},
     "/api/admin/exclusion-policy/previews": {"post": "createExclusionPolicyPreview"},
@@ -121,6 +122,10 @@ STRICT_MODEL_SCHEMA_NAMES: tuple[str, ...] = (
     "SmallFilePreflightData",
     "SmallFilePreflightRequest",
     "SmallFileTerminalResultData",
+    "ApiEnvelope_SmallFileRejectionDiagnosticsData_",
+    "SmallFileRejectionCounterData",
+    "SmallFileRejectionDiagnosticsData",
+    "SmallFileRejectionRecordData",
 )
 
 _URL_PATTERN = re.compile(r"\w+://")

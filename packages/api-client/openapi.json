@@ -1073,6 +1073,51 @@
         "title": "ApiEnvelope[SmallFilePreflightData]",
         "type": "object"
       },
+      "ApiEnvelope_SmallFileRejectionDiagnosticsData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SmallFileRejectionDiagnosticsData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[SmallFileRejectionDiagnosticsData]",
+        "type": "object"
+      },
       "ApiEnvelope_SmallFileTerminalResultData_": {
         "additionalProperties": false,
         "properties": {
@@ -3191,6 +3236,15 @@
         "title": "SignedPolicySnapshotData",
         "type": "object"
       },
+      "SmallFileOperation": {
+        "description": "Closed vocabulary of preflight operations (spec 10.1: create/update).",
+        "enum": [
+          "create",
+          "update"
+        ],
+        "title": "SmallFileOperation",
+        "type": "string"
+      },
       "SmallFilePreflightData": {
         "additionalProperties": false,
         "description": "One completed preflight: exactly one typed outcome and its safe payload.\n\n``single_part_upload`` carries only the opaque operation token and its\nexpiry; ``committed_replay`` and ``no_change`` carry only the frozen\nterminal result; ``excluded`` and ``conflict`` carry no payload member at\nall. Responses render with ``exclude_unset`` so each outcome emits\nexactly its own members.",
@@ -3335,6 +3389,94 @@
           "policy_revision"
         ],
         "title": "SmallFilePreflightRequest",
+        "type": "object"
+      },
+      "SmallFileRejectionCounterData": {
+        "additionalProperties": false,
+        "description": "One rejection counter: closed labels plus its count.",
+        "properties": {
+          "count": {
+            "minimum": 0.0,
+            "title": "Count",
+            "type": "integer"
+          },
+          "error_code": {
+            "$ref": "#/components/schemas/SmallFileRejectionReason"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/SmallFileOperation"
+          }
+        },
+        "required": [
+          "operation",
+          "error_code",
+          "count"
+        ],
+        "title": "SmallFileRejectionCounterData",
+        "type": "object"
+      },
+      "SmallFileRejectionDiagnosticsData": {
+        "additionalProperties": false,
+        "description": "The rejection evidence snapshot of the Admin diagnostics route.",
+        "properties": {
+          "recent_rejections": {
+            "items": {
+              "$ref": "#/components/schemas/SmallFileRejectionRecordData"
+            },
+            "title": "Recent Rejections",
+            "type": "array"
+          },
+          "rejection_counters": {
+            "items": {
+              "$ref": "#/components/schemas/SmallFileRejectionCounterData"
+            },
+            "title": "Rejection Counters",
+            "type": "array"
+          }
+        },
+        "required": [
+          "rejection_counters",
+          "recent_rejections"
+        ],
+        "title": "SmallFileRejectionDiagnosticsData",
+        "type": "object"
+      },
+      "SmallFileRejectionReason": {
+        "description": "The closed rejection reason codes mirroring the domain error registry.",
+        "enum": [
+          "small_file_preflight_invalid",
+          "small_file_operation_not_found",
+          "small_file_operation_expired",
+          "small_file_operation_identity_mismatch",
+          "small_file_size_limit_exceeded",
+          "small_file_content_integrity_failed",
+          "small_file_upload_state_invalid"
+        ],
+        "title": "SmallFileRejectionReason",
+        "type": "string"
+      },
+      "SmallFileRejectionRecordData": {
+        "additionalProperties": false,
+        "description": "One recent rejection of the bounded diagnostics ring.\n\nThe closed error code mirrors the domain error registry, the timestamp is\nan epoch-millisecond integer and the operation label stands in for the\nroute-template token — the metrics layer sits below the correlation\nplumbing that owns route templates, and the two sync routes derive their\noperation label from the same request.",
+        "properties": {
+          "at_epoch_ms": {
+            "minimum": 0.0,
+            "title": "At Epoch Ms",
+            "type": "integer"
+          },
+          "error_code": {
+            "$ref": "#/components/schemas/SmallFileRejectionReason"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/SmallFileOperation"
+          }
+        },
+        "required": [
+          "error_code",
+          "at_epoch_ms",
+          "operation"
+        ],
+        "title": "SmallFileRejectionRecordData",
         "type": "object"
       },
       "SmallFileTerminalResultData": {
@@ -3987,6 +4129,25 @@
           }
         },
         "summary": "Publish"
+      }
+    },
+    "/api/admin/sync/rejections": {
+      "get": {
+        "description": "Serve the closed rejection evidence snapshot (read-only).",
+        "operationId": "getSyncRejectionDiagnostics",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_SmallFileRejectionDiagnosticsData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Rejection Diagnostics"
       }
     },
     "/api/auth/device-authorizations": {

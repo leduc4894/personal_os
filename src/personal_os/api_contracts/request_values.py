@@ -43,6 +43,7 @@ class ApiRouteTemplate(StrEnum):
     AUTH_DEVICE_TOKENS_REVOKE_CURRENT = "/api/auth/device-tokens/revoke-current"
     ADMIN_DEVICES = "/api/admin/devices"
     ADMIN_DEVICE_REVOKE = "/api/admin/devices/{device_id}/revoke"
+    ADMIN_SYNC_REJECTIONS = "/api/admin/sync/rejections"
     ADMIN_EXCLUSION_POLICY = "/api/admin/exclusion-policy"
     ADMIN_EXCLUSION_POLICY_DRAFT = "/api/admin/exclusion-policy/draft"
     ADMIN_EXCLUSION_POLICY_PREVIEWS = "/api/admin/exclusion-policy/previews"
@@ -135,16 +136,29 @@ SOURCE_LIFECYCLE_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset
     }
 )
 
+#: The closed sync diagnostics admin route set: the read-only rejection
+#: evidence surface behind the Web session contract. Its payloads are
+#: per-process counters and ring snapshots that must never come from a shared
+#: cache.
+SYNC_DIAGNOSTICS_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset(
+    {
+        ApiRouteTemplate.ADMIN_SYNC_REJECTIONS,
+    }
+)
+
 #: Every route whose responses — success, service rejection and dependency
 #: failure alike — carry ``Cache-Control: no-store`` (spec 16): the
-#: authentication-bound sets plus the exclusion-policy and small-file sync
-#: routes, whose payloads are per-request policy state, signed envelopes and
-#: device-derived sync results that must never come from a shared cache.
+#: authentication-bound sets plus the exclusion-policy, small-file sync,
+#: source lifecycle and sync diagnostics admin routes, whose payloads are
+#: per-request policy state, signed envelopes, device-derived sync results
+#: and per-process rejection evidence that must never come from a shared
+#: cache.
 NO_STORE_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = (
     AUTHENTICATION_ROUTE_TEMPLATES
     | EXCLUSION_POLICY_ROUTE_TEMPLATES
     | SMALL_FILE_SYNC_ROUTE_TEMPLATES
     | SOURCE_LIFECYCLE_ROUTE_TEMPLATES
+    | SYNC_DIAGNOSTICS_ROUTE_TEMPLATES
 )
 
 #: Immutable view of the no-store template values, for classifying a raw

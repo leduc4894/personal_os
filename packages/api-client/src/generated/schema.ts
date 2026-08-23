@@ -144,6 +144,26 @@ export type paths = {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/admin/sync/rejections": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Get Rejection Diagnostics
+         * @description Serve the closed rejection evidence snapshot (read-only).
+         */
+        readonly get: operations["getSyncRejectionDiagnostics"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/auth/device-authorizations": {
         readonly parameters: {
             readonly query?: never;
@@ -1030,6 +1050,21 @@ export type components = {
         /** ApiEnvelope[SmallFilePreflightData] */
         readonly ApiEnvelope_SmallFilePreflightData_: {
             readonly data: components["schemas"]["SmallFilePreflightData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[SmallFileRejectionDiagnosticsData] */
+        readonly ApiEnvelope_SmallFileRejectionDiagnosticsData_: {
+            readonly data: components["schemas"]["SmallFileRejectionDiagnosticsData"] | null;
             readonly error: components["schemas"]["ApiErrorBody"] | null;
             /**
              * Request Id
@@ -1999,6 +2034,12 @@ export type components = {
             readonly signature: components["schemas"]["PolicySnapshotSignatureData"];
         };
         /**
+         * SmallFileOperation
+         * @description Closed vocabulary of preflight operations (spec 10.1: create/update).
+         * @enum {string}
+         */
+        readonly SmallFileOperation: "create" | "update";
+        /**
          * SmallFilePreflightData
          * @description One completed preflight: exactly one typed outcome and its safe payload.
          *
@@ -2068,6 +2109,48 @@ export type components = {
             readonly size_bytes: number;
             /** Source Id */
             readonly source_id?: string | null;
+        };
+        /**
+         * SmallFileRejectionCounterData
+         * @description One rejection counter: closed labels plus its count.
+         */
+        readonly SmallFileRejectionCounterData: {
+            /** Count */
+            readonly count: number;
+            readonly error_code: components["schemas"]["SmallFileRejectionReason"];
+            readonly operation: components["schemas"]["SmallFileOperation"];
+        };
+        /**
+         * SmallFileRejectionDiagnosticsData
+         * @description The rejection evidence snapshot of the Admin diagnostics route.
+         */
+        readonly SmallFileRejectionDiagnosticsData: {
+            /** Recent Rejections */
+            readonly recent_rejections: readonly components["schemas"]["SmallFileRejectionRecordData"][];
+            /** Rejection Counters */
+            readonly rejection_counters: readonly components["schemas"]["SmallFileRejectionCounterData"][];
+        };
+        /**
+         * SmallFileRejectionReason
+         * @description The closed rejection reason codes mirroring the domain error registry.
+         * @enum {string}
+         */
+        readonly SmallFileRejectionReason: "small_file_preflight_invalid" | "small_file_operation_not_found" | "small_file_operation_expired" | "small_file_operation_identity_mismatch" | "small_file_size_limit_exceeded" | "small_file_content_integrity_failed" | "small_file_upload_state_invalid";
+        /**
+         * SmallFileRejectionRecordData
+         * @description One recent rejection of the bounded diagnostics ring.
+         *
+         *     The closed error code mirrors the domain error registry, the timestamp is
+         *     an epoch-millisecond integer and the operation label stands in for the
+         *     route-template token — the metrics layer sits below the correlation
+         *     plumbing that owns route templates, and the two sync routes derive their
+         *     operation label from the same request.
+         */
+        readonly SmallFileRejectionRecordData: {
+            /** At Epoch Ms */
+            readonly at_epoch_ms: number;
+            readonly error_code: components["schemas"]["SmallFileRejectionReason"];
+            readonly operation: components["schemas"]["SmallFileOperation"];
         };
         /**
          * SmallFileTerminalResultData
@@ -2459,6 +2542,26 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["ApiEnvelope_PolicyPublicationData_"];
+                };
+            };
+        };
+    };
+    readonly getSyncRejectionDiagnostics: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_SmallFileRejectionDiagnosticsData_"];
                 };
             };
         };
