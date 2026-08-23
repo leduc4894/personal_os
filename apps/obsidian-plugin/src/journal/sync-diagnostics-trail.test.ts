@@ -21,6 +21,7 @@ import {
   MAX_SYNC_DIAGNOSTICS_TRAIL_ENTRIES,
   MAX_SYNC_DIAGNOSTICS_TRAIL_TOKENS_PER_ENTRY,
   SYNC_DIAGNOSTICS_TRAIL_FILE_NAME,
+  SYNC_PARK_SITE_TOKENS,
   SYNC_SELF_CHECK_VERDICT_TOKENS,
   createSyncDiagnosticsTrail,
   envelopeErrorCode,
@@ -368,6 +369,14 @@ describe("sync diagnostics trail envelope error-code tokens (diagnostic round U1
       "authorization_scope_denied",
       { requestId: REQUEST_ID },
     ]);
+  });
+});
+
+// --- the park throw-site tokens (diagnostic round U2) --------------------------------------------------
+
+describe("sync diagnostics trail park throw-site tokens (diagnostic round U2)", () => {
+  it("pins the fixed two-token park throw-site vocabulary", () => {
+    expect(SYNC_PARK_SITE_TOKENS).toEqual(["site_argument_validation", "site_mutation_internal"]);
   });
 });
 

@@ -38,9 +38,10 @@
  */
 
 import type { JournalEvent, JournalEventState, JournalSafeErrorLabel, LocalFile } from "./contracts";
-import { MAX_FILE_SIZE_BYTES } from "./contracts";
+import { JOURNAL_SAFE_ERROR_LABELS, MAX_FILE_SIZE_BYTES } from "./contracts";
 import { deriveFrozenFingerprint } from "./fingerprint";
 import type { LifecycleDriver, LifecycleRunOutcome } from "./lifecycle-driver";
+import { isUuid } from "./repository";
 import type { JournalRepository } from "./repository";
 import { JournalStoreError, type JournalStoreErrorReason } from "./sqlite-database";
 import type { JournalPreflightOutcome, JournalSyncApi, SmallFileTerminalReceipt } from "./sync-api";
@@ -49,6 +50,7 @@ import type {
   SyncDiagnosticsTrail,
   SyncDiagnosticToken,
   SyncEventStateToken,
+  SyncParkSiteToken,
 } from "./sync-diagnostics-trail";
 import { envelopeErrorCode, envelopeRequestId } from "./sync-diagnostics-trail";
 
@@ -229,6 +231,32 @@ function journalEventStateToken(state: JournalEventState): SyncEventStateToken {
 }
 
 // --- the driver ----------------------------------------------------------------------------------------
+
+/**
+ * The park-failure throw-site discriminator (diagnostic round U2): ONE more
+ * closed token naming WHY a `markEventWaitingRetry` throw is consistent
+ * with which site, derived entirely OUTSIDE the repository from the values
+ * the driver already holds in scope. `site_argument_validation` when any
+ * precondition the repository's own argument validation would reject is
+ * observable (a non-uuid event id per the exported repository `isUuid`, a
+ * safe error outside the closed labels, or a retry epoch that is not a
+ * non-negative integer); otherwise `site_mutation_internal` — the
+ * arguments were valid, and together with the entry's row-present/state
+ * token the throw happened inside the serialized mutation. Pure and
+ * side-effect free; never touches the repository.
+ */
+export function parkFailureSiteToken(
+  eventId: string,
+  safeError: string,
+  nextEligibleRetryEpochMs: number,
+): SyncParkSiteToken {
+  const areParkArgumentsValid =
+    isUuid(eventId) &&
+    (JOURNAL_SAFE_ERROR_LABELS as readonly string[]).includes(safeError) &&
+    Number.isInteger(nextEligibleRetryEpochMs) &&
+    nextEligibleRetryEpochMs >= 0;
+  return areParkArgumentsValid ? "site_mutation_internal" : "site_argument_validation";
+}
 
 /**
  * The bounded foreground queue pass driver. One instance holds the pass
@@ -929,12 +957,13 @@ export class JournalQueueDriver {
       requestCorrelationId: correlationId,
     });
     const nextAttemptCount = event.attemptCount + 1;
+    // Hoisted (not recomputed) so the park-failure recorder below can re-check
+    // the exact epoch value the repository was given — evaluation order and
+    // semantics are unchanged.
+    const nextEligibleRetryEpochMs =
+      this.#nowEpochMs() + computeRetryBackoffMs(nextAttemptCount, this.#randomJitter);
     try {
-      await this.#repository.markEventWaitingRetry(
-        eventId,
-        safeError,
-        this.#nowEpochMs() + computeRetryBackoffMs(nextAttemptCount, this.#randomJitter),
-      );
+      await this.#repository.markEventWaitingRetry(eventId, safeError, nextEligibleRetryEpochMs);
     } catch (error) {
       // Park failure state capture (sync error tracing park diagnosis
       // round): the park is pure in-memory SQL, yet on the live machine it
@@ -944,7 +973,7 @@ export class JournalQueueDriver {
       // BEFORE rethrowing; the rethrow itself is unchanged, so the pass
       // still fails closed through the pass-loop catch (ring entry and the
       // pre-existing journal_failure tap) with identical pass semantics.
-      this.#recordParkFailureTrailEntry(eventId, error);
+      this.#recordParkFailureTrailEntry(eventId, safeError, nextEligibleRetryEpochMs, error);
       throw error;
     }
   }
@@ -954,10 +983,17 @@ export class JournalQueueDriver {
    * (sync error tracing park diagnosis round): the park error's closed store
    * reason — or the closed `reason_unknown` token for a non-store error —
    * plus the closed state token of the row read back AT the failure moment,
-   * where a null or throwing read-back records `row_absent`. Closed tokens
-   * only; fire-and-forget, never blocking the pass.
+   * where a null or throwing read-back records `row_absent`, plus (diagnostic
+   * round U2) the closed throw-site token derived by re-checking the park
+   * arguments the repository was given. Closed tokens only; fire-and-forget,
+   * never blocking the pass.
    */
-  #recordParkFailureTrailEntry(eventId: string, error: unknown): void {
+  #recordParkFailureTrailEntry(
+    eventId: string,
+    safeError: JournalSafeErrorLabel,
+    nextEligibleRetryEpochMs: number,
+    error: unknown,
+  ): void {
     if (this.#diagnosticTrail === null) {
       return;
     }
@@ -965,7 +1001,11 @@ export class JournalQueueDriver {
       error instanceof JournalStoreError ? error.reason : "reason_unknown";
     void this.#diagnosticTrail.append({
       kind: "journal_failure",
-      tokens: [reasonToken, this.#readEventStateTokenAtFailure(eventId)],
+      tokens: [
+        reasonToken,
+        this.#readEventStateTokenAtFailure(eventId),
+        parkFailureSiteToken(eventId, safeError, nextEligibleRetryEpochMs),
+      ],
     });
   }
 

@@ -77,7 +77,8 @@ export type SyncDiagnosticClosedToken =
   | SyncApiFailureKind
   | LifecycleRunOutcome
   | SyncSelfCheckVerdictToken
-  | SyncEventStateToken;
+  | SyncEventStateToken
+  | SyncParkSiteToken;
 
 /**
  * The closed row-state tokens a `journal_failure` entry may carry when a
@@ -123,6 +124,25 @@ export const SYNC_SELF_CHECK_VERDICT_TOKENS = [
 ] as const;
 
 export type SyncSelfCheckVerdictToken = (typeof SYNC_SELF_CHECK_VERDICT_TOKENS)[number];
+
+/**
+ * The fixed park throw-site tokens (diagnostic round U2): one closed token
+ * a `journal_failure` entry from the retry-park throw site appends to name
+ * WHY the throw is consistent with which site. `site_argument_validation`:
+ * at least one argument precondition the repository's own
+ * `markEventWaitingRetry` validation would reject was observable in the
+ * driver's scope at the failure moment (a non-uuid event id, a safe error
+ * outside the closed labels, or a retry epoch that is not a non-negative
+ * integer). `site_mutation_internal`: the arguments were all valid — with
+ * the row-present/state facts carried by the entry's state token, the
+ * throw happened inside the serialized mutation itself.
+ */
+export const SYNC_PARK_SITE_TOKENS = [
+  "site_argument_validation",
+  "site_mutation_internal",
+] as const;
+
+export type SyncParkSiteToken = (typeof SYNC_PARK_SITE_TOKENS)[number];
 
 /**
  * The brand that keeps the opaque envelope request id out of the closed

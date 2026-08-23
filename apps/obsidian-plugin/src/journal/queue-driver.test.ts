@@ -27,6 +27,7 @@ import {
   RETRY_BACKOFF_INITIAL_MS,
   RETRY_BACKOFF_MAXIMUM_MS,
   computeRetryBackoffMs,
+  parkFailureSiteToken,
 } from "./queue-driver";
 import type { QueuePassSummary } from "./queue-driver";
 import { JournalRepository } from "./repository";
@@ -1321,8 +1322,42 @@ describe("queue driver retry-park failure state capture (sync error tracing park
     expect(harness.diagnosticTrail.entries[1]?.tokens).toEqual([
       "journal_mutation_failed",
       "state_blocked_conflict",
+      "site_mutation_internal",
     ]);
     expect(harness.diagnosticTrail.entries[2]?.tokens).toEqual(["journal_mutation_failed"]);
+  });
+
+  it("appends site_mutation_internal when the park throws with valid arguments over a present pending row (diagnostic round U2)", async () => {
+    const harness = createHarness();
+    await captureBytes(harness, "notes/park-valid-args.md", new TextEncoder().encode("valid"));
+    harness.installTransport({
+      preflight: async () => ({
+        status: 403,
+        bodyText: errorBody("authorization_scope_denied"),
+      }),
+    });
+    // The live-mystery shape with VALID arguments: an injected repository
+    // whose park simply throws the closed reason while the row sits in its
+    // PENDING preflight state — every precondition the repository's own
+    // argument validation checks holds (uuid id, closed safe label,
+    // non-negative integer epoch), so the throw is consistent only with a
+    // site INSIDE the serialized mutation.
+    harness.repository.markEventWaitingRetry = () => {
+      throw journalStoreError("journal_mutation_failed");
+    };
+
+    const summary = await runPass(harness.driver);
+
+    expect(summary.outcome).toBe("login_required");
+    expect(harness.driver.readJournalFailureReasons()).toEqual(["journal_mutation_failed"]);
+    const parkEntry = harness.diagnosticTrail.entries.find(
+      (entry) => entry.kind === "journal_failure" && entry.tokens.includes("state_preflight"),
+    );
+    expect(parkEntry?.tokens).toEqual([
+      "journal_mutation_failed",
+      "state_preflight",
+      "site_mutation_internal",
+    ]);
   });
 
   it("captures row_absent when the parked row is gone at the failure moment", async () => {
@@ -1348,7 +1383,11 @@ describe("queue driver retry-park failure state capture (sync error tracing park
       (entry) => entry.tokens.includes("row_absent"),
     );
     expect(parkEntry?.kind).toBe("journal_failure");
-    expect(parkEntry?.tokens).toEqual(["journal_mutation_failed", "row_absent"]);
+    expect(parkEntry?.tokens).toEqual([
+      "journal_mutation_failed",
+      "row_absent",
+      "site_mutation_internal",
+    ]);
   });
 
   it("records no journal_failure entry when the retry park succeeds", async () => {
@@ -1371,6 +1410,31 @@ describe("queue driver retry-park failure state capture (sync error tracing park
       "wire_failure",
       "pass_outcome",
     ]);
+  });
+
+  it("derives site_argument_validation for every argument shape the park's own validation would reject (diagnostic round U2)", () => {
+    const validEventId = "00000000-0000-4000-8000-000000000001";
+    const validEpochMs = 1_784_000_001_000;
+    // Valid arguments (the repository's isUuid, closed-label membership and
+    // non-negative-integer checks all hold): the throw site is inside the
+    // serialized mutation.
+    expect(parkFailureSiteToken(validEventId, "login_required", validEpochMs)).toBe(
+      "site_mutation_internal",
+    );
+    // Each observable argument precondition the repository's own validation
+    // would reject flips the discriminator to the argument-validation site.
+    expect(parkFailureSiteToken("not-a-uuid", "login_required", validEpochMs)).toBe(
+      "site_argument_validation",
+    );
+    expect(parkFailureSiteToken(validEventId, "edge block page", validEpochMs)).toBe(
+      "site_argument_validation",
+    );
+    expect(parkFailureSiteToken(validEventId, "login_required", -1)).toBe(
+      "site_argument_validation",
+    );
+    expect(parkFailureSiteToken(validEventId, "login_required", 1_784_000_000.5)).toBe(
+      "site_argument_validation",
+    );
   });
 });
 

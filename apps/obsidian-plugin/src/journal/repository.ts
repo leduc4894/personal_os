@@ -166,7 +166,14 @@ function sqlText(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
-function isUuid(value: string): boolean {
+/**
+ * Whether one string is a canonical lowercase UUID — the exact shape
+ * {@link JournalRepository.markEventWaitingRetry}'s own argument
+ * validation checks. Exported (diagnostic round U2) so the queue driver's
+ * park throw-site discriminator re-checks the SAME precondition outside
+ * the repository, with identical semantics.
+ */
+export function isUuid(value: string): boolean {
   return UUID_PATTERN.test(value);
 }
 
