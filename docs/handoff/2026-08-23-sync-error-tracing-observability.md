@@ -7,10 +7,16 @@
 `cfbfced..69ea532` (Tasks 1–4); **last implementation SHA before Task 5
 `69ea532`** (`feat: expose sync rejection diagnostics to the web admin`).
 Task 5 (operations documentation and closure) lands as three commits —
-`test: allow the diagnostics notice surface`, `docs: record the rejection
-ring operation label ruling`, `docs: record sync error tracing operations`
-— whose SHAs and the final re-run evidence are recorded in
-`.superpowers/sdd/2026-08-23-sync-error-tracing-observability/task-5-report.md`.
+`2033e9a` (`test: allow the diagnostics notice surface`), `31173ca`
+(`docs: record the rejection ring operation label ruling`), `addade86`
+(`docs: record sync error tracing operations`) — followed by the
+whole-branch review fixes `5c84915` (`docs: correct the sync tracing
+runbook vocabularies and backlog triggers`) and this bookkeeping commit,
+which exists only to complete this SHA record.
+**Final branch head at plan close-out: this commit** — the one commit
+after `5c84915` (its SHA is recorded in the task-5 report appendix of
+`.superpowers/sdd/2026-08-23-sync-error-tracing-observability/task-5-report.md`,
+which also holds the final re-run evidence).
 
 Living operational status: `docs/operations/sync-error-tracing.md` (the
 runbook this plan set out to produce). Ledger with per-task evidence:
@@ -134,6 +140,13 @@ mystery M1 — it is the one open item (§6, one BACKLOG row).**
 - Contract alignment: `tests/contract/api/test_plugin_authentication_bundle.py`
   `ALLOWED_OBSIDIAN_IMPORT_NAMES` += `Notice` (RED → GREEN).
 - BACKLOG: five rows added (see §5/§6).
+- Whole-branch review fixes (2026-08-23): the runbook names only the three
+  commands the plugin actually registers (the convergence work removed
+  `Sync now` / `Sync existing files`) and lists all twelve
+  `JournalSafeErrorLabel` members; the two BACKLOG "next diagnostics
+  cleanup" implement-by values were reworded to the verifiable
+  "Before next plugin release" trigger; this handoff's final-SHA record
+  was completed (header).
 
 ## 5. Deferred minors (rulings; one BACKLOG line each)
 
@@ -149,12 +162,13 @@ mystery M1 — it is the one open item (§6, one BACKLOG row).**
 - **Export/settings typing batch (Task 2 review; deferred, minor):**
   `stopReasonTokens` typed `string[]` one layer short of the closed token
   type (house-consistent); fire-and-forget copy command theoretical
-  unhandled rejection; tail element order cosmetic. Ruling: defer to the
-  next diagnostics cleanup.
+  unhandled rejection; tail element order cosmetic. Ruling: defer — close
+  before the next plugin release.
 - **Self-check hygiene batch (Task 3 review; deferred, minor):**
   counter-saturation conservative-pass edge at the 999 append-failure cap
   undocumented; flat closed-token union crosses vocabularies without
-  per-vocabulary narrowing. Ruling: defer to the next diagnostics cleanup.
+  per-vocabulary narrowing. Ruling: defer — close before the next plugin
+  release.
   (The "probe read-back is in-memory (sound)" and "fire-and-forget without
   catch (house-consistent)" notes were informational only — no BACKLOG
   row.)
