@@ -38,6 +38,12 @@ RETRYABLE_CONTENTION_SQLSTATES: Final[frozenset[str]] = frozenset(
 _UNAVAILABLE_SQLSTATE_PREFIX: Final[str] = "08"
 _UNAVAILABLE_SQLSTATES: Final[frozenset[str]] = frozenset({"53300", "57P01", "57P02", "57P03"})
 
+#: Integrity-constraint SQLSTATE class prefix (``23xxx``): a server-side
+#: constraint rejection returned on a healthy connection, so the transaction
+#: deterministically rolled back. Classification reads only this closed class
+#: prefix and the exception shape — never the constraint name or message.
+_INTEGRITY_SQLSTATE_PREFIX: Final[str] = "23"
+
 #: Cancellable retry jitter bounds from the canonical transaction contract.
 RETRY_JITTER_MINIMUM_SECONDS: Final[float] = 0.05
 RETRY_JITTER_MAXIMUM_SECONDS: Final[float] = 0.25
@@ -47,6 +53,7 @@ class DatabaseFailureKind(StrEnum):
     """Closed classification of a driver or database failure."""
 
     CONTENTION = "contention"
+    INTEGRITY = "integrity"
     UNAVAILABLE = "unavailable"
     UNCLASSIFIED_DATABASE = "unclassified_database"
     NOT_DATABASE = "not_database"
@@ -78,6 +85,8 @@ def classify_database_failure(cause: BaseException) -> DatabaseFailureKind:
     if sqlstate is not None:
         if sqlstate in RETRYABLE_CONTENTION_SQLSTATES:
             return DatabaseFailureKind.CONTENTION
+        if sqlstate.startswith(_INTEGRITY_SQLSTATE_PREFIX):
+            return DatabaseFailureKind.INTEGRITY
         if sqlstate.startswith(_UNAVAILABLE_SQLSTATE_PREFIX) or sqlstate in _UNAVAILABLE_SQLSTATES:
             return DatabaseFailureKind.UNAVAILABLE
     if isinstance(
@@ -96,18 +105,29 @@ def classify_database_failure(cause: BaseException) -> DatabaseFailureKind:
 def map_database_failure(cause: BaseException, *, source_id: UUID) -> ApplicationError:
     """Map a database or driver failure onto the closed error registry.
 
-    Contention maps to the retryable ``source_concurrency_busy``; unavailability
-    and any unclassified database failure map to the retryable
-    ``source_commit_outcome_unknown`` because the transaction outcome could not
-    be determined and must never be guessed (design section 9.4). A non-database
-    exception is an internal bug and crosses the boundary as ``internal_error``.
-    The cause remains chained only; its text never enters the mapped error.
+    Contention maps to the retryable ``source_concurrency_busy``; an
+    integrity-constraint violation (``23xxx``) maps to the redacted
+    non-retryable ``internal_error`` because the server returned a
+    deterministic rejection on a healthy connection — it is never the
+    retryable ``source_commit_outcome_unknown`` (the outcome is proven
+    rolled back) and never a typed business conflict: only the publication
+    boundary's guarded locator pre-check produces ``source_locator_conflict``,
+    so an unrelated constraint violation — whatever its name — must not wear
+    that label. Unavailability and any unclassified database failure map to
+    the retryable ``source_commit_outcome_unknown`` because the transaction
+    outcome could not be determined and must never be guessed (design
+    section 9.4). A non-database exception is an internal bug and crosses
+    the boundary as ``internal_error``. The cause remains chained only; its
+    SQLSTATE, constraint name, statement and text never enter the mapped
+    error.
     """
     failure_kind = classify_database_failure(cause)
     if failure_kind is DatabaseFailureKind.CONTENTION:
         return SourcePublicationError(
             ErrorCode.SOURCE_CONCURRENCY_BUSY, safe_details={"source_id": source_id}
         )
+    if failure_kind is DatabaseFailureKind.INTEGRITY:
+        return InternalApplicationError(ErrorCode.INTERNAL_ERROR)
     if failure_kind is DatabaseFailureKind.NOT_DATABASE:
         return InternalApplicationError(ErrorCode.INTERNAL_ERROR)
     return SourcePublicationError(

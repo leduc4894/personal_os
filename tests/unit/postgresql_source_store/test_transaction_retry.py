@@ -238,13 +238,13 @@ async def test_integrity_failure_maps_without_retry_or_recovery_lookup() -> None
     """A server-returned 23xxx proves a deterministic rollback.
 
     A constraint violation carries a server SQLSTATE on a healthy connection,
-    so it is never an uncertain acknowledgement: the retryable
-    ``source_commit_outcome_unknown`` mapping is returned after exactly one
-    attempt, without consulting the recovery lookup or consuming jitter. The
-    caller's sanctioned retry then flows through the preflight-style lookup,
-    where an ``event_id`` collision hydrates into the typed
-    ``source_event_identity_mismatch`` / ``source_idempotency_mismatch``
-    rejection instead of the retry loop.
+    so it is never an uncertain acknowledgement: the redacted non-retryable
+    ``internal_error`` mapping is returned after exactly one attempt, without
+    consulting the recovery lookup or consuming jitter. An unrelated
+    integrity violation is never the retryable
+    ``source_commit_outcome_unknown`` and never the typed
+    ``source_locator_conflict`` — only the publication boundary's guarded
+    locator pre-check produces that business verdict.
     """
     sleep = _SleepRecorder()
     recovery = _RecoveryRecorder("committed", committed="must-not-be-used")
@@ -255,7 +255,7 @@ async def test_integrity_failure_maps_without_retry_or_recovery_lookup() -> None
         attempts.append(attempt)
         raise integrity_cause
 
-    with pytest.raises(SourcePublicationError) as captured:
+    with pytest.raises(InternalApplicationError) as captured:
         await DatabaseRetryPolicy().run(
             operation,
             source_id=uuid4(),
@@ -264,8 +264,8 @@ async def test_integrity_failure_maps_without_retry_or_recovery_lookup() -> None
             recover=recovery,
         )
     error = captured.value
-    assert error.error_code is ErrorCode.SOURCE_COMMIT_OUTCOME_UNKNOWN
-    assert error.is_retryable is True
+    assert error.error_code is ErrorCode.INTERNAL_ERROR
+    assert error.is_retryable is False
     assert error.__cause__ is integrity_cause
     assert attempts == [1]
     assert recovery.calls == 0

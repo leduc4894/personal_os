@@ -9,10 +9,13 @@ closed landing of each shape. This gate pins the corpus hash, proves the
 Obsidian plugin's vitest replay reads exactly these bytes and passes them
 through the real hand-mirrored client, and replays every route-reachable
 entry against the real application factory so the served envelopes and the
-corpus cannot drift apart. One entry — the defensive
-``small_file_upload_state_invalid`` mapping — is unreachable through the
-served routes by design (a committed identity always replays its frozen
-receipt first) and stays corpus-only plugin-side coverage.
+corpus cannot drift apart. Two entries are unreachable through the served
+routes of this harness by design — the defensive
+``small_file_upload_state_invalid`` mapping (a committed identity always
+replays its frozen receipt first) and the typed create-time
+``source_locator_conflict`` (produced only by the durable publication
+store's guarded locator pre-check, which the offline harness double does not
+model) — and stay corpus-only plugin-side coverage.
 """
 
 from __future__ import annotations
@@ -71,7 +74,7 @@ def policy_harness() -> Iterator[SmallFileWireHarness]:
 #: The cross-language contract hash: both language replays consume these
 #: exact bytes; changing the corpus means updating this registry in the same
 #: commit.
-WIRE_GOLDEN_SHA256: Final[str] = "8cc32494893dbddddda7b53a1e1d5afbf7945d0d44107a6ea99765ebfa968e2f"
+WIRE_GOLDEN_SHA256: Final[str] = "b8683dccb406c98ffead888697531d09fce91442768396d388364bd4386c2d38"
 
 #: The TypeScript replay suite that must read the fixture file.
 TS_REPLAY_SOURCE: Final[str] = "apps/obsidian-plugin/src/journal/sync-wire-contract.test.ts"
@@ -81,11 +84,16 @@ _CONTENT_DIGEST: Final[str] = sha256(_CONTENT).hexdigest()
 _MEDIA_TYPE: Final[str] = "text/markdown"
 _CURRENT_BASE_COMMITTED_AT: Final[datetime] = datetime(2026, 8, 18, 0, 0, 0, tzinfo=UTC)
 
-#: The one corpus entry the served routes can never produce: a committed
-#: identity answers its frozen replay before any state transition, so the
-#: code exists only as the plugin's defensive mapping.
+#: The corpus entries the served routes of this harness can never produce: a
+#: committed identity answers its frozen replay before any state transition
+#: (``small_file_upload_state_invalid`` exists only as the plugin's defensive
+#: mapping), and the typed create-time locator conflict is produced only by
+#: the durable publication store's guarded pre-check — the harness's offline
+#: publication double models no active-locator unique index — so
+#: ``content_source_locator_conflict`` stays corpus/plugin-side coverage while
+#: its registered status mapping is pinned by the API error-contract suite.
 _ROUTE_UNREACHABLE_ENTRIES: Final[frozenset[str]] = frozenset(
-    {"error_small_file_upload_state_invalid"}
+    {"error_small_file_upload_state_invalid", "content_source_locator_conflict"}
 )
 
 
@@ -356,13 +364,15 @@ def test_every_route_reachable_entry_replays_against_the_real_routes(
         _assert_envelope_matches_entry(entry, response)
 
 
-def test_the_state_invalid_entry_is_corpus_only_plugin_coverage() -> None:
-    """The defensive mapping cannot be produced through the served routes.
+def test_route_unreachable_entries_stay_corpus_only_plugin_coverage() -> None:
+    """The route-unreachable shapes cannot be produced through these routes.
 
     A committed identity always answers its frozen replay first, so no
-    request sequence reaches ``small_file_upload_state_invalid``; the corpus
-    entry exists so the plugin's defensive mapping is still pinned in the
-    TypeScript replay.
+    request sequence reaches ``small_file_upload_state_invalid``; and the
+    typed create-time ``source_locator_conflict`` answers only from the
+    durable publication store's guarded locator pre-check, which the offline
+    harness double does not model. Both entries exist so their plugin-side
+    landings are still pinned in the TypeScript replay.
     """
 
     names = {entry["name"] for entry in _entries()}

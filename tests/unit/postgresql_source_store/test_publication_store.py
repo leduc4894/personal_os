@@ -21,6 +21,7 @@ from tests.unit.sources.fakes import (
 )
 
 from personal_os.error_contracts.codes import ErrorCategory, ErrorCode
+from personal_os.error_contracts.exceptions import InternalApplicationError
 from personal_os.exclusion_policy.contracts import PolicySubject
 from personal_os.exclusion_policy.enforcement import (
     AllowedPolicyRevisionBinding,
@@ -707,16 +708,18 @@ async def test_locator_free_create_skips_the_locator_guard_entirely(
 
 
 @pytest.mark.asyncio
-async def test_foreign_unique_violation_keeps_the_outcome_unknown_mapping(
+async def test_foreign_unique_violation_is_redacted_never_a_locator_conflict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only the active-locator constraint is translated; other 23505s are not.
+    """Only the active-locator pre-check is translated; other 23505s are not.
 
     A unique violation from a different constraint in the same create
-    transaction must keep crossing the boundary as the retryable
-    ``source_commit_outcome_unknown`` (the classification contract of
-    ``error_mapping``): the typed conflict is scoped strictly to the guarded
-    locator pre-check, never to SQLSTATE 23505 at large.
+    transaction must keep crossing the boundary as the redacted non-retryable
+    ``internal_error`` of the narrowed classification contract in
+    ``error_mapping`` (never the retryable
+    ``source_commit_outcome_unknown`` and never the typed conflict): the
+    typed conflict is scoped strictly to the guarded locator pre-check,
+    never to SQLSTATE 23505 at large.
     """
 
     command = build_create_command(initial_locator=NormalizedLocator("notes/owner-clash.md"))
@@ -729,11 +732,11 @@ async def test_foreign_unique_violation_keeps_the_outcome_unknown_mapping(
         sources_insert_violates=True,
     )
 
-    with pytest.raises(SourcePublicationError) as raised:
+    with pytest.raises(InternalApplicationError) as raised:
         await _commit_create(store, command)
 
-    assert raised.value.error_code is ErrorCode.SOURCE_COMMIT_OUTCOME_UNKNOWN
-    assert raised.value.is_retryable is True
+    assert raised.value.error_code is ErrorCode.INTERNAL_ERROR
+    assert raised.value.is_retryable is False
 
 
 _MISSING: Final[object] = object()

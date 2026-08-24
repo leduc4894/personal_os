@@ -573,11 +573,14 @@ def map_small_file_database_failure(cause: BaseException) -> ApplicationError:
     The small-file registry carries no dependency-unavailable code by design:
     transport-level retries belong to the plugin's bounded foreground retry
     (spec 12), never to the server request path. Every database failure —
-    contention exhausted after the bounded retries, unavailability or an
-    unclassified SQLSTATE — therefore crosses the boundary as the safe
-    ``internal_error``, and a non-database exception is an internal bug of the
-    same class. The cause remains chained only; its text never enters the
-    error.
+    contention exhausted after the bounded retries, unavailability, an
+    integrity-constraint violation (``23xxx``, the narrow non-retryable class
+    of the shared classifier that is never the typed
+    ``source_locator_conflict``) or any other unclassified SQLSTATE —
+    therefore crosses the boundary as the safe ``internal_error``, and a
+    non-database exception is an internal bug of the same class. The cause
+    remains chained only; its SQLSTATE, constraint name and text never enter
+    the error.
     """
     del cause
     return InternalApplicationError(ErrorCode.INTERNAL_ERROR)
@@ -682,8 +685,8 @@ class SmallFileDatabaseRetryPolicy:
 
     At most ``maximum_attempts`` attempts run with the shared cancellable
     50-250 ms jitter. Typed application errors pass through untouched; every
-    other failure — contention exhausted, unavailability or an unclassified
-    database failure — maps through
+    other failure — contention exhausted, unavailability, an integrity-
+    constraint violation or an unclassified database failure — maps through
     :func:`map_small_file_database_failure`, which never leaks SQLSTATE, SQL
     text, parameters or driver messages. No uncertain-commit recovery lookup
     is wired here: the terminal write is idempotent, so a lost commit

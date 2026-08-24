@@ -47,11 +47,34 @@ class _DriverFailure(Exception):
         self.sqlstate = sqlstate
 
 
+class _IntegrityViolation(Exception):
+    """Fake driver integrity violation carrying SQLSTATE and a constraint name."""
+
+    def __init__(self, sqlstate: str, constraint: str) -> None:
+        super().__init__(_SENTINEL_DRIVER_TEXT)
+        self.sqlstate = sqlstate
+        self.constraint_name = constraint
+
+
 def _wrapped_failure(sqlstate: str | None) -> sa_exc.DBAPIError:
     return sa_exc.DBAPIError(
         _SENTINEL_STATEMENT,
         {_SENTINEL_PARAMETER_KEY: _SENTINEL_PARAMETER_VALUE},
         _DriverFailure(sqlstate),
+    )
+
+
+def _integrity_error(sqlstate: str, constraint: str) -> sa_exc.IntegrityError:
+    """Build one driver integrity violation with constraint diag context.
+
+    The constraint name is deliberate adapter-side evidence: classification
+    may read the closed SQLSTATE class and the exception shape, but neither
+    the constraint name nor the SQLSTATE may ever cross the mapped boundary.
+    """
+    return sa_exc.IntegrityError(
+        _SENTINEL_STATEMENT,
+        {_SENTINEL_PARAMETER_KEY: _SENTINEL_PARAMETER_VALUE},
+        _IntegrityViolation(sqlstate, constraint),
     )
 
 
@@ -87,8 +110,19 @@ def test_operational_error_without_sqlstate_classifies_as_unavailable() -> None:
 
 
 def test_other_database_failure_classifies_as_unclassified_database() -> None:
-    assert classify_database_failure(_wrapped_failure("23514")) is (
+    # 22012 is outside every closed class (contention/integrity/unavailable),
+    # so it stays the genuine unclassified-database shape.
+    assert classify_database_failure(_wrapped_failure("22012")) is (
         DatabaseFailureKind.UNCLASSIFIED_DATABASE
+    )
+
+
+@pytest.mark.parametrize("sqlstate", ["23001", "23503", "23505", "23514"])
+def test_integrity_class_sqlstates_classify_as_integrity(sqlstate: str) -> None:
+    # Classification keys on the closed ``23xxx`` class prefix only — the
+    # constraint name never participates.
+    assert classify_database_failure(_integrity_error(sqlstate, "any_constraint")) is (
+        DatabaseFailureKind.INTEGRITY
     )
 
 
@@ -121,7 +155,7 @@ def test_unavailable_maps_to_retryable_unknown_commit_outcome() -> None:
 
 def test_unclassified_database_failure_maps_to_unknown_commit_outcome() -> None:
     source_id = uuid4()
-    error = map_database_failure(_wrapped_failure("23514"), source_id=source_id)
+    error = map_database_failure(_wrapped_failure("22012"), source_id=source_id)
     assert isinstance(error, SourcePublicationError)
     assert error.error_code is ErrorCode.SOURCE_COMMIT_OUTCOME_UNKNOWN
     assert error.is_retryable is True
@@ -131,6 +165,22 @@ def test_non_database_failure_maps_to_internal_error() -> None:
     error = map_database_failure(RuntimeError(_SENTINEL_DRIVER_TEXT), source_id=uuid4())
     assert isinstance(error, InternalApplicationError)
     assert error.error_code is ErrorCode.INTERNAL_ERROR
+
+
+def test_unrelated_integrity_error_is_not_a_locator_conflict() -> None:
+    mapped = map_database_failure(
+        _integrity_error(sqlstate="23505", constraint="other_unique"), source_id=uuid4()
+    )
+    assert mapped.error_code is not ErrorCode.SOURCE_LOCATOR_CONFLICT
+    assert mapped.is_retryable is False
+
+
+def test_mapping_never_exposes_database_details() -> None:
+    mapped = map_database_failure(
+        _integrity_error(sqlstate="23505", constraint="private_name"), source_id=uuid4()
+    )
+    assert "23505" not in str(mapped)
+    assert "private_name" not in str(mapped)
 
 
 def test_mapped_errors_never_leak_sql_parameters_or_driver_text() -> None:

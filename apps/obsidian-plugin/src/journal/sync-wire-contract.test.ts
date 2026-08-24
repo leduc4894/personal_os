@@ -144,6 +144,7 @@ describe("shared small-file sync wire-contract corpus (spec 10, 12)", () => {
     expect([...failureKinds].sort()).toEqual(
       [
         "access_expired",
+        "blocked_conflict",
         "blocked_size",
         "integrity_failed",
         "login_required",

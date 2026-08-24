@@ -567,6 +567,17 @@ describe("queue driver outcome mapping (spec 10.1 table, 12)", () => {
     expect(harness.repository.readEventAttemptHistory(conflicted.eventId).at(-1)?.outcomeLabel).toBe(
       "blocked_conflict",
     );
+    // The terminal trail carries the closed tokens — the plugin kind and the
+    // server's closed registry code — plus only the envelope's UUID-gated
+    // request id: no status, URL, body text or any database detail.
+    const wireFailure = harness.diagnosticTrail.entries.find(
+      (entry) => entry.kind === "wire_failure",
+    );
+    expect(wireFailure?.tokens).toEqual([
+      "blocked_conflict",
+      "source_locator_conflict",
+      { requestId: "66666666-6666-4666-8666-666666666666" },
+    ]);
     // The queue moved on: the follower event was reached in the same pass
     // instead of the whole pass ending behind a retryable verdict.
     expect(scripted.preflightBodies.map((body) => body["normalized_locator"])).toEqual([

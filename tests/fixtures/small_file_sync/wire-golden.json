@@ -106,6 +106,13 @@
       "status": 403,
       "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d0f\",\"data\":null,\"warnings\":[],\"error\":{\"code\":\"exclusion_policy_denied\",\"message\":\"The exclusion policy denied this operation\",\"retryable\":false,\"details\":{\"policy_revision_number\":2}}}",
       "plugin_expectation": { "kind": "failure", "failureKind": "login_required" }
+    },
+    {
+      "name": "content_source_locator_conflict",
+      "surface": "content",
+      "status": 409,
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d10\",\"data\":null,\"warnings\":[],\"error\":{\"code\":\"source_locator_conflict\",\"message\":\"Source lifecycle locator conflicts with existing canonical state\",\"retryable\":false,\"details\":{}}}",
+      "plugin_expectation": { "kind": "failure", "failureKind": "blocked_conflict" }
     }
   ]
 }
