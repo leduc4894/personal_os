@@ -69,6 +69,15 @@ def test_classifier_returns_only_closed_reason_tokens(
     assert _PROVIDER_MESSAGE_SENTINEL not in serialized
 
 
+def test_diagnostic_serializer_rejects_reason_outside_fixed_allowlist() -> None:
+    """Allowing an arbitrary reason would let unsafe text enter the record."""
+
+    with pytest.raises(ValueError, match="reason is not allowed"):
+        live_conftest.ZeroByteLiveDiagnostic(
+            stage="store", reason=_PROVIDER_MESSAGE_SENTINEL
+        ).to_json()
+
+
 class _PrimaryFailure(Exception):
     pass
 

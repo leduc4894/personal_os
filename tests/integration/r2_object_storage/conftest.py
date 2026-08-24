@@ -139,6 +139,8 @@ class ZeroByteLiveDiagnostic:
 
         if self.stage not in _ZERO_BYTE_STAGES:
             raise ValueError("zero-byte diagnostic stage is not allowed")
+        if self.reason not in _ZERO_BYTE_REASONS:
+            raise ValueError("zero-byte diagnostic reason is not allowed")
         return json.dumps(
             {
                 "event": _ZERO_BYTE_FAILURE_EVENT,
@@ -201,10 +203,20 @@ def _sanitized_zero_byte_system_out(test_case: ElementTree.Element) -> str | Non
     streams = [child for child in test_case if _xml_local_name(child.tag) == "system-out"]
     if len(streams) != 1 or streams[0].text is None:
         return None
-    try:
-        record = json.loads(streams[0].text)
-    except json.JSONDecodeError, TypeError:
+    records: list[object] = []
+    for raw_line in streams[0].text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("{"):
+            continue
+        if not line.endswith("}"):
+            return None
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError, TypeError:
+            return None
+    if len(records) != 1:
         return None
+    record = records[0]
     if not isinstance(record, dict) or set(record) != {"event", "stage", "reason"}:
         return None
     event = record.get("event")
@@ -244,6 +256,7 @@ def sanitize_live_junit_report(raw_report: Path, sanitized_report: Path) -> None
         for child in list(parent):
             local_name = _xml_local_name(child.tag)
             if local_name == "system-out" and zero_byte_system_out is not None:
+                child.clear()
                 child.text = zero_byte_system_out
             elif local_name in {"properties", "system-out", "system-err"}:
                 parent.remove(child)

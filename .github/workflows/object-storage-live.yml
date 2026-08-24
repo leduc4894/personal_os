@@ -85,7 +85,10 @@ jobs:
           test_status=0
           sanitize_status=0
           uv run pytest tests/integration/r2_object_storage/test_live_r2_adapter.py \
-            -m r2_live -q --tb=no --no-summary --junitxml="$raw_report" \
+            -m r2_live -q --tb=no --no-summary \
+            -o junit_logging=system-out \
+            -o junit_log_passing_tests=false \
+            --junitxml="$raw_report" \
             || test_status=$?
           uv run python -m tests.integration.r2_object_storage.conftest \
             sanitize-junit --source "$raw_report" --destination "$sanitized_report" \

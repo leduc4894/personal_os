@@ -716,6 +716,8 @@ def test_r2_live_workflow_uploads_only_postprocessed_junit() -> None:
         "sanitize-junit",
         "--tb=no",
         "--no-summary",
+        "-o junit_logging=system-out",
+        "-o junit_log_passing_tests=false",
     ):
         assert required in run_body
     assert "if: always()" in raw_cleanup_body
