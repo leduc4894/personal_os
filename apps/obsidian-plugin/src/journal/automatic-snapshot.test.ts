@@ -126,6 +126,24 @@ describe("AutomaticSnapshotCoordinator", () => {
     expect(runPassCallCount).toBe(2);
   });
 
+  it("reports a queue drain failure while preserving the settled request", async () => {
+    const tokens: string[] = [];
+    const dispatcher = new CoalescingQueuePassDispatcher(
+      {
+        runPass: async () => {
+          throw new Error("sentinel");
+        },
+      },
+      {
+        reportJournalFailure: (token) => tokens.push(token),
+      },
+    );
+
+    await dispatcher.request();
+
+    expect(tokens).toEqual(["queue_drain_failed"]);
+  });
+
   it("aborts the active snapshot and waits for it to quiesce when stopped", async () => {
     let started = false;
     let stopped = false;
@@ -150,6 +168,26 @@ describe("AutomaticSnapshotCoordinator", () => {
 
     expect(stopped).toBe(true);
     expect(queuePassCallCount).toBe(0);
+  });
+
+  it("reports a snapshot drain failure while preserving the settled request", async () => {
+    const tokens: string[] = [];
+    const coordinator = new AutomaticSnapshotCoordinator(
+      {
+        runSnapshot: async () => {
+          throw new Error("sentinel");
+        },
+        requestQueuePass: async () => undefined,
+      },
+      {
+        reportJournalFailure: (token) => tokens.push(token),
+      },
+    );
+
+    coordinator.request("startup");
+    await waitUntil(() => tokens.length === 1);
+
+    expect(tokens).toEqual(["snapshot_drain_failed"]);
   });
 
   it("requests a policy-revision snapshot only after a verified refresh advances the revision", async () => {

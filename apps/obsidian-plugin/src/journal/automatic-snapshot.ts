@@ -1,4 +1,5 @@
 import type { QueuePassSummary } from "./queue-driver";
+import type { JournalFailureReporter } from "./diagnostic-reporter";
 
 export type AutomaticSnapshotReason = "startup" | "policy_accepted" | "policy_revision_advanced";
 
@@ -23,12 +24,17 @@ export interface CoalescingQueuePassRunner {
  */
 export class CoalescingQueuePassDispatcher {
   readonly #runner: CoalescingQueuePassRunner;
+  readonly #failureReporter: JournalFailureReporter | null;
   #hasFollowUpPass = false;
   #isStopped = false;
   #drainPromise: Promise<void> | null = null;
 
-  constructor(runner: CoalescingQueuePassRunner) {
+  constructor(
+    runner: CoalescingQueuePassRunner,
+    failureReporter: JournalFailureReporter | null = null,
+  ) {
     this.#runner = runner;
+    this.#failureReporter = failureReporter;
   }
 
   request(): Promise<void> {
@@ -37,7 +43,10 @@ export class CoalescingQueuePassDispatcher {
     }
     this.#hasFollowUpPass = true;
     if (this.#drainPromise === null) {
-      const drainPromise = this.#drain().catch(() => undefined);
+      const drainPromise = this.#drain().catch(() => {
+        this.#failureReporter?.reportJournalFailure("queue_drain_failed");
+        return undefined;
+      });
       this.#drainPromise = drainPromise;
       void drainPromise.finally(() => {
         if (this.#drainPromise === drainPromise) {
@@ -89,13 +98,18 @@ export async function refreshVerifiedPolicyAndRequestSnapshot(
 
 export class AutomaticSnapshotCoordinator {
   readonly #runner: AutomaticSnapshotRunner;
+  readonly #failureReporter: JournalFailureReporter | null;
   #hasFollowUpSnapshot = false;
   #isStopped = false;
   readonly #abortController = new AbortController();
   #drainPromise: Promise<void> | null = null;
 
-  constructor(runner: AutomaticSnapshotRunner) {
+  constructor(
+    runner: AutomaticSnapshotRunner,
+    failureReporter: JournalFailureReporter | null = null,
+  ) {
     this.#runner = runner;
+    this.#failureReporter = failureReporter;
   }
 
   request(reason: AutomaticSnapshotReason): void {
@@ -103,7 +117,10 @@ export class AutomaticSnapshotCoordinator {
     if (this.#isStopped) return;
     this.#hasFollowUpSnapshot = true;
     if (this.#drainPromise === null) {
-      const drainPromise = this.#drain().catch(() => undefined);
+      const drainPromise = this.#drain().catch(() => {
+        this.#failureReporter?.reportJournalFailure("snapshot_drain_failed");
+        return undefined;
+      });
       this.#drainPromise = drainPromise;
       void drainPromise.finally(() => {
         if (this.#drainPromise === drainPromise) {

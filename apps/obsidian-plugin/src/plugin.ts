@@ -613,7 +613,8 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       // Retained so the settings snapshot and the copy-sync-diagnostics
       // export can read the trail without re-creating the sidecar port.
       this.#diagnosticTrail = diagnosticTrail;
-      this.#journalFailureReporter = createJournalFailureReporter(diagnosticTrail);
+      const journalFailureReporter = createJournalFailureReporter(diagnosticTrail);
+      this.#journalFailureReporter = journalFailureReporter;
       this.#flushBufferedStartupFailureEntries(diagnosticTrail);
       startupStage = "wasm_read";
       const engineWasmBinary = await this.#readJournalEngineWasmBinary();
@@ -688,7 +689,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         runPass: async () => {
           return await this.#runBoundedQueuePass();
         },
-      });
+      }, journalFailureReporter);
       const automaticSnapshotCoordinator = new AutomaticSnapshotCoordinator({
         runSnapshot: async (signal) => {
           if (signal.aborted || !this.#canCaptureVaultChanges()) {
@@ -730,7 +731,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         requestQueuePass: async () => {
           await boundedQueuePassDispatcher.request();
         },
-      });
+      }, journalFailureReporter);
       this.#journalPersistence = persistence;
       this.#capture = capture;
       this.#queueDriver = queueDriver;

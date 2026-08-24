@@ -239,6 +239,12 @@ describe("Obsidian plugin composition root", () => {
     expect(coordinatorBody).toContain('snapshot.kind === "reconcile_required"');
     expect(coordinatorBody).toContain("capture.runAutomaticSnapshot({ signal })");
     expect(coordinatorBody).toContain("await boundedQueuePassDispatcher.request()");
+    expect(coordinatorBody).toContain("journalFailureReporter");
+
+    const dispatcherIndex = pluginSource.indexOf("new CoalescingQueuePassDispatcher(");
+    expect(dispatcherIndex).toBeGreaterThanOrEqual(0);
+    const dispatcherBody = pluginSource.slice(dispatcherIndex, dispatcherIndex + 800);
+    expect(dispatcherBody).toContain("journalFailureReporter");
   });
 
   it("arms one cancellable scheduled retry pass after every pass that actually ran", () => {
