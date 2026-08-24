@@ -24,9 +24,9 @@ Task 3 documentation commit: recorded by the commit containing this handoff
 
 Task 2 changed exactly one SHA character in each named workflow, from `actions/setup-node@820762786026740c76336085b0efc47a31fe5020` to `actions/setup-node@820762786026740c76f36085b0efc47a31fe5020`:
 
-1. `.github/workflows/quality.yml` (two references).
-2. `.github/workflows/authentication-acceptance.yml` (one reference).
-3. `.github/workflows/exclusion-policy-acceptance.yml` (one reference).
+1. `.github/workflows/quality.yml:92` (one reference).
+2. `.github/workflows/authentication-acceptance.yml:45` (one reference).
+3. `.github/workflows/exclusion-policy-acceptance.yml:54` (one reference).
 
 Comments, installation behavior, toolchain settings, permissions, triggers, caches, and surrounding workflow content were retained.
 

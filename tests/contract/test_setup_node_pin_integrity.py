@@ -12,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 APPROVED_SETUP_NODE_REFERENCE: Final[str] = (
     "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
 )
-SETUP_NODE_RE = re.compile(r"^\s*uses:\s*(['\"]?)(actions/setup-node@[^\s#'\"]+)\1")
+SETUP_NODE_RE = re.compile(r"^\s*(?:-\s*)?uses:\s*(['\"]?)(actions/setup-node[^\s#'\"]*)\1")
 
 
 def _tracked_workflow_paths() -> list[Path]:
@@ -81,3 +81,23 @@ def test_historical_typo_reports_relative_location(tmp_path: Path) -> None:
         match=r"workflow\.yml:1: actions/setup-node@820762786026740c76336085b0efc47a31fe5020",
     ):
         _assert_approved_setup_node_references(references)
+
+
+@pytest.mark.parametrize(
+    ("reference_line", "expected_reference"),
+    (
+        (
+            "- uses: actions/setup-node@820762786026740c76336085b0efc47a31fe5020",
+            "actions/setup-node@820762786026740c76336085b0efc47a31fe5020",
+        ),
+        ("uses: actions/setup-node", "actions/setup-node"),
+        ("uses: actions/setup-node@", "actions/setup-node@"),
+    ),
+)
+def test_malformed_setup_node_references_are_collected(
+    tmp_path: Path, reference_line: str, expected_reference: str
+) -> None:
+    workflow_path = tmp_path / "workflow.yml"
+    workflow_path.write_text(reference_line + "\n", encoding="utf-8")
+
+    assert _setup_node_references((workflow_path,)) == [("workflow.yml", 1, expected_reference)]
