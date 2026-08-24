@@ -49,7 +49,8 @@ from personal_os.source_lifecycle.commands import (
 from personal_os.source_lifecycle.errors import SourceLifecycleError
 from personal_os.source_lifecycle.metrics import (
     InMemorySourceLifecycleMetrics,
-    SourceLifecycleMetrics,
+    SourceLifecycleDiagnosticsSource,
+    SourceLifecycleMetricsWithDiagnostics,
 )
 from personal_os.source_lifecycle.ports import (
     LifecycleDeviceContext,
@@ -81,16 +82,20 @@ class SourceLifecycleRuntime:
 
     ``service`` is the :class:`SourceLifecycleService` the route hands a
     command to; ``store`` and ``policy`` mirror the injected ports so
-    composition-time introspection remains cheap; ``web_authentication``
-    is the web-authentication runtime that resolves the access Bearer
-    credential to the device context. The offline runtime carries its
-    ``state`` container for tests; the serve graph leaves it unset.
+    composition-time introspection remains cheap; ``metrics`` is the shared
+    write sink; ``lifecycle_diagnostics`` exposes the metrics sink's read
+    side — the closed commit counters and the bounded rejection ring — for
+    the Web Admin lifecycle diagnostics route; ``web_authentication`` is the
+    web-authentication runtime that resolves the access Bearer credential to
+    the device context. The offline runtime carries its ``state`` container
+    for tests; the serve graph leaves it unset.
     """
 
     service: SourceLifecycleService
     store: SourceLifecycleStore
     policy: SourceLifecyclePolicy
-    metrics: SourceLifecycleMetrics
+    metrics: SourceLifecycleMetricsWithDiagnostics
+    lifecycle_diagnostics: SourceLifecycleDiagnosticsSource
     web_authentication: WebAuthenticationRuntime
     state: OfflineSourceLifecycleState | None = None
 
@@ -102,7 +107,7 @@ def compose_source_lifecycle_runtime(
     *,
     store: SourceLifecycleStore,
     policy: SourceLifecyclePolicy,
-    metrics: SourceLifecycleMetrics,
+    metrics: SourceLifecycleMetricsWithDiagnostics,
     web_authentication: WebAuthenticationRuntime,
     clock: Callable[[], datetime] = _lifecycle_default_clock,
 ) -> SourceLifecycleRuntime:
@@ -124,6 +129,7 @@ def compose_source_lifecycle_runtime(
         store=store,
         policy=policy,
         metrics=metrics,
+        lifecycle_diagnostics=metrics,
         web_authentication=web_authentication,
     )
 
@@ -376,7 +382,7 @@ def _replay_key(command: SourceLifecycleCommand) -> str:
 def compose_offline_source_lifecycle(
     *,
     state: OfflineSourceLifecycleState | None = None,
-    metrics: SourceLifecycleMetrics | None = None,
+    metrics: SourceLifecycleMetricsWithDiagnostics | None = None,
 ) -> SourceLifecycleRuntime:
     """Build the deterministic offline source lifecycle runtime.
 
@@ -402,6 +408,7 @@ def compose_offline_source_lifecycle(
         store=store,
         policy=policy,
         metrics=recorder,
+        lifecycle_diagnostics=recorder,
         web_authentication=compose_offline_web_authentication(),
         state=offline_state,
     )

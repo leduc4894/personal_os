@@ -210,6 +210,7 @@ def _harness(
         store=store,  # type: ignore[arg-type]
         policy=policy,  # type: ignore[arg-type]
         metrics=metrics,
+        lifecycle_diagnostics=metrics,
         web_authentication=web_authentication,  # type: ignore[arg-type]
     )
     return _RuntimeHarness(runtime=runtime, credential=credential)

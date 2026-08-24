@@ -1208,6 +1208,51 @@
         "title": "ApiEnvelope[SourceLifecycleCommitData]",
         "type": "object"
       },
+      "ApiEnvelope_SourceLifecycleDiagnosticsData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceLifecycleDiagnosticsData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[SourceLifecycleDiagnosticsData]",
+        "type": "object"
+      },
       "ApiEnvelope_TotpEnrollmentData_": {
         "additionalProperties": false,
         "properties": {
@@ -1786,6 +1831,15 @@
         ],
         "title": "ExclusionPolicyStatusData",
         "type": "object"
+      },
+      "LifecycleMetricOutcome": {
+        "enum": [
+          "committed",
+          "rejected",
+          "replayed"
+        ],
+        "title": "LifecycleMetricOutcome",
+        "type": "string"
       },
       "LifecycleOperation": {
         "description": "The only source lifecycle transitions this child permits.",
@@ -3525,6 +3579,30 @@
         "title": "SmallFileTerminalResultKind",
         "type": "string"
       },
+      "SourceLifecycleCommitCounterData": {
+        "additionalProperties": false,
+        "description": "One commit counter: closed labels plus its count.",
+        "properties": {
+          "count": {
+            "minimum": 0.0,
+            "title": "Count",
+            "type": "integer"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/LifecycleOperation"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/LifecycleMetricOutcome"
+          }
+        },
+        "required": [
+          "operation",
+          "outcome",
+          "count"
+        ],
+        "title": "SourceLifecycleCommitCounterData",
+        "type": "object"
+      },
       "SourceLifecycleCommitData": {
         "additionalProperties": false,
         "description": "The safe receipt of one closed lifecycle commit (spec 19.2).\n\nExactly the eight members of :class:`SourceLifecycleCommitResult` —\nnever a fingerprint, locator text, snapshot bytes, canonical envelope\nor signed payload. The response renders with ``exclude_unset`` so the\n``deleted`` outcome emits ``tombstone_id`` and omits\n``resulting_locator``, mirroring the domain invariant that the\nresulting locator is the canonical locator of the active state only.",
@@ -3591,6 +3669,46 @@
         ],
         "title": "SourceLifecycleCommitData",
         "type": "object"
+      },
+      "SourceLifecycleDiagnosticsData": {
+        "additionalProperties": false,
+        "description": "The lifecycle evidence snapshot of the Admin diagnostics route.",
+        "properties": {
+          "commit_counters": {
+            "items": {
+              "$ref": "#/components/schemas/SourceLifecycleCommitCounterData"
+            },
+            "title": "Commit Counters",
+            "type": "array"
+          },
+          "recent_rejections": {
+            "items": {
+              "$ref": "#/components/schemas/SourceLifecycleRejectionRecordData"
+            },
+            "title": "Recent Rejections",
+            "type": "array"
+          }
+        },
+        "required": [
+          "commit_counters",
+          "recent_rejections"
+        ],
+        "title": "SourceLifecycleDiagnosticsData",
+        "type": "object"
+      },
+      "SourceLifecycleErrorCode": {
+        "description": "The complete externally safe lifecycle error vocabulary.",
+        "enum": [
+          "source_lifecycle_input_invalid",
+          "source_locator_missing",
+          "source_locator_conflict",
+          "source_tombstone_not_found",
+          "source_tombstone_closed",
+          "source_lifecycle_version_conflict",
+          "source_lifecycle_commit_outcome_unknown"
+        ],
+        "title": "SourceLifecycleErrorCode",
+        "type": "string"
       },
       "SourceLifecycleEventRequest": {
         "additionalProperties": false,
@@ -3678,6 +3796,30 @@
           "policy_revision"
         ],
         "title": "SourceLifecycleEventRequest",
+        "type": "object"
+      },
+      "SourceLifecycleRejectionRecordData": {
+        "additionalProperties": false,
+        "description": "One recent rejection of the bounded diagnostics ring.\n\nThe closed error code mirrors the domain error registry, the timestamp is\nan epoch-millisecond integer and the closed operation label stands in for\nthe design's route-template token: the metrics layer sits below the\ncorrelation plumbing that owns route templates, so the label localizes\nthe rejecting operation without claiming route equivalence.",
+        "properties": {
+          "at_epoch_ms": {
+            "minimum": 0.0,
+            "title": "At Epoch Ms",
+            "type": "integer"
+          },
+          "error_code": {
+            "$ref": "#/components/schemas/SourceLifecycleErrorCode"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/LifecycleOperation"
+          }
+        },
+        "required": [
+          "error_code",
+          "at_epoch_ms",
+          "operation"
+        ],
+        "title": "SourceLifecycleRejectionRecordData",
         "type": "object"
       },
       "TotpCodeRequest": {
@@ -4129,6 +4271,25 @@
           }
         },
         "summary": "Publish"
+      }
+    },
+    "/api/admin/source-lifecycle/rejections": {
+      "get": {
+        "description": "Serve the closed lifecycle evidence snapshot (read-only).",
+        "operationId": "getSourceLifecycleRejectionDiagnostics",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_SourceLifecycleDiagnosticsData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Rejection Diagnostics"
       }
     },
     "/api/admin/sync/rejections": {

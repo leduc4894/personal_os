@@ -144,6 +144,26 @@ export type paths = {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/admin/source-lifecycle/rejections": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Get Rejection Diagnostics
+         * @description Serve the closed lifecycle evidence snapshot (read-only).
+         */
+        readonly get: operations["getSourceLifecycleRejectionDiagnostics"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/admin/sync/rejections": {
         readonly parameters: {
             readonly query?: never;
@@ -1107,6 +1127,21 @@ export type components = {
              */
             readonly warnings: readonly components["schemas"]["ApiWarning"][];
         };
+        /** ApiEnvelope[SourceLifecycleDiagnosticsData] */
+        readonly ApiEnvelope_SourceLifecycleDiagnosticsData_: {
+            readonly data: components["schemas"]["SourceLifecycleDiagnosticsData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
         /** ApiEnvelope[TotpEnrollmentData] */
         readonly ApiEnvelope_TotpEnrollmentData_: {
             readonly data: components["schemas"]["TotpEnrollmentData"] | null;
@@ -1377,6 +1412,11 @@ export type components = {
             readonly draft: components["schemas"]["PolicyDraftData"];
             readonly reconciliation: components["schemas"]["PolicyReconciliationSummaryData"] | null;
         };
+        /**
+         * LifecycleMetricOutcome
+         * @enum {string}
+         */
+        readonly LifecycleMetricOutcome: "committed" | "rejected" | "replayed";
         /**
          * LifecycleOperation
          * @description The only source lifecycle transitions this child permits.
@@ -2188,6 +2228,16 @@ export type components = {
          */
         readonly SmallFileTerminalResultKind: "committed" | "no_change";
         /**
+         * SourceLifecycleCommitCounterData
+         * @description One commit counter: closed labels plus its count.
+         */
+        readonly SourceLifecycleCommitCounterData: {
+            /** Count */
+            readonly count: number;
+            readonly operation: components["schemas"]["LifecycleOperation"];
+            readonly outcome: components["schemas"]["LifecycleMetricOutcome"];
+        };
+        /**
          * SourceLifecycleCommitData
          * @description The safe receipt of one closed lifecycle commit (spec 19.2).
          *
@@ -2228,6 +2278,22 @@ export type components = {
             readonly tombstone_id?: string | null;
         };
         /**
+         * SourceLifecycleDiagnosticsData
+         * @description The lifecycle evidence snapshot of the Admin diagnostics route.
+         */
+        readonly SourceLifecycleDiagnosticsData: {
+            /** Commit Counters */
+            readonly commit_counters: readonly components["schemas"]["SourceLifecycleCommitCounterData"][];
+            /** Recent Rejections */
+            readonly recent_rejections: readonly components["schemas"]["SourceLifecycleRejectionRecordData"][];
+        };
+        /**
+         * SourceLifecycleErrorCode
+         * @description The complete externally safe lifecycle error vocabulary.
+         * @enum {string}
+         */
+        readonly SourceLifecycleErrorCode: "source_lifecycle_input_invalid" | "source_locator_missing" | "source_locator_conflict" | "source_tombstone_not_found" | "source_tombstone_closed" | "source_lifecycle_version_conflict" | "source_lifecycle_commit_outcome_unknown";
+        /**
          * SourceLifecycleEventRequest
          * @description The strict lifecycle event commit body (spec 19.2).
          *
@@ -2265,6 +2331,22 @@ export type components = {
             readonly target_locator?: string | null;
             /** Tombstone Id */
             readonly tombstone_id?: string | null;
+        };
+        /**
+         * SourceLifecycleRejectionRecordData
+         * @description One recent rejection of the bounded diagnostics ring.
+         *
+         *     The closed error code mirrors the domain error registry, the timestamp is
+         *     an epoch-millisecond integer and the closed operation label stands in for
+         *     the design's route-template token: the metrics layer sits below the
+         *     correlation plumbing that owns route templates, so the label localizes
+         *     the rejecting operation without claiming route equivalence.
+         */
+        readonly SourceLifecycleRejectionRecordData: {
+            /** At Epoch Ms */
+            readonly at_epoch_ms: number;
+            readonly error_code: components["schemas"]["SourceLifecycleErrorCode"];
+            readonly operation: components["schemas"]["LifecycleOperation"];
         };
         /**
          * TotpCodeRequest
@@ -2542,6 +2624,26 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["ApiEnvelope_PolicyPublicationData_"];
+                };
+            };
+        };
+    };
+    readonly getSourceLifecycleRejectionDiagnostics: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_SourceLifecycleDiagnosticsData_"];
                 };
             };
         };

@@ -84,6 +84,10 @@ from api_runtime.small_file_sync_models import (
 )
 from api_runtime.small_file_sync_routes import create_small_file_sync_route_endpoints
 from api_runtime.source_lifecycle_composition import SourceLifecycleRuntime
+from api_runtime.source_lifecycle_diagnostics_models import SourceLifecycleDiagnosticsData
+from api_runtime.source_lifecycle_diagnostics_routes import (
+    create_source_lifecycle_diagnostics_admin_route_endpoints,
+)
 from api_runtime.source_lifecycle_models import SourceLifecycleCommitData
 from api_runtime.source_lifecycle_routes import create_source_lifecycle_route_endpoints
 from api_runtime.totp_routes import create_totp_route_endpoints
@@ -216,6 +220,9 @@ def create_api_application(
         _register_sync_diagnostics_admin_route(app, web_authentication, small_file_sync)
     if source_lifecycle is not None:
         _register_source_lifecycle_routes(app, web_authentication, source_lifecycle)
+        _register_source_lifecycle_diagnostics_admin_route(
+            app, web_authentication, source_lifecycle
+        )
     _classify_openapi_route(app)
     _suppress_framework_validation_error_document(app)
     # The pure-ASGI correlation middleware declares read-only ``Mapping``
@@ -550,6 +557,30 @@ def _register_source_lifecycle_routes(
         methods=["POST"],
         operation_id="commitSourceLifecycleEvent",
         response_model=ApiEnvelope[SourceLifecycleCommitData],
+    )
+
+
+def _register_source_lifecycle_diagnostics_admin_route(
+    app: FastAPI,
+    web_authentication: WebAuthenticationRuntime,
+    source_lifecycle: SourceLifecycleRuntime,
+) -> None:
+    """Register the closed source lifecycle diagnostics Admin route.
+
+    The route carries its manually assigned semantic operation id and the
+    envelope response model of its strict closed payload; the active-session
+    dependency of the Web Admin surface lives in the endpoint factory, and
+    the payload carries only closed tokens, counts and epoch timestamps.
+    """
+    endpoints = create_source_lifecycle_diagnostics_admin_route_endpoints(
+        web_authentication=web_authentication, source_lifecycle=source_lifecycle
+    )
+    app.add_api_route(
+        "/api/admin/source-lifecycle/rejections",
+        endpoints.get_rejection_diagnostics,
+        methods=["GET"],
+        operation_id="getSourceLifecycleRejectionDiagnostics",
+        response_model=ApiEnvelope[SourceLifecycleDiagnosticsData],
     )
 
 

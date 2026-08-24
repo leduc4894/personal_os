@@ -44,6 +44,7 @@ class ApiRouteTemplate(StrEnum):
     ADMIN_DEVICES = "/api/admin/devices"
     ADMIN_DEVICE_REVOKE = "/api/admin/devices/{device_id}/revoke"
     ADMIN_SYNC_REJECTIONS = "/api/admin/sync/rejections"
+    ADMIN_SOURCE_LIFECYCLE_REJECTIONS = "/api/admin/source-lifecycle/rejections"
     ADMIN_EXCLUSION_POLICY = "/api/admin/exclusion-policy"
     ADMIN_EXCLUSION_POLICY_DRAFT = "/api/admin/exclusion-policy/draft"
     ADMIN_EXCLUSION_POLICY_PREVIEWS = "/api/admin/exclusion-policy/previews"
@@ -146,19 +147,30 @@ SYNC_DIAGNOSTICS_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset
     }
 )
 
+#: The closed source lifecycle diagnostics admin route set: the read-only
+#: commit-counter and rejection-ring evidence surface behind the Web session
+#: contract. Its payloads are per-process counters and ring snapshots that
+#: must never come from a shared cache.
+SOURCE_LIFECYCLE_DIAGNOSTICS_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset(
+    {
+        ApiRouteTemplate.ADMIN_SOURCE_LIFECYCLE_REJECTIONS,
+    }
+)
+
 #: Every route whose responses — success, service rejection and dependency
 #: failure alike — carry ``Cache-Control: no-store`` (spec 16): the
 #: authentication-bound sets plus the exclusion-policy, small-file sync,
-#: source lifecycle and sync diagnostics admin routes, whose payloads are
-#: per-request policy state, signed envelopes, device-derived sync results
-#: and per-process rejection evidence that must never come from a shared
-#: cache.
+#: source lifecycle and the two diagnostics admin route sets, whose payloads
+#: are per-request policy state, signed envelopes, device-derived sync
+#: results and per-process rejection evidence that must never come from a
+#: shared cache.
 NO_STORE_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = (
     AUTHENTICATION_ROUTE_TEMPLATES
     | EXCLUSION_POLICY_ROUTE_TEMPLATES
     | SMALL_FILE_SYNC_ROUTE_TEMPLATES
     | SOURCE_LIFECYCLE_ROUTE_TEMPLATES
     | SYNC_DIAGNOSTICS_ROUTE_TEMPLATES
+    | SOURCE_LIFECYCLE_DIAGNOSTICS_ROUTE_TEMPLATES
 )
 
 #: Immutable view of the no-store template values, for classifying a raw
