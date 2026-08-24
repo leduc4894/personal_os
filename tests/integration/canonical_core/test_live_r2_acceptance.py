@@ -62,7 +62,7 @@ from personal_os.object_storage import (
 )
 from personal_os.object_storage.errors import DIGEST_MISMATCH, ObjectStorageError
 from personal_os.recovery.bundle import FilesystemRecoveryBundleStore
-from personal_os.recovery.contracts import InMemoryCanonicalBackupMetrics
+from personal_os.recovery.contracts import CANONICAL_COUNT_TABLES, InMemoryCanonicalBackupMetrics
 from personal_os.recovery.ports import PostgresqlConnectionTarget
 from personal_os.recovery.service import (
     AcceptanceSmokeProbe,
@@ -630,6 +630,13 @@ async def test_restore_matches_source_bundle_and_post_restore_read(
         )
     )
     counts_at_backup = await harness.table_counts()
+    assert counts_at_backup["policy_previews"] == 1
+    assert "policy_previews" not in CANONICAL_COUNT_TABLES
+    assert "policy_preview_results" not in CANONICAL_COUNT_TABLES
+    counts_at_backup = {
+        table_name: counts_at_backup[table_name] for table_name in CANONICAL_COUNT_TABLES
+    }
+    assert set(counts_at_backup) == set(CANONICAL_COUNT_TABLES)
 
     # Remove the exact published object so the restore must conditionally
     # re-create it in the LIVE bucket from the verified bundle bytes.
@@ -656,11 +663,11 @@ async def test_restore_matches_source_bundle_and_post_restore_read(
     )
 
     assert result.object_count == 1
+    assert set(result.table_counts) == set(CANONICAL_COUNT_TABLES)
     assert dict(result.table_counts) == counts_at_backup
-    assert (
-        dict(await live_restore_target_context.restore_target.read_canonical_counts())
-        == counts_at_backup
-    )
+    restored_counts = dict(await live_restore_target_context.restore_target.read_canonical_counts())
+    assert set(restored_counts) == set(CANONICAL_COUNT_TABLES)
+    assert restored_counts == counts_at_backup
     restored_bytes = await live_restore_target_context.read_service.read_current_source_bytes(
         _read_command(workspace, published), harness.diagnostic_context()
     )
