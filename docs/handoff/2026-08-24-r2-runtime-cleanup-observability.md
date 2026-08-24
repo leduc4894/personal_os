@@ -32,7 +32,7 @@ separately after that implementation commit.
 | Lint | Passed | `uv run poe lint`: Ruff and all pnpm lint workspaces passed. |
 | Python type check | Passed | `uv run poe python-type-check`: mypy success on 182 source files. |
 | Boundary check | Passed | `uv run poe boundary-check`: 5 import contracts kept, 10 architecture tests passed, API artifacts current, generated client check completed. |
-| Diff check | Passed after closure fix | `git diff --check 730ed2a..adba69a` passed after removing the handoff EOF blank line. |
+| Diff check | Passed after closure fix | `git diff --check` passed on the final working tree after removing the handoff EOF blank line. The historical `730ed2a..adba69a` range correctly exposed the defect in the prior handoff commit. |
 | Full verify | Passed after closure fix | `uv run poe verify` passed after the branch-owned formatting fixes. |
 
 ## Deferred items
