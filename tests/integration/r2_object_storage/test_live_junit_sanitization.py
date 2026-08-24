@@ -14,6 +14,7 @@ _TRACEBACK_TOKEN = "provider-stack-frame-sentinel"
 _PROPERTY_TOKEN = "provider-property-sentinel"
 _ORDINARY_OUTPUT_TOKEN = "ordinary-system-out-sentinel"
 _MALFORMED_RECORD_TOKEN = "malformed-diagnostic-sentinel"
+_NESTED_FAILURE_TOKEN = "nested-provider-detail-sentinel"
 
 
 def _zero_byte_record(*, stage: str = "store", reason: str = "provider_timeout") -> str:
@@ -51,13 +52,14 @@ def test_sanitizer_retains_only_one_valid_zero_byte_diagnostic_before_artifact_u
       <property name="provider_request" value="{_PROPERTY_TOKEN}" />
     </properties>
     <testcase classname="live.contract" name="test_call_failure" time="0.50">
-      <failure message="request to {_FAILURE_TOKEN} failed">
+      <failure message="request to {_FAILURE_TOKEN} failed" provider_context="{_NESTED_FAILURE_TOKEN}">
         {_TRACEBACK_TOKEN}: {_REQUEST_TOKEN}
+        <provider-details request="{_NESTED_FAILURE_TOKEN}">{_NESTED_FAILURE_TOKEN}</provider-details>{_NESTED_FAILURE_TOKEN}
       </failure>
       <system-out>captured {_FAILURE_TOKEN} {_ORDINARY_OUTPUT_TOKEN}</system-out>
     </testcase>
     <testcase classname="live.contract" name="test_setup_failure" time="0.75">
-      <error message="setup request {_REQUEST_TOKEN} failed">{_TRACEBACK_TOKEN}</error>
+      <error message="setup request {_REQUEST_TOKEN} failed" provider_context="{_NESTED_FAILURE_TOKEN}">{_TRACEBACK_TOKEN}<provider-details request="{_NESTED_FAILURE_TOKEN}">{_NESTED_FAILURE_TOKEN}</provider-details>{_NESTED_FAILURE_TOKEN}</error>
       <system-err>captured {_PROPERTY_TOKEN}</system-err>
     </testcase>
     <testcase classname="live.r2" name="test_zero_byte_round_trip" time="0.10">
@@ -114,6 +116,7 @@ def test_sanitizer_retains_only_one_valid_zero_byte_diagnostic_before_artifact_u
         _PROPERTY_TOKEN,
         _ORDINARY_OUTPUT_TOKEN,
         _MALFORMED_RECORD_TOKEN,
+        _NESTED_FAILURE_TOKEN,
     ):
         assert forbidden not in sanitized
 

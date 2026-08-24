@@ -248,7 +248,8 @@ def sanitize_live_junit_report(raw_report: Path, sanitized_report: Path) -> None
             elif local_name in {"properties", "system-out", "system-err"}:
                 parent.remove(child)
             elif local_name in {"failure", "error"}:
-                child.attrib.clear()
+                child.clear()
+                child.tail = None
                 child.set("message", _SANITIZED_FAILURE_DETAILS)
                 child.text = _SANITIZED_FAILURE_DETAILS
 
