@@ -5,8 +5,9 @@
 tracing operator surface.  
 **Implementation range:** `3485e48..1a460c2` (Tasks 2–4); Task 1 vocabulary
 and reporter are in `570b815`.  
-**Final implementation commit:** recorded after the final docs/test commit in
-the Task 5 report; this handoff is the closing record.
+**Final implementation commit:** `39603b3f77a08fcb0aa795725aa5a6706c3046f0`
+(`docs: hand off journal diagnostics closure`). This follow-up bookkeeping
+commit records the SHA in the handoff without changing the implementation.
 
 ## Gate status
 
