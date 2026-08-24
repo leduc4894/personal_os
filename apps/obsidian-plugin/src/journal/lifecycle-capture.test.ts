@@ -35,6 +35,8 @@ import {
 import { deriveFrozenFingerprint } from "./fingerprint";
 import { JOURNAL_SCHEMA_VERSION, SqliteDatabase } from "./sqlite-database";
 import type { SqliteEngineModule } from "./sqlite-database";
+import type { JournalFailureReporter } from "./diagnostic-reporter";
+import type { SyncDiagnosticClosedToken } from "./sync-diagnostics-trail";
 
 let engineModule: SqliteEngineModule;
 
@@ -95,6 +97,7 @@ interface Harness {
   readonly vault: FakeVault;
   readonly database: SqliteDatabase;
   readonly policyRevision: number;
+  readonly failureTokens: SyncDiagnosticClosedToken[];
 }
 
 function createHarness(options?: {
@@ -125,12 +128,19 @@ function createHarness(options?: {
   });
   const policyRevision = options?.policyRevision ?? 1;
   const vault = createFakeVault();
+  const failureTokens: SyncDiagnosticClosedToken[] = [];
+  const failureReporter: JournalFailureReporter = {
+    reportJournalFailure(token): void {
+      failureTokens.push(token);
+    },
+  };
   const capture = new LifecycleCaptureImpl({
     repository,
     lifecycle,
     vaultReader: vault,
     nowEpochMs,
     policyRevision,
+    failureReporter,
     ...(options?.settleDelayMs !== undefined ? { settleDelayMs: options.settleDelayMs } : {}),
   });
   return {
@@ -140,6 +150,7 @@ function createHarness(options?: {
     vault,
     database,
     policyRevision,
+    failureTokens,
   };
 }
 
@@ -348,6 +359,24 @@ describe("LifecycleCapture rename vs move (spec 7.1)", () => {
 });
 
 describe("LifecycleCapture tombstone recording (spec 6.3, 7.1)", () => {
+  it("reports a rejected reconcile write while preserving the fail-closed null result", async () => {
+    const harness = createHarness();
+    const real = await realFingerprintOf("uncommitted delete");
+    await harness.repository.recordCapture({
+      normalizedPath: "notes/reconcile-write.md",
+      fingerprint: real.fingerprint,
+      policyRevisionNumber: harness.policyRevision,
+      admission: "policy_allowed",
+    });
+    vi.spyOn(harness.repository.lifecycle.database, "runSerializedMutation")
+      .mockRejectedValueOnce(new Error("persistence rejected"));
+
+    await expect(
+      harness.capture.captureDelete(fakeAbstractFile("notes/reconcile-write.md", "notes")),
+    ).resolves.toBeNull();
+    expect(harness.failureTokens).toEqual(["lifecycle_reconcile_persist_failed"]);
+  });
+
   it("records a delete event and marks the local mapping as tombstoned", async () => {
     const harness = createHarness();
     const real = await realFingerprintOf("delete me");

@@ -25,6 +25,8 @@ import type {
 import { JournalRepository } from "./repository";
 import { JOURNAL_SCHEMA_VERSION, SqliteDatabase } from "./sqlite-database";
 import type { SqliteEngineModule } from "./sqlite-database";
+import type { JournalFailureReporter } from "./diagnostic-reporter";
+import type { SyncDiagnosticClosedToken } from "./sync-diagnostics-trail";
 
 /** The real sql.js WebAssembly engine drives every capture test (spec 6.1). */
 let engineModule: SqliteEngineModule;
@@ -110,6 +112,7 @@ interface CaptureHarness {
   readonly vault: FakeCaptureVault;
   readonly gate: FakePolicyGate;
   readonly lifecycleState: FakeLifecycleState;
+  readonly failureTokens: SyncDiagnosticClosedToken[];
 }
 
 interface AutomaticSnapshotTestHarness {
@@ -145,6 +148,12 @@ function createHarness(options?: {
     options?.policyRevisionNumber ?? 1,
   );
   const { fake: lifecycleCapture, state: lifecycleState } = createFakeLifecycleCapture();
+  const failureTokens: SyncDiagnosticClosedToken[] = [];
+  const failureReporter: JournalFailureReporter = {
+    reportJournalFailure(token): void {
+      failureTokens.push(token);
+    },
+  };
   const capture = new JournalCapture({
     repository,
     vaultReader: vault,
@@ -152,6 +161,7 @@ function createHarness(options?: {
     lifecycleCapture,
     scanMaximumFiles: options?.scanMaximumFiles,
     scanBatchFiles: options?.scanBatchFiles,
+    failureReporter,
   });
   return {
     capture,
@@ -160,6 +170,7 @@ function createHarness(options?: {
     vault,
     gate,
     lifecycleState,
+    failureTokens,
     async captureUnderPolicy(normalizedPath, admission): Promise<void> {
       policyOutcomes.set(normalizedPath, admission === "excluded_policy" ? "excluded" : "allowed");
       vault.setFileBytes(normalizedPath, bytesOf(`fixture ${normalizedPath}`));
@@ -336,6 +347,21 @@ describe("JournalCapture settle admission (spec 7.1, 9)", () => {
     expect(isResolved).toBe(true);
     expect(harness.repository.readLocalFileByPath("notes/gate.md")).not.toBeNull();
     expect(soleEventOf(harness, "notes/gate.md").state).toBe("queued");
+  });
+
+  it("reports a rejected settled admission while preserving its resolved waiter outcome", async () => {
+    useSettleFakeTimers();
+    const harness = createHarness();
+    harness.vault.setFileBytes("notes/rejected-settle.md", bytesOf("content"));
+    vi.spyOn(harness.repository, "recordCapture").mockRejectedValueOnce(
+      new Error("persistence rejected"),
+    );
+
+    const notifyPromise = harness.capture.notifyPathChanged("notes/rejected-settle.md");
+    await vi.advanceTimersByTimeAsync(FILE_SETTLE_DELAY_MS);
+
+    await expect(notifyPromise).resolves.toBeUndefined();
+    expect(harness.failureTokens).toEqual(["settled_admission_failed"]);
   });
 
   it("resolves every superseded notify promise after the one shared admission", async () => {
@@ -591,6 +617,7 @@ describe("JournalCapture automatic restore fail-closed (spec 7.1, child 5 fix ro
       vault,
       gate,
       lifecycleState: { deleteCalls: [], renameCalls: [] },
+      failureTokens: [],
     };
   }
 
@@ -717,6 +744,20 @@ describe("JournalCapture existing-files scan (spec 7.1)", () => {
 });
 
 describe("JournalCapture automatic snapshot admission", () => {
+  it("coalesces rejected automatic admissions into one failure token per scan", async () => {
+    const harness = createHarness();
+    harness.vault.setFileBytes("notes/rejected-one.md", bytesOf("one"));
+    harness.vault.setFileBytes("notes/rejected-two.md", bytesOf("two"));
+    vi.spyOn(harness.repository, "recordCapture").mockRejectedValue(
+      new Error("persistence rejected"),
+    );
+
+    const summary = await harness.capture.runAutomaticSnapshot();
+
+    expect(summary.skippedFileCount).toBe(2);
+    expect(harness.failureTokens).toEqual(["automatic_snapshot_admission_failed"]);
+  });
+
   it("creates an allowed queued successor after a prior policy block", async () => {
     const harness = createHarness();
     await harness.captureUnderPolicy("notes/recovered.md", "excluded_policy");

@@ -40,6 +40,7 @@ import {
   MAX_PENDING_EVENTS,
 } from "./contracts";
 import { deriveFrozenFingerprint } from "./fingerprint";
+import type { JournalFailureReporter } from "./diagnostic-reporter";
 import { JournalStoreError, journalStoreError } from "./sqlite-database";
 import type {
   LifecycleCapture,
@@ -98,6 +99,8 @@ export interface JournalCaptureOptions {
   readonly scanMaximumFiles?: number | undefined;
   /** Snapshot batch size override; defaults to {@link EXISTING_FILES_SCAN_BATCH_FILES}. */
   readonly scanBatchFiles?: number | undefined;
+  /** Closed-token reporter owned by the plugin composition root. */
+  readonly failureReporter?: JournalFailureReporter | null;
 }
 
 const PENDING_EVENT_STATES: ReadonlySet<string> = new Set(JOURNAL_PENDING_EVENT_STATES);
@@ -176,6 +179,7 @@ export class JournalCapture {
   readonly #lifecycleCapture: LifecycleCapture;
   readonly #scanMaximumFiles: number;
   readonly #scanBatchFiles: number;
+  readonly #failureReporter: JournalFailureReporter | null;
   readonly #settleTimers = new Map<string, ReturnType<typeof setTimeout>>();
   readonly #settleWaiters = new Map<string, Set<() => void>>();
   readonly #lifecycleGuardedPaths = new Set<string>();
@@ -195,6 +199,7 @@ export class JournalCapture {
     this.#lifecycleCapture = options.lifecycleCapture;
     this.#scanMaximumFiles = options.scanMaximumFiles ?? EXISTING_FILES_SCAN_MAXIMUM_FILES;
     this.#scanBatchFiles = options.scanBatchFiles ?? EXISTING_FILES_SCAN_BATCH_FILES;
+    this.#failureReporter = options.failureReporter ?? null;
   }
 
   /**
@@ -234,7 +239,13 @@ export class JournalCapture {
           // the tail before closing the store.
           this.#admissionTail = this.#admissionTail
             .then(() => this.#admitNormalizedPath(normalizedPath))
-            .then(() => undefined, () => undefined)
+            .then(
+              () => undefined,
+              () => {
+                this.#failureReporter?.reportJournalFailure("settled_admission_failed");
+                return undefined;
+              },
+            )
             .then(() => this.#releaseSettleWaiters(normalizedPath));
         }, FILE_SETTLE_DELAY_MS),
       );
@@ -332,11 +343,14 @@ export class JournalCapture {
     if (this.#isSnapshotStopped(options.signal)) {
       return stoppedSummary();
     }
-    return this.#captureSnapshot(options.signal);
+    return this.#captureSnapshot(options.signal, true);
   }
 
   /** Enumerate and admit one deterministic bounded regular-file snapshot. */
-  async #captureSnapshot(signal?: AbortSignal): Promise<ExistingFilesScanSummary> {
+  async #captureSnapshot(
+    signal?: AbortSignal,
+    shouldReportAdmissionFailure = false,
+  ): Promise<ExistingFilesScanSummary> {
     if (this.#isSnapshotStopped(signal)) {
       return stoppedSummary();
     }
@@ -354,6 +368,7 @@ export class JournalCapture {
     let processedFileCount = 0;
     let skippedFileCount = 0;
     let queuedEventCount = 0;
+    let hasReportedAdmissionFailure = false;
     for (let offset = 0; offset < boundedPaths.length; offset += this.#scanBatchFiles) {
       const batchPaths = boundedPaths.slice(offset, offset + this.#scanBatchFiles);
       for (const normalizedPath of batchPaths) {
@@ -378,6 +393,10 @@ export class JournalCapture {
             queuedEventCount += 1;
           }
         } catch {
+          if (shouldReportAdmissionFailure && !hasReportedAdmissionFailure) {
+            this.#failureReporter?.reportJournalFailure("automatic_snapshot_admission_failed");
+            hasReportedAdmissionFailure = true;
+          }
           skippedFileCount += 1;
         }
       }

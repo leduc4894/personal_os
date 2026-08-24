@@ -40,6 +40,7 @@ import {
 import type { LifecycleRepository } from "./lifecycle-repository";
 import type { JournalRepository } from "./repository";
 import { deriveFrozenFingerprint } from "./fingerprint";
+import type { JournalFailureReporter } from "./diagnostic-reporter";
 
 // --- structural Vault file surface -----------------------------------------------------------
 
@@ -155,6 +156,8 @@ export interface LifecycleCaptureOptions {
   readonly policyRevision: number;
   /** Optional settle-delay override; defaults to {@link FILE_SETTLE_DELAY_MS}. */
   readonly settleDelayMs?: number;
+  /** Closed-token reporter owned by the plugin composition root. */
+  readonly failureReporter?: JournalFailureReporter | null;
 }
 
 // --- helpers -------------------------------------------------------------------------------
@@ -211,6 +214,7 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
   readonly #createId: () => string;
   readonly #policyRevision: number;
   readonly #settleDelayMs: number;
+  readonly #failureReporter: JournalFailureReporter | null;
 
   readonly #settleTimers = new Map<string, ReturnType<typeof setTimeout>>();
   readonly #settleWaiters = new Map<string, Set<() => void>>();
@@ -231,6 +235,7 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
     this.#createId = options.createId ?? (() => crypto.randomUUID());
     this.#policyRevision = options.policyRevision;
     this.#settleDelayMs = options.settleDelayMs ?? FILE_SETTLE_DELAY_MS;
+    this.#failureReporter = options.failureReporter ?? null;
   }
 
   /**
@@ -333,7 +338,7 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
     }
     if (localFile.sourceId === null || localFile.baseVersionId === null) {
       // Fail closed: missing identity — a later pass must reconcile the row.
-      await this.#flagReconcileRequired().catch(() => undefined);
+      await this.#flagReconcileRequiredOrReport();
       return null;
     }
     const issuedTombstoneId = tombstoneId ?? this.#createId();
@@ -582,14 +587,14 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
       return null;
     }
     if (localFile.sourceId === null || localFile.baseVersionId === null) {
-      await this.#flagReconcileRequired().catch(() => undefined);
+      await this.#flagReconcileRequiredOrReport();
       return null;
     }
     // I2: read the target file bytes after the settle and fingerprint
     // them; the frozen fingerprint rides on the operand.
     const targetBytes = await this.#vaultReader.readRegularFileBytes(newPath);
     if (targetBytes === null) {
-      await this.#flagReconcileRequired().catch(() => undefined);
+      await this.#flagReconcileRequiredOrReport();
       return null;
     }
     const targetFingerprint = await deriveFrozenFingerprint(targetBytes);
@@ -695,6 +700,14 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
           "update journal_meta set is_reconcile_required = 1 where singleton_key = 1;",
         );
       }
+    });
+  }
+
+  /** Preserve fail-closed null outcomes while surfacing a failed flag write. */
+  async #flagReconcileRequiredOrReport(): Promise<void> {
+    await this.#flagReconcileRequired().catch(() => {
+      this.#failureReporter?.reportJournalFailure("lifecycle_reconcile_persist_failed");
+      return undefined;
     });
   }
 }

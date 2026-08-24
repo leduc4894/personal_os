@@ -651,12 +651,14 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         vaultReader: lifecycleVaultReader,
         createId: createJournalId,
         policyRevision: 1,
+        failureReporter: journalFailureReporter,
       });
       const capture = new JournalCapture({
         repository,
         vaultReader,
         policyGate: policySession,
         lifecycleCapture,
+        failureReporter: journalFailureReporter,
       });
       const lifecycleDriver = new LifecycleDriverImpl({
         repository,
