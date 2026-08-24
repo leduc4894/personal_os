@@ -18,6 +18,8 @@
  * Vault bytes and nothing else.
  */
 
+import type { components } from "@workspace/api-client";
+
 import type { FrozenFingerprint, JournalOperation } from "./contracts";
 
 // --- the raw sync transport port -------------------------------------------------------------
@@ -74,6 +76,31 @@ export const SYNC_API_FAILURE_KINDS = [
 export type SyncApiFailureKind = (typeof SYNC_API_FAILURE_KINDS)[number];
 
 /**
+ * The canonical envelope error codes consumed by this hand-mirrored sync
+ * client. The runtime list is checked against the generated API registry
+ * type so diagnostics can whitelist known codes without admitting arbitrary
+ * snake_case strings.
+ */
+export const SYNC_API_ENVELOPE_ERROR_CODES = [
+  "device_credential_invalid",
+  "authorization_scope_denied",
+  "authentication_rate_limited",
+  "internal_error",
+  "database_connection_unavailable",
+  "exclusion_policy_denied",
+  "small_file_size_limit_exceeded",
+  "source_locator_conflict",
+  "small_file_content_integrity_failed",
+  "small_file_operation_identity_mismatch",
+  "small_file_operation_not_found",
+  "small_file_operation_expired",
+  "small_file_upload_state_invalid",
+] as const satisfies readonly components["schemas"]["ErrorCode"][];
+
+export type SyncApiEnvelopeErrorCode =
+  (typeof SYNC_API_ENVELOPE_ERROR_CODES)[number];
+
+/**
  * One mapped sync failure: a closed kind and a static message. The message
  * never carries the URL, status, registry code, credential or any response
  * text, so a thrown error is redacted by construction. Two extra facts a
@@ -85,7 +112,8 @@ export type SyncApiFailureKind = (typeof SYNC_API_FAILURE_KINDS)[number];
  * rejected the request — round 5's discrimination already parsed it to tell
  * an API 403 from an edge 403, and now it survives the mapping instead of
  * being discarded. The code stays out of the static message; the diagnostics
- * trail boundary whitelists it by shape before it is ever recorded.
+ * trail boundary whitelists it against the declared runtime vocabulary
+ * before it is ever recorded.
  */
 export class SyncApiError extends Error {
   readonly kind: SyncApiFailureKind;

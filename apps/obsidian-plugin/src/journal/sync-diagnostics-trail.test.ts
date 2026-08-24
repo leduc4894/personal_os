@@ -212,6 +212,37 @@ describe("sync diagnostics trail sidecar persistence", () => {
     }
   });
 
+  it("rejects a fabricated snake_case reason token during persisted reload", async () => {
+    const store = new FakeTrailFileStore();
+    store.files.set(
+      SYNC_DIAGNOSTICS_TRAIL_FILE_NAME,
+      new TextEncoder().encode(
+        JSON.stringify({
+          contract: "obsidian_sync_diagnostics_trail/v1",
+          entries: [
+            {
+              kind: "journal_failure",
+              at_epoch_ms: 1_784_000_000_000,
+              tokens: ["made_up_reason"],
+            },
+          ],
+        }),
+      ).buffer as ArrayBuffer,
+    );
+
+    const trail = await createLoadedTrail(store);
+
+    expect(trail.readEntries()).toEqual([
+      {
+        kind: "trail_reset",
+        atEpochMs: 1_784_000_000_000,
+        tokens: [],
+      },
+    ]);
+    const reloaded = await createLoadedTrail(store);
+    expect(reloaded.readEntries().map((entry) => entry.kind)).toEqual(["trail_reset"]);
+  });
+
   it("records nothing for an absent sidecar and never persists on a fresh load", async () => {
     const store = new FakeTrailFileStore();
     const trail = await createLoadedTrail(store);
@@ -340,13 +371,13 @@ describe("sync diagnostics trail self_check entries", () => {
 // --- the server envelope error-code tokens (diagnostic round U1) ---------------------------------------
 
 describe("sync diagnostics trail envelope error-code tokens (diagnostic round U1)", () => {
-  it("admits a server envelope code by shape and nulls a non-conforming code", () => {
-    // These tokens are SERVER envelope codes: the server registry's closed
-    // error-code vocabulary (snake_case strings), not a client-side union.
-    // The trail boundary whitelists them by the existing closed-token shape
-    // only — anything else records nothing.
+  it("admits a declared server envelope code and nulls foreign or non-conforming codes", () => {
+    // These tokens are the plugin-consumed subset of the server registry's
+    // closed error-code vocabulary. Shape alone never admits a foreign code.
     expect(envelopeErrorCode("exclusion_policy_denied")).toBe("exclusion_policy_denied");
     expect(envelopeErrorCode("authorization_scope_denied")).toBe("authorization_scope_denied");
+    expect(envelopeErrorCode("completed")).toBeNull();
+    expect(envelopeErrorCode("made_up_reason")).toBeNull();
     expect(envelopeErrorCode("Just a moment...")).toBeNull();
     expect(envelopeErrorCode("edge/challenge fragment")).toBeNull();
     expect(envelopeErrorCode("")).toBeNull();
@@ -365,8 +396,7 @@ describe("sync diagnostics trail envelope error-code tokens (diagnostic round U1
     });
 
     const reloaded = await createLoadedTrail(store);
-    // The code survives the reload as a plain closed string token, validated
-    // by the same sidecar CLOSED_TOKEN_PATTERN guard as every other token.
+    // The code survives the reload as a declared closed string token.
     expect(reloaded.readEntries()[0]?.tokens).toEqual([
       "login_required",
       "authorization_scope_denied",

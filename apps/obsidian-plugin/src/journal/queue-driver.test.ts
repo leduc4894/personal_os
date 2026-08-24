@@ -1301,8 +1301,8 @@ describe("queue driver diagnostics trail wiring (sync error tracing task 1)", ()
     const wireFailure = harness.diagnosticTrail.entries[0];
     expect(wireFailure?.kind).toBe("wire_failure");
     // The parsed server envelope code lands as one additional closed token
-    // between the kind and the request id: the registry code that rejected
-    // the request, whitelisted at the trail boundary by shape only.
+    // between the kind and the request id: the declared registry code that
+    // rejected the request.
     expect(wireFailure?.tokens).toEqual([
       "login_required",
       "exclusion_policy_denied",

@@ -585,9 +585,9 @@ export class JournalQueueDriver {
    * (non-wire) failure records nothing. Diagnostic round U1: when the
    * failing body parsed as the canonical envelope, its closed server error
    * code rides along as one additional closed token between the kind and
-   * the request id — whitelisted at the trail boundary by shape only, so a
-   * null code (an edge HTML body) or a non-conforming code records nothing
-   * extra.
+   * the request id — whitelisted at the trail boundary against the declared
+   * runtime vocabulary, so a null code (an edge HTML body), a foreign code,
+   * or a non-conforming code records nothing extra.
    */
   #recordWireFailureTrailEntry(error: unknown): void {
     if (this.#diagnosticTrail === null || !(error instanceof SyncApiError)) {

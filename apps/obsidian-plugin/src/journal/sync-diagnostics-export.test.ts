@@ -17,8 +17,12 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
+import type { JournalFileStore } from "./persistence";
 import {
   SYNC_COMPOSITION_READ_FAILURE_TOKENS,
+  SYNC_DIAGNOSTICS_TRAIL_CONTRACT,
+  SYNC_DIAGNOSTICS_TRAIL_FILE_NAME,
+  createSyncDiagnosticsTrail,
   envelopeRequestId,
 } from "./sync-diagnostics-trail";
 import type { SyncDiagnosticToken, SyncDiagnosticTrailEntry } from "./sync-diagnostics-trail";
@@ -30,6 +34,50 @@ import {
 } from "./sync-diagnostics-export";
 
 const REQUEST_ID = "66666666-6666-4666-8666-666666666666";
+
+class PersistedTrailFileStore implements JournalFileStore {
+  #bytes: ArrayBuffer;
+
+  constructor(token: string) {
+    this.#bytes = new TextEncoder().encode(
+      JSON.stringify({
+        contract: SYNC_DIAGNOSTICS_TRAIL_CONTRACT,
+        entries: [
+          {
+            kind: "journal_failure",
+            at_epoch_ms: 1_784_000_000_000,
+            tokens: [token],
+          },
+        ],
+      }),
+    ).buffer as ArrayBuffer;
+  }
+
+  async exists(fileName: string): Promise<boolean> {
+    return fileName === SYNC_DIAGNOSTICS_TRAIL_FILE_NAME;
+  }
+
+  async readBinary(): Promise<ArrayBuffer> {
+    return this.#bytes.slice(0);
+  }
+
+  async writeBinary(_fileName: string, data: ArrayBuffer): Promise<void> {
+    this.#bytes = data.slice(0);
+  }
+
+  async remove(): Promise<void> {
+    return undefined;
+  }
+}
+
+async function reloadPersistedTrailToken(token: string) {
+  const trail = createSyncDiagnosticsTrail({
+    fileStore: new PersistedTrailFileStore(token),
+    nowEpochMs: () => 1_784_000_001_000,
+  });
+  await trail.load();
+  return trail;
+}
 
 /** Build one trail entry the way the durable trail hands it to a renderer. */
 function trailEntry(
@@ -43,6 +91,46 @@ function trailEntry(
 // --- the export block --------------------------------------------------------------------------------
 
 describe("renderSyncDiagnosticsExportBlock", () => {
+  it("rejects a fabricated persisted reason before the sanitized export boundary", async () => {
+    const trail = await reloadPersistedTrailToken("made_up_reason");
+    const entries = trail.readEntries();
+    const block = renderSyncDiagnosticsExportBlock({
+      syncStatusLine: "Ready",
+      syncBlockerGuidance: [],
+      journalStoreDiagnostics: {
+        lastJournalFailureReasons: [],
+        generationPublishFailureCount: 0,
+        lastGenerationPublishFailureReasons: [],
+      },
+      trailEntryCount: entries.length,
+      trailAppendFailureCount: trail.readAppendFailureCount(),
+      trailTail: entries,
+    });
+
+    expect(block).not.toContain("made_up_reason");
+    expect(block).toContain("trail_reset");
+  });
+
+  it("accepts and exports a declared token after persisted reload", async () => {
+    const trail = await reloadPersistedTrailToken("lifecycle_reconcile_persist_failed");
+    const entries = trail.readEntries();
+    const block = renderSyncDiagnosticsExportBlock({
+      syncStatusLine: "Ready",
+      syncBlockerGuidance: [],
+      journalStoreDiagnostics: {
+        lastJournalFailureReasons: [],
+        generationPublishFailureCount: 0,
+        lastGenerationPublishFailureReasons: [],
+      },
+      trailEntryCount: entries.length,
+      trailAppendFailureCount: trail.readAppendFailureCount(),
+      trailTail: entries,
+    });
+
+    expect(block).toContain("lifecycle_reconcile_persist_failed");
+    expect(block).not.toContain("trail_reset");
+  });
+
   it("builds the sanitized block from the status line, guidance, diagnostics, counts and trail tail", () => {
     const block = renderSyncDiagnosticsExportBlock({
       syncStatusLine: "Ready (3)",

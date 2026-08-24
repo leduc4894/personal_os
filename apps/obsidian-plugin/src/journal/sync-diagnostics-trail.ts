@@ -7,16 +7,16 @@
  * closed vocabularies (`QueuePassOutcome`, `JournalSafeErrorLabel`,
  * `JournalStoreErrorReason`, `SyncApiFailureKind` labels,
  * `LifecycleRunOutcome`) plus the one opaque envelope request id, the
- * server envelope error-code tokens (SERVER ENVELOPE CODES: the server
- * error registry's closed `error.code` vocabulary, admitted by the closed
- * snake_case shape only through {@link envelopeErrorCode} — the plugin
- * mirrors no registry client-side) and the fixed self-check verdict
+ * declared server envelope error-code tokens (SERVER ENVELOPE CODES: the
+ * plugin-consumed subset of the server registry's closed `error.code`
+ * vocabulary, admitted only through {@link envelopeErrorCode}) and the
+ * fixed self-check verdict
  * tokens of the `self_check` kind. Closed-reason surfacing C1 adds the
  * `startup_failure` kind (one startup stage token plus the closed store
- * reason when the throw is a store error) and the two bounded composition
- * read-failure tokens. A free-form string cannot enter an
+ * reason when the throw is a store error) and the bounded composition
+ * failure tokens. A free-form string cannot enter an
  * entry at the type level, and the sidecar parser rejects any token that
- * is not a closed snake_case token or a well-formed request id record.
+ * is not a declared vocabulary member or a well-formed request id record.
  *
  * The trail persists as ONE JSON sidecar (`sync-diagnostics-trail.json`)
  * through the journal file store port bound to the Vault's plugin
@@ -28,11 +28,14 @@
  * detail may reach an entry, the sidecar or a diagnostic surface.
  */
 
+import { JOURNAL_SAFE_ERROR_LABELS } from "./contracts";
 import type { JournalSafeErrorLabel } from "./contracts";
 import type { LifecycleRunOutcome } from "./lifecycle-driver";
 import type { JournalFileStore } from "./persistence";
 import type { QueuePassOutcome } from "./queue-driver";
-import type { SyncApiFailureKind } from "./sync-api";
+import { SYNC_API_ENVELOPE_ERROR_CODES, SYNC_API_FAILURE_KINDS } from "./sync-api";
+import type { SyncApiEnvelopeErrorCode, SyncApiFailureKind } from "./sync-api";
+import { JOURNAL_STORE_ERROR_REASONS } from "./sqlite-database";
 import type { JournalStoreErrorReason } from "./sqlite-database";
 
 // --- frozen bounds and file vocabulary ------------------------------------------------------------
@@ -84,7 +87,8 @@ export type SyncDiagnosticClosedToken =
   | SyncEventStateToken
   | SyncParkSiteToken
   | SyncStartupStageToken
-  | SyncCompositionReadFailureToken;
+  | SyncCompositionReadFailureToken
+  | SyncApiEnvelopeErrorCode;
 
 /**
  * The closed row-state tokens a `journal_failure` entry may carry when a
@@ -217,17 +221,13 @@ export function envelopeRequestId(requestId: string): SyncDiagnosticRequestIdTok
 
 /**
  * Wrap one server envelope error code as the closed trail token, or answer
- * null when the code is not shaped like a closed snake_case token
- * (diagnostic round U1). These tokens are SERVER ENVELOPE CODES — the
- * server error registry's closed `error.code` vocabulary — not a
- * client-side union: the plugin mirrors no registry, so the trail boundary
- * whitelists them by the existing `CLOSED_TOKEN_PATTERN` shape only,
- * exactly like the sidecar load path does for every closed token. A
- * non-conforming code (challenge text, path-shaped or free-form values)
- * records nothing.
+ * null when the code is not in the declared plugin-consumed subset of the
+ * server registry's closed `error.code` vocabulary (diagnostic round U1).
+ * A foreign code, challenge text, path-shaped or free-form value records
+ * nothing.
  */
-export function envelopeErrorCode(code: string): SyncDiagnosticClosedToken | null {
-  return CLOSED_TOKEN_PATTERN.test(code) ? (code as SyncDiagnosticClosedToken) : null;
+export function envelopeErrorCode(code: string): SyncApiEnvelopeErrorCode | null {
+  return isSyncApiEnvelopeErrorCode(code) ? code : null;
 }
 
 /** One token of a trail entry: a closed token or the opaque request id. */
@@ -274,12 +274,49 @@ export interface SyncDiagnosticsTrailOptions {
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/**
- * The structural guard for loaded closed tokens: every closed vocabulary
- * token is a lowercase snake_case word. Path-shaped, credential-shaped and
- * free-form text (slashes, dots, spaces, separators) cannot match.
- */
-const CLOSED_TOKEN_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+const QUEUE_PASS_OUTCOME_TOKENS = [
+  "completed",
+  "deadline_reached",
+  "stopped",
+  "login_required",
+  "retry_scheduled",
+  "pass_already_running",
+  "pass_wrapper_failed",
+] as const satisfies readonly QueuePassOutcome[];
+
+const LIFECYCLE_RUN_OUTCOME_TOKENS = [
+  "idle",
+  "committed",
+  "blocked",
+  "retry",
+  "login_required",
+] as const satisfies readonly LifecycleRunOutcome[];
+
+const CLOSED_DIAGNOSTIC_TOKEN_SET: ReadonlySet<string> = new Set<string>([
+  ...QUEUE_PASS_OUTCOME_TOKENS,
+  ...JOURNAL_SAFE_ERROR_LABELS,
+  ...JOURNAL_STORE_ERROR_REASONS,
+  ...SYNC_API_FAILURE_KINDS,
+  ...LIFECYCLE_RUN_OUTCOME_TOKENS,
+  ...SYNC_SELF_CHECK_VERDICT_TOKENS,
+  ...SYNC_EVENT_STATE_TOKENS,
+  ...SYNC_PARK_SITE_TOKENS,
+  ...SYNC_STARTUP_STAGE_TOKENS,
+  ...SYNC_COMPOSITION_READ_FAILURE_TOKENS,
+  ...SYNC_API_ENVELOPE_ERROR_CODES,
+]);
+
+const SYNC_API_ENVELOPE_ERROR_CODE_SET: ReadonlySet<string> = new Set<string>(
+  SYNC_API_ENVELOPE_ERROR_CODES,
+);
+
+function isSyncDiagnosticClosedToken(value: unknown): value is SyncDiagnosticClosedToken {
+  return typeof value === "string" && CLOSED_DIAGNOSTIC_TOKEN_SET.has(value);
+}
+
+function isSyncApiEnvelopeErrorCode(value: unknown): value is SyncApiEnvelopeErrorCode {
+  return typeof value === "string" && SYNC_API_ENVELOPE_ERROR_CODE_SET.has(value);
+}
 
 const DIAGNOSTIC_KIND_SET: ReadonlySet<string> = new Set<string>(SYNC_DIAGNOSTIC_KINDS);
 
@@ -289,12 +326,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /** Parse one loaded token; a violation fails the whole sidecar. */
 function parseTrailToken(value: unknown): SyncDiagnosticToken | null {
-  if (typeof value === "string") {
-    // The pattern check is the runtime guard; the cast re-enters the closed
-    // vocabulary only after it passed (untrusted sidecar bytes).
-    return CLOSED_TOKEN_PATTERN.test(value)
-      ? (value as SyncDiagnosticClosedToken)
-      : null;
+  if (isSyncDiagnosticClosedToken(value)) {
+    return value;
   }
   if (isRecord(value)) {
     const requestId = value["request_id"];
