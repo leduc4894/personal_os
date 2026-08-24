@@ -67,16 +67,24 @@ import {
 } from "./journal/status";
 import type { JournalSyncStatusSnapshot, LifecycleBlockedReasonCode } from "./journal/status";
 import type { LifecycleStateCounts } from "./journal/status";
-import { loadVendoredSqliteEngine } from "./journal/sqlite-database";
+import { JournalStoreError, loadVendoredSqliteEngine } from "./journal/sqlite-database";
 import { createSyncDiagnosticsTrail } from "./journal/sync-diagnostics-trail";
-import type { SyncDiagnosticsTrail } from "./journal/sync-diagnostics-trail";
+import type {
+  SyncDiagnosticClosedToken,
+  SyncDiagnosticsTrail,
+  SyncStartupStageToken,
+} from "./journal/sync-diagnostics-trail";
 import {
   SYNC_DIAGNOSTICS_TRAIL_TAIL_ENTRY_LIMIT,
   deriveSyncStopReasonTokens,
   renderSyncDiagnosticsExportBlock,
 } from "./journal/sync-diagnostics-export";
 import { createJournalSyncApi } from "./journal/sync-api";
-import { renderSyncSelfCheckSummaryText, runSyncSelfCheck } from "./journal/sync-self-check";
+import {
+  renderSyncSelfCheckJournalNotRunningText,
+  renderSyncSelfCheckSummaryText,
+  runSyncSelfCheck,
+} from "./journal/sync-self-check";
 import { createUuidv7Factory } from "./journal/uuidv7";
 import { PolicySession } from "./exclusion-policy/policy-session";
 import type { PolicyCacheAdapter } from "./exclusion-policy/policy-cache";
@@ -96,6 +104,14 @@ const ALLOW_LOOPBACK_HTTP_ORIGIN = false;
  * eligibility.
  */
 const SCHEDULED_RETRY_PASS_SAFETY_MARGIN_MS = 250;
+
+/**
+ * The bound of the pre-trail startup-failure buffer (closed-reason
+ * surfacing C1 P4): the two fire-and-forget startup chains can reject
+ * before the trail sidecar is loaded; the buffer holds at most this many
+ * token lists and the oldest are dropped beyond it.
+ */
+const MAX_BUFFERED_STARTUP_FAILURE_ENTRIES = 8;
 
 const DEFAULT_DEVICE_NAME = "Obsidian vault";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -224,6 +240,24 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
    * export can read the tail, the counts and the derived stop reasons.
    */
   #diagnosticTrail: SyncDiagnosticsTrail | null = null;
+  /**
+   * Closed-reason surfacing C1 P1: the closed tokens of the last journal
+   * startup failure (the failed stage token plus the closed store reason
+   * when the throw was a store error), or null before the first failure —
+   * never a fake success token. Feeds the settings snapshot and the
+   * self-check's journal-not-running verdict.
+   */
+  #lastStartupFailureTokens: readonly SyncDiagnosticClosedToken[] | null = null;
+  /**
+   * Closed-reason surfacing C1 P4: startup-failure token lists recorded
+   * before the trail sidecar is loaded; flushed into the trail right after
+   * its load (bounded by MAX_BUFFERED_STARTUP_FAILURE_ENTRIES).
+   */
+  #bufferedStartupFailureTokenLists: (readonly SyncDiagnosticClosedToken[])[] = [];
+  /** C1 P5: has the pending-count read swallow already been recorded? */
+  #hasRecordedStatusReadFailure = false;
+  /** C1 P5: has the note-status read swallow already been recorded? */
+  #hasRecordedNoteStatusReadFailure = false;
   #automaticSnapshotCoordinator: AutomaticSnapshotCoordinator | null = null;
   #boundedQueuePassDispatcher: CoalescingQueuePassDispatcher | null = null;
   #pendingAutomaticSnapshotReason: AutomaticSnapshotReason | null = null;
@@ -346,6 +380,13 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           trailTailEntries: trailEntries.slice(-SYNC_DIAGNOSTICS_TRAIL_TAIL_ENTRY_LIMIT),
           trailEntryCount: trailEntries.length,
           trailAppendFailureCount: this.#diagnosticTrail?.readAppendFailureCount() ?? 0,
+          // Closed-reason surfacing C1 P3: the closed policy integrity
+          // state (including `policy_integrity_failed`) reaches the
+          // settings tab, which renders one fixed guidance line per value.
+          policyState: this.#policyState,
+          // C1 P1: the closed tokens of the last journal startup failure —
+          // null before the first failure, never a fake success token.
+          lastStartupFailureTokens: this.#lastStartupFailureTokens,
           localNoteSyncStatuses: this.#readLocalNoteSyncStatuses(),
         };
       },
@@ -399,12 +440,19 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     const startupRecord = readDeviceSecretRecord(secretStore, DEVICE_CREDENTIAL_RECORD_NAME);
     const startupAction = resolveStartupAction(startupRecord);
     if (startupAction === "resume_pending_grant") {
-      void controller.resumePendingGrant().catch(() => undefined);
+      // Closed-reason surfacing C1 P4: an exceptional throw of the startup
+      // chain routes into the startup_failure trail path instead of
+      // vanishing; the action itself stays fire-and-forget.
+      void controller.resumePendingGrant().catch((error: unknown) => {
+        this.#recordStartupChainFailure(error);
+      });
     } else {
       await controller.reconcileCrashWindow();
       if (startupAction === "refresh_credential") {
         // Policy keyset/snapshot are fetched only AFTER a successful token
         // refresh (spec 18), still fire-and-forget and never awaited here.
+        // C1 P4: the catch routes exceptional throws into the same
+        // startup_failure trail path.
         void session.refresh()
           .then(() =>
             refreshVerifiedPolicyAndRequestSnapshot({
@@ -413,7 +461,9 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
               requestSnapshot: (reason) => this.#requestAutomaticSnapshot(reason),
             }),
           )
-          .catch(() => undefined);
+          .catch((error: unknown) => {
+            this.#recordStartupChainFailure(error);
+          });
       }
     }
 
@@ -528,17 +578,22 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     if (policySession === null || session === null) {
       return;
     }
+    // Closed-reason surfacing C1 P1: the failed startup stage must be
+    // nameable at the catch. The variable advances before each stage;
+    // anything at or after the repository composition is `other`.
+    let startupStage: SyncStartupStageToken = "other";
     try {
-      const engineModule = await loadVendoredSqliteEngine({
-        wasmBinary: await this.#readJournalEngineWasmBinary(),
-      });
       // Sync error tracing task 1: the durable closed-token diagnostics
       // trail persists one JSON sidecar (`sync-diagnostics-trail.json`)
       // through the SAME Vault plugin-directory store as the journal. It
       // loads (and resets, when corrupt) BEFORE any seam can append, then
       // feeds both the persistence publish-failure tap and the queue
       // driver wire/pass taps. The trail only observes: appends are
-      // fire-and-forget and never block the sync path.
+      // fire-and-forget and never block the sync path. Closed-reason
+      // surfacing C1 P1 moves the creation to the very top of the startup
+      // chain so EVERY stage — including the wasm read and the engine
+      // load — can append its failure entry, and the pre-trail buffer of
+      // C1 P4 flushes into it.
       const diagnosticTrail = createSyncDiagnosticsTrail({
         fileStore: this.createJournalFileStore(),
       });
@@ -546,12 +601,21 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       // Retained so the settings snapshot and the copy-sync-diagnostics
       // export can read the trail without re-creating the sidecar port.
       this.#diagnosticTrail = diagnosticTrail;
+      this.#flushBufferedStartupFailureEntries(diagnosticTrail);
+      startupStage = "wasm_read";
+      const engineWasmBinary = await this.#readJournalEngineWasmBinary();
+      startupStage = "engine_load";
+      const engineModule = await loadVendoredSqliteEngine({
+        wasmBinary: engineWasmBinary,
+      });
       const persistence = new JournalPersistence({
         fileStore: this.createJournalFileStore(),
         engineModule,
         diagnosticTrail,
       });
+      startupStage = "journal_recovery";
       await persistence.open();
+      startupStage = "other";
       const journalDatabase: JournalRepositoryDatabase = {
         runSerializedMutation(operation) {
           return persistence.commitGeneration(operation);
@@ -641,6 +705,9 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
             );
           } catch {
             // An unreadable journal keeps the scan's own count (fail-closed).
+            // Closed-reason surfacing C1 P5: the swallowed reason surfaces
+            // as one bounded once-per-session closed-token trail entry.
+            this.#recordStatusReadFailureOnce();
           }
           return {
             outcome: summary.outcome === "completed" ? "completed" : "stopped",
@@ -743,9 +810,106 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           void this.#runRestoreSelectedTombstone();
         },
       });
-    } catch {
+    } catch (error) {
       // Engine or recovery failure is fail-closed: no capture surface is
-      // registered and Vault editing is never touched.
+      // registered and Vault editing is never touched. Closed-reason
+      // surfacing C1 P1: the closed stage token (plus the closed store
+      // reason when the throw is a store error) reaches the trail, the
+      // settings snapshot and the self-check instead of being discarded.
+      const startupFailureTokens = this.#buildStartupFailureTokens(startupStage, error);
+      this.#lastStartupFailureTokens = startupFailureTokens;
+      this.#appendStartupFailureTrailEntry(startupFailureTokens);
+    }
+  }
+
+  // --- closed startup-failure and read-swallow surfacing (C1 P1/P4/P5) ---------------------------
+
+  /**
+   * Build the closed token list of one startup failure (C1 P1): the failed
+   * stage token plus the closed `JournalStoreErrorReason` when the thrown
+   * value is a store error. Closed tokens only — the exception text, any
+   * path and any raw detail never enter the list.
+   */
+  #buildStartupFailureTokens(
+    startupStage: SyncStartupStageToken,
+    error: unknown,
+  ): readonly SyncDiagnosticClosedToken[] {
+    const tokens: SyncDiagnosticClosedToken[] = [startupStage];
+    if (error instanceof JournalStoreError) {
+      tokens.push(error.reason);
+    }
+    return tokens;
+  }
+
+  /**
+   * Append one `startup_failure` trail entry (fire-and-forget, the trail's
+   * never-blocks guarantee holds) or buffer it when the trail does not
+   * exist yet (C1 P4: the startup chains can reject before the sidecar is
+   * loaded). The buffer is bounded; the oldest entries drop beyond it.
+   */
+  #appendStartupFailureTrailEntry(tokens: readonly SyncDiagnosticClosedToken[]): void {
+    const trail = this.#diagnosticTrail;
+    if (trail === null) {
+      if (this.#bufferedStartupFailureTokenLists.length < MAX_BUFFERED_STARTUP_FAILURE_ENTRIES) {
+        this.#bufferedStartupFailureTokenLists.push(tokens);
+      }
+      return;
+    }
+    void trail.append({ kind: "startup_failure", tokens });
+  }
+
+  /**
+   * Flush the bounded pre-trail startup-failure buffer into the freshly
+   * loaded trail (C1 P4). Each buffered list appends exactly once; entries
+   * recorded after this point append directly.
+   */
+  #flushBufferedStartupFailureEntries(trail: SyncDiagnosticsTrail): void {
+    for (const tokens of this.#bufferedStartupFailureTokenLists) {
+      void trail.append({ kind: "startup_failure", tokens });
+    }
+    this.#bufferedStartupFailureTokenLists = [];
+  }
+
+  /**
+   * Route one exceptional throw of the two fire-and-forget startup chains
+   * into the same `startup_failure` trail path (C1 P4): stage token
+   * `other` plus the closed store reason when applicable, buffered until
+   * the trail exists. The settings snapshot's journal-startup verdict
+   * stays untouched — these chains do not stop the journal.
+   */
+  #recordStartupChainFailure(error: unknown): void {
+    this.#appendStartupFailureTrailEntry(this.#buildStartupFailureTokens("other", error));
+  }
+
+  /**
+   * Record the pending-count read swallow (C1 P5): ONE `journal_failure`
+   * trail entry carrying the closed `status_read_failed` token, at most
+   * once per session — no per-render spam.
+   */
+  #recordStatusReadFailureOnce(): void {
+    if (this.#hasRecordedStatusReadFailure) {
+      return;
+    }
+    this.#hasRecordedStatusReadFailure = true;
+    const trail = this.#diagnosticTrail;
+    if (trail !== null) {
+      void trail.append({ kind: "journal_failure", tokens: ["status_read_failed"] });
+    }
+  }
+
+  /**
+   * Record the note-status read swallow (C1 P5): ONE `journal_failure`
+   * trail entry carrying the closed `note_status_read_failed` token, at
+   * most once per session — no per-render spam.
+   */
+  #recordNoteStatusReadFailureOnce(): void {
+    if (this.#hasRecordedNoteStatusReadFailure) {
+      return;
+    }
+    this.#hasRecordedNoteStatusReadFailure = true;
+    const trail = this.#diagnosticTrail;
+    if (trail !== null) {
+      void trail.append({ kind: "journal_failure", tokens: ["note_status_read_failed"] });
     }
   }
 
@@ -925,10 +1089,14 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
    */
   async #runSyncSelfCheck(): Promise<void> {
     const trail = this.#diagnosticTrail;
-    if (trail === null) {
-      // The journal stack failed closed at load: there is no trail to probe
-      // and no sync surface to diagnose beyond that fact.
-      new Notice("Sync self-check unavailable: journal not running on this device.");
+    const startupFailureTokens = this.#lastStartupFailureTokens;
+    if (trail === null || startupFailureTokens !== null) {
+      // The journal stack failed closed at load (or never started): there
+      // is no trail to probe and no sync surface to diagnose beyond that
+      // fact. Closed-reason surfacing C1 P1: the journal-not-running
+      // verdict renders the SAME closed startup-failure tokens the
+      // settings snapshot carries.
+      new Notice(renderSyncSelfCheckJournalNotRunningText(startupFailureTokens), 10_000);
       return;
     }
     const transport = createObsidianPolicyHttpTransport();
@@ -972,8 +1140,14 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       summary = await driver.requestPass();
     } catch {
       // The driver never lets a trigger crash; a local failure still ends
-      // this wrapper's view of the pass.
-      summary = { outcome: "completed", processedEventCount: 0 };
+      // this wrapper's view of the pass. Closed-reason surfacing C1 P2:
+      // the swallowed throw surfaces as the closed `pass_wrapper_failed`
+      // outcome — on the trail AND on the summary — never `completed`.
+      summary = { outcome: "pass_wrapper_failed", processedEventCount: 0 };
+      const trail = this.#diagnosticTrail;
+      if (trail !== null) {
+        void trail.append({ kind: "pass_outcome", tokens: ["pass_wrapper_failed"] });
+      }
     }
     if (summary.outcome !== "pass_already_running") {
       // Only the invocation that actually ran the pass clears the active
@@ -1134,6 +1308,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     try {
       return this.#queueRepository?.readLocalNoteSyncStatuses() ?? [];
     } catch {
+      // Closed-reason surfacing C1 P5: the swallowed reason surfaces as one
+      // bounded once-per-session closed-token trail entry (no per-render
+      // spam); the settings tab keeps its empty fallback.
+      this.#recordNoteStatusReadFailureOnce();
       return [];
     }
   }

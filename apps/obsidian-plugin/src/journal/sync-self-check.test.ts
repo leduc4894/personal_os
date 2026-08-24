@@ -22,6 +22,7 @@ import { SYNC_DIAGNOSTICS_TRAIL_FILE_NAME, createSyncDiagnosticsTrail } from "./
 import type { SyncDiagnosticsTrail } from "./sync-diagnostics-trail";
 import {
   SYNC_SELF_CHECK_ORIGIN_PROBE_TIMEOUT_MS,
+  renderSyncSelfCheckJournalNotRunningText,
   renderSyncSelfCheckSummaryText,
   runSyncSelfCheck,
 } from "./sync-self-check";
@@ -276,6 +277,33 @@ describe("renderSyncSelfCheckSummaryText", () => {
       "Error:",
     ]) {
       expect(text).not.toContain(forbiddenText);
+    }
+  });
+});
+
+describe("renderSyncSelfCheckJournalNotRunningText (closed-reason surfacing C1 P1)", () => {
+  it("renders the fixed journal-not-running line alone before any startup failure", () => {
+    expect(renderSyncSelfCheckJournalNotRunningText(null)).toBe(
+      "Sync self-check unavailable: journal not running on this device.",
+    );
+  });
+
+  it("renders the closed startup-failure tokens on the journal-not-running verdict", () => {
+    const singleTokenText = renderSyncSelfCheckJournalNotRunningText(["wasm_read"]);
+    expect(singleTokenText).toContain(
+      "Sync self-check unavailable: journal not running on this device.",
+    );
+    expect(singleTokenText).toContain("wasm_read");
+
+    const multiTokenText = renderSyncSelfCheckJournalNotRunningText([
+      "journal_recovery",
+      "journal_schema_unsupported",
+    ]);
+    expect(multiTokenText).toContain("journal_recovery, journal_schema_unsupported");
+    // Closed tokens only: no exception text, path, credential or any other
+    // free-form detail ever rides along with the verdict.
+    for (const forbiddenText of ["Error:", "notes/", ".md", "at1.", "https://"]) {
+      expect(multiTokenText).not.toContain(forbiddenText);
     }
   });
 });

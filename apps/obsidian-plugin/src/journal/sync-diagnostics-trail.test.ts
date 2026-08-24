@@ -20,9 +20,12 @@ import {
   MAX_SYNC_DIAGNOSTICS_TRAIL_APPEND_FAILURES,
   MAX_SYNC_DIAGNOSTICS_TRAIL_ENTRIES,
   MAX_SYNC_DIAGNOSTICS_TRAIL_TOKENS_PER_ENTRY,
+  SYNC_COMPOSITION_READ_FAILURE_TOKENS,
+  SYNC_DIAGNOSTIC_KINDS,
   SYNC_DIAGNOSTICS_TRAIL_FILE_NAME,
   SYNC_PARK_SITE_TOKENS,
   SYNC_SELF_CHECK_VERDICT_TOKENS,
+  SYNC_STARTUP_STAGE_TOKENS,
   createSyncDiagnosticsTrail,
   envelopeErrorCode,
   envelopeRequestId,
@@ -419,6 +422,60 @@ describe("sync diagnostics trail closed vocabulary (type level)", () => {
       // @ts-expect-error a free-form verdict must not enter a self_check entry
       tokens: ["the trail is fine"],
     }).catch(() => undefined);
+  });
+});
+
+// --- the startup_failure kind and composition tokens (closed-reason surfacing C1) ---------------------
+
+describe("sync diagnostics trail startup_failure entries (closed-reason surfacing C1 P1)", () => {
+  it("pins the fixed startup stage token vocabulary", () => {
+    expect(SYNC_STARTUP_STAGE_TOKENS).toEqual([
+      "engine_load",
+      "wasm_read",
+      "journal_recovery",
+      "other",
+    ]);
+  });
+
+  it("pins the fixed composition read-failure token vocabulary (C1 P5)", () => {
+    expect(SYNC_COMPOSITION_READ_FAILURE_TOKENS).toEqual([
+      "status_read_failed",
+      "note_status_read_failed",
+    ]);
+  });
+
+  it("admits the startup_failure kind into the closed kind vocabulary", () => {
+    expect(SYNC_DIAGNOSTIC_KINDS).toContain("startup_failure");
+  });
+
+  it("persists and reloads a startup_failure entry carrying the stage and store reason tokens", async () => {
+    const store = new FakeTrailFileStore();
+    const trail = await createLoadedTrail(store);
+    await trail.append({ kind: "startup_failure", tokens: ["engine_load"] });
+    await trail.append({
+      kind: "startup_failure",
+      tokens: ["journal_recovery", "journal_schema_unsupported"],
+    });
+    const reloaded = await createLoadedTrail(store);
+    expect(reloaded.readEntries().map((entry) => [entry.kind, ...entry.tokens])).toEqual([
+      ["startup_failure", "engine_load"],
+      ["startup_failure", "journal_recovery", "journal_schema_unsupported"],
+    ]);
+  });
+
+  it("accepts pass_wrapper_failed and the two read-failure tokens as closed trail tokens", async () => {
+    // C1 P2/P5: the wrapper's honest pass outcome and the two bounded
+    // read-swallow tokens type-check against the closed vocabulary.
+    const store = new FakeTrailFileStore();
+    const trail = await createLoadedTrail(store);
+    await trail.append({ kind: "pass_outcome", tokens: ["pass_wrapper_failed"] });
+    await trail.append({ kind: "journal_failure", tokens: ["status_read_failed"] });
+    await trail.append({ kind: "journal_failure", tokens: ["note_status_read_failed"] });
+    expect(trail.readEntries().map((entry) => entry.tokens[0])).toEqual([
+      "pass_wrapper_failed",
+      "status_read_failed",
+      "note_status_read_failed",
+    ]);
   });
 });
 

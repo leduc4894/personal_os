@@ -10,6 +10,7 @@ import type { App, Plugin } from "obsidian";
 
 import { CONNECTION_STATUS_TEXT, resolveAuthenticationControls } from "./contracts";
 import type { ConnectionState } from "./contracts";
+import type { PolicyIntegrityState } from "../exclusion-policy/contracts";
 import type { LifecycleStateCounts, LifecycleBlockedReasonCode } from "../journal/status";
 import { LIFECYCLE_LOCAL_FILE_STATES } from "../journal/lifecycle-contracts";
 import type { LifecycleLocalFileState } from "../journal/lifecycle-contracts";
@@ -76,6 +77,19 @@ export interface DeviceAuthenticationSnapshot {
   readonly trailEntryCount: number;
   /** The bounded count of swallowed trail append/persist failures. */
   readonly trailAppendFailureCount: number;
+  /**
+   * The closed policy integrity state of spec 18 (closed-reason surfacing
+   * C1 P3) — including `policy_integrity_failed`, which gates capture but
+   * previously never reached this snapshot. A closed enum value only.
+   */
+  readonly policyState: PolicyIntegrityState;
+  /**
+   * The closed tokens of the last journal startup failure (closed-reason
+   * surfacing C1 P1): the failed startup stage plus the closed store
+   * reason when the throw was a store error. Null before the first
+   * failure — never a fake success token.
+   */
+  readonly lastStartupFailureTokens: readonly string[] | null;
   /** Local-only per-note statuses; paths must never leave this settings tab. */
   readonly localNoteSyncStatuses: readonly LocalNoteSyncStatus[];
 }
@@ -122,6 +136,14 @@ export class DeviceAuthenticationSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Sync status")
       .setDesc(syncStatusDescription(snapshot));
+
+    // Closed-reason surfacing C1 P3: the closed policy integrity state
+    // renders one fixed guidance line per closed value, so a
+    // `policy_integrity_failed` state (which silently gates capture) is
+    // finally visible with its resolution boundary.
+    new Setting(containerEl)
+      .setName("Policy state")
+      .setDesc(renderPolicyStateGuidanceLine(snapshot.policyState));
 
     // Task 10 / fix round 1 I1: the redacted lifecycle state histogram
     // reaches the settings tab here. Counts only, closed enum keys, no
@@ -240,10 +262,61 @@ function syncStatusDescription(snapshot: DeviceAuthenticationSnapshot): string {
     lines.push(snapshot.syncStatusText);
   }
   lines.push(...snapshot.syncBlockerGuidance);
+  // Closed-reason surfacing C1 P1: when the journal stack failed closed at
+  // load, the closed startup-failure tokens render beside the status so
+  // the silent stop is diagnosable from this tab.
+  const startupFailureLine = renderJournalStartupFailureLine(
+    snapshot.lastStartupFailureTokens,
+  );
+  if (startupFailureLine !== null) {
+    lines.push(startupFailureLine);
+  }
   if (lines.length === 0) {
     return "Journal not running on this device";
   }
   return lines.join(" ");
+}
+
+/**
+ * The fixed guidance line of each closed policy integrity state
+ * (closed-reason surfacing C1 P3): one line per closed value, keyed by
+ * the closed enum — fixed English only, never a path, credential,
+ * hostname or any free-form detail.
+ */
+const POLICY_STATE_GUIDANCE_TEXT: Readonly<Record<PolicyIntegrityState, string>> = {
+  policy_not_initialized:
+    "Policy not initialized: complete the browser login to establish policy trust before any capture runs.",
+  policy_ready:
+    "Policy verified: capture and sync run under the currently accepted policy revision.",
+  policy_refresh_required:
+    "Policy refresh required: the accepted policy revision is stale; the next successful credential refresh renews it.",
+  policy_offline_cached:
+    "Policy offline cache in use: capture continues under the last verified policy revision until connectivity returns.",
+  policy_integrity_failed:
+    "Policy integrity failed: capture is stopped until policy trust is re-established through the authorized login flow.",
+};
+
+/**
+ * Render the one fixed guidance line of one closed policy integrity state
+ * (closed-reason surfacing C1 P3). The closed enum is the only key; the
+ * line is fixed text, so no raw value can ever reach the description.
+ */
+export function renderPolicyStateGuidanceLine(policyState: PolicyIntegrityState): string {
+  return POLICY_STATE_GUIDANCE_TEXT[policyState];
+}
+
+/**
+ * Render the journal-startup-failure line (closed-reason surfacing C1 P1):
+ * a fixed English head plus the closed tokens only — or null before the
+ * first failure (never a fake success token).
+ */
+export function renderJournalStartupFailureLine(
+  startupFailureTokens: readonly string[] | null,
+): string | null {
+  if (startupFailureTokens === null || startupFailureTokens.length === 0) {
+    return null;
+  }
+  return `Journal startup failed: ${startupFailureTokens.join(", ")}`;
 }
 
 /**

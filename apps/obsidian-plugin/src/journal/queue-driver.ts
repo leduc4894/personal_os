@@ -115,6 +115,10 @@ export interface QueueVaultFileReader {
  * One bounded pass refresh outcome; closed vocabulary. `retry_scheduled`
  * marks a pass ended by a retryable failure: the failed event sits in
  * bounded backoff, so such a pass is never continuable automatically.
+ * `pass_wrapper_failed` (closed-reason surfacing C1 P2) is produced ONLY
+ * by the composition's pass wrapper when `requestPass` itself threw —
+ * the driver never returns it, and a wrapper-failed pass never renders
+ * as `completed`.
  */
 export type QueuePassOutcome =
   | "completed"
@@ -122,7 +126,8 @@ export type QueuePassOutcome =
   | "stopped"
   | "login_required"
   | "retry_scheduled"
-  | "pass_already_running";
+  | "pass_already_running"
+  | "pass_wrapper_failed";
 
 /** The closed summary of one bounded pass: an outcome and a count only. */
 export interface QueuePassSummary {

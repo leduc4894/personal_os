@@ -205,3 +205,22 @@ export function renderSyncSelfCheckSummaryText(summary: SyncSelfCheckSummary): s
   );
   return `Sync self-check: ${stepTexts.join(" · ")}`;
 }
+
+/**
+ * The fixed journal-not-running line of the self-check notice (spec text
+ * unchanged), with the closed startup-failure tokens appended when the
+ * journal stack failed closed at load (closed-reason surfacing C1 P1).
+ * The tokens are the SAME closed tokens the settings snapshot carries —
+ * the failed startup stage plus the closed store reason when applicable;
+ * no exception text, path, credential or any free-form string ever rides
+ * along.
+ */
+export function renderSyncSelfCheckJournalNotRunningText(
+  startupFailureTokens: readonly string[] | null,
+): string {
+  const baseLine = "Sync self-check unavailable: journal not running on this device.";
+  if (startupFailureTokens === null || startupFailureTokens.length === 0) {
+    return baseLine;
+  }
+  return `${baseLine} Journal startup failed: ${startupFailureTokens.join(", ")}`;
+}

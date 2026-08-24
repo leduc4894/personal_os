@@ -670,6 +670,125 @@ describe("Obsidian plugin composition root", () => {
     expect(pluginSource).not.toContain("await this.#journalPersistence");
   });
 
+  it("records the closed startup-failure stage instead of discarding it (closed-reason surfacing C1 P1)", () => {
+    // The startup catch used to be a bare `catch {}`: whether the engine
+    // load, the wasm read or the journal recovery failed reached nowhere.
+    // It must now classify the failed stage into the closed token set and
+    // surface the tokens on the trail AND the settings snapshot.
+    const startMethodMatch = pluginSource.match(
+      /async #startJournalCapture\(\): Promise<void> \{[\s\S]*?\n  \}\n/,
+    );
+    expect(startMethodMatch?.[0]).toBeTruthy();
+    const startBody = startMethodMatch?.[0] ?? "";
+    expect(startBody).toContain("catch (error)");
+    expect(startBody).toContain("#lastStartupFailureTokens");
+    expect(startBody).toContain("#appendStartupFailureTrailEntry");
+    // The recorder appends the closed `startup_failure` trail kind.
+    const recorderIndex = pluginSource.indexOf("#appendStartupFailureTrailEntry(tokens: readonly SyncDiagnosticClosedToken[]): void");
+    expect(recorderIndex).toBeGreaterThanOrEqual(0);
+    const recorderBody = pluginSource.slice(recorderIndex, recorderIndex + 700);
+    expect(recorderBody).toContain('"startup_failure"');
+    for (const stageToken of ["engine_load", "wasm_read", "journal_recovery"]) {
+      expect(startBody).toContain(`"${stageToken}"`);
+    }
+    // The closed JournalStoreErrorReason rides along when the throw is a
+    // store error; the exception text never enters the tokens.
+    expect(startBody).toContain("JournalStoreError");
+    expect(startBody).not.toContain("error.message");
+    expect(startBody).not.toContain("String(error)");
+    // The trail is created and loaded BEFORE the wasm read so every
+    // startup stage can append its failure entry.
+    const trailCreateIndex = startBody.indexOf("createSyncDiagnosticsTrail(");
+    const wasmReadIndex = startBody.indexOf("#readJournalEngineWasmBinary()");
+    expect(trailCreateIndex).toBeGreaterThanOrEqual(0);
+    expect(wasmReadIndex).toBeGreaterThan(trailCreateIndex);
+    // The settings snapshot carries the tokens (null before first failure).
+    const snapshotIndex = pluginSource.indexOf("getSnapshot: () => {");
+    const snapshotBody = pluginSource.slice(snapshotIndex, snapshotIndex + 3_400);
+    expect(snapshotBody).toContain("lastStartupFailureTokens: this.#lastStartupFailureTokens");
+  });
+
+  it("renders the startup-failure tokens on the self-check journal-not-running verdict (closed-reason surfacing C1 P1)", () => {
+    const methodMatch = pluginSource.match(
+      /async #runSyncSelfCheck\(\): Promise<void> \{[\s\S]*?\n  \}\n/,
+    );
+    expect(methodMatch?.[0]).toBeTruthy();
+    const methodBody = methodMatch?.[0] ?? "";
+    expect(methodBody).toContain("renderSyncSelfCheckJournalNotRunningText");
+    expect(methodBody).toContain("#lastStartupFailureTokens");
+  });
+
+  it("keeps the queue-pass wrapper summary honest on an unexpected requestPass throw (closed-reason surfacing C1 P2)", () => {
+    const wrapperMatch = pluginSource.match(
+      /async #runBoundedQueuePass\(\): Promise<QueuePassSummary> \{[\s\S]*?\n  \}\n/,
+    );
+    expect(wrapperMatch?.[0]).toBeTruthy();
+    const wrapperBody = wrapperMatch?.[0] ?? "";
+    const catchIndex = wrapperBody.indexOf("} catch {");
+    expect(catchIndex).toBeGreaterThanOrEqual(0);
+    const catchBody = wrapperBody.slice(catchIndex, catchIndex + 600);
+    // The wrapper-level failure surfaces as the closed `pass_wrapper_failed`
+    // outcome token — on the trail AND on the summary, never `completed`.
+    expect(catchBody).toContain('"pass_outcome"');
+    expect(catchBody).toContain("pass_wrapper_failed");
+    expect(catchBody).not.toContain('outcome: "completed"');
+    // The genuinely-idle driver-less early return stays `completed`-with-zero.
+    const idleIndex = wrapperBody.indexOf("if (driver === null)");
+    expect(idleIndex).toBeGreaterThanOrEqual(0);
+    const idleBody = wrapperBody.slice(idleIndex, idleIndex + 200);
+    expect(idleBody).toContain('outcome: "completed"');
+  });
+
+  it("carries the closed policy state on the settings snapshot (closed-reason surfacing C1 P3)", () => {
+    const snapshotIndex = pluginSource.indexOf("getSnapshot: () => {");
+    const snapshotBody = pluginSource.slice(snapshotIndex, snapshotIndex + 3_400);
+    expect(snapshotBody).toContain("policyState: this.#policyState");
+  });
+
+  it("routes exceptional throws of the two fire-and-forget startup chains into the startup-failure path (closed-reason surfacing C1 P4)", () => {
+    // Both startup chains keep their fire-and-forget shape (never awaited
+    // in onload) but their catch handlers now feed the same startup_failure
+    // recorder instead of discarding the throw.
+    const resumeIndex = pluginSource.indexOf("void controller.resumePendingGrant()");
+    expect(resumeIndex).toBeGreaterThanOrEqual(0);
+    const resumeBody = pluginSource.slice(resumeIndex, resumeIndex + 300);
+    expect(resumeBody).toContain(".catch(");
+    expect(resumeBody).toContain("#recordStartupChainFailure");
+    const refreshIndex = pluginSource.indexOf("void session.refresh()");
+    expect(refreshIndex).toBeGreaterThanOrEqual(0);
+    const refreshBody = pluginSource.slice(refreshIndex, refreshIndex + 700);
+    expect(refreshBody).toContain(".catch(");
+    expect(refreshBody).toContain("#recordStartupChainFailure");
+  });
+
+  it("records one bounded once-per-session token for the two swallowed composition reads (closed-reason surfacing C1 P5)", () => {
+    // Pending-count read inside the automatic snapshot coordinator.
+    const countIndex = pluginSource.indexOf("repository.countPendingEvents()");
+    expect(countIndex).toBeGreaterThanOrEqual(0);
+    const countBody = pluginSource.slice(countIndex, countIndex + 500);
+    expect(countBody).toContain("#recordStatusReadFailureOnce");
+    // Note-status read of the settings snapshot.
+    const noteIndex = pluginSource.indexOf(
+      "#readLocalNoteSyncStatuses(): readonly LocalNoteSyncStatus[]",
+    );
+    expect(noteIndex).toBeGreaterThanOrEqual(0);
+    const noteBody = pluginSource.slice(noteIndex, noteIndex + 600);
+    expect(noteBody).toContain("#recordNoteStatusReadFailureOnce");
+    // Each site records AT MOST one trail entry per session (no per-render
+    // spam) and rides the existing journal_failure kind with its closed
+    // token.
+    const statusOnceIndex = pluginSource.indexOf("#recordStatusReadFailureOnce(): void");
+    expect(statusOnceIndex).toBeGreaterThanOrEqual(0);
+    const statusOnceBody = pluginSource.slice(statusOnceIndex, statusOnceIndex + 600);
+    expect(statusOnceBody).toContain("#hasRecordedStatusReadFailure");
+    expect(statusOnceBody).toContain('"status_read_failed"');
+    const noteOnceIndex = pluginSource.indexOf("#recordNoteStatusReadFailureOnce(): void");
+    expect(noteOnceIndex).toBeGreaterThanOrEqual(0);
+    const noteOnceBody = pluginSource.slice(noteOnceIndex, noteOnceIndex + 600);
+    expect(noteOnceBody).toContain("#hasRecordedNoteStatusReadFailure");
+    expect(noteOnceBody).toContain('"note_status_read_failed"');
+  });
+
   it("touches no forbidden runtime capability at load time", () => {
     for (const forbiddenText of [
       "node:",

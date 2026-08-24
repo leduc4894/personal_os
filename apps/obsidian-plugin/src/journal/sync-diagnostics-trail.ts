@@ -11,7 +11,10 @@
  * error registry's closed `error.code` vocabulary, admitted by the closed
  * snake_case shape only through {@link envelopeErrorCode} — the plugin
  * mirrors no registry client-side) and the fixed self-check verdict
- * tokens of the `self_check` kind. A free-form string cannot enter an
+ * tokens of the `self_check` kind. Closed-reason surfacing C1 adds the
+ * `startup_failure` kind (one startup stage token plus the closed store
+ * reason when the throw is a store error) and the two bounded composition
+ * read-failure tokens. A free-form string cannot enter an
  * entry at the type level, and the sidecar parser rejects any token that
  * is not a closed snake_case token or a well-formed request id record.
  *
@@ -59,6 +62,7 @@ export const SYNC_DIAGNOSTIC_KINDS = [
   "publish_failure",
   "trail_reset",
   "self_check",
+  "startup_failure",
 ] as const;
 
 export type SyncDiagnosticKind = (typeof SYNC_DIAGNOSTIC_KINDS)[number];
@@ -78,7 +82,9 @@ export type SyncDiagnosticClosedToken =
   | LifecycleRunOutcome
   | SyncSelfCheckVerdictToken
   | SyncEventStateToken
-  | SyncParkSiteToken;
+  | SyncParkSiteToken
+  | SyncStartupStageToken
+  | SyncCompositionReadFailureToken;
 
 /**
  * The closed row-state tokens a `journal_failure` entry may carry when a
@@ -143,6 +149,41 @@ export const SYNC_PARK_SITE_TOKENS = [
 ] as const;
 
 export type SyncParkSiteToken = (typeof SYNC_PARK_SITE_TOKENS)[number];
+
+/**
+ * The fixed journal-startup stage tokens (closed-reason surfacing C1 P1):
+ * one closed token naming the startup stage whose throw was swallowed by
+ * the composition's fail-closed catch. `engine_load`: the vendored sql.js
+ * engine failed to initialize. `wasm_read`: the engine's WebAssembly
+ * binary could not be read from the plugin directory. `journal_recovery`:
+ * the journal recovery (`persistence.open`) failed. `other`: any other
+ * exceptional throw of the startup chain (including the two fire-and-forget
+ * startup actions of C1 P4).
+ */
+export const SYNC_STARTUP_STAGE_TOKENS = [
+  "engine_load",
+  "wasm_read",
+  "journal_recovery",
+  "other",
+] as const;
+
+export type SyncStartupStageToken = (typeof SYNC_STARTUP_STAGE_TOKENS)[number];
+
+/**
+ * The fixed composition read-failure tokens (closed-reason surfacing C1
+ * P5): one closed token naming a composition-root journal read whose throw
+ * was swallowed into a fallback value (`0` / `[]`). `status_read_failed`:
+ * the automatic snapshot's pending-event count read. `note_status_read_failed`:
+ * the settings snapshot's local note-status read. Each site records its
+ * token at most once per session.
+ */
+export const SYNC_COMPOSITION_READ_FAILURE_TOKENS = [
+  "status_read_failed",
+  "note_status_read_failed",
+] as const;
+
+export type SyncCompositionReadFailureToken =
+  (typeof SYNC_COMPOSITION_READ_FAILURE_TOKENS)[number];
 
 /**
  * The brand that keeps the opaque envelope request id out of the closed
