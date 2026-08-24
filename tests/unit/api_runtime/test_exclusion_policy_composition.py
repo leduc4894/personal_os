@@ -22,6 +22,8 @@ import pytest
 import sqlalchemy as sa
 from api_runtime.exclusion_policy_composition import (
     KEYSET_PAGE_MAXIMUM,
+    STALE_RUNNING_PAGE_MAXIMUM,
+    STALE_RUNNING_THRESHOLD_SECONDS,
     OfflineExclusionPolicyState,
     PolicyKeysetPage,
     PolicyQueryService,
@@ -30,6 +32,7 @@ from api_runtime.exclusion_policy_composition import (
     compose_offline_exclusion_policy,
 )
 from api_runtime.exclusion_policy_models import PolicyReconciliationSummary
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from personal_os.diagnostics.context import create_diagnostic_context
@@ -349,9 +352,13 @@ class _FakeListEngine:
 async def test_serve_staleness_read_selects_executable_rows_beyond_the_bound() -> None:
     """The serve staleness read is one bounded read-only select (W3/C5).
 
-    The select targets the executable preview states with the database clock
-    against ``created_at`` — the same anchor and bound the worker's overdue
-    sweep applies — and hydrates only the opaque id plus the age in seconds.
+    The compiled PostgreSQL statement is pinned end to end: the workspace
+    filter, the exact executable state set (the set the worker's overdue
+    sweep fails), the staleness bound derived from the database clock
+    against ``created_at``, the oldest-first order and the bounded page — so
+    a serve-only regression (wrong state set, dropped workspace filter,
+    off-by-one bound) cannot pass. The hydration carries only the opaque id
+    plus the age in seconds.
     """
 
     stale_id = UUID(int=301)
@@ -365,6 +372,29 @@ async def test_serve_staleness_read_selects_executable_rows_beyond_the_bound() -
         column.name for column in cast("sa.Select", select_statement).selected_columns
     }
     assert "policy_preview_id" in selected_columns
+    # The bound is the domain's own execution deadline — the moment a live
+    # worker's sweep would have failed the row — pinned so an off-by-one
+    # drift of the constant itself cannot pass either.
+    assert STALE_RUNNING_THRESHOLD_SECONDS == PREVIEW_EXECUTION_DEADLINE_SECONDS
+    compiled_sql = " ".join(
+        str(
+            cast("sa.Select", select_statement).compile(
+                dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+            )
+        ).split()
+    )
+    assert f"knowledge.policy_previews.workspace_id = '{_WORKSPACE_ID}'" in compiled_sql, (
+        compiled_sql
+    )
+    assert "knowledge.policy_previews.state IN ('pending', 'leased', 'running')" in compiled_sql, (
+        compiled_sql
+    )
+    assert (
+        "knowledge.policy_previews.created_at <= CURRENT_TIMESTAMP "
+        f"- make_interval(0, 0, 0, 0, 0, 0, {STALE_RUNNING_THRESHOLD_SECONDS})" in compiled_sql
+    ), compiled_sql
+    assert "ORDER BY knowledge.policy_previews.created_at ASC" in compiled_sql, compiled_sql
+    assert f"LIMIT {STALE_RUNNING_PAGE_MAXIMUM}" in compiled_sql, compiled_sql
     assert [(row.policy_preview_id, row.age_seconds) for row in stale] == [(stale_id, 2400)]
 
 
