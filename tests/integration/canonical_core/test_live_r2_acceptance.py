@@ -235,7 +235,11 @@ async def _referencing_row_counts(
                 )
             ),
         }
-    return {table: int(count) for table, count in counts.items()}
+    normalized_counts: dict[str, int] = {}
+    for table_name, count in counts.items():
+        assert count is not None
+        normalized_counts[table_name] = count
+    return normalized_counts
 
 
 # --- live composition fixtures -----------------------------------------------------
@@ -284,7 +288,7 @@ async def live_acceptance_context(
         await dispose_source_store_engine(engine)
 
 
-@pytest_asyncio.fixture
+@pytest.fixture
 def live_recovery_service(
     live_acceptance_context: LiveAcceptanceContext,
     live_r2_harness: LiveR2Harness,

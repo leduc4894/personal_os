@@ -34,7 +34,7 @@ import subprocess
 import sys
 import tempfile
 from asyncio import AbstractEventLoop
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -446,7 +446,7 @@ class LocalFilesystemObjectStore:
 
     async def store_stream(
         self,
-        stream: AsyncIterator[bytes],
+        stream: AsyncIterable[bytes],
         expected_size_bytes: int,
         media_type: str,
         claimed_sha256: str | None = None,
@@ -614,7 +614,7 @@ class DisposableIdentityDatabase:
 @pytest_asyncio.fixture
 async def disposable_identity_database(
     canonical_core_stack: CanonicalCoreStack, object_store_root: Path
-) -> Iterator[DisposableIdentityDatabase]:
+) -> AsyncIterator[DisposableIdentityDatabase]:
     """A freshly migrated database per identity test.
 
     Identity bootstrap classifies the whole users/workspaces/devices graph, so
@@ -862,7 +862,7 @@ class CanonicalCoreHarness:
 @pytest_asyncio.fixture
 async def canonical_core_harness(
     canonical_core_stack: CanonicalCoreStack, object_store_root: Path
-) -> Iterator[CanonicalCoreHarness]:
+) -> AsyncIterator[CanonicalCoreHarness]:
     engine = create_source_store_engine(
         canonical_core_stack.settings, canonical_core_stack.password
     )
@@ -904,7 +904,7 @@ async def restore_target_context(
     canonical_core_stack: CanonicalCoreStack,
     canonical_core_harness: CanonicalCoreHarness,
     disposable_restore_database: DisposableRestoreDatabase,
-) -> Iterator[RestoreTargetContext]:
+) -> AsyncIterator[RestoreTargetContext]:
     engine = create_source_store_engine(
         disposable_restore_database.settings, canonical_core_stack.password
     )
@@ -943,6 +943,7 @@ __all__ = [
     "DisposableIdentityDatabase",
     "DisposableRestoreDatabase",
     "LocalFilesystemObjectStore",
+    "PostgresqlDumpProcessAdapter",
     "PublishedSource",
     "RecordingIdentityDiagnostics",
     "RestoreTargetContext",
