@@ -40,13 +40,22 @@ diagnostic event(s) and closes the R2 client exactly once. It never renders
 settings values, secret paths or exception causes.
 
 Janitor degradation is a warning, never a probe skip and never an exit-code
-change: a failed cleanup run emits one `object_storage_spool_cleanup_degraded`
-event carrying only safe counts, the `HeadBucket` probe still runs, and the
-exit code reflects only the probe outcome. Stale candidates the janitor could
-not handle are picked up by a later run. Every completed probe emits exactly
-one probe-outcome event — `object_storage_operation_succeeded` on success or
-`object_storage_operation_failed` on dependency/access failure; a degraded
-janitor adds one separate cleanup warning event.
+change. A cleanup scan failure emits one
+`object_storage_spool_cleanup_degraded` event with safe cleanup counts and the
+closed reason `spool_cleanup_scan_failed`. Stale candidates the janitor could
+not handle are picked up by a later run; an individual stale-entry failure
+uses `spool_cleanup_entry_failed` as its closed reason. The `HeadBucket` probe
+still runs and its result remains authoritative: emit exactly one
+`object_storage_operation_succeeded` or `object_storage_operation_failed`
+probe-outcome event, and use that outcome alone for the exit code.
+
+Client close is a separate lifecycle diagnostic. If closing the client
+degrades, emit `object_storage_client_close_degraded` with the closed client
+close reason `object_storage_client_close_failed` after the probe outcome.
+This event never replaces the probe
+event and never changes its already-determined exit code. Thus the probe
+outcome has precedence for command status; cleanup and close diagnostics are
+additional safe events only.
 
 | Exit | Meaning |
 | --- | --- |

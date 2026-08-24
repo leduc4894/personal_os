@@ -36,6 +36,17 @@ if TYPE_CHECKING:
 COMMAND_MODULE = "r2_object_storage.runtime_check"
 COMMAND_PROGRAM = "object-storage-check-runtime"
 
+
+def test_operations_guide_documents_closed_cleanup_degradation_reasons() -> None:
+    guide = Path(__file__).parents[3] / "docs" / "operations" / "object-storage.md"
+    content = guide.read_text(encoding="utf-8")
+    for reason in ("spool_cleanup_scan_failed", "object_storage_client_close_degraded"):
+        assert reason in content, (
+            "the object-storage operations guide must document the closed diagnostic "
+            f"reason token {reason!r}"
+        )
+
+
 _VALID_ACCOUNT_ID = "abcdef0123456789abcdef0123456789"
 _VALID_ENDPOINT = f"https://{_VALID_ACCOUNT_ID}.r2.cloudflarestorage.com"
 _VALID_BUCKET = "knowledge-test"
