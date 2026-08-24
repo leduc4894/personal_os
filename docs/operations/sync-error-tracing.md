@@ -54,7 +54,7 @@ counter (capped at 999) that the settings section surfaces.
 | ----------------- | ----------------------------------------------------------------------------------------------- |
 | `wire_failure`    | One sync HTTP request failed; carries the closed `SyncApiFailureKind` label and, when the server answered with an envelope, the opaque `request_id` token. |
 | `pass_outcome`    | Every finished queue pass; carries the closed `QueuePassOutcome`. A success that returned a server envelope may sample its `request_id` onto the entry. |
-| `journal_failure` | A journal mutation inside the pass loop failed; carries the closed `JournalStoreErrorReason`. Also carries the bounded composition read-failure tokens (`status_read_failed`, `note_status_read_failed`) when a settings/snapshot journal read was swallowed — at most once per session per site. |
+| `journal_failure` | A journal mutation inside the pass loop failed; carries the closed `JournalStoreErrorReason`. It also carries the closed journal-orchestration failure tokens listed below when composition, scheduling, drain, capture or reconcile work fails closed. |
 | `publish_failure` | A journal generation publish failed; carries the closed `JournalStoreErrorReason`.               |
 | `trail_reset`     | The sidecar was unreadable or corrupt and the trail reset to empty.                             |
 | `self_check`      | A `Run sync self-check` step closed; carries the fixed self-check verdict tokens.               |
@@ -87,8 +87,33 @@ The closed token vocabularies are exactly the existing sync vocabularies:
   `origin_reachable`, `origin_unreachable`.
 - Startup stage tokens (`startup_failure` kind): `engine_load`,
   `wasm_read`, `journal_recovery`, `other`.
-- Composition read-failure tokens (ride the `journal_failure` kind):
-  `status_read_failed`, `note_status_read_failed`.
+- Journal orchestration failure tokens (ride the `journal_failure` kind):
+  `status_read_failed`, `note_status_read_failed`,
+  `retry_schedule_read_failed`, `sync_status_read_failed`,
+  `queue_drain_failed`, `snapshot_drain_failed`,
+  `settled_admission_failed`, `automatic_snapshot_admission_failed`,
+  `lifecycle_reconcile_persist_failed`. Their safe meanings and emission
+  bounds are fixed below.
+
+### Journal orchestration failure tokens
+
+All nine tokens below name only a failed internal operation. They never
+carry the thrown error, a note path, content, identifier, or credential.
+They are appended as a `journal_failure` trail entry through the same bounded
+128-entry ring; a failed trail append remains non-blocking and is counted by
+the existing append-failure counter.
+
+| Token | Safe operator meaning | Bounded emission behavior |
+| --- | --- | --- |
+| `status_read_failed` | The automatic snapshot could not read its pending-event status, so it used its existing fail-closed fallback. | At most once per plugin session for this read site. |
+| `note_status_read_failed` | The settings snapshot could not read local note status, so it used its existing fail-closed fallback. | At most once per plugin session for this read site. |
+| `retry_schedule_read_failed` | Retry scheduling could not read journal state and did not arm a retry timer. | At most once per plugin session for this read site. |
+| `sync_status_read_failed` | Sync-status projection could not read journal state and returns no partial status. | At most once per plugin session for this read site. |
+| `queue_drain_failed` | The queue coordinator drain rejected; its public wait still settles with the existing closed fallback. | One token for each rejected queue drain. |
+| `snapshot_drain_failed` | The snapshot coordinator drain rejected; its public wait still settles with the existing closed fallback. | One token for each rejected snapshot drain. |
+| `settled_admission_failed` | A settled content-admission operation rejected before its waiters were released. | One token for each rejected settled admission. |
+| `automatic_snapshot_admission_failed` | One or more automatic-snapshot admissions rejected; affected files remain counted as skipped. | At most one token per automatic snapshot scan. |
+| `lifecycle_reconcile_persist_failed` | Persisting the lifecycle `reconcile_required` marker failed; the lifecycle result stays fail-closed. | One token for each failed reconcile-marker persistence attempt. |
 
 The one opaque value that may ride along is the server envelope's
 `request_id` (a UUID), rendered as `request_id=<uuid>`. It is the

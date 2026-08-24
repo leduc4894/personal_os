@@ -17,7 +17,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-import { envelopeRequestId } from "./sync-diagnostics-trail";
+import {
+  SYNC_COMPOSITION_READ_FAILURE_TOKENS,
+  envelopeRequestId,
+} from "./sync-diagnostics-trail";
 import type { SyncDiagnosticToken, SyncDiagnosticTrailEntry } from "./sync-diagnostics-trail";
 import {
   SYNC_DIAGNOSTICS_TRAIL_TAIL_ENTRY_LIMIT,
@@ -260,6 +263,12 @@ describe("deriveSyncStopReasonTokens", () => {
 // --- the type-level closed vocabulary ------------------------------------------------------------------
 
 describe("sync diagnostics export closed vocabulary (type level)", () => {
+  it("exports the automatic snapshot admission token as a closed trail token", () => {
+    expect(SYNC_COMPOSITION_READ_FAILURE_TOKENS).toContain(
+      "automatic_snapshot_admission_failed",
+    );
+  });
+
   it("rejects a free-form token at compile time", () => {
     // A free-form string must not enter a rendered trail entry.
     const entry = trailEntry("wire_failure", 1, [

@@ -506,3 +506,16 @@ describe("sync diagnostics trail privacy source contract", () => {
     }
   });
 });
+
+describe("sync error tracing runbook token contract", () => {
+  it("documents every journal orchestration failure token for operators", () => {
+    const runbookText = readFileSync(
+      new URL("../../../../docs/operations/sync-error-tracing.md", import.meta.url),
+      "utf8",
+    );
+
+    for (const token of SYNC_COMPOSITION_READ_FAILURE_TOKENS) {
+      expect(runbookText).toContain(token);
+    }
+  });
+});

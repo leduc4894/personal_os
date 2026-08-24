@@ -170,12 +170,17 @@ export const SYNC_STARTUP_STAGE_TOKENS = [
 export type SyncStartupStageToken = (typeof SYNC_STARTUP_STAGE_TOKENS)[number];
 
 /**
- * The fixed composition read-failure tokens (closed-reason surfacing C1
- * P5): one closed token naming a composition-root journal read whose throw
- * was swallowed into a fallback value (`0` / `[]`). `status_read_failed`:
- * the automatic snapshot's pending-event count read. `note_status_read_failed`:
- * the settings snapshot's local note-status read. Each site records its
- * token at most once per session.
+ * The fixed journal-orchestration failure tokens (closed-reason surfacing C1
+ * P5): composition-root read catches name their fail-closed fallback as
+ * `status_read_failed`, `note_status_read_failed`,
+ * `retry_schedule_read_failed`, or `sync_status_read_failed` (once per
+ * session per site). Coordinator drain rejections name `queue_drain_failed`
+ * or `snapshot_drain_failed`; a rejected settled admission names
+ * `settled_admission_failed`; an automatic snapshot coalesces rejected
+ * admissions as `automatic_snapshot_admission_failed` once per scan; and a
+ * failed lifecycle reconcile-marker persistence names
+ * `lifecycle_reconcile_persist_failed` once per attempt. Every token is
+ * closed and is appended only as a `journal_failure` trail entry.
  */
 export const SYNC_COMPOSITION_READ_FAILURE_TOKENS = [
   "status_read_failed",
