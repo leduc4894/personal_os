@@ -34,7 +34,7 @@ from personal_os.object_storage.errors import (
     ObjectStorageError,
 )
 from r2_object_storage import spool as spool_module
-from r2_object_storage.spool import SpoolLimits, SpoolManager
+from r2_object_storage.spool import SpoolCleanupSummary, SpoolLimits, SpoolManager
 
 _MIB = 1024 * 1024
 _MAXIMUM_OBJECT_SIZE_BYTES = 100 * _MIB
@@ -155,6 +155,35 @@ def test_spool_limits_are_immutable() -> None:
     limits = SpoolLimits()
     with pytest.raises(AttributeError):
         limits.maximum_object_size_bytes = 1  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_count"),
+    [
+        ("examined_count", 1.5),
+        ("removed_count", 1.5),
+        ("skipped_count", 1.5),
+        ("deferred_count", 1.5),
+        ("failed_count", 1.5),
+        ("examined_count", True),
+        ("removed_count", True),
+        ("skipped_count", True),
+        ("deferred_count", True),
+        ("failed_count", True),
+    ],
+)
+def test_cleanup_summary_rejects_non_integer_counts(field_name: str, invalid_count: object) -> None:
+    counts: dict[str, object] = {
+        "examined_count": 0,
+        "removed_count": 0,
+        "skipped_count": 0,
+        "deferred_count": 0,
+        "failed_count": 0,
+    }
+    counts[field_name] = invalid_count
+
+    with pytest.raises(ValueError, match="cleanup counts must be integers"):
+        SpoolCleanupSummary(**counts)  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio

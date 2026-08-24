@@ -109,6 +109,8 @@ class SpoolCleanupSummary:
             self.deferred_count,
             self.failed_count,
         )
+        if any(isinstance(count, bool) or not isinstance(count, int) for count in counts):
+            raise ValueError("cleanup counts must be integers")
         if any(count < 0 for count in counts):
             raise ValueError("cleanup counts must be non-negative")
         if self.reason == SPOOL_CLEANUP_SCAN_FAILED:

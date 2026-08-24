@@ -7,8 +7,13 @@ Date: 2026-08-24
 Task 3 documentation closure is implemented. The evidence commit for the
 documentation and contract test is
 [`be89fd7`](../../commit/be89fd7fdf2f6076e89da737a36a485a77c46692) (`docs:
-explain r2 cleanup degradation diagnostics`). This handoff is committed
-separately after that implementation commit.
+explain r2 cleanup degradation diagnostics`). The verified implementation/gate
+tree SHA is
+[`5d4de6a`](../../commit/5d4de6ad7babceac14ecf58b501af6a916b46a3b) (`docs:
+correct r2 closure gate evidence`). That handoff-correction commit is
+metadata-only: it changes only this handoff and does not alter the
+implementation or verified gate outcomes. This record makes no claim about a
+subsequent, unverified SHA.
 
 ## Changes
 
@@ -34,6 +39,10 @@ separately after that implementation commit.
 | Boundary check | Passed | `uv run poe boundary-check`: 5 import contracts kept, 10 architecture tests passed, API artifacts current, generated client check completed. |
 | Diff check | Passed after closure fix | `git diff --check` passed on the final working tree after removing the handoff EOF blank line. The historical `730ed2a..adba69a` range correctly exposed the defect in the prior handoff commit. |
 | Full verify | Passed after closure fix | `uv run poe verify` passed after the branch-owned formatting fixes. |
+| Final-review TDD RED | Passed (expected failure) | `uv run pytest tests/unit/object_storage/test_spool_manager.py -q` produced 10 intended failures for fractional and boolean counts before the type guard. |
+| Final-review TDD GREEN | Passed | The same focused file passed with `44 passed, 3 skipped in 2.12s` after the exact-integer guard. |
+| Final-review object-storage unit suite | Passed | `uv run pytest tests/unit/object_storage -q`: `194 passed, 3 skipped in 2.20s`. |
+| Final-review targeted static checks | Passed | `uv run ruff format --check ...`: 2 files already formatted; `uv run ruff check ...`: all checks passed; `uv run mypy packages/r2-object-storage/src`: success on 8 source files. |
 
 ## Deferred items
 
