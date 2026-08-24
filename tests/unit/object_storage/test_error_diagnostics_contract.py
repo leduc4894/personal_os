@@ -204,11 +204,29 @@ def test_object_storage_events_are_registered_with_exact_fields() -> None:
             ),
         ),
         EventName.OBJECT_STORAGE_SPOOL_CLEANUP_DEGRADED: (
-            frozenset({"operation", "count"}),
+            frozenset({"operation", "count", "reason"}),
             frozenset(
                 {
                     "operation",
                     "count",
+                    "reason",
+                }
+            ),
+        ),
+        EventName.OBJECT_STORAGE_CLIENT_CLOSE_DEGRADED: (
+            frozenset(
+                {
+                    "operation",
+                    "reason",
+                    "error_code",
+                    "error_category",
+                    "is_retryable",
+                }
+            ),
+            frozenset(
+                {
+                    "operation",
+                    "reason",
                     "error_code",
                     "error_category",
                     "is_retryable",

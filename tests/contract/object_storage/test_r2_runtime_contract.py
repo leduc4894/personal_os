@@ -12,6 +12,7 @@ the deterministic :class:`ScriptedS3Client`, so no test touches the network.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import os
@@ -34,6 +35,17 @@ if TYPE_CHECKING:
 
 COMMAND_MODULE = "r2_object_storage.runtime_check"
 COMMAND_PROGRAM = "object-storage-check-runtime"
+
+
+def test_operations_guide_documents_closed_cleanup_degradation_reasons() -> None:
+    guide = Path(__file__).parents[3] / "docs" / "operations" / "object-storage.md"
+    content = guide.read_text(encoding="utf-8")
+    for reason in ("spool_cleanup_scan_failed", "object_storage_client_close_degraded"):
+        assert reason in content, (
+            "the object-storage operations guide must document the closed diagnostic "
+            f"reason token {reason!r}"
+        )
+
 
 _VALID_ACCOUNT_ID = "abcdef0123456789abcdef0123456789"
 _VALID_ENDPOINT = f"https://{_VALID_ACCOUNT_ID}.r2.cloudflarestorage.com"
@@ -125,6 +137,18 @@ class RaisingClientSource(RecordingClientSource):
 
     async def get_client(self) -> ScriptedS3Client:
         await super().get_client()
+        raise self._cause
+
+
+class CloseFailingClientSource(RecordingClientSource):
+    """Client source that exposes a close failure without rendering its cause."""
+
+    def __init__(self, client: ScriptedS3Client, cause: BaseException) -> None:
+        super().__init__(client)
+        self._cause = cause
+
+    async def close(self) -> None:
+        await super().close()
         raise self._cause
 
 
@@ -365,6 +389,47 @@ async def test_success_exits_0_with_one_succeeded_event_and_one_close(
     assert _SECRET_ACCESS_KEY_VALUE not in combined
 
 
+@pytest.mark.asyncio
+async def test_close_failure_after_success_keeps_exit_0_and_emits_closed_degradation(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Suppressing close failures would hide a degraded resource lifecycle."""
+
+    secret_root = tmp_path / "secrets"
+    secret_root.mkdir()
+    _secret_files(secret_root)
+    spool_root = tmp_path / "spool"
+    spool_root.mkdir()
+
+    client = ScriptedS3Client()
+    client.enqueue(None)
+    source = CloseFailingClientSource(client, RuntimeError("sentinel-close"))
+
+    exit_code = await _run_check(_valid_environ(secret_root, spool_root), source)
+
+    captured = capsys.readouterr()
+    captured_output = captured.out + captured.err
+    events = [
+        json.loads(line)
+        for line in captured_output.splitlines()
+        if line.startswith("{") and '"diagnostic_schema_version"' in line
+    ]
+    assert exit_code == 0
+    assert [event["event"] for event in events] == [
+        "object_storage_operation_succeeded",
+        "object_storage_client_close_degraded",
+    ]
+    assert events[-1]["operation"] == "object_storage_client_close"
+    assert events[-1]["reason"] == "object_storage_client_close_failed"
+    assert events[-1]["error_code"] == "internal_error"
+    assert events[-1]["error_category"] == "internal"
+    assert events[-1]["is_retryable"] is False
+    assert source.close_count == 1
+    assert "sentinel-close" not in captured_output
+    _assert_read_only(client, 1)
+
+
 # --- dependency and access failures: exit 69 -------------------------------
 
 
@@ -395,6 +460,50 @@ async def test_access_denied_exits_69_without_retry(
     assert event["attempt_count"] == 1
     assert source.close_count == 1
     _assert_read_only(client, 1)
+
+
+@pytest.mark.asyncio
+async def test_close_failure_after_unavailable_probe_keeps_exit_69(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """A close failure must not replace the already-determined probe exit code."""
+
+    secret_root = tmp_path / "secrets"
+    secret_root.mkdir()
+    _secret_files(secret_root)
+    spool_root = tmp_path / "spool"
+    spool_root.mkdir()
+
+    client = ScriptedS3Client()
+    for _ in range(_EXPECTED_MAXIMUM_PROBE_ATTEMPTS):
+        client.enqueue(_client_error("ServiceUnavailable", 503))
+    source = CloseFailingClientSource(client, RuntimeError("sentinel-close"))
+
+    exit_code = await _run_check(_valid_environ(secret_root, spool_root), source)
+
+    captured = capsys.readouterr()
+    captured_output = captured.out + captured.err
+    events = [
+        json.loads(line)
+        for line in captured_output.splitlines()
+        if line.startswith("{") and '"diagnostic_schema_version"' in line
+    ]
+    assert exit_code == 69
+    assert {event["event"] for event in events} == {
+        "object_storage_operation_failed",
+        "object_storage_client_close_degraded",
+    }
+    close_event = next(
+        event for event in events if event["event"] == "object_storage_client_close_degraded"
+    )
+    failed_event = next(
+        event for event in events if event["event"] == "object_storage_operation_failed"
+    )
+    assert close_event["reason"] == "object_storage_client_close_failed"
+    assert failed_event["error_code"] == "object_storage_unavailable"
+    assert "sentinel-close" not in captured_output
+    _assert_read_only(client, _EXPECTED_MAXIMUM_PROBE_ATTEMPTS)
 
 
 @pytest.mark.asyncio
@@ -509,6 +618,29 @@ async def test_unexpected_client_failure_exits_70_without_rendering_the_cause(
 
 
 @pytest.mark.asyncio
+async def test_close_cancellation_propagates(
+    tmp_path: Path,
+) -> None:
+    """Catching cancellation during close would leave task cancellation stuck."""
+
+    secret_root = tmp_path / "secrets"
+    secret_root.mkdir()
+    _secret_files(secret_root)
+    spool_root = tmp_path / "spool"
+    spool_root.mkdir()
+
+    client = ScriptedS3Client()
+    client.enqueue(None)
+    source = CloseFailingClientSource(client, asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await _run_check(_valid_environ(secret_root, spool_root), source)
+
+    assert source.close_count == 1
+    _assert_read_only(client, 1)
+
+
+@pytest.mark.asyncio
 async def test_janitor_degradation_reports_safe_counts_but_never_skips_the_probe(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
@@ -550,6 +682,7 @@ async def test_janitor_degradation_reports_safe_counts_but_never_skips_the_probe
     ]
     assert events[0]["operation"] == "spool_cleanup"
     assert events[0]["count"] == 0
+    assert events[0]["reason"] == "spool_cleanup_janitor_failed"
     assert events[1]["attempt_count"] == 1
     combined = _combined_output(capsys)
     assert "spool-scan-failed-do-not-render" not in combined
@@ -617,7 +750,9 @@ async def test_janitor_deferred_candidates_emit_degraded_with_real_count(
         from r2_object_storage.spool import SpoolCleanupSummary
 
         async def _janitor() -> SpoolCleanupSummary:
-            return SpoolCleanupSummary(1_000, 997, 0, 3)
+            from r2_object_storage.spool import SPOOL_CLEANUP_DEFERRED
+
+            return SpoolCleanupSummary(1_000, 997, 0, 3, reason=SPOOL_CLEANUP_DEFERRED)
 
         return _janitor()
 
@@ -636,6 +771,71 @@ async def test_janitor_deferred_candidates_emit_degraded_with_real_count(
     ]
     assert events[0]["operation"] == "spool_cleanup"
     assert events[0]["count"] == 3
+    assert events[0]["reason"] == "spool_cleanup_deferred"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failed_count", "reason_value"),
+    [
+        (0, "spool_cleanup_scan_failed"),
+        (1, "spool_cleanup_entry_failed"),
+    ],
+)
+async def test_janitor_summary_failure_reason_is_emitted(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    failed_count: int,
+    reason_value: str,
+) -> None:
+    """Discarding a summary reason would prevent operators distinguishing cleanup failures."""
+
+    secret_root = tmp_path / "secrets"
+    secret_root.mkdir()
+    _secret_files(secret_root)
+    spool_root = tmp_path / "spool"
+    spool_root.mkdir()
+
+    client = ScriptedS3Client()
+    client.enqueue(None)
+    source = RecordingClientSource(client)
+
+    def _reasoned_janitor(_spool_root: Path) -> Awaitable[SpoolCleanupSummary]:
+        from r2_object_storage.spool import (
+            SPOOL_CLEANUP_ENTRY_FAILED,
+            SPOOL_CLEANUP_SCAN_FAILED,
+            SpoolCleanupSummary,
+        )
+
+        reason = {
+            "spool_cleanup_scan_failed": SPOOL_CLEANUP_SCAN_FAILED,
+            "spool_cleanup_entry_failed": SPOOL_CLEANUP_ENTRY_FAILED,
+        }[reason_value]
+
+        async def _janitor() -> SpoolCleanupSummary:
+            return SpoolCleanupSummary(
+                failed_count,
+                0,
+                0,
+                0,
+                failed_count,
+                reason,
+            )
+
+        return _janitor()
+
+    exit_code = await _run_check(
+        _valid_environ(secret_root, spool_root), source, spool_janitor=_reasoned_janitor
+    )
+
+    assert exit_code == 0
+    events = _event_records(capsys)
+    assert [event["event"] for event in events] == [
+        "object_storage_spool_cleanup_degraded",
+        "object_storage_operation_succeeded",
+    ]
+    assert events[0]["reason"] == reason_value
+    _assert_read_only(client, 1)
 
 
 @pytest.mark.asyncio

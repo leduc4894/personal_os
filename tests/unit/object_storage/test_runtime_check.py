@@ -55,6 +55,11 @@ class _TimedClientSource:
         return None
 
 
+class _CloseFailingTimedClientSource(_TimedClientSource):
+    async def close(self) -> None:
+        raise RuntimeError("sentinel-close")
+
+
 @pytest.fixture(autouse=True)
 def _clean_diagnostics() -> Iterator[None]:
     reset_diagnostics_for_testing()
@@ -126,3 +131,62 @@ async def test_duration_excludes_client_composition(
     assert exit_code == 0
     assert len(events) == 1
     assert events[0]["duration_ms"] == 25
+
+
+@pytest.mark.asyncio
+async def test_close_failure_after_success_keeps_exit_code_and_emits_closed_reason(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """A close failure must be visible without exposing its provider exception."""
+
+    secret_root = tmp_path / "secrets"
+    secret_root.mkdir()
+    (secret_root / _ACCESS_KEY_FILE_NAME).write_text("access-key", encoding="utf-8")
+    (secret_root / _SECRET_ACCESS_KEY_FILE_NAME).write_text("secret-key", encoding="utf-8")
+    spool_root = tmp_path / "spool"
+    spool_root.mkdir()
+
+    clock = _Clock()
+    source = _CloseFailingTimedClientSource(clock)
+
+    def _client_source_factory(
+        settings: ObjectStorageSettings,
+        credentials: LoadedR2Credentials,
+    ) -> R2ClientSource:
+        del settings, credentials
+        return source
+
+    async def _clean_janitor(_spool_root: Path) -> SpoolCleanupSummary:
+        from r2_object_storage.spool import SpoolCleanupSummary
+
+        return SpoolCleanupSummary(0, 0, 0, 0)
+
+    async def _no_sleep(_delay_seconds: float) -> None:
+        return None
+
+    from r2_object_storage.runtime_check import run_object_storage_runtime_check
+
+    exit_code = await run_object_storage_runtime_check(
+        ServiceName.WORKER,
+        environ=_valid_environ(secret_root, spool_root),
+        client_source_factory=_client_source_factory,
+        spool_janitor=_clean_janitor,
+        monotonic=clock.monotonic,
+        sleep=_no_sleep,
+    )
+
+    captured = capsys.readouterr()
+    captured_output = captured.out + captured.err
+    events = [
+        json.loads(line)
+        for line in captured_output.splitlines()
+        if line.startswith("{") and '"diagnostic_schema_version"' in line
+    ]
+    assert exit_code == 0
+    assert [event["event"] for event in events] == [
+        "object_storage_operation_succeeded",
+        "object_storage_client_close_degraded",
+    ]
+    assert events[-1]["reason"] == "object_storage_client_close_failed"
+    assert "sentinel-close" not in captured_output

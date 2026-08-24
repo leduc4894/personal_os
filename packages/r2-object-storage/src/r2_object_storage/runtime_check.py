@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -83,6 +82,9 @@ _MAXIMUM_PROBE_ATTEMPTS: Final[int] = 3
 _PROBE_RETRY_BASE_DELAY_SECONDS: Final[float] = 0.5
 _PROBE_OPERATION_TOKEN: Final[str] = "head_bucket"
 _JANITOR_OPERATION_TOKEN: Final[str] = "spool_cleanup"
+_JANITOR_FAILED_REASON_TOKEN: Final[str] = "spool_cleanup_janitor_failed"
+_CLIENT_CLOSE_OPERATION_TOKEN: Final[str] = "object_storage_client_close"
+_CLIENT_CLOSE_FAILED_REASON_TOKEN: Final[str] = "object_storage_client_close_failed"
 _PROVIDER_TOKEN: Final[str] = "r2"
 
 
@@ -233,6 +235,7 @@ async def run_object_storage_runtime_check(
         emit_emergency_application_error,
         emit_emergency_internal_error,
     )
+    from personal_os.error_contracts.codes import ErrorCategory, ErrorCode
     from personal_os.error_contracts.exceptions import ApplicationError
     from personal_os.object_storage.errors import ObjectStorageError
     from personal_os.runtime_configuration.loading import load_runtime_settings
@@ -241,6 +244,9 @@ async def run_object_storage_runtime_check(
     provider = SafeToken.parse(_PROVIDER_TOKEN)
     probe_operation = SafeToken.parse(_PROBE_OPERATION_TOKEN)
     janitor_operation = SafeToken.parse(_JANITOR_OPERATION_TOKEN)
+    janitor_failed_reason = SafeToken.parse(_JANITOR_FAILED_REASON_TOKEN)
+    client_close_operation = SafeToken.parse(_CLIENT_CLOSE_OPERATION_TOKEN)
+    client_close_failed_reason = SafeToken.parse(_CLIENT_CLOSE_FAILED_REASON_TOKEN)
 
     resolution = create_diagnostic_context()
     context = resolution.context
@@ -273,20 +279,25 @@ async def run_object_storage_runtime_check(
             # handled by a later run, so a successful summary with deferred
             # candidates still emits the warning while the probe continues.
             deferred_count = 0
-            janitor_failed = False
+            cleanup_reason: SafeToken | None = None
             try:
                 summary = await spool_janitor(object_settings.object_storage_spool_root)
                 deferred_count = summary.deferred_count
+                cleanup_reason = summary.reason
             except asyncio.CancelledError:
                 raise
             except Exception:
                 # A failed janitor is degraded with an unknown deferred count;
                 # no summary is available on the failure path, so count is 0.
-                janitor_failed = True
-            if janitor_failed or deferred_count > 0:
+                cleanup_reason = janitor_failed_reason
+            if cleanup_reason is not None:
                 logger.emit(
                     EventName.OBJECT_STORAGE_SPOOL_CLEANUP_DEGRADED,
-                    {"operation": janitor_operation, "count": deferred_count},
+                    {
+                        "operation": janitor_operation,
+                        "count": deferred_count,
+                        "reason": cleanup_reason,
+                    },
                 )
 
             started: float | None = None
@@ -336,9 +347,24 @@ async def run_object_storage_runtime_check(
             return EX_UNAVAILABLE
         finally:
             # The client manager's close is idempotent; it runs exactly once on
-            # every completed path and never masks the emitted event or code.
-            with contextlib.suppress(Exception):
+            # every completed path. A close failure never replaces the probe's
+            # already-determined exit code, but remains observable with only
+            # fixed closed fields; cancellation always propagates.
+            try:
                 await client_source.close()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.emit(
+                    EventName.OBJECT_STORAGE_CLIENT_CLOSE_DEGRADED,
+                    {
+                        "operation": client_close_operation,
+                        "reason": client_close_failed_reason,
+                        "error_code": ErrorCode.INTERNAL_ERROR,
+                        "error_category": ErrorCategory.INTERNAL,
+                        "is_retryable": False,
+                    },
+                )
 
 
 def _build_argument_parser() -> argparse.ArgumentParser:
