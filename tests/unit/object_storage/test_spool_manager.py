@@ -21,6 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from personal_os.diagnostics.events import SafeToken
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.object_storage import CanonicalMediaType, ContentDigest, ExpectedObject
 from personal_os.object_storage.errors import (
@@ -814,3 +815,56 @@ async def test_janitor_defers_candidates_beyond_the_cap(tmp_path: Path) -> None:
     assert summary.removed_count == 2
     assert summary.deferred_count == 1
     assert len([path for path in tmp_path.iterdir() if path.is_file()]) == 1
+
+
+@pytest.mark.asyncio
+async def test_janitor_reports_scan_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manager = build_spool_manager(tmp_path)
+
+    def fail_scan(_root: Path) -> object:
+        raise OSError("scan failed")
+
+    monkeypatch.setattr(spool_module.os, "scandir", fail_scan)
+
+    summary = await manager.cleanup_stale_spools()
+
+    assert summary.examined_count == 0
+    assert summary.removed_count == 0
+    assert summary.skipped_count == 0
+    assert summary.deferred_count == 0
+    assert summary.failed_count == 0
+    assert summary.reason == SafeToken.parse("spool_cleanup_scan_failed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["lstat", "unlink"])
+async def test_janitor_reports_entry_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str
+) -> None:
+    manager = build_spool_manager(tmp_path)
+    stale = tmp_path / _spool_file_name()
+    stale.write_bytes(b"stale")
+    stale_mtime = fake_wall_now[0] - _STALE_AFTER_SECONDS - 1
+    os.utime(stale, (stale_mtime, stale_mtime))
+
+    if failure == "lstat":
+        def fail_lstat(_path: Path) -> object:
+            raise OSError("lstat failed")
+
+        monkeypatch.setattr(spool_module.os, "lstat", fail_lstat)
+    else:
+        def fail_unlink(_path: Path) -> object:
+            raise OSError("unlink failed")
+
+        monkeypatch.setattr(spool_module.os, "unlink", fail_unlink)
+
+    summary = await manager.cleanup_stale_spools()
+
+    assert summary.examined_count == 1
+    assert summary.removed_count == 0
+    assert summary.skipped_count == 0
+    assert summary.deferred_count == 0
+    assert summary.failed_count == 1
+    assert summary.reason == SafeToken.parse("spool_cleanup_entry_failed")

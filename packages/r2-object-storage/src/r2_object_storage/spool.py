@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol
 
+from personal_os.diagnostics.events import SafeToken
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.object_storage.contracts import ExpectedObject
 from personal_os.object_storage.errors import (
@@ -49,6 +50,10 @@ _SPOOL_FILE_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(
     f"{re.escape(_SPOOL_FILE_PREFIX)}{_UUID_HEX_GRAMMAR}{re.escape(_SPOOL_FILE_SUFFIX)}"
 )
 _OWNER_READ_WRITE_MODE: Final[int] = 0o600
+
+SPOOL_CLEANUP_DEFERRED: Final[SafeToken] = SafeToken.parse("spool_cleanup_deferred")
+SPOOL_CLEANUP_SCAN_FAILED: Final[SafeToken] = SafeToken.parse("spool_cleanup_scan_failed")
+SPOOL_CLEANUP_ENTRY_FAILED: Final[SafeToken] = SafeToken.parse("spool_cleanup_entry_failed")
 
 
 class DiskUsageSnapshot(Protocol):
@@ -93,6 +98,32 @@ class SpoolCleanupSummary:
     removed_count: int
     skipped_count: int
     deferred_count: int
+    failed_count: int = 0
+    reason: SafeToken | None = None
+
+    def __post_init__(self) -> None:
+        counts = (
+            self.examined_count,
+            self.removed_count,
+            self.skipped_count,
+            self.deferred_count,
+            self.failed_count,
+        )
+        if any(count < 0 for count in counts):
+            raise ValueError("cleanup counts must be non-negative")
+        if self.reason == SPOOL_CLEANUP_SCAN_FAILED:
+            if any(counts):
+                raise ValueError("scan failure summary must have zero counts")
+        elif self.reason == SPOOL_CLEANUP_ENTRY_FAILED:
+            if self.failed_count == 0:
+                raise ValueError("entry failure summary must have failed entries")
+        elif self.reason == SPOOL_CLEANUP_DEFERRED:
+            if self.deferred_count == 0 or self.failed_count != 0:
+                raise ValueError("deferred summary must have deferred entries only")
+        elif self.reason is not None:
+            raise ValueError("unknown cleanup failure reason")
+        elif self.failed_count != 0 or self.deferred_count != 0:
+            raise ValueError("failure counts require a cleanup reason")
 
 
 class _AdmissionWindowExpired(Exception):
@@ -351,10 +382,13 @@ class SpoolManager:
         removed_count = 0
         skipped_count = 0
         deferred_count = 0
+        failed_count = 0
         try:
             entries = list(os.scandir(self._root))
         except OSError:
-            return SpoolCleanupSummary(0, 0, 0, 0)
+            return SpoolCleanupSummary(
+                0, 0, 0, 0, reason=SPOOL_CLEANUP_SCAN_FAILED
+            )
         for entry in entries:
             if _SPOOL_FILE_NAME_PATTERN.fullmatch(entry.name) is None:
                 continue
@@ -372,8 +406,20 @@ class SpoolManager:
                 else:
                     skipped_count += 1
             except OSError:
-                skipped_count += 1
-        return SpoolCleanupSummary(examined_count, removed_count, skipped_count, deferred_count)
+                failed_count += 1
+        reason = None
+        if failed_count:
+            reason = SPOOL_CLEANUP_ENTRY_FAILED
+        elif deferred_count:
+            reason = SPOOL_CLEANUP_DEFERRED
+        return SpoolCleanupSummary(
+            examined_count,
+            removed_count,
+            skipped_count,
+            deferred_count,
+            failed_count,
+            reason,
+        )
 
     def _require_declared_size(self, size_bytes: int) -> None:
         if isinstance(size_bytes, bool) or not isinstance(size_bytes, int):
