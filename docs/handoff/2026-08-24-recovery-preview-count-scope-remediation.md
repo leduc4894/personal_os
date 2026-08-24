@@ -4,10 +4,11 @@ Date: 2026-08-24
 
 ## Status gate
 
-Planning is complete; implementation has not started. The planning baseline is
-commit `d6af511` (`docs: record ci action admission evidence`). No production,
-test, schema, workflow, or configuration file was changed while creating this
-plan.
+Code/task review is complete at implementation commit `e197dbd` (`test:
+scope live restore counts to canonical tables`). The protected R2 live gate is
+**BLOCKED**, not deferred or passed: the dedicated endpoint, bucket, and
+secret-root configuration required by the live harness is unavailable in this
+workspace. No production, schema, workflow, or dependency change was made.
 
 ## Decision
 
@@ -19,13 +20,15 @@ plan adds no manifest, lock-order, migration, or recovery-service change.
 
 ## Planned gates
 
-| Gate | Status | Evidence required during execution |
+| Gate | Status | Evidence |
 | --- | --- | --- |
-| TDD RED | Not run | Existing all-table comparison fails when the seeded `policy_previews` row is present. |
-| Focused live restore GREEN | Not run | The edited drill passes against a disposable `knowledge-ci-*` stack and dedicated R2 test bucket. |
-| Offline recovery compatibility | Not run | `tests/integration/canonical_core/test_recovery_integration.py` and `tests/unit/recovery` pass. |
-| Static/diff checks | Not run | Ruff format/check, mypy, and `git diff --check` pass. |
-| Protected canonical-core acceptance | Not run | `.github/workflows/canonical-core-acceptance.yml` is green on the implementation SHA. |
+| TDD RED | Blocked before assertion | Focused live setup failed closed because `R2_TEST_ENDPOINT`, `R2_TEST_BUCKET_NAME`, and `R2_TEST_SECRET_ROOT` are unavailable. |
+| Focused live restore GREEN | Blocked | Same dedicated R2 configuration gate; no mock/substitute was used. |
+| Offline recovery compatibility | Passed | 105 passed, 4 skipped, 8 deselected. |
+| Ruff format/check | Passed | Fresh format check and lint both exit 0. |
+| Mypy | Failed baseline | 13 existing integration fixture/test typing errors remain; no unrelated fixes made. |
+| Diff check | Passed | `git diff --check` exits 0. |
+| Protected canonical-core acceptance | Blocked | Cannot dispatch/claim green without dedicated R2 configuration. |
 
 ## Deferred items
 
@@ -33,4 +36,8 @@ None. No `BACKLOG.md` row was added.
 
 ## Next actions
 
-Execute `docs/superpowers/plans/2026-08-24-recovery-preview-count-scope-remediation.md` with the mandatory live-test prerequisite sequence in `.local/RESTART.md`.
+Next actions: provision/load the approved dedicated R2 endpoint, bucket, and
+secret-root through the repository's live-test contract without exposing
+values; rerun the focused live restore test and the protected
+`canonical-core-acceptance.yml` workflow on `e197dbd`; retain sanitized
+evidence and update this handoff only after the live gate is green.
