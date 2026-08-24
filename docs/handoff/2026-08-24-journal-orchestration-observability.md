@@ -3,13 +3,12 @@
 **Date:** 2026-08-24  
 **Scope:** closed journal-orchestration failure vocabulary and the sync-error
 tracing operator surface.  
-**Implementation range:** `3485e48..1a460c2` (Tasks 2–4); Task 1 vocabulary
-and reporter are in `570b815`.  
-**Final implementation commit:** `39603b3f77a08fcb0aa795725aa5a6706c3046f0`
-(`docs: hand off journal diagnostics closure`). **Closure/handoff commit:**
-`62b6b13c8a75b675ab5af5949f2aff4b5b4ad236`
-(`docs: record journal diagnostics closure SHA`); it records this distinction
-without changing the implementation.
+**Implementation range:** `570b815..169a319`. Tasks 1–4 landed in
+`570b815..1a460c2`; final independent review repairs landed in
+`0c6d221..169a319`.
+**Final implementation commit:** `169a319` (`fix: admit supported sync
+envelope diagnostics`). The subsequent handoff commit records verification
+evidence only and does not change implementation.
 
 ## Gate status
 
@@ -17,10 +16,16 @@ without changing the implementation.
   `retry_schedule_read_failed` was absent from the runbook.
 - GREEN: focused trail/export tests, plugin type-check, plugin lint and
   `git diff --check` passed after the runbook and vocabulary comment update.
-- Full gate: `uv run poe verify` passed end-to-end: 463 Python files format
-  checked; lint, mypy (182 files), TypeScript checks, import/API contracts,
-  Python coverage (`3451 passed, 21 skipped, 398 deselected`), all plugin
-  tests (`701`), web tests (`138`) and all package/web/plugin builds passed.
+- Final review: independently found and repaired two errors in the original
+  closure: lifecycle reconcile persistence now rejects after recording its
+  token, and persisted sync-envelope diagnostics accept only the closed,
+  supported token vocabulary.
+- Full gate: `uv run poe verify` passed end-to-end on `169a319`: 463 Python
+  files format checked; lint, mypy (182 files), TypeScript checks, import/API
+  contracts, Python coverage (`3451 passed, 21 skipped, 398 deselected`), all
+  plugin tests (`707`), web tests (`138`) and all package/web/plugin builds
+  passed. `git diff --check` also passed before the evidence-only handoff
+  update.
 
 ## Decisions
 
