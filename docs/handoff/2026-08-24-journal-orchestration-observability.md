@@ -6,8 +6,10 @@ tracing operator surface.
 **Implementation range:** `3485e48..1a460c2` (Tasks 2–4); Task 1 vocabulary
 and reporter are in `570b815`.  
 **Final implementation commit:** `39603b3f77a08fcb0aa795725aa5a6706c3046f0`
-(`docs: hand off journal diagnostics closure`). This follow-up bookkeeping
-commit records the SHA in the handoff without changing the implementation.
+(`docs: hand off journal diagnostics closure`). **Closure/handoff commit:**
+`62b6b13c8a75b675ab5af5949f2aff4b5b4ad236`
+(`docs: record journal diagnostics closure SHA`); it records this distinction
+without changing the implementation.
 
 ## Gate status
 
@@ -29,8 +31,8 @@ commit records the SHA in the handoff without changing the implementation.
   The durable trail remains capped at 128 entries; diagnostic append failure
   is non-blocking and counted separately.
 - The `sync-diagnostics-trail.ts` vocabulary comment now names all nine
-  tokens, including the Task 1 review minor, so source and operations
-  documentation cannot drift silently.
+  tokens, including the Task 1 review minor, alongside the contract-enforced
+  runbook token list.
 
 ## Deferred-item ruling
 
