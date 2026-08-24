@@ -7,6 +7,12 @@ line; unmarked dependency log records are reduced to a fingerprinted
 failure enters a non-recursive constant fallback that never calls ``logging``
 again, so a diagnostics failure can never replace an application error or exit
 code.
+
+The two stream handlers always ship. When the runtime settings carry an
+absolute ``diagnostics_log_dir``, an additional size-rotated file sink writes
+the same redacted JSON lines beneath that directory (bounded disk: at most
+``backup_count`` rotated files of ``max_bytes``); activation failures fail
+closed to the stream-only configuration after one closed rejection line.
 """
 
 from __future__ import annotations
@@ -19,6 +25,8 @@ import threading
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from types import MappingProxyType
 from typing import Final, TextIO, cast
 from uuid import UUID
@@ -79,6 +87,10 @@ _MINIMAL_EMERGENCY_LINE: Final[str] = (
     '"event":"logging_payload_rejected","result_code":"rejected",'
     '"reason":"serializer_failure"}\n'
 )
+_DIAGNOSTICS_LOG_FILE_NAME: Final[str] = "api-diagnostics.log"
+_FILE_ROTATION_MAX_BYTES: Final[int] = 10 * 1024 * 1024
+_FILE_ROTATION_BACKUP_COUNT: Final[int] = 5
+_LOG_DIR_UNAVAILABLE_REASON: Final[SafeToken] = SafeToken.parse("diagnostics_log_dir_unavailable")
 
 # Module-private configuration state. The clock seam (``_current_timestamp``) is
 # patched by tests; the remaining globals are owned by ``configure_diagnostics``.
@@ -228,6 +240,21 @@ def _emit_fallback_line() -> None:
         _fallback_set(False)
 
 
+def _emit_minimal_emergency_line() -> None:
+    """Non-recursive tier-2 fallback: write the constant minimal line to stderr."""
+    if _fallback_in_progress():
+        return
+    _fallback_set(True)
+    try:
+        target = sys.stderr
+        target.write(_MINIMAL_EMERGENCY_LINE)
+        target.flush()
+    except Exception:
+        pass
+    finally:
+        _fallback_set(False)
+
+
 class _MaxLevelFilter(logging.Filter):
     """Accept only records at or below a ceiling level."""
 
@@ -299,20 +326,41 @@ class _DiagnosticStreamHandler(logging.StreamHandler[TextIO]):
             stream.write(message)
             stream.flush()
         except Exception:
-            self._emit_minimal_emergency()
+            _emit_minimal_emergency_line()
 
-    def _emit_minimal_emergency(self) -> None:
-        if _fallback_in_progress():
-            return
-        _fallback_set(True)
+
+class _DiagnosticRotatingFileHandler(RotatingFileHandler):
+    """Owned size-rotated file sink mirroring the stream handler's fallback.
+
+    The handler receives exactly the records the stream handlers receive —
+    same formatter, same closed vocabulary, no level filter — so the file
+    holds the complete redacted JSON trail. Writes already end in exactly one
+    newline, so unlike the stdlib file emit no terminator is appended; any
+    failure degrades to the non-recursive minimal emergency line instead of a
+    traceback.
+    """
+
+    _diagnostics_owned: bool = False
+
+    def __init__(self, log_path: Path, *, max_bytes: int, backup_count: int) -> None:
+        super().__init__(
+            filename=log_path,
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding="utf-8",
+        )
+        self.setLevel(logging.DEBUG)
+        self._diagnostics_owned = True
+
+    def emit(self, record: logging.LogRecord) -> None:
         try:
-            target = sys.stderr
-            target.write(_MINIMAL_EMERGENCY_LINE)
-            target.flush()
+            if self.shouldRollover(record):
+                self.doRollover()
+            stream = self.stream if self.stream is not None else self._open()
+            stream.write(self.format(record))
+            stream.flush()
         except Exception:
-            pass
-        finally:
-            _fallback_set(False)
+            _emit_minimal_emergency_line()
 
 
 class DiagnosticLogger:
@@ -390,14 +438,56 @@ class DiagnosticLogger:
         )
 
 
+def _attach_rotating_file_sink(
+    root: logging.Logger,
+    directory: Path,
+    *,
+    formatter: logging.Formatter,
+    max_bytes: int,
+    backup_count: int,
+) -> bool:
+    """Create the rotated file sink below ``directory`` and attach it to ``root``.
+
+    Returns ``False`` — attaching nothing — when the directory is relative,
+    cannot be created, or the log file cannot be opened: activation must never
+    raise and never degrade the stream handlers.
+    """
+    if not directory.is_absolute():
+        return False
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        handler = _DiagnosticRotatingFileHandler(
+            directory / _DIAGNOSTICS_LOG_FILE_NAME,
+            max_bytes=max_bytes,
+            backup_count=backup_count,
+        )
+    except Exception:
+        return False
+    handler.setFormatter(formatter)
+    root.addHandler(handler)
+    return True
+
+
 def configure_diagnostics(
     settings: RuntimeSettings,
     *,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
     rejection_counter_hook: RejectionCounterHook | None = None,
+    file_rotation_max_bytes: int = _FILE_ROTATION_MAX_BYTES,
+    file_rotation_backup_count: int = _FILE_ROTATION_BACKUP_COUNT,
 ) -> DiagnosticLogger:
-    """Install the diagnostic root handlers and return the validating logger."""
+    """Install the diagnostic root handlers and return the validating logger.
+
+    The two stream handlers always ship. When ``settings.diagnostics_log_dir``
+    is set and absolute, a size-rotated file sink is additionally installed
+    beneath it writing the same redacted JSON lines to
+    ``api-diagnostics.log`` (at most ``file_rotation_backup_count`` rotated
+    files of ``file_rotation_max_bytes`` bytes). Any activation failure fails
+    closed to the stream-only configuration after exactly one closed
+    ``logging_payload_rejected`` line on stdout; the stream handlers stay
+    untouched and startup never raises.
+    """
     global _prior_root_handlers, _prior_root_level, _active_logger, _active_snapshot
     global _active_stdout, _active_stderr, _active_fallback_line
 
@@ -435,6 +525,19 @@ def configure_diagnostics(
     _active_stdout = out_stream
     _active_stderr = err_stream
     _active_fallback_line = fallback_line
+
+    log_dir = settings.diagnostics_log_dir
+    if log_dir is not None and not _attach_rotating_file_sink(
+        root,
+        log_dir,
+        formatter=formatter,
+        max_bytes=file_rotation_max_bytes,
+        backup_count=file_rotation_backup_count,
+    ):
+        logger.emit(
+            EventName.LOGGING_PAYLOAD_REJECTED,
+            {"reason": _LOG_DIR_UNAVAILABLE_REASON, "count": _REJECTION_COUNT},
+        )
     return logger
 
 

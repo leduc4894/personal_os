@@ -16,12 +16,15 @@ from __future__ import annotations
 
 from typing import Final
 
-#: Runtime fragment: service identity, environment, log level and secret root.
+#: Runtime fragment: service identity, environment, log level, secret root and
+#: the optional local diagnostics log directory (blank/unset disables the
+#: rotating file sink; the value is a directory path, never a secret).
 RUNTIME_ENVIRONMENT_NAMES: Final[frozenset[str]] = frozenset(
     {
         "KNOWLEDGE_ENVIRONMENT",
         "KNOWLEDGE_LOG_LEVEL",
         "KNOWLEDGE_SECRET_ROOT",
+        "KNOWLEDGE_DIAGNOSTICS_LOG_DIR",
     }
 )
 

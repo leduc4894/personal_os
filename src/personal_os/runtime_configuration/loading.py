@@ -25,6 +25,7 @@ ENVIRONMENT_FIELDS: Final[Mapping[str, str]] = {
     "KNOWLEDGE_ENVIRONMENT": "environment",
     "KNOWLEDGE_LOG_LEVEL": "log_level",
     "KNOWLEDGE_SECRET_ROOT": "secret_root",
+    "KNOWLEDGE_DIAGNOSTICS_LOG_DIR": "diagnostics_log_dir",
 }
 
 #: Canonical recovery fragment: the field map owned by

@@ -258,3 +258,37 @@ def test_runtime_loader_still_rejects_typo_of_registered_key(tmp_path: Path) -> 
             },
         )
     assert raised.value.error_code is ErrorCode.CONFIGURATION_UNKNOWN_KEY
+
+
+def test_diagnostics_log_dir_is_loaded_from_the_registered_env_name(tmp_path: Path) -> None:
+    settings = load_runtime_settings(
+        ServiceName.API,
+        environ={
+            "KNOWLEDGE_SECRET_ROOT": str(tmp_path),
+            "KNOWLEDGE_DIAGNOSTICS_LOG_DIR": str(tmp_path / "runtime-logs"),
+        },
+    )
+    assert settings.diagnostics_log_dir == tmp_path / "runtime-logs"
+
+
+def test_diagnostics_log_dir_defaults_to_disabled(tmp_path: Path) -> None:
+    settings = load_runtime_settings(
+        ServiceName.API,
+        environ={"KNOWLEDGE_SECRET_ROOT": str(tmp_path)},
+    )
+    assert settings.diagnostics_log_dir is None
+
+
+@pytest.mark.parametrize("blank_value", ["", "   "])
+def test_blank_diagnostics_log_dir_env_value_means_disabled(
+    tmp_path: Path,
+    blank_value: str,
+) -> None:
+    settings = load_runtime_settings(
+        ServiceName.API,
+        environ={
+            "KNOWLEDGE_SECRET_ROOT": str(tmp_path),
+            "KNOWLEDGE_DIAGNOSTICS_LOG_DIR": blank_value,
+        },
+    )
+    assert settings.diagnostics_log_dir is None

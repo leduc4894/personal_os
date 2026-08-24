@@ -49,12 +49,26 @@ class RuntimeSettings(BaseSettings):
     environment: RuntimeEnvironment = RuntimeEnvironment.LOCAL
     log_level: ConfiguredLogLevel = ConfiguredLogLevel.INFO
     secret_root: Path = Path("/run/secrets")
+    diagnostics_log_dir: Path | None = None
 
     @field_validator("secret_root")
     @classmethod
     def require_absolute_secret_root(cls, value: Path) -> Path:
         if not value.is_absolute():
             raise ValueError("secret root must be absolute")
+        return value
+
+    @field_validator("diagnostics_log_dir", mode="before")
+    @classmethod
+    def blank_diagnostics_log_dir_means_disabled(cls, value: object) -> object:
+        """Treat a blank environment value as unset: the file sink stays disabled.
+
+        Activation strictness (absolute path, creatable directory, writable
+        file) belongs to the diagnostics boundary, which fails closed instead
+        of failing configuration loading.
+        """
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
         return value
 
     @classmethod

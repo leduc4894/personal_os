@@ -178,7 +178,13 @@ The join, start to finish:
    or wherever the JSON log stream is captured; see
    [`api-runtime-contract.md`](api-runtime-contract.md)). Uvicorn's access
    log is disabled — the structured events are the only request-level
-   logging.
+   logging. The local launcher additionally keeps the same redacted lines in
+   a durable rotating sink at `.local/runtime-logs/api-diagnostics.log`
+   (10 MB per file, 5 files), activated by the
+   `KNOWLEDGE_DIAGNOSTICS_LOG_DIR` runtime setting: blank/unset disables
+   it, and an invalid directory fails closed to disabled after one closed
+   `logging_payload_rejected` line — the sink never changes the emitted
+   vocabulary or the stdout stream.
 4. The matching lines carry the closed route template, the HTTP status,
    the duration and any structured error events of that exchange — enough
    to tell a transport failure (no lines at all: the request never
