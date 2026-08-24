@@ -30,6 +30,7 @@ import type {
   SyncDiagnosticToken,
   SyncDiagnosticTrailEntry,
 } from "./sync-diagnostics-trail";
+import type { SyncDiagnosticsTrailSectionInput } from "./sync-diagnostics-export";
 import {
   SYNC_DIAGNOSTICS_TRAIL_TAIL_ENTRY_LIMIT,
   deriveSyncStopReasonTokens,
@@ -38,6 +39,18 @@ import {
 } from "./sync-diagnostics-export";
 
 const REQUEST_ID = "66666666-6666-4666-8666-666666666666";
+
+/**
+ * The request-id token of the canonical test UUID; a null gate answer fails
+ * the calling test (the gate admits this exact canonical shape).
+ */
+function canonicalRequestIdToken() {
+  const token = envelopeRequestId(REQUEST_ID);
+  if (token === null) {
+    throw new Error("expected a request-id token for the canonical test UUID");
+  }
+  return token;
+}
 
 class PersistedTrailFileStore implements JournalFileStore {
   #bytes: ArrayBuffer;
@@ -189,7 +202,7 @@ describe("renderSyncDiagnosticsExportBlock", () => {
         trailEntry("pass_outcome", 1_784_000_000_000, ["completed"]),
         trailEntry("wire_failure", 1_784_000_001_000, [
           "server_error",
-          envelopeRequestId(REQUEST_ID),
+          canonicalRequestIdToken(),
         ]),
       ],
     });
@@ -295,7 +308,7 @@ describe("renderSyncDiagnosticsExportBlock", () => {
       trailTail: [
         trailEntry("wire_failure", 1_784_000_000_000, [
           "network_timeout",
-          envelopeRequestId(REQUEST_ID),
+          canonicalRequestIdToken(),
         ]),
       ],
     });
@@ -326,7 +339,7 @@ describe("renderSyncDiagnosticsTrailSection", () => {
         trailEntry("pass_outcome", 1_784_000_000_000, ["completed"]),
         trailEntry("wire_failure", 1_784_000_001_000, [
           "server_error",
-          envelopeRequestId(REQUEST_ID),
+          canonicalRequestIdToken(),
         ]),
       ],
     });
@@ -351,6 +364,22 @@ describe("renderSyncDiagnosticsTrailSection", () => {
     expect(section).not.toContain("Stop reasons:");
     expect(section).toContain("Trail entries: 0 · Append failures: 0");
     expect(section).toContain("No trail entries recorded yet.");
+  });
+
+  it("renders only the closed stop-reason union", () => {
+    const input: SyncDiagnosticsTrailSectionInput = {
+      stopReasonTokens: ["blocked_conflict"], totalEntryCount: 1, appendFailureCount: 0, entries: [],
+    };
+    expect(renderSyncDiagnosticsTrailSection(input)).toContain("blocked_conflict");
+    // The settings input is closed at the type level: a free-form server
+    // value must not type-check as a stop reason.
+    renderSyncDiagnosticsTrailSection({
+      // @ts-expect-error a free-form stop reason must not enter the settings section
+      stopReasonTokens: ["edge block page after 12 seconds"],
+      totalEntryCount: 1,
+      appendFailureCount: 0,
+      entries: [],
+    });
   });
 });
 
@@ -378,7 +407,7 @@ describe("deriveSyncStopReasonTokens", () => {
     expect(
       deriveSyncStopReasonTokens([
         trailEntry("pass_outcome", 1, ["completed"]),
-        trailEntry("wire_failure", 2, [envelopeRequestId(REQUEST_ID)]),
+        trailEntry("wire_failure", 2, [canonicalRequestIdToken()]),
         // A self_check verdict (sync error tracing task 3) is never a stop
         // reason, not even the unreachable-origin one.
         trailEntry("self_check", 3, ["origin_unreachable", "network_offline"]),

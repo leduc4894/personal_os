@@ -42,10 +42,12 @@ import {
   type LifecycleEventOperands,
 } from "./lifecycle-contracts";
 import type { SyncHttpRequest } from "./sync-api";
-import type {
-  SyncDiagnosticsTrail,
-  SyncDiagnosticsTrailAppendInput,
-  SyncDiagnosticTrailEntry,
+import type { JournalFileStore } from "./persistence";
+import {
+  createSyncDiagnosticsTrail,
+  type SyncDiagnosticsTrail,
+  type SyncDiagnosticsTrailAppendInput,
+  type SyncDiagnosticTrailEntry,
 } from "./sync-diagnostics-trail";
 
 /** The real sql.js WebAssembly engine drives every driver test (spec 6.1). */
@@ -204,10 +206,48 @@ class RecordingDiagnosticsTrail implements SyncDiagnosticsTrail {
   }
 }
 
+/**
+ * The failing journal file store behind the real durable trail of the
+ * persist-failure test: when `writeThrows` is set, every sidecar write
+ * rejects — exactly a Vault plugin directory that stopped accepting writes.
+ */
+class FailingTrailFileStore implements JournalFileStore {
+  writeThrows = false;
+
+  async exists(): Promise<boolean> {
+    return false;
+  }
+
+  async readBinary(): Promise<ArrayBuffer> {
+    throw new Error("file not found");
+  }
+
+  async writeBinary(): Promise<void> {
+    if (this.writeThrows) {
+      throw new Error("write failed");
+    }
+  }
+
+  async remove(): Promise<void> {
+    return undefined;
+  }
+}
+
+/** Let one macrotask pass so a fire-and-forget trail append finishes its persist. */
+async function settleTrailPersist(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 interface DriverHarness {
   readonly repository: JournalRepository;
   readonly driver: JournalQueueDriver;
   readonly diagnosticTrail: RecordingDiagnosticsTrail;
+  /**
+   * The REAL durable trail over the injected file store when the harness
+   * was built with `diagnosticTrailFileStore`; null otherwise (the driver
+   * then runs against the synchronous recording trail above).
+   */
+  readonly durableDiagnosticTrail: SyncDiagnosticsTrail | null;
   readonly vaultBytes: Map<string, Uint8Array>;
   readonly refreshCalls: { count: number };
   setRefreshImplementation: (implementation: () => Promise<void>) => void;
@@ -223,6 +263,7 @@ function createHarness(options?: {
   readonly passDeadlineMs?: number;
   readonly useWallClock?: boolean;
   readonly diagnosticTrailAppendBehavior?: () => Promise<void>;
+  readonly diagnosticTrailFileStore?: JournalFileStore;
   readonly randomJitter?: () => number;
 }): DriverHarness {
   const database = SqliteDatabase.createEmpty(engineModule, {
@@ -264,6 +305,10 @@ function createHarness(options?: {
     getAccessToken: () => accessToken,
   });
   const diagnosticTrail = new RecordingDiagnosticsTrail(options?.diagnosticTrailAppendBehavior);
+  const durableDiagnosticTrail =
+    options?.diagnosticTrailFileStore === undefined
+      ? null
+      : createSyncDiagnosticsTrail({ fileStore: options.diagnosticTrailFileStore });
   const driver = new JournalQueueDriver({
     repository,
     syncApi,
@@ -279,12 +324,13 @@ function createHarness(options?: {
     randomJitter: options?.randomJitter ?? (() => 0),
     requestTimeoutMs: options?.requestTimeoutMs,
     passDeadlineMs: options?.passDeadlineMs,
-    diagnosticTrail,
+    diagnosticTrail: durableDiagnosticTrail ?? diagnosticTrail,
   });
   return {
     repository,
     driver,
     diagnosticTrail,
+    durableDiagnosticTrail,
     vaultBytes,
     refreshCalls,
     setRefreshImplementation: (implementation) => {
@@ -1382,6 +1428,33 @@ describe("queue driver diagnostics trail wiring (sync error tracing task 1)", ()
       "wire_failure",
       "pass_outcome",
     ]);
+  });
+
+  it("keeps queue behavior and exposes a bounded trail token when diagnostics persistence fails", async () => {
+    const failingStore = new FailingTrailFileStore();
+    const harness = createHarness({ diagnosticTrailFileStore: failingStore });
+    const trail = harness.durableDiagnosticTrail;
+    if (trail === null) {
+      throw new Error("expected the real durable diagnostics trail");
+    }
+    await trail.load();
+    failingStore.writeThrows = true;
+
+    const summary = await harness.driver.requestPass();
+
+    // Queue behavior is unchanged: the pass completes normally — the trail
+    // persist failure is swallowed and never blocks or breaks the pass.
+    expect(summary).toEqual({ outcome: "completed", processedEventCount: 0 });
+    // The driver appends the pass outcome fire-and-forget, so the coalesced
+    // persist settles on the next macrotask before the read-back below.
+    await settleTrailPersist();
+    // The failure is observable through the existing bounded surfaces: ONE
+    // counter increment plus ONE bounded `self_check · trail_persist_failed`
+    // marker entry — even though no self-check command ran.
+    expect(trail.readAppendFailureCount()).toBe(1);
+    expect(trail.readEntries()).toContainEqual(
+      expect.objectContaining({ tokens: expect.arrayContaining(["trail_persist_failed"]) }),
+    );
   });
 });
 

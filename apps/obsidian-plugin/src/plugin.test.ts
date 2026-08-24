@@ -539,6 +539,28 @@ describe("Obsidian plugin composition root", () => {
     expect(builderBody).not.toContain("console.");
   });
 
+  it("attaches a bounded rejection handler to the copy command (child six deferred remediation)", () => {
+    const commandIndex = pluginSource.indexOf('id: "copy-sync-diagnostics"');
+    const commandBody = pluginSource.slice(commandIndex, commandIndex + 400);
+    // The fire-and-forget call carries a rejection handler, so a rejection
+    // of the copy pipeline itself can never throw into UI processing.
+    expect(commandBody).toContain("#copySyncDiagnostics().catch(");
+    // The rejection reports through the established bounded diagnostics
+    // pattern: ONE closed-token `self_check` trail entry.
+    const recorderIndex = pluginSource.indexOf(
+      "#recordDiagnosticsCopyFailureTrailEntry(): void",
+    );
+    expect(recorderIndex).toBeGreaterThanOrEqual(0);
+    const recorderBody = pluginSource.slice(recorderIndex, recorderIndex + 900);
+    expect(recorderBody).toContain('"self_check"');
+    expect(recorderBody).toContain('"trail_persist_failed"');
+    // Nothing is logged anywhere and the handler holds no clipboard data:
+    // the closed token carries no detail of the failure.
+    expect(commandBody).not.toContain("console.");
+    expect(recorderBody).not.toContain("console.");
+    expect(recorderBody).not.toContain("clipboard");
+  });
+
   it("registers the bounded sync self-check command with closed verdicts only (sync error tracing task 3)", () => {
     expect(pluginSource).toContain('id: "run-sync-self-check"');
     expect(pluginSource).toContain('"Run sync self-check"');

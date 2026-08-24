@@ -46,6 +46,7 @@ import type { JournalRepository } from "./repository";
 import { JournalStoreError, type JournalStoreErrorReason } from "./sqlite-database";
 import type { JournalPreflightOutcome, JournalSyncApi, SmallFileTerminalReceipt } from "./sync-api";
 import { SyncApiError } from "./sync-api";
+import type { SyncApiFailureKind } from "./sync-api";
 import type {
   SyncDiagnosticsTrail,
   SyncDiagnosticToken,
@@ -201,14 +202,15 @@ interface RefreshBudget {
   requiresLogin: boolean;
 }
 
-/** Extract the closed failure kind of a thrown sync error, if any. */
-function syncFailureKind(error: unknown): string | null {
-  const kind = (error as { kind?: unknown } | null)?.kind;
-  return typeof kind === "string" ? kind : null;
-}
-
-function canResumeClaimedOperation(error: unknown): boolean {
-  return (error as { canResumeClaimedOperation?: unknown } | null)?.canResumeClaimedOperation === true;
+/**
+ * The one safe narrowing predicate of thrown sync failures (child six
+ * deferred remediation): only a real `SyncApiError` instance carries the
+ * closed `SyncApiFailureKind`, so the kind is extracted through
+ * `instanceof` narrowing — never duck-typed `.kind` member access on an
+ * unknown value — and the answer is the CLOSED kind union, not `string`.
+ */
+function syncFailureKind(error: unknown): SyncApiFailureKind | null {
+  return error instanceof SyncApiError ? error.kind : null;
 }
 
 /**
@@ -580,14 +582,16 @@ export class JournalQueueDriver {
 
   /**
    * Append one `wire_failure` trail entry for one failed wire request
-   * outcome (sync error tracing task 1): the closed failure kind, plus the
-   * failing envelope's opaque request id when the server sent one. A local
-   * (non-wire) failure records nothing. Diagnostic round U1: when the
-   * failing body parsed as the canonical envelope, its closed server error
-   * code rides along as one additional closed token between the kind and
-   * the request id — whitelisted at the trail boundary against the declared
-   * runtime vocabulary, so a null code (an edge HTML body), a foreign code,
-   * or a non-conforming code records nothing extra.
+   * outcome that reached the failure hook (sync error tracing task 1): the
+   * closed failure kind, plus the failing envelope's opaque request id when
+   * the server sent a CANONICAL UUID (the trail's constructor gate nulls
+   * any non-conforming value — the rejected value records nothing). A
+   * local (non-wire) failure records nothing. Diagnostic round U1: when
+   * the failing body parsed as the canonical envelope, its closed server
+   * error code rides along as one additional closed token between the kind
+   * and the request id — whitelisted at the trail boundary against the
+   * declared runtime vocabulary, so a null code (an edge HTML body), a
+   * foreign code, or a non-conforming code records nothing extra.
    */
   #recordWireFailureTrailEntry(error: unknown): void {
     if (this.#diagnosticTrail === null || !(error instanceof SyncApiError)) {
@@ -601,7 +605,10 @@ export class JournalQueueDriver {
       }
     }
     if (error.requestId !== null) {
-      tokens.push(envelopeRequestId(error.requestId));
+      const requestIdToken = envelopeRequestId(error.requestId);
+      if (requestIdToken !== null) {
+        tokens.push(requestIdToken);
+      }
     }
     void this.#diagnosticTrail.append({ kind: "wire_failure", tokens });
   }
@@ -609,7 +616,9 @@ export class JournalQueueDriver {
   /**
    * Append one `pass_outcome` trail entry (sync error tracing task 1): the
    * closed pass outcome plus the sampled request id of the pass's last
-   * successful request outcome, when the server sent one.
+   * successful request outcome, when the server sent a canonical UUID (a
+   * non-conforming sampled value is omitted by the trail's constructor
+   * gate).
    */
   #recordPassOutcomeTrailEntry(outcome: QueuePassOutcome): void {
     if (this.#diagnosticTrail === null) {
@@ -617,7 +626,10 @@ export class JournalQueueDriver {
     }
     const tokens: SyncDiagnosticToken[] = [outcome];
     if (this.#lastPassWireRequestId !== null) {
-      tokens.push(envelopeRequestId(this.#lastPassWireRequestId));
+      const requestIdToken = envelopeRequestId(this.#lastPassWireRequestId);
+      if (requestIdToken !== null) {
+        tokens.push(requestIdToken);
+      }
     }
     void this.#diagnosticTrail.append({ kind: "pass_outcome", tokens });
   }
@@ -710,9 +722,12 @@ export class JournalQueueDriver {
   }
 
   #claimedResumeOperationId(event: JournalEvent, error: unknown): string | null {
+    // The same instanceof narrowing: the resume flag is read only off a
+    // real `SyncApiError`, never duck-typed off an unknown value.
     if (
-      syncFailureKind(error) !== "operation_retry_required" ||
-      !canResumeClaimedOperation(error) ||
+      !(error instanceof SyncApiError) ||
+      error.kind !== "operation_retry_required" ||
+      !error.canResumeClaimedOperation ||
       (event.state !== "uploading" && event.state !== "waiting_retry") ||
       event.operationId === null
     ) {
@@ -902,9 +917,16 @@ export class JournalQueueDriver {
     refreshBudget: RefreshBudget,
   ): Promise<PassContinuation> {
     const kind = syncFailureKind(error);
-    // Sync error tracing task 1: every failed wire request outcome lands on
-    // the durable trail with its closed kind label (and the failing
-    // envelope's request id) before the ordinary retry/terminal handling.
+    // Sync error tracing task 1 (comment corrected in the child six
+    // remediation): every failed wire outcome that REACHES this failure
+    // hook lands on the durable trail with its closed kind label (and the
+    // failing envelope's canonical request id) before the ordinary
+    // retry/terminal handling. Not every failed wire outcome reaches this
+    // hook: an `access_expired` whose one refresh-budget retry then
+    // succeeds is recovered inside `#requestWithDeadline` and never
+    // surfaces as a failure, and an `operation_retry_required` whose
+    // claimed-operation resume succeeds is settled by `#streamContent`
+    // instead — neither records a `wire_failure` entry.
     this.#recordWireFailureTrailEntry(error);
     switch (kind) {
       case "access_expired":
@@ -945,7 +967,7 @@ export class JournalQueueDriver {
     }
   }
 
-  #safeRetryLabel(kind: string | null): JournalSafeErrorLabel {
+  #safeRetryLabel(kind: SyncApiFailureKind | null): JournalSafeErrorLabel {
     switch (kind) {
       case "network_offline":
         return "network_offline";

@@ -421,11 +421,17 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     // is built ONLY from closed tokens, counts and ISO timestamps by the
     // pure renderer; the clipboard carries it out, and a read-only
     // preformatted modal is the fallback when the clipboard is unavailable.
+    // Child six deferred remediation: the fire-and-forget call carries a
+    // rejection handler — a rejection of the copy pipeline itself reports
+    // through the bounded diagnostics trail and never throws into UI
+    // processing.
     this.addCommand({
       id: "copy-sync-diagnostics",
       name: "Copy sync diagnostics",
       callback: () => {
-        void this.#copySyncDiagnostics();
+        void this.#copySyncDiagnostics().catch(() => {
+          this.#recordDiagnosticsCopyFailureTrailEntry();
+        });
       },
     });
 
@@ -1079,6 +1085,25 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       }
     }
     new PreformattedTextModal(this.app, "Sync diagnostics", block).open();
+  }
+
+  /**
+   * Record the copy command's own rejection (child six deferred
+   * remediation): the clipboard-unavailable/refused branch is already
+   * absorbed by the modal fallback inside `#copySyncDiagnostics`, so this
+   * handler covers an exceptional rejection of the copy pipeline itself.
+   * It reports through the established bounded diagnostics pattern — ONE
+   * `self_check` trail entry carrying the closed `trail_persist_failed`
+   * verdict token (the diagnostics write-out pipeline failed; the
+   * append itself is failure-counted and never rejects). The handler
+   * never rethrows into UI processing and never logs the clipboard data
+   * or any other value: the closed token carries no detail.
+   */
+  #recordDiagnosticsCopyFailureTrailEntry(): void {
+    const trail = this.#diagnosticTrail;
+    if (trail !== null) {
+      void trail.append({ kind: "self_check", tokens: ["trail_persist_failed"] });
+    }
   }
 
   /**

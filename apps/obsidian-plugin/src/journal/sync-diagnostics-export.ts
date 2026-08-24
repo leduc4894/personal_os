@@ -17,6 +17,7 @@ import type {
   SyncDiagnosticToken,
   SyncDiagnosticTrailEntry,
 } from "./sync-diagnostics-trail";
+import type { JournalStoreErrorReason } from "./sqlite-database";
 
 /** How many trail tail entries the settings section and the export render. */
 export const SYNC_DIAGNOSTICS_TRAIL_TAIL_ENTRY_LIMIT = 5;
@@ -38,9 +39,9 @@ const STOP_REASON_KIND_ORDER: readonly SyncDiagnosticKind[] = [
 
 /** The closed inputs of the journal store diagnostics line. */
 export interface JournalStoreDiagnosticsLineInput {
-  readonly lastJournalFailureReasons: readonly string[];
+  readonly lastJournalFailureReasons: readonly JournalStoreErrorReason[];
   readonly generationPublishFailureCount: number;
-  readonly lastGenerationPublishFailureReasons: readonly string[];
+  readonly lastGenerationPublishFailureReasons: readonly JournalStoreErrorReason[];
 }
 
 /**
@@ -127,8 +128,12 @@ function renderTrailEntryLine(entry: SyncDiagnosticTrailEntry): string {
 
 /** The closed inputs of the settings trail section. */
 export interface SyncDiagnosticsTrailSectionInput {
-  /** The derived closed stop-reason tokens (may be empty). */
-  readonly stopReasonTokens: readonly string[];
+  /**
+   * The derived closed stop-reason tokens (may be empty). The input is the
+   * existing readonly closed-token union — a free-form server value cannot
+   * type-check into the settings section.
+   */
+  readonly stopReasonTokens: readonly SyncDiagnosticClosedToken[];
   /** The total durable trail entry count. */
   readonly totalEntryCount: number;
   /** The bounded swallowed append/persist failure count. */

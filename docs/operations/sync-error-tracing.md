@@ -50,6 +50,18 @@ empty and records a `trail_reset` entry; sync is never blocked by the
 trail, and swallowed append/persist failures accumulate in a bounded
 counter (capped at 999) that the settings section surfaces.
 
+Persist-failure observability (child six remediation): every swallowed
+persist failure also records ONE bounded `self_check · trail_persist_failed`
+marker entry per failure episode — the marker re-arms only after the next
+successful persist, rides that persist into the sidecar as an honest
+durable record, and needs no `Run sync self-check` invocation. The counter
+saturates at 999 and then stops moving, so a saturated counter cannot by
+itself flag a NEW failure; the marker entry and the visible `999` reading
+together still localize the failure to the trail write path (inside that
+saturation window the self-check's trail-persist probe conservatively
+passes for the same reason — a failed write cannot move an already-full
+counter).
+
 | Kind              | Recorded when                                                                                   |
 | ----------------- | ----------------------------------------------------------------------------------------------- |
 | `wire_failure`    | One sync HTTP request failed; carries the closed `SyncApiFailureKind` label and, when the server answered with an envelope, the opaque `request_id` token. |
@@ -57,7 +69,7 @@ counter (capped at 999) that the settings section surfaces.
 | `journal_failure` | A journal mutation inside the pass loop failed; carries the closed `JournalStoreErrorReason`. It also carries the closed journal-orchestration failure tokens listed below when composition, scheduling, drain, capture or reconcile work fails closed. |
 | `publish_failure` | A journal generation publish failed; carries the closed `JournalStoreErrorReason`.               |
 | `trail_reset`     | The sidecar was unreadable or corrupt and the trail reset to empty.                             |
-| `self_check`      | A `Run sync self-check` step closed; carries the fixed self-check verdict tokens.               |
+| `self_check`      | A `Run sync self-check` step closed; carries the fixed self-check verdict tokens. The trail itself also records one `trail_persist_failed` entry per persist-failure episode, and the copy command records one on its own exceptional rejection (below). |
 | `startup_failure` | The journal startup chain (engine load, wasm read, journal recovery, or a fire-and-forget startup action) threw and capture failed closed; carries exactly one startup stage token, plus the closed `JournalStoreErrorReason` when the throw is a store error. The same tokens persist in the settings snapshot as the `lastStartupFailureTokens` field. |
 
 The closed token vocabularies are exactly the existing sync vocabularies:
@@ -118,7 +130,12 @@ the existing append-failure counter.
 The one opaque value that may ride along is the server envelope's
 `request_id` (a UUID), rendered as `request_id=<uuid>`. It is the
 correlation token that joins the client trail with server-side logs (see
-below); it identifies no content, no account and no device.
+below); it identifies no content, no account and no device. The trail
+admits the token only through a constructor UUID gate — a non-canonical
+value (free-form text, a path fragment, an uppercase/braced UUID variant)
+is rejected before any entry exists and is never echoed, rendered or
+logged — so even a compromised envelope shape cannot smuggle a value into
+the trail.
 
 ## Run sync self-check (localize the failing layer)
 
@@ -190,6 +207,14 @@ Trail tail (last 5):
 All timestamps are ISO-8601 UTC by design: the block is a shareable
 paste, and local-time offsets would leak coarse location.
 
+Failure surfacing: a clipboard that is unavailable or refuses the write is
+absorbed by the read-only modal fallback above. An exceptional rejection
+of the copy pipeline itself (child six remediation) can never throw into
+UI processing — the command carries a rejection handler that records ONE
+`self_check · trail_persist_failed` trail entry through the same bounded
+mechanism, and nothing is ever logged: no console, no clipboard data, no
+failure detail beyond the closed token.
+
 ## The settings "Sync diagnostics trail" section
 
 The plugin settings tab renders one read-only section that folds the
@@ -197,7 +222,9 @@ durable trail into three lines:
 
 - **Stop reasons** — the newest closed token of each failure kind, in the
   fixed order `journal_failure`, `publish_failure`, `wire_failure`. This
-  answers "why did syncing stop" without opening the export.
+  answers "why did syncing stop" without opening the export. The input is
+  typed as the existing closed-token union, so no free-form server value
+  can enter the line.
 - **Trail entries / append failures** — the total durable entry count and
   the bounded swallowed-append-failure counter (a non-zero counter means
   the sidecar write path is failing even though sync continues).

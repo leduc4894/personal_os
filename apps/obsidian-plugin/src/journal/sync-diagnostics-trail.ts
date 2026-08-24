@@ -52,7 +52,18 @@ export const MAX_SYNC_DIAGNOSTICS_TRAIL_ENTRIES = 128;
 /** The per-entry token count cap; tokens beyond it are dropped. */
 export const MAX_SYNC_DIAGNOSTICS_TRAIL_TOKENS_PER_ENTRY = 8;
 
-/** The append-failure counter cap (the counter is surfaced, never unbounded). */
+/**
+ * The append-failure counter cap (the counter is surfaced, never unbounded).
+ *
+ * Saturation: once the counter reaches 999, further persist failures no
+ * longer move it — the counter stops distinguishing "999 failures" from
+ * "999 or more". A saturated counter therefore cannot flag a NEW persist
+ * failure by itself; each failure episode instead records one bounded
+ * `self_check · trail_persist_failed` marker entry (see
+ * `#recordPersistFailureMarkerEntry`), and the self-check's trail-persist
+ * probe conservatively passes inside that window for the same reason (see
+ * `sync-self-check.ts`).
+ */
 export const MAX_SYNC_DIAGNOSTICS_TRAIL_APPEND_FAILURES = 999;
 
 // --- the closed kind vocabulary -------------------------------------------------------------------
@@ -214,9 +225,18 @@ export interface SyncDiagnosticRequestIdToken {
   readonly requestId: string;
 }
 
-/** Wrap one server envelope request id as the opaque trail token. */
-export function envelopeRequestId(requestId: string): SyncDiagnosticRequestIdToken {
-  return { requestId } as SyncDiagnosticRequestIdToken;
+/**
+ * Wrap one server envelope request id as the opaque trail token, or answer
+ * null when the value is not a canonical UUID. The gate sits at the token
+ * boundary — BEFORE any entry exists or any persistence runs — so an
+ * untrusted, path-shaped or free-form value can never become a trail token
+ * even when a caller bypasses the sync client's own envelope parsing. The
+ * rejected value itself is never recorded, rendered or logged.
+ */
+export function envelopeRequestId(requestId: string): SyncDiagnosticRequestIdToken | null {
+  return UUID_PATTERN.test(requestId)
+    ? ({ requestId } as SyncDiagnosticRequestIdToken)
+    : null;
 }
 
 /**
@@ -331,7 +351,8 @@ function parseTrailToken(value: unknown): SyncDiagnosticToken | null {
   }
   if (isRecord(value)) {
     const requestId = value["request_id"];
-    if (typeof requestId === "string" && UUID_PATTERN.test(requestId)) {
+    if (typeof requestId === "string") {
+      // The same constructor UUID gate covers the reload path.
       return envelopeRequestId(requestId);
     }
   }
@@ -400,6 +421,8 @@ class SyncDiagnosticsTrailImpl implements SyncDiagnosticsTrail {
   #appendFailureCount = 0;
   #hasPendingPersist = false;
   #appendDrain: Promise<void> | null = null;
+  /** Whether the current failure episode already recorded its marker entry. */
+  #hasRecordedPersistFailureSinceLastSuccess = false;
 
   constructor(options: SyncDiagnosticsTrailOptions) {
     this.#fileStore = options.fileStore;
@@ -475,15 +498,44 @@ class SyncDiagnosticsTrailImpl implements SyncDiagnosticsTrail {
             SYNC_DIAGNOSTICS_TRAIL_FILE_NAME,
             toArrayBuffer(this.#serializeEntries()),
           );
+          this.#hasRecordedPersistFailureSinceLastSuccess = false;
         } catch {
           this.#appendFailureCount = Math.min(
             MAX_SYNC_DIAGNOSTICS_TRAIL_APPEND_FAILURES,
             this.#appendFailureCount + 1,
           );
+          this.#recordPersistFailureMarkerEntry();
         }
       }
     } finally {
       this.#appendDrain = null;
+    }
+  }
+
+  /**
+   * Record ONE bounded `self_check` trail entry carrying the closed
+   * `trail_persist_failed` verdict token per failure episode (child six
+   * deferred remediation): the counter alone is invisible until a surface
+   * reads it, and at 999 saturation it cannot move at all, so the marker
+   * keeps every swallowed persist failure readable on the trail surfaces
+   * even when no self-check command ran. The marker enters the ring
+   * directly — recording it must not trigger another persist attempt or
+   * bump the counter a second time — so it rides the NEXT successful
+   * persist into the sidecar (an honest durable record) and re-arms only
+   * after that success. Bounded by the ring's eviction cap like any entry.
+   */
+  #recordPersistFailureMarkerEntry(): void {
+    if (this.#hasRecordedPersistFailureSinceLastSuccess) {
+      return;
+    }
+    this.#hasRecordedPersistFailureSinceLastSuccess = true;
+    this.#entries.push({
+      kind: "self_check",
+      atEpochMs: this.#nowEpochMs(),
+      tokens: ["trail_persist_failed"],
+    });
+    if (this.#entries.length > MAX_SYNC_DIAGNOSTICS_TRAIL_ENTRIES) {
+      this.#entries.splice(0, this.#entries.length - MAX_SYNC_DIAGNOSTICS_TRAIL_ENTRIES);
     }
   }
 

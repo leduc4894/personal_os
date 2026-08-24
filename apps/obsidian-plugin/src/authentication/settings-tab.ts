@@ -16,7 +16,8 @@ import type { LifecycleStateCounts, LifecycleBlockedReasonCode } from "../journa
 import { LIFECYCLE_LOCAL_FILE_STATES } from "../journal/lifecycle-contracts";
 import type { LifecycleLocalFileState } from "../journal/lifecycle-contracts";
 import type { LocalNoteSyncState, LocalNoteSyncStatus } from "../journal/note-status";
-import type { SyncDiagnosticTrailEntry } from "../journal/sync-diagnostics-trail";
+import type { SyncDiagnosticClosedToken, SyncDiagnosticTrailEntry } from "../journal/sync-diagnostics-trail";
+import type { JournalStoreErrorReason } from "../journal/sqlite-database";
 import {
   renderJournalStoreDiagnosticsLine,
   renderSyncDiagnosticsTrailSection,
@@ -66,20 +67,20 @@ export interface DeviceAuthenticationSnapshot {
    * the journal failures the queue pass loop's fail-closed catch swallowed,
    * newest last (bounded, in-memory only). Empty when none were observed.
    */
-  readonly lastJournalFailureReasons: readonly string[];
+  readonly lastJournalFailureReasons: readonly JournalStoreErrorReason[];
   /**
    * Fix round 5 diagnostics: the total generation-publish failure count and
    * the last bounded closed reason tokens (the file-store/publish path),
    * newest last. Zero/empty when every publish verified.
    */
   readonly generationPublishFailureCount: number;
-  readonly lastGenerationPublishFailureReasons: readonly string[];
+  readonly lastGenerationPublishFailureReasons: readonly JournalStoreErrorReason[];
   /**
    * Sync error tracing task 2: the closed stop-reason tokens derived from
    * the durable diagnostics trail (the newest closed token of each failure
    * kind), empty when no failure was recorded.
    */
-  readonly syncStopReasonTokens: readonly string[];
+  readonly syncStopReasonTokens: readonly SyncDiagnosticClosedToken[];
   /** The durable trail's bounded entry view, oldest first (the tail). */
   readonly trailTailEntries: readonly SyncDiagnosticTrailEntry[];
   /** The total durable trail entry count. */
@@ -98,7 +99,7 @@ export interface DeviceAuthenticationSnapshot {
    * reason when the throw was a store error. Null before the first
    * failure — never a fake success token.
    */
-  readonly lastStartupFailureTokens: readonly string[] | null;
+  readonly lastStartupFailureTokens: readonly SyncDiagnosticClosedToken[] | null;
   /** Local-only per-note statuses; paths must never leave this settings tab. */
   readonly localNoteSyncStatuses: readonly LocalNoteSyncStatus[];
 }
@@ -352,10 +353,11 @@ export function renderPolicyStateGuidanceLine(policyState: PolicyIntegrityState)
 /**
  * Render the journal-startup-failure line (closed-reason surfacing C1 P1):
  * a fixed English head plus the closed tokens only — or null before the
- * first failure (never a fake success token).
+ * first failure (never a fake success token). The input is the existing
+ * readonly closed-token union, so a free-form value cannot type-check in.
  */
 export function renderJournalStartupFailureLine(
-  startupFailureTokens: readonly string[] | null,
+  startupFailureTokens: readonly SyncDiagnosticClosedToken[] | null,
 ): string | null {
   if (startupFailureTokens === null || startupFailureTokens.length === 0) {
     return null;

@@ -203,8 +203,13 @@ interface WireEnvelope {
   readonly request_id?: unknown;
 }
 
-/** The envelope's opaque request id, only when it is UUID-shaped. */
-function envelopeRequestId(value: unknown): string | null {
+/**
+ * The envelope's opaque request id, only when it is UUID-shaped. Renamed in
+ * the child six remediation so the name `envelopeRequestId` belongs to
+ * exactly one plugin module — the diagnostics trail's gated token wrapper —
+ * while this private parser extracts the raw wire member.
+ */
+function parseEnvelopeRequestId(value: unknown): string | null {
   return typeof value === "string" && UUID_PATTERN.test(value) ? value : null;
 }
 
@@ -227,7 +232,7 @@ function parseEnvelope(status: number, bodyText: string): { data: unknown; reque
     throw mapWireFailure(status, null, null);
   }
   const envelope = parsed as Partial<WireEnvelope>;
-  const requestId = envelopeRequestId(envelope.request_id);
+  const requestId = parseEnvelopeRequestId(envelope.request_id);
   if (envelope.error !== null && envelope.error !== undefined) {
     const code = typeof envelope.error.code === "string" ? envelope.error.code : null;
     throw mapWireFailure(status, code, requestId);

@@ -85,6 +85,18 @@ class FakeTrailFileStore implements JournalFileStore {
 
 const REQUEST_ID = "66666666-6666-4666-8666-666666666666";
 
+/**
+ * The request-id token of the canonical test UUID; a null gate answer fails
+ * the calling test (the gate admits this exact canonical shape).
+ */
+function canonicalRequestIdToken() {
+  const token = envelopeRequestId(REQUEST_ID);
+  if (token === null) {
+    throw new Error("expected a request-id token for the canonical test UUID");
+  }
+  return token;
+}
+
 /** Create one loaded trail over a fresh fake store. */
 async function createLoadedTrail(
   store: FakeTrailFileStore,
@@ -143,7 +155,7 @@ describe("sync diagnostics trail sidecar persistence", () => {
     await trail.append({ kind: "journal_failure", tokens: ["journal_query_failed"] });
     await trail.append({
       kind: "wire_failure",
-      tokens: ["server_error", envelopeRequestId(REQUEST_ID)],
+      tokens: ["server_error", canonicalRequestIdToken()],
     });
 
     expect(store.files.has(SYNC_DIAGNOSTICS_TRAIL_FILE_NAME)).toBe(true);
@@ -273,8 +285,14 @@ describe("sync diagnostics trail append failure handling", () => {
     store.writeThrows = true;
     const trail = await createLoadedTrail(store);
     await expect(trail.append({ kind: "pass_outcome", tokens: ["completed"] })).resolves.toBeUndefined();
-    expect(trail.readEntries()).toHaveLength(1);
     expect(trail.readAppendFailureCount()).toBe(1);
+    // Child six remediation: the swallowed failure also records ONE bounded
+    // `self_check · trail_persist_failed` marker entry after the appended
+    // entry, so the failure is readable on the trail surfaces.
+    expect(trail.readEntries().map((entry) => entry.kind)).toEqual([
+      "pass_outcome",
+      "self_check",
+    ]);
 
     for (let index = 0; index < MAX_SYNC_DIAGNOSTICS_TRAIL_APPEND_FAILURES + 10; index += 1) {
       await trail.append({ kind: "pass_outcome", tokens: ["stopped"] });
@@ -296,11 +314,71 @@ describe("sync diagnostics trail append failure handling", () => {
     expect(trail.readAppendFailureCount()).toBe(1);
     const reloaded = await createLoadedTrail(store);
     // The in-memory ring kept the un-persisted entry; the first persist after
-    // recovery writes the whole ring, so nothing observed is lost.
+    // recovery writes the whole ring, so nothing observed is lost. The
+    // persist-failure marker (child six remediation) rides along as an
+    // honest durable record of the failed episode.
     expect(reloaded.readEntries().map((entry) => entry.kind)).toEqual([
       "pass_outcome",
+      "self_check",
       "wire_failure",
     ]);
+  });
+});
+
+// --- the persist-failure marker (child six deferred remediation) -----------------------------------------
+
+describe("sync diagnostics trail persist-failure marker (child six deferred remediation)", () => {
+  /** Render one entry's tokens as strings (the request-id token as its id) for assertions. */
+  function tokenTexts(entry: { readonly tokens: readonly unknown[] }): readonly string[] {
+    return entry.tokens.map((token) =>
+      typeof token === "string" ? token : `request_id=${(token as { requestId: string }).requestId}`,
+    );
+  }
+
+  it("records one bounded trail_persist_failed marker per failure episode", async () => {
+    const store = new FakeTrailFileStore();
+    store.writeThrows = true;
+    const trail = await createLoadedTrail(store);
+    await trail.append({ kind: "pass_outcome", tokens: ["completed"] });
+
+    expect(trail.readAppendFailureCount()).toBe(1);
+    expect(trail.readEntries().map((entry) => [entry.kind, ...tokenTexts(entry)])).toEqual([
+      ["pass_outcome", "completed"],
+      ["self_check", "trail_persist_failed"],
+    ]);
+
+    // Further failures inside the SAME episode count on the bounded counter
+    // but never repeat the marker — one bounded token per episode.
+    await trail.append({ kind: "pass_outcome", tokens: ["stopped"] });
+    expect(trail.readAppendFailureCount()).toBe(2);
+    expect(
+      trail.readEntries().filter((entry) => entry.tokens.includes("trail_persist_failed")),
+    ).toHaveLength(1);
+  });
+
+  it("rides the marker into the sidecar on the next successful persist and re-arms after recovery", async () => {
+    const store = new FakeTrailFileStore();
+    store.writeThrows = true;
+    const trail = await createLoadedTrail(store);
+    await trail.append({ kind: "pass_outcome", tokens: ["completed"] });
+    store.writeThrows = false;
+    await trail.append({ kind: "wire_failure", tokens: ["server_error"] });
+
+    // The marker is an honest durable record: the first successful persist
+    // after the failure writes the whole ring, marker included.
+    const reloaded = await createLoadedTrail(store);
+    expect(reloaded.readEntries().map((entry) => entry.kind)).toEqual([
+      "pass_outcome",
+      "self_check",
+      "wire_failure",
+    ]);
+
+    // A NEW failure after the recovery records a fresh marker episode.
+    store.writeThrows = true;
+    await trail.append({ kind: "pass_outcome", tokens: ["stopped"] });
+    expect(
+      trail.readEntries().filter((entry) => entry.tokens.includes("trail_persist_failed")),
+    ).toHaveLength(2);
   });
 });
 
@@ -392,7 +470,7 @@ describe("sync diagnostics trail envelope error-code tokens (diagnostic round U1
     }
     await trail.append({
       kind: "wire_failure",
-      tokens: ["login_required", codeToken, envelopeRequestId(REQUEST_ID)],
+      tokens: ["login_required", codeToken, canonicalRequestIdToken()],
     });
 
     const reloaded = await createLoadedTrail(store);
@@ -400,6 +478,53 @@ describe("sync diagnostics trail envelope error-code tokens (diagnostic round U1
     expect(reloaded.readEntries()[0]?.tokens).toEqual([
       "login_required",
       "authorization_scope_denied",
+      { requestId: REQUEST_ID },
+    ]);
+  });
+});
+
+// --- the envelope request-id UUID gate (child six deferred remediation) ---------------------------------
+
+describe("sync diagnostics trail envelope request-id UUID gate (child six deferred remediation)", () => {
+  it("rejects a non-UUID request id before durable trail persistence", () => {
+    expect(envelopeRequestId("untrusted-value")).toBeNull();
+  });
+
+  it("admits only canonical lowercase-hex UUIDs as request-id tokens", () => {
+    // The one canonical shape the sidecar parser already accepts.
+    expect(envelopeRequestId(REQUEST_ID)).toEqual({ requestId: REQUEST_ID });
+    const lowercaseHexUuidWithLetters = "0abcdef0-0abc-4abc-8abc-0abcdef0abcd";
+    expect(envelopeRequestId(lowercaseHexUuidWithLetters)).toEqual({
+      requestId: lowercaseHexUuidWithLetters,
+    });
+    // Every non-canonical shape — free-form text, an injected fragment, a
+    // UUID with uppercase hex, a braced/urn form, an empty value — is
+    // rejected at the token boundary, before any entry exists.
+    for (const nonUuidValue of [
+      "untrusted-value",
+      "notes/leaked-path.md · " + REQUEST_ID,
+      lowercaseHexUuidWithLetters.toUpperCase(),
+      `{${REQUEST_ID}}`,
+      `urn:uuid:${REQUEST_ID}`,
+      REQUEST_ID.slice(0, 35),
+      `${REQUEST_ID} `,
+      "",
+    ]) {
+      expect(envelopeRequestId(nonUuidValue)).toBeNull();
+    }
+  });
+
+  it("round-trips the gated request-id token through the sidecar unchanged", async () => {
+    const store = new FakeTrailFileStore();
+    const trail = await createLoadedTrail(store);
+    const requestIdToken = envelopeRequestId(REQUEST_ID);
+    if (requestIdToken === null) {
+      throw new Error("expected a request-id token for a canonical UUID");
+    }
+    await trail.append({ kind: "pass_outcome", tokens: ["completed", requestIdToken] });
+    const reloaded = await createLoadedTrail(store);
+    expect(reloaded.readEntries()[0]?.tokens).toEqual([
+      "completed",
       { requestId: REQUEST_ID },
     ]);
   });
@@ -438,7 +563,7 @@ describe("sync diagnostics trail closed vocabulary (type level)", () => {
     await trail.append({ kind: "pass_outcome", tokens: ["retry_scheduled"] });
     await trail.append({
       kind: "wire_failure",
-      tokens: ["server_error", envelopeRequestId(REQUEST_ID)],
+      tokens: ["server_error", canonicalRequestIdToken()],
     });
     // The fixed self-check verdicts DO type-check as self_check tokens,
     // including the reused sync network kinds.

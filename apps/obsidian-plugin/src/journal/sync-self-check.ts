@@ -20,6 +20,7 @@
 import type { SyncApiFailureKind } from "./sync-api";
 import type {
   SyncDiagnosticsTrail,
+  SyncDiagnosticClosedToken,
   SyncDiagnosticTrailEntry,
   SyncSelfCheckVerdictToken,
 } from "./sync-diagnostics-trail";
@@ -93,6 +94,17 @@ function countTrailProbeEntries(entries: readonly SyncDiagnosticTrailEntry[]): n
  * its coalesced persist, then verify the entry is readable back and no
  * persist failure was counted. The verdict entry is appended after the
  * outcome is known — an entry cannot carry the verdict of its own persist.
+ *
+ * Counter-saturation edge (child six deferred remediation): the swallowed-
+ * failure counter is bounded at 999 and stops moving once saturated. A
+ * persist failure inside the probe window therefore goes UNCOUNTED when the
+ * counter already reads 999, so the counter-equality check cannot detect it
+ * and the probe conservatively PASSES (`trail_persist_ok`) despite the
+ * failed write. The saturation itself is operator-visible — the settings
+ * counter reads 999 and each failure episode records one bounded
+ * `self_check · trail_persist_failed` marker entry on the trail — so a
+ * saturated counter plus an ok verdict still localizes the failure to the
+ * trail write path.
  */
 async function runTrailPersistProbeStep(trail: SyncDiagnosticsTrail): Promise<SyncSelfCheckStepResult> {
   const appendFailureCountBefore = trail.readAppendFailureCount();
@@ -212,11 +224,11 @@ export function renderSyncSelfCheckSummaryText(summary: SyncSelfCheckSummary): s
  * journal stack failed closed at load (closed-reason surfacing C1 P1).
  * The tokens are the SAME closed tokens the settings snapshot carries —
  * the failed startup stage plus the closed store reason when applicable;
- * no exception text, path, credential or any free-form string ever rides
- * along.
+ * the input is the existing readonly closed-token union, so no exception
+ * text, path, credential or any free-form string can ride along.
  */
 export function renderSyncSelfCheckJournalNotRunningText(
-  startupFailureTokens: readonly string[] | null,
+  startupFailureTokens: readonly SyncDiagnosticClosedToken[] | null,
 ): string {
   const baseLine = "Sync self-check unavailable: journal not running on this device.";
   if (startupFailureTokens === null || startupFailureTokens.length === 0) {
