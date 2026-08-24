@@ -68,6 +68,8 @@ import {
 import type { JournalSyncStatusSnapshot, LifecycleBlockedReasonCode } from "./journal/status";
 import type { LifecycleStateCounts } from "./journal/status";
 import { JournalStoreError, loadVendoredSqliteEngine } from "./journal/sqlite-database";
+import { createJournalFailureReporter } from "./journal/diagnostic-reporter";
+import type { JournalFailureReporter } from "./journal/diagnostic-reporter";
 import { createSyncDiagnosticsTrail } from "./journal/sync-diagnostics-trail";
 import type {
   SyncDiagnosticClosedToken,
@@ -240,6 +242,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
    * export can read the tail, the counts and the derived stop reasons.
    */
   #diagnosticTrail: SyncDiagnosticsTrail | null = null;
+  #journalFailureReporter: JournalFailureReporter | null = null;
   /**
    * Closed-reason surfacing C1 P1: the closed tokens of the last journal
    * startup failure (the failed stage token plus the closed store reason
@@ -258,6 +261,8 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   #hasRecordedStatusReadFailure = false;
   /** C1 P5: has the note-status read swallow already been recorded? */
   #hasRecordedNoteStatusReadFailure = false;
+  #hasReportedRetryScheduleReadFailure = false;
+  #hasReportedSyncStatusReadFailure = false;
   #automaticSnapshotCoordinator: AutomaticSnapshotCoordinator | null = null;
   #boundedQueuePassDispatcher: CoalescingQueuePassDispatcher | null = null;
   #pendingAutomaticSnapshotReason: AutomaticSnapshotReason | null = null;
@@ -608,6 +613,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       // Retained so the settings snapshot and the copy-sync-diagnostics
       // export can read the trail without re-creating the sidecar port.
       this.#diagnosticTrail = diagnosticTrail;
+      this.#journalFailureReporter = createJournalFailureReporter(diagnosticTrail);
       this.#flushBufferedStartupFailureEntries(diagnosticTrail);
       startupStage = "wasm_read";
       const engineWasmBinary = await this.#readJournalEngineWasmBinary();
@@ -920,6 +926,22 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     }
   }
 
+  #reportRetryScheduleReadFailureOnce(): void {
+    if (this.#hasReportedRetryScheduleReadFailure) {
+      return;
+    }
+    this.#hasReportedRetryScheduleReadFailure = true;
+    this.#journalFailureReporter?.reportJournalFailure("retry_schedule_read_failed");
+  }
+
+  #reportSyncStatusReadFailureOnce(): void {
+    if (this.#hasReportedSyncStatusReadFailure) {
+      return;
+    }
+    this.#hasReportedSyncStatusReadFailure = true;
+    this.#journalFailureReporter?.reportJournalFailure("sync_status_read_failed");
+  }
+
   /**
    * The explicit-restore command callback (Task 10, spec 6.3 + 7.1):
    * show the picker for retained tombstones, confirm the target path
@@ -1212,6 +1234,8 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       earliestRetryEpochMs = repository.readEarliestPendingRetryEpochMs();
     } catch {
       // An unreadable journal arms nothing (fail-closed).
+      // Closed reason: "retry_schedule_read_failed".
+      this.#reportRetryScheduleReadFailureOnce();
       return;
     }
     if (earliestRetryEpochMs === null) {
@@ -1292,6 +1316,8 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     } catch {
       // The journal store is closed or unreadable: render no status rather
       // than a wrong one (the fail-closed rule of the journal design).
+      // Closed reason: "sync_status_read_failed".
+      this.#reportSyncStatusReadFailureOnce();
       return null;
     }
     return projectJournalSyncStatus({

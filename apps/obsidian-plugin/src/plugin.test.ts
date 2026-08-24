@@ -804,6 +804,18 @@ describe("Obsidian plugin composition root", () => {
     expect(noteOnceBody).toContain('"note_status_read_failed"');
   });
 
+  it("surfaces retry scheduling and sync-status composition read failures", () => {
+    const retryReadIndex = pluginSource.indexOf("repository.readEarliestPendingRetryEpochMs()");
+    expect(retryReadIndex).toBeGreaterThanOrEqual(0);
+    const retryReadCatchBody = pluginSource.slice(retryReadIndex, retryReadIndex + 500);
+    expect(retryReadCatchBody).toContain('"retry_schedule_read_failed"');
+
+    const statusReadIndex = pluginSource.indexOf("#projectSyncStatus(): JournalSyncStatusSnapshot | null");
+    expect(statusReadIndex).toBeGreaterThanOrEqual(0);
+    const statusReadCatchBody = pluginSource.slice(statusReadIndex, statusReadIndex + 2_000);
+    expect(statusReadCatchBody).toContain('"sync_status_read_failed"');
+  });
+
   it("touches no forbidden runtime capability at load time", () => {
     for (const forbiddenText of [
       "node:",
