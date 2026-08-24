@@ -441,6 +441,13 @@ describe("sync diagnostics trail startup_failure entries (closed-reason surfacin
     expect(SYNC_COMPOSITION_READ_FAILURE_TOKENS).toEqual([
       "status_read_failed",
       "note_status_read_failed",
+      "retry_schedule_read_failed",
+      "sync_status_read_failed",
+      "queue_drain_failed",
+      "snapshot_drain_failed",
+      "settled_admission_failed",
+      "automatic_snapshot_admission_failed",
+      "lifecycle_reconcile_persist_failed",
     ]);
   });
 

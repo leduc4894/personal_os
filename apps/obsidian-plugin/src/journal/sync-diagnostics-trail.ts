@@ -180,6 +180,13 @@ export type SyncStartupStageToken = (typeof SYNC_STARTUP_STAGE_TOKENS)[number];
 export const SYNC_COMPOSITION_READ_FAILURE_TOKENS = [
   "status_read_failed",
   "note_status_read_failed",
+  "retry_schedule_read_failed",
+  "sync_status_read_failed",
+  "queue_drain_failed",
+  "snapshot_drain_failed",
+  "settled_admission_failed",
+  "automatic_snapshot_admission_failed",
+  "lifecycle_reconcile_persist_failed",
 ] as const;
 
 export type SyncCompositionReadFailureToken =
