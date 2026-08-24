@@ -303,6 +303,15 @@ describe("journal sync api failure mapping (spec 12)", () => {
     // whose bound path already has a foreign ACTIVE locator is a permanent
     // business conflict — terminal, never retried.
     [409, "source_locator_conflict", "blocked_conflict"],
+    // Policy SYSTEM failures (policy-observability remediation C1): the
+    // preflight boundary propagates the typed system errors instead of
+    // collapsing them into the 200 `excluded` shape — a missing active
+    // signed policy renders as 409 and corrupt signing material as 503.
+    // Both carry no dedicated plugin verdict, so they fall through to the
+    // retryable `server_error` family: the queue keeps the event under
+    // bounded backoff and no queued work is dropped.
+    [409, "exclusion_policy_not_initialized", "server_error"],
+    [503, "exclusion_policy_signing_unavailable", "server_error"],
     [422, "small_file_preflight_invalid", "server_error"],
     [418, null, "server_error"],
   ])(

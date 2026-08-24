@@ -64,8 +64,11 @@ from personal_os.exclusion_policy.enforcement import (
 from personal_os.exclusion_policy.errors import (
     INPUT_REASONS,
     PAYLOAD_CONTRACT_REASONS,
+    POLICY_DENIAL_ERROR_CODES,
+    POLICY_SYSTEM_ERROR_CODES,
     ExclusionPolicyError,
     PolicyContractError,
+    is_policy_system_failure,
     payload_contract_error,
 )
 from personal_os.exclusion_policy.evaluation import (
@@ -138,6 +141,8 @@ __all__ = [
     "MAXIMUM_SAFE_INTEGER",
     "MAXIMUM_SIZE_BYTES_CEILING",
     "PAYLOAD_CONTRACT_REASONS",
+    "POLICY_DENIAL_ERROR_CODES",
+    "POLICY_SYSTEM_ERROR_CODES",
     "RULE_FINGERPRINT_CONTRACT",
     "SIGNATURE_ALGORITHM",
     "SIGNED_SNAPSHOT_MAXIMUM_BYTES",
@@ -197,6 +202,7 @@ __all__ = [
     "evaluate_policy_decision",
     "fold_ascii_lowercase",
     "glob_matches",
+    "is_policy_system_failure",
     "is_wellformed_ed25519_key_id",
     "normalize_locator",
     "normalize_rule",

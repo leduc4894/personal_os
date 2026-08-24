@@ -518,6 +518,12 @@ def test_metric_label_values_are_closed_enums() -> None:
         "small_file_size_limit_exceeded",
         "small_file_content_integrity_failed",
         "small_file_upload_state_invalid",
+        # The policy-failure codes the preflight boundaries record (C1): the
+        # denials keep the excluded outcome, the system failures propagate.
+        "exclusion_policy_denied",
+        "exclusion_policy_indeterminate",
+        "exclusion_policy_not_initialized",
+        "exclusion_policy_signing_unavailable",
     }
 
 

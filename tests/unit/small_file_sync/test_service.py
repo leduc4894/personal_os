@@ -2,8 +2,10 @@
 
 Proves the normative flows of spec 10.1-10.3 against the REAL publication
 service over recording fakes: server-side policy denial before any operation
-store or object-store access, read-boundary policy failures on the update base
-mapping to the same terminal ``excluded`` outcome, exact preflight replay of a
+store or object-store access, policy DENIALS on both the authorize and the
+read boundary mapping to the same terminal ``excluded`` outcome with their
+closed code on the rejection ring while policy SYSTEM failures propagate as
+the typed 409/503 errors (G1), exact preflight replay of a
 frozen terminal result, pending same-identity reservation with token rotation,
 payload substitution rejection, create reservation without a source insert,
 stale and missing update bases as durable conflicts, the frozen no-change
@@ -121,6 +123,76 @@ class TestPreflightPolicy:
             )
             == 1
         )
+
+    @pytest.mark.asyncio
+    async def test_policy_denial_records_the_closed_code_into_the_rejection_ring(
+        self,
+    ) -> None:
+        """A denial keeps the excluded outcome and now names its closed why."""
+
+        harness = build_service_harness(denying_policy_guard=True)
+
+        result = await harness.service.preflight(
+            preflight=build_create_preflight(),
+            device_context=build_device_context(),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert result.outcome is SmallFilePreflightOutcome.EXCLUDED
+        assert (
+            harness.metrics.rejection_count(
+                SmallFileOperation.CREATE, SmallFileRejectionReason.EXCLUSION_POLICY_DENIED
+            )
+            == 1
+        )
+        diagnostics = harness.metrics.rejection_diagnostics()
+        (record,) = diagnostics.recent_rejections
+        assert record.error_code is SmallFileRejectionReason.EXCLUSION_POLICY_DENIED
+        assert record.operation is SmallFileOperation.CREATE
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "system_code",
+        [
+            ErrorCode.EXCLUSION_POLICY_NOT_INITIALIZED,
+            ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE,
+        ],
+    )
+    async def test_policy_system_failure_propagates_as_the_typed_error(
+        self, system_code: ErrorCode
+    ) -> None:
+        """A policy SYSTEM failure never collapses into the 200 excluded shape.
+
+        The API's existing closed status mapping renders the typed error as a
+        409 (not initialized) or 503 (signing unavailable) envelope, and the
+        plugin's wire table maps both onto the retryable server_error family.
+        """
+
+        harness = build_service_harness(policy_guard_error=ExclusionPolicyError(system_code))
+
+        with pytest.raises(ExclusionPolicyError) as raised:
+            await harness.service.preflight(
+                preflight=build_create_preflight(),
+                device_context=build_device_context(),
+                diagnostic_context=build_diagnostic_context(),
+            )
+
+        assert raised.value.error_code is system_code
+        # The system failure still names its closed why on the operator ring...
+        assert (
+            harness.metrics.rejection_count(
+                SmallFileOperation.CREATE, SmallFileRejectionReason(system_code.value)
+            )
+            == 1
+        )
+        # ...but never masquerades as a completed excluded preflight.
+        assert (
+            harness.metrics.preflight_count(
+                SmallFileOperation.CREATE, SmallFilePreflightOutcome.EXCLUDED
+            )
+            == 0
+        )
+        assert harness.ledger.entries == []
 
 
 class TestPreflightReservation:
@@ -268,15 +340,17 @@ class TestPreflightUpdateBase:
 
 
 class TestPreflightUpdateBasePolicy:
-    """Read-boundary policy failures map to the excluded preflight outcome.
+    """Read-boundary policy failures split denials from system failures.
 
     The canonical-read boundary re-evaluates the active policy while it
-    resolves the update base (spec 14.2). Its typed exclusion-policy failure
-    — an indeterminate subject over locator-dependent rules exactly like the
-    live extension-rule incident, or a definite denial — must surface as the
-    same 200 ``excluded`` preflight outcome the authorize boundary produces
-    (spec 9/10.1), never as an escaping error the route envelope would
-    answer with a 403 the plugin parks as ``login_required``.
+    resolves the update base (spec 14.2). Its typed policy DENIALS — an
+    indeterminate subject over locator-dependent rules exactly like the live
+    extension-rule incident, or a definite denial — surface as the same 200
+    ``excluded`` preflight outcome the authorize boundary produces (spec
+    9/10.1), never as an escaping error the route envelope would answer with
+    a 403 the plugin parks as ``login_required``. Policy SYSTEM failures
+    (no active signed policy, corrupt signing material) propagate as the
+    typed error so the API answers with its closed 409/503 envelope (G1).
     """
 
     @pytest.mark.asyncio
@@ -333,6 +407,71 @@ class TestPreflightUpdateBasePolicy:
             )
             == 1
         )
+
+    @pytest.mark.asyncio
+    async def test_read_boundary_indeterminate_records_the_closed_code_into_the_ring(
+        self,
+    ) -> None:
+        """The read boundary's denial keeps excluded and names its closed why."""
+
+        preflight = build_update_preflight(source_id=uuid4(), base_version_id=uuid4())
+        reference = build_current_reference(preflight, content_digest=ContentDigest.parse("c" * 64))
+        harness = build_service_harness(current_reference=reference)
+        harness.current_sources.resolve_error = policy_indeterminate_error()
+
+        result = await harness.service.preflight(
+            preflight=preflight,
+            device_context=build_device_context(),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert result.outcome is SmallFilePreflightOutcome.EXCLUDED
+        assert (
+            harness.metrics.rejection_count(
+                SmallFileOperation.UPDATE, SmallFileRejectionReason.EXCLUSION_POLICY_INDETERMINATE
+            )
+            == 1
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "system_code",
+        [
+            ErrorCode.EXCLUSION_POLICY_NOT_INITIALIZED,
+            ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE,
+        ],
+    )
+    async def test_read_boundary_policy_system_failure_propagates_as_the_typed_error(
+        self, system_code: ErrorCode
+    ) -> None:
+        """The read boundary never collapses a policy system failure either."""
+
+        preflight = build_update_preflight(source_id=uuid4(), base_version_id=uuid4())
+        reference = build_current_reference(preflight, content_digest=ContentDigest.parse("c" * 64))
+        harness = build_service_harness(current_reference=reference)
+        harness.current_sources.resolve_error = ExclusionPolicyError(system_code)
+
+        with pytest.raises(ExclusionPolicyError) as raised:
+            await harness.service.preflight(
+                preflight=preflight,
+                device_context=build_device_context(),
+                diagnostic_context=build_diagnostic_context(),
+            )
+
+        assert raised.value.error_code is system_code
+        assert (
+            harness.metrics.rejection_count(
+                SmallFileOperation.UPDATE, SmallFileRejectionReason(system_code.value)
+            )
+            == 1
+        )
+        assert (
+            harness.metrics.preflight_count(
+                SmallFileOperation.UPDATE, SmallFilePreflightOutcome.EXCLUDED
+            )
+            == 0
+        )
+        assert STORE_RESERVE_OPERATION not in harness.ledger.entries
 
 
 class TestPreflightNoChange:

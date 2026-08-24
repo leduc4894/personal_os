@@ -202,6 +202,14 @@ def test_diagnostics_payload_schemas_close_their_members(application: FastAPI) -
         "small_file_size_limit_exceeded",
         "small_file_content_integrity_failed",
         "small_file_upload_state_invalid",
+        # The policy-failure codes the preflight boundaries record into the
+        # ring (policy-observability remediation C1): the two denial codes
+        # keep the excluded outcome, the two system codes propagate as the
+        # typed 409/503 errors — all four are ring-recordable codes.
+        "exclusion_policy_denied",
+        "exclusion_policy_indeterminate",
+        "exclusion_policy_not_initialized",
+        "exclusion_policy_signing_unavailable",
     ]
     assert schemas["SmallFileOperation"]["enum"] == ["create", "update"]
     counter = schemas["SmallFileRejectionCounterData"]

@@ -38,7 +38,7 @@ from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import ApplicationError
 from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
-from personal_os.exclusion_policy.errors import ExclusionPolicyError
+from personal_os.exclusion_policy.errors import ExclusionPolicyError, is_policy_system_failure
 from personal_os.object_storage import (
     CanonicalMediaType,
     CanonicalObjectStore,
@@ -116,6 +116,28 @@ _CREATE_TITLE_BY_SOURCE_TYPE: Final[Mapping[SourceType, str]] = MappingProxyType
         SourceType.IMAGE: "Image file",
         SourceType.AUDIO: "Audio file",
     }
+)
+
+#: The closed policy-failure codes recordable into the rejection diagnostics
+#: ring (policy-observability remediation C1): the policy DENIAL codes keep
+#: the terminal ``excluded`` preflight outcome while the SYSTEM codes
+#: propagate as the typed errors behind the closed 409/503 envelopes — both
+#: sides record their registry code so the operator surface carries the why.
+_POLICY_REJECTION_REASON_BY_CODE: Final[Mapping[ErrorCode, SmallFileRejectionReason]] = (
+    MappingProxyType(
+        {
+            ErrorCode.EXCLUSION_POLICY_DENIED: SmallFileRejectionReason.EXCLUSION_POLICY_DENIED,
+            ErrorCode.EXCLUSION_POLICY_INDETERMINATE: (
+                SmallFileRejectionReason.EXCLUSION_POLICY_INDETERMINATE
+            ),
+            ErrorCode.EXCLUSION_POLICY_NOT_INITIALIZED: (
+                SmallFileRejectionReason.EXCLUSION_POLICY_NOT_INITIALIZED
+            ),
+            ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE: (
+                SmallFileRejectionReason.EXCLUSION_POLICY_SIGNING_UNAVAILABLE
+            ),
+        }
+    )
 )
 
 
@@ -328,11 +350,20 @@ class SmallFileSyncService:
         # re-evaluated server-side with the locator-aware subject before any
         # replay lookup, reservation or object-store access, so a denied or
         # indeterminate subject never receives canonical data or an upload.
+        # A policy DENIAL keeps the terminal ``excluded`` outcome; a policy
+        # SYSTEM failure (no active signed policy, corrupt signing material)
+        # propagates as the typed error so the API answers with its closed
+        # 409/503 envelope instead of collapsing a broken policy system into
+        # a success shape. Both record the closed registry code into the
+        # rejection ring (policy-observability remediation C1).
         try:
             policy_binding = await self.policy_guard.authorize_small_file(
                 preflight, device_context, diagnostic_context
             )
-        except ExclusionPolicyError:
+        except ExclusionPolicyError as error:
+            self._record_policy_rejection(preflight.operation, error.error_code)
+            if is_policy_system_failure(error):
+                raise
             self._record_preflight(
                 preflight.operation, SmallFilePreflightOutcome.EXCLUDED, started_at
             )
@@ -393,10 +424,13 @@ class SmallFileSyncService:
         current base whose committed digest equals the declared digest is the
         safe ``no_change`` receipt: the operation is reserved and the
         confirmed current base frozen as its terminal result so a lost
-        response replays the exact no-op. A typed policy failure raised by
+        response replays the exact no-op. A typed policy DENIAL raised by
         the read boundary's locked recheck is the same terminal ``excluded``
         outcome the authorize boundary produces (spec 9/10.1) — it never
-        escapes as an error envelope the route would answer with 403.
+        escapes as an error envelope the route would answer with 403. A
+        policy SYSTEM failure propagates as the typed error behind the closed
+        409/503 envelope instead (policy-observability remediation C1); both
+        sides record their closed registry code into the rejection ring.
         """
 
         update_source_id = preflight.source_id
@@ -417,10 +451,16 @@ class SmallFileSyncService:
                 preflight.operation, SmallFilePreflightOutcome.CONFLICT, started_at
             )
             return SmallFilePreflightResult(outcome=SmallFilePreflightOutcome.CONFLICT)
-        except ExclusionPolicyError:
+        except ExclusionPolicyError as error:
             # The read boundary's transaction-final recheck denied or could
             # not decide the subject: the preflight outcome contract stays
-            # total over policy errors with the typed ``excluded`` outcome.
+            # total over policy DENIALS with the typed ``excluded`` outcome,
+            # while a policy SYSTEM failure propagates as the typed error
+            # (policy-observability remediation C1). Both record the closed
+            # registry code into the rejection ring.
+            self._record_policy_rejection(preflight.operation, error.error_code)
+            if is_policy_system_failure(error):
+                raise
             self._record_preflight(
                 preflight.operation, SmallFilePreflightOutcome.EXCLUDED, started_at
             )
@@ -602,6 +642,21 @@ class SmallFileSyncService:
             operation=operation,
             reason_code=SmallFileRejectionReason(error.error_code.value),
         )
+
+    def _record_policy_rejection(
+        self, operation: SmallFileOperation, error_code: ErrorCode
+    ) -> None:
+        """Record one closed policy-failure code into the rejection ring.
+
+        Only the classified policy codes have ring members; a code outside
+        that closed set keeps today's behavior with no ring record, because
+        the ring accepts no label outside its own closed vocabulary.
+        """
+
+        reason_code = _POLICY_REJECTION_REASON_BY_CODE.get(error_code)
+        if reason_code is None:
+            return
+        self.metrics.record_rejection(operation=operation, reason_code=reason_code)
 
     def _elapsed_seconds_since(self, started_at: datetime) -> float:
         # Clamped at zero so a clock seam that repeats or drifts backwards can

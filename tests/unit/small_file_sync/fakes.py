@@ -838,6 +838,7 @@ def build_service_harness(
     *,
     current_reference: CanonicalSourceReference | None = None,
     denying_policy_guard: bool = False,
+    policy_guard_error: Exception | None = None,
     publication_guard_error: Exception | None = None,
     update_outcome: PublicationOutcome = PublicationOutcome.PUBLISHED,
 ) -> ServiceHarness:
@@ -858,11 +859,13 @@ def build_service_harness(
     operation_store = FakeSmallFileUploadOperationStore(ledger=ledger, clock=clock)
     current_sources = FakeCurrentSourceStore(ledger=ledger, reference=current_reference)
     metrics = InMemorySmallFileSyncMetrics()
-    policy_guard: SmallFilePolicyGuardFake = (
-        denying_small_file_policy_guard()
-        if denying_policy_guard
-        else AllowingSmallFilePolicyGuard(ledger=ledger)
-    )
+    policy_guard: SmallFilePolicyGuardFake
+    if policy_guard_error is not None:
+        policy_guard = DenyingSmallFilePolicyGuard(error=policy_guard_error)
+    elif denying_policy_guard:
+        policy_guard = denying_small_file_policy_guard()
+    else:
+        policy_guard = AllowingSmallFilePolicyGuard(ledger=ledger)
     service = SmallFileSyncService(
         operation_store=operation_store,
         policy_guard=policy_guard,

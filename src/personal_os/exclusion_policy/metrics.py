@@ -7,10 +7,12 @@ per-source evaluations plus ``exclusion_policy_preview_total{outcome}`` and
 executions, and ``exclusion_policy_publication_total{outcome}`` for known
 durable publication outcomes. Every label is a closed :class:`enum.StrEnum`
 member: the boundary vocabulary mirrors the mandatory boundaries of spec 14.2,
-the decision label is the raw three-value decision so indeterminacy stays
-observable, and the preview and publication outcomes are recorded only after
-the durable outcome is known. Workspace, source, rule, preview, revision,
-path, media type and key ID are prohibited labels and can never be recorded.
+the decision label is the raw evaluation decision so indeterminacy stays
+observable, a policy system failure records the closed ``failed`` decision
+together with its registry code, and the preview and publication outcomes are
+recorded only after the durable outcome is known. Workspace, source, rule,
+preview, revision, path, media type and key ID are prohibited labels and can
+never be recorded.
 
 :class:`ExclusionPolicyMetrics` is the injectable Protocol enforcement paths
 depend on; :class:`InMemoryExclusionPolicyMetrics` is the bounded test and
@@ -28,6 +30,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Final, Protocol, runtime_checkable
+
+from personal_os.error_contracts.codes import ErrorCode
 
 
 class PolicyBoundary(StrEnum):
@@ -52,6 +56,11 @@ class EvaluationMetricOutcome(StrEnum):
     ALLOWED = "allowed"
     EXCLUDED = "excluded"
     INDETERMINATE = "indeterminate"
+    #: The policy SYSTEM itself failed before it could decide (no active
+    #: signed policy, corrupt signing material): the fail-closed raises
+    #: record this outcome together with the closed registry code instead of
+    #: recording nothing (spec 2026-08-24 C1).
+    FAILED = "failed"
 
 
 class PreviewMetricOutcome(StrEnum):
@@ -104,12 +113,14 @@ class EvaluationRecord:
 
     Carries only the closed boundary and decision enums plus a finite
     non-negative duration; never a UUID, locator, operand or subject
-    fingerprint.
+    fingerprint. A ``failed`` decision additionally carries the closed
+    registry ``error_code`` that names the policy system failure.
     """
 
     boundary: PolicyBoundary
     decision: EvaluationMetricOutcome
     duration_seconds: float
+    error_code: ErrorCode | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +157,18 @@ def _validate_finite_non_negative(field_name: str, value: float) -> None:
         raise ValueError(f"{field_name} must be finite and non-negative")
 
 
+def _validate_evaluation_error_code(
+    decision: EvaluationMetricOutcome, error_code: ErrorCode | None
+) -> None:
+    """Keep the failure code closed: only a ``failed`` decision may carry one."""
+
+    if decision is EvaluationMetricOutcome.FAILED:
+        if error_code is None:
+            raise ValueError("the failed decision requires its closed error_code")
+    elif error_code is not None:
+        raise ValueError("error_code is recordable only on the failed decision")
+
+
 @runtime_checkable
 class ExclusionPolicyMetrics(Protocol):
     """The low-cardinality exclusion-policy metrics sink."""
@@ -156,8 +179,13 @@ class ExclusionPolicyMetrics(Protocol):
         boundary: PolicyBoundary,
         decision: EvaluationMetricOutcome,
         duration_seconds: float,
+        error_code: ErrorCode | None = None,
     ) -> None:
-        """Record one completed evaluation outcome and its duration in seconds."""
+        """Record one completed evaluation outcome and its duration in seconds.
+
+        A ``failed`` decision must carry its closed registry ``error_code``;
+        every other decision carries none.
+        """
         ...
 
     def record_preview(
@@ -199,15 +227,18 @@ class InMemoryExclusionPolicyMetrics:
         boundary: PolicyBoundary,
         decision: EvaluationMetricOutcome,
         duration_seconds: float,
+        error_code: ErrorCode | None = None,
     ) -> None:
         _validate_label("boundary", PolicyBoundary, boundary)
         _validate_label("decision", EvaluationMetricOutcome, decision)
         _validate_finite_non_negative("duration_seconds", duration_seconds)
+        _validate_evaluation_error_code(decision, error_code)
         self._evaluations.append(
             EvaluationRecord(
                 boundary=boundary,
                 decision=decision,
                 duration_seconds=duration_seconds,
+                error_code=error_code,
             )
         )
 

@@ -702,6 +702,123 @@ async def test_bound_publication_fails_closed_when_active_snapshot_is_missing_or
         assert evidence_source.requested_sources == []
 
 
+# --- fail-closed system failures record the closed outcome (G1) --------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "boundary",
+    [PolicyBoundary.SINGLE_PART_UPLOAD, PolicyBoundary.CANONICAL_READ],
+)
+async def test_missing_active_policy_records_the_failed_evaluation_with_the_closed_code(
+    boundary: PolicyBoundary,
+) -> None:
+    """The not-initialized raise records the closed failed outcome, not nothing."""
+
+    service, _, _, metrics = build_service(material=None)
+
+    with pytest.raises(ExclusionPolicyError) as raised:
+        await service.authorize_preflight(
+            subject=PolicySubject(workspace_id=WORKSPACE_ID, source_id=uuid4()),
+            boundary=boundary,
+            context=context(),
+        )
+
+    assert raised.value.error_code is ErrorCode.EXCLUSION_POLICY_NOT_INITIALIZED
+    assert metrics.evaluation_count(boundary, EvaluationMetricOutcome.FAILED) == 1
+    (record,) = metrics.evaluation_records()
+    assert record.boundary is boundary
+    assert record.decision is EvaluationMetricOutcome.FAILED
+    assert record.error_code is ErrorCode.EXCLUSION_POLICY_NOT_INITIALIZED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "boundary",
+    [PolicyBoundary.SINGLE_PART_UPLOAD, PolicyBoundary.CANONICAL_READ],
+)
+async def test_corrupt_signing_material_records_the_failed_evaluation_with_the_closed_code(
+    boundary: PolicyBoundary,
+) -> None:
+    """The signing-unavailable raise records the closed failed outcome, not nothing."""
+
+    material = build_material(build_revision(), payload_sha256="1" * 64)
+    service, _, _, metrics = build_service(material=material)
+
+    with pytest.raises(ExclusionPolicyError) as raised:
+        await service.authorize_preflight(
+            subject=PolicySubject(workspace_id=WORKSPACE_ID, source_id=uuid4()),
+            boundary=boundary,
+            context=context(),
+        )
+
+    assert raised.value.error_code is ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE
+    assert metrics.evaluation_count(boundary, EvaluationMetricOutcome.FAILED) == 1
+    (record,) = metrics.evaluation_records()
+    assert record.boundary is boundary
+    assert record.decision is EvaluationMetricOutcome.FAILED
+    assert record.error_code is ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_bound_publication_fail_closed_raises_record_the_failed_outcome() -> None:
+    """Both bound-publication system failures record failed with their code."""
+
+    for material, expected_error in (
+        (None, ErrorCode.EXCLUSION_POLICY_NOT_INITIALIZED),
+        (
+            build_material(build_revision(), payload_sha256="0" * 64),
+            ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE,
+        ),
+    ):
+        service, _, _, metrics = build_service(material=material)
+
+        with pytest.raises(ExclusionPolicyError) as raised:
+            await service.authorize_bound_publication(
+                build_create_command(),
+                AllowedPolicyRevisionBinding(workspace_id=WORKSPACE_ID, policy_revision_number=1),
+                context(),
+            )
+
+        assert raised.value.error_code is expected_error
+        assert (
+            metrics.evaluation_count(
+                PolicyBoundary.SINGLE_PART_UPLOAD, EvaluationMetricOutcome.FAILED
+            )
+            == 1
+        )
+        (record,) = metrics.evaluation_records()
+        assert record.decision is EvaluationMetricOutcome.FAILED
+        assert record.error_code is expected_error
+
+
+@pytest.mark.asyncio
+async def test_policy_denials_keep_their_closed_outcomes_unrecorded_as_failed() -> None:
+    """Denial semantics stay unchanged: excluded/indeterminate, never failed."""
+
+    denied_revision = build_revision(rule(RuleKind.MEDIA_TYPE, text_operand="text/markdown"))
+    service, _, _, metrics = build_service(material=build_material(denied_revision))
+
+    with pytest.raises(ExclusionPolicyError):
+        await service.authorize_preflight(
+            subject=PolicySubject(
+                workspace_id=WORKSPACE_ID,
+                source_id=uuid4(),
+                media_type=CanonicalMediaType.parse("text/markdown"),
+            ),
+            boundary=PolicyBoundary.CANONICAL_READ,
+            context=context(),
+        )
+
+    assert (
+        metrics.evaluation_count(PolicyBoundary.CANONICAL_READ, EvaluationMetricOutcome.EXCLUDED)
+        == 1
+    )
+    assert (
+        metrics.evaluation_count(PolicyBoundary.CANONICAL_READ, EvaluationMetricOutcome.FAILED) == 0
+    )
+
+
 @pytest.mark.asyncio
 async def test_keyed_trust_anchor_verifier_adapts_the_keyed_port() -> None:
     material = build_material(build_revision())

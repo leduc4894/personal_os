@@ -2181,7 +2181,7 @@ export type components = {
          * @description The closed rejection reason codes mirroring the domain error registry.
          * @enum {string}
          */
-        readonly SmallFileRejectionReason: "small_file_preflight_invalid" | "small_file_operation_not_found" | "small_file_operation_expired" | "small_file_operation_identity_mismatch" | "small_file_size_limit_exceeded" | "small_file_content_integrity_failed" | "small_file_upload_state_invalid";
+        readonly SmallFileRejectionReason: "small_file_preflight_invalid" | "small_file_operation_not_found" | "small_file_operation_expired" | "small_file_operation_identity_mismatch" | "small_file_size_limit_exceeded" | "small_file_content_integrity_failed" | "small_file_upload_state_invalid" | "exclusion_policy_denied" | "exclusion_policy_indeterminate" | "exclusion_policy_not_initialized" | "exclusion_policy_signing_unavailable";
         /**
          * SmallFileRejectionRecordData
          * @description One recent rejection of the bounded diagnostics ring.

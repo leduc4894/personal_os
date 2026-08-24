@@ -69,6 +69,14 @@ class SmallFileRejectionReason(StrEnum):
     SMALL_FILE_SIZE_LIMIT_EXCEEDED = "small_file_size_limit_exceeded"
     SMALL_FILE_CONTENT_INTEGRITY_FAILED = "small_file_content_integrity_failed"
     SMALL_FILE_UPLOAD_STATE_INVALID = "small_file_upload_state_invalid"
+    # The policy-failure codes the preflight boundaries record into the ring
+    # (policy-observability remediation C1): the two DENIAL codes keep the
+    # ``excluded`` outcome while the two SYSTEM codes propagate as the typed
+    # 409/503 errors — all four name the why on the operator surface.
+    EXCLUSION_POLICY_DENIED = "exclusion_policy_denied"
+    EXCLUSION_POLICY_INDETERMINATE = "exclusion_policy_indeterminate"
+    EXCLUSION_POLICY_NOT_INITIALIZED = "exclusion_policy_not_initialized"
+    EXCLUSION_POLICY_SIGNING_UNAVAILABLE = "exclusion_policy_signing_unavailable"
 
 
 #: The exact required metric names and their label dimensions. IDs, keys,

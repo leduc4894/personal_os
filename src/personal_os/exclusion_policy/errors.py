@@ -13,6 +13,8 @@ only safe details ``exclusion_policy_input_invalid`` accepts.
 
 from __future__ import annotations
 
+from typing import Final
+
 from personal_os.diagnostics.events import SafeToken
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import ApplicationError
@@ -110,6 +112,44 @@ class ExclusionPolicyError(ApplicationError):
             ErrorCode.EXCLUSION_POLICY_COMMIT_OUTCOME_UNKNOWN,
         }
     )
+
+
+#: Registry codes whose arrival at a guarded boundary means the policy SYSTEM
+#: itself failed (spec 2026-08-24 C1): no active signed policy exists, or the
+#: persisted signing material failed verification. These are not verdicts
+#: about the subject — the policy subsystem cannot decide at all — so the
+#: preflight boundary propagates them as typed errors (the closed 409/503
+#: envelopes) instead of mapping them onto an exclusion outcome.
+POLICY_SYSTEM_ERROR_CODES: Final[frozenset[ErrorCode]] = frozenset(
+    {
+        ErrorCode.EXCLUSION_POLICY_NOT_INITIALIZED,
+        ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE,
+    }
+)
+
+#: Registry codes whose arrival means the policy DENIED the subject (spec
+#: 2026-08-24 C1): a definite rule match or an indeterminate outcome. These
+#: are verdicts about the subject and keep the terminal ``excluded`` outcome
+#: at the preflight boundaries.
+POLICY_DENIAL_ERROR_CODES: Final[frozenset[ErrorCode]] = frozenset(
+    {
+        ErrorCode.EXCLUSION_POLICY_DENIED,
+        ErrorCode.EXCLUSION_POLICY_INDETERMINATE,
+    }
+)
+
+
+def is_policy_system_failure(error: ExclusionPolicyError) -> bool:
+    """Return whether the typed error is a policy SYSTEM failure code.
+
+    The single classification seam of the SYSTEM vs DENIAL split: boundaries
+    call this predicate instead of listing codes, so a future registry code
+    joins exactly one of :data:`POLICY_SYSTEM_ERROR_CODES` or
+    :data:`POLICY_DENIAL_ERROR_CODES` in this module and every boundary
+    follows.
+    """
+
+    return error.error_code in POLICY_SYSTEM_ERROR_CODES
 
 
 def input_invalid(reason: SafeToken, rule_index: int | None = None) -> ExclusionPolicyError:

@@ -9,10 +9,13 @@ the :class:`PolicyEnforcementService` application service whose
 ``authorize_preflight`` evaluates one candidate subject against the currently
 active revision before any object-store access. Every fail-closed rule of the
 spec maps to a typed error: a missing active signed policy is the typed
-not-initialized denial, corrupt signature material is the typed
-signing-unavailable denial, a definite match is the typed denied error
+not-initialized error, corrupt signature material is the typed
+signing-unavailable error, a definite match is the typed denied error
 carrying only the revision number, and a raw indeterminate outcome is the
-typed indeterminate error carrying only the closed reason token. The service
+typed indeterminate error carrying only the closed reason token. The two
+policy SYSTEM failures (not-initialized, signing-unavailable) record the
+closed ``failed`` evaluation outcome with their registry code before raising
+so a broken policy system is observable. The service
 never falls back to a projection, plugin decision or cached client claim, and
 metrics record only the closed ``boundary`` and ``decision`` labels.
 
@@ -33,7 +36,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Final, NoReturn, Protocol
 from uuid import UUID
 
 from personal_os.diagnostics.context import DiagnosticContext
@@ -50,7 +53,7 @@ from personal_os.exclusion_policy.contracts import (
     RawPolicyDecision,
     RuleKind,
 )
-from personal_os.exclusion_policy.errors import ExclusionPolicyError
+from personal_os.exclusion_policy.errors import ExclusionPolicyError, is_policy_system_failure
 from personal_os.exclusion_policy.evaluation import evaluate_policy
 from personal_os.exclusion_policy.metrics import (
     EvaluationMetricOutcome,
@@ -501,7 +504,11 @@ class PolicyEnforcementService:
         started = time.monotonic()
         material = await self._snapshot_source.load_active_snapshot(subject.workspace_id, context)
         if material is None:
-            raise policy_not_initialized_error()
+            self._record_failure_and_raise(
+                boundary=boundary,
+                error=policy_not_initialized_error(),
+                started_monotonic=started,
+            )
         decision = self._evaluate_material(material, subject, boundary, started)
         enforce_policy_decision(decision)
         return decision
@@ -544,8 +551,14 @@ class PolicyEnforcementService:
             command.workspace_id, diagnostic_context
         )
         if material is None:
-            raise policy_not_initialized_error()
-        revision = parse_verified_policy_revision(material, verifier=self._verifier)
+            self._record_failure_and_raise(
+                boundary=PolicyBoundary.SINGLE_PART_UPLOAD,
+                error=policy_not_initialized_error(),
+                started_monotonic=started_monotonic,
+            )
+        revision = self._parse_verified_material(
+            material, PolicyBoundary.SINGLE_PART_UPLOAD, started_monotonic
+        )
         if revision.revision_number == binding.policy_revision_number:
             if self._metrics is not None:
                 self._metrics.record_evaluation(
@@ -630,8 +643,51 @@ class PolicyEnforcementService:
         boundary: PolicyBoundary,
         started_monotonic: float,
     ) -> PolicyDecision:
-        revision = parse_verified_policy_revision(material, verifier=self._verifier)
+        revision = self._parse_verified_material(material, boundary, started_monotonic)
         return self._evaluate_revision(revision, subject, boundary, started_monotonic)
+
+    def _parse_verified_material(
+        self,
+        material: ActivePolicySnapshotMaterial,
+        boundary: PolicyBoundary,
+        started_monotonic: float,
+    ) -> ExclusionPolicyRevision:
+        """Verify one snapshot, recording a system failure before its raise.
+
+        A signing-unavailable failure from the verify-and-parse path records
+        the closed ``failed`` evaluation outcome (with the registry code)
+        before propagating, so a broken policy system is observable instead
+        of recording nothing (spec 2026-08-24 C1).
+        """
+
+        try:
+            return parse_verified_policy_revision(material, verifier=self._verifier)
+        except ExclusionPolicyError as error:
+            if is_policy_system_failure(error):
+                self._record_failure_and_raise(
+                    boundary=boundary,
+                    error=error,
+                    started_monotonic=started_monotonic,
+                )
+            raise
+
+    def _record_failure_and_raise(
+        self,
+        *,
+        boundary: PolicyBoundary,
+        error: ExclusionPolicyError,
+        started_monotonic: float,
+    ) -> NoReturn:
+        """Record one fail-closed system failure, then raise the typed error."""
+
+        if self._metrics is not None:
+            self._metrics.record_evaluation(
+                boundary=boundary,
+                decision=EvaluationMetricOutcome.FAILED,
+                duration_seconds=max(time.monotonic() - started_monotonic, 0.0),
+                error_code=error.error_code,
+            )
+        raise error
 
     def _evaluate_revision(
         self,
