@@ -21,7 +21,10 @@ digest, object key, receipt fields) never become labels, messages or safe
 details. Rejection metrics use the registry-code vocabulary of
 ``PublicationRejectionReason``; the shorter audit-rejection tokens of spec
 section 10.3 are written by the store adapter's audit transaction, not by this
-service (see :data:`REJECTION_REASON_BY_ERROR_CODE`).
+service (see :data:`REJECTION_REASON_BY_ERROR_CODE`). A policy-guard failure
+rides the existing failed-event shape with its closed registry code and —
+because the service never retries a policy verdict — the terminal rejected
+publication outcome, without touching the business-rejection vocabulary.
 """
 
 from __future__ import annotations
@@ -42,7 +45,8 @@ from personal_os.diagnostics.events import (
     build_registered_event,
 )
 from personal_os.error_contracts.codes import ErrorCode
-from personal_os.error_contracts.exceptions import InternalApplicationError
+from personal_os.error_contracts.exceptions import ApplicationError, InternalApplicationError
+from personal_os.exclusion_policy.errors import ExclusionPolicyError
 from personal_os.object_storage import (
     CanonicalMediaType,
     CanonicalObjectStore,
@@ -267,6 +271,14 @@ class SourceVersionPublicationService:
                 started_at=started_at,
             )
             raise
+        except ExclusionPolicyError as error:
+            self._record_policy_guard_failure(
+                command=command,
+                operation=operation,
+                error=error,
+                started_at=started_at,
+            )
+            raise
         return result
 
     async def _publish_once(
@@ -409,6 +421,46 @@ class SourceVersionPublicationService:
             duration_seconds=duration_seconds,
         )
 
+    def _record_policy_guard_failure(
+        self,
+        *,
+        command: SourceVersionCommand,
+        operation: PublicationOperation,
+        error: ExclusionPolicyError,
+        started_at: datetime,
+    ) -> None:
+        """Record a policy-guard failure through the existing closed surfaces.
+
+        The guard raises the typed exclusion-policy error (a denial, an
+        indeterminate verdict or a policy system failure) before any store or
+        object-store access, and the service never retries it. The closed
+        registry code therefore rides the existing failed-event shape, and a
+        not-retryable registry code additionally records the terminal rejected
+        publication outcome — the codes the guard boundary raises today are
+        all not-retryable. A retryable registry code would keep the
+        metric-free retryable shape, exactly like the busy dependency path,
+        so a terminal outcome never double-counts a later retry. The typed
+        error re-raises unchanged for envelope rendering; the closed business
+        rejection vocabulary stays untouched because a policy verdict is not
+        a spec-10.3 business rejection.
+        """
+
+        duration_seconds = self._elapsed_seconds_since(started_at)
+        if not error.is_retryable:
+            self.metrics.record_publication(
+                operation=operation,
+                outcome=PublicationMetricOutcome.REJECTED,
+                duration_seconds=duration_seconds,
+            )
+        self._emit_registered_event(
+            *publication_failed_event_fields(
+                command=command,
+                operation=operation,
+                error=error,
+                duration_seconds=duration_seconds,
+            )
+        )
+
     def _emit_retryable_failure(
         self,
         *,
@@ -496,7 +548,7 @@ def _publication_error_event_fields(
     event_name: EventName,
     command: SourceVersionCommand,
     operation: PublicationOperation,
-    error: SourcePublicationError,
+    error: ApplicationError,
     duration_seconds: float,
 ) -> tuple[EventName, dict[str, object]]:
     return event_name, {
@@ -538,10 +590,16 @@ def publication_failed_event_fields(
     *,
     command: SourceVersionCommand,
     operation: PublicationOperation,
-    error: SourcePublicationError,
+    error: ApplicationError,
     duration_seconds: float,
 ) -> tuple[EventName, dict[str, object]]:
-    """Return the safe, registered event fields for a retryable failure."""
+    """Return the safe, registered event fields for a failed publication.
+
+    Carries any typed registry error — a retryable source failure or a
+    policy-guard verdict whose closed code names the why — over the closed
+    field set; only registry codes, categories and the retryability flag
+    ever enter the fields.
+    """
 
     return _publication_error_event_fields(
         EventName.SOURCE_VERSION_PUBLISH_FAILED,

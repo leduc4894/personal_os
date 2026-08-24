@@ -22,6 +22,7 @@ from tests.unit.sources.fakes import (
     STORE_RESOLVE_COMMITTED,
     AllowingPolicyGuard,
     CallLedger,
+    DenyingPolicyGuard,
     FakeCanonicalObjectStore,
     FakeSourcePublicationStore,
     ProbedByteStream,
@@ -38,7 +39,7 @@ from tests.unit.sources.fakes import (
 )
 
 from personal_os.diagnostics.events import EventName
-from personal_os.error_contracts.codes import ErrorCode
+from personal_os.error_contracts.codes import ErrorCategory, ErrorCode
 from personal_os.exclusion_policy.enforcement import (
     AllowedPolicyRevisionBinding,
     PublicationPolicyEvidence,
@@ -573,6 +574,8 @@ async def test_invalid_expected_object_is_rejected_before_any_io() -> None:
 
 def _build_service_with_guard(
     guard: object,
+    *,
+    diagnostics: RecordingDiagnosticSink | None = None,
 ) -> tuple[
     SourceVersionPublicationService,
     FakeSourcePublicationStore,
@@ -598,6 +601,7 @@ def _build_service_with_guard(
         metrics=metrics,
         clock=SequencedUtcClock(moments=[_PUBLICATION_START, _PUBLICATION_START]),
         policy_guard=guard,  # type: ignore[arg-type]
+        diagnostics=diagnostics,
     )
     return service, store, object_store, metrics, ledger
 
@@ -622,9 +626,11 @@ async def test_excluded_source_never_calls_object_store() -> None:
     assert object_store.resolve_call_count() == 0
     assert object_store.store_stream_calls == []
     assert store.commit_receipt_identities == []
+    # The not-retryable verdict still records the terminal rejected
+    # publication outcome (spec 2026-08-24 C3): a denial must leave a trail.
     assert (
         metrics.publication_count(PublicationOperation.CREATE, PublicationMetricOutcome.REJECTED)
-        == 0
+        == 1
     )
 
 
@@ -734,3 +740,148 @@ async def test_preflight_evidence_flows_to_the_commit_as_a_hint() -> None:
     # preflight evidence, once per commit invocation.
     assert store.commit_policy_decisions == [decision]
     assert guard.publication_calls == [command.source_id]
+
+
+# --- policy-guard failure surfaces (spec 2026-08-24 C3, gap G3) --------------------
+
+
+async def _publish_under_guard_denial(
+    guard_error: ExclusionPolicyError,
+) -> tuple[
+    ExclusionPolicyError,
+    RecordingDiagnosticSink,
+    InMemorySourcePublicationMetrics,
+    CallLedger,
+    FakeCanonicalObjectStore,
+]:
+    """Run one create whose policy guard raises ``guard_error``; capture surfaces.
+
+    Returns the raised error (for identity checks), the recorded diagnostic
+    events, the publication metrics, the port ledger and the object store so
+    each policy-guard test can assert the full failure trail in one shape.
+    """
+
+    diagnostics = RecordingDiagnosticSink()
+    service, _store, object_store, metrics, ledger = _build_service_with_guard(
+        DenyingPolicyGuard(error=guard_error),
+        diagnostics=diagnostics,
+    )
+
+    with pytest.raises(ExclusionPolicyError) as raised:
+        await service.publish_create(
+            command=build_create_command(),
+            stream=ProbedByteStream([b"must-not-be-read"]),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+    return raised.value, diagnostics, metrics, ledger, object_store
+
+
+@pytest.mark.asyncio
+async def test_policy_denial_records_failed_event_and_rejected_publication_outcome() -> None:
+    """A guard denial crosses the service leaving the closed failure trail.
+
+    The typed denial used to escape ``_publish`` uncaught, so the operator
+    saw neither a publication outcome nor a failed event (gap G3). The
+    not-retryable verdict now rides the existing failed-event shape with the
+    closed registry code and the terminal rejected publication outcome, and
+    the error re-raises unchanged for envelope rendering.
+    """
+
+    denial = ExclusionPolicyError(ErrorCode.EXCLUSION_POLICY_DENIED)
+    raised, diagnostics, metrics, ledger, object_store = await _publish_under_guard_denial(denial)
+
+    # The typed error re-raises unchanged: same instance, same closed code.
+    assert raised is denial
+    assert raised.error_code is ErrorCode.EXCLUSION_POLICY_DENIED
+    # The denial still stops the invocation before the store preflight and
+    # before any object-store access.
+    assert ledger.entries == []
+    assert object_store.resolve_call_count() == 0
+    # The existing failed-event shape carries the closed registry code.
+    assert [event_name for event_name, _ in diagnostics.events] == [
+        EventName.SOURCE_VERSION_PUBLISH_FAILED
+    ]
+    fields = diagnostics.events[0][1]
+    assert fields["error_code"] is ErrorCode.EXCLUSION_POLICY_DENIED
+    assert fields["error_category"] is ErrorCategory.AUTHORIZATION
+    assert fields["is_retryable"] is False
+    assert set(fields) == {
+        "operation",
+        "outcome",
+        "duration_ms",
+        "error_code",
+        "error_category",
+        "is_retryable",
+        "source_id",
+        "event_id",
+    }
+    # The not-retryable verdict records the terminal rejected publication
+    # outcome: the service never retries a policy verdict.
+    assert (
+        metrics.publication_count(PublicationOperation.CREATE, PublicationMetricOutcome.REJECTED)
+        == 1
+    )
+    # A policy verdict is not a spec-10.3 business rejection: no rejection
+    # counter fires, the closed business-rejection vocabulary stays intact.
+    assert (
+        sum(
+            metrics.rejection_count(PublicationOperation.CREATE, reason)
+            for reason in PublicationRejectionReason
+        )
+        == 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_policy_signing_outage_records_failed_event_and_rejected_outcome() -> None:
+    """A signing-unavailable outage during publish leaves the closed trail.
+
+    The system-failure outage is the headline G3 case: the guard cannot even
+    decide, the service does not retry it, so the outage must surface as the
+    failed event with its closed code plus the terminal rejected publication
+    outcome instead of vanishing without a trail.
+    """
+
+    outage = ExclusionPolicyError(ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE)
+    raised, diagnostics, metrics, ledger, object_store = await _publish_under_guard_denial(outage)
+
+    assert raised is outage
+    assert ledger.entries == []
+    assert object_store.resolve_call_count() == 0
+    assert [event_name for event_name, _ in diagnostics.events] == [
+        EventName.SOURCE_VERSION_PUBLISH_FAILED
+    ]
+    fields = diagnostics.events[0][1]
+    assert fields["error_code"] is ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE
+    assert fields["error_category"] is ErrorCategory.DEPENDENCY
+    assert fields["is_retryable"] is False
+    assert (
+        metrics.publication_count(PublicationOperation.CREATE, PublicationMetricOutcome.REJECTED)
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_retryable_policy_error_records_failed_event_without_terminal_outcome() -> None:
+    """A retryable policy registry code keeps the metric-free retryable shape.
+
+    The publication outcome choice follows the not-retryable semantics of the
+    underlying registry code: a retryable code assigns no terminal outcome —
+    exactly like the busy dependency path — so a later successful retry never
+    double-counts.
+    """
+
+    outdated = ExclusionPolicyError(ErrorCode.EXCLUSION_POLICY_SNAPSHOT_OUTDATED)
+    raised, diagnostics, metrics, ledger, object_store = await _publish_under_guard_denial(outdated)
+
+    assert raised is outdated
+    assert ledger.entries == []
+    assert object_store.resolve_call_count() == 0
+    assert [event_name for event_name, _ in diagnostics.events] == [
+        EventName.SOURCE_VERSION_PUBLISH_FAILED
+    ]
+    fields = diagnostics.events[0][1]
+    assert fields["error_code"] is ErrorCode.EXCLUSION_POLICY_SNAPSHOT_OUTDATED
+    assert fields["is_retryable"] is True
+    assert metrics.publication_records() == []
