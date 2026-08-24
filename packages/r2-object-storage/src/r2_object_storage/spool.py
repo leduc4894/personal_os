@@ -386,9 +386,7 @@ class SpoolManager:
         try:
             entries = list(os.scandir(self._root))
         except OSError:
-            return SpoolCleanupSummary(
-                0, 0, 0, 0, reason=SPOOL_CLEANUP_SCAN_FAILED
-            )
+            return SpoolCleanupSummary(0, 0, 0, 0, reason=SPOOL_CLEANUP_SCAN_FAILED)
         for entry in entries:
             if _SPOOL_FILE_NAME_PATTERN.fullmatch(entry.name) is None:
                 continue

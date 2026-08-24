@@ -28,12 +28,12 @@ separately after that implementation commit.
 | TDD RED | Passed (expected failure) | The new contract assertion failed because `spool_cleanup_scan_failed` was absent. |
 | TDD GREEN | Passed | The focused assertion passed: `1 passed in 0.50s`. |
 | Focused object-storage tests | Passed | `uv run pytest tests/unit/object_storage tests/contract/object_storage -q`: `266 passed, 3 skipped in 49.78s`. |
-| Format check | Blocked by pre-existing scope | `uv run poe format-check` reports three unrelated unformatted files: `packages/r2-object-storage/src/r2_object_storage/spool.py`, `tests/unit/object_storage/test_spool_manager.py`, and (before formatting) the touched contract test. The touched test was formatted; the two unrelated files were not changed. |
+| Format check | Passed after closure fix | `uv run poe format-check` passed after formatting the branch-owned `packages/r2-object-storage/src/r2_object_storage/spool.py` and `tests/unit/object_storage/test_spool_manager.py` (and the touched contract test). |
 | Lint | Passed | `uv run poe lint`: Ruff and all pnpm lint workspaces passed. |
 | Python type check | Passed | `uv run poe python-type-check`: mypy success on 182 source files. |
 | Boundary check | Passed | `uv run poe boundary-check`: 5 import contracts kept, 10 architecture tests passed, API artifacts current, generated client check completed. |
-| Diff check | Passed | `git diff --check` exited 0 before the implementation commit. |
-| Full verify | Blocked by same format prerequisite | `uv run poe verify` stopped at `format-check` for the same two unrelated files. |
+| Diff check | Passed after closure fix | `git diff --check 730ed2a..adba69a` passed after removing the handoff EOF blank line. |
+| Full verify | Passed after closure fix | `uv run poe verify` passed after the branch-owned formatting fixes. |
 
 ## Deferred items
 
@@ -41,6 +41,4 @@ None. No `BACKLOG.md` row was added.
 
 ## Next actions
 
-Reformat the two pre-existing files in their owning implementation change,
-then rerun `uv run poe format-check` and `uv run poe verify`.
-
+No further actions are required for this closure.

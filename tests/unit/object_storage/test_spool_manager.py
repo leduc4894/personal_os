@@ -850,11 +850,13 @@ async def test_janitor_reports_entry_failure(
     os.utime(stale, (stale_mtime, stale_mtime))
 
     if failure == "lstat":
+
         def fail_lstat(_path: Path) -> object:
             raise OSError("lstat failed")
 
         monkeypatch.setattr(spool_module.os, "lstat", fail_lstat)
     else:
+
         def fail_unlink(_path: Path) -> object:
             raise OSError("unlink failed")
 
