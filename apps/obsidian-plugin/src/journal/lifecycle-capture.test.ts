@@ -359,7 +359,7 @@ describe("LifecycleCapture rename vs move (spec 7.1)", () => {
 });
 
 describe("LifecycleCapture tombstone recording (spec 6.3, 7.1)", () => {
-  it("reports a rejected reconcile write while preserving the fail-closed null result", async () => {
+  it("reports a rejected reconcile write and rejects instead of claiming it settled", async () => {
     const harness = createHarness();
     const real = await realFingerprintOf("uncommitted delete");
     await harness.repository.recordCapture({
@@ -373,7 +373,7 @@ describe("LifecycleCapture tombstone recording (spec 6.3, 7.1)", () => {
 
     await expect(
       harness.capture.captureDelete(fakeAbstractFile("notes/reconcile-write.md", "notes")),
-    ).resolves.toBeNull();
+    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
     expect(harness.failureTokens).toEqual(["lifecycle_reconcile_persist_failed"]);
   });
 

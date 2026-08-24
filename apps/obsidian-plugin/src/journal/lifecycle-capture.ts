@@ -703,11 +703,14 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
     });
   }
 
-  /** Preserve fail-closed null outcomes while surfacing a failed flag write. */
+  /** Surface a failed flag write, then reject so callers cannot treat it as settled. */
   async #flagReconcileRequiredOrReport(): Promise<void> {
-    await this.#flagReconcileRequired().catch(() => {
+    await this.#flagReconcileRequired().catch((error: unknown) => {
       this.#failureReporter?.reportJournalFailure("lifecycle_reconcile_persist_failed");
-      return undefined;
+      if (isStoreError(error)) {
+        throw error;
+      }
+      throw journalStoreError("journal_mutation_failed");
     });
   }
 }
