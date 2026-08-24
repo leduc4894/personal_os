@@ -29,11 +29,12 @@ POLICY_ROUTE_METHODS: Final[dict[str, frozenset[str]]] = {
     "/api/admin/exclusion-policy/previews": frozenset({"POST"}),
     "/api/admin/exclusion-policy/previews/{policy_preview_id}": frozenset({"GET"}),
     "/api/admin/exclusion-policy/publications": frozenset({"POST"}),
+    "/api/admin/exclusion-policy/diagnostics": frozenset({"GET"}),
     "/api/sync/exclusion-policy/keysets": frozenset({"GET"}),
     "/api/sync/exclusion-policy/snapshot": frozenset({"GET"}),
 }
 
-#: The exact semantic operation ids of the seven policy operations.
+#: The exact semantic operation ids of the eight policy operations.
 POLICY_OPERATION_IDS: Final[dict[tuple[str, str], str]] = {
     ("/api/admin/exclusion-policy", "get"): "getExclusionPolicyStatus",
     ("/api/admin/exclusion-policy/draft", "put"): "replaceExclusionPolicyDraft",
@@ -43,6 +44,7 @@ POLICY_OPERATION_IDS: Final[dict[tuple[str, str], str]] = {
         "get",
     ): "getExclusionPolicyPreview",
     ("/api/admin/exclusion-policy/publications", "post"): "publishExclusionPolicy",
+    ("/api/admin/exclusion-policy/diagnostics", "get"): "getExclusionPolicyDiagnostics",
     ("/api/sync/exclusion-policy/keysets", "get"): "listExclusionPolicyKeysets",
     ("/api/sync/exclusion-policy/snapshot", "get"): "getExclusionPolicySnapshot",
 }

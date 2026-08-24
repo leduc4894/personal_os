@@ -280,6 +280,61 @@ def test_server_serves_the_source_lifecycle_route() -> None:
     assert "/api/sources/lifecycle-events" in paths
 
 
+def test_server_serves_the_policy_diagnostics_admin_route() -> None:
+    """The serve graph must expose the policy metrics to the Web Admin.
+
+    Spec 2026-08-24 C2: without this route the spec-21 policy counters stay
+    unreadable in production even once they record.
+    """
+
+    captured = RecordingServerFactory()
+    assert run_server(environ=LOCAL_ENVIRONMENT, server_factory=captured) == 0
+    application = captured.config.app
+    assert isinstance(application, FastAPI)
+    paths = {route.path for route in application.routes}
+    assert "/api/admin/exclusion-policy/diagnostics" in paths
+
+
+def test_server_binds_one_shared_policy_metrics_sink_at_both_composition_sites(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One shared ``InMemoryExclusionPolicyMetrics`` feeds both sites (C2).
+
+    The engine composition (publication outcomes) and the small-file
+    composition (enforcement evaluations) must receive the SAME sink object,
+    so the Admin diagnostics route observes both counter families of one
+    process through one snapshot.
+    """
+
+    from api_runtime import server as server_module
+
+    from personal_os.exclusion_policy.metrics import InMemoryExclusionPolicyMetrics
+
+    observed: dict[str, object] = {}
+    real_exclusion_policy_composition = server_module.compose_exclusion_policy
+    real_small_file_composition = server_module.compose_small_file_sync
+
+    def recording_exclusion_policy_composition(**kwargs: object) -> object:
+        observed["exclusion_policy_metrics"] = kwargs.get("metrics")
+        return real_exclusion_policy_composition(**kwargs)
+
+    def recording_small_file_composition(**kwargs: object) -> object:
+        observed["small_file_sync_metrics"] = kwargs.get("policy_metrics")
+        return real_small_file_composition(**kwargs)
+
+    monkeypatch.setattr(
+        server_module, "compose_exclusion_policy", recording_exclusion_policy_composition
+    )
+    monkeypatch.setattr(server_module, "compose_small_file_sync", recording_small_file_composition)
+
+    captured = RecordingServerFactory()
+    assert run_server(environ=LOCAL_ENVIRONMENT, server_factory=captured) == 0
+
+    bound_metrics = observed["exclusion_policy_metrics"]
+    assert isinstance(bound_metrics, InMemoryExclusionPolicyMetrics)
+    assert observed["small_file_sync_metrics"] is bound_metrics
+
+
 def test_server_missing_object_storage_configuration_exits_seventy_eight(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

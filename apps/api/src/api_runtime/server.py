@@ -70,6 +70,7 @@ from personal_os.diagnostics.logging import (
     emit_emergency_internal_error,
 )
 from personal_os.error_contracts.exceptions import ApplicationError
+from personal_os.exclusion_policy.metrics import InMemoryExclusionPolicyMetrics
 from personal_os.runtime_configuration.loading import load_runtime_settings
 from personal_os.runtime_configuration.models import ServiceName
 from personal_os.source_lifecycle.metrics import InMemorySourceLifecycleMetrics
@@ -155,13 +156,24 @@ def run_server(
                 keyring=keyring,
                 engine=engine,
             )
-            exclusion_policy = compose_exclusion_policy(engine=engine, signer=policy_signer)
+            # One shared in-memory policy metrics sink serves both composition
+            # sites (spec 2026-08-24 C2): the enforcement evaluations of the
+            # small-file graph and the publish outcomes of the policy graph
+            # record into the same counters, which the Web Admin diagnostics
+            # route then serves. A production sink replacing it implements the
+            # same Protocol; the compositions' no-op fallback only applies
+            # when no sink is bound at all.
+            policy_metrics = InMemoryExclusionPolicyMetrics()
+            exclusion_policy = compose_exclusion_policy(
+                engine=engine, signer=policy_signer, metrics=policy_metrics
+            )
             small_file_sync = compose_small_file_sync(
                 engine=engine,
                 signer=policy_signer,
                 object_storage_settings=object_storage_settings,
                 object_storage_credentials=object_storage_credentials,
                 logger=logger,
+                policy_metrics=policy_metrics,
             )
             lifecycle_metrics = InMemorySourceLifecycleMetrics()
             lifecycle_policy_verifier = TrustAnchorEd25519Verifier()

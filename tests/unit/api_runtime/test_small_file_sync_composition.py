@@ -65,6 +65,10 @@ from personal_os.exclusion_policy.enforcement import (
     PolicyEnforcementService,
 )
 from personal_os.exclusion_policy.errors import ExclusionPolicyError
+from personal_os.exclusion_policy.metrics import (
+    EvaluationMetricOutcome,
+    InMemoryExclusionPolicyMetrics,
+)
 from personal_os.exclusion_policy.signatures import (
     SNAPSHOT_SIGNING_DOMAIN,
     build_signed_message,
@@ -164,6 +168,82 @@ def test_serve_composition_binds_the_bound_policy_publication_gateway(
     assert isinstance(service.publication_gateway.enforcement, PolicyEnforcementService)
     assert isinstance(service.policy_guard, PolicyEnforcementSmallFileGuard)
     assert isinstance(service.policy_guard.enforcement, PolicyEnforcementService)
+
+
+def test_serve_composition_binds_the_shared_policy_metrics_sink_into_enforcement(
+    tmp_path: Path,
+    serve_engine: AsyncEngine,
+) -> None:
+    """The serve composition records policy evaluations into the bound sink.
+
+    Spec 2026-08-24 C2: the small-file composition must hand its shared
+    exclusion-policy metrics sink to the enforcement service, so the
+    ``exclusion_policy_evaluation_total`` counters actually record in the
+    serve graph instead of silently recording nothing.
+    """
+
+    recorder = InMemoryExclusionPolicyMetrics()
+    spool_root = tmp_path / "spool"
+    spool_root.mkdir()
+    settings = ObjectStorageSettings(
+        environment=RuntimeEnvironment.LOCAL,
+        secret_root=tmp_path,
+        r2_endpoint=_R2_ENDPOINT,
+        r2_bucket_name="personal-knowledge-objects",
+        r2_access_key_id_file="r2_access_key_id",
+        r2_secret_access_key_file="r2_secret_access_key",
+        object_storage_spool_root=spool_root,
+    )
+    runtime = compose_small_file_sync(
+        engine=serve_engine,
+        signer=Ed25519PolicySigner.from_seed_bytes(_SIGNER_SEED),
+        object_storage_settings=settings,
+        object_storage_credentials=LoadedR2Credentials(
+            access_key_id=SecretStr("access-key-id"),
+            secret_access_key=SecretStr("secret-access-key"),
+        ),
+        logger=DiagnosticLogger({"service": "api", "environment": "local"}),
+        policy_metrics=recorder,
+    )
+    workspace_id = uuid4()
+    revision = ExclusionPolicyRevision(
+        policy_revision_id=uuid4(),
+        workspace_id=workspace_id,
+        revision_number=1,
+    )
+    payload_bytes = build_snapshot_payload(
+        revision,
+        parent_policy_revision_id=None,
+        published_at=datetime(2026, 8, 20, tzinfo=UTC),
+    )
+    signer = Ed25519PolicySigner.from_seed_bytes(_SIGNER_SEED)
+    material = ActivePolicySnapshotMaterial(
+        workspace_id=workspace_id,
+        policy_revision_id=revision.policy_revision_id,
+        revision_number=revision.revision_number,
+        payload_bytes=payload_bytes,
+        payload_sha256=compute_payload_sha256_hex(payload_bytes),
+        signature_bytes=signer.sign(build_signed_message(SNAPSHOT_SIGNING_DOMAIN, payload_bytes)),
+        public_key_bytes=signer.public_key_bytes,
+    )
+    guard = runtime.service.policy_guard
+    assert isinstance(guard, PolicyEnforcementSmallFileGuard)
+
+    guard.enforcement.evaluate_material(
+        material,
+        subject=PolicySubject(
+            workspace_id=workspace_id,
+            normalized_locator="notes/allowed.md",
+            media_type=CanonicalMediaType.parse("text/markdown"),
+            size_bytes=128,
+        ),
+        boundary=PolicyBoundary.SINGLE_PART_UPLOAD,
+    )
+
+    snapshot = recorder.policy_diagnostics()
+    assert dict(snapshot.evaluation_counters) == {
+        (PolicyBoundary.SINGLE_PART_UPLOAD, EvaluationMetricOutcome.ALLOWED): 1
+    }
 
 
 def test_serve_composition_never_binds_an_offline_double(

@@ -488,6 +488,51 @@
         "title": "ApiEnvelope[DeviceSelfRevokeData]",
         "type": "object"
       },
+      "ApiEnvelope_ExclusionPolicyDiagnosticsData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExclusionPolicyDiagnosticsData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[ExclusionPolicyDiagnosticsData]",
+        "type": "object"
+      },
       "ApiEnvelope_ExclusionPolicyStatusData_": {
         "additionalProperties": false,
         "properties": {
@@ -1789,6 +1834,51 @@
         "title": "ErrorCode",
         "type": "string"
       },
+      "EvaluationMetricOutcome": {
+        "description": "The closed evaluation outcomes used as metric labels.",
+        "enum": [
+          "allowed",
+          "excluded",
+          "indeterminate",
+          "failed"
+        ],
+        "title": "EvaluationMetricOutcome",
+        "type": "string"
+      },
+      "ExclusionPolicyDiagnosticsData": {
+        "additionalProperties": false,
+        "description": "The policy evidence snapshot of the Admin diagnostics route.",
+        "properties": {
+          "evaluation_counters": {
+            "items": {
+              "$ref": "#/components/schemas/PolicyEvaluationCounterData"
+            },
+            "title": "Evaluation Counters",
+            "type": "array"
+          },
+          "publication_counters": {
+            "items": {
+              "$ref": "#/components/schemas/PolicyPublicationCounterData"
+            },
+            "title": "Publication Counters",
+            "type": "array"
+          },
+          "recent_failures": {
+            "items": {
+              "$ref": "#/components/schemas/PolicyFailureRecordData"
+            },
+            "title": "Recent Failures",
+            "type": "array"
+          }
+        },
+        "required": [
+          "evaluation_counters",
+          "publication_counters",
+          "recent_failures"
+        ],
+        "title": "ExclusionPolicyDiagnosticsData",
+        "type": "object"
+      },
       "ExclusionPolicyStatusData": {
         "additionalProperties": false,
         "description": "The Admin status read: revision metadata, draft, reconciliation and\nthe read-only stale-running staleness block (null while nothing is\nstale).",
@@ -1949,6 +2039,24 @@
         ],
         "title": "PasswordChangeRequest",
         "type": "object"
+      },
+      "PolicyBoundary": {
+        "description": "The closed enforcement-boundary vocabulary (spec 14.2).",
+        "enum": [
+          "sync_preflight",
+          "single_part_upload",
+          "multipart_upload",
+          "source_create_update",
+          "canonical_read",
+          "manifest_reconcile",
+          "conflict_capture",
+          "ingestion",
+          "rebuild_repair",
+          "retrieval",
+          "mcp_action"
+        ],
+        "title": "PolicyBoundary",
+        "type": "string"
       },
       "PolicyDraftData": {
         "additionalProperties": false,
@@ -2113,6 +2221,54 @@
           "rule_kind"
         ],
         "title": "PolicyDraftRuleRequest",
+        "type": "object"
+      },
+      "PolicyEvaluationCounterData": {
+        "additionalProperties": false,
+        "description": "One evaluation counter: closed boundary and decision labels plus count.",
+        "properties": {
+          "boundary": {
+            "$ref": "#/components/schemas/PolicyBoundary"
+          },
+          "count": {
+            "minimum": 0.0,
+            "title": "Count",
+            "type": "integer"
+          },
+          "decision": {
+            "$ref": "#/components/schemas/EvaluationMetricOutcome"
+          }
+        },
+        "required": [
+          "boundary",
+          "decision",
+          "count"
+        ],
+        "title": "PolicyEvaluationCounterData",
+        "type": "object"
+      },
+      "PolicyFailureRecordData": {
+        "additionalProperties": false,
+        "description": "One recent policy system failure of the bounded diagnostics ring.\n\nThe closed registry error code names the policy system failure, the\nclosed boundary label stands in for the design's route-template token\n(the metrics layer sits below the correlation plumbing that owns route\ntemplates) and the timestamp is an epoch-millisecond integer.",
+        "properties": {
+          "at_epoch_ms": {
+            "minimum": 0.0,
+            "title": "At Epoch Ms",
+            "type": "integer"
+          },
+          "boundary": {
+            "$ref": "#/components/schemas/PolicyBoundary"
+          },
+          "error_code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          }
+        },
+        "required": [
+          "boundary",
+          "error_code",
+          "at_epoch_ms"
+        ],
+        "title": "PolicyFailureRecordData",
         "type": "object"
       },
       "PolicyKeysetEnvelopeData": {
@@ -2582,6 +2738,26 @@
           "missing_fields"
         ],
         "title": "PolicyPreviewResultRowData",
+        "type": "object"
+      },
+      "PolicyPublicationCounterData": {
+        "additionalProperties": false,
+        "description": "One publication counter: the closed outcome label plus its count.",
+        "properties": {
+          "count": {
+            "minimum": 0.0,
+            "title": "Count",
+            "type": "integer"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/PublicationMetricOutcome"
+          }
+        },
+        "required": [
+          "outcome",
+          "count"
+        ],
+        "title": "PolicyPublicationCounterData",
         "type": "object"
       },
       "PolicyPublicationData": {
@@ -3063,6 +3239,16 @@
         ],
         "title": "PolicySnapshotSignatureData",
         "type": "object"
+      },
+      "PublicationMetricOutcome": {
+        "description": "The closed publication outcomes used as metric labels (spec 21).\n\nRecorded only after the durable outcome is known: ``published`` for a\nfresh committed revision, ``replayed`` for an exact replay\nacknowledgement (including recovery-resolved ones) and ``rejected`` for\na terminal business rejection. An unknown commit outcome records\nnothing. Workspace, preview, revision and key IDs are prohibited labels.",
+        "enum": [
+          "published",
+          "replayed",
+          "rejected"
+        ],
+        "title": "PublicationMetricOutcome",
+        "type": "string"
       },
       "ReadinessChecks": {
         "additionalProperties": false,
@@ -4157,6 +4343,25 @@
           }
         },
         "summary": "Get Policy Status"
+      }
+    },
+    "/api/admin/exclusion-policy/diagnostics": {
+      "get": {
+        "description": "Serve the closed policy evidence snapshot (read-only).",
+        "operationId": "getExclusionPolicyDiagnostics",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_ExclusionPolicyDiagnosticsData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Policy Diagnostics"
       }
     },
     "/api/admin/exclusion-policy/draft": {

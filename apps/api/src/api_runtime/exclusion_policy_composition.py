@@ -28,6 +28,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import Final, Protocol
 from uuid import UUID, uuid5, uuid7
 
@@ -52,7 +53,12 @@ from personal_os.exclusion_policy.drafts import (
     compute_draft_semantic_sha256,
 )
 from personal_os.exclusion_policy.errors import ExclusionPolicyError
-from personal_os.exclusion_policy.metrics import ExclusionPolicyMetrics
+from personal_os.exclusion_policy.metrics import (
+    ExclusionPolicyDiagnostics,
+    ExclusionPolicyDiagnosticsSource,
+    ExclusionPolicyMetricsWithDiagnostics,
+    InMemoryExclusionPolicyMetrics,
+)
 from personal_os.exclusion_policy.ports import (
     PolicyActor,
     PolicyDraft,
@@ -271,12 +277,35 @@ class PolicyQueryService:
 
 @dataclass(frozen=True, slots=True)
 class ExclusionPolicyRuntime:
-    """One composed exclusion-policy runtime the policy routes consume."""
+    """One composed exclusion-policy runtime the policy routes consume.
+
+    ``metrics_diagnostics`` exposes the bound metrics sink's read side — the
+    closed evaluation and publication counters plus the bounded failure ring
+    — for the Web Admin policy diagnostics route.
+    """
 
     drafts: PolicyDraftService
     previews: PolicyPreviewService
     publication: ExclusionPolicyPublicationService
     queries: PolicyQueryService
+    metrics_diagnostics: ExclusionPolicyDiagnosticsSource
+
+
+class _EmptyPolicyDiagnosticsSource:
+    """The documented no-op fallback of a composition without a metrics sink.
+
+    A missing sink never blocks evaluation: the services simply record
+    nothing and the Web Admin diagnostics route serves the empty snapshot —
+    exact counters at zero and an empty failure ring — instead of failing to
+    construct (spec 2026-08-24 C2 error cases).
+    """
+
+    def policy_diagnostics(self) -> ExclusionPolicyDiagnostics:
+        return ExclusionPolicyDiagnostics(
+            evaluation_counters=MappingProxyType({}),
+            publication_counters=MappingProxyType({}),
+            recent_failures=(),
+        )
 
 
 # --- the serve composition ---------------------------------------------------------------
@@ -580,13 +609,17 @@ def compose_exclusion_policy(
     *,
     engine: AsyncEngine,
     signer: Ed25519PolicySigner,
-    metrics: ExclusionPolicyMetrics | None = None,
+    metrics: ExclusionPolicyMetricsWithDiagnostics | None = None,
 ) -> ExclusionPolicyRuntime:
     """Build the real exclusion-policy runtime of one serve process.
 
     The verifier is bound to the signer's own derived public key — the
     in-transaction self-check of spec 11.1 step 7 — and the read adapter
-    shares the engine with the stores without opening a connection here.
+    shares the engine with the stores without opening a connection here. A
+    provided metrics sink records the publication outcomes and serves the
+    Web Admin diagnostics route; without one the documented no-op fallback
+    records nothing and serves the empty snapshot, never blocking
+    evaluation.
     """
 
     draft_store = PostgresqlPolicyDraftStore(engine)
@@ -602,6 +635,7 @@ def compose_exclusion_policy(
             metrics=metrics,
         ),
         queries=PolicyQueryService(query_store=draft_store, plugin_reads=plugin_reads),
+        metrics_diagnostics=metrics if metrics is not None else _EmptyPolicyDiagnosticsSource(),
     )
 
 
@@ -1047,11 +1081,20 @@ class OfflinePolicyPluginReadStore:
 
 
 def compose_offline_exclusion_policy(
-    *, state: OfflineExclusionPolicyState | None = None
+    *,
+    state: OfflineExclusionPolicyState | None = None,
+    metrics: ExclusionPolicyMetricsWithDiagnostics | None = None,
 ) -> ExclusionPolicyRuntime:
-    """Build the deterministic offline runtime for export and tests."""
+    """Build the deterministic offline runtime for export and tests.
+
+    A provided metrics sink records the offline publication outcomes and
+    serves the diagnostics read side, so route tests observe real journeys;
+    the default is a fresh in-memory recorder, which keeps the contract
+    document byte-deterministic (recordings never render into it).
+    """
 
     offline_state = state if state is not None else OfflineExclusionPolicyState()
+    recorder = metrics if metrics is not None else InMemoryExclusionPolicyMetrics()
     draft_store = OfflinePolicyDraftStore(offline_state)
     plugin_reads: PolicyPluginReadPort = OfflinePolicyPluginReadStore(offline_state)
     return ExclusionPolicyRuntime(
@@ -1063,8 +1106,10 @@ def compose_offline_exclusion_policy(
             verifier=Ed25519PolicyVerifier(
                 {offline_state.signer.key_id: offline_state.signer.public_key_bytes}
             ),
+            metrics=recorder,
         ),
         queries=PolicyQueryService(query_store=draft_store, plugin_reads=plugin_reads),
+        metrics_diagnostics=recorder,
     )
 
 

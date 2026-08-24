@@ -5,8 +5,9 @@ routes, six TOTP/recovery routes, seven browser device-authorization and
 device-token routes, two Admin device routes of the injected
 web-authentication runtime, the optional runtime-gated exclusion-policy,
 small-file sync and source-lifecycle route sets — including the read-only
-sync rejection diagnostics Admin route of the small-file-sync runtime — and
-the local/test-only OpenAPI document route, registers the four envelope
+sync rejection diagnostics Admin route of the small-file-sync runtime and the
+read-only policy diagnostics Admin route of the exclusion-policy runtime —
+and the local/test-only OpenAPI document route, registers the four envelope
 exception handlers,
 strips FastAPI's default validation-error response from the generated
 document (the shared handler emits the canonical error envelope instead),
@@ -61,6 +62,10 @@ from api_runtime.device_authorization_routes import (
     create_device_authorization_route_endpoints,
 )
 from api_runtime.exclusion_policy_composition import ExclusionPolicyRuntime
+from api_runtime.exclusion_policy_diagnostics_models import ExclusionPolicyDiagnosticsData
+from api_runtime.exclusion_policy_diagnostics_routes import (
+    create_policy_diagnostics_admin_route_endpoints,
+)
 from api_runtime.exclusion_policy_models import (
     ExclusionPolicyStatusData,
     PolicyDraftData,
@@ -215,6 +220,7 @@ def create_api_application(
     _register_device_admin_routes(app, web_authentication)
     if exclusion_policy is not None:
         _register_exclusion_policy_routes(app, web_authentication, exclusion_policy)
+        _register_policy_diagnostics_admin_route(app, web_authentication, exclusion_policy)
     if small_file_sync is not None:
         _register_small_file_sync_routes(app, web_authentication, small_file_sync)
         _register_sync_diagnostics_admin_route(app, web_authentication, small_file_sync)
@@ -533,6 +539,30 @@ def _register_exclusion_policy_routes(
         operation_id="getExclusionPolicySnapshot",
         response_model=ApiEnvelope[SignedPolicySnapshotData],
         responses={"304": {"description": "The presented entity tag is current"}},
+    )
+
+
+def _register_policy_diagnostics_admin_route(
+    app: FastAPI,
+    web_authentication: WebAuthenticationRuntime,
+    exclusion_policy: ExclusionPolicyRuntime,
+) -> None:
+    """Register the closed policy diagnostics Admin route.
+
+    The route carries its manually assigned semantic operation id and the
+    envelope response model of its strict closed payload; the active-session
+    dependency of the Web Admin surface lives in the endpoint factory, and
+    the payload carries only closed tokens, counts and epoch timestamps.
+    """
+    endpoints = create_policy_diagnostics_admin_route_endpoints(
+        web_authentication=web_authentication, exclusion_policy=exclusion_policy
+    )
+    app.add_api_route(
+        "/api/admin/exclusion-policy/diagnostics",
+        endpoints.get_policy_diagnostics,
+        methods=["GET"],
+        operation_id="getExclusionPolicyDiagnostics",
+        response_model=ApiEnvelope[ExclusionPolicyDiagnosticsData],
     )
 
 

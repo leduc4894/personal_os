@@ -64,6 +64,26 @@ export type paths = {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/admin/exclusion-policy/diagnostics": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Get Policy Diagnostics
+         * @description Serve the closed policy evidence snapshot (read-only).
+         */
+        readonly get: operations["getExclusionPolicyDiagnostics"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/admin/exclusion-policy/draft": {
         readonly parameters: {
             readonly query?: never;
@@ -887,6 +907,21 @@ export type components = {
              */
             readonly warnings: readonly components["schemas"]["ApiWarning"][];
         };
+        /** ApiEnvelope[ExclusionPolicyDiagnosticsData] */
+        readonly ApiEnvelope_ExclusionPolicyDiagnosticsData_: {
+            readonly data: components["schemas"]["ExclusionPolicyDiagnosticsData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
         /** ApiEnvelope[ExclusionPolicyStatusData] */
         readonly ApiEnvelope_ExclusionPolicyStatusData_: {
             readonly data: components["schemas"]["ExclusionPolicyStatusData"] | null;
@@ -1401,6 +1436,24 @@ export type components = {
          */
         readonly ErrorCode: "configuration_invalid" | "configuration_unknown_key" | "configuration_secret_invalid" | "secret_file_missing" | "secret_file_outside_root" | "secret_file_invalid_type" | "secret_file_insecure_permissions" | "secret_file_too_large" | "secret_file_invalid_encoding" | "secret_file_empty" | "diagnostic_context_invalid" | "diagnostic_payload_rejected" | "internal_error" | "database_migration_configuration_invalid" | "database_connection_unavailable" | "database_migration_busy" | "database_schema_contract_invalid" | "database_destructive_downgrade_refused" | "object_storage_configuration_invalid" | "object_storage_input_invalid" | "object_storage_busy" | "object_storage_unavailable" | "object_storage_access_denied" | "object_storage_contract_invalid" | "object_storage_object_missing" | "object_storage_integrity_failed" | "object_storage_metadata_conflict" | "source_publish_input_invalid" | "source_not_found" | "source_already_exists" | "source_state_invalid" | "source_version_conflict" | "source_idempotency_mismatch" | "source_event_identity_mismatch" | "source_verified_receipt_stale" | "source_content_object_conflict" | "source_concurrency_busy" | "source_concurrency_invariant_failed" | "source_commit_outcome_unknown" | "projection_dispatch_unavailable" | "projection_intent_contract_invalid" | "identity_bootstrap_input_invalid" | "identity_bootstrap_state_conflict" | "canonical_read_state_invalid" | "canonical_recovery_environment_refused" | "canonical_recovery_configuration_invalid" | "canonical_recovery_snapshot_busy" | "canonical_recovery_bundle_exists" | "canonical_recovery_bundle_invalid" | "canonical_recovery_target_not_empty" | "canonical_recovery_dependency_unavailable" | "canonical_recovery_integrity_failed" | "canonical_recovery_restore_failed" | "api_request_malformed" | "api_request_validation_failed" | "api_route_not_found" | "api_method_not_allowed" | "authentication_required" | "authentication_failed" | "authentication_rate_limited" | "recent_authentication_required" | "csrf_validation_failed" | "authorization_scope_denied" | "totp_enrollment_state_invalid" | "device_authorization_pending" | "device_authorization_slow_down" | "device_authorization_denied" | "device_authorization_expired" | "device_authorization_state_invalid" | "device_revocation_confirmation_invalid" | "device_credential_invalid" | "device_revoked" | "device_token_reuse_detected" | "plugin_version_unsupported" | "exclusion_policy_input_invalid" | "exclusion_policy_not_initialized" | "exclusion_policy_draft_conflict" | "exclusion_policy_preview_pending" | "exclusion_policy_preview_failed" | "exclusion_policy_preview_expired" | "exclusion_policy_preview_stale" | "exclusion_policy_confirmation_invalid" | "exclusion_policy_denied" | "exclusion_policy_indeterminate" | "exclusion_policy_snapshot_outdated" | "exclusion_policy_signing_unavailable" | "exclusion_policy_commit_outcome_unknown" | "small_file_preflight_invalid" | "small_file_operation_not_found" | "small_file_operation_expired" | "small_file_operation_identity_mismatch" | "small_file_size_limit_exceeded" | "small_file_content_integrity_failed" | "small_file_upload_state_invalid" | "source_lifecycle_input_invalid" | "source_locator_missing" | "source_locator_conflict" | "source_tombstone_not_found" | "source_tombstone_closed" | "source_lifecycle_version_conflict" | "source_lifecycle_commit_outcome_unknown";
         /**
+         * EvaluationMetricOutcome
+         * @description The closed evaluation outcomes used as metric labels.
+         * @enum {string}
+         */
+        readonly EvaluationMetricOutcome: "allowed" | "excluded" | "indeterminate" | "failed";
+        /**
+         * ExclusionPolicyDiagnosticsData
+         * @description The policy evidence snapshot of the Admin diagnostics route.
+         */
+        readonly ExclusionPolicyDiagnosticsData: {
+            /** Evaluation Counters */
+            readonly evaluation_counters: readonly components["schemas"]["PolicyEvaluationCounterData"][];
+            /** Publication Counters */
+            readonly publication_counters: readonly components["schemas"]["PolicyPublicationCounterData"][];
+            /** Recent Failures */
+            readonly recent_failures: readonly components["schemas"]["PolicyFailureRecordData"][];
+        };
+        /**
          * ExclusionPolicyStatusData
          * @description The Admin status read: revision metadata, draft, reconciliation and
          *     the read-only stale-running staleness block (null while nothing is
@@ -1478,6 +1531,12 @@ export type components = {
             readonly new_password: string;
         };
         /**
+         * PolicyBoundary
+         * @description The closed enforcement-boundary vocabulary (spec 14.2).
+         * @enum {string}
+         */
+        readonly PolicyBoundary: "sync_preflight" | "single_part_upload" | "multipart_upload" | "source_create_update" | "canonical_read" | "manifest_reconcile" | "conflict_capture" | "ingestion" | "rebuild_repair" | "retrieval" | "mcp_action";
+        /**
          * PolicyDraftData
          * @description The working draft with its exact version (spec 16.1).
          */
@@ -1529,6 +1588,31 @@ export type components = {
             readonly source_id?: string | null;
             /** Source Type */
             readonly source_type?: string | null;
+        };
+        /**
+         * PolicyEvaluationCounterData
+         * @description One evaluation counter: closed boundary and decision labels plus count.
+         */
+        readonly PolicyEvaluationCounterData: {
+            readonly boundary: components["schemas"]["PolicyBoundary"];
+            /** Count */
+            readonly count: number;
+            readonly decision: components["schemas"]["EvaluationMetricOutcome"];
+        };
+        /**
+         * PolicyFailureRecordData
+         * @description One recent policy system failure of the bounded diagnostics ring.
+         *
+         *     The closed registry error code names the policy system failure, the
+         *     closed boundary label stands in for the design's route-template token
+         *     (the metrics layer sits below the correlation plumbing that owns route
+         *     templates) and the timestamp is an epoch-millisecond integer.
+         */
+        readonly PolicyFailureRecordData: {
+            /** At Epoch Ms */
+            readonly at_epoch_ms: number;
+            readonly boundary: components["schemas"]["PolicyBoundary"];
+            readonly error_code: components["schemas"]["ErrorCode"];
         };
         /**
          * PolicyKeysetEnvelopeData
@@ -1719,6 +1803,15 @@ export type components = {
              * Format: uuid
              */
             readonly source_id: string;
+        };
+        /**
+         * PolicyPublicationCounterData
+         * @description One publication counter: the closed outcome label plus its count.
+         */
+        readonly PolicyPublicationCounterData: {
+            /** Count */
+            readonly count: number;
+            readonly outcome: components["schemas"]["PublicationMetricOutcome"];
         };
         /**
          * PolicyPublicationData
@@ -1922,6 +2015,18 @@ export type components = {
             /** Value */
             readonly value: string;
         };
+        /**
+         * PublicationMetricOutcome
+         * @description The closed publication outcomes used as metric labels (spec 21).
+         *
+         *     Recorded only after the durable outcome is known: ``published`` for a
+         *     fresh committed revision, ``replayed`` for an exact replay
+         *     acknowledgement (including recovery-resolved ones) and ``rejected`` for
+         *     a terminal business rejection. An unknown commit outcome records
+         *     nothing. Workspace, preview, revision and key IDs are prohibited labels.
+         * @enum {string}
+         */
+        readonly PublicationMetricOutcome: "published" | "replayed" | "rejected";
         /**
          * ReadinessChecks
          * @description Canonical dependency check outcomes; this child tracks PostgreSQL only.
@@ -2539,6 +2644,26 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["ApiEnvelope_ExclusionPolicyStatusData_"];
+                };
+            };
+        };
+    };
+    readonly getExclusionPolicyDiagnostics: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_ExclusionPolicyDiagnosticsData_"];
                 };
             };
         };

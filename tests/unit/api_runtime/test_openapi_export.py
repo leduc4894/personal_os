@@ -135,6 +135,7 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
         "/api/admin/exclusion-policy/previews",
         "/api/admin/exclusion-policy/previews/{policy_preview_id}",
         "/api/admin/exclusion-policy/publications",
+        "/api/admin/exclusion-policy/diagnostics",
         "/api/sync/exclusion-policy/keysets",
         "/api/sync/exclusion-policy/snapshot",
         "/api/sync/journal-events/preflight",
@@ -211,6 +212,10 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
     assert (
         document["paths"]["/api/admin/source-lifecycle/rejections"]["get"]["operationId"]
         == "getSourceLifecycleRejectionDiagnostics"
+    )
+    assert (
+        document["paths"]["/api/admin/exclusion-policy/diagnostics"]["get"]["operationId"]
+        == "getExclusionPolicyDiagnostics"
     )
 
 

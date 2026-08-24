@@ -50,6 +50,7 @@ class ApiRouteTemplate(StrEnum):
     ADMIN_EXCLUSION_POLICY_PREVIEWS = "/api/admin/exclusion-policy/previews"
     ADMIN_EXCLUSION_POLICY_PREVIEW = "/api/admin/exclusion-policy/previews/{policy_preview_id}"
     ADMIN_EXCLUSION_POLICY_PUBLICATIONS = "/api/admin/exclusion-policy/publications"
+    ADMIN_EXCLUSION_POLICY_DIAGNOSTICS = "/api/admin/exclusion-policy/diagnostics"
     SYNC_EXCLUSION_POLICY_KEYSETS = "/api/sync/exclusion-policy/keysets"
     SYNC_EXCLUSION_POLICY_SNAPSHOT = "/api/sync/exclusion-policy/snapshot"
     SYNC_JOURNAL_EVENTS_PREFLIGHT = "/api/sync/journal-events/preflight"
@@ -157,10 +158,21 @@ SOURCE_LIFECYCLE_DIAGNOSTICS_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]]
     }
 )
 
+#: The closed exclusion-policy diagnostics admin route set (spec 2026-08-24
+#: C2): the read-only evaluation-counter, publication-counter and
+#: recent-failure-ring evidence surface behind the Web session contract. Its
+#: payloads are per-process counters and ring snapshots that must never come
+#: from a shared cache.
+EXCLUSION_POLICY_DIAGNOSTICS_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset(
+    {
+        ApiRouteTemplate.ADMIN_EXCLUSION_POLICY_DIAGNOSTICS,
+    }
+)
+
 #: Every route whose responses — success, service rejection and dependency
 #: failure alike — carry ``Cache-Control: no-store`` (spec 16): the
 #: authentication-bound sets plus the exclusion-policy, small-file sync,
-#: source lifecycle and the two diagnostics admin route sets, whose payloads
+#: source lifecycle and the three diagnostics admin route sets, whose payloads
 #: are per-request policy state, signed envelopes, device-derived sync
 #: results and per-process rejection evidence that must never come from a
 #: shared cache.
@@ -171,6 +183,7 @@ NO_STORE_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = (
     | SOURCE_LIFECYCLE_ROUTE_TEMPLATES
     | SYNC_DIAGNOSTICS_ROUTE_TEMPLATES
     | SOURCE_LIFECYCLE_DIAGNOSTICS_ROUTE_TEMPLATES
+    | EXCLUSION_POLICY_DIAGNOSTICS_ROUTE_TEMPLATES
 )
 
 #: Immutable view of the no-store template values, for classifying a raw

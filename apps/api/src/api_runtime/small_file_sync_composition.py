@@ -53,7 +53,7 @@ from personal_os.exclusion_policy.enforcement import (
     default_utc_clock,
 )
 from personal_os.exclusion_policy.errors import ExclusionPolicyError
-from personal_os.exclusion_policy.metrics import PolicyBoundary
+from personal_os.exclusion_policy.metrics import ExclusionPolicyMetrics, PolicyBoundary
 from personal_os.object_storage import (
     CanonicalMediaType,
     CanonicalObjectKey,
@@ -329,6 +329,7 @@ def compose_small_file_sync(
     object_storage_settings: ObjectStorageSettings,
     object_storage_credentials: LoadedR2Credentials,
     logger: DiagnosticLogger,
+    policy_metrics: ExclusionPolicyMetrics | None = None,
 ) -> SmallFileSyncRuntime:
     """Build the real serve runtime of one API process.
 
@@ -338,11 +339,15 @@ def compose_small_file_sync(
     stores connect lazily per transaction and the R2 client opens at the first
     object-store call inside the serving loop. The graph is therefore
     composable before the socket exists while every adapter is the production
-    one.
+    one. ``policy_metrics`` is the shared exclusion-policy metrics sink of the
+    serve graph (spec 2026-08-24 C2): the enforcement service records its
+    closed evaluation outcomes into it. The documented no-op fallback applies
+    when no sink is bound — evaluation proceeds and records nothing, so a
+    metrics sink can never block it.
     """
 
     verifier = TrustAnchorEd25519Verifier()
-    enforcement = compose_policy_enforcement(engine, verifier=verifier)
+    enforcement = compose_policy_enforcement(engine, verifier=verifier, metrics=policy_metrics)
     object_store = R2S3ObjectStore(
         LazyR2ClientSource(R2ClientManager(object_storage_settings, object_storage_credentials)),
         spools=SpoolManager(object_storage_settings.object_storage_spool_root),

@@ -19,13 +19,23 @@ depend on; :class:`InMemoryExclusionPolicyMetrics` is the bounded test and
 standalone recorder. A production sink implements the same Protocol behind
 the boundary and, like the in-memory recorder, must reject non-enum labels
 and negative or non-finite durations.
+
+The recorder additionally exposes a read side for the Web Admin diagnostics
+route (spec 2026-08-24 C2): :class:`ExclusionPolicyDiagnosticsSource` serves
+one immutable :class:`ExclusionPolicyDiagnostics` snapshot — the exact
+evaluation counters by boundary and decision (``failed`` included), the exact
+publication outcome counters, and a bounded ring of the most recent policy
+system failures carrying exactly the closed registry code, the closed
+boundary label and the epoch-millisecond timestamp stamped through the
+injected clock.
 """
 
 from __future__ import annotations
 
 import math
+import time
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
@@ -106,6 +116,18 @@ EXCLUSION_POLICY_METRIC_CONTRACTS: Final[Mapping[str, frozenset[str]]] = Mapping
 #: standalone runs, never an unbounded audit log.
 _MAXIMUM_EVALUATION_RECORDS: Final[int] = 4096
 
+#: Maximum number of retained failure records in the diagnostics ring (spec
+#: 2026-08-24 C2): the bounded recent-failure surface of the Web Admin
+#: diagnostics route.
+_MAXIMUM_FAILURE_RECORDS: Final[int] = 50
+
+_NANOSECONDS_PER_MILLISECOND: Final = 1_000_000
+
+
+def _wall_clock_epoch_ms() -> int:
+    """Return the current wall-clock moment in epoch milliseconds."""
+    return time.time_ns() // _NANOSECONDS_PER_MILLISECOND
+
 
 @dataclass(frozen=True, slots=True)
 class EvaluationRecord:
@@ -147,6 +169,40 @@ class PublicationRecord:
     duration_seconds: float
 
 
+@dataclass(frozen=True, slots=True)
+class PolicyFailureRecord:
+    """One recent policy system failure of the bounded diagnostics ring.
+
+    Carries only the closed boundary label, the closed registry error code
+    that names the policy system failure and the epoch-millisecond moment of
+    the recording. The boundary label stands in for the design's
+    route-template token: the metrics layer sits below the request-correlation
+    plumbing that owns route templates. Never a UUID, locator, operand,
+    subject fingerprint, digest, path or free-form string.
+    """
+
+    boundary: PolicyBoundary
+    error_code: ErrorCode
+    at_epoch_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class ExclusionPolicyDiagnostics:
+    """One immutable snapshot of the policy evidence the Admin route serves.
+
+    ``evaluation_counters`` maps every observed (boundary, decision) pair to
+    its exact count and ``publication_counters`` every observed publication
+    outcome to its exact count — both exact regardless of ring eviction.
+    ``recent_failures`` is the bounded ring in recorded order, oldest first.
+    All three are copies: later recordings never mutate a snapshot already
+    taken.
+    """
+
+    evaluation_counters: Mapping[tuple[PolicyBoundary, EvaluationMetricOutcome], int]
+    publication_counters: Mapping[PublicationMetricOutcome, int]
+    recent_failures: tuple[PolicyFailureRecord, ...]
+
+
 def _validate_label(field_name: str, expected_type: type, value: object) -> None:
     if not isinstance(value, expected_type):
         raise ValueError(f"{field_name} label must be a closed enum member")
@@ -167,6 +223,11 @@ def _validate_evaluation_error_code(
             raise ValueError("the failed decision requires its closed error_code")
     elif error_code is not None:
         raise ValueError("error_code is recordable only on the failed decision")
+
+
+def _validate_epoch_ms(value: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError("epoch_ms_clock must return a non-negative integer")
 
 
 @runtime_checkable
@@ -207,19 +268,44 @@ class ExclusionPolicyMetrics(Protocol):
         ...
 
 
+@runtime_checkable
+class ExclusionPolicyDiagnosticsSource(Protocol):
+    """The read side of a policy metrics sink the Admin route consumes."""
+
+    def policy_diagnostics(self) -> ExclusionPolicyDiagnostics:
+        """Return one immutable snapshot of counters and the failure ring."""
+        ...
+
+
+@runtime_checkable
+class ExclusionPolicyMetricsWithDiagnostics(
+    ExclusionPolicyMetrics, ExclusionPolicyDiagnosticsSource, Protocol
+):
+    """Composition seam: a write sink that also exposes its read side."""
+
+
 class InMemoryExclusionPolicyMetrics:
     """Bounded in-memory recorder implementing :class:`ExclusionPolicyMetrics`.
 
     Keeps at most :data:`_MAXIMUM_EVALUATION_RECORDS` evaluation and preview
     records in ring buffers keyed only by the closed enum labels, and rejects
     negative or non-finite durations and any non-enum label so a UUID, locator
-    or operand can never become a label.
+    or operand can never become a label. The diagnostics read side keeps
+    exact counters keyed only by the closed labels — exact regardless of ring
+    eviction — plus a bounded ring of :data:`_MAXIMUM_FAILURE_RECORDS` closed
+    failure records stamped through the injected epoch-millisecond clock (the
+    wall clock by default); :meth:`policy_diagnostics` serves immutable
+    snapshots of all three.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, epoch_ms_clock: Callable[[], int] = _wall_clock_epoch_ms) -> None:
         self._evaluations: deque[EvaluationRecord] = deque(maxlen=_MAXIMUM_EVALUATION_RECORDS)
         self._previews: deque[PreviewRecord] = deque(maxlen=_MAXIMUM_EVALUATION_RECORDS)
         self._publications: deque[PublicationRecord] = deque(maxlen=_MAXIMUM_EVALUATION_RECORDS)
+        self._evaluation_counters: dict[tuple[PolicyBoundary, EvaluationMetricOutcome], int] = {}
+        self._publication_counters: dict[PublicationMetricOutcome, int] = {}
+        self._failure_records: deque[PolicyFailureRecord] = deque(maxlen=_MAXIMUM_FAILURE_RECORDS)
+        self._epoch_ms_clock = epoch_ms_clock
 
     def record_evaluation(
         self,
@@ -241,6 +327,23 @@ class InMemoryExclusionPolicyMetrics:
                 error_code=error_code,
             )
         )
+        counter_key = (boundary, decision)
+        self._evaluation_counters[counter_key] = self._evaluation_counters.get(counter_key, 0) + 1
+        if decision is EvaluationMetricOutcome.FAILED:
+            # ``_validate_evaluation_error_code`` guarantees the code is present
+            # exactly on the failed decision; the check keeps the narrowing
+            # explicit for the closed record constructor below.
+            if error_code is None:  # pragma: no cover - guarded above
+                raise ValueError("the failed decision requires its closed error_code")
+            at_epoch_ms = self._epoch_ms_clock()
+            _validate_epoch_ms(at_epoch_ms)
+            self._failure_records.append(
+                PolicyFailureRecord(
+                    boundary=boundary,
+                    error_code=error_code,
+                    at_epoch_ms=at_epoch_ms,
+                )
+            )
 
     def evaluation_records(self) -> list[EvaluationRecord]:
         """A snapshot list of recorded evaluation outcomes (oldest first)."""
@@ -276,6 +379,7 @@ class InMemoryExclusionPolicyMetrics:
         self._publications.append(
             PublicationRecord(outcome=outcome, duration_seconds=duration_seconds)
         )
+        self._publication_counters[outcome] = self._publication_counters.get(outcome, 0) + 1
 
     def publication_records(self) -> list[PublicationRecord]:
         """A snapshot list of recorded publication outcomes (oldest first)."""
@@ -283,13 +387,18 @@ class InMemoryExclusionPolicyMetrics:
         return list(self._publications)
 
     def publication_count(self, outcome: PublicationMetricOutcome) -> int:
-        return sum(1 for record in self._publications if record.outcome is outcome)
+        return self._publication_counters.get(outcome, 0)
 
     def evaluation_count(self, boundary: PolicyBoundary, decision: EvaluationMetricOutcome) -> int:
-        return sum(
-            1
-            for record in self._evaluations
-            if record.boundary is boundary and record.decision is decision
+        return self._evaluation_counters.get((boundary, decision), 0)
+
+    def policy_diagnostics(self) -> ExclusionPolicyDiagnostics:
+        """Return one immutable snapshot of the policy evidence."""
+
+        return ExclusionPolicyDiagnostics(
+            evaluation_counters=MappingProxyType(dict(self._evaluation_counters)),
+            publication_counters=MappingProxyType(dict(self._publication_counters)),
+            recent_failures=tuple(self._failure_records),
         )
 
     def __repr__(self) -> str:

@@ -13,7 +13,7 @@ page maximum is the spec value 16.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Final, cast
 from uuid import UUID
@@ -36,19 +36,32 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from personal_os.diagnostics.context import create_diagnostic_context
+from personal_os.error_contracts.codes import ErrorCode
 from personal_os.exclusion_policy.drafts import PolicyDraftService
-from personal_os.exclusion_policy.ports import PolicyKeysetRecord
+from personal_os.exclusion_policy.metrics import (
+    EvaluationMetricOutcome,
+    InMemoryExclusionPolicyMetrics,
+    PolicyBoundary,
+    PublicationMetricOutcome,
+)
+from personal_os.exclusion_policy.ports import PolicyActor, PolicyActorKind, PolicyKeysetRecord
 from personal_os.exclusion_policy.previews import (
     PREVIEW_EXECUTION_DEADLINE_SECONDS,
     PolicyPreviewRecord,
     PolicyPreviewService,
     PreviewStatus,
+    compute_impact_digest,
 )
-from personal_os.exclusion_policy.publication import ExclusionPolicyPublicationService
+from personal_os.exclusion_policy.publication import (
+    CONFIRMATION_PHRASE,
+    ExclusionPolicyPublicationService,
+    PublishPolicyCommand,
+)
 from personal_os.exclusion_policy.signatures import (
     build_keyset_payload,
     compute_payload_sha256_hex,
 )
+from personal_os.sources.commands import IdempotencyKey
 
 _FIXED_NOW: Final[datetime] = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 _WORKSPACE_ID: Final[UUID] = UUID("00000000-0000-7000-8000-000000000002")
@@ -56,6 +69,10 @@ _WORKSPACE_ID: Final[UUID] = UUID("00000000-0000-7000-8000-000000000002")
 
 def _context():
     return create_diagnostic_context().context
+
+
+def _admin_actor() -> PolicyActor:
+    return PolicyActor(actor_kind=PolicyActorKind.USER, user_id=UUID(int=2))
 
 
 def _keyset_record(revision: int) -> PolicyKeysetRecord:
@@ -86,6 +103,99 @@ def test_offline_composition_builds_the_four_services() -> None:
     assert isinstance(runtime.previews, PolicyPreviewService)
     assert isinstance(runtime.publication, ExclusionPolicyPublicationService)
     assert isinstance(runtime.queries, PolicyQueryService)
+
+
+@pytest.mark.asyncio
+async def test_offline_composition_records_publication_outcomes_into_the_bound_sink() -> None:
+    """Spec 2026-08-24 C2: a bound policy metrics sink records real outcomes.
+
+    The offline composition hands its metrics sink to the publication service
+    and exposes the same sink's diagnostics read side on the runtime, so a
+    publication journey through the composed graph lands in the counters the
+    Web Admin diagnostics route serves.
+    """
+
+    recorder = InMemoryExclusionPolicyMetrics()
+    state = OfflineExclusionPolicyState()
+    runtime = compose_offline_exclusion_policy(state=state, metrics=recorder)
+    context = _context()
+    preview = await runtime.previews.request_preview(_WORKSPACE_ID, _admin_actor(), context)
+    ready = replace(
+        preview,
+        status=PreviewStatus.READY,
+        impact_digest=compute_impact_digest(()),
+        ready_at=preview.created_at,
+        expires_at=preview.created_at,
+    )
+    state.preview_rows[preview.policy_preview_id] = ready
+    command = PublishPolicyCommand(
+        workspace_id=_WORKSPACE_ID,
+        actor=_admin_actor(),
+        policy_preview_id=preview.policy_preview_id,
+        policy_draft_id=preview.policy_draft_id,
+        expected_draft_version=preview.draft_version,
+        expected_draft_sha256=preview.draft_sha256,
+        preview_impact_digest=ready.impact_digest,
+        expected_active_policy_revision_id=None,
+        expected_active_revision_number=0,
+        idempotency_key=IdempotencyKey("policy-diagnostics-journey-001"),
+        confirmation=CONFIRMATION_PHRASE,
+    )
+
+    result = await runtime.publication.publish(command, context)
+
+    assert result.is_replay is False
+    snapshot = runtime.metrics_diagnostics.policy_diagnostics()
+    assert dict(snapshot.publication_counters) == {PublicationMetricOutcome.PUBLISHED: 1}
+    assert dict(snapshot.evaluation_counters) == {}
+    assert snapshot.recent_failures == ()
+
+    recorder.record_evaluation(
+        boundary=PolicyBoundary.SINGLE_PART_UPLOAD,
+        decision=EvaluationMetricOutcome.FAILED,
+        duration_seconds=0.0,
+        error_code=ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE,
+    )
+    exposed = runtime.metrics_diagnostics.policy_diagnostics()
+    assert dict(exposed.evaluation_counters) == {
+        (PolicyBoundary.SINGLE_PART_UPLOAD, EvaluationMetricOutcome.FAILED): 1
+    }
+    assert len(exposed.recent_failures) == 1
+
+
+def test_serve_composition_without_a_sink_falls_back_to_empty_diagnostics() -> None:
+    """The documented no-op fallback: no sink never blocks evaluation.
+
+    A serve composition that passes no metrics sink still exposes a readable
+    diagnostics source — one serving empty counters and an empty ring — so
+    the Admin route stays constructible and evaluation never depends on a
+    metrics sink being available.
+    """
+
+    from api_runtime.exclusion_policy_crypto import Ed25519PolicySigner
+
+    signer = Ed25519PolicySigner.from_seed_bytes(bytes(range(32)))
+    runtime = compose_exclusion_policy(engine=cast("AsyncEngine", object()), signer=signer)
+
+    snapshot = runtime.metrics_diagnostics.policy_diagnostics()
+    assert dict(snapshot.evaluation_counters) == {}
+    assert dict(snapshot.publication_counters) == {}
+    assert snapshot.recent_failures == ()
+
+
+def test_serve_composition_exposes_the_bound_sink_diagnostics() -> None:
+    from api_runtime.exclusion_policy_crypto import Ed25519PolicySigner
+
+    recorder = InMemoryExclusionPolicyMetrics()
+    signer = Ed25519PolicySigner.from_seed_bytes(bytes(range(32)))
+    runtime = compose_exclusion_policy(
+        engine=cast("AsyncEngine", object()), signer=signer, metrics=recorder
+    )
+
+    recorder.record_publication(outcome=PublicationMetricOutcome.REPLAYED, duration_seconds=0.1)
+
+    snapshot = runtime.metrics_diagnostics.policy_diagnostics()
+    assert dict(snapshot.publication_counters) == {PublicationMetricOutcome.REPLAYED: 1}
 
 
 @pytest.mark.asyncio

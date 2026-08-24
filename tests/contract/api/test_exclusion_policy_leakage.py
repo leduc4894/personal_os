@@ -180,6 +180,12 @@ class _LeakJourney:
                 headers={"Authorization": f"Bearer {credential}"},
             )
             self._record("snapshot", snapshot)
+            diagnostics = client.get(
+                "/api/admin/exclusion-policy/diagnostics",
+                headers=self._headers(self._login_cookies),
+            )
+            assert diagnostics.status_code == 200, diagnostics.text
+            self._record("policy-diagnostics", diagnostics)
 
     def _force_ready(self, response: object) -> object:
         from personal_os.exclusion_policy.previews import (
