@@ -97,6 +97,7 @@ class EventName(StrEnum):
     OBJECT_STORAGE_OBJECT_DEDUPLICATED = "object_storage_object_deduplicated"
     OBJECT_STORAGE_INTEGRITY_FAILED = "object_storage_integrity_failed"
     OBJECT_STORAGE_SPOOL_CLEANUP_DEGRADED = "object_storage_spool_cleanup_degraded"
+    OBJECT_STORAGE_CLIENT_CLOSE_DEGRADED = "object_storage_client_close_degraded"
     SOURCE_VERSION_PUBLISH_SUCCEEDED = "source_version_publish_succeeded"
     SOURCE_VERSION_PUBLISH_REPLAYED = "source_version_publish_replayed"
     SOURCE_VERSION_PUBLISH_REJECTED = "source_version_publish_rejected"
@@ -289,11 +290,31 @@ EVENT_DEFINITIONS: Final[Mapping[EventName, EventDefinition]] = MappingProxyType
         EventName.OBJECT_STORAGE_SPOOL_CLEANUP_DEGRADED: EventDefinition(
             level=DiagnosticLevel.WARNING,
             result_code=ResultCode.DEGRADED,
-            required_fields=frozenset({"operation", "count"}),
+            required_fields=frozenset({"operation", "count", "reason"}),
             allowed_fields=frozenset(
                 {
                     "operation",
                     "count",
+                    "reason",
+                }
+            ),
+        ),
+        EventName.OBJECT_STORAGE_CLIENT_CLOSE_DEGRADED: EventDefinition(
+            level=DiagnosticLevel.WARNING,
+            result_code=ResultCode.DEGRADED,
+            required_fields=frozenset(
+                {
+                    "operation",
+                    "reason",
+                    "error_code",
+                    "error_category",
+                    "is_retryable",
+                }
+            ),
+            allowed_fields=frozenset(
+                {
+                    "operation",
+                    "reason",
                     "error_code",
                     "error_category",
                     "is_retryable",

@@ -51,6 +51,7 @@ def test_event_names_are_closed() -> None:
         "object_storage_object_deduplicated",
         "object_storage_integrity_failed",
         "object_storage_spool_cleanup_degraded",
+        "object_storage_client_close_degraded",
         "source_version_publish_succeeded",
         "source_version_publish_replayed",
         "source_version_publish_rejected",
