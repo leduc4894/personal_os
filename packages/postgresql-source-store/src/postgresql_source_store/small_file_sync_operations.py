@@ -541,6 +541,32 @@ def bound_terminal_result_update_statement(
     )
 
 
+def bound_terminal_failure_update_statement(
+    *, operation_id: UUID, error_code: ErrorCode
+) -> sa.Update:
+    """Build the guarded typed-failure terminal transition of one claimed row.
+
+    The SET clause carries only the terminal ``failed`` state, the closed
+    registry token of the typed business rejection and the server timestamp;
+    the WHERE clause admits exactly one row still in ``receiving``, so a
+    concurrent terminal winner (committed or failed) is visible as a
+    zero-row guarded update the caller resolves through its own fence.
+    """
+
+    return (
+        sa.update(small_file_upload_operations)
+        .values(
+            state=STATE_FAILED,
+            safe_error_code=error_code.value,
+            updated_at=sa.text("CURRENT_TIMESTAMP"),
+        )
+        .where(
+            small_file_upload_operations.c.operation_id == operation_id,
+            small_file_upload_operations.c.state == STATE_RECEIVING,
+        )
+    )
+
+
 def map_small_file_database_failure(cause: BaseException) -> ApplicationError:
     """Map a database or driver failure onto the closed error boundary.
 
@@ -930,6 +956,29 @@ class PostgresqlSmallFileUploadOperationStore:
             lambda _attempt: self._record_bound_terminal_result_once(bound, result)
         )
 
+    async def record_bound_terminal_failure(
+        self,
+        bound: SmallFileBoundOperation,
+        error_code: ErrorCode,
+        diagnostic_context: DiagnosticContext,
+    ) -> None:
+        """Persist a typed business rejection as the claim's terminal state.
+
+        The receive-side guarded ``receiving -> failed`` transition for a
+        typed non-retryable rejection (for example the publication boundary's
+        locator conflict): behind the same operation-identity lock, the
+        guarded update lands ``failed`` carrying only the closed registry
+        token, so the claim never stays fenced in ``receiving`` after a
+        typed rejection. Idempotence admits only the identical bound/code
+        pair; every other prior terminal record fails closed with the
+        existing upload-state-invalid error, and like the terminal result a
+        valid claim may fail after its reservation deadline.
+        """
+        del diagnostic_context
+        await self._retry.run(
+            lambda _attempt: self._record_bound_terminal_failure_once(bound, error_code)
+        )
+
     async def acquire_bound_publication_fence_in_transaction(
         self,
         connection: AsyncConnection,
@@ -1049,6 +1098,56 @@ class PostgresqlSmallFileUploadOperationStore:
                 )
             )
             await self._apply_bound_terminal_transition(connection, bound, result)
+
+    async def _record_bound_terminal_failure_once(
+        self, bound: SmallFileBoundOperation, error_code: ErrorCode
+    ) -> None:
+        async with (
+            self._engine.connect() as connection,
+            connection.begin(),
+        ):
+            await apply_transaction_bounds(connection)
+            await connection.execute(
+                advisory_xact_lock_statement(
+                    UPLOAD_OPERATION_LOCK_NAMESPACE,
+                    upload_operation_identity_lock_key(
+                        bound.workspace_id,
+                        bound.device_id,
+                        bound.event_id,
+                        bound.idempotency_key.value,
+                    ),
+                )
+            )
+            await self._apply_bound_terminal_failure(connection, bound, error_code)
+
+    async def _apply_bound_terminal_failure(
+        self,
+        connection: AsyncConnection,
+        bound: SmallFileBoundOperation,
+        error_code: ErrorCode,
+    ) -> None:
+        result_set = await connection.execute(
+            operation_token_lookup_statement(bound.operation_token)
+        )
+        row_mapping = result_set.mappings().one_or_none()
+        if row_mapping is None:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND)
+        row = SmallFileOperationRow.from_row_mapping(row_mapping)
+        if not _bound_matches_row(row, bound):
+            raise _identity_mismatch()
+        if row.state == STATE_FAILED:
+            if row.safe_error_code == error_code.value:
+                return
+            raise _state_invalid()
+        if row.state != STATE_RECEIVING:
+            raise _state_invalid()
+        guarded = await connection.execute(
+            bound_terminal_failure_update_statement(
+                operation_id=row.operation_id, error_code=error_code
+            )
+        )
+        if guarded.rowcount != 1:
+            raise _state_invalid()
 
     async def _apply_bound_terminal_transition(
         self,

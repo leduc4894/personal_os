@@ -122,6 +122,7 @@ _OFFLINE_EXPIRY_SECONDS: Final[int] = 900
 _PENDING_STATE: Final[str] = "pending"
 _RECEIVING_STATE: Final[str] = "receiving"
 _COMMITTED_STATE: Final[str] = "committed"
+_FAILED_STATE: Final[str] = "failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,6 +406,7 @@ class _OfflineOperationRow:
     state: str
     policy_revision_number: int
     terminal_result: SmallFileTerminalResult | None = None
+    safe_error_code: str | None = None
 
 
 @dataclass
@@ -638,6 +640,28 @@ class OfflineSmallFileUploadOperationStore:
         if not _bound_matches_offline_row(row, bound):
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH)
         self._apply_terminal_transition(row, result, require_claimed=True)
+
+    async def record_bound_terminal_failure(
+        self,
+        bound: SmallFileBoundOperation,
+        error_code: ErrorCode,
+        diagnostic_context: DiagnosticContext,
+    ) -> None:
+        """Guarded ``receiving -> failed`` transition mirroring the durable adapter."""
+        del diagnostic_context
+        row = self._token_row(bound.operation_token)
+        if row is None:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND)
+        if not _bound_matches_offline_row(row, bound):
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH)
+        if row.state == _FAILED_STATE:
+            if row.safe_error_code == error_code.value:
+                return
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        if row.state != _RECEIVING_STATE:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        row.state = _FAILED_STATE
+        row.safe_error_code = error_code.value
 
     def _apply_terminal_transition(
         self,

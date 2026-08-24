@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import Protocol
 
 from personal_os.diagnostics.context import DiagnosticContext
+from personal_os.error_contracts.codes import ErrorCode
 from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
 from personal_os.small_file_sync.contracts import (
     BoundSmallFileOperation,
@@ -107,7 +108,10 @@ class SmallFileUploadOperationStore(Protocol):
     receive to the exact operation its opaque token names (closed
     not-found/identity-mismatch/expired/state-invalid failures included) and
     ``record_bound_terminal_result`` is the receive-side guarded terminal
-    write over that binding.
+    write over that binding. ``record_bound_terminal_failure`` is the same
+    guarded write for a typed non-retryable business rejection: it lands the
+    terminal ``failed`` state with the closed registry token only, so a
+    typed rejection never leaves the claimed row fenced in ``receiving``.
     """
 
     async def resolve_terminal_result(
@@ -143,5 +147,12 @@ class SmallFileUploadOperationStore(Protocol):
         self,
         bound: SmallFileBoundOperation,
         result: SmallFileTerminalResult,
+        diagnostic_context: DiagnosticContext,
+    ) -> None: ...
+
+    async def record_bound_terminal_failure(
+        self,
+        bound: SmallFileBoundOperation,
+        error_code: ErrorCode,
         diagnostic_context: DiagnosticContext,
     ) -> None: ...

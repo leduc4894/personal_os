@@ -15,7 +15,11 @@ single-part ceiling before any spool, streams through the server-side
 bounded verification/CAS path, and hands the already-verified canonical
 object to the publication service — never a raw byte and never an unverified
 receipt — before freezing the publication transaction's result as the
-operation's replayable terminal receipt.
+operation's replayable terminal receipt. A typed non-retryable rejection
+raised after the claim is persisted as the operation's terminal ``failed``
+state carrying its closed registry token, then re-raised unchanged, so a
+typed business rejection never leaves the claimed row fenced in
+``receiving``; retryable and untyped failures keep their resume behavior.
 
 The module imports no FastAPI, SQLAlchemy, R2 SDK or request type; it never
 copies a locator, digest, token, byte count or provider detail into an error
@@ -331,6 +335,8 @@ class SmallFileSyncService:
                 if error.error_code is ErrorCode.SMALL_FILE_CONTENT_INTEGRITY_FAILED:
                     upload_outcome = SmallFileMetricOutcome.INTEGRITY_FAILED
                 self._record_rejection(bound.operation, error)
+            if not error.is_retryable:
+                await self._persist_typed_rejection(bound, error.error_code, diagnostic_context)
             self.metrics.record_upload(
                 operation=bound.operation,
                 outcome=upload_outcome,
@@ -625,6 +631,29 @@ class SmallFileSyncService:
             diagnostic_context=diagnostic_context,
         )
 
+    async def _persist_typed_rejection(
+        self,
+        bound: SmallFileBoundOperation,
+        error_code: ErrorCode,
+        diagnostic_context: DiagnosticContext,
+    ) -> None:
+        """Persist one typed non-retryable rejection as the claim's terminal state.
+
+        The store's guarded ``receiving -> failed`` transition carries only
+        the closed registry token. When the guarded write itself refuses —
+        a concurrent terminal winner or a binding that drifted from its row —
+        the original typed rejection still surfaces unchanged; the refused
+        write names its own closed token on the rejection ring instead of
+        being swallowed silently.
+        """
+
+        try:
+            await self.operation_store.record_bound_terminal_failure(
+                bound, error_code, diagnostic_context
+            )
+        except ApplicationError as write_error:
+            self._record_rejection_code(bound.operation, write_error.error_code)
+
     def _record_preflight(
         self,
         operation: SmallFileOperation,
@@ -638,10 +667,20 @@ class SmallFileSyncService:
         )
 
     def _record_rejection(self, operation: SmallFileOperation, error: SmallFileSyncError) -> None:
-        self.metrics.record_rejection(
-            operation=operation,
-            reason_code=SmallFileRejectionReason(error.error_code.value),
-        )
+        self._record_rejection_code(operation, error.error_code)
+
+    def _record_rejection_code(self, operation: SmallFileOperation, error_code: ErrorCode) -> None:
+        """Record one closed registry code onto the rejection ring, if a member.
+
+        The ring accepts no label outside its own closed vocabulary, so a
+        code without a ring member keeps today's behavior with no record.
+        """
+
+        try:
+            reason_code = SmallFileRejectionReason(error_code.value)
+        except ValueError:
+            return
+        self.metrics.record_rejection(operation=operation, reason_code=reason_code)
 
     def _record_policy_rejection(
         self, operation: SmallFileOperation, error_code: ErrorCode

@@ -34,6 +34,7 @@ from tests.unit.small_file_sync.fakes import (
     PUBLICATION_GUARD,
     PUBLICATION_RESOLVE_COMMITTED,
     STORE_RECORD_BOUND_TERMINAL,
+    STORE_RECORD_BOUND_TERMINAL_FAILURE,
     STORE_RESERVE_OPERATION,
     STORE_RESOLVE_BOUND,
     STORE_RESOLVE_TERMINAL,
@@ -73,6 +74,7 @@ from personal_os.small_file_sync.service import (
     derive_create_title,
     derive_source_type,
 )
+from personal_os.sources.errors import SourcePublicationError
 from personal_os.sources.results import PublicationOutcome
 
 _EXPIRY_SECONDS: Final[int] = 900
@@ -777,6 +779,119 @@ class TestReceiveIntegrity:
             harness.metrics.upload_count(SmallFileOperation.CREATE, SmallFileMetricOutcome.REJECTED)
             == 1
         )
+
+
+class TestReceiveTypedRejectionTerminalization:
+    @pytest.mark.asyncio
+    async def test_typed_non_retryable_rejection_terminalizes_the_claimed_operation(
+        self,
+    ) -> None:
+        """A typed non-retryable rejection never leaves the claim fenced in receiving.
+
+        The publication boundary's typed locator conflict (the stuck 409 of
+        the live event) propagates to the caller as the exact same error
+        object, while the claimed operation row lands its terminal ``failed``
+        state carrying only the closed registry token (child-six deferred
+        remediation task 1).
+        """
+
+        rejection = SourcePublicationError(ErrorCode.SOURCE_LOCATOR_CONFLICT)
+        harness = build_service_harness(publication_guard_error=rejection)
+        device_context = build_device_context()
+        preflight = build_create_preflight()
+        harness.operation_store.now_override = harness.clock.moment
+        reserved = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        assert reserved.operation_token is not None
+
+        with pytest.raises(ApplicationError) as exc_info:
+            await harness.service.receive(
+                operation_token=reserved.operation_token,
+                device_context=device_context,
+                stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+                diagnostic_context=build_diagnostic_context(),
+            )
+
+        assert exc_info.value is rejection
+        assert _error_code(exc_info.value) is ErrorCode.SOURCE_LOCATOR_CONFLICT
+        record = harness.operation_store.record_for_token(reserved.operation_token)
+        assert record is not None
+        assert record.state == "failed"
+        assert record.safe_error_code == "source_locator_conflict"
+        assert harness.ledger.entries[-1] == STORE_RECORD_BOUND_TERMINAL_FAILURE
+        assert (
+            harness.metrics.upload_count(SmallFileOperation.CREATE, SmallFileMetricOutcome.REJECTED)
+            == 1
+        )
+
+    @pytest.mark.asyncio
+    async def test_retryable_typed_failure_keeps_the_operation_receiving(self) -> None:
+        """A retryable typed failure retains its current resume behavior.
+
+        The outcome-unknown family stays retryable by contract, so the claim
+        must not be terminalized: the row remains ``receiving`` for the
+        bounded foreground retry.
+        """
+
+        harness = build_service_harness(
+            publication_guard_error=SourcePublicationError(ErrorCode.SOURCE_COMMIT_OUTCOME_UNKNOWN)
+        )
+        device_context = build_device_context()
+        harness.operation_store.now_override = harness.clock.moment
+        reserved = await harness.service.preflight(
+            preflight=build_create_preflight(),
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        assert reserved.operation_token is not None
+
+        with pytest.raises(ApplicationError) as exc_info:
+            await harness.service.receive(
+                operation_token=reserved.operation_token,
+                device_context=device_context,
+                stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+                diagnostic_context=build_diagnostic_context(),
+            )
+
+        assert _error_code(exc_info.value) is ErrorCode.SOURCE_COMMIT_OUTCOME_UNKNOWN
+        record = harness.operation_store.record_for_token(reserved.operation_token)
+        assert record is not None
+        assert record.state == "receiving"
+        assert record.safe_error_code is None
+        assert STORE_RECORD_BOUND_TERMINAL_FAILURE not in harness.ledger.entries
+
+    @pytest.mark.asyncio
+    async def test_untyped_failure_keeps_the_operation_receiving(self) -> None:
+        """An untyped failure is never terminalized by the receive path."""
+
+        harness = build_service_harness(
+            publication_guard_error=RuntimeError("untyped transport failure")
+        )
+        device_context = build_device_context()
+        harness.operation_store.now_override = harness.clock.moment
+        reserved = await harness.service.preflight(
+            preflight=build_create_preflight(),
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        assert reserved.operation_token is not None
+
+        with pytest.raises(RuntimeError):
+            await harness.service.receive(
+                operation_token=reserved.operation_token,
+                device_context=device_context,
+                stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+                diagnostic_context=build_diagnostic_context(),
+            )
+
+        record = harness.operation_store.record_for_token(reserved.operation_token)
+        assert record is not None
+        assert record.state == "receiving"
+        assert record.safe_error_code is None
+        assert STORE_RECORD_BOUND_TERMINAL_FAILURE not in harness.ledger.entries
 
 
 class TestReceiveGuards:

@@ -39,11 +39,14 @@ from personal_os.small_file_sync.contracts import (
 from personal_os.small_file_sync.errors import SmallFileSyncError
 from personal_os.small_file_sync.ports import SmallFileBoundOperation
 from postgresql_source_store.small_file_sync_operations import (
+    STATE_FAILED,
+    STATE_RECEIVING,
     UPLOAD_OPERATION_EXPIRY_SECONDS,
     PostgresqlSmallFileUploadOperationStore,
     SmallFileDatabaseRetryPolicy,
     SmallFileOperationRow,
     _bound_matches_row,
+    bound_terminal_failure_update_statement,
     compute_upload_operation_expiry,
     identity_lookup_statement,
     locator_fingerprint_persisted,
@@ -894,3 +897,245 @@ async def test_reservation_persists_only_the_locator_digest_for_update_preflight
     assert params["locator_fingerprint"] == compute_locator_fingerprint(
         preflight.normalized_locator
     )
+
+
+# --- typed-rejection terminalization of a claimed receive (task 1 remediation) ------
+
+
+def test_bound_terminal_failure_statement_writes_the_registry_token_only() -> None:
+    """The guarded failure write lands the closed token over the receiving guard.
+
+    The UPDATE's SET clause carries only the terminal state, the closed
+    registry token and the server timestamp; the WHERE clause admits exactly
+    one operation row still in ``receiving``, so a concurrent terminal
+    winner is visible as a zero-row guarded update.
+    """
+
+    statement = bound_terminal_failure_update_statement(
+        operation_id=uuid4(), error_code=ErrorCode.SOURCE_LOCATOR_CONFLICT
+    )
+
+    params = statement.compile(dialect=postgresql.dialect()).params
+    assert params["state"] == STATE_FAILED
+    assert params["safe_error_code"] == "source_locator_conflict"
+    rendered = str(
+        statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    )
+    assert "knowledge.small_file_upload_operations" in rendered
+    assert f"state = '{STATE_RECEIVING}'" in rendered
+    assert "updated_at=CURRENT_TIMESTAMP" in rendered
+
+
+def _receiving_create_row_and_bound(
+    *,
+    state: str = STATE_RECEIVING,
+    safe_error_code: str | None = None,
+) -> tuple[dict[str, Any], SmallFileBoundOperation]:
+    """One claimed create row and its exact receive-side binding."""
+
+    device_context = _device_context()
+    preflight = _preflight()
+    locator = preflight.normalized_locator
+    assert locator is not None
+    digest = compute_locator_fingerprint(locator)
+    reserved_source_id = uuid4()
+    expires_at = datetime.now(UTC) + timedelta(seconds=UPLOAD_OPERATION_EXPIRY_SECONDS)
+    row: dict[str, Any] = {
+        "operation_id": uuid4(),
+        "operation_token_hash": "d" * 64,
+        "workspace_id": device_context.workspace_id,
+        "device_id": device_context.device_id,
+        "event_id": preflight.event_id,
+        "idempotency_key": preflight.idempotency_key.value,
+        "operation_kind": SmallFileOperation.CREATE.value,
+        "declared_sha256": preflight.sha256.hexadecimal,
+        "declared_size_bytes": preflight.size_bytes,
+        "declared_media_type": preflight.media_type.value,
+        "policy_revision_number": _POLICY_REVISION_NUMBER,
+        "reserved_source_id": reserved_source_id,
+        "update_source_id": None,
+        "update_base_version_id": None,
+        "normalized_locator": locator.value,
+        "locator_fingerprint": digest,
+        "state": state,
+        "safe_error_code": safe_error_code,
+        "result_kind": None,
+        "result_source_id": None,
+        "result_source_version_id": None,
+        "result_content_version": None,
+        "result_committed_at": None,
+        "expires_at": expires_at,
+    }
+    bound = SmallFileBoundOperation(
+        operation_id=row["operation_id"],
+        operation_token=UploadOperationToken("D" * 43),
+        workspace_id=device_context.workspace_id,
+        device_id=device_context.device_id,
+        event_id=preflight.event_id,
+        idempotency_key=preflight.idempotency_key,
+        operation=SmallFileOperation.CREATE,
+        declared_sha256=preflight.sha256,
+        declared_size_bytes=preflight.size_bytes,
+        declared_media_type=preflight.media_type,
+        policy_revision_number=_POLICY_REVISION_NUMBER,
+        reserved_source_id=reserved_source_id,
+        update_source_id=None,
+        update_base_version_id=None,
+        normalized_locator=locator,
+        locator_fingerprint=digest,
+        expires_at=expires_at,
+        terminal_result=None,
+    )
+    return row, bound
+
+
+class _TerminalFailureScriptedConnection:
+    """Connection double serving one claimed row and applying its failure write.
+
+    The double serves the durable row for every token-hash lookup and folds
+    the guarded typed-failure update back onto its own row view, so a
+    replayed call observes the terminal failure state it previously wrote
+    instead of a second write.
+    """
+
+    def __init__(self, row: dict[str, Any]) -> None:
+        self._row = row
+        self.operation_state: str | None = None
+        self.safe_error_code: str | None = None
+        self.failed_write_count = 0
+
+    def begin(self) -> _ScriptedBegin:
+        return _ScriptedBegin()
+
+    async def execute(self, statement: Any) -> _ScriptedResult:
+        visit_name = statement.__visit_name__
+        if visit_name == "select":
+            compiled = str(statement.compile())
+            if "operation_token_hash" in compiled:
+                return _ScriptedResult(mapping=self._row)
+            raise AssertionError(f"unexpected select: {compiled}")
+        if visit_name == "update":
+            params = statement.compile(dialect=postgresql.dialect()).params
+            if "safe_error_code" not in params:
+                raise AssertionError("unexpected update without the closed error token")
+            self.failed_write_count += 1
+            self.operation_state = params["state"]
+            self.safe_error_code = params["safe_error_code"]
+            self._row["state"] = params["state"]
+            self._row["safe_error_code"] = params["safe_error_code"]
+            return _ScriptedResult(rowcount=1)
+        if visit_name in {"text", "textclause"}:
+            return _ScriptedResult()
+        raise AssertionError(f"unexpected statement kind: {visit_name}")
+
+
+def _terminal_failure_store(
+    connection: _TerminalFailureScriptedConnection,
+) -> PostgresqlSmallFileUploadOperationStore:
+    return PostgresqlSmallFileUploadOperationStore(
+        cast(Any, _ReceiveScriptedEngine(connection)), clock=lambda: datetime.now(UTC)
+    )
+
+
+@pytest.mark.asyncio
+async def test_typed_rejection_moves_receiving_operation_to_failed() -> None:
+    """A typed business rejection terminalizes the claimed receive row.
+
+    The typed 409 the publication boundary raises (for example the guarded
+    locator conflict) must never leave the canonical operation row fenced in
+    ``receiving``: the guarded write lands ``failed`` carrying only the
+    closed registry token, behind the same operation-identity fence the
+    terminal-result write uses.
+    """
+
+    row, bound = _receiving_create_row_and_bound()
+    connection = _TerminalFailureScriptedConnection(row)
+
+    await _terminal_failure_store(connection).record_bound_terminal_failure(
+        bound, ErrorCode.SOURCE_LOCATOR_CONFLICT, cast(Any, object())
+    )
+
+    assert connection.operation_state == STATE_FAILED
+    assert connection.safe_error_code == "source_locator_conflict"
+
+
+@pytest.mark.asyncio
+async def test_terminal_failure_replay_is_idempotent() -> None:
+    """Replaying the identical bound/code pair writes the failure exactly once."""
+
+    row, bound = _receiving_create_row_and_bound()
+    connection = _TerminalFailureScriptedConnection(row)
+    store = _terminal_failure_store(connection)
+
+    await store.record_bound_terminal_failure(
+        bound, ErrorCode.SOURCE_LOCATOR_CONFLICT, cast(Any, object())
+    )
+    await store.record_bound_terminal_failure(
+        bound, ErrorCode.SOURCE_LOCATOR_CONFLICT, cast(Any, object())
+    )
+
+    assert connection.failed_write_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state", "safe_error_code", "error_code"),
+    [
+        pytest.param(
+            STATE_FAILED,
+            "small_file_upload_state_invalid",
+            ErrorCode.SMALL_FILE_CONTENT_INTEGRITY_FAILED,
+            id="failed row with a different code",
+        ),
+        pytest.param(
+            "committed",
+            None,
+            ErrorCode.SOURCE_LOCATOR_CONFLICT,
+            id="committed row",
+        ),
+        pytest.param(
+            "pending",
+            None,
+            ErrorCode.SOURCE_LOCATOR_CONFLICT,
+            id="unclaimed row",
+        ),
+    ],
+)
+async def test_terminal_failure_rejects_other_prior_records(
+    state: str, safe_error_code: str | None, error_code: ErrorCode
+) -> None:
+    """Only the identical bound/code pair replays; every other record fails closed.
+
+    A failed row already carrying a different closed token, a committed row
+    and an unclaimed pending row are all prior terminal-or-invalid records:
+    each surfaces the existing closed upload-state-invalid error without any
+    new write, mirroring the fence of the terminal-result transition.
+    """
+
+    row, bound = _receiving_create_row_and_bound(state=state, safe_error_code=safe_error_code)
+    connection = _TerminalFailureScriptedConnection(row)
+
+    with pytest.raises(SmallFileSyncError) as rejected:
+        await _terminal_failure_store(connection).record_bound_terminal_failure(
+            bound, error_code, cast(Any, object())
+        )
+
+    assert rejected.value.error_code is ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID
+    assert connection.failed_write_count == 0
+
+
+@pytest.mark.asyncio
+async def test_terminal_failure_rejects_a_drifted_binding() -> None:
+    """A binding that no longer matches its row fails closed as identity mismatch."""
+
+    row, bound = _receiving_create_row_and_bound()
+    row["declared_size_bytes"] = bound.declared_size_bytes + 1
+    connection = _TerminalFailureScriptedConnection(row)
+
+    with pytest.raises(SmallFileSyncError) as rejected:
+        await _terminal_failure_store(connection).record_bound_terminal_failure(
+            bound, ErrorCode.SOURCE_LOCATOR_CONFLICT, cast(Any, object())
+        )
+
+    assert rejected.value.error_code is ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH
+    assert connection.failed_write_count == 0

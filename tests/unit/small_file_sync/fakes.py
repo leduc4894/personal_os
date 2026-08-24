@@ -76,6 +76,7 @@ STORE_RESERVE_OPERATION: Final[str] = "operation_store.reserve_operation"
 STORE_RECORD_TERMINAL: Final[str] = "operation_store.record_terminal_result"
 STORE_RESOLVE_BOUND: Final[str] = "operation_store.resolve_bound_operation"
 STORE_RECORD_BOUND_TERMINAL: Final[str] = "operation_store.record_bound_terminal_result"
+STORE_RECORD_BOUND_TERMINAL_FAILURE: Final[str] = "operation_store.record_bound_terminal_failure"
 OBJECT_STORE_RESOLVE: Final[str] = "object_store.resolve_verified_object"
 OBJECT_STORE_STORE_STREAM: Final[str] = "object_store.store_stream"
 CURRENT_SOURCES_RESOLVE: Final[str] = "current_sources.resolve_current"
@@ -95,6 +96,7 @@ _CURRENT_BASE_COMMITTED_AT: Final[datetime] = datetime(2026, 8, 18, 9, 30, 0, tz
 _PENDING_STATE: Final[str] = "pending"
 _RECEIVING_STATE: Final[str] = "receiving"
 _COMMITTED_STATE: Final[str] = "committed"
+_FAILED_STATE: Final[str] = "failed"
 _EXPIRY_SECONDS: Final[int] = 900
 
 
@@ -243,6 +245,7 @@ class _OperationRecord:
     state: str
     policy_revision_number: int
     terminal_result: SmallFileTerminalResult | None = None
+    safe_error_code: str | None = None
 
 
 @dataclass
@@ -431,6 +434,37 @@ class FakeSmallFileUploadOperationStore:
             SmallFileDeviceContext(device_id=bound.device_id, workspace_id=bound.workspace_id),
             require_claimed=True,
         )
+
+    async def record_bound_terminal_failure(
+        self,
+        bound: SmallFileBoundOperation,
+        error_code: ErrorCode,
+        diagnostic_context: DiagnosticContext,
+    ) -> None:
+        """Guarded ``receiving -> failed`` transition mirroring the durable adapter.
+
+        Only the identical bound/code pair replays idempotently; a drifted
+        binding, a different closed token, a committed row or an unclaimed
+        row fail closed with the adapter's own closed errors.
+        """
+        del diagnostic_context
+        self.ledger.record(STORE_RECORD_BOUND_TERMINAL_FAILURE)
+        record = self._token_record(bound.operation_token)
+        if record is None:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND)
+        if (
+            record.device_context.workspace_id != bound.workspace_id
+            or record.device_context.device_id != bound.device_id
+        ):
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH)
+        if record.state == _FAILED_STATE:
+            if record.safe_error_code == error_code.value:
+                return
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        if record.state != _RECEIVING_STATE:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        record.state = _FAILED_STATE
+        record.safe_error_code = error_code.value
 
     def _apply_terminal_transition(
         self,
