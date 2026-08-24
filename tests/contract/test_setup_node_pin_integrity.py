@@ -12,9 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 APPROVED_SETUP_NODE_REFERENCE: Final[str] = (
     "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
 )
-SETUP_NODE_RE = re.compile(
-    r"^\s*uses:\s*(['\"]?)(actions/setup-node@[^\s#'\"]+)\1"
-)
+SETUP_NODE_RE = re.compile(r"^\s*uses:\s*(['\"]?)(actions/setup-node@[^\s#'\"]+)\1")
 
 
 def _tracked_workflow_paths() -> list[Path]:
@@ -67,9 +65,7 @@ def _assert_approved_setup_node_references(
 
 
 def test_every_tracked_setup_node_reference_uses_the_approved_full_sha() -> None:
-    _assert_approved_setup_node_references(
-        _setup_node_references(_tracked_workflow_paths())
-    )
+    _assert_approved_setup_node_references(_setup_node_references(_tracked_workflow_paths()))
 
 
 def test_historical_typo_reports_relative_location(tmp_path: Path) -> None:
