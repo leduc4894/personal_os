@@ -32,8 +32,10 @@ Comments, installation behavior, toolchain settings, permissions, triggers, cach
 
 ## GitHub admission observation
 
-**OPEN EXTERNAL GATE — not observed.** This branch was not pushed and no pull request or protected-master run was submitted, per task authority. Therefore the required admission criterion remains unverified: the `Setup Node` step must start in `quality.yml`, `authentication-acceptance.yml`, and `exclusion-policy-acceptance.yml`, with no pre-checkout/action-resolution failure for the historical typo reference. This handoff makes no GitHub-side pass claim.
+**OBSERVED — admission gate satisfied.** `master` commit `4db17bbce6b71900868e3ab768bb87598705a719` was pushed on 2026-08-24. GitHub recorded successful `Setup Node` steps after checkout in each affected workflow, with no action-resolution failure for the historical typo reference:
 
-## Deferred item and next action
+1. [quality run 32729704466](https://github.com/leduc4894/personal_os/actions/runs/32729704466): Ubuntu quality and Windows portability both completed `Setup Node` successfully.
+2. [authentication acceptance run 32729704340](https://github.com/leduc4894/personal_os/actions/runs/32729704340): both browser-journey and stack jobs completed `Setup Node` successfully.
+3. [exclusion policy acceptance run 32729704448](https://github.com/leduc4894/personal_os/actions/runs/32729704448): the acceptance-stack job completed `Setup Node` successfully.
 
-The normal review path must observe all three protected workflow runs before production activation. Remove the matching row from `docs/handoff/BACKLOG.md` only after each run shows `Setup Node` admitted and started.
+The protected-run admission criterion is closed. This evidence covers action admission only; the longer acceptance jobs continue under their own workflow conclusions.
