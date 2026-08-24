@@ -83,7 +83,17 @@ PUT  /api/admin/exclusion-policy/draft          replace draft (CSRF + expected_d
 POST /api/admin/exclusion-policy/previews       202, starts the async preview
 GET  /api/admin/exclusion-policy/previews/{id}  202 while pending/running, 200 ready
 POST /api/admin/exclusion-policy/publications   201 new publication, 200 exact replay
+GET  /api/admin/exclusion-policy/diagnostics    200 evaluation/publication counters + recent-failure ring
 ```
+
+The diagnostics read is the observability surface of this domain: evaluation
+counters by `(boundary, decision)` — the closed `failed` decision included —,
+publication outcome counters, and the bounded ring of recent policy system
+failures (closed registry code, closed boundary, epoch-ms timestamp). It is
+read-only, in-memory per process (resets on restart) and sits behind the same
+strict Web Admin session gate as the routes above; the operator procedure and
+the sanitized payload shape live in
+[`sync-error-tracing.md`](sync-error-tracing.md).
 
 The preview runs as one deterministic Temporal workflow per preview:
 
@@ -285,3 +295,16 @@ outcomes surface through its own diagnostics, not this backend metric set).
 Workspace, source, rule, preview, revision, path, media type and key ID are
 prohibited labels. Nothing logs rule operands, paths, titles, signatures, key
 bytes or secret-file paths.
+
+The `decision` label of the evaluation metrics is the closed set
+`allowed | excluded | indeterminate | failed`: the first three are the raw
+evaluation decision (indeterminacy stays observable; enforcement maps
+`indeterminate` to deny), and `failed` records that the policy SYSTEM itself
+failed before it could decide — no active signed policy
+(`exclusion_policy_not_initialized`) or signing unavailable/corrupt
+(`exclusion_policy_signing_unavailable`) — so a fail-closed boundary is
+counted instead of invisible (policy-observability remediation 2026-08-24 C1).
+The registry code of a `failed` evaluation never becomes a metric label; it
+rides the record and surfaces through the Admin diagnostics route
+(`GET /api/admin/exclusion-policy/diagnostics`, operator procedure in
+[`sync-error-tracing.md`](sync-error-tracing.md)).

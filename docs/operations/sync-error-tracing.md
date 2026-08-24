@@ -19,11 +19,13 @@ The operator surface is small and deliberately redacted:
   **detail lines** that render the closed failure reasons of the
   composition and auth layers (journal startup failure, policy state,
   connection detail, last cleared reason).
-- Two **admin routes**: `GET /api/admin/sync/rejections` (small-file sync)
-  and `GET /api/admin/source-lifecycle/rejections` (source lifecycle), and
-  the Admin policy status read `GET /api/admin/exclusion-policy` whose
-  summary carries the reconciliation reason and the stale-running
-  staleness block — all behind the strict Web Admin session gate.
+- Three **admin routes**: `GET /api/admin/sync/rejections` (small-file sync),
+  `GET /api/admin/source-lifecycle/rejections` (source lifecycle), and
+  `GET /api/admin/exclusion-policy/diagnostics` (policy evaluation counters
+  and the recent policy-system-failure ring), plus the Admin policy status
+  read `GET /api/admin/exclusion-policy` whose summary carries the
+  reconciliation reason and the stale-running staleness block — all behind
+  the strict Web Admin session gate.
 - The worker **dispatch events** (`preview_dispatch_unavailable`,
   `reconciliation_dispatch_unavailable`) riding the structured logging
   boundary.
@@ -280,6 +282,25 @@ route plumbing). `error_code` is the closed rejection registry:
 | `small_file_size_limit_exceeded`      | The content exceeds the small-file size boundary.    |
 | `small_file_content_integrity_failed` | The streamed bytes failed the integrity check.       |
 | `small_file_upload_state_invalid`     | The upload state machine rejected the transition.    |
+| `exclusion_policy_denied`             | The active policy excluded the content (a policy DENIAL verdict). |
+| `exclusion_policy_indeterminate`      | The evaluation could not decide (integrity); enforced as deny. |
+| `exclusion_policy_not_initialized`    | Policy SYSTEM failure: no active signed policy.      |
+| `exclusion_policy_signing_unavailable` | Policy SYSTEM failure: signing unavailable or corrupt. |
+
+The four policy codes split into two classes (policy-observability
+remediation 2026-08-24 C1). A **DENIAL** (`exclusion_policy_denied`,
+`exclusion_policy_indeterminate`) is a completed policy decision: the
+preflight answers 200 `excluded` as before and the ring entry names the
+verdict. A **SYSTEM failure** (`exclusion_policy_not_initialized`,
+`exclusion_policy_signing_unavailable`) means the policy itself could not
+run: the preflight PROPAGATES the typed error (409 / 503 envelope per the
+closed status table) instead of answering a wrong 200 `excluded`, and the
+ring entry is the only small-file trace — a raise is not a completed
+preflight, so no `small_file_preflight_total` outcome row exists for it.
+Plugin-side, both system codes map to the retryable `server_error` wire
+family with bounded backoff (the event is kept, never dropped), so a
+`wire_failure · server_error` trail entry joined with a ring SYSTEM code is
+the signature of a policy outage, not a content denial.
 
 Sanitized example (shape only):
 
@@ -360,6 +381,83 @@ answers the server half of a typed 4xx that the plugin parks as
 `blocked_conflict`/`deferred_lifecycle`: the plugin trail names the
 outcome, this ring names the closed rejection reason.
 
+## Web Admin policy evaluation diagnostics
+
+The exclusion-policy domain exposes its evaluation evidence at
+`GET /api/admin/exclusion-policy/diagnostics` (operation id
+`getExclusionPolicyDiagnostics`), behind the same strict Web Admin session
+gate, envelope and `Cache-Control: no-store` contract as the two rejection
+routes above. Three shapes come back inside the envelope's `data`:
+
+- `evaluation_counters` — rows of `{boundary, decision, count}`, sorted by
+  boundary then decision. `decision` is the closed set
+  `allowed | excluded | indeterminate | failed`: the first three are raw
+  evaluation decisions, `failed` records that the policy SYSTEM failed
+  before it could decide (no active signed policy, signing
+  unavailable/corrupt) — the fail-closed outcome that was previously
+  invisible.
+- `publication_counters` — rows of `{outcome, count}`; `outcome` is the
+  closed set `published | replayed | rejected`.
+- `recent_failures` — the bounded ring of the last 50 policy system
+  failures, oldest first, each `{boundary, error_code, at_epoch_ms}`.
+  `error_code` is the closed registry enum (`exclusion_policy_not_initialized`,
+  `exclusion_policy_signing_unavailable` are the codes the enforcement
+  boundary records today); `boundary` is the closed boundary label
+  (`sync_preflight`, `canonical_read`, …) standing in for the design's
+  route-template token.
+
+Sanitized example (shape only):
+
+```json
+{
+  "request_id": "018f6d10-3c7a-7e1f-9b2c-8d4e5f6a7b8c",
+  "data": {
+    "evaluation_counters": [
+      { "boundary": "sync_preflight", "decision": "allowed", "count": 412 },
+      { "boundary": "sync_preflight", "decision": "excluded", "count": 3 },
+      { "boundary": "sync_preflight", "decision": "failed", "count": 2 }
+    ],
+    "publication_counters": [
+      { "outcome": "published", "count": 1 }
+    ],
+    "recent_failures": [
+      { "boundary": "sync_preflight", "error_code": "exclusion_policy_signing_unavailable", "at_epoch_ms": 1784550000000 },
+      { "boundary": "canonical_read", "error_code": "exclusion_policy_not_initialized", "at_epoch_ms": 1784550060000 }
+    ]
+  },
+  "error": null,
+  "warnings": []
+}
+```
+
+Reading it during an incident:
+
+- A `failed` counter row plus matching `recent_failures` entries is the
+  server-side proof of a policy outage class (broken signer, missing
+  policy) — join it with the small-file rejection ring's SYSTEM codes
+  (above) and the plugin's `wire_failure · server_error` entries.
+- Non-zero `failed` while the stack "looks idle": check the degraded-state
+  table of the policy domain
+  ([`exclusion-policy-publication.md`](exclusion-policy-publication.md)) —
+  an invalid signer refuses startup; a missing policy answers 409 on every
+  content boundary.
+- `publication_counters` rows are POLICY revision publications (the
+  preview/publish flow of [`exclusion-policy-publication.md`](exclusion-policy-publication.md)):
+  `published` fresh committed revision, `replayed` exact replay,
+  `rejected` terminal business rejection. Do not confuse them with the
+  source-version publication guard failures of the 2026-08-24 remediation
+  — those emit the existing `SOURCE_VERSION_PUBLISH_FAILED` event with the
+  closed policy code and a terminal `rejected` outcome in the sources
+  domain's own metrics, read from the structured event stream, not this
+  route.
+
+The same in-memory caveats as the other rings apply: the counters and ring
+are per-process and reset on API restart; they are evidence of what this
+process saw, not a durable audit trail (the audit table is the durable
+half). No Prometheus/exporter sink exists — the in-memory recorder bound in
+the serve graph is the spec-21-compliant sink; a production metrics sink
+remains a documented boundary TODO.
+
 ## Policy worker diagnostics (dispatch events, reconciliation reason, stale running)
 
 Three surfaces cover the policy worker failure modes — the "preview stuck
@@ -409,12 +507,48 @@ not set it by default, so an operator who wants durable worker dispatch
 events gives each worker process its own diagnostics directory (never a
 shared directory; the sink rotates files under an exclusive lock).
 
+## Object-storage busy reasons and CLI failure tokens
+
+Two more closed surfaces close the remaining "silent reason" classes of the
+2026-08-24 remediation round:
+
+- **Spool busy reason tokens.** Every `object_storage_busy` envelope from
+  the local upload spool now carries `safe_details.reason` with exactly one
+  of three closed tokens (the key was already registry-validated; the value
+  vocabulary is closed by module constants):
+
+  | `reason` token                    | Meaning                                                       |
+  | --------------------------------- | ------------------------------------------------------------- |
+  | `spool_free_space`                | The spool directory's free-space reserve check failed.        |
+  | `spool_permits_exhausted`         | The admission wait ended with permits/budget exhausted.       |
+  | `spool_admission_window_expired`  | The admission window (the outer wait bound) elapsed without a release wake. |
+
+  One retryable code, three distinguishable causes — read the token from
+  the error envelope's `safe_details`, never from any path or message. The
+  spool mechanics live in [`object-storage.md`](object-storage.md).
+
+- **CLI exception class token.** When a `personal-api` CLI command dies on
+  an unexpected internal exception, the emergency failure line prints the
+  exception CLASS as a closed snake_case token after the code —
+  `personal-api: internal_error: timeout_error` (exit code stays 70). The
+  token is derived from the class name alone through a bounded
+  alphabet/length reduction (arbitrary class names cannot smuggle content;
+  an unrepresentable name collapses to `unknown_error`) — no traceback and
+  no message text ever reach the line. The fix covers the authentication
+  commands; a same-class bare `internal_error` print remains in the
+  `policy-key` CLI dispatch and is tracked in
+  [`BACKLOG.md`](../handoff/BACKLOG.md).
+
 ## Privacy invariants
 
 - The sidecar, the export block, the settings section, the settings
   detail lines, the notices and the admin routes carry only closed
   tokens, counts and timestamps — no paths, hostnames, origins,
   credentials, digests, source ids, device ids or free-form strings.
+- The policy diagnostics route adds only closed boundary/decision/outcome
+  labels, closed registry codes and epoch-ms integers; the busy reason
+  tokens and the CLI class token are closed vocabularies by construction
+  (module constants; bounded alphabet reduction).
 - The worker dispatch events carry only the opaque row id, the attempt
   count and the closed exception-type/stack-fingerprint reductions —
   never provider text, a workflow identity or any exception argument.
@@ -436,6 +570,10 @@ shared directory; the sink rotates files under an exclusive lock).
 - Remediation contract (`docs/superpowers/specs/2026-08-24-closed-reason-surfacing-remediation-design.md`)
   — the startup/pass/policy-state/auth detail tokens, the lifecycle admin
   route, the worker dispatch events and the stale-running surface.
+- Policy observability contract (`docs/superpowers/specs/2026-08-24-policy-observability-remediation-design.md`)
+  — the policy SYSTEM/DENIAL split, the `failed` evaluation decision, the
+  policy diagnostics admin route, the publication guard events and the
+  spool busy reason tokens this guide operates.
 - Plugin modules (`apps/obsidian-plugin/src/journal/sync-diagnostics-trail.ts`,
   `sync-diagnostics-export.ts`, `sync-self-check.ts`) — the closed
   vocabularies and bounds.
@@ -486,8 +624,18 @@ The remediation surfaces add one failure class each to the loop:
    (a locator conflict is the cheap trigger), read
    `GET /api/admin/source-lifecycle/rejections` and match the ring's
    `error_code` against the plugin trail's parked outcome.
+4. **Policy system failure (diagnostics route + rejection ring).**
+   Temporarily point the signer at a broken key (or stop the policy
+   worker), drive one content operation, then read
+   `GET /api/admin/exclusion-policy/diagnostics`: a `failed` evaluation
+   counter row and `recent_failures` entries with the closed code must
+   appear, the small-file rejection ring must carry the SYSTEM code, and
+   the rotating API diagnostics log holds the typed exchange. Restore the
+   signer/worker afterwards.
 
-None of these live rounds has been observed yet — the remediation
-handoff (`docs/handoff/2026-08-24-closed-reason-surfacing-remediation.md`)
-tracks them as its one open gate. No live claim of completion may be
-made until they run.
+None of these live rounds has been observed yet — the remediation handoff
+(`docs/handoff/2026-08-24-closed-reason-surfacing-remediation.md`) tracks
+classes 1–3 as its open gate, and the policy-observability handoff
+(`docs/handoff/2026-08-24-policy-observability-remediation.md`) tracks
+class 4 as its own. No live claim of completion may be made until they
+run.
