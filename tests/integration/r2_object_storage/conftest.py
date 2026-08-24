@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import logging
 import os
 import shutil
@@ -32,7 +33,8 @@ import sys
 import tempfile
 import uuid
 import xml.etree.ElementTree as ElementTree
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -40,6 +42,14 @@ import pytest
 import pytest_asyncio
 from aiobotocore.config import AioConfig
 from aiobotocore.session import get_session
+from botocore.exceptions import (
+    ClientError,
+    ConnectionClosedError,
+    ConnectTimeoutError,
+    ReadTimeoutError,
+    ResponseStreamingError,
+)
+from botocore.exceptions import ConnectionError as BotoCoreConnectionError
 from tests.integration.r2_object_storage.cleanup_manifest import (
     CleanupRejection,
     CreatedObjectRecord,
@@ -100,6 +110,68 @@ _LIVE_REQUIRED_SECRET_FILES: Final[tuple[str, ...]] = (
 
 _PAYLOAD_CHUNK_SIZE_BYTES: Final[int] = 1_048_576
 _SANITIZED_FAILURE_DETAILS: Final[str] = "r2_live_failure_details_redacted"
+_ZERO_BYTE_FAILURE_EVENT: Final[str] = "r2_live_zero_byte_failed"
+_ZERO_BYTE_STAGES: Final[frozenset[str]] = frozenset({"store", "resolve", "read"})
+
+
+@dataclass(frozen=True, slots=True)
+class ZeroByteLiveDiagnostic:
+    """The only fixed-schema failure record emitted by the live zero-byte case."""
+
+    stage: str
+    reason: str
+
+    def to_json(self) -> str:
+        """Serialize only the event contract; no exception object is accepted here."""
+
+        if self.stage not in _ZERO_BYTE_STAGES:
+            raise ValueError("zero-byte diagnostic stage is not allowed")
+        return json.dumps(
+            {
+                "event": _ZERO_BYTE_FAILURE_EVENT,
+                "stage": self.stage,
+                "reason": self.reason,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+
+def classify_zero_byte_live_failure(failure: BaseException) -> str:
+    """Map a body failure to a closed token without reading exception text or causes."""
+
+    if isinstance(failure, ApplicationError):
+        return failure.error_code.value
+    if isinstance(failure, ClientError):
+        return "provider_client_error"
+    if isinstance(failure, ConnectTimeoutError | ReadTimeoutError):
+        return "provider_timeout"
+    if isinstance(
+        failure,
+        BotoCoreConnectionError | ConnectionClosedError | ResponseStreamingError,
+    ):
+        return "provider_transport_error"
+    return "provider_unclassified_error"
+
+
+def emit_zero_byte_live_diagnostic(
+    stage: str,
+    failure: BaseException,
+    *,
+    emit: Callable[[str], None] = print,
+) -> None:
+    """Emit a closed diagnostic while preserving the original body failure path."""
+
+    try:
+        emit(
+            ZeroByteLiveDiagnostic(
+                stage=stage,
+                reason=classify_zero_byte_live_failure(failure),
+            ).to_json()
+        )
+    except Exception:
+        with contextlib.suppress(Exception):
+            emit(ZeroByteLiveDiagnostic(stage=stage, reason="diagnostic_emission_failed").to_json())
 
 
 def _xml_local_name(tag: str) -> str:

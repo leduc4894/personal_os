@@ -20,10 +20,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import secrets
+from collections.abc import Callable
 from contextlib import suppress
 
 import pytest
-from tests.integration.r2_object_storage.conftest import LiveR2Harness
+from tests.integration.r2_object_storage.conftest import (
+    LiveR2Harness,
+    emit_zero_byte_live_diagnostic,
+)
 
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.object_storage import (
@@ -67,17 +71,35 @@ async def _read_verified(harness: LiveR2Harness, expected: ExpectedObject) -> by
 # --- Live cases --------------------------------------------------------------
 
 
+async def _run_zero_byte_round_trip(
+    live_r2_harness: LiveR2Harness,
+    *,
+    emit_diagnostic: Callable[[str], None] = print,
+) -> None:
+    """Exercise the three zero-byte body operations with one closed failure record."""
+
+    stage = "store"
+    try:
+        receipt = await live_r2_harness.store_payload(b"", media_type=_MEDIA_TYPE)
+
+        assert receipt.size_bytes == 0
+        assert receipt.verification_method is VerificationMethod.UPLOADED_FULL_READ
+        assert len(live_r2_harness.manifest) == 1
+
+        stage = "resolve"
+        resolved = await live_r2_harness.store.resolve_verified_object(_expected(receipt))
+        assert resolved is not None
+        assert resolved.content_digest == receipt.content_digest
+
+        stage = "read"
+        assert await _read_verified(live_r2_harness, _expected(receipt)) == b""
+    except Exception as failure:
+        emit_zero_byte_live_diagnostic(stage, failure, emit=emit_diagnostic)
+        raise
+
+
 async def test_zero_byte_round_trip(live_r2_harness: LiveR2Harness) -> None:
-    receipt = await live_r2_harness.store_payload(b"", media_type=_MEDIA_TYPE)
-
-    assert receipt.size_bytes == 0
-    assert receipt.verification_method is VerificationMethod.UPLOADED_FULL_READ
-    assert len(live_r2_harness.manifest) == 1
-
-    resolved = await live_r2_harness.store.resolve_verified_object(_expected(receipt))
-    assert resolved is not None
-    assert resolved.content_digest == receipt.content_digest
-    assert await _read_verified(live_r2_harness, _expected(receipt)) == b""
+    await _run_zero_byte_round_trip(live_r2_harness)
 
 
 async def test_multi_chunk_round_trip(live_r2_harness: LiveR2Harness) -> None:
