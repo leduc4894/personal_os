@@ -7,9 +7,11 @@
 `1daf32a..e33c24a` (Tasks 1–5); implementation head `e33c24a`
 (`test: pin the serve staleness read sql`). **Final commit of the plan:
 the docs commit that carries this handoff** (`docs: extend error tracing
-runbook and hand off remediation`) — same convention as the 2026-08-23
-handoff; its SHA is one `git log -1` away and no later commit belongs to
-this plan.
+runbook and hand off remediation`, `da1bf8d`) — same convention as the
+2026-08-23 handoff. The whole-branch review fix round then landed one
+documentation-only commit, `docs: align remediation handoff with review
+ledger` (§5 ledger alignment, two more BACKLOG rows, two runbook
+caveats); no code changed after `da1bf8d`.
 
 Living operator surface: `docs/operations/sync-error-tracing.md` (extended
 by Task 6). Per-task RED/GREEN evidence lives in the SDD reports under
@@ -67,7 +69,7 @@ the local stack and MUST run before any completion claim (§4).**
   (`docs/operations/sync-error-tracing.md`: settings detail lines,
   lifecycle route, worker dispatch events, reconciliation reason,
   staleness block, smoke-round procedure), this handoff, four BACKLOG
-  rows.
+  rows (the whole-branch review fixes later added two more — §5.4–5.5).
 
 ## 2. Gate evidence (final runs, Task 6 close-out)
 
@@ -260,10 +262,86 @@ credentials/raw content).
    Verdict: defer. **Implement by: before production activation** (the
    milestone where worker liveness guarantees get their acceptance
    pass).
+4. **The write side never records the `committed` outcome** —
+   `SourceLifecycleService.commit` records only the `replayed` outcome
+   (`_record_replay`) and typed rejections (`_record_rejection`);
+   a fresh successful commit returns without
+   `record_commit(COMMITTED)`, so the lifecycle route's
+   `commit_counters` can only ever show `replayed` and `rejected` rows.
+   Pre-existing write-side gap outside the remediation diff, surfaced by
+   Task 3's review. Verdict: defer — the remediation is surfacing-only;
+   the route reads whatever the write side records. **Implement by: at
+   next source-lifecycle metrics change** — the gap lives in the metrics
+   call sites of `src/personal_os/source_lifecycle/service.py`, so any
+   change to those metrics is the natural moment to close it (same
+   conditional style as the `At next small-file-sync metrics change`
+   rows).
+5. **P5 read tokens can occupy the derived settings "Stop reasons"
+   line** — `status_read_failed`/`note_status_read_failed` ride the
+   `journal_failure` trail kind (§3.3), and the stop-reason derivation
+   takes the newest token per failure kind, so a swallowed settings
+   read can render as the current stop reason while sync itself runs
+   fine. Verdict: defer — the tokens are honest trail signal; only
+   their derived placement misleads, and the live smoke round does not
+   read that line (its readbacks are the settings detail lines, the
+   trail tail and the admin routes). **Implement by: at next plugin
+   diagnostics-trail vocabulary change** — excluding read tokens from
+   the derivation or giving them their own kind is a trail-vocabulary
+   decision, best made the next time that closed vocabulary changes.
 
-Trivial polish that died in review stays as prose here (verdict: accept
-as-is, no row): none recorded — Tasks 1–5 reviews surfaced no waived
-minors beyond the three rows above and the smoke round itself.
+Trivial polish that died in review stays as prose here (verdict:
+accept as-is, no row). The ledger
+(`.superpowers/sdd/2026-08-24-closed-reason-surfacing-remediation/progress.md`)
+records twenty per-task review minors across Tasks 1–6 (one from Task
+5's re-review); every one is accounted for here or in the rows above.
+The fourteen ride items:
+
+- Task 1: stage-assignment ordering asserted only for
+  trail-before-wasm (no indexOf-style assertions for
+  journal_recovery-before-open and engine_load-before-load) — accept
+  as-is, test-coverage polish.
+- Task 1: P5 once-flags set before the trail null-check, asymmetric
+  with buffering — accept as-is, unreachable today (the ledger's own
+  verdict).
+- Task 1: notice duration changed to 10_000ms — accept as-is, benign
+  unrequested extra (the ledger's own verdict).
+- Task 2: A4 mapped branch with null version bounds still emits null
+  detail while holding a closed code — accept as-is, deliberate per
+  §3.4 (the audit scoped to the non-mapped collapse;
+  `configuration_invalid` is the diagnosis).
+- Task 2: `DeviceAuthError.code` stays typed `string` (compile-time
+  union only for `clearedReason`) — accept as-is, pre-existing
+  contract; the tokens are closed at runtime and widening would breach
+  the surfacing-only scope.
+- Task 2: two overlapping source windows pin the same snapshot builder
+  in `plugin.test.ts` — accept as-is, test-structure polish.
+- Task 3: the contract test seeds its rejection via the recorder
+  directly instead of driving a typed rejection through the lifecycle
+  POST route — accept as-is, test polish.
+- Task 4: `RecordingDiagnosticSink` duplicated verbatim in two worker
+  test files — accept as-is, test-support polish.
+- Task 4: string-matching source-contract tests pin spelling not
+  behavior — accept as-is, pre-existing house pattern.
+- Task 5: no test for the staleness-read-fails → closed
+  dependency-error case — accept as-is, inherited from the shared
+  retry policy ordering.
+- Task 5: `get_policy_status` docstring lags the new staleness block —
+  accept as-is, docstring drift; the runbook documents the block.
+- Task 5: `STALE_RUNNING_PAGE_MAXIMUM = 16` caps silently with no
+  truncation marker — the bound is now stated in the runbook (this fix
+  round); the marker itself stays unimplemented, accept as-is.
+- Task 6: the final commit SHA named by subject only, not written in
+  prose — accept as-is, the header's `git log -1` note covers it.
+- Task 6: one gate-evidence line abbreviates the ruff format path set
+  with an ellipsis — accept as-is, prose abbreviation only.
+
+The remaining six ledger lines are not ride items: Task 5's re-review
+LIMIT-pinning minor was addressed inside the branch (`e33c24a` pinned
+the interpolated bound); Task 5's wire-only-rendering and
+reconciliation-leased minors are rows 2–3 above; Task 3's pre-existing
+COMMITTED minor and Task 1's P5-read-token minor are rows 4–5 above;
+and Task 6's runbook-page-bound minor is fixed by this same docs
+commit.
 
 ## 6. Next actions
 
@@ -274,7 +352,10 @@ minors beyond the three rows above and the smoke round itself.
    UI line vs endpoint read — before the readback.
 3. Wire the worker diagnostics directories (§5.1) if durable W1 capture
    is wanted for the round.
-4. Nothing else is queued for this plan; the 2026-08-23 sync-error-
+4. The two review-fix BACKLOG rows (§5.4 write-side `committed`
+   recording, §5.5 read tokens in the derived stop reasons) wait on
+   their own triggers; nothing in this plan blocks on them.
+5. Nothing else is queued for this plan; the 2026-08-23 sync-error-
    tracing BACKLOG rows (plugin release batches) are untouched and
    remain owned by that handoff.
 

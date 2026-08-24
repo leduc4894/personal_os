@@ -350,8 +350,13 @@ Sanitized example (shape only):
 }
 ```
 
-The same in-memory caveats as the sync ring apply. This route answers the
-server half of a typed 4xx that the plugin parks as
+The same in-memory caveats as the sync ring apply. One write-side
+caveat: the write side currently records only `replayed` outcomes and
+rejections — a fresh successful commit does not yet produce a
+`committed` counter row, so missing `committed` rows do not mean no
+commit ever succeeded (deferred:
+[`BACKLOG.md`](../handoff/BACKLOG.md), source-lifecycle row). This route
+answers the server half of a typed 4xx that the plugin parks as
 `blocked_conflict`/`deferred_lifecycle`: the plugin trail names the
 outcome, this ring names the closed rejection reason.
 
@@ -385,7 +390,9 @@ running forever" class included:
   minutes) — each `{policy_preview_id, reason, age_seconds}` with the
   fixed reason token `worker_stale_running`. The verdict is computed on
   read against the database clock: a row older than the bound proves no
-  worker is sweeping it. Nothing is restarted or scheduled by this
+  worker is sweeping it. The read pages at the 16 oldest rows — more
+  than 16 stuck rows render as the 16 oldest, with no truncation
+  marker. Nothing is restarted or scheduled by this
   surface; the operator decides.
 
 Sanitized example (shape only):
