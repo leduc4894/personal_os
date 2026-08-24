@@ -25,7 +25,11 @@ import {
   createSyncDiagnosticsTrail,
   envelopeRequestId,
 } from "./sync-diagnostics-trail";
-import type { SyncDiagnosticToken, SyncDiagnosticTrailEntry } from "./sync-diagnostics-trail";
+import type {
+  SyncDiagnosticKind,
+  SyncDiagnosticToken,
+  SyncDiagnosticTrailEntry,
+} from "./sync-diagnostics-trail";
 import {
   SYNC_DIAGNOSTICS_TRAIL_TAIL_ENTRY_LIMIT,
   deriveSyncStopReasonTokens,
@@ -38,13 +42,13 @@ const REQUEST_ID = "66666666-6666-4666-8666-666666666666";
 class PersistedTrailFileStore implements JournalFileStore {
   #bytes: ArrayBuffer;
 
-  constructor(token: string) {
+  constructor(token: string, kind: SyncDiagnosticKind) {
     this.#bytes = new TextEncoder().encode(
       JSON.stringify({
         contract: SYNC_DIAGNOSTICS_TRAIL_CONTRACT,
         entries: [
           {
-            kind: "journal_failure",
+            kind,
             at_epoch_ms: 1_784_000_000_000,
             tokens: [token],
           },
@@ -70,9 +74,12 @@ class PersistedTrailFileStore implements JournalFileStore {
   }
 }
 
-async function reloadPersistedTrailToken(token: string) {
+async function reloadPersistedTrailToken(
+  token: string,
+  kind: SyncDiagnosticKind = "journal_failure",
+) {
   const trail = createSyncDiagnosticsTrail({
-    fileStore: new PersistedTrailFileStore(token),
+    fileStore: new PersistedTrailFileStore(token, kind),
     nowEpochMs: () => 1_784_000_001_000,
   });
   await trail.load();
@@ -130,6 +137,40 @@ describe("renderSyncDiagnosticsExportBlock", () => {
     expect(block).toContain("lifecycle_reconcile_persist_failed");
     expect(block).not.toContain("trail_reset");
   });
+
+  it.each([
+    "exclusion_policy_not_initialized",
+    "exclusion_policy_signing_unavailable",
+    "small_file_preflight_invalid",
+  ] as const)(
+    "round-trips supported canonical envelope code %s through persisted reload and export",
+    async (errorCode) => {
+      const trail = await reloadPersistedTrailToken(errorCode, "wire_failure");
+      const entries = trail.readEntries();
+      const block = renderSyncDiagnosticsExportBlock({
+        syncStatusLine: "Ready",
+        syncBlockerGuidance: [],
+        journalStoreDiagnostics: {
+          lastJournalFailureReasons: [],
+          generationPublishFailureCount: 0,
+          lastGenerationPublishFailureReasons: [],
+        },
+        trailEntryCount: entries.length,
+        trailAppendFailureCount: trail.readAppendFailureCount(),
+        trailTail: entries,
+      });
+
+      expect(entries).toEqual([
+        {
+          kind: "wire_failure",
+          atEpochMs: 1_784_000_000_000,
+          tokens: [errorCode],
+        },
+      ]);
+      expect(block).toContain(`wire_failure · ${errorCode}`);
+      expect(block).not.toContain("trail_reset");
+    },
+  );
 
   it("builds the sanitized block from the status line, guidance, diagnostics, counts and trail tail", () => {
     const block = renderSyncDiagnosticsExportBlock({
