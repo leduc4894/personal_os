@@ -607,7 +607,9 @@ describe("journal sync journeys over the durable stack", () => {
       "blocked_conflict",
     );
     expect(harness.persistence.readJournalMeta().isReconcileRequired).toBe(true);
-  });
+    // Seeds ~2x MAX_PENDING_EVENTS rows through multi-megabyte SQL; under the
+    // concurrent workspace test run plus coverage it exceeds the 5s default.
+  }, 20_000);
 
   it("recovers the prior verified generation after a torn newest write", async () => {
     const harness = await createJourneyHarness();

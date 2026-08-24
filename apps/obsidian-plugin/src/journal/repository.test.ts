@@ -549,7 +549,9 @@ describe("JournalRepository queue soft limits (spec 6.4)", () => {
       throw new Error("expected a recorded capture");
     }
     expect(repository.readEvent(atLimit.event.eventId)?.fingerprint).toEqual(fingerprintOf("c4"));
-  });
+    // Seeds ~2x MAX_PENDING_EVENTS rows through multi-megabyte SQL; under the
+    // concurrent workspace test run plus coverage it exceeds the 5s default.
+  }, 20_000);
 
   it("refuses new rows once the journal image reaches the size ceiling", async () => {
     const { repository, database } = createOpenedJournal();
