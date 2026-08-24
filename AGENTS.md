@@ -97,6 +97,7 @@ Quy ước theo ngôn ngữ và artifact:
 - Không log raw content, query, vector, token, secret hoặc dữ liệu nhạy cảm.
 - External call phải có timeout, bounded retry, error mapping và metrics.
 - Mọi path lỗi đóng mới phải surface reason token của nó tới một nơi đọc được (trail chẩn đoán, status, settings hoặc log đóng) — không được nuốt im lặng lý do lỗi (theo `docs/15-OBSERVABILITY_AND_ALERTING.md`).
+- Mỗi domain/phase plan mới đi kèm một task diagnostics surface: mọi closed error path của domain đó surface reason token (trail/settings/log đóng) ngay khi code land, không trì hoãn đến Phase 10 (pattern chuẩn: `docs/15-OBSERVABILITY_AND_ALERTING.md` §Device diagnostics).
 
 ## Chất lượng và thay đổi
 
