@@ -1,4 +1,4 @@
-# Recovery Preview Count Scope Remediation Planning Handoff
+# Recovery Preview Count Scope Remediation Implementation Handoff
 
 Date: 2026-08-24
 
@@ -18,7 +18,7 @@ drill can prove that preview state appears in the complete source-store map
 but is deliberately absent from the current recovery count contract. The
 plan adds no manifest, lock-order, migration, or recovery-service change.
 
-## Planned gates
+## Verification gates
 
 | Gate | Status | Evidence |
 | --- | --- | --- |
