@@ -1402,7 +1402,9 @@ export type components = {
         readonly ErrorCode: "configuration_invalid" | "configuration_unknown_key" | "configuration_secret_invalid" | "secret_file_missing" | "secret_file_outside_root" | "secret_file_invalid_type" | "secret_file_insecure_permissions" | "secret_file_too_large" | "secret_file_invalid_encoding" | "secret_file_empty" | "diagnostic_context_invalid" | "diagnostic_payload_rejected" | "internal_error" | "database_migration_configuration_invalid" | "database_connection_unavailable" | "database_migration_busy" | "database_schema_contract_invalid" | "database_destructive_downgrade_refused" | "object_storage_configuration_invalid" | "object_storage_input_invalid" | "object_storage_busy" | "object_storage_unavailable" | "object_storage_access_denied" | "object_storage_contract_invalid" | "object_storage_object_missing" | "object_storage_integrity_failed" | "object_storage_metadata_conflict" | "source_publish_input_invalid" | "source_not_found" | "source_already_exists" | "source_state_invalid" | "source_version_conflict" | "source_idempotency_mismatch" | "source_event_identity_mismatch" | "source_verified_receipt_stale" | "source_content_object_conflict" | "source_concurrency_busy" | "source_concurrency_invariant_failed" | "source_commit_outcome_unknown" | "projection_dispatch_unavailable" | "projection_intent_contract_invalid" | "identity_bootstrap_input_invalid" | "identity_bootstrap_state_conflict" | "canonical_read_state_invalid" | "canonical_recovery_environment_refused" | "canonical_recovery_configuration_invalid" | "canonical_recovery_snapshot_busy" | "canonical_recovery_bundle_exists" | "canonical_recovery_bundle_invalid" | "canonical_recovery_target_not_empty" | "canonical_recovery_dependency_unavailable" | "canonical_recovery_integrity_failed" | "canonical_recovery_restore_failed" | "api_request_malformed" | "api_request_validation_failed" | "api_route_not_found" | "api_method_not_allowed" | "authentication_required" | "authentication_failed" | "authentication_rate_limited" | "recent_authentication_required" | "csrf_validation_failed" | "authorization_scope_denied" | "totp_enrollment_state_invalid" | "device_authorization_pending" | "device_authorization_slow_down" | "device_authorization_denied" | "device_authorization_expired" | "device_authorization_state_invalid" | "device_revocation_confirmation_invalid" | "device_credential_invalid" | "device_revoked" | "device_token_reuse_detected" | "plugin_version_unsupported" | "exclusion_policy_input_invalid" | "exclusion_policy_not_initialized" | "exclusion_policy_draft_conflict" | "exclusion_policy_preview_pending" | "exclusion_policy_preview_failed" | "exclusion_policy_preview_expired" | "exclusion_policy_preview_stale" | "exclusion_policy_confirmation_invalid" | "exclusion_policy_denied" | "exclusion_policy_indeterminate" | "exclusion_policy_snapshot_outdated" | "exclusion_policy_signing_unavailable" | "exclusion_policy_commit_outcome_unknown" | "small_file_preflight_invalid" | "small_file_operation_not_found" | "small_file_operation_expired" | "small_file_operation_identity_mismatch" | "small_file_size_limit_exceeded" | "small_file_content_integrity_failed" | "small_file_upload_state_invalid" | "source_lifecycle_input_invalid" | "source_locator_missing" | "source_locator_conflict" | "source_tombstone_not_found" | "source_tombstone_closed" | "source_lifecycle_version_conflict" | "source_lifecycle_commit_outcome_unknown";
         /**
          * ExclusionPolicyStatusData
-         * @description The Admin status read: revision metadata, draft and reconciliation.
+         * @description The Admin status read: revision metadata, draft, reconciliation and
+         *     the read-only stale-running staleness block (null while nothing is
+         *     stale).
          */
         readonly ExclusionPolicyStatusData: {
             /** Active Policy Revision Id */
@@ -1411,6 +1413,8 @@ export type components = {
             readonly active_revision_number: number;
             readonly draft: components["schemas"]["PolicyDraftData"];
             readonly reconciliation: components["schemas"]["PolicyReconciliationSummaryData"] | null;
+            /** Stale Running Previews */
+            readonly stale_running_previews: readonly components["schemas"]["StaleRunningPreviewData"][] | null;
         };
         /**
          * LifecycleMetricOutcome
@@ -2349,6 +2353,28 @@ export type components = {
             readonly at_epoch_ms: number;
             readonly error_code: components["schemas"]["SourceLifecycleErrorCode"];
             readonly operation: components["schemas"]["LifecycleOperation"];
+        };
+        /**
+         * StaleRunningPreviewData
+         * @description One preview row beyond the Admin staleness bound (spec C5/W3).
+         *
+         *     Carries only the opaque preview identity, the closed staleness reason
+         *     token and the row's age in whole seconds — computed on read, never a
+         *     restart or a diagnostic payload.
+         */
+        readonly StaleRunningPreviewData: {
+            /** Age Seconds */
+            readonly age_seconds: number;
+            /**
+             * Policy Preview Id
+             * Format: uuid
+             */
+            readonly policy_preview_id: string;
+            /**
+             * Reason
+             * @constant
+             */
+            readonly reason: "worker_stale_running";
         };
         /**
          * TotpCodeRequest

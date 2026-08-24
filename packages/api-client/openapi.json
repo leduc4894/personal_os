@@ -1791,7 +1791,7 @@
       },
       "ExclusionPolicyStatusData": {
         "additionalProperties": false,
-        "description": "The Admin status read: revision metadata, draft and reconciliation.",
+        "description": "The Admin status read: revision metadata, draft, reconciliation and\nthe read-only stale-running staleness block (null while nothing is\nstale).",
         "properties": {
           "active_policy_revision_id": {
             "anyOf": [
@@ -1821,13 +1821,28 @@
                 "type": "null"
               }
             ]
+          },
+          "stale_running_previews": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/StaleRunningPreviewData"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stale Running Previews"
           }
         },
         "required": [
           "active_policy_revision_id",
           "active_revision_number",
           "draft",
-          "reconciliation"
+          "reconciliation",
+          "stale_running_previews"
         ],
         "title": "ExclusionPolicyStatusData",
         "type": "object"
@@ -3832,6 +3847,34 @@
           "operation"
         ],
         "title": "SourceLifecycleRejectionRecordData",
+        "type": "object"
+      },
+      "StaleRunningPreviewData": {
+        "additionalProperties": false,
+        "description": "One preview row beyond the Admin staleness bound (spec C5/W3).\n\nCarries only the opaque preview identity, the closed staleness reason\ntoken and the row's age in whole seconds — computed on read, never a\nrestart or a diagnostic payload.",
+        "properties": {
+          "age_seconds": {
+            "minimum": 0.0,
+            "title": "Age Seconds",
+            "type": "integer"
+          },
+          "policy_preview_id": {
+            "format": "uuid",
+            "title": "Policy Preview Id",
+            "type": "string"
+          },
+          "reason": {
+            "const": "worker_stale_running",
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "policy_preview_id",
+          "reason",
+          "age_seconds"
+        ],
+        "title": "StaleRunningPreviewData",
         "type": "object"
       },
       "TotpCodeRequest": {

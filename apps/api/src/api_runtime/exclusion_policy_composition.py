@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Final, Protocol
 from uuid import UUID, uuid5, uuid7
 
@@ -63,6 +63,7 @@ from personal_os.exclusion_policy.ports import (
     PolicyStatus,
 )
 from personal_os.exclusion_policy.previews import (
+    PREVIEW_EXECUTION_DEADLINE_SECONDS,
     PREVIEW_RESULT_PAGE_MAXIMUM,
     PolicyPreviewRecord,
     PolicyPreviewResultPage,
@@ -108,6 +109,7 @@ from postgresql_source_store.policy_publication import PostgresqlPolicyPublicati
 from postgresql_source_store.tables import (
     policy_keyset_signatures,
     policy_keysets,
+    policy_previews,
     policy_reconciliation_intents,
     policy_signing_keys,
     source_policies,
@@ -117,6 +119,26 @@ from postgresql_source_store.tables import (
 #: The keyset chain page bound of spec 13.3: at most 16 ordered envelopes per
 #: response, so a long-offline device verifies every link in bounded pages.
 KEYSET_PAGE_MAXIMUM: Final[int] = 16
+
+#: The staleness bound of the Admin policy summary (spec C5/W3): a preview
+#: row still in an executable state is stale once its age crosses the
+#: domain's bounded execution deadline — the exact moment a live worker's
+#: overdue sweep would have failed the row, because the sweep runs every
+#: dispatch cycle. A row older than this bound proves no worker is sweeping.
+STALE_RUNNING_THRESHOLD_SECONDS: Final[int] = PREVIEW_EXECUTION_DEADLINE_SECONDS
+
+#: The bounded page of stale rows the Admin staleness read reports, oldest
+#: first — the same 16-row bound as the keyset page.
+STALE_RUNNING_PAGE_MAXIMUM: Final[int] = KEYSET_PAGE_MAXIMUM
+
+#: The still-working preview states the staleness read covers: exactly the
+#: executable set the worker's overdue sweep fails (pending, leased and
+#: running all render "Preview running" in the Admin UI).
+_STALE_RUNNING_STATES: Final[tuple[PreviewStatus, ...]] = (
+    PreviewStatus.PENDING,
+    PreviewStatus.LEASED,
+    PreviewStatus.RUNNING,
+)
 
 #: Deterministic offline identities and material.
 OFFLINE_POLICY_WORKSPACE_ID: Final[UUID] = UUID("00000000-0000-7000-8000-000000000002")
@@ -143,8 +165,18 @@ class PolicyKeysetPage:
     has_more: bool
 
 
+@dataclass(frozen=True, slots=True)
+class StaleRunningPreview:
+    """One preview row beyond the staleness bound, with its age in seconds."""
+
+    policy_preview_id: UUID
+    age_seconds: int
+
+
 class PolicyPluginReadPort(Protocol):
-    """The plugin-facing read surface: keyset chain, snapshot, reconciliation."""
+    """The plugin-facing read surface: keyset chain, snapshot, reconciliation
+    and the Admin stale-running staleness read.
+    """
 
     async def list_keyset_records(
         self,
@@ -161,6 +193,10 @@ class PolicyPluginReadPort(Protocol):
     async def get_reconciliation_summary(
         self, workspace_id: UUID, context: DiagnosticContext
     ) -> PolicyReconciliationSummary | None: ...
+
+    async def list_stale_running_previews(
+        self, workspace_id: UUID, context: DiagnosticContext
+    ) -> tuple[StaleRunningPreview, ...]: ...
 
 
 class PolicyQueryService:
@@ -193,6 +229,20 @@ class PolicyQueryService:
 
         reject_nil_uuid("workspace_id", workspace_id)
         return await self._plugin_reads.get_reconciliation_summary(workspace_id, context)
+
+    async def get_stale_running_previews(
+        self, workspace_id: UUID, context: DiagnosticContext
+    ) -> tuple[StaleRunningPreview, ...]:
+        """Return preview rows beyond the staleness bound, oldest first.
+
+        The read-only liveness surface of spec C5/W3: rows still in an
+        executable state whose age crosses the fixed bound prove the worker
+        that owes them a transition is not sweeping. Nothing is restarted,
+        failed over or scheduled here — the verdict is computed on read.
+        """
+
+        reject_nil_uuid("workspace_id", workspace_id)
+        return await self._plugin_reads.list_stale_running_previews(workspace_id, context)
 
     async def load_active_snapshot(
         self, workspace_id: UUID, context: DiagnosticContext
@@ -461,6 +511,68 @@ class PostgresqlPolicyPluginReadStore:
             safe_error_code=(
                 None if row["safe_error_code"] is None else str(row["safe_error_code"])
             ),
+        )
+
+    async def list_stale_running_previews(
+        self, workspace_id: UUID, context: DiagnosticContext
+    ) -> tuple[StaleRunningPreview, ...]:
+        del context
+        return await self._retry.run(
+            lambda _attempt: self._list_stale_running_previews_once(workspace_id)
+        )
+
+    async def _list_stale_running_previews_once(
+        self, workspace_id: UUID
+    ) -> tuple[StaleRunningPreview, ...]:
+        """Read the stale running rows in one bounded read-only transaction.
+
+        The age derives from the database clock against ``created_at`` — the
+        same anchor and bound the worker's overdue sweep applies — so the
+        statement writes nothing and a database failure maps onto the shared
+        closed dependency error exactly like every other read here.
+        """
+
+        async with (
+            self._engine.connect() as connection,
+            connection.begin(),
+        ):
+            await apply_transaction_bounds(connection)
+            rows = list(
+                (
+                    await connection.execute(
+                        sa.select(
+                            policy_previews.c.policy_preview_id,
+                            sa.func.floor(
+                                sa.func.extract(
+                                    "epoch",
+                                    sa.func.current_timestamp() - policy_previews.c.created_at,
+                                )
+                            ).label("age_seconds"),
+                        )
+                        .where(
+                            policy_previews.c.workspace_id == workspace_id,
+                            policy_previews.c.state.in_(
+                                state.value for state in _STALE_RUNNING_STATES
+                            ),
+                            policy_previews.c.created_at
+                            <= sa.func.current_timestamp()
+                            - sa.func.make_interval(
+                                0, 0, 0, 0, 0, 0, STALE_RUNNING_THRESHOLD_SECONDS
+                            ),
+                        )
+                        .order_by(policy_previews.c.created_at.asc())
+                        .limit(STALE_RUNNING_PAGE_MAXIMUM)
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return tuple(
+            StaleRunningPreview(
+                policy_preview_id=row["policy_preview_id"],
+                age_seconds=int(row["age_seconds"]),
+            )
+            for row in rows
         )
 
 
@@ -904,6 +1016,35 @@ class OfflinePolicyPluginReadStore:
         del workspace_id, context
         return self._state.reconciliation_summary
 
+    async def list_stale_running_previews(
+        self, workspace_id: UUID, context: DiagnosticContext
+    ) -> tuple[StaleRunningPreview, ...]:
+        """Compute the stale rows against the deterministic offline clock.
+
+        Mirrors the serve read exactly — executable states only, the fixed
+        threshold against ``created_at``, oldest first, bounded page — so the
+        offline contract document and the route tests stay deterministic.
+        """
+
+        del workspace_id, context
+        stale_records = sorted(
+            (
+                record
+                for record in self._state.preview_rows.values()
+                if record.status in _STALE_RUNNING_STATES
+                and _OFFLINE_NOW - record.created_at
+                >= timedelta(seconds=STALE_RUNNING_THRESHOLD_SECONDS)
+            ),
+            key=lambda record: record.created_at,
+        )
+        return tuple(
+            StaleRunningPreview(
+                policy_preview_id=record.policy_preview_id,
+                age_seconds=int((_OFFLINE_NOW - record.created_at).total_seconds()),
+            )
+            for record in stale_records[:STALE_RUNNING_PAGE_MAXIMUM]
+        )
+
 
 def compose_offline_exclusion_policy(
     *, state: OfflineExclusionPolicyState | None = None
@@ -930,6 +1071,8 @@ def compose_offline_exclusion_policy(
 __all__ = [
     "KEYSET_PAGE_MAXIMUM",
     "OFFLINE_POLICY_WORKSPACE_ID",
+    "STALE_RUNNING_PAGE_MAXIMUM",
+    "STALE_RUNNING_THRESHOLD_SECONDS",
     "ExclusionPolicyRuntime",
     "OfflineExclusionPolicyState",
     "OfflinePolicyDraftStore",
@@ -940,6 +1083,7 @@ __all__ = [
     "PolicyPluginReadPort",
     "PolicyQueryService",
     "PostgresqlPolicyPluginReadStore",
+    "StaleRunningPreview",
     "compose_exclusion_policy",
     "compose_offline_exclusion_policy",
 ]

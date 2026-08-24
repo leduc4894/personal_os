@@ -120,6 +120,7 @@ STRICT_MODEL_SCHEMA_NAMES: tuple[str, ...] = (
     "PolicySnapshotRuleData",
     "PolicySnapshotSignatureData",
     "SignedPolicySnapshotData",
+    "StaleRunningPreviewData",
     "SmallFilePreflightData",
     "SmallFilePreflightRequest",
     "SmallFileTerminalResultData",

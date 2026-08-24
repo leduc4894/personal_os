@@ -57,6 +57,7 @@ function statusData(): PolicyStatusData {
       rules: [],
     },
     reconciliation: null,
+    stale_running_previews: null,
   };
 }
 

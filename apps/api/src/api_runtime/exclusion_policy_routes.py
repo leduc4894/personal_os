@@ -40,6 +40,7 @@ from api_runtime.authentication_dependencies import (
 )
 from api_runtime.exclusion_policy_composition import ExclusionPolicyRuntime
 from api_runtime.exclusion_policy_models import (
+    WORKER_STALE_RUNNING_REASON,
     ExclusionPolicyStatusData,
     PolicyDraftData,
     PolicyDraftReplaceRequest,
@@ -49,6 +50,7 @@ from api_runtime.exclusion_policy_models import (
     PolicyPublicationRequest,
     PolicyReconciliationSummaryData,
     SignedPolicySnapshotData,
+    StaleRunningPreviewData,
     policy_draft_data,
     policy_keyset_page_data,
     policy_preview_data,
@@ -236,6 +238,9 @@ def create_exclusion_policy_route_endpoints(
         workspace_id = authentication.context.workspace_id
         status = await exclusion_policy.queries.get_policy_status(workspace_id, context)
         summary = await exclusion_policy.queries.get_reconciliation_summary(workspace_id, context)
+        stale_running = await exclusion_policy.queries.get_stale_running_previews(
+            workspace_id, context
+        )
         return _success_json(
             ExclusionPolicyStatusData(
                 active_policy_revision_id=status.active_policy_revision_id,
@@ -249,6 +254,21 @@ def create_exclusion_policy_route_endpoints(
                         state=summary.state,
                         updated_at=summary.updated_at,
                         safe_error_code=summary.safe_error_code,
+                    )
+                ),
+                # The read-only liveness verdict of spec C5/W3: null while no
+                # executable row crosses the staleness bound, else each stale
+                # row with its closed token and age — never a restart.
+                stale_running_previews=(
+                    None
+                    if not stale_running
+                    else tuple(
+                        StaleRunningPreviewData(
+                            policy_preview_id=row.policy_preview_id,
+                            reason=WORKER_STALE_RUNNING_REASON,
+                            age_seconds=row.age_seconds,
+                        )
+                        for row in stale_running
                     )
                 ),
             )

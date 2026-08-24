@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Final, cast
 from uuid import UUID
 
@@ -35,7 +35,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from personal_os.diagnostics.context import create_diagnostic_context
 from personal_os.exclusion_policy.drafts import PolicyDraftService
 from personal_os.exclusion_policy.ports import PolicyKeysetRecord
-from personal_os.exclusion_policy.previews import PolicyPreviewService
+from personal_os.exclusion_policy.previews import (
+    PREVIEW_EXECUTION_DEADLINE_SECONDS,
+    PolicyPreviewRecord,
+    PolicyPreviewService,
+    PreviewStatus,
+)
 from personal_os.exclusion_policy.publication import ExclusionPolicyPublicationService
 from personal_os.exclusion_policy.signatures import (
     build_keyset_payload,
@@ -157,6 +162,97 @@ async def test_offline_reconciliation_summary_carries_the_safe_error_code() -> N
     assert failed.safe_error_code == "reconciliation_dispatch_terminal"
 
 
+def _preview_record(
+    *,
+    preview_id: UUID,
+    status: PreviewStatus,
+    created_at: datetime,
+    impact_digest: str | None = None,
+    ready_at: datetime | None = None,
+) -> PolicyPreviewRecord:
+    """Build one offline preview row for staleness seeding."""
+
+    return PolicyPreviewRecord(
+        policy_preview_id=preview_id,
+        workspace_id=_WORKSPACE_ID,
+        policy_draft_id=UUID(int=1),
+        draft_version=1,
+        draft_sha256="a" * 64,
+        base_policy_revision_id=None,
+        source_checkpoint_event_sequence=0,
+        status=status,
+        impact_digest=impact_digest,
+        safe_error_code=None,
+        created_by_user_id=UUID(int=2),
+        created_at=created_at,
+        ready_at=ready_at,
+        expires_at=None,
+        consumed_at=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_stale_running_previews_report_the_age_of_overdue_rows() -> None:
+    """Rows the worker owes a transition to are reported with their age.
+
+    The staleness read covers exactly the executable states the worker's
+    overdue sweep fails (pending, leased, running — all rendered "Preview
+    running" by the Admin UI) and reports each row beyond the bound with its
+    age in seconds, oldest first. Terminal rows are never stale.
+    """
+
+    state = OfflineExclusionPolicyState()
+    stale_running_id = UUID(int=101)
+    stale_pending_id = UUID(int=102)
+    state.preview_rows[stale_running_id] = _preview_record(
+        preview_id=stale_running_id,
+        status=PreviewStatus.RUNNING,
+        created_at=_FIXED_NOW - timedelta(seconds=2 * PREVIEW_EXECUTION_DEADLINE_SECONDS),
+    )
+    state.preview_rows[stale_pending_id] = _preview_record(
+        preview_id=stale_pending_id,
+        status=PreviewStatus.PENDING,
+        created_at=_FIXED_NOW - timedelta(seconds=PREVIEW_EXECUTION_DEADLINE_SECONDS),
+    )
+    state.preview_rows[UUID(int=103)] = _preview_record(
+        preview_id=UUID(int=103),
+        status=PreviewStatus.RUNNING,
+        created_at=_FIXED_NOW,
+    )
+    state.preview_rows[UUID(int=104)] = _preview_record(
+        preview_id=UUID(int=104),
+        status=PreviewStatus.READY,
+        created_at=_FIXED_NOW - timedelta(seconds=10 * PREVIEW_EXECUTION_DEADLINE_SECONDS),
+        impact_digest="b" * 64,
+        ready_at=_FIXED_NOW,
+    )
+    runtime = compose_offline_exclusion_policy(state=state)
+
+    stale = await runtime.queries.get_stale_running_previews(_WORKSPACE_ID, _context())
+
+    assert [(row.policy_preview_id, row.age_seconds) for row in stale] == [
+        (stale_running_id, 2 * PREVIEW_EXECUTION_DEADLINE_SECONDS),
+        (stale_pending_id, PREVIEW_EXECUTION_DEADLINE_SECONDS),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stale_running_previews_stay_empty_when_nothing_is_stale() -> None:
+    """No executable row beyond the bound renders no stale rows at all."""
+
+    state = OfflineExclusionPolicyState()
+    state.preview_rows[UUID(int=201)] = _preview_record(
+        preview_id=UUID(int=201),
+        status=PreviewStatus.RUNNING,
+        created_at=_FIXED_NOW,
+    )
+    runtime = compose_offline_exclusion_policy(state=state)
+
+    stale = await runtime.queries.get_stale_running_previews(_WORKSPACE_ID, _context())
+
+    assert stale == ()
+
+
 @dataclass
 class _FakeRowResult:
     """Result double answering one row for the summary select."""
@@ -201,6 +297,75 @@ class _FakeEngine:
 
     def connect(self) -> _FakeConnection:
         return self.connection
+
+
+@dataclass
+class _FakeListRowResult:
+    """Result double answering the full row list of the staleness select."""
+
+    rows: list[Mapping[str, object]]
+
+    def mappings(self) -> _FakeListRowResult:
+        return self
+
+    def all(self) -> list[Mapping[str, object]]:
+        return self.rows
+
+
+@dataclass
+class _FakeListConnection:
+    """Connection double capturing the staleness select and answering rows."""
+
+    rows: list[Mapping[str, object]] = field(default_factory=list)
+    selects: list[object] = field(default_factory=list)
+
+    async def __aenter__(self) -> _FakeListConnection:
+        return self
+
+    async def __aexit__(self, *exception_details: object) -> bool:
+        return False
+
+    def begin(self) -> _FakeListConnection:
+        return self
+
+    async def execute(self, statement: object) -> _FakeListRowResult:
+        if isinstance(statement, sa.Select):
+            self.selects.append(statement)
+            return _FakeListRowResult(self.rows)
+        return _FakeListRowResult([])
+
+
+@dataclass
+class _FakeListEngine:
+    """Engine double handing out its single list-answering connection."""
+
+    connection: _FakeListConnection
+
+    def connect(self) -> _FakeListConnection:
+        return self.connection
+
+
+@pytest.mark.asyncio
+async def test_serve_staleness_read_selects_executable_rows_beyond_the_bound() -> None:
+    """The serve staleness read is one bounded read-only select (W3/C5).
+
+    The select targets the executable preview states with the database clock
+    against ``created_at`` — the same anchor and bound the worker's overdue
+    sweep applies — and hydrates only the opaque id plus the age in seconds.
+    """
+
+    stale_id = UUID(int=301)
+    connection = _FakeListConnection(rows=[{"policy_preview_id": stale_id, "age_seconds": 2400}])
+    store = PostgresqlPolicyPluginReadStore(cast("AsyncEngine", _FakeListEngine(connection)))
+
+    stale = await store.list_stale_running_previews(_WORKSPACE_ID, _context())
+
+    (select_statement,) = connection.selects
+    selected_columns = {
+        column.name for column in cast("sa.Select", select_statement).selected_columns
+    }
+    assert "policy_preview_id" in selected_columns
+    assert [(row.policy_preview_id, row.age_seconds) for row in stale] == [(stale_id, 2400)]
 
 
 @pytest.mark.asyncio

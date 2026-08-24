@@ -30,6 +30,7 @@ function statusData(overrides: Partial<PolicyStatusData> = {}): PolicyStatusData
       updated_at: "2026-08-17T08:00:00Z",
       safe_error_code: null,
     },
+    stale_running_previews: null,
     ...overrides,
   };
 }

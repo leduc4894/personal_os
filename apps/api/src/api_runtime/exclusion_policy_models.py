@@ -93,6 +93,12 @@ PreviewImpactClassValue = Literal[
 ]
 KeysetStateValue = Literal["current", "staged", "retired"]
 
+#: The closed staleness reason of the Admin policy summary (spec C5/W3): a
+#: preview row still in an executable state beyond the staleness bound proves
+#: the worker that owes it a transition is not sweeping it.
+StaleRunningReasonValue = Literal["worker_stale_running"]
+WORKER_STALE_RUNNING_REASON: Final[StaleRunningReasonValue] = "worker_stale_running"
+
 
 class PolicyDraftRuleRequest(BaseModel):
     """One desired draft rule in the shared signed-payload member grammar."""
@@ -185,8 +191,26 @@ class PolicyReconciliationSummaryData(BaseModel):
     safe_error_code: str | None
 
 
+class StaleRunningPreviewData(BaseModel):
+    """One preview row beyond the Admin staleness bound (spec C5/W3).
+
+    Carries only the opaque preview identity, the closed staleness reason
+    token and the row's age in whole seconds — computed on read, never a
+    restart or a diagnostic payload.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    policy_preview_id: UUID
+    reason: StaleRunningReasonValue
+    age_seconds: int = Field(ge=0)
+
+
 class ExclusionPolicyStatusData(BaseModel):
-    """The Admin status read: revision metadata, draft and reconciliation."""
+    """The Admin status read: revision metadata, draft, reconciliation and
+    the read-only stale-running staleness block (null while nothing is
+    stale).
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -194,6 +218,7 @@ class ExclusionPolicyStatusData(BaseModel):
     active_revision_number: int
     draft: PolicyDraftData
     reconciliation: PolicyReconciliationSummaryData | None
+    stale_running_previews: tuple[StaleRunningPreviewData, ...] | None
 
 
 class PolicyPreviewCountersData(BaseModel):

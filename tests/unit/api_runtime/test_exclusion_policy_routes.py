@@ -52,6 +52,7 @@ from personal_os.exclusion_policy.contracts import (
 from personal_os.exclusion_policy.normalization import normalize_rule
 from personal_os.exclusion_policy.ports import PolicyKeysetRecord
 from personal_os.exclusion_policy.previews import (
+    PREVIEW_EXECUTION_DEADLINE_SECONDS,
     PREVIEW_READY_EXPIRY_SECONDS,
     PREVIEW_RESULT_PAGE_MAXIMUM,
     PolicyPreviewRecord,
@@ -878,3 +879,51 @@ def test_status_renders_the_reconciliation_safe_error_code(harness: PolicyRouteH
     assert rendered["policy_revision_id"] == revision_id
     assert rendered["state"] == "terminal"
     assert rendered["safe_error_code"] == "reconciliation_dispatch_terminal"
+
+
+def test_status_reports_stale_running_previews_with_the_closed_token(
+    harness: PolicyRouteHarness,
+) -> None:
+    """Stale running preview rows reach the Admin summary with token and age.
+
+    Fresh rows render the null-safe absent staleness block; an executable
+    row beyond the staleness bound renders the closed ``worker_stale_running``
+    token with its age in seconds — computed on read, never restarted
+    (spec C5/W3).
+    """
+
+    cookies = login(harness.client)
+    headers = session_headers(cookies, csrf=False)
+
+    fresh = harness.client.get("/api/admin/exclusion-policy", headers=headers)
+    assert fresh.status_code == 200, fresh.text
+    assert fresh.json()["data"]["stale_running_previews"] is None
+
+    stale_preview_id = uuid4()
+    harness.policy_state.preview_rows[stale_preview_id] = PolicyPreviewRecord(
+        policy_preview_id=stale_preview_id,
+        workspace_id=harness.policy_state.workspace_id,
+        policy_draft_id=harness.policy_state.draft.draft_id,
+        draft_version=1,
+        draft_sha256="a" * 64,
+        base_policy_revision_id=None,
+        source_checkpoint_event_sequence=0,
+        status=PreviewStatus.RUNNING,
+        impact_digest=None,
+        safe_error_code=None,
+        created_by_user_id=uuid4(),
+        created_at=_FIXED_NOW - timedelta(seconds=2 * PREVIEW_EXECUTION_DEADLINE_SECONDS),
+        ready_at=None,
+        expires_at=None,
+        consumed_at=None,
+    )
+
+    stale = harness.client.get("/api/admin/exclusion-policy", headers=headers)
+    assert stale.status_code == 200, stale.text
+    assert stale.json()["data"]["stale_running_previews"] == [
+        {
+            "policy_preview_id": str(stale_preview_id),
+            "reason": "worker_stale_running",
+            "age_seconds": 2 * PREVIEW_EXECUTION_DEADLINE_SECONDS,
+        }
+    ]
