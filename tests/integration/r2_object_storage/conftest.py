@@ -61,6 +61,7 @@ from tests.integration.r2_object_storage.cleanup_manifest import (
 from types_aiobotocore_s3 import S3Client
 
 from personal_os.diagnostics import DiagnosticLogger
+from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import ApplicationError
 from personal_os.object_storage import (
     CanonicalMediaType,
@@ -112,6 +113,18 @@ _PAYLOAD_CHUNK_SIZE_BYTES: Final[int] = 1_048_576
 _SANITIZED_FAILURE_DETAILS: Final[str] = "r2_live_failure_details_redacted"
 _ZERO_BYTE_FAILURE_EVENT: Final[str] = "r2_live_zero_byte_failed"
 _ZERO_BYTE_STAGES: Final[frozenset[str]] = frozenset({"store", "resolve", "read"})
+_ZERO_BYTE_PROVIDER_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "provider_client_error",
+        "provider_timeout",
+        "provider_transport_error",
+        "provider_unclassified_error",
+        "diagnostic_emission_failed",
+    }
+)
+_ZERO_BYTE_REASONS: Final[frozenset[str]] = (
+    frozenset(error_code.value for error_code in ErrorCode) | _ZERO_BYTE_PROVIDER_REASONS
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,22 +191,61 @@ def _xml_local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
+def _sanitized_zero_byte_system_out(test_case: ElementTree.Element) -> str | None:
+    """Return the sole safe diagnostic for one failed zero-byte testcase."""
+
+    if test_case.get("name") != "test_zero_byte_round_trip":
+        return None
+    if not any(_xml_local_name(child.tag) in {"failure", "error"} for child in test_case):
+        return None
+    streams = [child for child in test_case if _xml_local_name(child.tag) == "system-out"]
+    if len(streams) != 1 or streams[0].text is None:
+        return None
+    try:
+        record = json.loads(streams[0].text)
+    except json.JSONDecodeError, TypeError:
+        return None
+    if not isinstance(record, dict) or set(record) != {"event", "stage", "reason"}:
+        return None
+    event = record.get("event")
+    stage = record.get("stage")
+    reason = record.get("reason")
+    if (
+        event != _ZERO_BYTE_FAILURE_EVENT
+        or not isinstance(stage, str)
+        or stage not in _ZERO_BYTE_STAGES
+        or not isinstance(reason, str)
+        or reason not in _ZERO_BYTE_REASONS
+    ):
+        return None
+    return ZeroByteLiveDiagnostic(stage=stage, reason=reason).to_json()
+
+
 def sanitize_live_junit_report(raw_report: Path, sanitized_report: Path) -> None:
     """Write a publishable JUnit report with provider failure details removed.
 
     Test identity, status counts and durations remain useful as gate evidence.
-    Failure/error messages and tracebacks, captured streams and arbitrary
-    properties are removed because provider exceptions may contain request or
-    endpoint material. The destination is replaced only after a complete XML
-    document is ready, so sanitizer failure cannot publish a partial report.
+    Failure/error messages and tracebacks, arbitrary streams and properties are
+    removed because provider exceptions may contain request or endpoint
+    material. The sole exception is a canonicalized fixed-schema zero-byte
+    diagnostic in the failed zero-byte testcase. The destination is replaced
+    only after a complete XML document is ready, so sanitizer failure cannot
+    publish a partial report.
     """
 
     tree = ElementTree.parse(raw_report)
     root = tree.getroot()
     for parent in root.iter():
+        zero_byte_system_out = (
+            _sanitized_zero_byte_system_out(parent)
+            if _xml_local_name(parent.tag) == "testcase"
+            else None
+        )
         for child in list(parent):
             local_name = _xml_local_name(child.tag)
-            if local_name in {"properties", "system-out", "system-err"}:
+            if local_name == "system-out" and zero_byte_system_out is not None:
+                child.text = zero_byte_system_out
+            elif local_name in {"properties", "system-out", "system-err"}:
                 parent.remove(child)
             elif local_name in {"failure", "error"}:
                 child.attrib.clear()
