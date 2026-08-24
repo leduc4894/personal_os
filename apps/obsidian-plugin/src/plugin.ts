@@ -355,9 +355,16 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         // (last five entries), the total entry count and the bounded
         // append-failure counter. Closed tokens and timestamps only.
         const trailEntries = this.#diagnosticTrail?.readEntries() ?? [];
+        // Closed-reason surfacing C2 A3: the durable tombstone reason of the
+        // credential record, so "Revoked"/"Not connected" renders its durable
+        // cause — null while no tombstone exists, never a fake success token.
+        const secretRecord = readDeviceSecretRecord(secretStore, DEVICE_CREDENTIAL_RECORD_NAME);
         return {
           connectionState: this.#connectionState,
           statusDetail: this.#statusDetail,
+          // C2 A3: the closed ClearedReason of the terminal tombstone.
+          clearedReason:
+            secretRecord?.state === "cleared" ? secretRecord.cleared_reason : null,
           serverOrigin: this.#settings.server_origin,
           deviceName: this.#settings.device_name,
           hasPendingGrant: this.#settings.pending_grant !== null,

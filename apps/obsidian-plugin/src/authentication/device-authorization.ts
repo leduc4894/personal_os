@@ -11,6 +11,7 @@
 
 import {
   parseServerOrigin,
+  resolveDeviceAuthClosedCode,
   validateDeviceName,
 } from "./contracts";
 import type {
@@ -25,6 +26,7 @@ import type {
   Delay,
   UrlOpener,
 } from "./contracts";
+import { PolicyVerificationError } from "../exclusion-policy/contracts";
 import {
   readDeviceSecretRecord,
   writeActiveDeviceRecord,
@@ -230,7 +232,9 @@ export class DeviceAuthorizationController {
     this.#deps.settings.pending_grant = null;
     this.#deps.settings.secret_record_name = null;
     await this.#deps.persistSettings();
-    this.#deps.onStateChange(nextState, null);
+    // Closed-reason surfacing C2 A3: the terminal ClearedReason is durable
+    // in the tombstone and rides the state seam as the detail.
+    this.#deps.onStateChange(nextState, clearedReason);
   }
 
   #surfaceCreationFailure(error: unknown): void {
@@ -247,7 +251,10 @@ export class DeviceAuthorizationController {
       this.#deps.onStateChange("configuration_invalid", detail);
       return;
     }
-    this.#deps.onStateChange("offline", null);
+    // Closed-reason surfacing C2 A4: the closed code the transport already
+    // produced (transport code or server registry code) reaches the seam
+    // instead of collapsing every non-mapped failure to a null detail.
+    this.#deps.onStateChange("offline", resolveDeviceAuthClosedCode(error));
   }
 
   async #pollUntilTerminal(): Promise<void> {
@@ -291,7 +298,7 @@ export class DeviceAuthorizationController {
           await this.#terminatePendingGrant(outcome.clearedReason, "not_connected");
           return;
         }
-        this.#deps.onStateChange("offline", null);
+        this.#deps.onStateChange("offline", outcome.code);
         return;
       }
       if (this.#stopRequested || this.#deps.settings.pending_grant === null) {
@@ -314,11 +321,16 @@ export class DeviceAuthorizationController {
       await this.#deps.persistSettings();
       try {
         await this.#deps.onExchange(exchange);
-      } catch {
+      } catch (error) {
         // The active refresh credential remains safely stored for a later
         // retry, but a device without a verified policy snapshot must not be
-        // presented as ready to capture or sync content.
-        this.#deps.onStateChange("offline", null);
+        // presented as ready to capture or sync content. Closed-reason
+        // surfacing C2 A1: the policy-trust bootstrap closes with a closed
+        // `policy_*` reason token that now rides the seam instead of being
+        // discarded; a foreign throw keeps the null detail (no raw text).
+        const policyReason =
+          error instanceof PolicyVerificationError ? error.reason : null;
+        this.#deps.onStateChange("offline", policyReason);
         return;
       }
       this.#deps.onStateChange("connected", null);
@@ -330,11 +342,15 @@ export class DeviceAuthorizationController {
    * Classify one poll failure without side effects: pending and slow-down
    * carry the server's exact retry hint, terminal outcomes name their
    * tombstone reason, and everything recoverable is an offline finish that
-   * preserves the record.
+   * preserves the record while carrying the closed code it closed on
+   * (closed-reason surfacing C2 A5).
    */
   #classifyPollFailure(
     error: unknown,
-  ): { kind: "continue"; intervalSeconds?: number } | { kind: "terminal"; clearedReason: ClearedReason } | { kind: "offline" } {
+  ):
+    | { kind: "continue"; intervalSeconds?: number }
+    | { kind: "terminal"; clearedReason: ClearedReason }
+    | { kind: "offline"; code: string | null } {
     const authError = error as DeviceAuthError;
     if (
       authError?.code === "device_authorization_pending" ||
@@ -359,6 +375,6 @@ export class DeviceAuthorizationController {
     ) {
       return { kind: "terminal", clearedReason: "grant_invalid" };
     }
-    return { kind: "offline" };
+    return { kind: "offline", code: resolveDeviceAuthClosedCode(error) };
   }
 }

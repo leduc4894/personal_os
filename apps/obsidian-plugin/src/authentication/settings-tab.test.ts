@@ -16,6 +16,7 @@ vi.mock("obsidian", () => ({
 
 import { renderJournalStoreDiagnosticsLine, renderLocalNoteSyncStatusList } from "./settings-tab";
 import {
+  renderConnectionStatusDescription,
   renderJournalStartupFailureLine,
   renderPolicyStateGuidanceLine,
 } from "./settings-tab";
@@ -158,6 +159,23 @@ describe("DeviceAuthenticationSettingTab source contract", () => {
     }
   });
 
+  it("carries the durable cleared reason beside the terminal state (closed-reason surfacing C2 A3)", () => {
+    // C2 A3: the terminal tombstone `ClearedReason` joins the settings
+    // snapshot and the connection-status description renders it beside the
+    // terminal state text, so "Revoked"/"Not connected" shows its durable
+    // cause. Closed enum value only; null before any tombstone exists.
+    expect(tabSource).toContain("clearedReason");
+    expect(tabSource).toContain("renderConnectionStatusDescription");
+    // Reject any path-leaking pattern in the description builder: closed
+    // tokens and fixed English only.
+    const renderIndex = tabSource.indexOf("export function renderConnectionStatusDescription");
+    expect(renderIndex).toBeGreaterThanOrEqual(0);
+    const renderSnippet = tabSource.slice(renderIndex, renderIndex + 1_100);
+    for (const forbidden of [".md", "notes/", "at1.", "secret", "https://", "Error:"]) {
+      expect(renderSnippet).not.toContain(forbidden);
+    }
+  });
+
   it("offers no control implying automatic full-Vault upload", () => {
     for (const forbiddenLabel of ["Sync all", "Upload all", "Sync everything", "Upload everything"]) {
       expect(tabSource).not.toContain(forbiddenLabel);
@@ -242,6 +260,93 @@ describe("renderJournalStartupFailureLine (closed-reason surfacing C1 P1)", () =
       "journal_schema_unsupported",
     ]);
     expect(line).toBe("Journal startup failed: journal_recovery, journal_schema_unsupported");
+    for (const forbidden of [".md", "notes/", "at1.", "secret", "https://", "Error:"]) {
+      expect(line).not.toContain(forbidden);
+    }
+  });
+});
+
+describe("renderConnectionStatusDescription (closed-reason surfacing C2)", () => {
+  it("renders the live closed-token detail unchanged beside the state text", () => {
+    expect(
+      renderConnectionStatusDescription({
+        connectionState: "offline",
+        statusDetail: "network_unavailable",
+        clearedReason: null,
+      }),
+    ).toBe("Offline — credentials preserved — network_unavailable");
+    expect(
+      renderConnectionStatusDescription({
+        connectionState: "offline",
+        statusDetail: "policy_signature_untrusted_key",
+        clearedReason: null,
+      }),
+    ).toBe("Offline — credentials preserved — policy_signature_untrusted_key");
+  });
+
+  it("renders the durable tombstone reason beside a terminal state with no live detail (A3)", () => {
+    expect(
+      renderConnectionStatusDescription({
+        connectionState: "revoked",
+        statusDetail: null,
+        clearedReason: "device_revoked",
+      }),
+    ).toBe("Revoked — Last cleared reason: device_revoked");
+    expect(
+      renderConnectionStatusDescription({
+        connectionState: "not_connected",
+        statusDetail: null,
+        clearedReason: "login_cancelled",
+      }),
+    ).toBe("Not connected — Last cleared reason: login_cancelled");
+  });
+
+  it("does not duplicate the cleared reason when the live detail already carries it", () => {
+    expect(
+      renderConnectionStatusDescription({
+        connectionState: "revoked",
+        statusDetail: "token_reuse",
+        clearedReason: "token_reuse",
+      }),
+    ).toBe("Revoked — token_reuse");
+  });
+
+  it("keeps the durable cause off non-terminal states", () => {
+    expect(
+      renderConnectionStatusDescription({
+        connectionState: "waiting_for_approval",
+        statusDetail: "ABCD-EFGH",
+        clearedReason: "login_cancelled",
+      }),
+    ).toBe("Waiting for approval — ABCD-EFGH");
+  });
+
+  it("renders no detail before any failure (never a fake success token)", () => {
+    expect(
+      renderConnectionStatusDescription({
+        connectionState: "not_connected",
+        statusDetail: null,
+        clearedReason: null,
+      }),
+    ).toBe("Not connected");
+    expect(
+      renderConnectionStatusDescription({
+        connectionState: "connected",
+        statusDetail: null,
+        clearedReason: null,
+      }),
+    ).toBe("Connected");
+  });
+
+  it("renders closed tokens and fixed English only — no forbidden substrate", () => {
+    const line = renderConnectionStatusDescription({
+      connectionState: "revoked",
+      statusDetail: "policy_signature_untrusted_key",
+      clearedReason: "credential_invalid",
+    });
+    expect(line).toBe(
+      "Revoked — policy_signature_untrusted_key · Last cleared reason: credential_invalid",
+    );
     for (const forbidden of [".md", "notes/", "at1.", "secret", "https://", "Error:"]) {
       expect(line).not.toContain(forbidden);
     }

@@ -10,6 +10,7 @@ import type { App, Plugin } from "obsidian";
 
 import { CONNECTION_STATUS_TEXT, resolveAuthenticationControls } from "./contracts";
 import type { ConnectionState } from "./contracts";
+import type { ClearedReason } from "./secret-storage-record";
 import type { PolicyIntegrityState } from "../exclusion-policy/contracts";
 import type { LifecycleStateCounts, LifecycleBlockedReasonCode } from "../journal/status";
 import { LIFECYCLE_LOCAL_FILE_STATES } from "../journal/lifecycle-contracts";
@@ -29,6 +30,14 @@ export { renderJournalStoreDiagnosticsLine } from "../journal/sync-diagnostics-e
 export interface DeviceAuthenticationSnapshot {
   readonly connectionState: ConnectionState;
   readonly statusDetail: string | null;
+  /**
+   * The durable closed `ClearedReason` of the credential tombstone
+   * (closed-reason surfacing C2 A3): why the record was terminally cleared,
+   * or null while no tombstone exists — never a fake success token.
+   * Rendered beside the terminal connection state so "Revoked"/"Not
+   * connected" shows its durable cause. Closed enum value only.
+   */
+  readonly clearedReason: ClearedReason | null;
   readonly serverOrigin: string;
   readonly deviceName: string;
   readonly hasPendingGrant: boolean;
@@ -122,13 +131,9 @@ export class DeviceAuthenticationSettingTab extends PluginSettingTab {
       hasActiveCredential: snapshot.hasActiveCredential,
     });
 
-    const statusText = CONNECTION_STATUS_TEXT[snapshot.connectionState];
-    const statusDescription =
-      snapshot.statusDetail === null ? statusText : `${statusText} — ${snapshot.statusDetail}`;
-
     new Setting(containerEl)
       .setName("Connection status")
-      .setDesc(statusDescription);
+      .setDesc(renderConnectionStatusDescription(snapshot));
 
     // The small sync status of spec 11: one of the six closed values with
     // counts plus the fixed blocker guidance — display only, never an
@@ -275,6 +280,45 @@ function syncStatusDescription(snapshot: DeviceAuthenticationSnapshot): string {
     return "Journal not running on this device";
   }
   return lines.join(" ");
+}
+
+/**
+ * The closed connection states whose durable tombstone cause renders beside
+ * the state text (closed-reason surfacing C2 A3): the two terminal states a
+ * cleared credential record leaves behind.
+ */
+const TERMINAL_CONNECTION_STATES: readonly ConnectionState[] = ["revoked", "not_connected"];
+
+/**
+ * Render the connection-status description (closed-reason surfacing C2): the
+ * fixed state text, then the live closed-token detail the state seam carried
+ * (A1/A2/A4/A5), then — beside a terminal state only — the durable tombstone
+ * `ClearedReason` when the live detail does not already show it (A3). Closed
+ * tokens and fixed English only; null inputs render nothing (never a fake
+ * success token).
+ */
+export function renderConnectionStatusDescription(
+  snapshot: Pick<
+    DeviceAuthenticationSnapshot,
+    "connectionState" | "statusDetail" | "clearedReason"
+  >,
+): string {
+  const statusText = CONNECTION_STATUS_TEXT[snapshot.connectionState];
+  const parts: string[] = [];
+  if (snapshot.statusDetail !== null) {
+    parts.push(snapshot.statusDetail);
+  }
+  const isTerminalConnectionState = TERMINAL_CONNECTION_STATES.includes(
+    snapshot.connectionState,
+  );
+  if (
+    isTerminalConnectionState &&
+    snapshot.clearedReason !== null &&
+    snapshot.clearedReason !== snapshot.statusDetail
+  ) {
+    parts.push(`Last cleared reason: ${snapshot.clearedReason}`);
+  }
+  return parts.length === 0 ? statusText : `${statusText} — ${parts.join(" · ")}`;
 }
 
 /**

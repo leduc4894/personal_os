@@ -127,6 +127,20 @@ export class DeviceAuthError extends Error {
   }
 }
 
+/**
+ * Resolve the closed transport code a thrown value carries, or null when the
+ * value is not a mapped device-authentication failure (closed-reason
+ * surfacing C2). Only the already-closed code vocabulary can pass: the
+ * exception message and any foreign error's raw properties never do, so the
+ * result is safe to render as a state-change detail.
+ */
+export function resolveDeviceAuthClosedCode(error: unknown): string | null {
+  if (error instanceof DeviceAuthError && error.code !== "") {
+    return error.code;
+  }
+  return null;
+}
+
 // --- hand-written wire shapes (mirror schema.ts) -------------------------------------
 
 /** Mirrors `DevicePlatformClass` of schema.ts (spec 11.1). */

@@ -10,7 +10,7 @@
  * with a credential-free tombstone; offline preserves everything.
  */
 
-import { DeviceAuthError } from "./contracts";
+import { DeviceAuthError, resolveDeviceAuthClosedCode } from "./contracts";
 import type {
   ConnectionState,
   DeviceApiTransport,
@@ -130,10 +130,14 @@ export class DeviceTokenSession {
       return;
     }
     if (code === "network_unavailable") {
-      this.#deps.onStateChange("offline", null);
+      // Closed-reason surfacing C2 A2: the closed code the failure already
+      // holds rides the seam instead of a null detail.
+      this.#deps.onStateChange("offline", "network_unavailable");
       return;
     }
-    this.#deps.onStateChange("refresh_required", null);
+    // Closed-reason surfacing C2 A2: the unknown fallback still carries the
+    // closed server code it closed on; only a foreign throw keeps null.
+    this.#deps.onStateChange("refresh_required", resolveDeviceAuthClosedCode(error));
   }
 
   async #clearTerminalRecord(
@@ -144,7 +148,9 @@ export class DeviceTokenSession {
     this.#deps.settings.secret_record_name = null;
     this.#accessCredential = null;
     await this.#deps.persistSettings();
-    this.#deps.onStateChange(nextState, null);
+    // Closed-reason surfacing C2 A3: the terminal ClearedReason is durable
+    // in the tombstone and rides the state seam as the detail.
+    this.#deps.onStateChange(nextState, clearedReason);
   }
 
   /**
@@ -171,7 +177,9 @@ export class DeviceTokenSession {
         return;
       }
       if (code === "network_unavailable") {
-        this.#deps.onStateChange("offline", null);
+        // Closed-reason surfacing C2 A2: same closed token as the refresh
+        // network failure — the code the transport already produced.
+        this.#deps.onStateChange("offline", "network_unavailable");
       }
       throw error;
     }

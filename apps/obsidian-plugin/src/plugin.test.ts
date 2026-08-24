@@ -600,12 +600,13 @@ describe("Obsidian plugin composition root", () => {
     // Fix round 1 I1: the settings snapshot holds the same four lifecycle
     // fields so the settings tab can render the histogram and the blocked
     // reason codes list. Without this the operator can never see the
-    // security-grade redacted lifecycle surface.
+    // security-grade redacted lifecycle surface. The window grew with the
+    // cleared-reason tombstone read (closed-reason surfacing C2 A3).
     const snapshotBuilderIndex = pluginSource.indexOf("getSnapshot: () => {");
     expect(snapshotBuilderIndex).toBeGreaterThanOrEqual(0);
     const snapshotBuilderBody = pluginSource.slice(
       snapshotBuilderIndex,
-      snapshotBuilderIndex + 2_000,
+      snapshotBuilderIndex + 2_600,
     );
     expect(snapshotBuilderBody).toContain("lifecycleStateCounts");
     expect(snapshotBuilderBody).toContain("pendingLifecycleEventCount");
@@ -743,6 +744,20 @@ describe("Obsidian plugin composition root", () => {
     const snapshotIndex = pluginSource.indexOf("getSnapshot: () => {");
     const snapshotBody = pluginSource.slice(snapshotIndex, snapshotIndex + 3_400);
     expect(snapshotBody).toContain("policyState: this.#policyState");
+  });
+
+  it("carries the durable tombstone cleared reason on the settings snapshot (closed-reason surfacing C2 A3)", () => {
+    // A3: the terminal tombstone `ClearedReason` is durable in the SecretStorage
+    // record but previously never reached the settings snapshot, so
+    // "Revoked"/"Not connected" rendered no durable cause. The snapshot builder
+    // must derive the closed enum value from the record — null-safe while no
+    // tombstone exists, never a fake success token.
+    const snapshotIndex = pluginSource.indexOf("getSnapshot: () => {");
+    const snapshotBody = pluginSource.slice(snapshotIndex, snapshotIndex + 3_600);
+    expect(snapshotBody).toContain("readDeviceSecretRecord(secretStore, DEVICE_CREDENTIAL_RECORD_NAME)");
+    expect(snapshotBody).toContain('state === "cleared"');
+    expect(snapshotBody).toContain("clearedReason:");
+    expect(snapshotBody).toContain("cleared_reason");
   });
 
   it("routes exceptional throws of the two fire-and-forget startup chains into the startup-failure path (closed-reason surfacing C1 P4)", () => {

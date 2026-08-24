@@ -6,6 +6,7 @@ import type {
   DeviceAuthenticationSettings,
   SecretStorageRecordAdapter,
 } from "./contracts";
+import { policyVerificationError } from "../exclusion-policy/contracts";
 import { DEVICE_CREDENTIAL_RECORD_NAME } from "./secret-storage-record";
 
 const SERVER_ORIGIN = "https://vault.example.com";
@@ -94,6 +95,7 @@ interface TestHarness {
   openUrl: ReturnType<typeof vi.fn>;
   timeline: ManualTimeline;
   states: string[];
+  stateDetails: (string | null)[];
   onExchange: ReturnType<typeof vi.fn>;
   pendingGrantsAtOpenUrl: unknown[];
 }
@@ -122,6 +124,7 @@ function createHarness(overrides: Partial<DeviceAuthenticationSettings> = {}): T
   };
   const timeline = new ManualTimeline();
   const states: string[] = [];
+  const stateDetails: (string | null)[] = [];
   const onExchange = vi.fn();
   const persistSettings = vi.fn(async () => undefined);
   const pendingGrantsAtOpenUrl: unknown[] = [];
@@ -146,8 +149,9 @@ function createHarness(overrides: Partial<DeviceAuthenticationSettings> = {}): T
     openUrl,
     delay: timeline.delay,
     nowEpochMs: () => timeline.nowMs,
-    onStateChange: (state) => {
+    onStateChange: (state, detail) => {
       states.push(state);
+      stateDetails.push(detail);
     },
     onExchange,
   });
@@ -161,6 +165,7 @@ function createHarness(overrides: Partial<DeviceAuthenticationSettings> = {}): T
     openUrl,
     timeline,
     states,
+    stateDetails,
     onExchange,
     pendingGrantsAtOpenUrl,
   };
@@ -654,5 +659,118 @@ describe("crash-window reconciliation of the pending reference", () => {
     expect(harness.settings.pending_grant).toBeNull();
     expect(harness.settings.secret_record_name).toBe(DEVICE_CREDENTIAL_RECORD_NAME);
     expect(harness.states[harness.states.length - 1]).toBe("connected");
+  });
+});
+
+describe("closed failure-reason detail surfacing (closed-reason surfacing C2)", () => {
+  it("surfaces the closed policy token of a failed onboarding exchange (A1)", async () => {
+    const harness = createHarness();
+    harness.transport.createGrant.mockResolvedValue(GRANT_DATA);
+    harness.transport.pollGrant.mockResolvedValue(EXCHANGE_DATA);
+    harness.onExchange.mockRejectedValue(
+      policyVerificationError("policy_signature_untrusted_key"),
+    );
+
+    const loginPromise = harness.controller.login();
+    await harness.timeline.releaseOneDelay();
+    await loginPromise;
+
+    expect(harness.states[harness.states.length - 1]).toBe("offline");
+    expect(harness.stateDetails[harness.stateDetails.length - 1]).toBe(
+      "policy_signature_untrusted_key",
+    );
+  });
+
+  it("keeps a null detail when the exchange bootstrap throws a foreign error (A1)", async () => {
+    const harness = createHarness();
+    harness.transport.createGrant.mockResolvedValue(GRANT_DATA);
+    harness.transport.pollGrant.mockResolvedValue(EXCHANGE_DATA);
+    harness.onExchange.mockRejectedValue(new Error("unmapped exchange failure"));
+
+    const loginPromise = harness.controller.login();
+    await harness.timeline.releaseOneDelay();
+    await loginPromise;
+
+    expect(harness.states[harness.states.length - 1]).toBe("offline");
+    expect(harness.stateDetails[harness.stateDetails.length - 1]).toBeNull();
+  });
+
+  it("surfaces network_unavailable on a creation network failure (A4)", async () => {
+    const harness = createHarness();
+    harness.transport.createGrant.mockRejectedValue(
+      new DeviceAuthError("network_unavailable", { status: 0, message: "offline", isLocal: true }),
+    );
+
+    await harness.controller.login();
+
+    expect(harness.states[harness.states.length - 1]).toBe("offline");
+    expect(harness.stateDetails[harness.stateDetails.length - 1]).toBe("network_unavailable");
+  });
+
+  it("surfaces the closed server code of an unmapped grant-creation failure (A4)", async () => {
+    const harness = createHarness();
+    harness.transport.createGrant.mockRejectedValue(
+      new DeviceAuthError("authentication_rate_limited", {
+        status: 429,
+        message: "rate limited",
+      }),
+    );
+
+    await harness.controller.login();
+
+    expect(harness.states[harness.states.length - 1]).toBe("offline");
+    expect(harness.stateDetails[harness.stateDetails.length - 1]).toBe(
+      "authentication_rate_limited",
+    );
+  });
+
+  it("surfaces network_unavailable on a poll network failure (A5)", async () => {
+    const harness = createHarness();
+    harness.transport.createGrant.mockResolvedValue(GRANT_DATA);
+    harness.transport.pollGrant.mockRejectedValue(
+      new DeviceAuthError("network_unavailable", { status: 0, message: "offline", isLocal: true }),
+    );
+
+    const loginPromise = harness.controller.login();
+    await harness.timeline.releaseOneDelay();
+    await loginPromise;
+
+    expect(harness.states[harness.states.length - 1]).toBe("offline");
+    expect(harness.stateDetails[harness.stateDetails.length - 1]).toBe("network_unavailable");
+  });
+
+  it("surfaces the closed server code of an unmapped poll failure (A5)", async () => {
+    const harness = createHarness();
+    harness.transport.createGrant.mockResolvedValue(GRANT_DATA);
+    harness.transport.pollGrant.mockRejectedValue(
+      new DeviceAuthError("database_connection_unavailable", {
+        status: 503,
+        message: "unavailable",
+      }),
+    );
+
+    const loginPromise = harness.controller.login();
+    await harness.timeline.releaseOneDelay();
+    await loginPromise;
+
+    expect(harness.states[harness.states.length - 1]).toBe("offline");
+    expect(harness.stateDetails[harness.stateDetails.length - 1]).toBe(
+      "database_connection_unavailable",
+    );
+  });
+
+  it("surfaces the terminal ClearedReason beside a denied grant (A3)", async () => {
+    const harness = createHarness();
+    harness.transport.createGrant.mockResolvedValue(GRANT_DATA);
+    harness.transport.pollGrant.mockRejectedValue(
+      new DeviceAuthError("device_authorization_denied", { status: 403, message: "denied" }),
+    );
+
+    const loginPromise = harness.controller.login();
+    await harness.timeline.releaseOneDelay();
+    await loginPromise;
+
+    expect(harness.states[harness.states.length - 1]).toBe("not_connected");
+    expect(harness.stateDetails[harness.stateDetails.length - 1]).toBe("grant_denied");
   });
 });

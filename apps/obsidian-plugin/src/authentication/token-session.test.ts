@@ -42,6 +42,7 @@ interface SessionHarness {
   settings: DeviceAuthenticationSettings;
   persistSettings: ReturnType<typeof vi.fn>;
   states: string[];
+  stateDetails: (string | null)[];
 }
 
 function createSessionHarness(
@@ -78,6 +79,7 @@ function createSessionHarness(
   };
   const persistSettings = vi.fn(async () => undefined);
   const states: string[] = [];
+  const stateDetails: (string | null)[] = [];
   const session = new DeviceTokenSession({
     transport,
     secretStore: secretStorage,
@@ -85,11 +87,12 @@ function createSessionHarness(
     settings,
     persistSettings,
     createRotationId: () => "22222222-2222-4222-8222-222222222222",
-    onStateChange: (state) => {
+    onStateChange: (state, detail) => {
       states.push(state);
+      stateDetails.push(detail);
     },
   });
-  return { session, transport, secretStorage, stored, settings, persistSettings, states };
+  return { session, transport, secretStorage, stored, settings, persistSettings, states, stateDetails };
 }
 
 function lastStoredJson(harness: SessionHarness): Record<string, unknown> {
@@ -348,5 +351,103 @@ describe("resolveStartupAction", () => {
     ).toBe("none");
 
     expect(resolveStartupAction(null)).toBe("none");
+  });
+});
+
+describe("closed failure-reason detail surfacing (closed-reason surfacing C2)", () => {
+  it("surfaces network_unavailable on a refresh network failure (A2)", async () => {
+    const harness = createSessionHarness();
+    harness.transport.refresh.mockRejectedValue(
+      new DeviceAuthError("network_unavailable", {
+        status: 0,
+        message: "offline",
+        isLocal: true,
+      }),
+    );
+
+    await expect(harness.session.refresh()).rejects.toMatchObject({
+      code: "network_unavailable",
+    });
+
+    expect(harness.states).toEqual(["offline"]);
+    expect(harness.stateDetails).toEqual(["network_unavailable"]);
+  });
+
+  it("surfaces the closed server code of an unmapped refresh failure (A2)", async () => {
+    const harness = createSessionHarness();
+    harness.transport.refresh.mockRejectedValue(
+      new DeviceAuthError("database_connection_unavailable", {
+        status: 503,
+        message: "unavailable",
+      }),
+    );
+
+    await expect(harness.session.refresh()).rejects.toMatchObject({
+      code: "database_connection_unavailable",
+    });
+
+    expect(harness.states).toEqual(["refresh_required"]);
+    expect(harness.stateDetails).toEqual(["database_connection_unavailable"]);
+  });
+
+  it("surfaces the terminal ClearedReason when a refresh failure tombstones the record (A3)", async () => {
+    const reuseHarness = createSessionHarness();
+    reuseHarness.transport.refresh.mockRejectedValue(deviceTokenReuseError());
+    await expect(reuseHarness.session.refresh()).rejects.toMatchObject({
+      code: "device_token_reuse_detected",
+    });
+    expect(reuseHarness.states).toEqual(["revoked"]);
+    expect(reuseHarness.stateDetails).toEqual(["token_reuse"]);
+
+    const revokedHarness = createSessionHarness();
+    revokedHarness.transport.refresh.mockRejectedValue(
+      new DeviceAuthError("device_revoked", { status: 401, message: "revoked" }),
+    );
+    await expect(revokedHarness.session.refresh()).rejects.toMatchObject({ code: "device_revoked" });
+    expect(revokedHarness.states).toEqual(["revoked"]);
+    expect(revokedHarness.stateDetails).toEqual(["device_revoked"]);
+
+    const invalidHarness = createSessionHarness();
+    invalidHarness.transport.refresh.mockRejectedValue(
+      new DeviceAuthError("device_credential_invalid", {
+        status: 401,
+        message: "credential is no longer valid",
+      }),
+    );
+    await expect(invalidHarness.session.refresh()).rejects.toMatchObject({
+      code: "device_credential_invalid",
+    });
+    expect(invalidHarness.states).toEqual(["revoked"]);
+    expect(invalidHarness.stateDetails).toEqual(["credential_invalid"]);
+  });
+
+  it("surfaces network_unavailable and the self-disconnect ClearedReason on disconnect (A2/A3)", async () => {
+    const offlineHarness = createSessionHarness();
+    offlineHarness.transport.revokeCurrent.mockRejectedValue(
+      new DeviceAuthError("network_unavailable", {
+        status: 0,
+        message: "offline",
+        isLocal: true,
+      }),
+    );
+    await expect(offlineHarness.session.disconnect()).rejects.toMatchObject({
+      code: "network_unavailable",
+    });
+    expect(offlineHarness.states[offlineHarness.states.length - 1]).toBe("offline");
+    expect(offlineHarness.stateDetails[offlineHarness.stateDetails.length - 1]).toBe(
+      "network_unavailable",
+    );
+
+    const disconnectedHarness = createSessionHarness();
+    disconnectedHarness.transport.revokeCurrent.mockResolvedValue({
+      device_id: "77777777-7777-4777-8777-777777777777",
+      token_family_id: "88888888-8888-4888-8888-888888888888",
+      revoked_at: "2026-08-16T10:10:00Z",
+    });
+    await disconnectedHarness.session.disconnect();
+    expect(disconnectedHarness.states[disconnectedHarness.states.length - 1]).toBe("not_connected");
+    expect(
+      disconnectedHarness.stateDetails[disconnectedHarness.stateDetails.length - 1],
+    ).toBe("self_disconnect");
   });
 });
