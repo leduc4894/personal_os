@@ -15,9 +15,18 @@ The operator surface is small and deliberately redacted:
 - Two **commands**: `Run sync self-check` and `Copy sync diagnostics`,
   alongside the `Restore selected tombstone` command — exactly these
   three commands are registered in the plugin's command palette.
-- One **settings section**: `Sync diagnostics trail`.
-- One **admin route**: `GET /api/admin/sync/rejections` on the API, behind
-  the strict Web Admin session gate.
+- One **settings section**: `Sync diagnostics trail`, plus the settings
+  **detail lines** that render the closed failure reasons of the
+  composition and auth layers (journal startup failure, policy state,
+  connection detail, last cleared reason).
+- Two **admin routes**: `GET /api/admin/sync/rejections` (small-file sync)
+  and `GET /api/admin/source-lifecycle/rejections` (source lifecycle), and
+  the Admin policy status read `GET /api/admin/exclusion-policy` whose
+  summary carries the reconciliation reason and the stale-running
+  staleness block — all behind the strict Web Admin session gate.
+- The worker **dispatch events** (`preview_dispatch_unavailable`,
+  `reconciliation_dispatch_unavailable`) riding the structured logging
+  boundary.
 
 Every one of these surfaces carries ONLY closed tokens, counts and
 ISO-8601 UTC timestamps. No path, hostname, origin, credential, digest,
@@ -43,15 +52,18 @@ counter (capped at 999) that the settings section surfaces.
 | ----------------- | ----------------------------------------------------------------------------------------------- |
 | `wire_failure`    | One sync HTTP request failed; carries the closed `SyncApiFailureKind` label and, when the server answered with an envelope, the opaque `request_id` token. |
 | `pass_outcome`    | Every finished queue pass; carries the closed `QueuePassOutcome`. A success that returned a server envelope may sample its `request_id` onto the entry. |
-| `journal_failure` | A journal mutation inside the pass loop failed; carries the closed `JournalStoreErrorReason`.   |
+| `journal_failure` | A journal mutation inside the pass loop failed; carries the closed `JournalStoreErrorReason`. Also carries the bounded composition read-failure tokens (`status_read_failed`, `note_status_read_failed`) when a settings/snapshot journal read was swallowed — at most once per session per site. |
 | `publish_failure` | A journal generation publish failed; carries the closed `JournalStoreErrorReason`.               |
 | `trail_reset`     | The sidecar was unreadable or corrupt and the trail reset to empty.                             |
 | `self_check`      | A `Run sync self-check` step closed; carries the fixed self-check verdict tokens.               |
+| `startup_failure` | The journal startup chain (engine load, wasm read, journal recovery, or a fire-and-forget startup action) threw and capture failed closed; carries exactly one startup stage token, plus the closed `JournalStoreErrorReason` when the throw is a store error. The same tokens persist in the settings snapshot as the `lastStartupFailureTokens` field. |
 
 The closed token vocabularies are exactly the existing sync vocabularies:
 
 - `QueuePassOutcome`: `completed`, `deadline_reached`, `stopped`,
-  `login_required`, `retry_scheduled`, `pass_already_running`.
+  `login_required`, `retry_scheduled`, `pass_already_running`,
+  `pass_wrapper_failed` (the pass wrapper itself threw — an honest
+  failure, never rendered as `completed`).
 - `SyncApiFailureKind`: `network_offline`, `network_timeout`,
   `network_rate_limited`, `server_error`, `access_expired`,
   `login_required`, `blocked_size`, `integrity_failed`,
@@ -71,6 +83,10 @@ The closed token vocabularies are exactly the existing sync vocabularies:
 - Self-check verdicts: `trail_probe`, `trail_persist_ok`,
   `trail_persist_failed`, `credential_present`, `credential_absent`,
   `origin_reachable`, `origin_unreachable`.
+- Startup stage tokens (`startup_failure` kind): `engine_load`,
+  `wasm_read`, `journal_recovery`, `other`.
+- Composition read-failure tokens (ride the `journal_failure` kind):
+  `status_read_failed`, `note_status_read_failed`.
 
 The one opaque value that may ride along is the server envelope's
 `request_id` (a UUID), rendered as `request_id=<uuid>`. It is the
@@ -159,6 +175,43 @@ durable trail into three lines:
   the bounded swallowed-append-failure counter (a non-zero counter means
   the sidecar write path is failing even though sync continues).
 - **The last five entries** — the same closed lines the export renders.
+
+## Settings detail lines (startup, policy state, auth reasons)
+
+The settings tab renders four more closed-token lines beside the trail
+section. Each is fixed English keyed by a closed enum value — no path,
+hostname, credential or free-form text can enter any of them, and every
+field is null-safe (absent before the first failure, never a fake success
+token):
+
+- **Journal startup failure** — `Journal startup failed: <stage token>[, <store reason>]`,
+  rendered inside the Sync status description whenever the snapshot's
+  `lastStartupFailureTokens` field is non-null. The same tokens ride the
+  trail's `startup_failure` kind and the self-check's "journal not
+  running" notice, so one startup failure is readable from three places.
+- **Policy state** — one fixed guidance line per closed policy integrity
+  state (`policy_not_initialized`, `policy_ready`,
+  `policy_refresh_required`, `policy_offline_cached`,
+  `policy_integrity_failed`). `policy_integrity_failed` gates capture, so
+  this line is the only settings-side answer to "why did syncing silently
+  stop" when policy trust broke.
+- **Connection detail** — the auth state seam's closed reason token
+  (transport codes, `policy_*` tokens, closed server codes) appended to
+  the fixed connection status text when a failure transition carries one.
+- **Last cleared reason** — `Last cleared reason: <token>` beside a
+  terminal connection state, from the durable credential tombstone's
+  closed `ClearedReason` (`token_reuse`, `device_revoked`,
+  `credential_invalid`, `grant_denied`, `grant_expired`, `grant_invalid`,
+  `login_cancelled`, `self_disconnect`).
+
+Sanitized example (shape only):
+
+```text
+Sync status: Offline — network_unavailable
+Policy state: Policy integrity failed: capture is stopped until policy trust is re-established through the authorized login flow.
+Journal startup failed: journal_recovery, journal_store_unavailable
+Last cleared reason: device_revoked
+```
 
 ## Correlate a client failure with API access logs (the request_id join)
 
@@ -253,12 +306,111 @@ client never saw (or never reached) the rejecting exchange, while a
 `wire_failure · request_id` entry with no server-side line for that UUID
 means the request never arrived.
 
+## Web Admin source lifecycle rejection diagnostics
+
+The source lifecycle domain exposes the same evidence shape at
+`GET /api/admin/source-lifecycle/rejections`, behind the identical strict
+Web Admin session gate and envelope contract. Two shapes come back inside
+the envelope's `data`:
+
+- `commit_counters` — rows of `{operation, outcome, count}`, one per
+  observed (operation, outcome) pair. `operation` is the closed lifecycle
+  label `rename`, `move`, `delete` or `restore`; `outcome` is `committed`,
+  `rejected` or `replayed`.
+- `recent_rejections` — the bounded ring of the last 50 rejections, oldest
+  first, each `{error_code, at_epoch_ms, operation}`.
+
+`error_code` is the closed source lifecycle error registry:
+
+| `error_code`                              | Meaning                                              |
+| ----------------------------------------- | ---------------------------------------------------- |
+| `source_lifecycle_input_invalid`          | The lifecycle command failed closed validation.     |
+| `source_locator_missing`                  | The expected locator evidence did not match.         |
+| `source_locator_conflict`                 | Another active locator occupies the target path.     |
+| `source_tombstone_not_found`              | The referenced tombstone is unknown.                 |
+| `source_tombstone_closed`                 | The referenced tombstone no longer accepts restores. |
+| `source_lifecycle_version_conflict`       | The expected version did not match the current row.  |
+| `source_lifecycle_commit_outcome_unknown` | The commit's outcome stayed unknown (retryable).     |
+
+Sanitized example (shape only):
+
+```json
+{
+  "request_id": "018f6d02-4c61-7b0e-9c1d-2e3f4a5b6c7d",
+  "data": {
+    "commit_counters": [
+      { "operation": "delete", "outcome": "committed", "count": 2 }
+    ],
+    "recent_rejections": [
+      { "error_code": "source_locator_conflict", "at_epoch_ms": 1784546400000, "operation": "restore" }
+    ]
+  },
+  "error": null,
+  "warnings": []
+}
+```
+
+The same in-memory caveats as the sync ring apply. This route answers the
+server half of a typed 4xx that the plugin parks as
+`blocked_conflict`/`deferred_lifecycle`: the plugin trail names the
+outcome, this ring names the closed rejection reason.
+
+## Policy worker diagnostics (dispatch events, reconciliation reason, stale running)
+
+Three surfaces cover the policy worker failure modes — the "preview stuck
+running forever" class included:
+
+- **Worker dispatch events.** When the preview or reconciliation dispatch
+  loop swallows an unexpected start failure (the lease outcome stays
+  unknown and lease expiry reclaims it), the worker emits one closed
+  structured event: `preview_dispatch_unavailable` or
+  `reconciliation_dispatch_unavailable`. The event carries exactly the
+  opaque row id (`policy_preview_id` / `policy_reconciliation_intent_id`),
+  the `attempt_count`, and the closed `exception_type` /
+  `stack_fingerprint` reductions — never provider text, workflow identity
+  or exception arguments. The events ride the structured logging boundary,
+  so they appear in the worker's log stream and — when the worker process
+  runs with its own `KNOWLEDGE_DIAGNOSTICS_LOG_DIR` — in its rotating file
+  sink. Sanitized example line (shape only):
+  `preview_dispatch_unavailable · policy_preview_id=… · attempt_count=2 · exception_type=temporalio.client.workflowstartfailure · stack_fingerprint=…`.
+- **Reconciliation reason.** The Admin policy status read
+  (`GET /api/admin/exclusion-policy`) renders the latest reconciliation
+  intent with its durable `safe_error_code` — the closed failure reason
+  recorded on the row, `null` while no failure is recorded. A "failed"
+  reconciliation now names its closed code instead of only its state.
+- **Stale running staleness block.** The same status read carries
+  `stale_running_previews`: `null` while nothing is stale, else one row
+  per preview still in an executable state (`pending`, `leased`,
+  `running`) whose age exceeds the domain's execution deadline (15
+  minutes) — each `{policy_preview_id, reason, age_seconds}` with the
+  fixed reason token `worker_stale_running`. The verdict is computed on
+  read against the database clock: a row older than the bound proves no
+  worker is sweeping it. Nothing is restarted or scheduled by this
+  surface; the operator decides.
+
+Sanitized example (shape only):
+
+```json
+"stale_running_previews": [
+  { "policy_preview_id": "…", "reason": "worker_stale_running", "age_seconds": 4073 }
+]
+```
+
+Worker file-sink note: the rotating sink is activated per process by the
+`KNOWLEDGE_DIAGNOSTICS_LOG_DIR` runtime setting — the worker launchers do
+not set it by default, so an operator who wants durable worker dispatch
+events gives each worker process its own diagnostics directory (never a
+shared directory; the sink rotates files under an exclusive lock).
+
 ## Privacy invariants
 
-- The sidecar, the export block, the settings section, the notices and
-  the admin route carry only closed tokens, counts and timestamps — no
-  paths, hostnames, origins, credentials, digests, source ids, device ids
-  or free-form strings.
+- The sidecar, the export block, the settings section, the settings
+  detail lines, the notices and the admin routes carry only closed
+  tokens, counts and timestamps — no paths, hostnames, origins,
+  credentials, digests, source ids, device ids or free-form strings.
+- The worker dispatch events carry only the opaque row id, the attempt
+  count and the closed exception-type/stack-fingerprint reductions —
+  never provider text, a workflow identity or any exception argument.
 - The closed vocabularies are enforced at the type level in the plugin (a
   free-form string cannot enter a trail entry) and by contract tests on
   both sides, including forbidden-substrate scans for path-shaped and
@@ -274,6 +426,9 @@ means the request never arrived.
 - Design contract (`docs/superpowers/specs/2026-08-23-sync-error-tracing-observability-design.md`)
   — the trail, export, self-check, correlation and admin-route contracts
   this guide operates.
+- Remediation contract (`docs/superpowers/specs/2026-08-24-closed-reason-surfacing-remediation-design.md`)
+  — the startup/pass/policy-state/auth detail tokens, the lifecycle admin
+  route, the worker dispatch events and the stale-running surface.
 - Plugin modules (`apps/obsidian-plugin/src/journal/sync-diagnostics-trail.ts`,
   `sync-diagnostics-export.ts`, `sync-self-check.ts`) — the closed
   vocabularies and bounds.
@@ -307,3 +462,25 @@ plan's open park diagnosis) is recorded in the plan handoff
 (`docs/handoff/2026-08-23-sync-error-tracing-observability.md`); until
 that round runs, treat the loop as specified-but-not-yet-observed. Any
 recorded evidence must stay sanitized exactly like the examples above.
+
+The remediation surfaces add one failure class each to the loop:
+
+1. **Wrong-origin auth failure (settings detail tokens).** Point the
+   plugin at an origin that rejects the credential, let one refresh or
+   grant poll fail, then read the settings Connection detail line — it
+   must name the closed transport/server token, not a bare state.
+2. **Stopped policy worker (staleness line).** With the stack up and a
+   preview dispatched, stop the preview worker and wait past the 15
+   minute bound, then read the Admin policy status: the
+   `stale_running_previews` block must carry `worker_stale_running` with
+   the row's age. Restart the worker afterwards; the rows converge or
+   fail closed on their own.
+3. **Lifecycle rejections (admin route).** After any typed lifecycle 4xx
+   (a locator conflict is the cheap trigger), read
+   `GET /api/admin/source-lifecycle/rejections` and match the ring's
+   `error_code` against the plugin trail's parked outcome.
+
+None of these live rounds has been observed yet — the remediation
+handoff (`docs/handoff/2026-08-24-closed-reason-surfacing-remediation.md`)
+tracks them as its one open gate. No live claim of completion may be
+made until they run.
