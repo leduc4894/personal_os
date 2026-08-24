@@ -30,6 +30,9 @@ from personal_os.object_storage.contracts import ExpectedObject
 from personal_os.object_storage.errors import (
     SIZE_MISMATCH,
     SIZE_OUT_OF_RANGE,
+    SPOOL_ADMISSION_WINDOW_EXPIRED,
+    SPOOL_FREE_SPACE,
+    SPOOL_PERMITS_EXHAUSTED,
     STREAM_INVALID,
     ObjectStorageError,
 )
@@ -201,13 +204,17 @@ class SpoolManager:
     Admission gates four process-wide in-flight receive permits and a shared
     reservation budget through one :class:`asyncio.Condition`; a receive or
     verification reservation waits for local admission inside its ten-minute
-    window and maps a wait timeout to retryable ``object_storage_busy``. A
-    stream that fails to complete inside its admitted receive window maps to
-    non-retryable ``object_storage_input_invalid`` with
-    ``reason=stream_invalid``. Every path removes the spool file and releases
-    the reservation exactly once. Two clocks are injected: a monotonic clock
-    (``time.monotonic``) for receive/admission deadlines and a wall clock
-    (``time.time``) for janitor age checks against epoch file mtimes.
+    window and maps a lapsed wait to retryable ``object_storage_busy`` carrying
+    a closed ``reason`` token: ``spool_permits_exhausted`` when the loop's own
+    deadline check fires after a capacity wait, ``spool_admission_window_expired``
+    when the outer wait overruns the window, and ``spool_free_space`` when the
+    filesystem free-space reserve is violated. A stream that fails to complete
+    inside its admitted receive window maps to non-retryable
+    ``object_storage_input_invalid`` with ``reason=stream_invalid``. Every path
+    removes the spool file and releases the reservation exactly once. Two clocks
+    are injected: a monotonic clock (``time.monotonic``) for receive/admission
+    deadlines and a wall clock (``time.time``) for janitor age checks against
+    epoch file mtimes.
     """
 
     def __init__(
@@ -389,7 +396,10 @@ class SpoolManager:
     async def _require_free_space_reserve(self, size_bytes: int) -> None:
         disk_usage = await asyncio.to_thread(self._disk_usage, self._root)
         if disk_usage.free - size_bytes < self._limits.free_space_reserve_bytes:
-            raise ObjectStorageError(ErrorCode.OBJECT_STORAGE_BUSY)
+            raise ObjectStorageError(
+                ErrorCode.OBJECT_STORAGE_BUSY,
+                safe_details={"reason": SPOOL_FREE_SPACE},
+            )
 
     def _acquire_admission_locked(
         self,
@@ -429,8 +439,20 @@ class SpoolManager:
 
         try:
             await asyncio.wait_for(acquire_when_available(), timeout=deadline - self._clock())
-        except TimeoutError, _AdmissionWindowExpired:
-            raise ObjectStorageError(ErrorCode.OBJECT_STORAGE_BUSY) from None
+        except _AdmissionWindowExpired:
+            # The loop's deadline check is reached only after a capacity wait,
+            # so admission was denied by permits or the reservation budget.
+            raise ObjectStorageError(
+                ErrorCode.OBJECT_STORAGE_BUSY,
+                safe_details={"reason": SPOOL_PERMITS_EXHAUSTED},
+            ) from None
+        except TimeoutError:
+            # The admission wait itself overran the receive window without the
+            # loop's own deadline check observing a release.
+            raise ObjectStorageError(
+                ErrorCode.OBJECT_STORAGE_BUSY,
+                safe_details={"reason": SPOOL_ADMISSION_WINDOW_EXPIRED},
+            ) from None
 
     async def _release_admission(
         self,

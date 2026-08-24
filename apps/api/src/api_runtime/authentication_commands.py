@@ -21,7 +21,9 @@ transaction (the one the store commits).
 Exit codes follow the process-shell conventions: ``0`` on success, ``2`` for
 operator-input validation failures (mirroring argparse syntax failures),
 ``78`` for typed closed :class:`ApplicationError` rejections and ``70`` for
-any unexpected internal failure. stdout carries only the closed result line —
+any unexpected internal failure. The ``70`` stderr line appends the unexpected
+exception's class name as one closed sanitized snake_case token — never its
+message or traceback. stdout carries only the closed result line —
 the enrollment flag with its credential revision, or the reset's closed
 counts — never a hash, a password or any secret material.
 """
@@ -60,6 +62,16 @@ _PASSWORD_FILE_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
 )
 _MAXIMUM_PASSWORD_FILE_NAME_LENGTH: Final[int] = 128
+
+#: The emergency path derives one closed snake_case token from the unexpected
+#: exception's class name. Camel-case boundaries become underscores, every
+#: character outside ``[a-z0-9_]`` is stripped and the result is bounded, so an
+#: adversarial class name cannot smuggle message text into the failure line;
+#: a name with nothing salvageable collapses to the fixed fallback token.
+_EXCEPTION_CLASS_BOUNDARY_PATTERN: Final[re.Pattern[str]] = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_EXCEPTION_CLASS_UNSAFE_CHARACTERS: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9_]")
+_MAXIMUM_EXCEPTION_CLASS_TOKEN_LENGTH: Final[int] = 64
+_UNKNOWN_EXCEPTION_CLASS_TOKEN: Final[str] = "unknown_error"
 
 
 class CredentialCommandInputError(Exception):
@@ -178,6 +190,20 @@ def run_reset_web_authentication(arguments: Namespace) -> int:
     return _run_protected_command(operation)
 
 
+def _exception_class_token(error: Exception) -> str:
+    """Collapse one unexpected exception's class name to a closed token.
+
+    Only the class name is read — never the message or traceback — and the
+    sanitization keeps characters inside the shared safe-token alphabet, so the
+    emitted token stays closed-vocabulary safe by construction.
+    """
+
+    snake_case_name = _EXCEPTION_CLASS_BOUNDARY_PATTERN.sub("_", type(error).__name__).lower()
+    bounded_name = _EXCEPTION_CLASS_UNSAFE_CHARACTERS.sub("", snake_case_name)
+    token = bounded_name[:_MAXIMUM_EXCEPTION_CLASS_TOKEN_LENGTH].strip("_")
+    return token or _UNKNOWN_EXCEPTION_CLASS_TOKEN
+
+
 def _run_protected_command(operation: Callable[[], int]) -> int:
     """Map one protected operation onto the closed exit-code contract."""
     try:
@@ -191,8 +217,11 @@ def _run_protected_command(operation: Callable[[], int]) -> int:
             file=sys.stderr,
         )
         return _EXIT_APPLICATION_REJECTED
-    except Exception:
-        print("personal-api: internal_error", file=sys.stderr)
+    except Exception as error:
+        print(
+            f"personal-api: internal_error: {_exception_class_token(error)}",
+            file=sys.stderr,
+        )
         return _EXIT_INTERNAL
 
 

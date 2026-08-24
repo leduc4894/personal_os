@@ -26,6 +26,9 @@ from personal_os.object_storage import CanonicalMediaType, ContentDigest, Expect
 from personal_os.object_storage.errors import (
     SIZE_MISMATCH,
     SIZE_OUT_OF_RANGE,
+    SPOOL_ADMISSION_WINDOW_EXPIRED,
+    SPOOL_FREE_SPACE,
+    SPOOL_PERMITS_EXHAUSTED,
     STREAM_INVALID,
     ObjectStorageError,
 )
@@ -372,8 +375,65 @@ async def test_admission_timeout_maps_to_retryable_busy(tmp_path: Path) -> None:
         await waiting
     assert raised.value.error_code is ErrorCode.OBJECT_STORAGE_BUSY
     assert raised.value.is_retryable
+    assert raised.value.safe_details["reason"] is SPOOL_PERMITS_EXHAUSTED
 
     for holder in holders[1:]:
+        await _cancel_and_wait(holder)
+    assert list(tmp_path.iterdir()) == []
+    assert manager.reserved_size_bytes == 0
+    assert manager.in_flight_count == 0
+
+
+@pytest.mark.asyncio
+async def test_admission_wait_overrunning_the_window_reports_window_expiry(
+    tmp_path: Path,
+) -> None:
+    # The four in-flight permits are held; the fifth acquisition's own
+    # receive-window deadline then elapses while it is parked on the admission
+    # condition, so the outer wait_for timeout (not the loop's deadline check
+    # after a release) maps to retryable busy with the window-expiry reason.
+    gated: list[bool] = [False]
+    admitted_once_after_gate: list[bool] = [False]
+
+    def _window_crushing_clock() -> float:
+        if not gated[0]:
+            return 1_000.0
+        if not admitted_once_after_gate[0]:
+            admitted_once_after_gate[0] = True
+            return 1_000.0
+        return 1_599.5
+
+    manager = SpoolManager(
+        tmp_path,
+        clock=_window_crushing_clock,
+        wall_clock=_fake_wall_clock,
+        disk_usage=lambda _root: SimpleNamespace(free=8 * 1024 * 1024 * 1024),
+    )
+    started_count = [0]
+    all_permits_held = asyncio.Event()
+
+    def held_stream() -> AsyncIterator[bytes]:
+        return _held_stream(started_count, all_permits_held)
+
+    async def _held_stream(counter: list[int], gate: asyncio.Event) -> AsyncIterator[bytes]:
+        counter[0] += 1
+        if counter[0] >= 4:
+            gate.set()
+        await asyncio.Event().wait()
+        yield b""
+
+    holders = [asyncio.create_task(_hold_receive(manager, held_stream(), 10)) for _ in range(4)]
+    await all_permits_held.wait()
+    gated[0] = True
+
+    waiting = asyncio.create_task(_hold_receive(manager, chunks(b"0123456789"), 10))
+    with pytest.raises(ObjectStorageError) as raised:
+        await waiting
+    assert raised.value.error_code is ErrorCode.OBJECT_STORAGE_BUSY
+    assert raised.value.is_retryable
+    assert raised.value.safe_details["reason"] is SPOOL_ADMISSION_WINDOW_EXPIRED
+
+    for holder in holders:
         await _cancel_and_wait(holder)
     assert list(tmp_path.iterdir()) == []
     assert manager.reserved_size_bytes == 0
@@ -427,6 +487,7 @@ async def test_insufficient_free_space_rejects_admission_as_busy(
             pass
     assert raised.value.error_code is ErrorCode.OBJECT_STORAGE_BUSY
     assert raised.value.is_retryable
+    assert raised.value.safe_details["reason"] is SPOOL_FREE_SPACE
     assert list(tmp_path.iterdir()) == []
     assert manager.reserved_size_bytes == 0
 
@@ -662,6 +723,7 @@ async def test_verification_reservation_enforces_the_process_budget(
         await waiting
     assert raised.value.error_code is ErrorCode.OBJECT_STORAGE_BUSY
     assert raised.value.is_retryable
+    assert raised.value.safe_details["reason"] is SPOOL_PERMITS_EXHAUSTED
 
     for holder in holders:
         await _cancel_and_wait(holder)

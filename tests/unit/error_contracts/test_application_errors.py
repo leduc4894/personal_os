@@ -8,7 +8,7 @@ from personal_os.error_contracts.exceptions import (
     ConfigurationError,
     DatabaseMigrationError,
 )
-from personal_os.object_storage.errors import ObjectStorageError
+from personal_os.object_storage.errors import SPOOL_FREE_SPACE, ObjectStorageError
 
 
 def test_error_uses_registry_metadata_and_safe_details() -> None:
@@ -88,7 +88,6 @@ def test_object_storage_input_invalid_accepts_only_reason() -> None:
 @pytest.mark.parametrize(
     "code",
     [
-        ErrorCode.OBJECT_STORAGE_BUSY,
         ErrorCode.OBJECT_STORAGE_UNAVAILABLE,
         ErrorCode.OBJECT_STORAGE_ACCESS_DENIED,
         ErrorCode.OBJECT_STORAGE_CONTRACT_INVALID,
@@ -100,3 +99,13 @@ def test_object_storage_input_invalid_accepts_only_reason() -> None:
 def test_other_object_storage_codes_accept_no_detail_field(code: ErrorCode) -> None:
     with pytest.raises(ValueError, match="not registered for this error code"):
         ObjectStorageError(code, safe_details={"reason": SafeToken.parse("size_out_of_range")})
+
+
+def test_object_storage_busy_accepts_only_reason() -> None:
+    error = ObjectStorageError(
+        ErrorCode.OBJECT_STORAGE_BUSY,
+        safe_details={"reason": SPOOL_FREE_SPACE},
+    )
+    assert error.to_safe_dict()["safe_details"] == {"reason": "spool_free_space"}
+    with pytest.raises(ValueError, match="not registered for this error code"):
+        ObjectStorageError(ErrorCode.OBJECT_STORAGE_BUSY, safe_details={"count": 1})

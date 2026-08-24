@@ -259,7 +259,7 @@ ERROR_DEFINITIONS: Final[Mapping[ErrorCode, ErrorDefinition]] = MappingProxyType
             category=ErrorCategory.DEPENDENCY,
             is_retryable=True,
             safe_message="Local object-storage capacity is temporarily unavailable",
-            allowed_detail_fields=frozenset(),
+            allowed_detail_fields=frozenset({"reason"}),
         ),
         ErrorCode.OBJECT_STORAGE_UNAVAILABLE: ErrorDefinition(
             category=ErrorCategory.DEPENDENCY,

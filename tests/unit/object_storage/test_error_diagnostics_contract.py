@@ -22,6 +22,9 @@ from personal_os.object_storage.errors import (
     MEDIA_TYPE_INVALID,
     SIZE_MISMATCH,
     SIZE_OUT_OF_RANGE,
+    SPOOL_ADMISSION_WINDOW_EXPIRED,
+    SPOOL_FREE_SPACE,
+    SPOOL_PERMITS_EXHAUSTED,
     STREAM_INVALID,
     ObjectStorageError,
 )
@@ -73,7 +76,7 @@ def test_object_storage_error_rejects_outside_code() -> None:
             frozenset({"count", "field_names"}),
         ),
         (ErrorCode.OBJECT_STORAGE_INPUT_INVALID, frozenset({"reason"})),
-        (ErrorCode.OBJECT_STORAGE_BUSY, frozenset()),
+        (ErrorCode.OBJECT_STORAGE_BUSY, frozenset({"reason"})),
         (ErrorCode.OBJECT_STORAGE_UNAVAILABLE, frozenset()),
         (ErrorCode.OBJECT_STORAGE_ACCESS_DENIED, frozenset()),
         (ErrorCode.OBJECT_STORAGE_CONTRACT_INVALID, frozenset()),
@@ -99,6 +102,26 @@ def test_object_storage_input_reasons_are_closed_safe_tokens() -> None:
     for token, value in expected.items():
         assert isinstance(token, SafeToken)
         assert token.value == value
+
+
+def test_object_storage_busy_reasons_are_closed_safe_tokens() -> None:
+    expected = {
+        SPOOL_FREE_SPACE: "spool_free_space",
+        SPOOL_ADMISSION_WINDOW_EXPIRED: "spool_admission_window_expired",
+        SPOOL_PERMITS_EXHAUSTED: "spool_permits_exhausted",
+    }
+    for token, value in expected.items():
+        assert isinstance(token, SafeToken)
+        assert token.value == value
+
+
+def test_object_storage_busy_accepts_only_registered_reason() -> None:
+    error = ObjectStorageError(
+        ErrorCode.OBJECT_STORAGE_BUSY,
+        safe_details={"reason": SPOOL_FREE_SPACE},
+    )
+    assert error.to_safe_dict()["safe_details"] == {"reason": "spool_free_space"}
+    assert error.is_retryable
 
 
 def test_object_storage_input_invalid_accepts_only_registered_reason() -> None:

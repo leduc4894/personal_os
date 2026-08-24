@@ -200,3 +200,42 @@ def test_password_file_read_never_prompts_and_strips_line_endings(
         credential_commands.read_password_from_file_name(tmp_path, "cli-password")
         == "file-password-value"
     )
+
+
+# --- the emergency internal-error line carries the closed exception-class token --------
+
+
+def test_unexpected_exception_failure_line_carries_the_closed_class_token(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from api_runtime import authentication_commands as credential_commands
+
+    def _explode() -> int:
+        raise TimeoutError("operator-secret diagnostic message")
+
+    assert credential_commands._run_protected_command(_explode) == 70
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "personal-api: internal_error: timeout_error"
+    assert "operator-secret diagnostic message" not in captured.out + captured.err
+
+
+def test_exception_class_token_collapses_adversarial_class_names(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from api_runtime import authentication_commands as credential_commands
+
+    def _explode() -> int:
+        raise type("Weird-Name 42!", (Exception,), {})("secret text")
+
+    assert credential_commands._run_protected_command(_explode) == 70
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "personal-api: internal_error: weirdname42"
+    for smuggled in ("Weird", "secret text", "!", "42!"):
+        assert smuggled not in captured.err
+
+
+def test_exception_class_token_falls_back_when_nothing_survives_sanitization() -> None:
+    from api_runtime import authentication_commands as credential_commands
+
+    hostile_error = type("パスワード洩れ", (Exception,), {})("nope")
+    assert credential_commands._exception_class_token(hostile_error) == "unknown_error"
