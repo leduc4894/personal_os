@@ -2714,6 +2714,17 @@
             "title": "Policy Revision Id",
             "type": "string"
           },
+          "safe_error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Safe Error Code"
+          },
           "state": {
             "title": "State",
             "type": "string"
@@ -2727,7 +2738,8 @@
         "required": [
           "policy_revision_id",
           "state",
-          "updated_at"
+          "updated_at",
+          "safe_error_code"
         ],
         "title": "PolicyReconciliationSummaryData",
         "type": "object"

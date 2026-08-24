@@ -28,6 +28,7 @@ function statusData(overrides: Partial<PolicyStatusData> = {}): PolicyStatusData
       policy_revision_id: "2c3d4e5f-6a7b-4c8d-9e0f-1a2b3c4d5e6f",
       state: "running",
       updated_at: "2026-08-17T08:00:00Z",
+      safe_error_code: null,
     },
     ...overrides,
   };

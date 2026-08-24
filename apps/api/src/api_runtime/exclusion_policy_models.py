@@ -182,6 +182,7 @@ class PolicyReconciliationSummaryData(BaseModel):
     policy_revision_id: UUID
     state: str
     updated_at: datetime
+    safe_error_code: str | None
 
 
 class ExclusionPolicyStatusData(BaseModel):
@@ -398,11 +399,17 @@ class ActivePolicySnapshot:
 
 @dataclass(frozen=True, slots=True)
 class PolicyReconciliationSummary:
-    """The latest durable reconciliation intent of one workspace."""
+    """The latest durable reconciliation intent of one workspace.
+
+    ``safe_error_code`` is the row's durable closed failure reason — null
+    while no failure is recorded, mirroring the preview surface's
+    ``safe_error_code`` contract.
+    """
 
     policy_revision_id: UUID
     state: str
     updated_at: datetime
+    safe_error_code: str | None = None
 
 
 def to_domain_rule(rule: PolicyDraftRuleRequest, rule_index: int) -> ExclusionRule:

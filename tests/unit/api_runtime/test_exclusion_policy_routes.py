@@ -843,3 +843,38 @@ def test_status_reflects_publication_and_reconciliation(harness: PolicyRouteHarn
     assert data["reconciliation"]["policy_revision_id"] == revision_id
     assert data["reconciliation"]["state"] == "pending"
     assert data["draft"]["base_policy_revision_id"] == revision_id
+
+
+def test_status_renders_the_reconciliation_safe_error_code(harness: PolicyRouteHarness) -> None:
+    """The failed reconciliation's durable reason reaches the Admin summary.
+
+    A pending summary renders the null-safe absent reason; a terminal row
+    renders its closed ``safe_error_code`` token with parity to the preview
+    surface.
+    """
+
+    preview = seed_ready_preview(harness)
+    cookies = login(harness.client)
+    committed = publish(harness, cookies, preview)
+    assert committed.status_code == 201, committed.text
+    revision_id = str(committed.json()["data"]["policy_revision_id"])
+
+    pending = harness.client.get(
+        "/api/admin/exclusion-policy", headers=session_headers(cookies, csrf=False)
+    )
+    assert pending.status_code == 200, pending.text
+    assert pending.json()["data"]["reconciliation"]["safe_error_code"] is None
+
+    summary = harness.policy_state.reconciliation_summary
+    assert summary is not None
+    harness.policy_state.reconciliation_summary = replace(
+        summary, state="terminal", safe_error_code="reconciliation_dispatch_terminal"
+    )
+    failed = harness.client.get(
+        "/api/admin/exclusion-policy", headers=session_headers(cookies, csrf=False)
+    )
+    assert failed.status_code == 200, failed.text
+    rendered = failed.json()["data"]["reconciliation"]
+    assert rendered["policy_revision_id"] == revision_id
+    assert rendered["state"] == "terminal"
+    assert rendered["safe_error_code"] == "reconciliation_dispatch_terminal"

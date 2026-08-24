@@ -1795,6 +1795,8 @@ export type components = {
              * Format: uuid
              */
             readonly policy_revision_id: string;
+            /** Safe Error Code */
+            readonly safe_error_code: string | null;
             /** State */
             readonly state: string;
             /**

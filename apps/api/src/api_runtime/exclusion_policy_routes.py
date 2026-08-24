@@ -248,6 +248,7 @@ def create_exclusion_policy_route_endpoints(
                         policy_revision_id=summary.policy_revision_id,
                         state=summary.state,
                         updated_at=summary.updated_at,
+                        safe_error_code=summary.safe_error_code,
                     )
                 ),
             )

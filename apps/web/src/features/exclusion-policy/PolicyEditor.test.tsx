@@ -57,6 +57,7 @@ function statusData(overrides: Partial<PolicyStatusDataSchema> = {}): PolicyStat
       policy_revision_id: ACTIVE_REVISION_ID,
       state: "running",
       updated_at: "2026-08-17T08:00:00Z",
+      safe_error_code: null,
     },
     ...overrides,
   };
@@ -639,6 +640,7 @@ describe("PolicyEditor", () => {
         policy_revision_id: "6f7a8b9c-0d1e-4f2a-3b4c-5d6e7f8a9b0c",
         state: "pending",
         updated_at: "2026-08-17T08:05:00Z",
+        safe_error_code: null,
       },
     });
     const statusQueue = [statusData(), refreshedStatus];

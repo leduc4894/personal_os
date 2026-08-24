@@ -36,7 +36,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from temporalio.client import Client as TemporalClient
 from temporalio.worker import Worker
 
-from personal_os.diagnostics.events import SafeToken
+from personal_os.diagnostics.events import EventName, SafeToken
+from personal_os.diagnostics.logging import configure_diagnostics
+from personal_os.diagnostics.redaction import fingerprint_stack, normalize_exception_type
 from personal_os.error_contracts.exceptions import ApplicationError
 from personal_os.exclusion_policy.reconciliation import ReconciliationInput
 from personal_os.runtime_configuration.loading import load_runtime_settings
@@ -137,6 +139,20 @@ class AwareUtcClock(Protocol):
     def __call__(self) -> datetime: ...
 
 
+@runtime_checkable
+class PolicyDispatchDiagnosticSink(Protocol):
+    """Structural sink the worker composition satisfies with its logger.
+
+    Mirrors the projection dispatcher's sink: the composition root injects
+    the validating :class:`~personal_os.diagnostics.logging.DiagnosticLogger`,
+    so the closed dispatch-unavailable events ride the structured logging
+    boundary (and the rotating file sink); without a sink the runtime keeps
+    the previous build-only behavior.
+    """
+
+    def emit(self, event_name: EventName, fields: Mapping[str, object] | None = None) -> None: ...
+
+
 def load_policy_temporal_settings(
     *, environ: Mapping[str, str] | None = None
 ) -> TemporalDispatchSettings:
@@ -192,10 +208,12 @@ class PolicyPreviewDispatchRuntime:
         preview_store: PolicyPreviewOutboxStore,
         starter: PolicyPreviewStarterPort,
         clock: AwareUtcClock,
+        diagnostics: PolicyDispatchDiagnosticSink | None = None,
     ) -> None:
         self._preview_store = preview_store
         self._starter = starter
         self._clock = clock
+        self._diagnostics = diagnostics
 
     async def run_until_shutdown(
         self,
@@ -241,11 +259,29 @@ class PolicyPreviewDispatchRuntime:
                     lease.policy_preview_id, PREVIEW_DISPATCH_TERMINAL_ERROR_CODE
                 )
             return
-        except Exception:
+        except Exception as cause:
             # An unexpected start failure leaves the outcome unknown: the
-            # lease stays held and lease expiry reclaims it.
+            # lease stays held and lease expiry reclaims it. The closed
+            # dispatch-unavailable event is the only readable trace of the
+            # cause — it never carries provider or exception text.
+            self._emit_dispatch_unavailable(lease, cause)
             return
         del outcome  # Started and existing converge on the same execution.
+
+    def _emit_dispatch_unavailable(self, lease: LeasedPolicyPreview, cause: BaseException) -> None:
+        """Emit the closed unexpected-start event of one unknown outcome."""
+
+        if self._diagnostics is None:
+            return
+        self._diagnostics.emit(
+            EventName.PREVIEW_DISPATCH_UNAVAILABLE,
+            {
+                "policy_preview_id": lease.policy_preview_id,
+                "attempt_count": lease.attempt_count,
+                "exception_type": normalize_exception_type(cause),
+                "stack_fingerprint": fingerprint_stack(cause),
+            },
+        )
 
 
 def _safe_code(error: ApplicationError) -> SafeToken:
@@ -337,10 +373,12 @@ class PolicyReconciliationDispatchRuntime:
         store: PolicyReconciliationOutboxStore,
         starter: PolicyReconciliationStarterPort,
         clock: AwareUtcClock,
+        diagnostics: PolicyDispatchDiagnosticSink | None = None,
     ) -> None:
         self._store = store
         self._starter = starter
         self._clock = clock
+        self._diagnostics = diagnostics
 
     async def run_until_shutdown(
         self,
@@ -389,12 +427,32 @@ class PolicyReconciliationDispatchRuntime:
                     now,
                 )
             return
-        except Exception:
+        except Exception as cause:
             # An unexpected start failure leaves the outcome unknown: the
-            # lease stays held and lease expiry reclaims it.
+            # lease stays held and lease expiry reclaims it. The closed
+            # dispatch-unavailable event is the only readable trace of the
+            # cause — it never carries provider or exception text.
+            self._emit_dispatch_unavailable(lease, cause)
             return
         await self._store.acknowledge_dispatched(
             lease.policy_reconciliation_intent_id, lease.lease_token, now
+        )
+
+    def _emit_dispatch_unavailable(
+        self, lease: LeasedPolicyReconciliation, cause: BaseException
+    ) -> None:
+        """Emit the closed unexpected-start event of one unknown outcome."""
+
+        if self._diagnostics is None:
+            return
+        self._diagnostics.emit(
+            EventName.RECONCILIATION_DISPATCH_UNAVAILABLE,
+            {
+                "policy_reconciliation_intent_id": lease.policy_reconciliation_intent_id,
+                "attempt_count": lease.attempt_count,
+                "exception_type": normalize_exception_type(cause),
+                "stack_fingerprint": fingerprint_stack(cause),
+            },
         )
 
 
@@ -404,12 +462,15 @@ def build_policy_preview_process(
     temporal_client: TemporalClient,
     lease_token_generator: Callable[[], UUID] | None = None,
     clock: AwareUtcClock = _utc_now,
+    diagnostics: PolicyDispatchDiagnosticSink | None = None,
 ) -> PolicyPreviewProcess:
     """Compose the preview store, activities, worker and dispatch runtime.
 
     Pure composition: no connection is opened here beyond what the caller
     already owns (the engine and the connected Temporal client), so tests
-    build the same graph against disposable stacks.
+    build the same graph against disposable stacks. The diagnostic sink is
+    injected — never constructed here — so the process runner owns which
+    logger the dispatch-unavailable events ride.
     """
 
     store = PostgresqlPolicyPreviewStore(
@@ -425,7 +486,7 @@ def build_policy_preview_process(
     )
     starter = TemporalPolicyPreviewStarter(temporal_client)
     dispatch_runtime = PolicyPreviewDispatchRuntime(
-        preview_store=store, starter=starter, clock=clock
+        preview_store=store, starter=starter, clock=clock, diagnostics=diagnostics
     )
     return PolicyPreviewProcess(
         worker=worker, dispatch_runtime=dispatch_runtime, shutdown=asyncio.Event()
@@ -445,6 +506,7 @@ async def run_policy_preview_process() -> None:
     database_settings = load_database_runtime_settings()
     temporal_settings = load_policy_temporal_settings()
     require_dispatcher_activation_allowed(runtime_settings.environment, temporal_settings)
+    diagnostics = configure_diagnostics(runtime_settings)
     password = read_database_runtime_password(database_settings)
     engine = create_source_store_engine(database_settings, password)
     try:
@@ -457,7 +519,9 @@ async def run_policy_preview_process() -> None:
         from personal_os.exclusion_policy.errors import ExclusionPolicyError
 
         raise ExclusionPolicyError(ErrorCode.EXCLUSION_POLICY_COMMIT_OUTCOME_UNKNOWN) from cause
-    process = build_policy_preview_process(engine=engine, temporal_client=temporal_client)
+    process = build_policy_preview_process(
+        engine=engine, temporal_client=temporal_client, diagnostics=diagnostics
+    )
     _install_shutdown_signals(process.shutdown)
     try:
         async with process.worker:
@@ -481,12 +545,15 @@ def build_policy_reconciliation_process(
     temporal_client: TemporalClient,
     lease_token_generator: Callable[[], UUID] | None = None,
     clock: AwareUtcClock = _utc_now,
+    diagnostics: PolicyDispatchDiagnosticSink | None = None,
 ) -> PolicyReconciliationProcess:
     """Compose the reconciliation store, activities, worker and dispatcher.
 
     Pure composition: no connection is opened here beyond what the caller
     already owns (the engine and the connected Temporal client), so tests
-    build the same graph against disposable stacks.
+    build the same graph against disposable stacks. The diagnostic sink is
+    injected — never constructed here — so the process runner owns which
+    logger the dispatch-unavailable events ride.
     """
 
     store = PostgresqlPolicyReconciliationStore(
@@ -507,7 +574,7 @@ def build_policy_reconciliation_process(
     )
     starter = TemporalPolicyReconciliationStarter(temporal_client)
     dispatch_runtime = PolicyReconciliationDispatchRuntime(
-        store=store, starter=starter, clock=clock
+        store=store, starter=starter, clock=clock, diagnostics=diagnostics
     )
     return PolicyReconciliationProcess(
         worker=worker, dispatch_runtime=dispatch_runtime, shutdown=asyncio.Event()
@@ -529,6 +596,7 @@ async def run_policy_reconciliation_process() -> None:
     database_settings = load_database_runtime_settings()
     temporal_settings = load_policy_temporal_settings()
     require_dispatcher_activation_allowed(runtime_settings.environment, temporal_settings)
+    diagnostics = configure_diagnostics(runtime_settings)
     password = read_database_runtime_password(database_settings)
     engine = create_source_store_engine(database_settings, password)
     try:
@@ -541,7 +609,9 @@ async def run_policy_reconciliation_process() -> None:
         from personal_os.exclusion_policy.errors import ExclusionPolicyError
 
         raise ExclusionPolicyError(ErrorCode.EXCLUSION_POLICY_COMMIT_OUTCOME_UNKNOWN) from cause
-    process = build_policy_reconciliation_process(engine=engine, temporal_client=temporal_client)
+    process = build_policy_reconciliation_process(
+        engine=engine, temporal_client=temporal_client, diagnostics=diagnostics
+    )
     _install_shutdown_signals(process.shutdown)
     try:
         async with process.worker:
@@ -555,6 +625,7 @@ __all__ = [
     "AwareUtcClock",
     "LeasedPolicyPreview",
     "LeasedPolicyReconciliation",
+    "PolicyDispatchDiagnosticSink",
     "PolicyPreviewDispatchRuntime",
     "PolicyPreviewOutboxStore",
     "PolicyPreviewProcess",

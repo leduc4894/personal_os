@@ -12,19 +12,24 @@ page maximum is the spec value 16.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Final, cast
 from uuid import UUID
 
 import pytest
+import sqlalchemy as sa
 from api_runtime.exclusion_policy_composition import (
     KEYSET_PAGE_MAXIMUM,
     OfflineExclusionPolicyState,
     PolicyKeysetPage,
     PolicyQueryService,
+    PostgresqlPolicyPluginReadStore,
     compose_exclusion_policy,
     compose_offline_exclusion_policy,
 )
+from api_runtime.exclusion_policy_models import PolicyReconciliationSummary
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from personal_os.diagnostics.context import create_diagnostic_context
@@ -122,6 +127,106 @@ async def test_query_service_status_combines_draft_and_reconciliation() -> None:
     assert status.draft.draft_version == 1
     assert await runtime.queries.get_reconciliation_summary(_WORKSPACE_ID, context) is None
     assert await runtime.queries.load_active_snapshot(_WORKSPACE_ID, context) is None
+
+
+@pytest.mark.asyncio
+async def test_offline_reconciliation_summary_carries_the_safe_error_code() -> None:
+    """A failed reconciliation summary keeps its durable closed reason token.
+
+    A summary built without a failure renders the null-safe absent reason,
+    never a fake success token.
+    """
+
+    state = OfflineExclusionPolicyState()
+    state.reconciliation_summary = PolicyReconciliationSummary(
+        policy_revision_id=UUID(int=1), state="pending", updated_at=_FIXED_NOW
+    )
+    runtime = compose_offline_exclusion_policy(state=state)
+    pending = await runtime.queries.get_reconciliation_summary(_WORKSPACE_ID, _context())
+    assert pending is not None
+    assert pending.safe_error_code is None
+
+    state.reconciliation_summary = PolicyReconciliationSummary(
+        policy_revision_id=UUID(int=1),
+        state="terminal",
+        updated_at=_FIXED_NOW,
+        safe_error_code="reconciliation_dispatch_terminal",
+    )
+    failed = await runtime.queries.get_reconciliation_summary(_WORKSPACE_ID, _context())
+    assert failed is not None
+    assert failed.safe_error_code == "reconciliation_dispatch_terminal"
+
+
+@dataclass
+class _FakeRowResult:
+    """Result double answering one row for the summary select."""
+
+    row: Mapping[str, object] | None
+
+    def mappings(self) -> _FakeRowResult:
+        return self
+
+    def first(self) -> Mapping[str, object] | None:
+        return self.row
+
+
+@dataclass
+class _FakeConnection:
+    """Connection double capturing the summary select and answering one row."""
+
+    row: Mapping[str, object] | None = None
+    selects: list[object] = field(default_factory=list)
+
+    async def __aenter__(self) -> _FakeConnection:
+        return self
+
+    async def __aexit__(self, *exception_details: object) -> bool:
+        return False
+
+    def begin(self) -> _FakeConnection:
+        return self
+
+    async def execute(self, statement: object) -> _FakeRowResult:
+        if isinstance(statement, sa.Select):
+            self.selects.append(statement)
+            return _FakeRowResult(self.row)
+        return _FakeRowResult(None)
+
+
+@dataclass
+class _FakeEngine:
+    """Engine double handing out its single connection."""
+
+    connection: _FakeConnection
+
+    def connect(self) -> _FakeConnection:
+        return self.connection
+
+
+@pytest.mark.asyncio
+async def test_serve_reconciliation_summary_selects_and_returns_the_safe_error_code() -> None:
+    """The serve summary read selects the durable reason column (W2 parity)."""
+
+    connection = _FakeConnection(
+        row={
+            "policy_revision_id": UUID(int=1),
+            "state": "terminal",
+            "updated_at": _FIXED_NOW,
+            "safe_error_code": "reconciliation_dispatch_terminal",
+        }
+    )
+    store = PostgresqlPolicyPluginReadStore(cast("AsyncEngine", _FakeEngine(connection)))
+
+    summary = await store.get_reconciliation_summary(_WORKSPACE_ID, _context())
+
+    (select_statement,) = connection.selects
+    selected_columns = {
+        column.name for column in cast("sa.Select", select_statement).selected_columns
+    }
+    assert {"policy_revision_id", "state", "updated_at", "safe_error_code"} <= selected_columns
+    assert summary is not None
+    assert summary.state == "terminal"
+    assert summary.safe_error_code == "reconciliation_dispatch_terminal"
 
 
 def test_serve_composition_constructs_over_the_engine_without_io() -> None:

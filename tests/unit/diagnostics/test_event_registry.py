@@ -216,6 +216,37 @@ def test_source_publication_events_are_registered_with_exact_contracts() -> None
         assert definition.allowed_fields == allowed, event_name
 
 
+def test_policy_dispatch_unavailable_events_are_registered_with_exact_contracts() -> None:
+    """Worker dispatch-unavailable events: closed ids, counts and fingerprints only.
+
+    The two events of the policy worker dispatch loops (spec 10/15) fire at
+    the unexpected-start catches whose lease outcome stays unknown: the fields
+    carry the opaque row id, the attempt count and the closed
+    exception-type/stack-fingerprint reductions — never provider text, a
+    workflow identity or any exception argument.
+    """
+
+    expected = {
+        EventName.PREVIEW_DISPATCH_UNAVAILABLE: frozenset(
+            {"policy_preview_id", "attempt_count", "exception_type", "stack_fingerprint"}
+        ),
+        EventName.RECONCILIATION_DISPATCH_UNAVAILABLE: frozenset(
+            {
+                "policy_reconciliation_intent_id",
+                "attempt_count",
+                "exception_type",
+                "stack_fingerprint",
+            }
+        ),
+    }
+    for event_name, fields in expected.items():
+        definition = EVENT_DEFINITIONS[event_name]
+        assert definition.level is DiagnosticLevel.ERROR, event_name
+        assert definition.result_code is ResultCode.FAILED, event_name
+        assert definition.required_fields == fields, event_name
+        assert definition.allowed_fields == fields, event_name
+
+
 def test_exclusion_policy_evaluation_events_are_registered_with_exact_contracts() -> None:
     """Spec 21 evaluation events: closed boundary/decision labels and counts only.
 

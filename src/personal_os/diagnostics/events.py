@@ -121,6 +121,8 @@ class EventName(StrEnum):
     API_REQUEST_FAILED = "api_request_failed"
     EXCLUSION_POLICY_EVALUATION_COMPLETED = "exclusion_policy_evaluation_completed"
     EXCLUSION_POLICY_EVALUATION_REJECTED = "exclusion_policy_evaluation_rejected"
+    PREVIEW_DISPATCH_UNAVAILABLE = "preview_dispatch_unavailable"
+    RECONCILIATION_DISPATCH_UNAVAILABLE = "reconciliation_dispatch_unavailable"
 
 
 type SafeDiagnosticScalar = (
@@ -611,6 +613,41 @@ EVENT_DEFINITIONS: Final[Mapping[EventName, EventDefinition]] = MappingProxyType
                     "error_code",
                     "error_category",
                     "is_retryable",
+                }
+            ),
+        ),
+        # Worker dispatch-unavailable events (spec 10/15): fired at the two
+        # unexpected-start catches whose lease outcome stays unknown, these
+        # carry only the opaque row id, the attempt count and the closed
+        # exception-type/stack-fingerprint reductions — never provider text,
+        # a workflow identity or any exception argument.
+        EventName.PREVIEW_DISPATCH_UNAVAILABLE: EventDefinition(
+            level=DiagnosticLevel.ERROR,
+            result_code=ResultCode.FAILED,
+            required_fields=frozenset(
+                {"policy_preview_id", "attempt_count", "exception_type", "stack_fingerprint"}
+            ),
+            allowed_fields=frozenset(
+                {"policy_preview_id", "attempt_count", "exception_type", "stack_fingerprint"}
+            ),
+        ),
+        EventName.RECONCILIATION_DISPATCH_UNAVAILABLE: EventDefinition(
+            level=DiagnosticLevel.ERROR,
+            result_code=ResultCode.FAILED,
+            required_fields=frozenset(
+                {
+                    "policy_reconciliation_intent_id",
+                    "attempt_count",
+                    "exception_type",
+                    "stack_fingerprint",
+                }
+            ),
+            allowed_fields=frozenset(
+                {
+                    "policy_reconciliation_intent_id",
+                    "attempt_count",
+                    "exception_type",
+                    "stack_fingerprint",
                 }
             ),
         ),

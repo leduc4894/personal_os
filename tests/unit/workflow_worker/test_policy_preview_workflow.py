@@ -8,7 +8,9 @@ its bounded retry policy and heartbeat wiring, the activity's typed stale
 failures marking the durable row failed before surfacing the closed
 non-retryable error, the final-attempt failure marking, and the leased
 dispatcher's outcomes — converged start, retryable release with bounded
-backoff and terminal contract failure. Sensitive sentinels must never appear
+backoff and terminal contract failure — and the closed dispatch-unavailable
+event an injected diagnostic sink receives when an unexpected start failure
+would otherwise be swallowed. Sensitive sentinels must never appear
 in the serialized input, error surfaces or metric labels.
 """
 
@@ -16,6 +18,8 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -50,9 +54,16 @@ from workflow_worker.policy_preview_workflow import (
 from workflow_worker.policy_workflow_runtime import (
     LeasedPolicyPreview,
     PolicyPreviewDispatchRuntime,
+    run_policy_preview_process,
 )
 
-from personal_os.diagnostics.events import SafeToken
+from personal_os.diagnostics.events import (
+    DiagnosticEvent,
+    EventName,
+    SafeToken,
+    ShortDigest,
+    build_registered_event,
+)
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.exclusion_policy.errors import ExclusionPolicyError
 from personal_os.exclusion_policy.previews import (
@@ -493,3 +504,87 @@ async def test_dispatcher_marks_terminal_start_failures_failed() -> None:
     assert store.released == []
     assert len(store.failed) == 1
     assert store.failed[0][0] == PREVIEW_ID
+
+
+# --- dispatch diagnostics -----------------------------------------------------------------
+
+
+@dataclass
+class RecordingDiagnosticSink:
+    """Diagnostic sink double recording the closed events it receives."""
+
+    events: list[tuple[EventName, dict[str, object]]] = field(default_factory=list)
+
+    def emit(self, event_name: EventName, fields: Mapping[str, object] | None = None) -> None:
+        self.events.append((event_name, dict(fields or {})))
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_emits_dispatch_unavailable_when_start_raises_unexpectedly() -> None:
+    store = FakeDispatchStore()
+    store.claim_result = [_leased_preview(attempt_count=2)]
+    starter = FakeStarter(error=RuntimeError("sentinel provider detail"))
+    sink = RecordingDiagnosticSink()
+    runtime = PolicyPreviewDispatchRuntime(
+        preview_store=store,  # type: ignore[arg-type]
+        starter=starter,  # type: ignore[arg-type]
+        clock=lambda: datetime.now(UTC),
+        diagnostics=sink,
+    )
+
+    claimed = await runtime.dispatch_pending_previews_once()
+
+    assert claimed == 1
+    assert store.released == [] and store.failed == []
+    assert len(sink.events) == 1
+    event_name, fields = sink.events[0]
+    assert event_name is EventName.PREVIEW_DISPATCH_UNAVAILABLE
+    assert event_name.value == "preview_dispatch_unavailable"
+    assert fields["policy_preview_id"] == PREVIEW_ID
+    assert fields["attempt_count"] == 2
+    assert isinstance(fields["exception_type"], SafeToken)
+    assert fields["exception_type"] == SafeToken.parse("builtins.runtimeerror")
+    assert isinstance(fields["stack_fingerprint"], ShortDigest)
+    assert re.fullmatch(r"[0-9a-f]{16}", str(fields["stack_fingerprint"]))
+    rendered = json.dumps({key: str(value) for key, value in fields.items()})
+    assert "sentinel provider detail" not in rendered
+    built = build_registered_event(event_name, fields)
+    assert isinstance(built, DiagnosticEvent), "emitted fields must satisfy the closed registry"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        None,
+        ExclusionPolicyError(ErrorCode.EXCLUSION_POLICY_COMMIT_OUTCOME_UNKNOWN),
+        ExclusionPolicyError(ErrorCode.EXCLUSION_POLICY_INPUT_INVALID),
+    ],
+    ids=["converged-start", "retryable-release", "terminal-failure"],
+)
+async def test_dispatcher_emits_no_events_on_typed_start_outcomes(
+    error: Exception | None,
+) -> None:
+    store = FakeDispatchStore()
+    store.claim_result = [_leased_preview()]
+    starter = FakeStarter(error=error)
+    sink = RecordingDiagnosticSink()
+    runtime = PolicyPreviewDispatchRuntime(
+        preview_store=store,  # type: ignore[arg-type]
+        starter=starter,  # type: ignore[arg-type]
+        clock=lambda: datetime.now(UTC),
+        diagnostics=sink,
+    )
+
+    claimed = await runtime.dispatch_pending_previews_once()
+
+    assert claimed == 1
+    assert sink.events == []
+
+
+def test_preview_process_composition_wires_the_configured_diagnostic_sink() -> None:
+    """The process runner injects the configured logger; no hardcoded sink."""
+
+    source = inspect.getsource(run_policy_preview_process)
+    assert "configure_diagnostics(runtime_settings)" in source
+    assert "diagnostics=diagnostics" in source

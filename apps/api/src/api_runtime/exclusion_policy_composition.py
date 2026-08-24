@@ -442,6 +442,7 @@ class PostgresqlPolicyPluginReadStore:
                             policy_reconciliation_intents.c.policy_revision_id,
                             policy_reconciliation_intents.c.state,
                             policy_reconciliation_intents.c.updated_at,
+                            policy_reconciliation_intents.c.safe_error_code,
                         )
                         .where(policy_reconciliation_intents.c.workspace_id == workspace_id)
                         .order_by(policy_reconciliation_intents.c.created_at.desc())
@@ -457,6 +458,9 @@ class PostgresqlPolicyPluginReadStore:
             policy_revision_id=row["policy_revision_id"],
             state=str(row["state"]),
             updated_at=row["updated_at"],
+            safe_error_code=(
+                None if row["safe_error_code"] is None else str(row["safe_error_code"])
+            ),
         )
 
 
@@ -856,6 +860,7 @@ class OfflinePolicyPublicationStore:
             policy_revision_id=policy_revision_id,
             state="pending",
             updated_at=_OFFLINE_NOW,
+            safe_error_code=None,
         )
         self._state.draft = replace(
             draft,
