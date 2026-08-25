@@ -43,6 +43,7 @@ import {
   isLifecycleLocalFileState,
   type LifecycleEventOperands,
   type LifecycleLocalFileState,
+  type RestoreReservationResult,
 } from "./lifecycle-contracts";
 import { journalStoreError } from "./sqlite-database";
 import type {
@@ -307,7 +308,10 @@ function initialStateFor(
     case "delete":
       return "tombstoned";
     case "restore":
-      return "restored";
+      // The record-time state stays pending: the tombstone closes and the
+      // state advances to `restored` only through the committed receipt
+      // (the driver path), never at record time.
+      return "restore_pending";
   }
 }
 
@@ -471,6 +475,206 @@ export class LifecycleRepository {
         newPath: input.newPath ?? null,
         forceFailureAfterExec: input.forceFailureAfterExec === true,
       });
+    });
+  }
+
+  /**
+   * Reserve one explicit-restore target locator (the reservation-first
+   * protocol of the explicit-restore target reservation spec): in ONE
+   * transaction the tombstoned row is rebound to the target path and
+   * enters `restore_pending`, with the pre-reservation path retained in
+   * `restore_prior_path` for an explicit cancel and for the committed
+   * receipt's cleanup.
+   *
+   * Target availability is the precondition the upstream server contract
+   * demands ("an explicitly requested, available target locator"):
+   *   - another row WITH a source identity at the target → refused
+   *     `restore_target_occupied` (a converged fresh source or a genuine
+   *     other note; both rows stay untouched);
+   *   - a phantom row (no source identity) whose content events are all
+   *     unsent (`queued` / `waiting_retry`) → the phantom mapping and its
+   *     never-shipped events are released inside this same transaction
+   *     (the `removeLocalMapping` cleanup shape) and the reservation
+   *     proceeds — staged restore bytes must never converge as a fresh
+   *     source;
+   *   - a phantom row with any event in `preflight` / `uploading` →
+   *     refused `restore_target_busy` (retry after the pass settles).
+   *
+   * A non-terminal `restore` event of the row refuses the reservation as
+   * `restore_already_pending`. Re-reservation from `restore_pending`
+   * preserves the original `restore_prior_path` (never chained). A row
+   * without an open tombstone, source identity or stored predecessor
+   * delete event fails closed as `journal_mutation_failed`.
+   */
+  async reserveRestoreTarget(
+    localFileId: string,
+    targetPath: string,
+  ): Promise<RestoreReservationResult> {
+    if (!isUuid(localFileId)) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    if (typeof targetPath !== "string" || targetPath.length === 0) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    return this.#database.runSerializedMutation((session) => {
+      const row = firstRow(
+        session.readRows(
+          [
+            "select lifecycle_state, open_tombstone_id, source_id, base_version_id,",
+            "normalized_path, restore_prior_path from local_files",
+            `where local_file_id = ${sqlText(localFileId)};`,
+          ].join(" "),
+        ),
+      );
+      if (row === null) {
+        throw journalStoreError("journal_mutation_failed");
+      }
+      const [lifecycleState, openTombstoneId, sourceId, baseVersionId, currentPath, existingPriorPath] =
+        row;
+      if (
+        typeof lifecycleState !== "string" ||
+        typeof currentPath !== "string" ||
+        sourceId === null ||
+        baseVersionId === null ||
+        typeof sourceId !== "string" ||
+        typeof baseVersionId !== "string" ||
+        typeof openTombstoneId !== "string" ||
+        openTombstoneId.length === 0
+      ) {
+        throw journalStoreError("journal_mutation_failed");
+      }
+      if (lifecycleState !== "tombstoned" && lifecycleState !== "restore_pending") {
+        throw journalStoreError("journal_mutation_failed");
+      }
+      const predecessor = firstRow(
+        session.readRows(
+          [
+            "select event_id from journal_events",
+            `where local_file_id = ${sqlText(localFileId)}`,
+            "and operation = 'delete' limit 1;",
+          ].join(" "),
+        ),
+      );
+      if (predecessor === null) {
+        throw journalStoreError("journal_mutation_failed");
+      }
+      const inFlightRestore = firstRow(
+        session.readRows(
+          [
+            "select journal_events.event_id from journal_events",
+            "join lifecycle_event_operands",
+            "on lifecycle_event_operands.event_id = journal_events.event_id",
+            `where journal_events.local_file_id = ${sqlText(localFileId)}`,
+            "and journal_events.operation = 'restore'",
+            "and journal_events.state in ('queued', 'preflight', 'uploading', 'waiting_retry')",
+            "limit 1;",
+          ].join(" "),
+        ),
+      );
+      if (inFlightRestore !== null) {
+        return { outcome: "refused", reason: "restore_already_pending" };
+      }
+      const occupant = firstRow(
+        session.readRows(
+          [
+            "select local_file_id, source_id from local_files",
+            `where normalized_path = ${sqlText(targetPath)};`,
+          ].join(" "),
+        ),
+      );
+      if (occupant !== null && occupant[0] !== localFileId) {
+        if (typeof occupant[1] === "string" && occupant[1].length > 0) {
+          return { outcome: "refused", reason: "restore_target_occupied" };
+        }
+        const occupantId = String(occupant[0]);
+        const inFlightUpload = firstRow(
+          session.readRows(
+            [
+              "select event_id from journal_events",
+              `where local_file_id = ${sqlText(occupantId)}`,
+              "and state in ('preflight', 'uploading') limit 1;",
+            ].join(" "),
+          ),
+        );
+        if (inFlightUpload !== null) {
+          return { outcome: "refused", reason: "restore_target_busy" };
+        }
+        // Release the phantom mapping and its never-shipped events in this
+        // same transaction (the `removeLocalMapping` cleanup shape).
+        session.exec(
+          `delete from journal_attempts where event_id in (select event_id from journal_events where local_file_id = ${sqlText(occupantId)});`,
+        );
+        session.exec(
+          `delete from lifecycle_event_operands where event_id in (select event_id from journal_events where local_file_id = ${sqlText(occupantId)});`,
+        );
+        session.exec(
+          `delete from journal_events where local_file_id = ${sqlText(occupantId)};`,
+        );
+        session.exec(
+          `delete from local_files where local_file_id = ${sqlText(occupantId)};`,
+        );
+      }
+      const priorPath =
+        lifecycleState === "tombstoned" ||
+        typeof existingPriorPath !== "string" ||
+        existingPriorPath.length === 0
+          ? currentPath
+          : existingPriorPath;
+      session.exec(
+        [
+          "update local_files set",
+          `normalized_path = ${sqlText(targetPath)},`,
+          "lifecycle_state = 'restore_pending',",
+          `restore_prior_path = ${sqlText(priorPath)}`,
+          `where local_file_id = ${sqlText(localFileId)};`,
+        ].join(" "),
+      );
+      return { outcome: "reserved", priorNormalizedPath: priorPath };
+    });
+  }
+
+  /**
+   * Release one explicit-restore reservation (the explicit Cancel path of
+   * the restore command): in ONE transaction the row returns to its
+   * pre-reservation path, the state returns to `tombstoned` (the open
+   * tombstone was retained through the reservation) and
+   * `restore_prior_path` clears. A row that is not `restore_pending`, or
+   * whose prior path was not retained, fails closed as
+   * `journal_mutation_failed`.
+   */
+  async releaseRestoreTarget(localFileId: string): Promise<void> {
+    if (!isUuid(localFileId)) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    await this.#database.runSerializedMutation((session) => {
+      const row = firstRow(
+        session.readRows(
+          [
+            "select lifecycle_state, restore_prior_path from local_files",
+            `where local_file_id = ${sqlText(localFileId)};`,
+          ].join(" "),
+        ),
+      );
+      if (row === null) {
+        throw journalStoreError("journal_mutation_failed");
+      }
+      const [lifecycleState, priorPath] = row;
+      if (
+        lifecycleState !== "restore_pending" ||
+        typeof priorPath !== "string" ||
+        priorPath.length === 0
+      ) {
+        throw journalStoreError("journal_mutation_failed");
+      }
+      session.exec(
+        [
+          "update local_files set",
+          `normalized_path = ${sqlText(priorPath)},`,
+          "lifecycle_state = 'tombstoned',",
+          "restore_prior_path = null",
+          `where local_file_id = ${sqlText(localFileId)};`,
+        ].join(" "),
+      );
     });
   }
 
@@ -704,10 +908,22 @@ export class LifecycleRepository {
           );
           break;
         case "restore":
+          // The committed receipt is the single durable moment the local
+          // mapping may follow the restore to its target locator (the
+          // upstream "a path is rebound only after the lifecycle result is
+          // durable" rule): rebind to the event operands' target locator
+          // and clear the reservation's prior-path memory in the SAME
+          // transaction. Without the rebind the row would stay at the
+          // prior path while the canonical locator belongs to the restored
+          // source, and the next convergence of the staged bytes would
+          // collide with it.
           session.exec(
             [
               "update local_files set",
-              "lifecycle_state = 'restored'",
+              "normalized_path = (select target_locator from lifecycle_event_operands",
+              `where event_id = ${sqlText(eventId)}),`,
+              "lifecycle_state = 'restored',",
+              "restore_prior_path = null",
               `where local_file_id = ${sqlText(localFileId)};`,
             ].join(" "),
           );

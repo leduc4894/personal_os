@@ -18,6 +18,7 @@ import { JOURNAL_SCHEMA_VERSION } from "./sqlite-database";
 import {
   CHILD_FIVE_FIX_SCHEMA_VERSION,
   CHILD_FOUR_SCHEMA_VERSION,
+  SERVER_RECEIPT_SCHEMA_VERSION,
   JournalStoreError,
   journalStoreError,
 } from "./sqlite-database";
@@ -82,8 +83,10 @@ export function isLifecycleJournalOperation(
  * The closed `lifecycle_state` enum of one `local_files` row:
  *   - `active` — content surface is the source of truth.
  *   - `rename_pending` / `move_pending` / `delete_pending` /
- *     `restore_pending` — a lifecycle event has been recorded but the
- *     server has not yet acknowledged the locator / tombstone change.
+ *     `restore_pending` — a lifecycle intent is recorded (for
+ *     `restore_pending`: an explicit-restore target reservation or the
+ *     restore event itself) but the server has not yet acknowledged the
+ *     locator / tombstone change.
  *   - `tombstoned` — a delete has been committed on the server and the
  *     local mapping is retained for recovery / restore.
  *   - `restored` — a restore has been committed; the source is live again.
@@ -109,6 +112,35 @@ export function isLifecycleLocalFileState(value: unknown): value is LifecycleLoc
     (LIFECYCLE_LOCAL_FILE_STATES as readonly string[]).includes(value)
   );
 }
+
+// --- explicit-restore target reservation ------------------------------------------------------
+
+/**
+ * The closed refusal tokens of the explicit-restore target reservation.
+ * They are command-level refusals (never store failures): each names why
+ * `reserveRestoreTarget` could not claim the requested target locator.
+ */
+export const RESTORE_RESERVATION_REFUSALS = [
+  "restore_target_occupied",
+  "restore_target_busy",
+  "restore_already_pending",
+] as const;
+
+export type RestoreReservationRefusal = (typeof RESTORE_RESERVATION_REFUSALS)[number];
+
+export function isRestoreReservationRefusal(
+  value: unknown,
+): value is RestoreReservationRefusal {
+  return (
+    typeof value === "string" &&
+    (RESTORE_RESERVATION_REFUSALS as readonly string[]).includes(value)
+  );
+}
+
+/** The closed outcome of one reservation attempt (reserved, or refused with a closed token). */
+export type RestoreReservationResult =
+  | { readonly outcome: "reserved"; readonly priorNormalizedPath: string }
+  | { readonly outcome: "refused"; readonly reason: RestoreReservationRefusal };
 
 // --- the keyed operand record (spec 6.3) -----------------------------------------------------
 
@@ -267,6 +299,25 @@ const SERVER_RECEIPT_MIGRATION_DDL = [
   "alter table lifecycle_event_operands add column server_receipt_tombstone_id text;",
   "update journal_meta set schema_version = 5 where singleton_key = 1;",
   "pragma user_version = 5;",
+].join("");
+
+// --- Server-receipt → restore-reservation schema migration (v5 → v6) -----------------------
+
+/**
+ * The v5 → v6 migration of the explicit-restore target reservation flow:
+ * adds the nullable `restore_prior_path` column on `local_files`. The
+ * reservation transaction writes the pre-reservation path there when it
+ * rebinds a tombstoned row to an explicit restore target; an explicit
+ * cancel returns the row to that path and a committed restore clears it.
+ * Every v5 row reads back with `restore_prior_path = null` until the
+ * first reservation lands. The destination version is pinned to `6` here
+ * (NOT interpolated from `JOURNAL_SCHEMA_VERSION`) so a future v6 → v7
+ * migration can layer on top of this block without rewriting this DDL.
+ */
+const RESTORE_RESERVATION_MIGRATION_DDL = [
+  "alter table local_files add column restore_prior_path text;",
+  "update journal_meta set schema_version = 6 where singleton_key = 1;",
+  "pragma user_version = 6;",
 ].join("");
 
 function readUserVersion(engine: SqliteDatabaseEngine): number {
@@ -492,6 +543,47 @@ export function migrateLastCommittedJournalToServerReceiptSchema(
     engine.exec("begin immediate;");
     try {
       engine.exec(SERVER_RECEIPT_MIGRATION_DDL);
+      engine.exec("commit;");
+    } catch (error) {
+      try {
+        engine.exec("rollback;");
+      } catch {
+        // Best-effort rollback: the closed reason below is the answer.
+      }
+      throw error instanceof JournalStoreError
+        ? error
+        : journalStoreError("journal_mutation_failed");
+    }
+    return engine.export();
+  } finally {
+    engine.close();
+  }
+}
+
+/**
+ * Migrate one server-receipt (`pragma user_version = 5`) journal image to
+ * the v6 restore-reservation schema in memory. The migration adds the
+ * `restore_prior_path` column on `local_files`; every v5 row reads back
+ * with `restore_prior_path = null` until the first reservation lands. The
+ * input image is never mutated; the function returns the upgraded image
+ * and runs the DDL inside one transaction.
+ */
+export function migrateServerReceiptJournalToRestoreReservationSchema(
+  engineModule: SqliteEngineModule,
+  image: ArrayLike<number>,
+): Uint8Array {
+  const engine = new engineModule.Database(image);
+  try {
+    const currentVersion = readUserVersion(engine);
+    if (currentVersion !== SERVER_RECEIPT_SCHEMA_VERSION) {
+      throw journalStoreError("journal_schema_unsupported");
+    }
+    if (!lastCommittedJournalImageLooksValid(engine)) {
+      throw journalStoreError("journal_image_invalid");
+    }
+    engine.exec("begin immediate;");
+    try {
+      engine.exec(RESTORE_RESERVATION_MIGRATION_DDL);
       engine.exec("commit;");
     } catch (error) {
       try {

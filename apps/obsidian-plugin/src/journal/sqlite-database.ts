@@ -53,8 +53,16 @@ import type { JournalMeta, JournalRecoveryState } from "./contracts";
  * receipt, never from a locally-derived guess. The column is nullable;
  * every v4 row reads back with `server_receipt_tombstone_id = null`
  * until the first delete commits.
+ *
+ * Version 6 (explicit-restore target reservation) adds the nullable
+ * `restore_prior_path` column on `local_files`. The reservation flow
+ * writes the pre-reservation path there when it rebinds a tombstoned row
+ * to an explicit restore target, so an explicit cancel can return the
+ * row to its prior path and a committed restore can clear it. Every v5
+ * row reads back with `restore_prior_path = null` until the first
+ * reservation lands.
  */
-export const JOURNAL_SCHEMA_VERSION = 5;
+export const JOURNAL_SCHEMA_VERSION = 6;
 
 // --- closed failure reasons ---------------------------------------------------------------
 
@@ -182,7 +190,8 @@ create table if not exists local_files (
       'reconcile_required')),
   last_committed_sha256 text,
   last_committed_size_bytes integer check (last_committed_size_bytes >= 0),
-  last_committed_media_type text
+  last_committed_media_type text,
+  restore_prior_path text
 );
 `;
 
@@ -288,6 +297,14 @@ export const CHILD_FOUR_SCHEMA_VERSION = 2;
  * as the source version it accepts.
  */
 export const CHILD_FIVE_FIX_SCHEMA_VERSION = 4;
+
+/**
+ * The server-receipt schema version (5). The v5 → v6 migration adds the
+ * `restore_prior_path` column on `local_files`; the function lives in
+ * `lifecycle-contracts.ts` and pins this constant as the source version
+ * it accepts.
+ */
+export const SERVER_RECEIPT_SCHEMA_VERSION = 5;
 
 // --- closed failure reasons ---------------------------------------------------------------
 

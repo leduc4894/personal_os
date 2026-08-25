@@ -1282,18 +1282,22 @@ export class JournalRepository {
   }
 
   /**
-   * The retained tombstone ids the explicit restore surface addresses
-   * (Task 10, spec 6.3 + 7.1). The read returns every tracked file
-   * row whose `lifecycle_state` is `tombstoned`, identified by the
-   * plugin-local `localFileId`. No path, source id, tombstone id,
-   * locator or fingerprint reaches the caller; the picker constructs
-   * its display label from the safe identifier alone.
+   * The retained restorable rows the explicit restore surface addresses
+   * (Task 10, spec 6.3 + 7.1; the explicit-restore target reservation
+   * spec extends the set). The read returns every tracked file row that
+   * still holds an open tombstone — `tombstoned`, or `restore_pending`
+   * (a durable reservation or an in-flight restore event the operator
+   * can resume) — identified by the plugin-local `localFileId`. No path,
+   * source id, tombstone id, locator or fingerprint reaches the caller;
+   * the picker constructs its display label from the safe identifier
+   * alone.
    */
-  readTombstonedLocalFileIds(): readonly string[] {
+  readRestorableLocalFileIds(): readonly string[] {
     const rows = this.#database.readAll(
       [
         "select local_file_id from local_files",
-        "where lifecycle_state = 'tombstoned'",
+        "where lifecycle_state in ('tombstoned', 'restore_pending')",
+        "and open_tombstone_id is not null",
         "order by normalized_path asc;",
       ].join(" "),
     );

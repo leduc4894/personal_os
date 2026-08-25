@@ -165,18 +165,19 @@ describe("schema migration from Child 4 to Child 5", () => {
     engineModule = await initSqlJs({ wasmBinary });
   });
 
-  it("bumps JOURNAL_SCHEMA_VERSION to 5 with lifecycle tables present", async () => {
+  it("bumps JOURNAL_SCHEMA_VERSION to 6 with lifecycle tables present", async () => {
     const { LIFECYCLE_SCHEMA_VERSION } = await import("./lifecycle-contracts");
     expect(LIFECYCLE_SCHEMA_VERSION).toBe(JOURNAL_SCHEMA_VERSION);
-    expect(LIFECYCLE_SCHEMA_VERSION).toBe(5);
-    expect(JOURNAL_SCHEMA_VERSION).toBe(5);
+    expect(LIFECYCLE_SCHEMA_VERSION).toBe(6);
+    expect(JOURNAL_SCHEMA_VERSION).toBe(6);
   });
 
-  it("migrates a Child 4 journal through v3 to v5 without losing any prior row", async () => {
+  it("migrates a Child 4 journal through v3 to v6 without losing any prior row", async () => {
     const {
       migrateChildFourJournalToLifecycleSchema,
       migrateLifecycleJournalToLastCommittedSchema,
       migrateLastCommittedJournalToServerReceiptSchema,
+      migrateServerReceiptJournalToRestoreReservationSchema,
     } = await import(
       "./lifecycle-contracts"
     );
@@ -255,8 +256,12 @@ describe("schema migration from Child 4 to Child 5", () => {
     const v3Image = migrateChildFourJournalToLifecycleSchema(engineModule, childFourImage);
     const v4Image = migrateLifecycleJournalToLastCommittedSchema(engineModule, v3Image);
     const v5Image = migrateLastCommittedJournalToServerReceiptSchema(engineModule, v4Image);
+    const v6Image = migrateServerReceiptJournalToRestoreReservationSchema(
+      engineModule,
+      v5Image,
+    );
 
-    const reopened = SqliteDatabase.openFromImage(engineModule, v5Image);
+    const reopened = SqliteDatabase.openFromImage(engineModule, v6Image);
     const meta = reopened.readJournalMeta() satisfies JournalMeta;
     expect(meta.schemaVersion).toBe(JOURNAL_SCHEMA_VERSION);
     expect(meta.dirtyGeneration).toBe(4);
@@ -295,14 +300,46 @@ describe("schema migration from Child 4 to Child 5", () => {
       ["f1f1f1f1-0000-4000-8000-000000000001", "active", null, null, null],
       ["f1f1f1f1-0000-4000-8000-000000000002", "active", null, null, null],
     ]);
-    // The schema version has advanced to v5; the new server-receipt column is
-    // present and every row reads back with `server_receipt_tombstone_id = null`.
-    expect(reopened.readSchemaVersion()).toBe(5);
+    // The schema version has advanced to v6; the server-receipt column from v5
+    // and the restore-reservation column from v6 are both present, and every
+    // prior row reads back with both as null.
+    expect(reopened.readSchemaVersion()).toBe(6);
     const columnCheck = reopened.readAll(
       "select server_receipt_tombstone_id from lifecycle_event_operands;",
     );
     expect(columnCheck[0]?.values ?? []).toEqual([]);
+    const reservationCheck = reopened.readAll(
+      "select local_file_id, restore_prior_path from local_files order by normalized_path;",
+    );
+    expect(reservationCheck[0]?.values).toEqual([
+      ["f1f1f1f1-0000-4000-8000-000000000001", null],
+      ["f1f1f1f1-0000-4000-8000-000000000002", null],
+    ]);
     reopened.close();
+  });
+
+  it("rejects a v5-to-v6 migration of an image that is not at v5", async () => {
+    const { migrateServerReceiptJournalToRestoreReservationSchema } = await import(
+      "./lifecycle-contracts"
+    );
+    const seedDatabase = new engineModule.Database();
+    seedDatabase.exec(`
+      create table journal_meta (
+        singleton_key integer primary key check (singleton_key = 1),
+        schema_version integer not null,
+        dirty_generation integer not null,
+        last_verified_generation integer not null,
+        is_reconcile_required integer not null check (is_reconcile_required in (0, 1)),
+        recovery_state text not null
+      );
+      insert into journal_meta values (1, 4, 1, 1, 0, 'verified_generation_loaded');
+      pragma user_version = 4;
+    `);
+    const image = seedDatabase.export();
+    seedDatabase.close();
+    expect(() =>
+      migrateServerReceiptJournalToRestoreReservationSchema(engineModule, image),
+    ).toThrowError(expect.objectContaining({ reason: "journal_schema_unsupported" }));
   });
 
   it("rejects a Child 4 migration of an image that is not at v2", async () => {

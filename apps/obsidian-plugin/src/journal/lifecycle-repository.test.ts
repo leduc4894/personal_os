@@ -623,6 +623,356 @@ describe("LifecycleRepository reconcile_required on corrupt dependency evidence"
   });
 });
 
+describe("LifecycleRepository explicit-restore target reservation", () => {
+  async function seedTombstonedFile(
+    repository: JournalRepository,
+    lifecycle: LifecycleRepository,
+    path: string,
+  ): Promise<{ localFileId: string; deleteEventId: string }> {
+    await captureAndCommit(repository, path, fingerprintOf("c1"));
+    const file = requireLocalFile(repository.readLocalFileByPath(path));
+    const deleteResult = await lifecycle.recordLifecycleEvent(
+      operandsFor("delete", { expectedLocator: path }),
+      {
+        localFile: file,
+        tombstoneId: "66666666-6666-4666-8666-666666666666",
+      },
+    );
+    return { localFileId: file.localFileId, deleteEventId: deleteResult.event.eventId };
+  }
+
+  it("reserves a free target: rebinds the row, keeps the tombstone, records the prior path", async () => {
+    const { database, repository, lifecycle } = createOpenedJournal();
+    const { localFileId } = await seedTombstonedFile(
+      repository,
+      lifecycle,
+      "notes/restore-me.md",
+    );
+
+    const result = await lifecycle.reserveRestoreTarget(
+      localFileId,
+      "notes/restore-target.md",
+    );
+
+    expect(result).toEqual({
+      outcome: "reserved",
+      priorNormalizedPath: "notes/restore-me.md",
+    });
+    expect(repository.readLocalFileByPath("notes/restore-me.md")).toBeNull();
+    const reserved = database.readAll(
+      "select normalized_path, lifecycle_state, open_tombstone_id, restore_prior_path from local_files;",
+    );
+    expect(reserved[0]?.values[0]).toEqual([
+      "notes/restore-target.md",
+      "restore_pending",
+      "66666666-6666-4666-8666-666666666666",
+      "notes/restore-me.md",
+    ]);
+    database.close();
+  });
+
+  it("preserves the original prior path across a re-reservation to a new target", async () => {
+    const { database, repository, lifecycle } = createOpenedJournal();
+    const { localFileId } = await seedTombstonedFile(
+      repository,
+      lifecycle,
+      "notes/restore-me.md",
+    );
+    await lifecycle.reserveRestoreTarget(localFileId, "notes/first-target.md");
+
+    const result = await lifecycle.reserveRestoreTarget(
+      localFileId,
+      "notes/second-target.md",
+    );
+
+    expect(result).toEqual({
+      outcome: "reserved",
+      priorNormalizedPath: "notes/restore-me.md",
+    });
+    const reserved = database.readAll(
+      "select normalized_path, restore_prior_path from local_files;",
+    );
+    expect(reserved[0]?.values[0]).toEqual([
+      "notes/second-target.md",
+      "notes/restore-me.md",
+    ]);
+    database.close();
+  });
+
+  it("refuses a target occupied by another tracked source row and leaves both rows untouched", async () => {
+    const { database, repository, lifecycle } = createOpenedJournal();
+    const { localFileId } = await seedTombstonedFile(
+      repository,
+      lifecycle,
+      "notes/restore-me.md",
+    );
+    await captureAndCommit(repository, "notes/occupied.md", fingerprintOf("c2"));
+
+    const result = await lifecycle.reserveRestoreTarget(localFileId, "notes/occupied.md");
+
+    expect(result).toEqual({ outcome: "refused", reason: "restore_target_occupied" });
+    const tombstonedRow = database.readAll(
+      "select normalized_path, lifecycle_state, restore_prior_path from local_files where local_file_id = $id".replace(
+        "$id",
+        `'${localFileId}'`,
+      ),
+    );
+    expect(tombstonedRow[0]?.values[0]).toEqual(["notes/restore-me.md", "tombstoned", null]);
+    expect(repository.readLocalFileByPath("notes/occupied.md")).not.toBeNull();
+    database.close();
+  });
+
+  it("refuses a reservation while a restore event of the row is still non-terminal", async () => {
+    const { database, repository, lifecycle } = createOpenedJournal();
+    const { localFileId, deleteEventId } = await seedTombstonedFile(
+      repository,
+      lifecycle,
+      "notes/restore-me.md",
+    );
+    await lifecycle.reserveRestoreTarget(localFileId, "notes/restore-target.md");
+    const reservedFile = requireLocalFile(
+      repository.readLocalFileByPath("notes/restore-target.md"),
+    );
+    await lifecycle.recordLifecycleEvent(
+      operandsFor("restore", {
+        targetLocator: "notes/restore-target.md",
+        tombstoneId: "66666666-6666-4666-8666-666666666666",
+        predecessorEventId: deleteEventId,
+      }),
+      {
+        localFile: reservedFile,
+        tombstoneId: "66666666-6666-4666-8666-666666666666",
+      },
+    );
+
+    const result = await lifecycle.reserveRestoreTarget(
+      localFileId,
+      "notes/another-target.md",
+    );
+
+    expect(result).toEqual({ outcome: "refused", reason: "restore_already_pending" });
+    const row = database.readAll(
+      "select normalized_path, lifecycle_state from local_files;",
+    );
+    expect(row[0]?.values[0]).toEqual(["notes/restore-target.md", "restore_pending"]);
+    database.close();
+  });
+
+  it("releases a queued phantom create at the target inside the reservation transaction", async () => {
+    const { database, repository, lifecycle } = createOpenedJournal();
+    const { localFileId } = await seedTombstonedFile(
+      repository,
+      lifecycle,
+      "notes/restore-me.md",
+    );
+    const phantomCapture = await repository.recordCapture({
+      normalizedPath: "notes/staged.md",
+      fingerprint: fingerprintOf("c3"),
+      policyRevisionNumber: 1,
+      admission: "policy_allowed",
+    });
+    if (phantomCapture.outcome === "capture_refused") {
+      throw new Error("expected a recorded phantom capture");
+    }
+    const phantomFileId = phantomCapture.localFile.localFileId;
+
+    const result = await lifecycle.reserveRestoreTarget(localFileId, "notes/staged.md");
+
+    expect(result).toEqual({
+      outcome: "reserved",
+      priorNormalizedPath: "notes/restore-me.md",
+    });
+    const phantomRow = database.readAll(
+      "select count(*) from local_files where local_file_id = $id".replace(
+        "$id",
+        `'${phantomFileId}'`,
+      ),
+    );
+    expect(phantomRow[0]?.values[0]?.[0]).toBe(0);
+    const phantomEvents = database.readAll(
+      "select count(*) from journal_events where local_file_id = $id".replace(
+        "$id",
+        `'${phantomFileId}'`,
+      ),
+    );
+    expect(phantomEvents[0]?.values[0]?.[0]).toBe(0);
+    const reservedRow = database.readAll(
+      "select normalized_path, lifecycle_state, restore_prior_path from local_files where local_file_id = $id".replace(
+        "$id",
+        `'${localFileId}'`,
+      ),
+    );
+    expect(reservedRow[0]?.values[0]).toEqual([
+      "notes/staged.md",
+      "restore_pending",
+      "notes/restore-me.md",
+    ]);
+    database.close();
+  });
+
+  it("refuses a target whose phantom create upload is already in flight", async () => {
+    const { database, repository, lifecycle } = createOpenedJournal();
+    const { localFileId } = await seedTombstonedFile(
+      repository,
+      lifecycle,
+      "notes/restore-me.md",
+    );
+    const phantomCapture = await repository.recordCapture({
+      normalizedPath: "notes/inflight.md",
+      fingerprint: fingerprintOf("c4"),
+      policyRevisionNumber: 1,
+      admission: "policy_allowed",
+    });
+    if (phantomCapture.outcome === "capture_refused") {
+      throw new Error("expected a recorded phantom capture");
+    }
+    await database.runSerializedMutation((session) => {
+      session.exec(
+        "update journal_events set state = 'uploading' where event_id = $id".replace(
+          "$id",
+          `'${phantomCapture.event.eventId}'`,
+        ),
+      );
+    });
+
+    const result = await lifecycle.reserveRestoreTarget(localFileId, "notes/inflight.md");
+
+    expect(result).toEqual({ outcome: "refused", reason: "restore_target_busy" });
+    expect(repository.readLocalFileByPath("notes/inflight.md")).not.toBeNull();
+    const row = database.readAll(
+      "select normalized_path, lifecycle_state from local_files where local_file_id = $id".replace(
+        "$id",
+        `'${localFileId}'`,
+      ),
+    );
+    expect(row[0]?.values[0]).toEqual(["notes/restore-me.md", "tombstoned"]);
+    database.close();
+  });
+
+  it("releases an explicit reservation back to the prior path in one transaction", async () => {
+    const { database, repository, lifecycle } = createOpenedJournal();
+    const { localFileId } = await seedTombstonedFile(
+      repository,
+      lifecycle,
+      "notes/restore-me.md",
+    );
+    await lifecycle.reserveRestoreTarget(localFileId, "notes/restore-target.md");
+
+    await lifecycle.releaseRestoreTarget(localFileId);
+
+    const row = database.readAll(
+      "select normalized_path, lifecycle_state, restore_prior_path, open_tombstone_id from local_files;",
+    );
+    expect(row[0]?.values[0]).toEqual([
+      "notes/restore-me.md",
+      "tombstoned",
+      null,
+      "66666666-6666-4666-8666-666666666666",
+    ]);
+    expect(repository.readLocalFileByPath("notes/restore-target.md")).toBeNull();
+    database.close();
+  });
+
+  it("lists tombstoned and reserved rows as restorable, never restored ones", async () => {
+    const { database, repository, lifecycle } = createOpenedJournal();
+    const { localFileId } = await seedTombstonedFile(
+      repository,
+      lifecycle,
+      "notes/restore-me.md",
+    );
+    expect(repository.readRestorableLocalFileIds()).toEqual([localFileId]);
+
+    await lifecycle.reserveRestoreTarget(localFileId, "notes/restore-target.md");
+    expect(repository.readRestorableLocalFileIds()).toEqual([localFileId]);
+
+    await lifecycle.consumeRestoreSuccessor(localFileId);
+    expect(repository.readRestorableLocalFileIds()).toEqual([]);
+    database.close();
+  });
+});
+
+describe("LifecycleRepository restore record and commit path binding", () => {
+  async function seedReservedRestore(
+    repository: JournalRepository,
+    lifecycle: LifecycleRepository,
+    priorPath: string,
+    targetPath: string,
+  ): Promise<{ localFileId: string; restoreEventId: string }> {
+    await captureAndCommit(repository, priorPath, fingerprintOf("d1"));
+    const file = requireLocalFile(repository.readLocalFileByPath(priorPath));
+    const deleteResult = await lifecycle.recordLifecycleEvent(
+      operandsFor("delete", { expectedLocator: priorPath }),
+      {
+        localFile: file,
+        tombstoneId: "77777777-7777-4777-8777-777777777777",
+      },
+    );
+    await lifecycle.reserveRestoreTarget(file.localFileId, targetPath);
+    const reservedFile = requireLocalFile(repository.readLocalFileByPath(targetPath));
+    const restoreResult = await lifecycle.recordLifecycleEvent(
+      operandsFor("restore", {
+        targetLocator: targetPath,
+        tombstoneId: "77777777-7777-4777-8777-777777777777",
+        predecessorEventId: deleteResult.event.eventId,
+      }),
+      {
+        localFile: reservedFile,
+        tombstoneId: "77777777-7777-4777-8777-777777777777",
+      },
+    );
+    return { localFileId: file.localFileId, restoreEventId: restoreResult.event.eventId };
+  }
+
+  it("records a restore event as restore_pending with the tombstone retained (never restored)", async () => {
+    const { database, repository, lifecycle } = createOpenedJournal();
+    const { localFileId } = await seedReservedRestore(
+      repository,
+      lifecycle,
+      "notes/prior.md",
+      "notes/target.md",
+    );
+
+    const row = database.readAll(
+      "select normalized_path, lifecycle_state, open_tombstone_id from local_files where local_file_id = $id".replace(
+        "$id",
+        `'${localFileId}'`,
+      ),
+    );
+    expect(row[0]?.values[0]).toEqual([
+      "notes/target.md",
+      "restore_pending",
+      "77777777-7777-4777-8777-777777777777",
+    ]);
+    database.close();
+  });
+
+  it("rebinds normalized_path to the restore target and clears the prior path on the committed receipt", async () => {
+    const { database, repository, lifecycle } = createOpenedJournal();
+    const { localFileId, restoreEventId } = await seedReservedRestore(
+      repository,
+      lifecycle,
+      "notes/prior.md",
+      "notes/target.md",
+    );
+
+    await lifecycle.recordLifecycleCommittedReceipt(restoreEventId);
+    await lifecycle.consumeRestoreSuccessor(localFileId);
+
+    const row = database.readAll(
+      "select normalized_path, lifecycle_state, open_tombstone_id, restore_prior_path from local_files where local_file_id = $id".replace(
+        "$id",
+        `'${localFileId}'`,
+      ),
+    );
+    expect(row[0]?.values[0]).toEqual(["notes/target.md", "restored", null, null]);
+    expect(repository.readLocalFileByPath("notes/prior.md")).toBeNull();
+    expect(
+      requireLocalFile(repository.readLocalFileByPath("notes/target.md")).localFileId,
+    ).toBe(localFileId);
+    database.close();
+  });
+});
+
 describe("LifecycleRepository leakage contract", () => {
   it("status / attempt projections never expose expected_locator, target_locator or source IDs", async () => {
     const { database, repository, lifecycle } = createOpenedJournal();
