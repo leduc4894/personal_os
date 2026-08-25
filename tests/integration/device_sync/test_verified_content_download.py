@@ -293,9 +293,7 @@ async def test_mismatched_and_unknown_pairs_are_unavailable(
     payload = secrets.token_bytes(256)
     source_id, source_version_id = await seed_exact_version(engine, workspace, payload)
     # Distinct bytes: canonical content objects deduplicate globally by hash.
-    _, foreign_version_id = await seed_exact_version(
-        engine, other, secrets.token_bytes(256)
-    )
+    _, foreign_version_id = await seed_exact_version(engine, other, secrets.token_bytes(256))
 
     for pair in (
         (source_id, foreign_version_id),  # version belongs to another source

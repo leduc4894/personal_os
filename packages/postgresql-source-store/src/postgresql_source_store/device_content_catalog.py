@@ -322,13 +322,11 @@ class PostgresqlDeviceContentCatalog:
         if revision_row is None:
             raise ExclusionPolicyError(ErrorCode.EXCLUSION_POLICY_DENIED)
         rule_rows = list(
-            
-                (
-                    await connection.execute(
-                        policy_rules_select_statement(revision_row.policy_revision_id)
-                    )
-                ).mappings()
-            
+            (
+                await connection.execute(
+                    policy_rules_select_statement(revision_row.policy_revision_id)
+                )
+            ).mappings()
         )
         return ExclusionPolicyRevision(
             policy_revision_id=revision_row.policy_revision_id,
