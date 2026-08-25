@@ -8,15 +8,18 @@ terminal run transitions guard on the exact prior state, the completion
 cursor advance is monotonic and raises only the acknowledged watermark, the
 identity candidate reads are checkpoint-bounded over locator/tombstone
 history, the canonical-only download read excludes the run's resolved
-sources in bind-parameter chunks below the 65,535-parameter ceiling, the
-finalize-time id lookups merge their chunked rows without loss, and the
-canonical-JSON final digest over the run's ordered pages is deterministic
-and pinned to golden vectors. Durable transaction behavior is integration
-territory (the disposable stack suite).
+sources through one array-typed parameter whose statement parameter count
+never grows with the run size (the 65,535 extended-protocol ceiling holds
+even at the schema's full 100,000 resolved ids), the finalize-time id
+lookups merge their chunked rows without loss, and the canonical-JSON final
+digest over the run's ordered pages is deterministic and pinned to golden
+vectors. Durable transaction behavior is integration territory (the
+disposable stack suite).
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -297,26 +300,30 @@ def test_chunk_id_lookups_partition_in_order_without_loss() -> None:
     assert chunk_id_lookups(()) == ()
 
 
-def test_canonical_only_downloads_bind_the_exclusion_in_chunks() -> None:
-    """A run that resolved the schema's full id vocabulary still binds every
-    statement far below PostgreSQL's 65,535-parameter ceiling: the NOT IN
-    exclusion arrives as chunked conjuncts whose union is the whole set."""
+def test_canonical_only_downloads_bind_the_exclusion_as_one_array_parameter() -> None:
+    """The exclusion must respect the extended-protocol ceiling: even a run
+    that resolved the schema's full 100,000 ids binds ONE array-typed
+    parameter, so the compiled statement's distinct bind markers are
+    identical for a handful of ids and for 100,000 (the round-1 chunked
+    ``NOT IN`` conjuncts failed exactly here — every id remained a
+    parameter of the same statement, crossing the ceiling near 65,530
+    resolved sources)."""
 
-    ids = [uuid4() for _ in range(2 * MANIFEST_ID_LOOKUP_CHUNK_SIZE + 7)]
-    statement = manifest_canonical_only_downloads_statement(
-        _WORKSPACE_ID, _CHECKPOINT_SEQUENCE, ids
-    )
-    compiled = statement.compile(dialect=postgresql.dialect())
-    params = compiled.params
-    chunk_names = sorted(name for name in params if name.startswith("resolved_source_ids_"))
-    assert chunk_names == [
-        "resolved_source_ids_0",
-        "resolved_source_ids_1",
-        "resolved_source_ids_2",
-    ]
-    bound = [source_id for name in chunk_names for source_id in params[name]]
-    assert bound == ids
-    assert all(len(params[name]) <= MANIFEST_ID_LOOKUP_CHUNK_SIZE for name in chunk_names)
+    few_ids = [uuid4() for _ in range(3)]
+    full_ids = [uuid4() for _ in range(100_000)]
+    few = manifest_canonical_only_downloads_statement(
+        _WORKSPACE_ID, _CHECKPOINT_SEQUENCE, few_ids
+    ).compile(dialect=postgresql.dialect())
+    full = manifest_canonical_only_downloads_statement(
+        _WORKSPACE_ID, _CHECKPOINT_SEQUENCE, full_ids
+    ).compile(dialect=postgresql.dialect())
+    few_markers = set(re.findall(r"%\((\w+)\)s", str(few)))
+    full_markers = set(re.findall(r"%\((\w+)\)s", str(full)))
+    assert "resolved_source_ids" in full_markers
+    assert full_markers == few_markers
+    assert len(full_markers) <= MANIFEST_ID_LOOKUP_CHUNK_SIZE
+    assert list(full.params["resolved_source_ids"]) == full_ids
+    assert "unnest" in str(full)
 
 
 class _RowMappingStub(dict[str, Any]):

@@ -21,9 +21,11 @@ the pure planner: per-entry resolutions against the canonical source state
 at the checkpoint under the run's bound policy revision, plus canonical-only
 downloads for allowed active sources absent from the manifest (a deleted
 canonical source absent locally needs no file action). Because a run may
-resolve the schema's full 100,000 entries, every finalize-time id lookup and
-the canonical-only exclusion run in bind-parameter chunks far below
-PostgreSQL's 65,535-parameter ceiling and merge their rows. The first successful
+resolve the schema's full 100,000 entries, every finalize-time ``IN`` lookup
+runs in bind-parameter chunks far below PostgreSQL's 65,535-parameter
+ceiling and merges its rows, and the canonical-only exclusion binds the
+whole resolved-id set as one array-typed parameter so its statement's
+parameter count never grows with the run. The first successful
 ``read_manifest_actions`` moves ``planned`` to ``applying`` and later reads
 are state-preserving replays; every action read and completion rechecks the
 active policy revision and invalidates a stale run with the closed
@@ -156,12 +158,12 @@ MANIFEST_UNFINISHED_STATES: Final[frozenset[str]] = frozenset(
 #: page number, its accepted entry count and its page digest hex.
 type ManifestPageRecord = tuple[int, int, str]
 
-#: Maximum ids one finalize-time lookup binds per statement. PostgreSQL's
-#: extended protocol caps a statement at 65,535 bind parameters, while a
-#: manifest run may resolve up to 100,000 distinct ids at finalization, so
-#: the id lookups and the canonical-only exclusion run in chunks of this
-#: size and merge their results — far below the ceiling for any run the
-#: schema allows.
+#: Maximum ids one finalize-time ``IN`` lookup binds per statement.
+#: PostgreSQL's extended protocol caps a statement at 65,535 bind
+#: parameters, while a manifest run may resolve up to 100,000 distinct ids
+#: at finalization, so the id lookups run in chunks of this size and merge
+#: their results (the canonical-only exclusion needs no chunking: it binds
+#: its whole id set as one array-typed parameter).
 MANIFEST_ID_LOOKUP_CHUNK_SIZE: Final[int] = 5_000
 
 
@@ -845,12 +847,12 @@ def manifest_canonical_only_downloads_statement(
     and carries no tombstone open there (a deleted canonical source absent
     locally needs no file action), carries its checkpoint version and
     content evidence for the policy subject, and is excluded when the run
-    already proved some entry resolves to it. The exclusion is batched: the
-    resolved ids are bound as chunked ``NOT IN`` conjuncts of at most
-    :data:`MANIFEST_ID_LOOKUP_CHUNK_SIZE` parameters each, so a run that
-    resolved the schema's full 100,000 entries still stays far below the
-    extended protocol's 65,535-parameter ceiling (the conjunction of
-    chunked ``NOT IN`` predicates is exactly the single-list ``NOT IN``).
+    already proved some entry resolves to it. The exclusion binds the whole
+    resolved-id set as ONE array-typed parameter (``NOT IN (SELECT
+    unnest(:resolved_source_ids))``), so the statement's parameter count
+    never grows with the run size: a run that resolved the schema's full
+    100,000 entries still sends exactly one exclusion parameter and stays
+    far below the extended protocol's 65,535-parameter ceiling.
     """
 
     checkpoint_version = _checkpoint_version_lateral(checkpoint_sequence)
@@ -891,17 +893,15 @@ def manifest_canonical_only_downloads_statement(
     )
     if resolved_source_ids:
         statement = statement.where(
-            sa.and_(
-                *(
-                    sources.c.source_id.not_in(
+            sources.c.source_id.not_in(
+                sa.select(
+                    sa.func.unnest(
                         sa.bindparam(
-                            f"resolved_source_ids_{chunk_index}",
-                            list(chunk),
-                            type_=sa.Uuid(),
-                            expanding=True,
+                            "resolved_source_ids",
+                            list(resolved_source_ids),
+                            type_=sa.ARRAY(sa.Uuid()),
                         )
                     )
-                    for chunk_index, chunk in enumerate(chunk_id_lookups(resolved_source_ids))
                 )
             )
         )
