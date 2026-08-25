@@ -114,7 +114,13 @@ def _is_sanctioned_policy_surface(path: Path) -> bool:
     named ``small_file_sync*`` are the sanctioned small-file sync surface of
     the plugin journal design (spec 10), whose preflight/content routes and
     terminal receipts legitimately name canonical source and version
-    identity. The plugin journal client directory is the same sanctioned
+    identity. Modules named ``device_sync*`` are the sanctioned device sync
+    surface of the device cursor and manifest reconciliation design (spec
+    7.4): its verified exact-version download and manifest wire shapes
+    legitimately name canonical source and version identity, while the
+    static object-store guard still proves the bytes flow only through the
+    policy-authorized verified reader composition. The plugin journal client
+    directory is the same sanctioned
     surface on the Obsidian side: its hand-mirrored wire shapes and receipt
     records carry ``source_version_id`` identity, and its generation
     persistence speaks of publishing verified journal manifests — none of it
@@ -127,6 +133,8 @@ def _is_sanctioned_policy_surface(path: Path) -> bool:
     if path.name.startswith(("exclusion_policy", "exclusion-policy")):
         return True
     if path.name.startswith(("small_file_sync", "small-file-sync")):
+        return True
+    if path.name.startswith(("device_sync", "device-sync")):
         return True
     if SANCTIONED_PLUGIN_JOURNAL_ROOT in path.parents:
         return True

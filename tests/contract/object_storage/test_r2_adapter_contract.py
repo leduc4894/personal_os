@@ -25,8 +25,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import IO
+from uuid import UUID, uuid4
 
 import pytest
+from api_runtime.device_sync_content import VerifiedDeviceContentService
 from botocore.exceptions import ClientError
 from tests.contract.object_storage.scripted_s3 import (
     DEFAULT_ETAG,
@@ -35,7 +37,11 @@ from tests.contract.object_storage.scripted_s3 import (
     scripted_body,
 )
 
+from personal_os.device_sync.contracts import DeviceContentDescriptor, DeviceSyncContext
+from personal_os.device_sync.errors import DeviceSyncError, DeviceSyncErrorCode
+from personal_os.device_sync.metrics import InMemoryDeviceSyncMetrics
 from personal_os.diagnostics import DiagnosticLogger
+from personal_os.diagnostics.context import DiagnosticContext, create_diagnostic_context
 from personal_os.diagnostics.events import EventName
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.object_storage import (
@@ -1119,3 +1125,134 @@ async def test_store_records_failed_outcome_for_input_invalid(tmp_path: Path) ->
     ]
     assert store_records[-1].result is ObjectStorageResult.FAILED
     assert store_records[-1].error_code is ErrorCode.OBJECT_STORAGE_INPUT_INVALID
+
+
+# --- Verified device download composition -------------------------------------
+
+
+class _StaticDeviceContentCatalog:
+    """Catalog double resolving one fixed exact-version descriptor.
+
+    The catalog is the authorization/membership seam and resolves no bytes;
+    these cases pin what the composed device download does around the REAL
+    adapter: the exact HEAD + conditional If-Match GET verification runs
+    before the consumer receives anything, and absence/corruption cross the
+    boundary as the closed device download integrity error.
+    """
+
+    def __init__(self, expected: ExpectedObject) -> None:
+        self._expected = expected
+
+    async def resolve_descriptor(
+        self,
+        context: DeviceSyncContext,
+        *,
+        source_id: UUID,
+        source_version_id: UUID,
+        diagnostic_context: DiagnosticContext,
+    ) -> DeviceContentDescriptor:
+        del context, diagnostic_context
+        return DeviceContentDescriptor(
+            source_id=source_id,
+            source_version_id=source_version_id,
+            content_digest=self._expected.content_digest,
+            size_bytes=self._expected.size_bytes,
+            media_type=self._expected.media_type,
+        )
+
+
+def _device_download_service(
+    client: ScriptedS3Client, tmp_path: Path, expected: ExpectedObject
+) -> VerifiedDeviceContentService:
+    store = build_store(client, tmp_path)
+    return VerifiedDeviceContentService(
+        catalog=_StaticDeviceContentCatalog(expected),
+        objects=store,
+        metrics=InMemoryDeviceSyncMetrics(),
+        diagnostics=None,
+    )
+
+
+_DEVICE_DOWNLOAD_CONTEXT = DeviceSyncContext(
+    workspace_id=uuid4(), device_id=uuid4(), user_id=uuid4()
+)
+
+
+async def _open_device_content(
+    service: VerifiedDeviceContentService, expected: ExpectedObject
+) -> bytes:
+    diagnostic = create_diagnostic_context().context
+    collected = bytearray()
+    async with service.open_content(
+        _DEVICE_DOWNLOAD_CONTEXT,
+        source_id=uuid4(),
+        source_version_id=uuid4(),
+        diagnostic_context=diagnostic,
+    ) as content:
+        assert content.descriptor.expected_object() == expected
+        async for chunk in content.reader:
+            collected.extend(chunk)
+    return bytes(collected)
+
+
+@pytest.mark.asyncio
+async def test_device_download_yields_exact_bytes_after_if_match_get(
+    tmp_path: Path,
+) -> None:
+    payload = _CANONICAL_PAYLOAD
+    expected = _expected(payload)
+    client = ScriptedS3Client.matching_get(payload)
+    service = _device_download_service(client, tmp_path, expected)
+
+    assert await _open_device_content(service, expected) == payload
+
+    # The composed download performed the exact adapter verification: one
+    # HEAD then one conditional If-Match GET, spool removed on exit.
+    assert client.methods == ["head_object", "get_object"]
+    assert [call.if_match for call in client.get_calls] == [DEFAULT_ETAG]
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_device_download_missing_object_is_closed_integrity_failure(
+    tmp_path: Path,
+) -> None:
+    expected = _expected(_CANONICAL_PAYLOAD)
+    client = ScriptedS3Client.missing_object()
+    service = _device_download_service(client, tmp_path, expected)
+
+    with pytest.raises(DeviceSyncError) as raised:
+        await _open_device_content(service, expected)
+
+    assert raised.value.code is DeviceSyncErrorCode.DOWNLOAD_INTEGRITY_FAILED
+    rendered = (str(raised.value) + repr(raised.value)).lower()
+    for provider_string in ("r2", "bucket", "etag", "objects/sha256", "endpoint"):
+        assert provider_string not in rendered
+    assert client.methods == ["head_object"]
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_device_download_corrupt_object_fails_closed_before_any_byte(
+    tmp_path: Path,
+) -> None:
+    expected = _expected(_CORRUPT_PREFIX + _CORRUPT_CORRECT_TAIL)
+    client = ScriptedS3Client.corrupt_after_prefix(_CORRUPT_PREFIX, _CORRUPT_WRONG_TAIL)
+    service = _device_download_service(client, tmp_path, expected)
+
+    consumed = bytearray()
+    with pytest.raises(DeviceSyncError) as raised:
+        async with service.open_content(
+            _DEVICE_DOWNLOAD_CONTEXT,
+            source_id=uuid4(),
+            source_version_id=uuid4(),
+            diagnostic_context=create_diagnostic_context().context,
+        ) as content:
+            async for chunk in content.reader:
+                consumed.extend(chunk)
+
+    assert raised.value.code is DeviceSyncErrorCode.DOWNLOAD_INTEGRITY_FAILED
+    # No consumer byte flowed before the full verification failed, and the
+    # spool root is clean.
+    assert consumed == b""
+    assert list(tmp_path.iterdir()) == []

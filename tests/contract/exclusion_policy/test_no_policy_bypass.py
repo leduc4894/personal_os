@@ -74,6 +74,13 @@ APPROVED_OBJECT_STORE_MODULES: Final[frozenset[Path]] = frozenset(
         REPO_ROOT / "src" / "personal_os" / "recovery" / "service.py",
         REPO_ROOT / "tools" / "canonical_core_operations.py",
         REPO_ROOT / "src" / "personal_os" / "small_file_sync" / "service.py",
+        # The verified device download composition of the device cursor and
+        # manifest reconciliation design (spec 7.4): its catalog resolves
+        # workspace scope, exact version membership and the current active
+        # policy BEFORE the verified reader opens — the reader is entered
+        # only through this module after that authorization, and its reader
+        # failures map onto the closed device download codes.
+        REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "device_sync_content.py",
         REPO_ROOT / "packages" / "r2-object-storage" / "src" / "r2_object_storage" / "adapter.py",
         REPO_ROOT / "src" / "personal_os" / "object_storage" / "contracts.py",
     }

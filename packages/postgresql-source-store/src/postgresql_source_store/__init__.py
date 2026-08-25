@@ -19,6 +19,9 @@ from postgresql_source_store.canonical_read import (
     PostgresqlCanonicalSourceReadStore,
     hydrate_canonical_source_reference,
 )
+from postgresql_source_store.device_content_catalog import (
+    PostgresqlDeviceContentCatalog,
+)
 from postgresql_source_store.device_event_store import (
     PostgresqlDeviceEventStore,
     hydrate_device_event,
@@ -58,6 +61,7 @@ __all__ = [
     "DatabaseRetryPolicy",
     "PostgresqlBackupSnapshotStore",
     "PostgresqlCanonicalSourceReadStore",
+    "PostgresqlDeviceContentCatalog",
     "PostgresqlDeviceEventStore",
     "PostgresqlDeviceManifestStore",
     "PostgresqlIdentityBootstrapStore",
