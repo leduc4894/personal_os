@@ -12,7 +12,9 @@ range `2001e05..HEAD`:
 - `ecdb611` `docs: accept pinned ruff exception style` (Task 4)
 - `f9d5ac3` `docs: record mobile lifecycle physical evidence` (Task 5)
 - `6db2d9b` `test: pin typed rejection terminalization at the policy boundary` (Task 6 fix round)
-- **This commit** — `docs: hand off child six deferred remediation` (Task 6 closure; the branch head at plan close-out)
+- `5028233` `docs: hand off child six deferred remediation` (Task 6 closure)
+- `354bf34` `fix: re-claim failed upload operations on the durable adapter` (final-review fix wave: the durable `_reserve_operation_once` now rotates `failed` rows exactly like expired-pending, converging with the offline composition and the pinned integration contract; committed rows still refuse)
+- `e153458` `docs: reconcile deferred hygiene row and verdict line` (final-review fix wave; branch head at plan close-out; full `poe verify` re-run green at this head)
 
 **Status: all ten final gates GREEN (§2). Mobile physical matrix executed
 2026-08-25: 7/8 PASS on the physical device; explicit restore FAILS on the
