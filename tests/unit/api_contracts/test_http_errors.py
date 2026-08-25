@@ -114,6 +114,25 @@ def test_http_status_map_is_closed_for_the_api_surface() -> None:
         ErrorCode.SOURCE_TOMBSTONE_CLOSED: 409,
         ErrorCode.SOURCE_LIFECYCLE_VERSION_CONFLICT: 409,
         ErrorCode.SOURCE_LIFECYCLE_COMMIT_OUTCOME_UNKNOWN: 503,
+        # The device cursor and manifest reconciliation block of the design
+        # error contract (spec 13): 409 for the cursor/state conflicts and
+        # integrity stops, 404 for unavailable events and runs, 410 for the
+        # expired run, 422 for invalid pages/digests and download integrity,
+        # and one retryable 503 for the dependency outage.
+        ErrorCode.DEVICE_CURSOR_GAP: 409,
+        ErrorCode.DEVICE_CURSOR_REGRESSION: 409,
+        ErrorCode.DEVICE_CURSOR_ACK_AHEAD: 409,
+        ErrorCode.DEVICE_EVENT_UNAVAILABLE: 404,
+        ErrorCode.DEVICE_EVENT_INTEGRITY_FAILED: 409,
+        ErrorCode.DEVICE_MANIFEST_NOT_FOUND: 404,
+        ErrorCode.DEVICE_MANIFEST_EXPIRED: 410,
+        ErrorCode.DEVICE_MANIFEST_STATE_INVALID: 409,
+        ErrorCode.DEVICE_MANIFEST_PAGE_INVALID: 422,
+        ErrorCode.DEVICE_MANIFEST_PAGE_REPLAY_MISMATCH: 409,
+        ErrorCode.DEVICE_MANIFEST_DIGEST_MISMATCH: 422,
+        ErrorCode.DEVICE_MANIFEST_POLICY_ADVANCED: 409,
+        ErrorCode.DEVICE_DOWNLOAD_INTEGRITY_FAILED: 422,
+        ErrorCode.DEVICE_SYNC_DEPENDENCY_UNAVAILABLE: 503,
     }
 
 

@@ -124,6 +124,9 @@ class EventName(StrEnum):
     EXCLUSION_POLICY_EVALUATION_REJECTED = "exclusion_policy_evaluation_rejected"
     PREVIEW_DISPATCH_UNAVAILABLE = "preview_dispatch_unavailable"
     RECONCILIATION_DISPATCH_UNAVAILABLE = "reconciliation_dispatch_unavailable"
+    DEVICE_SYNC_OPERATION_COMPLETED = "device_sync_operation_completed"
+    DEVICE_SYNC_OPERATION_REJECTED = "device_sync_operation_rejected"
+    DEVICE_SYNC_OPERATION_FAILED = "device_sync_operation_failed"
 
 
 type SafeDiagnosticScalar = (
@@ -671,6 +674,30 @@ EVENT_DEFINITIONS: Final[Mapping[EventName, EventDefinition]] = MappingProxyType
                     "stack_fingerprint",
                 }
             ),
+        ),
+        # Device sync operation events (spec 14.2 of the device cursor and
+        # manifest reconciliation design): success carries exactly the closed
+        # operation label and duration; rejection and failure carry exactly
+        # the operation, the closed reason code and the duration — never a
+        # workspace/device/source/run identifier, locator, digest or any
+        # provider detail.
+        EventName.DEVICE_SYNC_OPERATION_COMPLETED: EventDefinition(
+            level=DiagnosticLevel.INFO,
+            result_code=ResultCode.SUCCEEDED,
+            required_fields=frozenset({"operation", "duration_ms"}),
+            allowed_fields=frozenset({"operation", "duration_ms"}),
+        ),
+        EventName.DEVICE_SYNC_OPERATION_REJECTED: EventDefinition(
+            level=DiagnosticLevel.WARNING,
+            result_code=ResultCode.REJECTED,
+            required_fields=frozenset({"operation", "reason", "duration_ms"}),
+            allowed_fields=frozenset({"operation", "reason", "duration_ms"}),
+        ),
+        EventName.DEVICE_SYNC_OPERATION_FAILED: EventDefinition(
+            level=DiagnosticLevel.ERROR,
+            result_code=ResultCode.FAILED,
+            required_fields=frozenset({"operation", "reason", "duration_ms"}),
+            allowed_fields=frozenset({"operation", "reason", "duration_ms"}),
         ),
     }
 )

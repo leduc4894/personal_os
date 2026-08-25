@@ -121,6 +121,20 @@ class ErrorCode(StrEnum):
     SOURCE_TOMBSTONE_CLOSED = "source_tombstone_closed"
     SOURCE_LIFECYCLE_VERSION_CONFLICT = "source_lifecycle_version_conflict"
     SOURCE_LIFECYCLE_COMMIT_OUTCOME_UNKNOWN = "source_lifecycle_commit_outcome_unknown"
+    DEVICE_CURSOR_GAP = "device_cursor_gap"
+    DEVICE_CURSOR_REGRESSION = "device_cursor_regression"
+    DEVICE_CURSOR_ACK_AHEAD = "device_cursor_ack_ahead"
+    DEVICE_EVENT_UNAVAILABLE = "device_event_unavailable"
+    DEVICE_EVENT_INTEGRITY_FAILED = "device_event_integrity_failed"
+    DEVICE_MANIFEST_NOT_FOUND = "device_manifest_not_found"
+    DEVICE_MANIFEST_EXPIRED = "device_manifest_expired"
+    DEVICE_MANIFEST_STATE_INVALID = "device_manifest_state_invalid"
+    DEVICE_MANIFEST_PAGE_INVALID = "device_manifest_page_invalid"
+    DEVICE_MANIFEST_PAGE_REPLAY_MISMATCH = "device_manifest_page_replay_mismatch"
+    DEVICE_MANIFEST_DIGEST_MISMATCH = "device_manifest_digest_mismatch"
+    DEVICE_MANIFEST_POLICY_ADVANCED = "device_manifest_policy_advanced"
+    DEVICE_DOWNLOAD_INTEGRITY_FAILED = "device_download_integrity_failed"
+    DEVICE_SYNC_DEPENDENCY_UNAVAILABLE = "device_sync_dependency_unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -750,6 +764,97 @@ ERROR_DEFINITIONS: Final[Mapping[ErrorCode, ErrorDefinition]] = MappingProxyType
             category=ErrorCategory.DEPENDENCY,
             is_retryable=True,
             safe_message="Source lifecycle commit outcome could not be determined",
+            allowed_detail_fields=frozenset(),
+        ),
+        # The device sync block of the device cursor and manifest
+        # reconciliation design (spec 13): every code is terminal for the
+        # triggering request except the retryable dependency outage, and no
+        # code accepts a safe detail — the readable reason travels through
+        # the structured diagnostic events and the plugin trail. HTTP
+        # statuses come from that table (409/404/410/422/503) and are wired
+        # into the closed api_contracts status map.
+        ErrorCode.DEVICE_CURSOR_GAP: ErrorDefinition(
+            category=ErrorCategory.INTEGRITY,
+            is_retryable=False,
+            safe_message="The retained event history cannot satisfy the device cursor",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.DEVICE_CURSOR_REGRESSION: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The device cursor cannot move backwards",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.DEVICE_CURSOR_ACK_AHEAD: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The acknowledgement exceeds the delivered cursor watermark",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.DEVICE_EVENT_UNAVAILABLE: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The requested device event is unavailable",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.DEVICE_EVENT_INTEGRITY_FAILED: ErrorDefinition(
+            category=ErrorCategory.INTEGRITY,
+            is_retryable=False,
+            safe_message="A device event failed hydration integrity checks",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.DEVICE_MANIFEST_NOT_FOUND: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The manifest run does not exist",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.DEVICE_MANIFEST_EXPIRED: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The manifest run expired",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.DEVICE_MANIFEST_STATE_INVALID: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The manifest run state does not accept this action",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.DEVICE_MANIFEST_PAGE_INVALID: ErrorDefinition(
+            category=ErrorCategory.VALIDATION,
+            is_retryable=False,
+            safe_message="The manifest page is invalid",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.DEVICE_MANIFEST_PAGE_REPLAY_MISMATCH: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The manifest page replay does not match recorded evidence",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.DEVICE_MANIFEST_DIGEST_MISMATCH: ErrorDefinition(
+            category=ErrorCategory.VALIDATION,
+            is_retryable=False,
+            safe_message="The manifest digest does not match recorded evidence",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.DEVICE_MANIFEST_POLICY_ADVANCED: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The active policy advanced past the manifest checkpoint",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.DEVICE_DOWNLOAD_INTEGRITY_FAILED: ErrorDefinition(
+            category=ErrorCategory.INTEGRITY,
+            is_retryable=False,
+            safe_message="Device content failed integrity verification",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.DEVICE_SYNC_DEPENDENCY_UNAVAILABLE: ErrorDefinition(
+            category=ErrorCategory.DEPENDENCY,
+            is_retryable=True,
+            safe_message="A device sync dependency is temporarily unavailable",
             allowed_detail_fields=frozenset(),
         ),
     }

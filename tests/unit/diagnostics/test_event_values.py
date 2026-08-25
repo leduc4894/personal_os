@@ -78,4 +78,7 @@ def test_event_names_are_closed() -> None:
         "exclusion_policy_evaluation_rejected",
         "preview_dispatch_unavailable",
         "reconciliation_dispatch_unavailable",
+        "device_sync_operation_completed",
+        "device_sync_operation_rejected",
+        "device_sync_operation_failed",
     }

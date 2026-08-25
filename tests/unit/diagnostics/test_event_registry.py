@@ -247,6 +247,42 @@ def test_policy_dispatch_unavailable_events_are_registered_with_exact_contracts(
         assert definition.allowed_fields == fields, event_name
 
 
+def test_device_sync_operation_events_are_registered_with_exact_contracts() -> None:
+    """Device-sync operation events: closed operation/reason labels and duration only.
+
+    Success carries exactly the operation and duration; rejection and failure
+    carry exactly the operation, the closed reason code and the duration (spec
+    14.2 of the device cursor and manifest reconciliation design). No
+    identifier, locator, digest or provider detail is ever a field.
+    """
+
+    expected = {
+        EventName.DEVICE_SYNC_OPERATION_COMPLETED: (
+            DiagnosticLevel.INFO,
+            ResultCode.SUCCEEDED,
+            frozenset({"operation", "duration_ms"}),
+            frozenset({"operation", "duration_ms"}),
+        ),
+        EventName.DEVICE_SYNC_OPERATION_REJECTED: (
+            DiagnosticLevel.WARNING,
+            ResultCode.REJECTED,
+            frozenset({"operation", "reason", "duration_ms"}),
+            frozenset({"operation", "reason", "duration_ms"}),
+        ),
+        EventName.DEVICE_SYNC_OPERATION_FAILED: (
+            DiagnosticLevel.ERROR,
+            ResultCode.FAILED,
+            frozenset({"operation", "reason", "duration_ms"}),
+            frozenset({"operation", "reason", "duration_ms"}),
+        ),
+    }
+    for event_name, (level, result_code, required, allowed) in expected.items():
+        definition = EVENT_DEFINITIONS[event_name]
+        assert (definition.level, definition.result_code) == (level, result_code), event_name
+        assert definition.required_fields == required, event_name
+        assert definition.allowed_fields == allowed, event_name
+
+
 def test_exclusion_policy_evaluation_events_are_registered_with_exact_contracts() -> None:
     """Spec 21 evaluation events: closed boundary/decision labels and counts only.
 
