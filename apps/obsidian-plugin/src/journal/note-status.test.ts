@@ -34,12 +34,14 @@ function projectInput(
     readonly isReconcileRequired?: boolean;
     readonly observedFingerprint?: FrozenFingerprint;
     readonly policyRevisionNumber?: number;
+    readonly lastCommittedFingerprint?: FrozenFingerprint | null;
   } = {},
 ) {
   return {
     normalizedPath: "notes/current.md",
     policyRevisionNumber: overrides.policyRevisionNumber ?? 7,
     observedFingerprint: overrides.observedFingerprint ?? FINGERPRINT,
+    lastCommittedFingerprint: overrides.lastCommittedFingerprint ?? null,
     latestEvent,
     isReconcileRequired: overrides.isReconcileRequired ?? false,
   };
@@ -88,6 +90,39 @@ describe("local note sync status projection", () => {
         }),
       ),
     ).toMatchObject({ state: "reconcile_required" });
+  });
+
+  it("verifies a lifecycle-committed note against the row's last-committed fingerprint, not the event placeholder", () => {
+    // A committed lifecycle event (rename / move / delete / restore) carries
+    // the deterministic zeros placeholder fingerprint, so comparing it with
+    // the real observed bytes always mismatched and mislabelled every
+    // lifecycle-settled note as reconciliation required (observed on the
+    // physical device 2026-08-25: a restored note showed the wrong label
+    // while its canonical state was correct). The verdict must instead
+    // compare the observed bytes with the row's last-committed fingerprint.
+    const lifecycleZeros: FrozenFingerprint = {
+      sha256: "0".repeat(64),
+      sizeBytes: 0,
+      mediaType: "application/octet-stream",
+    };
+    for (const operation of ["rename", "move", "delete", "restore"] as const) {
+      const lifecycleEvent = event("committed", {
+        operation,
+        fingerprint: lifecycleZeros,
+      });
+      expect(
+        projectLocalNoteSyncStatus(
+          projectInput(lifecycleEvent, { lastCommittedFingerprint: FINGERPRINT }),
+        ),
+      ).toMatchObject({ state: "synced" });
+      expect(
+        projectLocalNoteSyncStatus(
+          projectInput(lifecycleEvent, {
+            lastCommittedFingerprint: { ...FINGERPRINT, sha256: "b".repeat(64) },
+          }),
+        ),
+      ).toMatchObject({ state: "reconcile_required" });
+    }
   });
 
   it("prioritises the durable reconciliation stop", () => {

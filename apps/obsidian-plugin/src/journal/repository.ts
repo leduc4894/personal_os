@@ -419,6 +419,9 @@ function parseLocalNoteSyncStatusRow(
     observedSha256,
     observedSizeBytes,
     observedMediaType,
+    lastCommittedSha256,
+    lastCommittedSizeBytes,
+    lastCommittedMediaType,
     ...eventRow
   ] = row;
   if (
@@ -434,6 +437,16 @@ function parseLocalNoteSyncStatusRow(
   ) {
     throw journalStoreError("journal_image_invalid");
   }
+  const lastCommittedFingerprint =
+    typeof lastCommittedSha256 === "string" &&
+    typeof lastCommittedSizeBytes === "number" &&
+    typeof lastCommittedMediaType === "string"
+      ? {
+          sha256: lastCommittedSha256,
+          sizeBytes: lastCommittedSizeBytes,
+          mediaType: lastCommittedMediaType,
+        }
+      : null;
   const latestEvent = eventRow[0] === null
     ? null
     : parseJournalEventRow(eventRow);
@@ -448,6 +461,7 @@ function parseLocalNoteSyncStatusRow(
       sizeBytes: observedSizeBytes,
       mediaType: observedMediaType,
     },
+    lastCommittedFingerprint,
     latestEvent,
     isReconcileRequired,
   });
@@ -1161,6 +1175,7 @@ export class JournalRepository {
       [
         "select local_file.normalized_path, local_file.policy_revision,",
         "local_file.observed_sha256, local_file.observed_size_bytes, local_file.observed_media_type,",
+        "local_file.last_committed_sha256, local_file.last_committed_size_bytes, local_file.last_committed_media_type,",
         `current_event.${JOURNAL_EVENT_COLUMNS.join(", current_event.")}`,
         "from local_files local_file",
         "left join journal_events current_event on current_event.rowid = (",

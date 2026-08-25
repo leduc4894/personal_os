@@ -30,9 +30,24 @@ export interface LocalNoteSyncStatusInput {
   readonly normalizedPath: string;
   readonly policyRevisionNumber: number | null;
   readonly observedFingerprint: FrozenFingerprint;
+  /**
+   * The row's provable last-committed fingerprint. A committed lifecycle
+   * event (rename / move / delete / restore) carries the deterministic
+   * zeros placeholder instead of real bytes, so the content verdict for
+   * a lifecycle-settled note must compare the observed bytes against
+   * THIS fingerprint, never against the event's placeholder.
+   */
+  readonly lastCommittedFingerprint: FrozenFingerprint | null;
   readonly latestEvent: JournalEvent | null;
   readonly isReconcileRequired: boolean;
 }
+
+const LIFECYCLE_OPERATIONS: ReadonlySet<JournalEvent["operation"]> = new Set([
+  "rename",
+  "move",
+  "delete",
+  "restore",
+]);
 
 /** Project one note from its latest durable journal event and current file mapping. */
 export function projectLocalNoteSyncStatus(
@@ -65,10 +80,14 @@ export function projectLocalNoteSyncStatus(
     case "blocked_conflict":
       return { ...base, state: "conflict", retryAtEpochMs: null, reason: event.safeError };
     case "committed":
-    case "no_change":
-      return fingerprintsMatch(event.fingerprint, input.observedFingerprint)
+    case "no_change": {
+      const verdictFingerprint = LIFECYCLE_OPERATIONS.has(event.operation)
+        ? input.lastCommittedFingerprint
+        : event.fingerprint;
+      return fingerprintsMatch(verdictFingerprint, input.observedFingerprint)
         ? { ...base, state: "synced", retryAtEpochMs: null, reason: null }
         : { ...base, state: "reconcile_required", retryAtEpochMs: null, reason: null };
+    }
     case "blocked_size":
     case "deferred_lifecycle":
     case "integrity_failed":
@@ -81,8 +100,12 @@ export function projectLocalNoteSyncStatus(
   }
 }
 
-function fingerprintsMatch(left: FrozenFingerprint, right: FrozenFingerprint): boolean {
+function fingerprintsMatch(
+  left: FrozenFingerprint | null,
+  right: FrozenFingerprint,
+): boolean {
   return (
+    left !== null &&
     left.sha256 === right.sha256 &&
     left.sizeBytes === right.sizeBytes &&
     left.mediaType === right.mediaType
