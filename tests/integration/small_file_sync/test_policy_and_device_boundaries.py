@@ -269,10 +269,18 @@ def test_locator_rule_published_during_the_upload_fails_closed_at_publication(
     assert harness.sync_state.published_source_ids == set()
 
 
-def test_irrelevant_locator_revision_reauthorizes_claimed_exact_token_once(
+def test_irrelevant_locator_revision_reauthorizes_through_fresh_claim_after_terminal_rejection(
     policy_harness: SmallFileWireHarness,
 ) -> None:
-    """A locator-aware re-preflight hands the same claimed token fresh authority."""
+    """A typed rejection terminalizes its claim; fresh authority is a fresh claim.
+
+    The indeterminate 403 is a typed non-retryable 4xx, so the claimed row must
+    not stay at ``receiving`` — it terminalizes with the closed safe error
+    code. The new locator-only rule is irrelevant to this open locator, so the
+    re-preflight of the same journal identity answers a fresh claim under the
+    changed revision instead of rebinding the terminal token, and only the
+    fresh token commits the publication, exactly once.
+    """
 
     harness = policy_harness
     assert harness.snapshot_source is not None
@@ -281,8 +289,7 @@ def test_irrelevant_locator_revision_reauthorizes_claimed_exact_token_once(
     accepted_revision = harness.sync_state.rows[-1].policy_revision_number
 
     # The new locator-only rule is irrelevant to this open locator. The first
-    # PUT still fails closed because publication has no locator; re-preflight
-    # can authoritatively decide and synchronously rebind the claimed token.
+    # PUT still fails closed because publication has no locator.
     harness.snapshot_source.publish_rules((excluding_folder_rule(_EXCLUDED_FOLDER),))
     changed_revision = harness.snapshot_source.revision_number
     assert changed_revision > accepted_revision
@@ -292,18 +299,29 @@ def test_irrelevant_locator_revision_reauthorizes_claimed_exact_token_once(
     assert first_upload.json()["error"]["code"] == "exclusion_policy_indeterminate"
     assert harness.sync_state.publication_commits == 0
 
-    retry_required = harness.preflight(body)
-    assert retry_required.status_code == 409, retry_required.text
-    assert retry_required.json()["error"]["code"] == "small_file_upload_state_invalid"
+    # The typed non-retryable rejection terminalizes the claimed row: no
+    # ``receiving`` row survives it, only the closed safe error code remains.
+    terminal_row = harness.sync_state.rows[-1]
+    assert terminal_row.state == "failed"
+    assert terminal_row.safe_error_code == "exclusion_policy_indeterminate"
+
+    # Re-preflight of the same journal identity opens a fresh claim under the
+    # changed revision — the superseded same-token rebind path is gone.
+    fresh = harness.preflight(body)
+    assert fresh.status_code == 200, fresh.text
+    fresh_data = dict(fresh.json()["data"])
+    assert fresh_data["outcome"] == "single_part_upload", fresh_data
+    fresh_token = str(fresh_data["operation_id"])
+    assert fresh_token != token
     assert harness.sync_state.rows[-1].policy_revision_number == changed_revision
 
-    resumed = harness.upload(token, _CONTENT)
-    assert resumed.status_code == 200, resumed.text
-    committed = dict(resumed.json()["data"])
+    committed_upload = harness.upload(fresh_token, _CONTENT)
+    assert committed_upload.status_code == 200, committed_upload.text
+    committed = dict(committed_upload.json()["data"])
     assert committed["result_kind"] == "committed"
     assert harness.sync_state.publication_commits == 1
 
-    exact_replay = harness.upload(token, _CONTENT)
+    exact_replay = harness.upload(fresh_token, _CONTENT)
     assert exact_replay.status_code == 200, exact_replay.text
     assert dict(exact_replay.json()["data"]) == committed
     assert harness.sync_state.publication_commits == 1
