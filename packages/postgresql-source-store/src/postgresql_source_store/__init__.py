@@ -19,6 +19,10 @@ from postgresql_source_store.canonical_read import (
     PostgresqlCanonicalSourceReadStore,
     hydrate_canonical_source_reference,
 )
+from postgresql_source_store.device_event_store import (
+    PostgresqlDeviceEventStore,
+    hydrate_device_event,
+)
 from postgresql_source_store.error_mapping import (
     DatabaseRetryPolicy,
     map_database_failure,
@@ -50,6 +54,7 @@ __all__ = [
     "DatabaseRetryPolicy",
     "PostgresqlBackupSnapshotStore",
     "PostgresqlCanonicalSourceReadStore",
+    "PostgresqlDeviceEventStore",
     "PostgresqlIdentityBootstrapStore",
     "PostgresqlPolicyDraftStore",
     "PostgresqlPolicyKeysetStore",
@@ -63,5 +68,6 @@ __all__ = [
     "ProjectionRetryPolicy",
     "classify_replay",
     "hydrate_canonical_source_reference",
+    "hydrate_device_event",
     "map_database_failure",
 ]
