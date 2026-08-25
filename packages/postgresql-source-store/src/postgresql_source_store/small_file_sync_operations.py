@@ -23,7 +23,10 @@ digest remains for exact replay. An update reservation persists only the
 digest of the preflight's declared locator — the raw column stays NULL,
 because an update's locator is preflight policy evidence, never bound
 publication evidence the receive contract could carry. An expired pending row is invalid for
-continuation and may be re-reserved with a fresh token and extended deadline.
+continuation and may be re-reserved with a fresh token and extended deadline; a
+terminal-failed row re-reserves the same way — the same-identity preflight
+that follows a typed terminal rejection rotates the row back to a clean
+pending claim with a fresh token, in lockstep with the offline composition.
 Once a receive claims the row, that ``receiving`` claim retains its
 token/revision fence across the reservation deadline: exact-token retries may
 resume it and guarded terminalization may finish, while same-identity
@@ -109,10 +112,10 @@ UPLOAD_OPERATION_LOCK_NAMESPACE: Final[int] = 0x5346534F
 STATE_PENDING: Final[str] = "pending"
 STATE_RECEIVING: Final[str] = "receiving"
 STATE_COMMITTED: Final[str] = "committed"
+#: A terminal-failed row is reclaimable by a same-identity re-preflight in
+#: lockstep with the offline composition's failed case, jointly pinned by
+#: ``test_irrelevant_locator_revision_reauthorizes_through_fresh_claim_after_terminal_rejection``.
 STATE_FAILED: Final[str] = "failed"
-
-#: The non-terminal states an operation may be continued from.
-_NON_TERMINAL_STATES: Final[frozenset[str]] = frozenset({STATE_PENDING, STATE_RECEIVING})
 
 #: Entropy bytes behind every minted opaque operation token.
 _OPERATION_TOKEN_ENTROPY_BYTES: Final[int] = 32
@@ -335,7 +338,13 @@ def operation_token_rotation_statement(
 
     The same update writes the deadline the row now carries: a live row passes
     its own unchanged ``expires_at`` back, while the re-reservation of an
-    expired non-terminal row passes its freshly computed extended deadline.
+    expired row passes its freshly computed extended deadline. A reclaimable
+    failed row rotates through this same statement, and its stale
+    ``safe_error_code`` token clears because the terminal-shape CHECK admits
+    ``pending`` only without it — the same clean pending shape a fresh
+    reservation writes (the reclaim must stay in lockstep with the offline
+    composition's failed case, jointly pinned by
+    ``test_irrelevant_locator_revision_reauthorizes_through_fresh_claim_after_terminal_rejection``).
     """
 
     return (
@@ -344,6 +353,7 @@ def operation_token_rotation_statement(
             operation_token_hash=operation_token_hash,
             expires_at=expires_at,
             policy_revision_number=policy_revision_number,
+            safe_error_code=None,
             state=STATE_PENDING,
             updated_at=sa.text("CURRENT_TIMESTAMP"),
         )
@@ -1267,7 +1277,13 @@ class PostgresqlSmallFileUploadOperationStore:
                 )
             if not operation_fingerprint_matches(asdict(row), preflight, device_context):
                 raise _identity_mismatch()
-            if row.state not in _NON_TERMINAL_STATES:
+            # Only a committed row is closed to a same-identity re-preflight:
+            # its frozen terminal result stays reachable through
+            # ``resolve_terminal_result`` alone. A terminal-failed row
+            # re-reserves below exactly like an expired pending row, in
+            # lockstep with the offline composition's failed case (jointly
+            # pinned by the integration test named on ``STATE_FAILED``).
+            if row.state == STATE_COMMITTED:
                 raise _state_invalid()
             if row.state == STATE_RECEIVING:
                 guarded = await connection.execute(
@@ -1285,9 +1301,12 @@ class PostgresqlSmallFileUploadOperationStore:
             else:
                 should_resume_claimed = False
             if not should_resume_claimed:
-                # Only an expired pending row is reclaimable. A receiving row owns
-                # its token fence through guarded terminalization, even if its
-                # original reservation deadline passes during publication.
+                # A pending row and a terminal-failed row both re-reserve
+                # here: the token rotates, the state resets to pending with
+                # the stale failure token cleared, and an expired deadline
+                # extends. A receiving row owns its token fence through
+                # guarded terminalization, even if its original reservation
+                # deadline passes during publication.
                 expires_at = row.expires_at
                 if _is_expired(expires_at, self._clock()):
                     expires_at = compute_upload_operation_expiry(self._clock())

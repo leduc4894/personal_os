@@ -12,6 +12,7 @@ transaction behavior is integration territory (disposable stack).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -40,6 +41,7 @@ from personal_os.small_file_sync.errors import SmallFileSyncError
 from personal_os.small_file_sync.ports import SmallFileBoundOperation
 from postgresql_source_store.small_file_sync_operations import (
     STATE_FAILED,
+    STATE_PENDING,
     STATE_RECEIVING,
     UPLOAD_OPERATION_EXPIRY_SECONDS,
     PostgresqlSmallFileUploadOperationStore,
@@ -1139,3 +1141,244 @@ async def test_terminal_failure_rejects_a_drifted_binding() -> None:
 
     assert rejected.value.error_code is ErrorCode.SMALL_FILE_OPERATION_IDENTITY_MISMATCH
     assert connection.failed_write_count == 0
+
+
+# --- reclaiming a terminal-failed row through same-identity re-preflight -----------
+
+#: The closed token a typed rejection lands on the failed row.
+_FAILED_SAFE_ERROR_CODE = "source_locator_conflict"
+
+#: The raw token of the superseded claim the failed row still fences.
+_SUPERSEDED_RAW_TOKEN = UploadOperationToken("E" * 43)
+
+
+def _reclaim_row_and_preflight(
+    *,
+    state: str,
+    safe_error_code: str | None,
+    expires_at: datetime,
+) -> tuple[dict[str, Any], SmallFilePreflight, SmallFileDeviceContext]:
+    """One identity-matched create row and the exact preflight that reserved it."""
+
+    device_context = _device_context()
+    preflight = _preflight()
+    locator = preflight.normalized_locator
+    assert locator is not None
+    row: dict[str, Any] = {
+        "operation_id": uuid4(),
+        "operation_token_hash": upload_operation_token_hash(_SUPERSEDED_RAW_TOKEN),
+        "workspace_id": device_context.workspace_id,
+        "device_id": device_context.device_id,
+        "event_id": preflight.event_id,
+        "idempotency_key": preflight.idempotency_key.value,
+        "operation_kind": SmallFileOperation.CREATE.value,
+        "declared_sha256": preflight.sha256.hexadecimal,
+        "declared_size_bytes": preflight.size_bytes,
+        "declared_media_type": preflight.media_type.value,
+        "policy_revision_number": _POLICY_REVISION_NUMBER,
+        "reserved_source_id": uuid4(),
+        "update_source_id": None,
+        "update_base_version_id": None,
+        "normalized_locator": locator.value,
+        "locator_fingerprint": compute_locator_fingerprint(locator),
+        "state": state,
+        "safe_error_code": safe_error_code,
+        "result_kind": None,
+        "result_source_id": None,
+        "result_source_version_id": None,
+        "result_content_version": None,
+        "result_committed_at": None,
+        "expires_at": expires_at,
+    }
+    return row, preflight, device_context
+
+
+class _ReclaimScriptedConnection:
+    """Connection double serving one identity row across reclaim sequences.
+
+    Serves the same single-row view for the identity and token lookups the
+    reservation and terminalization paths perform, counts every guarded
+    write, and folds each rotation back onto the row view so a scripted
+    sequence observes the state it previously wrote.
+    """
+
+    def __init__(self, row: dict[str, Any]) -> None:
+        self._row = row
+        self.rotation_params: dict[str, Any] | None = None
+        self.failure_write_count = 0
+        self.update_count = 0
+
+    def begin(self) -> _ScriptedBegin:
+        return _ScriptedBegin()
+
+    async def execute(self, statement: Any) -> _ScriptedResult:
+        visit_name = statement.__visit_name__
+        if visit_name == "select":
+            # Both the identity lookup and the token lookup resolve to this row.
+            return _ScriptedResult(mapping=self._row)
+        if visit_name == "update":
+            self.update_count += 1
+            params = statement.compile(dialect=postgresql.dialect()).params
+            if params["state"] == STATE_FAILED:
+                self.failure_write_count += 1
+            else:
+                self.rotation_params = params
+                self._row["operation_token_hash"] = params["operation_token_hash"]
+                self._row["expires_at"] = params["expires_at"]
+                self._row["policy_revision_number"] = params["policy_revision_number"]
+            self._row["state"] = params["state"]
+            if "safe_error_code" in params:
+                self._row["safe_error_code"] = params["safe_error_code"]
+            return _ScriptedResult(rowcount=1)
+        if visit_name in {"text", "textclause"}:
+            return _ScriptedResult()
+        raise AssertionError(f"unexpected statement kind: {visit_name}")
+
+
+def _reclaim_store(
+    connection: _ReclaimScriptedConnection, *, clock: Callable[[], datetime]
+) -> PostgresqlSmallFileUploadOperationStore:
+    return PostgresqlSmallFileUploadOperationStore(
+        cast(Any, _ReceiveScriptedEngine(connection)), clock=clock
+    )
+
+
+@pytest.mark.asyncio
+async def test_re_preflight_reclaims_a_terminal_failed_row_with_a_fresh_token() -> None:
+    """A failed identity row re-reserves exactly like the expired-pending branch.
+
+    The typed terminal rejection parks the durable row at ``failed``; the
+    plugin's bounded retry re-preflights the same identity, and the durable
+    adapter must answer the fresh claim the offline composition pins — a new
+    opaque token, the state reset to pending with the stale failure token
+    cleared, the changed policy revision and the extended deadline — instead
+    of the closed state-invalid rejection that would park the journal
+    forever.
+    """
+
+    now = datetime.now(UTC)
+    row, preflight, device_context = _reclaim_row_and_preflight(
+        state=STATE_FAILED,
+        safe_error_code=_FAILED_SAFE_ERROR_CODE,
+        expires_at=now - timedelta(seconds=30),
+    )
+    changed_revision = _POLICY_REVISION_NUMBER + 3
+    connection = _ReclaimScriptedConnection(row)
+
+    claim = await _reclaim_store(connection, clock=lambda: now).reserve_operation(
+        preflight,
+        device_context,
+        _policy_binding(device_context, changed_revision),
+        cast(Any, object()),
+    )
+
+    assert claim.operation_token.value != _SUPERSEDED_RAW_TOKEN.value
+    assert connection.rotation_params is not None
+    rotation = connection.rotation_params
+    assert rotation["state"] == STATE_PENDING
+    assert rotation["safe_error_code"] is None
+    assert rotation["policy_revision_number"] == changed_revision
+    assert rotation["expires_at"] == compute_upload_operation_expiry(now)
+    assert rotation["operation_token_hash"] == upload_operation_token_hash(claim.operation_token)
+    assert claim.reserved_source_id == row["reserved_source_id"]
+    assert claim.expires_at == compute_upload_operation_expiry(now)
+    assert row["state"] == STATE_PENDING
+    assert row["safe_error_code"] is None
+
+
+@pytest.mark.asyncio
+async def test_re_preflight_still_refuses_a_committed_row() -> None:
+    """A committed identity row keeps its closed state-invalid rejection.
+
+    The failed-row reclaim must not widen into a committed-row reclaim: the
+    frozen terminal result of a committed row stays reachable only through
+    ``resolve_terminal_result``, so a same-identity re-preflight keeps
+    failing closed with no write.
+    """
+
+    committed_at = datetime.now(UTC) - timedelta(minutes=2)
+    row, preflight, device_context = _reclaim_row_and_preflight(
+        state="committed", safe_error_code=None, expires_at=committed_at
+    )
+    row["result_kind"] = "committed"
+    row["result_source_id"] = row["reserved_source_id"]
+    row["result_source_version_id"] = uuid4()
+    row["result_content_version"] = 1
+    row["result_committed_at"] = committed_at
+    connection = _ReclaimScriptedConnection(row)
+
+    with pytest.raises(SmallFileSyncError) as rejected:
+        await _reclaim_store(connection, clock=lambda: datetime.now(UTC)).reserve_operation(
+            preflight,
+            device_context,
+            _policy_binding(device_context, _POLICY_REVISION_NUMBER),
+            cast(Any, object()),
+        )
+
+    assert rejected.value.error_code is ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID
+    assert connection.update_count == 0
+    assert connection.rotation_params is None
+
+
+@pytest.mark.asyncio
+async def test_failed_row_terminalization_replay_stays_idempotent_before_reclaim() -> None:
+    """The Task 1 idempotent pair holds until the fresh claim rotates the row.
+
+    Replaying the identical bound/code pair on the failed row writes nothing
+    (the terminalization idempotent pair), a live failed row keeps its
+    remaining deadline, and only the subsequent same-identity preflight
+    mints the fresh claim that retires the superseded token.
+    """
+
+    row, preflight, device_context = _reclaim_row_and_preflight(
+        state=STATE_FAILED,
+        safe_error_code=_FAILED_SAFE_ERROR_CODE,
+        expires_at=datetime.now(UTC) + timedelta(seconds=UPLOAD_OPERATION_EXPIRY_SECONDS),
+    )
+    locator = preflight.normalized_locator
+    assert locator is not None
+    bound = SmallFileBoundOperation(
+        operation_id=row["operation_id"],
+        operation_token=_SUPERSEDED_RAW_TOKEN,
+        workspace_id=device_context.workspace_id,
+        device_id=device_context.device_id,
+        event_id=preflight.event_id,
+        idempotency_key=preflight.idempotency_key,
+        operation=SmallFileOperation.CREATE,
+        declared_sha256=preflight.sha256,
+        declared_size_bytes=preflight.size_bytes,
+        declared_media_type=preflight.media_type,
+        policy_revision_number=_POLICY_REVISION_NUMBER,
+        reserved_source_id=row["reserved_source_id"],
+        update_source_id=None,
+        update_base_version_id=None,
+        normalized_locator=locator,
+        locator_fingerprint=compute_locator_fingerprint(locator),
+        expires_at=row["expires_at"],
+        terminal_result=None,
+    )
+    connection = _ReclaimScriptedConnection(row)
+    store = _reclaim_store(connection, clock=lambda: datetime.now(UTC))
+
+    await store.record_bound_terminal_failure(
+        bound, ErrorCode.SOURCE_LOCATOR_CONFLICT, cast(Any, object())
+    )
+    await store.record_bound_terminal_failure(
+        bound, ErrorCode.SOURCE_LOCATOR_CONFLICT, cast(Any, object())
+    )
+    assert connection.failure_write_count == 0
+    assert connection.update_count == 0
+
+    claim = await store.reserve_operation(
+        preflight,
+        device_context,
+        _policy_binding(device_context, _POLICY_REVISION_NUMBER),
+        cast(Any, object()),
+    )
+
+    assert claim.operation_token.value != _SUPERSEDED_RAW_TOKEN.value
+    assert connection.rotation_params is not None
+    assert connection.rotation_params["safe_error_code"] is None
+    # A live failed row keeps its remaining deadline, exactly like a live
+    # pending row; only an expired one extends.
+    assert claim.expires_at == row["expires_at"]

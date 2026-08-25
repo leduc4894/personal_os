@@ -122,6 +122,9 @@ _OFFLINE_EXPIRY_SECONDS: Final[int] = 900
 _PENDING_STATE: Final[str] = "pending"
 _RECEIVING_STATE: Final[str] = "receiving"
 _COMMITTED_STATE: Final[str] = "committed"
+#: A terminal-failed row is reclaimable by a same-identity re-preflight in
+#: lockstep with the durable adapter's failed rotation, jointly pinned by
+#: ``test_irrelevant_locator_revision_reauthorizes_through_fresh_claim_after_terminal_rejection``.
 _FAILED_STATE: Final[str] = "failed"
 
 
@@ -554,9 +557,12 @@ class OfflineSmallFileUploadOperationStore:
             if row.state == _RECEIVING_STATE:
                 row.policy_revision_number = policy_binding.policy_revision_number
                 raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
-            # Mirroring the durable adapter: only an expired pending row is
-            # reclaimable. A claimed receive keeps its token/revision fence
-            # through guarded terminalization across the original deadline.
+            # A pending row and a terminal-failed row both re-reserve by
+            # rotating the token; the failed case must stay in lockstep
+            # with the durable adapter's failed rotation (jointly pinned
+            # by the integration test named on ``_FAILED_STATE``). A
+            # claimed receive keeps its token/revision fence through
+            # guarded terminalization across the original deadline.
             if row.expires_at <= now:
                 row.expires_at = now + timedelta(seconds=_OFFLINE_EXPIRY_SECONDS)
             row.operation_token = UploadOperationToken(secrets.token_urlsafe(32))
