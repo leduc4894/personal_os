@@ -563,6 +563,11 @@ describe("LifecycleCapture predecessor ordering on restore (spec 6.3)", () => {
       .find((entry) => entry.operation === "delete");
     expect(deleteEvent).toBeDefined();
 
+    const reservation = await harness.capture.reserveRestoreTarget(
+      fileBefore.localFileId,
+      "notes/recover.md",
+    );
+    expect(reservation.outcome).toBe("reserved");
     const result = await harness.capture.requestRestore(
       fileBefore.localFileId,
       "notes/recover.md",
@@ -677,7 +682,7 @@ describe("LifecycleCapture requestRestore (spec 6.3, 7.1)", () => {
     ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
   });
 
-  it("accepts an explicit restore when the retained mapping and bytes hash both match", async () => {
+  it("accepts an explicit restore when the reservation and the bytes hash both match", async () => {
     const harness = createHarness();
     const real = await realFingerprintOf("explicit restore ok");
     await captureAndCommit(harness, "notes/restore-ok.md", real.fingerprint);
@@ -689,6 +694,14 @@ describe("LifecycleCapture requestRestore (spec 6.3, 7.1)", () => {
       fakeAbstractFile("notes/restore-ok.md", "notes"),
       tombstoneId,
     );
+    const reservation = await harness.capture.reserveRestoreTarget(
+      fileBefore.localFileId,
+      "notes/restore-ok.md",
+    );
+    expect(reservation).toEqual({
+      outcome: "reserved",
+      priorNormalizedPath: "notes/restore-ok.md",
+    });
     harness.vault.setFileBytes("notes/restore-ok.md", real.bytes);
 
     const result = await harness.capture.requestRestore(
@@ -697,8 +710,158 @@ describe("LifecycleCapture requestRestore (spec 6.3, 7.1)", () => {
     );
     expect(result.operation).toBe("restore");
     expect(result.localFileId).toBe(fileBefore.localFileId);
+    // No eager consumption: the state stays restore_pending (tombstone
+    // retained) until the committed receipt advances it.
+    expect(lifecycleStateOf(harness.database, fileBefore.localFileId)).toBe(
+      "restore_pending",
+    );
+    expect(openTombstoneOf(harness.database, fileBefore.localFileId)).toBe(tombstoneId);
+    await harness.lifecycle.recordLifecycleCommittedReceipt(result.eventId);
     await harness.lifecycle.consumeRestoreSuccessor(fileBefore.localFileId);
     expect(lifecycleStateOf(harness.database, fileBefore.localFileId)).toBe("restored");
+    expect(openTombstoneOf(harness.database, fileBefore.localFileId)).toBeNull();
+  });
+});
+
+describe("LifecycleCapture explicit-restore target reservation (reservation-first protocol)", () => {
+  async function seedTombstonedFile(
+    harness: Harness,
+    path: string,
+    bytes: Uint8Array,
+  ): Promise<{ localFileId: string; fingerprint: FrozenFingerprint }> {
+    const fingerprint = await deriveFrozenFingerprint(bytes);
+    await captureAndCommit(harness, path, fingerprint);
+    const file = requireLocalFile(harness.repository.readLocalFileByPath(path));
+    await harness.capture.captureDelete(
+      fakeAbstractFile(path, path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : null),
+      "50505050-5050-7505-8505-505050505050",
+    );
+    return { localFileId: file.localFileId, fingerprint };
+  }
+
+  it("reserves through the capture adapter and rebinds the row to the target", async () => {
+    const harness = createHarness();
+    const { localFileId } = await seedTombstonedFile(
+      harness,
+      "notes/source.md",
+      bytesOf("reserve me"),
+    );
+
+    const reservation = await harness.capture.reserveRestoreTarget(
+      localFileId,
+      "notes/target.md",
+    );
+
+    expect(reservation).toEqual({
+      outcome: "reserved",
+      priorNormalizedPath: "notes/source.md",
+    });
+    expect(harness.repository.readLocalFileByPath("notes/source.md")).toBeNull();
+    expect(
+      requireLocalFile(harness.repository.readLocalFileByPath("notes/target.md")).localFileId,
+    ).toBe(localFileId);
+    expect(lifecycleStateOf(harness.database, localFileId)).toBe("restore_pending");
+  });
+
+  it("refuses an explicit restore whose row was never reserved", async () => {
+    const harness = createHarness();
+    const real = await realFingerprintOf("unreserved restore");
+    await captureAndCommit(harness, "notes/unreserved.md", real.fingerprint);
+    const file = requireLocalFile(harness.repository.readLocalFileByPath("notes/unreserved.md"));
+    await harness.capture.captureDelete(
+      fakeAbstractFile("notes/unreserved.md", "notes"),
+      "60606060-6060-7606-8606-606060606060",
+    );
+    harness.vault.setFileBytes("notes/unreserved.md", real.bytes);
+
+    await expect(
+      harness.capture.requestRestore(file.localFileId, "notes/unreserved.md"),
+    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+  });
+
+  it("keeps the reservation when the confirm-time bytes mismatch", async () => {
+    const harness = createHarness();
+    const { localFileId } = await seedTombstonedFile(
+      harness,
+      "notes/source.md",
+      bytesOf("original bytes"),
+    );
+    await harness.capture.reserveRestoreTarget(localFileId, "notes/target.md");
+    harness.vault.setFileBytes("notes/target.md", bytesOf("WRONG BYTES"));
+
+    await expect(
+      harness.capture.requestRestore(localFileId, "notes/target.md"),
+    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+
+    expect(lifecycleStateOf(harness.database, localFileId)).toBe("restore_pending");
+    expect(
+      requireLocalFile(harness.repository.readLocalFileByPath("notes/target.md")).localFileId,
+    ).toBe(localFileId);
+  });
+
+  it("refuses an automatic restore of a reserved row", async () => {
+    const harness = createHarness();
+    const real = await realFingerprintOf("reserved auto");
+    const { localFileId } = await seedTombstonedFile(
+      harness,
+      "notes/auto-reserved.md",
+      real.bytes,
+    );
+    await harness.capture.reserveRestoreTarget(localFileId, "notes/auto-reserved.md");
+    harness.vault.setFileBytes("notes/auto-reserved.md", real.bytes);
+
+    await expect(
+      harness.capture.detectAutomaticRestore("notes/auto-reserved.md"),
+    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+    expect(lifecycleStateOf(harness.database, localFileId)).toBe("restore_pending");
+  });
+
+  it("treats delete and rename notifications on a reserved row as quiet no-ops", async () => {
+    const harness = createHarness();
+    const real = await realFingerprintOf("reserved staging");
+    const { localFileId } = await seedTombstonedFile(
+      harness,
+      "notes/staged.md",
+      real.bytes,
+    );
+    await harness.capture.reserveRestoreTarget(localFileId, "notes/staged.md");
+    const eventsBefore = harness.database.readAll(
+      "select count(*) from journal_events;",
+    )[0]?.values[0]?.[0];
+
+    const deleteResult = await harness.capture.captureDelete(
+      fakeAbstractFile("notes/staged.md", "notes"),
+    );
+    expect(deleteResult).toBeNull();
+    const renameResult = await harness.capture.captureRename(
+      fakeFile("notes/staged-renamed.md", "notes"),
+      "notes/staged.md",
+    );
+    expect(renameResult).toBeNull();
+
+    const eventsAfter = harness.database.readAll(
+      "select count(*) from journal_events;",
+    )[0]?.values[0]?.[0];
+    expect(eventsAfter).toBe(eventsBefore);
+    expect(lifecycleStateOf(harness.database, localFileId)).toBe("restore_pending");
+  });
+
+  it("releases a reservation back to the prior path through the capture adapter", async () => {
+    const harness = createHarness();
+    const { localFileId } = await seedTombstonedFile(
+      harness,
+      "notes/source.md",
+      bytesOf("release me"),
+    );
+    await harness.capture.reserveRestoreTarget(localFileId, "notes/target.md");
+
+    await harness.capture.releaseRestoreTarget(localFileId);
+
+    expect(harness.repository.readLocalFileByPath("notes/target.md")).toBeNull();
+    expect(
+      requireLocalFile(harness.repository.readLocalFileByPath("notes/source.md")).localFileId,
+    ).toBe(localFileId);
+    expect(lifecycleStateOf(harness.database, localFileId)).toBe("tombstoned");
   });
 });
 
@@ -744,8 +907,14 @@ describe("LifecycleCapture automatic restore via captured path reuse (spec 6.3, 
     const result = await harness.capture.detectAutomaticRestore("notes/auto.md");
     expect(result.operation).toBe("restore");
     expect(result.localFileId).toBe(fileBefore.localFileId);
+    // No eager consumption: the tombstone closes only through the
+    // committed receipt (record -> restore_pending -> receipt -> restored).
+    expect(lifecycleStateOf(harness.database, fileBefore.localFileId)).toBe(
+      "restore_pending",
+    );
+    await harness.lifecycle.recordLifecycleCommittedReceipt(result.eventId);
+    await harness.lifecycle.consumeRestoreSuccessor(fileBefore.localFileId);
     expect(lifecycleStateOf(harness.database, fileBefore.localFileId)).toBe("restored");
-    // consumeRestoreSuccessor is called automatically by detectAutomaticRestore.
   });
 });
 

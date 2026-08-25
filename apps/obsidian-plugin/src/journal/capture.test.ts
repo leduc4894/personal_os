@@ -200,6 +200,7 @@ interface FakeLifecycleCapture extends LifecycleCapture {
 interface FakeLifecycleState {
   readonly deleteCalls: { readonly path: string }[];
   readonly renameCalls: { readonly file: { readonly path: string }; readonly priorPath: string }[];
+  readonly reconcileCalls: readonly string[];
 }
 
 /**
@@ -213,8 +214,9 @@ function createFakeLifecycleCapture(options?: {
   const state: FakeLifecycleState = {
     deleteCalls: [],
     renameCalls: [],
+    reconcileCalls: [],
   };
-  const reconcileCalls: string[] = [];
+  const reconcileCalls = state.reconcileCalls as string[];
   const fake: FakeLifecycleCapture = {
     reconcileCalls,
     captureRename: async (file, priorPath) => {
@@ -616,7 +618,7 @@ describe("JournalCapture automatic restore fail-closed (spec 7.1, child 5 fix ro
       database,
       vault,
       gate,
-      lifecycleState: { deleteCalls: [], renameCalls: [] },
+      lifecycleState: { deleteCalls: [], renameCalls: [], reconcileCalls: [] },
       failureTokens: [],
     };
   }
@@ -880,6 +882,57 @@ describe("JournalCapture automatic snapshot admission", () => {
 
     await expect(snapshot).resolves.toMatchObject({ outcome: "stopped", queuedEventCount: 0 });
     expect(harness.eventsFor("notes/cancelled.md")).toEqual([]);
+  });
+});
+
+describe("JournalCapture explicit-restore target reservation deferral", () => {
+  async function seedReservedRow(
+    harness: CaptureHarness,
+    normalizedPath: string,
+  ): Promise<void> {
+    await harness.database.runSerializedMutation((session) => {
+      session.exec(
+        [
+          "insert into local_files (local_file_id, normalized_path, source_id,",
+          "observed_sha256, observed_size_bytes, observed_media_type, base_version_id,",
+          "policy_revision, open_tombstone_id, lifecycle_state, restore_prior_path)",
+          "values ('90909090-9090-4909-8909-909090909090',",
+          `'${normalizedPath}', '11111111-1111-7111-8111-111111111111',`,
+          "'9191919191919191919191919191919191919191919191919191919191919191', 16,",
+          "'text/plain', '22222222-2222-7222-8222-222222222222', 1,",
+          "'92929292-9292-4929-8929-929292929292', 'restore_pending',",
+          "'notes/prior-reserved.md');",
+        ].join(" "),
+      );
+    });
+    harness.vault.setFileBytes(normalizedPath, bytesOf("staged restore bytes"));
+  }
+
+  it("never mints a create for a settled observation of a reserved target", async () => {
+    const harness = createHarness();
+    await seedReservedRow(harness, "notes/reserved-target.md");
+    useSettleFakeTimers();
+
+    const settled = harness.capture.notifyPathChanged("notes/reserved-target.md");
+    await settlePastDelay(harness);
+    await settled;
+
+    expect(harness.eventsFor("notes/reserved-target.md")).toEqual([]);
+    expect(harness.lifecycleState.reconcileCalls).toEqual([]);
+  });
+
+  it("excludes a reserved target from the automatic snapshot and admits nothing for it", async () => {
+    const harness = createHarness();
+    await seedReservedRow(harness, "notes/reserved-target.md");
+    harness.vault.setFileBytes("notes/other.md", bytesOf("unrelated note"));
+
+    const summary = await harness.capture.runAutomaticSnapshot();
+
+    expect(summary.outcome).toBe("completed");
+    expect(summary.skippedFileCount).toBe(1);
+    expect(summary.queuedEventCount).toBeLessThanOrEqual(1);
+    expect(harness.eventsFor("notes/reserved-target.md")).toEqual([]);
+    expect(harness.lifecycleState.reconcileCalls).toEqual([]);
   });
 });
 

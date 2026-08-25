@@ -36,6 +36,7 @@ import {
   createLifecycleEventOperands,
   type LifecycleEventOperands,
   type LifecycleJournalOperation,
+  type RestoreReservationResult,
 } from "./lifecycle-contracts";
 import type { LifecycleRepository } from "./lifecycle-repository";
 import type { JournalRepository } from "./repository";
@@ -336,6 +337,12 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
     if (localFile === null) {
       return null;
     }
+    // A reserved row (or one whose restore event is in flight) owns the
+    // path: deleting or renaming the staged bytes mid-flow is operator
+    // staging action, not a tracked lifecycle transition — a quiet no-op.
+    if (this.#readLifecycleState(localFile.localFileId) === "restore_pending") {
+      return null;
+    }
     if (localFile.sourceId === null || localFile.baseVersionId === null) {
       // Fail closed: missing identity — a later pass must reconcile the row.
       await this.#flagReconcileRequiredOrReport();
@@ -363,16 +370,68 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
   }
 
   /**
-   * The user-driven restore surface: pick a retained `localFileId` and a
-   * target path, then ask the adapter to record a `restore` event in
-   * one transaction. The adapter first verifies the target path's bytes
-   * still hash to the file's last committed content hash; a mismatch
-   * rejects with `journal_mutation_failed` (the queue driver can route
-   * the failure to the user).
-   *
-   * The `localFileId` must point at a tracked row whose
-   * `lifecycle_state` is `tombstoned`; otherwise the restore is rejected
-   * before any SQL runs.
+   * Reserve one explicit-restore target locator (the reservation-first
+   * protocol): the durable reservation lands the moment the restore
+   * command accepts the target path, BEFORE any bytes are staged, so the
+   * convergence lane can never ship the staged restore bytes as a fresh
+   * source at the target. Delegates to
+   * {@link LifecycleRepository.reserveRestoreTarget}; refusals come back
+   * as the closed result shape (never a throw) and a persistence failure
+   * rethrows the closed store reason after one
+   * `restore_reservation_persist_failed` trail token.
+   */
+  async reserveRestoreTarget(
+    localFileId: string,
+    targetPath: string,
+  ): Promise<RestoreReservationResult> {
+    if (this.#isDisposed || !isUuid(localFileId)) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    const normalizedTarget = this.#normalizePathOrNull(targetPath);
+    if (normalizedTarget === null) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    try {
+      return await this.#lifecycle.reserveRestoreTarget(localFileId, normalizedTarget);
+    } catch (error) {
+      this.#failureReporter?.reportJournalFailure("restore_reservation_persist_failed");
+      if (isStoreError(error)) {
+        throw error;
+      }
+      throw journalStoreError("journal_mutation_failed");
+    }
+  }
+
+  /**
+   * Release one explicit-restore reservation (the restore command's
+   * explicit Cancel path): the row returns to its pre-reservation path
+   * and `tombstoned` state. Modal dismissal never releases — a dangling
+   * reservation stays durable and resumable through the picker.
+   */
+  async releaseRestoreTarget(localFileId: string): Promise<void> {
+    if (!isUuid(localFileId)) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    try {
+      await this.#lifecycle.releaseRestoreTarget(localFileId);
+    } catch (error) {
+      if (isStoreError(error)) {
+        throw error;
+      }
+      throw journalStoreError("journal_mutation_failed");
+    }
+  }
+
+  /**
+   * The user-driven restore surface (confirm step of the
+   * reservation-first protocol): the row must already be reserved —
+   * `restore_pending` and rebound to the target path by
+   * {@link reserveRestoreTarget} — before this method runs. The adapter
+   * verifies the target path's bytes still hash to the file's last
+   * committed content hash; a mismatch rejects with
+   * `journal_mutation_failed` and the reservation stays resumable. The
+   * tombstone is NEVER consumed here: only the committed receipt
+   * advances the row past `restore_pending`.
    */
   async requestRestore(
     localFileId: string,
@@ -385,16 +444,21 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
     if (normalizedTarget === null) {
       throw journalStoreError("journal_mutation_failed");
     }
-    const localFile = this.#repository.readLocalFileByLocalFileId(localFileId);
+    const localFile = this.#repository.readLocalFileByPath(normalizedTarget);
     if (
       localFile === null ||
+      localFile.localFileId !== localFileId ||
       localFile.sourceId === null ||
       localFile.baseVersionId === null ||
       localFile.lastCommittedFingerprint === null
     ) {
       throw journalStoreError("journal_mutation_failed");
     }
-    // Tombstone must be retained: the file row exists with an open tombstone.
+    // Strict confirm-on-reserved: the row must sit at the target path in
+    // `restore_pending` with the tombstone retained.
+    if (this.#readLifecycleState(localFileId) !== "restore_pending") {
+      throw journalStoreError("journal_mutation_failed");
+    }
     const openTombstoneId = this.#readOpenTombstoneId(localFileId);
     if (openTombstoneId === null) {
       throw journalStoreError("journal_mutation_failed");
@@ -412,7 +476,6 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
     ) {
       throw journalStoreError("journal_mutation_failed");
     }
-    // Predecessor: the most recent `delete` event on this file.
     const predecessorEventId = this.#readPredecessorDeleteEventId(localFileId);
     if (predecessorEventId === null) {
       throw journalStoreError("journal_mutation_failed");
@@ -473,6 +536,12 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
     ) {
       throw journalStoreError("journal_mutation_failed");
     }
+    // Defense in depth: a row whose target is already reserved (or whose
+    // restore event is in flight) belongs to the explicit flow — a second
+    // restore would race the first into the closed tombstone family.
+    if (this.#readLifecycleState(localFile.localFileId) === "restore_pending") {
+      throw journalStoreError("journal_mutation_failed");
+    }
     const openTombstoneId = this.#readOpenTombstoneId(localFile.localFileId);
     if (openTombstoneId === null) {
       throw journalStoreError("journal_mutation_failed");
@@ -505,7 +574,9 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
       localFile,
       tombstoneId: openTombstoneId,
     });
-    await this.#lifecycle.consumeRestoreSuccessor(localFile.localFileId);
+    // No eager tombstone consumption: the record leaves the row at
+    // `restore_pending` and only the committed receipt (through the
+    // lifecycle driver) advances it to `restored`.
     return {
       operation: "restore",
       localFileId: localFile.localFileId,
@@ -584,6 +655,10 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
       throw error;
     }
     if (localFile === null) {
+      return null;
+    }
+    // Same reserved-row guard as delete: the reservation owns the path.
+    if (this.#readLifecycleState(localFile.localFileId) === "restore_pending") {
       return null;
     }
     if (localFile.sourceId === null || localFile.baseVersionId === null) {
@@ -670,6 +745,19 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
       const row = this.#repository
         .lifecycle.database.readAll(
           `select open_tombstone_id from local_files where local_file_id = '${localFileId}';`,
+        )[0]?.values[0]?.[0];
+      return typeof row === "string" && row.length > 0 ? row : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Read the closed `lifecycle_state` of one tracked file, or null. */
+  #readLifecycleState(localFileId: string): string | null {
+    try {
+      const row = this.#repository
+        .lifecycle.database.readAll(
+          `select lifecycle_state from local_files where local_file_id = '${localFileId}';`,
         )[0]?.values[0]?.[0];
       return typeof row === "string" && row.length > 0 ? row : null;
     } catch {

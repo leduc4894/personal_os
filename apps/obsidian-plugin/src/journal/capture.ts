@@ -561,12 +561,17 @@ export class JournalCapture {
   }
 
   /**
-   * Whether a path is lifecycle-deferred: guarded in this session, or
-   * durably carrying a `deferred_lifecycle` event in the journal. Such a
+   * Whether a path is lifecycle-deferred: guarded in this session, durably
+   * carrying a `deferred_lifecycle` event in the journal, or durably
+   * reserved as an explicit-restore target (`restore_pending` — the
+   * reservation-first protocol: staged restore bytes at the target must
+   * never converge as a fresh source, and the reserved row's open
+   * tombstone must not trigger the automatic-restore detector). Such a
    * path is never re-captured and excluded from the snapshot scan until
-   * the owning rename/move commits server-side — that commit deletes the
-   * marker rows and releases the path for re-admission (fix round 2 D7).
-   * A terminally-failed rename keeps the marker (fail-closed, child 6
+   * the owning lifecycle outcome releases it — the rename/move commit
+   * deletes the marker rows (fix round 2 D7), the restore commit / the
+   * explicit cancel advances the row out of `restore_pending`. A
+   * terminally-failed rename keeps the marker (fail-closed, child 6
    * owns repair).
    */
   #isLifecycleDeferredPath(normalizedPath: string): boolean {
@@ -577,9 +582,25 @@ export class JournalCapture {
     if (trackedFile === null) {
       return false;
     }
+    if (this.#readLifecycleStateOf(trackedFile.localFileId) === "restore_pending") {
+      return true;
+    }
     return this.#repository
       .readEventsByLocalFileId(trackedFile.localFileId)
       .some((event) => event.state === "deferred_lifecycle");
+  }
+
+  /** Read the closed `lifecycle_state` of one tracked file (or null). */
+  #readLifecycleStateOf(localFileId: string): string | null {
+    try {
+      const row = this.#repository.lifecycle.database
+        .readAll(
+          `select lifecycle_state from local_files where local_file_id = '${localFileId}';`,
+        )[0]?.values[0]?.[0];
+      return typeof row === "string" && row.length > 0 ? row : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Read the open tombstone id of one tracked file (or null). */
