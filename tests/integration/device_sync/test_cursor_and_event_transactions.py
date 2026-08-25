@@ -40,7 +40,13 @@ from postgresql_source_store.engine import (
     create_source_store_engine,
     dispose_source_store_engine,
 )
-from postgresql_source_store.tables import device_cursors, devices, sync_events
+from postgresql_source_store.tables import (
+    device_cursors,
+    devices,
+    source_locators,
+    source_tombstones,
+    sync_events,
+)
 
 pytestmark = pytest.mark.local_stack
 
@@ -148,6 +154,31 @@ class DeviceEventStoreHarness:
                 .where(
                     devices.c.workspace_id == workspace.workspace_id,
                     devices.c.device_id == device_id,
+                )
+            )
+
+    async def delete_entire_history(self, history: DeviceEventHistory) -> None:
+        """Remove every canonical row of one workspace's event history.
+
+        Locators and tombstones go first because their restricting foreign
+        keys pin the events they reference; the events themselves go last,
+        leaving the workspace with no retained history at all.
+        """
+
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                sa.delete(source_locators).where(
+                    source_locators.c.workspace_id == history.workspace.workspace_id
+                )
+            )
+            await connection.execute(
+                sa.delete(source_tombstones).where(
+                    source_tombstones.c.workspace_id == history.workspace.workspace_id
+                )
+            )
+            await connection.execute(
+                sa.delete(sync_events).where(
+                    sync_events.c.workspace_id == history.workspace.workspace_id
                 )
             )
 
@@ -495,6 +526,50 @@ async def test_missing_retained_history_above_floor_raises_cursor_gap(
 
 
 @pytest.mark.asyncio
+async def test_total_history_loss_above_floor_raises_cursor_gap(
+    device_event_store: DeviceEventStoreHarness,
+) -> None:
+    """A laggard above the floor never sees a silent caught-up page.
+
+    The device has delivered (but not acknowledged) the full history, so the
+    workspace floor stays at zero; removing every retained event must be the
+    closed cursor gap — never an empty page that reports the laggard as
+    caught up. The floor-owning control afterwards (acknowledged through
+    the delivered watermark, so the watermark never rises above the floor)
+    still pulls an empty page from the same emptied workspace.
+    """
+
+    history = await device_event_store.seed_history()
+    store = device_event_store.store
+    context = history.workspace.context()
+    await store.pull_events(context, limit=200, diagnostic_context=_diagnostic())
+    trailing = history.event_sequences["trailing_update"]
+    assert await store.minimum_acknowledged_sequence(history.workspace.workspace_id) == 0
+
+    await device_event_store.delete_entire_history(history)
+
+    with pytest.raises(DeviceSyncError) as raised:
+        await store.pull_events(context, limit=200, diagnostic_context=_diagnostic())
+    assert raised.value.code is DeviceSyncErrorCode.CURSOR_GAP
+
+    await store.acknowledge_cursor(
+        context,
+        expected_previous_sequence=0,
+        applied_through_sequence=trailing,
+        diagnostic_context=_diagnostic(),
+    )
+    assert await store.minimum_acknowledged_sequence(history.workspace.workspace_id) == (
+        trailing
+    )
+    caught_up = await store.pull_events(context, limit=200, diagnostic_context=_diagnostic())
+    assert caught_up.events == ()
+    assert caught_up.acknowledged_sequence == trailing
+    assert caught_up.delivered_through_sequence == trailing
+    assert caught_up.page_checkpoint_sequence == trailing
+    assert caught_up.has_more is False
+
+
+@pytest.mark.asyncio
 async def test_compacted_history_below_own_floor_still_pulls(
     device_event_store: DeviceEventStoreHarness,
 ) -> None:
@@ -525,8 +600,6 @@ async def test_compacted_history_below_own_floor_still_pulls(
 async def test_unhydratable_operand_raises_integrity_and_never_skips(
     device_event_store: DeviceEventStoreHarness,
 ) -> None:
-    from postgresql_source_store.tables import source_locators
-
     history = await device_event_store.seed_history()
     async with device_event_store.engine.begin() as connection:
         await connection.execute(

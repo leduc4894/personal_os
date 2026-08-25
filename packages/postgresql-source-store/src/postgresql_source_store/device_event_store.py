@@ -531,6 +531,10 @@ def manifest_action_page_statement(
     The manifest store (the next child) reads its frozen actions through
     this page; the statement walks the primary-key index in ``action_index``
     order with a parameter-bound limit and never rewrites a planned action.
+    The statement is run-scoped only: Task 4's store must compose it with
+    the credential-derived workspace/device ownership of the run (resolving
+    the run through the ``DeviceSyncContext`` first) so no foreign run's
+    actions ever cross the credential boundary.
     """
 
     return (
@@ -682,7 +686,12 @@ class PostgresqlDeviceEventStore:
             )
             checkpoint_row = checkpoint_result.one_or_none()
             checkpoint = None if checkpoint_row is None else int(checkpoint_row[0])
-            if checkpoint is not None and checkpoint < delivered:
+            # The gap witness runs whenever retained history no longer
+            # reaches a non-zero delivered watermark — partial loss (the
+            # checkpoint falls below it) and total loss (no checkpoint at
+            # all) alike. A zero watermark skips the floor round trip: a
+            # fresh device on an empty workspace can never be gapped.
+            if delivered > 0 and (checkpoint is None or checkpoint < delivered):
                 floor = await self._read_floor(connection, context.workspace_id)
                 if classify_cursor_gap(
                     delivered_through_sequence=delivered,
@@ -691,9 +700,13 @@ class PostgresqlDeviceEventStore:
                 ):
                     raise _cursor_gap()
             if checkpoint is None or checkpoint <= delivered:
+                # No events remain inside this pull's frozen checkpoint. The
+                # reported page checkpoint is the delivered watermark: the
+                # page contract forbids a checkpoint beneath it, and a None
+                # checkpoint means no retained history exists at all.
                 return DeviceEventPage(
                     acknowledged_sequence=acknowledged,
-                    page_checkpoint_sequence=max(delivered, checkpoint or 0),
+                    page_checkpoint_sequence=delivered,
                     delivered_through_sequence=delivered,
                     events=(),
                     has_more=False,

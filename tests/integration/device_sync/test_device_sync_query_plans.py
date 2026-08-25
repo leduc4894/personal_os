@@ -75,19 +75,10 @@ from postgresql_source_store.tables import (
 
 pytestmark = pytest.mark.local_stack
 
-_MIGRATIONS = tuple(
-    (
-        Path(__file__).resolve().parents[3] / "migrations" / "versions" / filename
-    )
-    for filename in (
-        "20260813_01_create_canonical_postgresql_baseline.py",
-        "20260816_01_add_web_authentication_and_device_tokens.py",
-        "20260817_01_add_exclusion_policy_publication.py",
-        "20260818_01_add_small_file_sync_operations.py",
-        "20260820_01_add_source_locator_lifecycle.py",
-        "20260826_01_add_device_sync_reconciliation.py",
-    )
-)
+#: Every shipped migration source, derived from the versions directory so a
+#: new migration's indexes join the approved set without editing this file.
+_MIGRATIONS_DIRECTORY = Path(__file__).resolve().parents[3] / "migrations" / "versions"
+_MIGRATIONS: Final[tuple[Path, ...]] = tuple(sorted(_MIGRATIONS_DIRECTORY.glob("*.py")))
 
 #: The plan-level acceptance population bound.
 _POPULATED_ROW_MINIMUM: Final[int] = 10_000
