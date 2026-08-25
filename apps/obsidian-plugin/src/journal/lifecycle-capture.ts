@@ -31,7 +31,7 @@
 import { normalizePolicyLocator } from "../exclusion-policy/evaluator";
 import type { JournalStoreErrorReason } from "./sqlite-database";
 import { journalStoreError } from "./sqlite-database";
-import { FILE_SETTLE_DELAY_MS } from "./contracts";
+import { FILE_SETTLE_DELAY_MS, JOURNAL_PENDING_EVENT_STATES } from "./contracts";
 import {
   createLifecycleEventOperands,
   type LifecycleEventOperands,
@@ -344,6 +344,13 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
       return null;
     }
     if (localFile.sourceId === null || localFile.baseVersionId === null) {
+      if (this.#isUncommittedTransitRow(localFile.localFileId)) {
+        // Same uncommitted-transit heal as rename: an unsynced note the
+        // operator deletes carries no canonical evidence — remove the
+        // phantom mapping quietly instead of hard-stopping the journal.
+        await this.#repository.removeLocalMapping(localFile.localFileId);
+        return null;
+      }
       // Fail closed: missing identity — a later pass must reconcile the row.
       await this.#flagReconcileRequiredOrReport();
       return null;
@@ -628,6 +635,32 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
 
   // --- internals ---------------------------------------------------------------------------
 
+  /**
+   * Whether one tracked row is an uncommitted transit mapping: no source
+   * identity, nothing in flight (`queued` / `preflight` / `uploading` /
+   * `waiting_retry`) and nothing ever committed — a phantom whose only
+   * history is dead terminal events (typically a create that closed
+   * `blocked_conflict` on the vault's untitled-transit name). Such a row
+   * carries no canonical evidence, so a rename or delete of it is
+   * operator transit action, not corruption: the mapping is quietly
+   * removed and the file re-admits fresh at its real name. A row with
+   * live in-flight work or any committed history keeps the fail-closed
+   * `reconcile_required` rule (an upload may still commit server-side).
+   */
+  #isUncommittedTransitRow(localFileId: string): boolean {
+    const events = this.#repository.readEventsByLocalFileId(localFileId);
+    if (events.length === 0) {
+      return true;
+    }
+    const pendingStates: ReadonlySet<string> = new Set(JOURNAL_PENDING_EVENT_STATES);
+    return events.every(
+      (event) =>
+        !pendingStates.has(event.state) &&
+        event.state !== "committed" &&
+        event.state !== "no_change",
+    );
+  }
+
   /** The rename operation token chosen by the parent-directory comparison. */
   #renameOperation(priorPath: string, newPath: string): "rename" | "move" {
     return parentOfPath(priorPath) === parentOfPath(newPath) ? "rename" : "move";
@@ -662,6 +695,14 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
       return null;
     }
     if (localFile.sourceId === null || localFile.baseVersionId === null) {
+      if (this.#isUncommittedTransitRow(localFile.localFileId)) {
+        // Untitled-transit heal: nothing canonical ever existed for this
+        // row — drop the phantom mapping so the file re-admits fresh at
+        // its real name (the capture composition follows the rename with
+        // a settle admission of the new path).
+        await this.#repository.removeLocalMapping(localFile.localFileId);
+        return null;
+      }
       await this.#flagReconcileRequiredOrReport();
       return null;
     }

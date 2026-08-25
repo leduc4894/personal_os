@@ -941,6 +941,88 @@ describe("LifecycleCapture fail-closed on missing identity (spec 6.4)", () => {
   });
 });
 
+describe("LifecycleCapture uncommitted-transit rebind (untitled-transit race heal)", () => {
+  async function seedBlockedPhantom(
+    harness: Harness,
+    path: string,
+  ): Promise<void> {
+    const capture = await harness.repository.recordCapture({
+      normalizedPath: path,
+      fingerprint: await deriveFrozenFingerprint(bytesOf("transit bytes")),
+      policyRevisionNumber: harness.policyRevision,
+      admission: "policy_allowed",
+    });
+    if (capture.outcome === "capture_refused") {
+      throw new Error("expected a recorded phantom capture");
+    }
+    await harness.repository.markEventTerminal(
+      capture.event.eventId,
+      "blocked_conflict",
+      "blocked_conflict",
+    );
+  }
+
+  it("a rename of a never-committed phantom quietly removes the row instead of flagging reconcile", async () => {
+    const harness = createHarness();
+    await seedBlockedPhantom(harness, "notes/transit.md");
+    expect(harness.database.readJournalMeta().isReconcileRequired).toBe(false);
+
+    const result = await harness.capture.captureRename(
+      fakeFile("notes/real-name.md", "notes"),
+      "notes/transit.md",
+    );
+
+    expect(result).toBeNull();
+    // The phantom mapping and its dead events are gone; the note will be
+    // re-admitted fresh at the real name by the following admission pass.
+    expect(harness.repository.readLocalFileByPath("notes/transit.md")).toBeNull();
+    expect(
+      harness.database.readAll("select count(*) from journal_events;")[0]?.values[0]?.[0],
+    ).toBe(0);
+    expect(harness.database.readJournalMeta().isReconcileRequired).toBe(false);
+  });
+
+  it("a delete of a never-committed phantom quietly removes the row instead of flagging reconcile", async () => {
+    const harness = createHarness();
+    await seedBlockedPhantom(harness, "notes/transit-delete.md");
+    expect(harness.database.readJournalMeta().isReconcileRequired).toBe(false);
+
+    const result = await harness.capture.captureDelete(
+      fakeAbstractFile("notes/transit-delete.md", "notes"),
+    );
+
+    expect(result).toBeNull();
+    expect(
+      harness.repository.readLocalFileByPath("notes/transit-delete.md"),
+    ).toBeNull();
+    expect(
+      harness.database.readAll("select count(*) from journal_events;")[0]?.values[0]?.[0],
+    ).toBe(0);
+    expect(harness.database.readJournalMeta().isReconcileRequired).toBe(false);
+  });
+
+  it("keeps the fail-closed reconcile rule when the phantom still has live in-flight work", async () => {
+    const harness = createHarness();
+    // A queued (never-terminal, never-committed) create: the upload may
+    // still commit server-side, so the row must never be silently dropped.
+    await harness.repository.recordCapture({
+      normalizedPath: "notes/inflight.md",
+      fingerprint: await deriveFrozenFingerprint(bytesOf("inflight bytes")),
+      policyRevisionNumber: harness.policyRevision,
+      admission: "policy_allowed",
+    });
+
+    const result = await harness.capture.captureRename(
+      fakeFile("notes/inflight-renamed.md", "notes"),
+      "notes/inflight.md",
+    );
+
+    expect(result).toBeNull();
+    expect(harness.repository.readLocalFileByPath("notes/inflight.md")).not.toBeNull();
+    expect(harness.database.readJournalMeta().isReconcileRequired).toBe(true);
+  });
+});
+
 describe("LifecycleCapture module safety (spec 9)", () => {
   const source = readFileSync(new URL("./lifecycle-capture.ts", import.meta.url), "utf8");
 

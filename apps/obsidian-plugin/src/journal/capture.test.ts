@@ -885,8 +885,33 @@ describe("JournalCapture automatic snapshot admission", () => {
   });
 });
 
-describe("JournalCapture explicit-restore target reservation deferral", () => {
-  async function seedReservedRow(
+describe("JournalCapture rename re-admission of the new path (untitled-transit heal)", () => {
+  it("schedules one settle admission of the new path after the lifecycle rename settles", async () => {
+    const harness = createHarness();
+    harness.vault.setFileBytes("notes/final-name.md", bytesOf("re-admitted content"));
+    useSettleFakeTimers();
+
+    const renamed = harness.capture.notifyPathRenamed(
+      { path: "notes/final-name.md", parent: { path: "notes" } },
+      "notes/transit-name.md",
+    );
+    await settlePastDelay(harness);
+
+    await renamed;
+    // The lifecycle capture (faked) recorded the rename call AND the new
+    // path went through the full settle admission — an untracked path
+    // mints its fresh create event, which is exactly the uncommitted-
+    // transit heal's re-admission.
+    expect(harness.lifecycleState.renameCalls).toEqual([
+      { file: { path: "notes/final-name.md" }, priorPath: "notes/transit-name.md" },
+    ]);
+    const events = harness.eventsFor("notes/final-name.md");
+    expect(events.length).toBe(1);
+    expect(events[0]?.operation).toBe("create");
+  });
+});
+
+describe("JournalCapture explicit-restore target reservation deferral", () => {  async function seedReservedRow(
     harness: CaptureHarness,
     normalizedPath: string,
   ): Promise<void> {

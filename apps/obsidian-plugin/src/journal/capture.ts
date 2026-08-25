@@ -298,6 +298,12 @@ export class JournalCapture {
    * is applied by the lifecycle capture so a burst collapses into one
    * durable row; a file whose local source identity is missing fails
    * closed with `reconcile_required` durably flagged.
+   *
+   * After the lifecycle capture settles, the NEW path is always scheduled
+   * for one settle admission too: for a committed rename the admission is
+   * a fingerprint-matched no-op, and for the uncommitted-transit heal
+   * (an unsynced note renamed off the vault's untitled-transit name) it
+   * is what re-admits the file fresh under its real name.
    */
   async notifyPathRenamed(file: VaultRenameTarget, priorPath: string): Promise<void> {
     if (this.#isDisposed) {
@@ -311,6 +317,29 @@ export class JournalCapture {
       }
       throw error;
     }
+    // Re-admission of the renamed path rides the SAME serialized
+    // admission tail WITHOUT a second debounce window: the path just
+    // settled through the lifecycle capture's own settle delay, so a
+    // fresh timer here would only delay (and under fake timers, strand)
+    // the admission. For a committed rename the admission is a
+    // fingerprint-matched no-op; for the uncommitted-transit heal it is
+    // what re-admits the file fresh under its real name.
+    const normalizedNewPath = this.#normalizePathOrNull(file.path);
+    if (normalizedNewPath === null) {
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      this.#admissionTail = this.#admissionTail
+        .then(() => this.#admitNormalizedPath(normalizedNewPath))
+        .then(
+          () => undefined,
+          () => {
+            this.#failureReporter?.reportJournalFailure("settled_admission_failed");
+            return undefined;
+          },
+        )
+        .then(() => resolve());
+    });
   }
 
   /**
