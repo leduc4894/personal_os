@@ -441,31 +441,13 @@ async function clickVisibleText(selector: string, expectedText: string): Promise
 }
 
 async function explicitlyRestoreFixtureNote(): Promise<void> {
-  await browser.execute(async () => {
-    const app = (
-      window as unknown as {
-        app: { plugins: { disablePlugin: (pluginId: string) => Promise<void> } };
-      }
-    ).app;
-    await app.plugins.disablePlugin("knowledge-workspace");
-  });
-  await browser.execute(async (notePath: string, content: string) => {
-    const app = (
-      window as unknown as {
-        app: { vault: { create: (path: string, text: string) => Promise<void> } };
-      }
-    ).app;
-    await app.vault.create(notePath, content);
-  }, restoredPath, fixtureContent);
-  await browser.execute(async () => {
-    const app = (
-      window as unknown as {
-        app: { plugins: { enablePlugin: (pluginId: string) => Promise<void> } };
-      }
-    ).app;
-    await app.plugins.enablePlugin("knowledge-workspace");
-  });
-  await browser.pause(1_000);
+  // Reservation-first protocol (2026-08-25): the restore command reserves
+  // the target locator the moment the target-path prompt is accepted, so
+  // the staged bytes land on a path the convergence lane durably defers
+  // — they can never converge as a fresh source before the restore event
+  // ships. The staging therefore happens BETWEEN the prompt accept and
+  // the confirm click, with the plugin enabled throughout (no
+  // disable/enable dance).
   await browser.execute(() => {
     const app = (
       window as unknown as {
@@ -499,7 +481,18 @@ async function explicitlyRestoreFixtureNote(): Promise<void> {
   if (!entered) {
     throw new Error("explicit restore target control was unavailable");
   }
+  // Accept the target path: the reservation is now durable.
   await clickVisibleText(".modal-container button", "Restore");
+  // Stage the restored bytes on the reserved target while the confirm
+  // modal is open.
+  await browser.execute(async (notePath: string, content: string) => {
+    const app = (
+      window as unknown as {
+        app: { vault: { create: (path: string, text: string) => Promise<void> } };
+      }
+    ).app;
+    await app.vault.create(notePath, content);
+  }, restoredPath, fixtureContent);
   await browser.pause(250);
   await clickVisibleText(".modal-container button", "Restore");
 }
