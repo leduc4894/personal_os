@@ -51,17 +51,18 @@ class CanonicalManifestSource:
     """One canonical source's checkpoint state offered as identity evidence.
 
     Carries the exact version identity and fingerprint current at the run
-    checkpoint, the source's normalized locator at that checkpoint, the
-    open tombstone when the source is deleted at the checkpoint, and the
-    closed policy decision for the source subject under the run's bound
-    policy revision. Locator and fingerprint are private values and never
-    render outside a redacted ``repr``.
+    checkpoint, the source's normalized locator at that checkpoint together
+    with the locator row open at it, the open tombstone when the source is
+    deleted at the checkpoint, and the closed policy decision for the source
+    subject under the run's bound policy revision. Locator and fingerprint
+    are private values and never render outside a redacted ``repr``.
     """
 
     source_id: UUID
     current_version_id: UUID
     current_fingerprint: SourceFingerprint
     locator: NormalizedLocator
+    active_locator_id: UUID | None
     tombstone_id: UUID | None
     is_policy_allowed: bool
 
@@ -179,6 +180,15 @@ def plan_manifest_action(
     canonical advance (the only action without a local entry); every other
     divergence is the local-diverged conflict — untrusted bytes are never
     automatically uploaded or downloaded.
+
+    The ``source_locator_id`` operand of the file-placement actions
+    (``no_change``, ``upload``, ``download``) is the canonical source's
+    locator row open at the checkpoint — where the file lives at ``C``,
+    which the plugin needs to place it — never the historical locator a
+    rule-2 entry matched (a remotely renamed source proves through its
+    closed locator, but the action must name the new, active one); the
+    entry's own historical locator already travels through
+    ``local_entry_id`` on the device.
     """
 
     if resolution.match_kind is ManifestMatchKind.UNPROVEN:
@@ -232,7 +242,7 @@ def plan_manifest_action(
             local_entry_id=resolution.local_entry_id,
             source_id=resolution.resolved_source_id,
             source_version_id=canonical.current_version_id,
-            source_locator_id=resolution.resolved_source_locator_id,
+            source_locator_id=canonical.active_locator_id,
             source_tombstone_id=None,
             reason=None,
         )
@@ -245,7 +255,7 @@ def plan_manifest_action(
             local_entry_id=resolution.local_entry_id,
             source_id=canonical.source_id,
             source_version_id=canonical.current_version_id,
-            source_locator_id=resolution.resolved_source_locator_id,
+            source_locator_id=canonical.active_locator_id,
             source_tombstone_id=None,
             reason=None,
         )
@@ -258,7 +268,7 @@ def plan_manifest_action(
             local_entry_id=None,
             source_id=canonical.source_id,
             source_version_id=canonical.current_version_id,
-            source_locator_id=resolution.resolved_source_locator_id,
+            source_locator_id=canonical.active_locator_id,
             source_tombstone_id=None,
             reason=None,
         )

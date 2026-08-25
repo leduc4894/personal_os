@@ -425,6 +425,167 @@ async def seed_canonical_source(
 
 
 @dataclass(frozen=True, slots=True)
+class SeededRenamedSource:
+    """One seeded source whose create locator a later rename closed."""
+
+    source_id: UUID
+    version_ids: tuple[UUID, ...]
+    old_locator_id: UUID
+    old_locator_text: str
+    new_locator_id: UUID
+    new_locator_text: str
+
+
+async def seed_renamed_source(
+    engine: AsyncEngine,
+    workspace: DeviceSyncWorkspace,
+    *,
+    old_locator_text: str,
+    new_locator_text: str,
+    fingerprint: SourceFingerprint,
+) -> SeededRenamedSource:
+    """Seed one source renamed remotely before any run checkpoint.
+
+    The create event opens the old locator and the rename event closes it
+    while opening the new one, keeping the version identity: at any later
+    checkpoint the old locator is historical evidence and the new locator
+    is the source's active placement.
+    """
+
+    nonce = uuid4().hex
+    source_id = uuid4()
+    content_object_id = uuid4()
+    version_id = uuid4()
+    create_event_id = uuid4()
+    rename_event_id = uuid4()
+    now = datetime.now(UTC)
+
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.insert(sources).values(
+                source_id=source_id,
+                workspace_id=workspace.workspace_id,
+                source_type="markdown",
+                title=f"Rename journey source {nonce[:12]}",
+                sync_state="pending",
+                current_version_id=None,
+            )
+        )
+        await connection.execute(
+            sa.insert(content_objects).values(
+                content_object_id=content_object_id,
+                content_hash=fingerprint.sha256,
+                object_key=(
+                    f"objects/sha256/{fingerprint.sha256[:2]}/"
+                    f"{fingerprint.sha256[2:4]}/{fingerprint.sha256}"
+                ),
+                byte_size=fingerprint.size_bytes,
+                media_type=fingerprint.media_type,
+                verified_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(source_versions).values(
+                source_version_id=version_id,
+                workspace_id=workspace.workspace_id,
+                source_id=source_id,
+                content_object_id=content_object_id,
+                content_version=1,
+                parent_version_id=None,
+                author_kind="device",
+                author_id=workspace.device_id,
+                committed_at=now,
+            )
+        )
+        create_result = await connection.execute(
+            sa.insert(sync_events)
+            .values(
+                event_id=create_event_id,
+                workspace_id=workspace.workspace_id,
+                source_id=source_id,
+                device_id=workspace.device_id,
+                committed_version_id=version_id,
+                base_version_id=None,
+                idempotency_key=f"rename-journey-{nonce}-create",
+                request_fingerprint=hashlib.sha256(
+                    f"rename-journey-{nonce}-create".encode("ascii")
+                ).hexdigest(),
+                event_type="create",
+            )
+            .returning(sync_events.c.event_sequence)
+        )
+        create_sequence = int(create_result.scalar_one())
+        rename_result = await connection.execute(
+            sa.insert(sync_events)
+            .values(
+                event_id=rename_event_id,
+                workspace_id=workspace.workspace_id,
+                source_id=source_id,
+                device_id=workspace.device_id,
+                committed_version_id=version_id,
+                base_version_id=version_id,
+                idempotency_key=f"rename-journey-{nonce}-rename",
+                request_fingerprint=hashlib.sha256(
+                    f"rename-journey-{nonce}-rename".encode("ascii")
+                ).hexdigest(),
+                event_type="rename",
+            )
+            .returning(sync_events.c.event_sequence)
+        )
+        rename_sequence = int(rename_result.scalar_one())
+        await connection.execute(
+            sa.update(sources)
+            .values(
+                sync_state="active",
+                current_version_id=version_id,
+                updated_at=sa.text("CURRENT_TIMESTAMP"),
+            )
+            .where(
+                sources.c.workspace_id == workspace.workspace_id,
+                sources.c.source_id == source_id,
+            )
+        )
+        old_locator_id = uuid4()
+        new_locator_id = uuid4()
+        await connection.execute(
+            sa.insert(source_locators).values(
+                source_locator_id=old_locator_id,
+                workspace_id=workspace.workspace_id,
+                source_id=source_id,
+                normalized_locator=old_locator_text,
+                display_locator=old_locator_text,
+                opened_event_id=create_event_id,
+                opened_sequence=create_sequence,
+                closed_event_id=rename_event_id,
+                closed_sequence=rename_sequence,
+                closed_at=sa.text("CURRENT_TIMESTAMP"),
+            )
+        )
+        await connection.execute(
+            sa.insert(source_locators).values(
+                source_locator_id=new_locator_id,
+                workspace_id=workspace.workspace_id,
+                source_id=source_id,
+                normalized_locator=new_locator_text,
+                display_locator=new_locator_text,
+                opened_event_id=rename_event_id,
+                opened_sequence=rename_sequence,
+                closed_event_id=None,
+                closed_sequence=None,
+                closed_at=None,
+            )
+        )
+    return SeededRenamedSource(
+        source_id=source_id,
+        version_ids=(version_id,),
+        old_locator_id=old_locator_id,
+        old_locator_text=old_locator_text,
+        new_locator_id=new_locator_id,
+        new_locator_text=new_locator_text,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class ReconciliationPopulation:
     """The canonical sources and foreign evidence of the planner scenario."""
 
@@ -452,6 +613,9 @@ ABSENT_LOCATOR = "notes/absent.md"
 FORBIDDEN_LOCATOR = "secret/plan.md"
 UPLOAD_LOCATOR = "notes/new-file.md"
 EXCLUDED_LOCATOR = "notes/vault-artifact.md"
+RENAMED_OLD_LOCATOR = "notes/renamed-old.md"
+RENAMED_NEW_LOCATOR = "notes/renamed-new.md"
+RENAMED_JOURNEY_DELETED_LOCATOR = "notes/renamed-journey-gone.md"
 
 def unique_fingerprint(label: str, *, media_type: str = "text/markdown") -> SourceFingerprint:
     return fingerprint(label, media_type=media_type)
@@ -693,6 +857,7 @@ class ManifestStoreHarness:
                             manifest_entry_resolutions.c.match_kind,
                             manifest_entry_resolutions.c.locator_evidence_digest,
                             manifest_entry_resolutions.c.resolved_source_id,
+                            manifest_entry_resolutions.c.resolved_source_locator_id,
                         )
                         .where(manifest_entry_resolutions.c.manifest_run_id == manifest_run_id)
                         .order_by(
@@ -1216,6 +1381,93 @@ async def test_finalize_materializes_the_deterministic_action_plan(
 
 
 @pytest.mark.asyncio
+async def test_remote_rename_journey_binds_historically_and_places_at_the_active_locator(
+    manifest_store: ManifestStoreHarness,
+) -> None:
+    """One live rule-2 journey: the entry carries the source's closed old
+    locator plus the exact current fingerprint, so it proves through the
+    historical bucket (the closed locator row resolves), the deleted
+    neighbor's closed locator never binds historically (rule-3 tombstone
+    only), and the planned no_change names the locator row open at the
+    checkpoint — the operand the plugin places the file with — never the
+    closed locator the entry matched."""
+
+    workspace = await seed_device_sync_workspace(manifest_store.engine)
+    await publish_workspace_policy(manifest_store.engine, workspace)
+    context = workspace.context()
+    renamed_fingerprint = unique_fingerprint("rename-journey-current")
+    renamed_source = await seed_renamed_source(
+        manifest_store.engine,
+        workspace,
+        old_locator_text=RENAMED_OLD_LOCATOR,
+        new_locator_text=RENAMED_NEW_LOCATOR,
+        fingerprint=renamed_fingerprint,
+    )
+    deleted_fingerprint = unique_fingerprint("rename-journey-deleted")
+    deleted_source = await seed_canonical_source(
+        manifest_store.engine,
+        workspace,
+        locator_text=RENAMED_JOURNEY_DELETED_LOCATOR,
+        fingerprints=(deleted_fingerprint,),
+        deleted=True,
+    )
+
+    run = await manifest_store.start(context)
+    entries = (
+        manifest_entry(
+            "entry-renamed", locator=RENAMED_OLD_LOCATOR, observed=renamed_fingerprint
+        ),
+        manifest_entry(
+            "entry-gone",
+            locator=RENAMED_JOURNEY_DELETED_LOCATOR,
+            observed=deleted_fingerprint,
+        ),
+    )
+    page_digest = _digest("rename-journey-page-0")
+    await manifest_store.append_page(
+        context, run.manifest_run_id, page_number=0, entries=entries, page_digest=page_digest
+    )
+    final_digest = ContentDigest.parse(
+        compute_manifest_final_digest(((0, len(entries), page_digest.hexadecimal),))
+    )
+    planned = await manifest_store.finalize(
+        context,
+        run.manifest_run_id,
+        total_entry_count=len(entries),
+        final_digest=final_digest,
+    )
+    assert planned.state is ManifestRunState.PLANNED
+
+    resolutions = await manifest_store.resolution_rows(run.manifest_run_id)
+    assert [row.local_entry_id for row in resolutions] == ["entry-renamed", "entry-gone"]
+    # The closed old locator bucketed historically and resolved to its own
+    # (historical) locator row id.
+    assert resolutions[0].match_kind == "historical_locator_fingerprint"
+    assert resolutions[0].resolved_source_id == renamed_source.source_id
+    assert resolutions[0].resolved_source_locator_id == renamed_source.old_locator_id
+    # The deleted source's closed locator is not a live authority: it never
+    # becomes a historical candidate, so the tombstone proves instead.
+    assert resolutions[1].match_kind == "open_tombstone_fingerprint"
+    assert resolutions[1].resolved_source_id == deleted_source.source_id
+
+    page = await manifest_store.read_actions(context, run.manifest_run_id, limit=200)
+    assert [action.action_kind for action in page.actions] == [
+        ManifestActionKind.NO_CHANGE,
+        ManifestActionKind.APPLY_TOMBSTONE,
+    ]
+    no_change, tombstone = page.actions
+    assert no_change.local_entry_id == "entry-renamed"
+    assert no_change.source_id == renamed_source.source_id
+    assert no_change.source_version_id == renamed_source.version_ids[0]
+    assert no_change.source_locator_id == renamed_source.new_locator_id
+    assert no_change.source_locator_id != renamed_source.old_locator_id
+    assert tombstone.source_tombstone_id == deleted_source.tombstone_id
+    # The renamed source is resolved, so no canonical-only duplicate
+    # download joins the plan.
+    assert page.has_more is False
+
+
+@pytest.mark.asyncio
 async def test_first_action_read_transitions_planned_to_applying_and_replays_stably(
     manifest_store: ManifestStoreHarness,
 ) -> None:
@@ -1252,6 +1504,28 @@ async def test_action_read_on_collecting_run_is_state_invalid(
 
 
 # --- policy advance and database expiry ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_policy_stale_rejection_precedes_the_collecting_state_rejection(
+    manifest_store: ManifestStoreHarness,
+) -> None:
+    """An action read of a policy-stale collecting run reports the policy
+    advance (and fails the run with that closed reason), not the plain
+    collecting-state rejection: the durable invalidation outranks the state
+    shape in the read path."""
+
+    population = await seed_reconciliation_population(manifest_store.engine)
+    context = population.workspace.context()
+    run = await manifest_store.start(context)
+    await manifest_store.advance_policy(population.workspace)
+
+    with pytest.raises(DeviceSyncError) as raised:
+        await manifest_store.read_actions(context, run.manifest_run_id)
+    assert raised.value.code is DeviceSyncErrorCode.MANIFEST_POLICY_ADVANCED
+    row = await manifest_store.run_row(run.manifest_run_id)
+    assert row.state == "failed"
+    assert row.safe_error_code == DeviceSyncErrorCode.MANIFEST_POLICY_ADVANCED.value
 
 
 @pytest.mark.asyncio

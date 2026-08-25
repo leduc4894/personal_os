@@ -41,6 +41,9 @@ _VERSION_ID = UUID("018f47a0-7b00-7000-8000-000000000004")
 _SECOND_VERSION_ID = UUID("018f47a0-7b00-7000-8000-000000000005")
 _LOCATOR_ID = UUID("018f47a0-7b00-7000-8000-000000000006")
 _TOMBSTONE_ID = UUID("018f47a0-7b00-7000-8000-000000000007")
+#: The checkpoint-active locator row of a remotely renamed source: the
+#: placement operand every file action must carry.
+_ACTIVE_LOCATOR_ID = UUID("018f47a0-7b00-7000-8000-000000000010")
 
 _LOCATOR = NormalizedLocator("notes/alpha.md")
 _OTHER_LOCATOR = NormalizedLocator("notes/beta.md")
@@ -75,6 +78,7 @@ def canonical_source(
     version_id: UUID = _VERSION_ID,
     fingerprint: SourceFingerprint = FINGERPRINT,
     locator: NormalizedLocator = _LOCATOR,
+    active_locator_id: UUID | None = _LOCATOR_ID,
     tombstone_id: UUID | None = None,
     is_policy_allowed: bool = True,
 ) -> CanonicalManifestSource:
@@ -85,6 +89,7 @@ def canonical_source(
         current_version_id=version_id,
         current_fingerprint=fingerprint,
         locator=locator,
+        active_locator_id=active_locator_id,
         tombstone_id=tombstone_id,
         is_policy_allowed=is_policy_allowed,
     )
@@ -329,6 +334,61 @@ def test_matching_current_bytes_plan_no_change() -> None:
     assert action.source_locator_id == _LOCATOR_ID
     assert action.source_tombstone_id is None
     assert action.reason is None
+
+
+def test_remote_rename_no_change_carries_the_checkpoint_active_locator() -> None:
+    """The rule-2 rename journey: the entry matched the source's closed
+    historical locator, but the placement operand must name the locator
+    open at the checkpoint (where the plugin places the file)."""
+
+    resolution = planned_entry_resolution(
+        match_kind=ManifestMatchKind.HISTORICAL_LOCATOR_FINGERPRINT,
+        # The historical locator the entry proved through; its id is the
+        # resolved operand the action must NOT carry.
+        resolved_source_locator_id=_LOCATOR_ID,
+    )
+    canonical = canonical_source(
+        locator=_OTHER_LOCATOR, active_locator_id=_ACTIVE_LOCATOR_ID
+    )
+    action = plan_manifest_action(resolution, canonical)
+    assert action.action_kind is ManifestActionKind.NO_CHANGE
+    assert action.source_locator_id == _ACTIVE_LOCATOR_ID
+    assert action.source_locator_id != resolution.resolved_source_locator_id
+
+
+def test_upload_and_download_carry_the_checkpoint_active_locator() -> None:
+    """Every file-placement action names the canonical active locator row,
+    never the entry's resolved (possibly historical) locator id."""
+
+    upload_resolution = planned_entry_resolution(
+        known_source_id=_SOURCE_ID,
+        known_version_id=_VERSION_ID,
+        submitted_fingerprint=OTHER_FINGERPRINT,
+        known_base_fingerprint=FINGERPRINT,
+    )
+    upload = plan_manifest_action(
+        upload_resolution,
+        canonical_source(active_locator_id=_ACTIVE_LOCATOR_ID),
+    )
+    assert upload.action_kind is ManifestActionKind.UPLOAD
+    assert upload.source_locator_id == _ACTIVE_LOCATOR_ID
+
+    download_resolution = planned_entry_resolution(
+        known_source_id=_SOURCE_ID,
+        known_version_id=_SECOND_VERSION_ID,
+        submitted_fingerprint=FINGERPRINT,
+        known_base_fingerprint=FINGERPRINT,
+    )
+    download = plan_manifest_action(
+        download_resolution,
+        canonical_source(
+            version_id=_VERSION_ID,
+            fingerprint=OTHER_FINGERPRINT,
+            active_locator_id=_ACTIVE_LOCATOR_ID,
+        ),
+    )
+    assert download.action_kind is ManifestActionKind.DOWNLOAD
+    assert download.source_locator_id == _ACTIVE_LOCATOR_ID
 
 
 def test_unowned_new_locator_plans_upload() -> None:

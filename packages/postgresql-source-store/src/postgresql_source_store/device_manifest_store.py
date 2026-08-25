@@ -20,7 +20,10 @@ run's ordered pages, then materializes the deterministic action plan through
 the pure planner: per-entry resolutions against the canonical source state
 at the checkpoint under the run's bound policy revision, plus canonical-only
 downloads for allowed active sources absent from the manifest (a deleted
-canonical source absent locally needs no file action). The first successful
+canonical source absent locally needs no file action). Because a run may
+resolve the schema's full 100,000 entries, every finalize-time id lookup and
+the canonical-only exclusion run in bind-parameter chunks far below
+PostgreSQL's 65,535-parameter ceiling and merge their rows. The first successful
 ``read_manifest_actions`` moves ``planned`` to ``applying`` and later reads
 are state-preserving replays; every action read and completion rechecks the
 active policy revision and invalidates a stale run with the closed
@@ -59,6 +62,7 @@ from personal_os.device_sync.contracts import (
     AppendManifestPageCommand,
     CompleteManifestCommand,
     DeviceCursorReceipt,
+    DeviceSyncContext,
     FinalizeManifestCommand,
     ManifestAction,
     ManifestActionKind,
@@ -119,8 +123,10 @@ from postgresql_source_store.tables import (
 )
 
 __all__ = [
+    "MANIFEST_ID_LOOKUP_CHUNK_SIZE",
     "MANIFEST_UNFINISHED_STATES",
     "PostgresqlDeviceManifestStore",
+    "chunk_id_lookups",
     "compute_manifest_final_digest",
     "device_cursor_completion_advance_statement",
     "device_cursor_completion_bootstrap_statement",
@@ -149,6 +155,29 @@ MANIFEST_UNFINISHED_STATES: Final[frozenset[str]] = frozenset(
 #: One page record of the canonical final-digest grammar: the zero-based
 #: page number, its accepted entry count and its page digest hex.
 type ManifestPageRecord = tuple[int, int, str]
+
+#: Maximum ids one finalize-time lookup binds per statement. PostgreSQL's
+#: extended protocol caps a statement at 65,535 bind parameters, while a
+#: manifest run may resolve up to 100,000 distinct ids at finalization, so
+#: the id lookups and the canonical-only exclusion run in chunks of this
+#: size and merge their results — far below the ceiling for any run the
+#: schema allows.
+MANIFEST_ID_LOOKUP_CHUNK_SIZE: Final[int] = 5_000
+
+
+def chunk_id_lookups(ids: Sequence[UUID]) -> tuple[tuple[UUID, ...], ...]:
+    """Split one ordered id set into bind-parameter-sized lookup chunks.
+
+    Each tuple stays at or below :data:`MANIFEST_ID_LOOKUP_CHUNK_SIZE` and
+    the chunks concatenate back to ``ids`` in order with no id lost or
+    duplicated, so a caller merging per-chunk row dictionaries reproduces
+    the single-statement lookup exactly.
+    """
+
+    return tuple(
+        tuple(ids[start : start + MANIFEST_ID_LOOKUP_CHUNK_SIZE])
+        for start in range(0, len(ids), MANIFEST_ID_LOOKUP_CHUNK_SIZE)
+    )
 
 
 def _unfinished_state_predicate() -> sa.ColumnElement[bool]:
@@ -816,7 +845,12 @@ def manifest_canonical_only_downloads_statement(
     and carries no tombstone open there (a deleted canonical source absent
     locally needs no file action), carries its checkpoint version and
     content evidence for the policy subject, and is excluded when the run
-    already proved some entry resolves to it.
+    already proved some entry resolves to it. The exclusion is batched: the
+    resolved ids are bound as chunked ``NOT IN`` conjuncts of at most
+    :data:`MANIFEST_ID_LOOKUP_CHUNK_SIZE` parameters each, so a run that
+    resolved the schema's full 100,000 entries still stays far below the
+    extended protocol's 65,535-parameter ceiling (the conjunction of
+    chunked ``NOT IN`` predicates is exactly the single-list ``NOT IN``).
     """
 
     checkpoint_version = _checkpoint_version_lateral(checkpoint_sequence)
@@ -857,12 +891,17 @@ def manifest_canonical_only_downloads_statement(
     )
     if resolved_source_ids:
         statement = statement.where(
-            sources.c.source_id.not_in(
-                sa.bindparam(
-                    "resolved_source_ids",
-                    list(resolved_source_ids),
-                    type_=sa.Uuid(),
-                    expanding=True,
+            sa.and_(
+                *(
+                    sources.c.source_id.not_in(
+                        sa.bindparam(
+                            f"resolved_source_ids_{chunk_index}",
+                            list(chunk),
+                            type_=sa.Uuid(),
+                            expanding=True,
+                        )
+                    )
+                    for chunk_index, chunk in enumerate(chunk_id_lookups(resolved_source_ids))
                 )
             )
         )
@@ -1038,7 +1077,7 @@ class PostgresqlDeviceManifestStore:
         return int(row.active_revision_number)
 
     async def _read_acknowledged_sequence(
-        self, connection: AsyncConnection, context: Any
+        self, connection: AsyncConnection, context: DeviceSyncContext
     ) -> int:
         row = (
             await connection.execute(
@@ -1106,6 +1145,8 @@ class PostgresqlDeviceManifestStore:
                 command.manifest_run_id,
                 DeviceSyncErrorCode.MANIFEST_PAGE_REPLAY_MISMATCH,
             )
+            # The failure mark commits before the typed raise so the
+            # rejected request's rollback cannot resurrect the run.
             await connection.commit()
             raise DeviceSyncError(DeviceSyncErrorCode.MANIFEST_PAGE_REPLAY_MISMATCH)
         if int(run.entry_count) + len(command.entries) > MAX_MANIFEST_RUN_ENTRIES:
@@ -1239,7 +1280,10 @@ class PostgresqlDeviceManifestStore:
         for row in rows:
             if row["source_id"] == source_id:
                 return row
-        raise DeviceSyncError(DeviceSyncErrorCode.EVENT_INTEGRITY_FAILED)
+        # The resolution and its evidence buckets derive from the same
+        # checkpoint rows; divergence is invalid manifest-resolution state,
+        # never an event hydration failure.
+        raise DeviceSyncError(DeviceSyncErrorCode.MANIFEST_STATE_INVALID)
 
     @staticmethod
     def _matched_tombstone_row(
@@ -1248,7 +1292,7 @@ class PostgresqlDeviceManifestStore:
         for row in rows:
             if row["source_id"] == source_id:
                 return row
-        raise DeviceSyncError(DeviceSyncErrorCode.EVENT_INTEGRITY_FAILED)
+        raise DeviceSyncError(DeviceSyncErrorCode.MANIFEST_STATE_INVALID)
 
     def _entry_evidence(
         self,
@@ -1300,6 +1344,7 @@ class PostgresqlDeviceManifestStore:
                     current_version_id=row["retained_version_id"],
                     current_fingerprint=fingerprint,
                     locator=retained_locator,
+                    active_locator_id=None,
                     tombstone_id=row["source_tombstone_id"],
                     is_policy_allowed=True,
                 )
@@ -1344,6 +1389,10 @@ class PostgresqlDeviceManifestStore:
             current_version_id=version_id,
             current_fingerprint=fingerprint,
             locator=locator,
+            # The locator row open at the checkpoint: the operand placement
+            # actions carry (planning pins it), never a rule-2 entry's
+            # historical matched locator.
+            active_locator_id=state.get("active_locator_id"),
             tombstone_id=state.get("open_tombstone_id"),
             is_policy_allowed=True,
         )
@@ -1355,16 +1404,26 @@ class PostgresqlDeviceManifestStore:
         checkpoint_sequence: int,
         source_ids: Sequence[UUID],
     ) -> dict[UUID, dict[str, Any]]:
-        if not source_ids:
-            return {}
-        rows = (
-            await connection.execute(
-                manifest_canonical_source_state_statement(
-                    workspace_id, checkpoint_sequence, source_ids
+        """Read the checkpoint state of every source, chunked per statement.
+
+        Finalization may resolve up to 100,000 distinct source ids while the
+        extended protocol caps one statement at 65,535 bind parameters, so
+        the ids are looked up in :data:`MANIFEST_ID_LOOKUP_CHUNK_SIZE`
+        chunks and the row dictionaries merged — the union equals the
+        single-statement lookup because each row keys on its own source id.
+        """
+
+        states: dict[UUID, dict[str, Any]] = {}
+        for chunk in chunk_id_lookups(source_ids):
+            rows = (
+                await connection.execute(
+                    manifest_canonical_source_state_statement(
+                        workspace_id, checkpoint_sequence, chunk
+                    )
                 )
-            )
-        ).mappings()
-        return {row.source_id: dict(row) for row in rows}
+            ).mappings()
+            states.update({row.source_id: dict(row) for row in rows})
+        return states
 
     # -- finalize -------------------------------------------------------------------
 
@@ -1396,6 +1455,8 @@ class PostgresqlDeviceManifestStore:
                     command.manifest_run_id,
                     DeviceSyncErrorCode.MANIFEST_DIGEST_MISMATCH,
                 )
+                # The failure mark commits before the typed raise so the
+                # rejected request's rollback cannot resurrect the run.
                 await connection.commit()
                 raise DeviceSyncError(DeviceSyncErrorCode.MANIFEST_DIGEST_MISMATCH)
             page_rows = (
@@ -1415,6 +1476,8 @@ class PostgresqlDeviceManifestStore:
                     command.manifest_run_id,
                     DeviceSyncErrorCode.MANIFEST_DIGEST_MISMATCH,
                 )
+                # The failure mark commits before the typed raise so the
+                # rejected request's rollback cannot resurrect the run.
                 await connection.commit()
                 raise DeviceSyncError(DeviceSyncErrorCode.MANIFEST_DIGEST_MISMATCH)
             revision = await self._load_bound_policy_revision(
@@ -1518,7 +1581,9 @@ class PostgresqlDeviceManifestStore:
                 row.submitted_sha256, row.submitted_size_bytes, row.submitted_media_type
             )
             if submitted is None:
-                raise DeviceSyncError(DeviceSyncErrorCode.EVENT_INTEGRITY_FAILED)
+                # The persisted resolution violates its own NOT NULL shape:
+                # invalid manifest state, not event hydration.
+                raise DeviceSyncError(DeviceSyncErrorCode.MANIFEST_STATE_INVALID)
             base_state = (
                 base_fingerprints.get(row.known_version_id)
                 if row.known_version_id is not None
@@ -1562,6 +1627,7 @@ class PostgresqlDeviceManifestStore:
                         current_version_id=candidate.current_version_id,
                         current_fingerprint=candidate.current_fingerprint,
                         locator=candidate.locator,
+                        active_locator_id=candidate.active_locator_id,
                         tombstone_id=candidate.tombstone_id,
                         is_policy_allowed=self._source_is_policy_allowed(
                             revision, workspace_id, canonical_state
@@ -1678,14 +1744,22 @@ class PostgresqlDeviceManifestStore:
         workspace_id: UUID,
         version_ids: Sequence[UUID],
     ) -> dict[UUID, dict[str, Any]]:
-        if not version_ids:
-            return {}
-        rows = (
-            await connection.execute(
-                known_base_fingerprints_statement(workspace_id, version_ids)
-            )
-        ).mappings()
-        return {row.source_version_id: dict(row) for row in rows}
+        """Read the trusted-base fingerprints, chunked per statement.
+
+        Batched for the same bind-parameter ceiling as
+        :meth:`_canonical_states`; the merged dictionary equals the
+        single-statement lookup because each row keys on its own version id.
+        """
+
+        fingerprints: dict[UUID, dict[str, Any]] = {}
+        for chunk in chunk_id_lookups(version_ids):
+            rows = (
+                await connection.execute(
+                    known_base_fingerprints_statement(workspace_id, chunk)
+                )
+            ).mappings()
+            fingerprints.update({row.source_version_id: dict(row) for row in rows})
+        return fingerprints
 
     # -- actions -------------------------------------------------------------------
 
@@ -1830,14 +1904,20 @@ class PostgresqlDeviceManifestStore:
     async def _completion_receipt(
         self,
         connection: AsyncConnection,
-        context: Any,
+        context: DeviceSyncContext,
         checkpoint_sequence: int,
     ) -> DeviceCursorReceipt:
+        # The receipt re-reads the live cursor row: the completing
+        # transaction (or, on a lost response, the earlier completed one)
+        # already bootstrapped or advanced it, so a missing row is invalid
+        # state rather than a driver-shaped NoResultFound.
         row = (
             await connection.execute(
                 device_cursor_select_statement(context.workspace_id, context.device_id)
             )
-        ).one()
+        ).one_or_none()
+        if row is None:
+            raise DeviceSyncError(DeviceSyncErrorCode.MANIFEST_STATE_INVALID)
         return DeviceCursorReceipt(
             acknowledged_sequence=int(row.acknowledged_sequence),
             delivered_through_sequence=max(
@@ -1848,7 +1928,10 @@ class PostgresqlDeviceManifestStore:
     # -- shared guards ---------------------------------------------------------------
 
     async def _lock_run(
-        self, connection: AsyncConnection, context: Any, manifest_run_id: UUID
+        self,
+        connection: AsyncConnection,
+        context: DeviceSyncContext,
+        manifest_run_id: UUID,
     ) -> RowMapping:
         reject_nil_uuid("manifest_run_id", manifest_run_id)
         row = (
@@ -1906,4 +1989,6 @@ def _action_reason(token: str) -> ManifestActionReason:
     try:
         return ManifestActionReason(token)
     except ValueError:
-        raise DeviceSyncError(DeviceSyncErrorCode.EVENT_INTEGRITY_FAILED) from None
+        # A stored action row outside the closed reason vocabulary is
+        # invalid manifest state, not event hydration.
+        raise DeviceSyncError(DeviceSyncErrorCode.MANIFEST_STATE_INVALID) from None

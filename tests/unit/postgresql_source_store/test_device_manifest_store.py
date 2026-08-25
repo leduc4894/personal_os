@@ -8,18 +8,26 @@ terminal run transitions guard on the exact prior state, the completion
 cursor advance is monotonic and raises only the acknowledged watermark, the
 identity candidate reads are checkpoint-bounded over locator/tombstone
 history, the canonical-only download read excludes the run's resolved
-sources, and the canonical-JSON final digest over the run's ordered pages is
-deterministic. Durable transaction behavior is integration territory (the
-disposable stack suite).
+sources in bind-parameter chunks below the 65,535-parameter ceiling, the
+finalize-time id lookups merge their chunked rows without loss, and the
+canonical-JSON final digest over the run's ordered pages is deterministic
+and pinned to golden vectors. Durable transaction behavior is integration
+territory (the disposable stack suite).
 """
 
 from __future__ import annotations
 
-from uuid import UUID
+from typing import Any, cast
+from uuid import UUID, uuid4
 
+import pytest
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from postgresql_source_store.device_manifest_store import (
+    MANIFEST_ID_LOOKUP_CHUNK_SIZE,
+    PostgresqlDeviceManifestStore,
+    chunk_id_lookups,
     compute_manifest_final_digest,
     device_cursor_completion_advance_statement,
     device_cursor_completion_bootstrap_statement,
@@ -271,6 +279,131 @@ def test_canonical_only_downloads_exclude_resolved_sources() -> None:
     assert str(_SOURCE_ID) not in text
 
 
+# --- bind-parameter chunking of the finalize-time lookups ---------------------------
+
+
+def test_chunk_id_lookups_partition_in_order_without_loss() -> None:
+    ids = [uuid4() for _ in range(2 * MANIFEST_ID_LOOKUP_CHUNK_SIZE + 3)]
+    chunks = chunk_id_lookups(ids)
+    assert all(len(chunk) <= MANIFEST_ID_LOOKUP_CHUNK_SIZE for chunk in chunks)
+    assert [len(chunk) for chunk in chunks] == [
+        MANIFEST_ID_LOOKUP_CHUNK_SIZE,
+        MANIFEST_ID_LOOKUP_CHUNK_SIZE,
+        3,
+    ]
+    # The chunks concatenate back to the input: no id lost, duplicated or
+    # reordered, so per-chunk merges reproduce the single-statement lookup.
+    assert [source_id for chunk in chunks for source_id in chunk] == ids
+    assert chunk_id_lookups(()) == ()
+
+
+def test_canonical_only_downloads_bind_the_exclusion_in_chunks() -> None:
+    """A run that resolved the schema's full id vocabulary still binds every
+    statement far below PostgreSQL's 65,535-parameter ceiling: the NOT IN
+    exclusion arrives as chunked conjuncts whose union is the whole set."""
+
+    ids = [uuid4() for _ in range(2 * MANIFEST_ID_LOOKUP_CHUNK_SIZE + 7)]
+    statement = manifest_canonical_only_downloads_statement(
+        _WORKSPACE_ID, _CHECKPOINT_SEQUENCE, ids
+    )
+    compiled = statement.compile(dialect=postgresql.dialect())
+    params = compiled.params
+    chunk_names = sorted(name for name in params if name.startswith("resolved_source_ids_"))
+    assert chunk_names == [
+        "resolved_source_ids_0",
+        "resolved_source_ids_1",
+        "resolved_source_ids_2",
+    ]
+    bound = [source_id for name in chunk_names for source_id in params[name]]
+    assert bound == ids
+    assert all(len(params[name]) <= MANIFEST_ID_LOOKUP_CHUNK_SIZE for name in chunk_names)
+
+
+class _RowMappingStub(dict[str, Any]):
+    """A RowMapping stand-in: attribute access over the dict keys."""
+
+    def __getattr__(self, name: str) -> Any:
+        return self[name]
+
+
+class _ChunkedResultStub:
+    """The ``.mappings()`` result shape the store's lookups consume."""
+
+    def __init__(self, rows: list[_RowMappingStub]) -> None:
+        self._rows = rows
+
+    def mappings(self) -> list[_RowMappingStub]:
+        return self._rows
+
+
+class _ChunkedConnectionStub:
+    """Executes one statement per chunk and records each requested chunk."""
+
+    def __init__(self, rows_by_key: dict[UUID, _RowMappingStub], bind_name: str) -> None:
+        self._rows_by_key = rows_by_key
+        self._bind_name = bind_name
+        self.requested_chunks: list[list[UUID]] = []
+
+    async def execute(self, statement: Any) -> _ChunkedResultStub:
+        params = statement.compile(dialect=postgresql.dialect()).params
+        requested = list(params[self._bind_name])
+        self.requested_chunks.append(requested)
+        return _ChunkedResultStub([self._rows_by_key[key] for key in requested])
+
+
+def _engineless_store() -> PostgresqlDeviceManifestStore:
+    """One store whose connection-free seams are under test (no engine use)."""
+
+    return PostgresqlDeviceManifestStore(cast(AsyncEngine, None))
+
+
+@pytest.mark.asyncio
+async def test_canonical_state_lookup_merges_chunked_rows_without_loss() -> None:
+    source_ids = [uuid4() for _ in range(2 * MANIFEST_ID_LOOKUP_CHUNK_SIZE + 3)]
+    rows = {
+        source_id: _RowMappingStub(
+            {"source_id": source_id, "active_locator_id": uuid4()}
+        )
+        for source_id in source_ids
+    }
+    connection = _ChunkedConnectionStub(rows, bind_name="source_ids")
+
+    merged = await _engineless_store()._canonical_states(
+        connection, _WORKSPACE_ID, _CHECKPOINT_SEQUENCE, source_ids
+    )
+
+    assert [len(chunk) for chunk in connection.requested_chunks] == [
+        MANIFEST_ID_LOOKUP_CHUNK_SIZE,
+        MANIFEST_ID_LOOKUP_CHUNK_SIZE,
+        3,
+    ]
+    assert set(merged) == set(source_ids)
+    assert merged == {source_id: dict(row) for source_id, row in rows.items()}
+
+
+@pytest.mark.asyncio
+async def test_known_base_fingerprint_lookup_merges_chunked_rows_without_loss() -> None:
+    version_ids = [uuid4() for _ in range(MANIFEST_ID_LOOKUP_CHUNK_SIZE + 1)]
+    rows = {
+        version_id: _RowMappingStub(
+            {"source_version_id": version_id, "content_hash": "a" * 64}
+        )
+        for version_id in version_ids
+    }
+    connection = _ChunkedConnectionStub(rows, bind_name="version_ids")
+
+    merged = await _engineless_store()._known_base_fingerprints(
+        connection, _WORKSPACE_ID, version_ids
+    )
+
+    assert [len(chunk) for chunk in connection.requested_chunks] == [
+        MANIFEST_ID_LOOKUP_CHUNK_SIZE,
+        1,
+    ]
+    assert set(merged) == set(version_ids)
+    assert merged == {version_id: dict(row) for version_id, row in rows.items()}
+
+
 # --- canonical-JSON final digest ----------------------------------------------------
 
 
@@ -289,3 +422,18 @@ def test_final_digest_binds_every_page_and_the_empty_manifest() -> None:
     changed_count = compute_manifest_final_digest(((0, 2, _PAGE_DIGEST),))
     changed_digest = compute_manifest_final_digest(((0, 1, "d" * 64),))
     assert len({empty, single, changed_count, changed_digest}) == 4
+
+
+def test_final_digest_matches_the_pinned_golden_vectors() -> None:
+    """The final-digest grammar is a wire contract the plugin must mirror,
+    so it is pinned byte for byte: a member rename, a key reorder or a shape
+    tweak fails here even though the determinism tests would still pass."""
+
+    two_pages = ((0, 2, _PAGE_DIGEST), (1, 3, "c" * 64))
+    assert compute_manifest_final_digest(two_pages) == (
+        "b048465d54c02d7191f0a736cbc36b2339dd881847292f6a4c6dfd5b27c9b430"
+    )
+    # The empty manifest still commits to the grammar envelope alone.
+    assert compute_manifest_final_digest(()) == (
+        "b53f908bd377e91b3784d07d32ed44ca068e8029760afc38fd71cb8a260a7b1d"
+    )
