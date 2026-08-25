@@ -603,6 +603,23 @@ describe("sync diagnostics trail startup_failure entries (closed-reason surfacin
       "settled_admission_failed",
       "automatic_snapshot_admission_failed",
       "lifecycle_reconcile_persist_failed",
+      "restore_reservation_persist_failed",
+    ]);
+  });
+
+  it("accepts the explicit-restore reservation refusal tokens as closed trail tokens", async () => {
+    const store = new FakeTrailFileStore();
+    const trail = await createLoadedTrail(store);
+    await trail.append({ kind: "journal_failure", tokens: ["restore_target_occupied"] });
+    await trail.append({ kind: "journal_failure", tokens: ["restore_target_busy"] });
+    await trail.append({
+      kind: "journal_failure",
+      tokens: ["restore_already_pending", "restore_reservation_persist_failed"],
+    });
+    expect(trail.readEntries().map((entry) => entry.tokens)).toEqual([
+      ["restore_target_occupied"],
+      ["restore_target_busy"],
+      ["restore_already_pending", "restore_reservation_persist_failed"],
     ]);
   });
 
@@ -670,6 +687,22 @@ describe("sync error tracing runbook token contract", () => {
     );
 
     for (const token of SYNC_COMPOSITION_READ_FAILURE_TOKENS) {
+      expect(runbookText).toContain(token);
+    }
+  });
+});
+
+describe("lifecycle runbook reservation token contract", () => {
+  it("documents every explicit-restore reservation refusal token for operators", async () => {
+    const runbookText = readFileSync(
+      new URL(
+        "../../../../docs/operations/source-locator-tombstone-lifecycle.md",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    const { RESTORE_RESERVATION_REFUSALS } = await import("./lifecycle-contracts");
+    for (const token of RESTORE_RESERVATION_REFUSALS) {
       expect(runbookText).toContain(token);
     }
   });

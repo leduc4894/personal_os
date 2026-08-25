@@ -30,6 +30,7 @@
 
 import { JOURNAL_SAFE_ERROR_LABELS } from "./contracts";
 import type { JournalSafeErrorLabel } from "./contracts";
+import type { RestoreReservationRefusal } from "./lifecycle-contracts";
 import type { LifecycleRunOutcome } from "./lifecycle-driver";
 import type { JournalFileStore } from "./persistence";
 import type { QueuePassOutcome } from "./queue-driver";
@@ -99,6 +100,7 @@ export type SyncDiagnosticClosedToken =
   | SyncParkSiteToken
   | SyncStartupStageToken
   | SyncCompositionReadFailureToken
+  | RestoreReservationRefusal
   | SyncApiEnvelopeErrorCode;
 
 /**
@@ -194,7 +196,9 @@ export type SyncStartupStageToken = (typeof SYNC_STARTUP_STAGE_TOKENS)[number];
  * `settled_admission_failed`; an automatic snapshot coalesces rejected
  * admissions as `automatic_snapshot_admission_failed` once per scan; and a
  * failed lifecycle reconcile-marker persistence names
- * `lifecycle_reconcile_persist_failed` once per attempt. Every token is
+ * `lifecycle_reconcile_persist_failed` once per attempt; and a failed
+ * explicit-restore reservation persistence names
+ * `restore_reservation_persist_failed` once per attempt. Every token is
  * closed and is appended only as a `journal_failure` trail entry.
  */
 export const SYNC_COMPOSITION_READ_FAILURE_TOKENS = [
@@ -207,6 +211,7 @@ export const SYNC_COMPOSITION_READ_FAILURE_TOKENS = [
   "settled_admission_failed",
   "automatic_snapshot_admission_failed",
   "lifecycle_reconcile_persist_failed",
+  "restore_reservation_persist_failed",
 ] as const;
 
 export type SyncCompositionReadFailureToken =

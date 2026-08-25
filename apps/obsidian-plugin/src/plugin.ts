@@ -44,6 +44,7 @@ import {
 } from "./journal/automatic-snapshot";
 import type { AutomaticSnapshotReason } from "./journal/automatic-snapshot";
 import { LifecycleCaptureImpl } from "./journal/lifecycle-capture";
+import type { RestoreReservationRefusal, RestoreReservationResult } from "./journal/lifecycle-contracts";
 import type {
   LifecycleVaultReader,
   VaultRenameTarget,
@@ -116,6 +117,24 @@ const SCHEDULED_RETRY_PASS_SAFETY_MARGIN_MS = 250;
 const MAX_BUFFERED_STARTUP_FAILURE_ENTRIES = 8;
 
 const DEFAULT_DEVICE_NAME = "Obsidian vault";
+
+/**
+ * The closed, path-free Notice texts of the three explicit-restore
+ * reservation refusals. The diagnostics trail carries the same closed
+ * token through the failure reporter; no path, locator or identifier
+ * ever reaches a Notice.
+ */
+const RESTORE_RESERVATION_REFUSAL_NOTICES: Record<
+  RestoreReservationRefusal,
+  string
+> = {
+  restore_target_occupied:
+    "Restore refused: the target path is already occupied. Choose another target.",
+  restore_target_busy:
+    "Restore postponed: an upload for the target path is in flight. Try again shortly.",
+  restore_already_pending:
+    "A restore for this tombstone is already in progress. Wait for it to finish.",
+};
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
@@ -975,8 +994,43 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     if (targetPath === null) {
       return;
     }
-    const confirmed = await this.#confirmRestoreRequest(selection, targetPath);
-    if (!confirmed) {
+    // Reservation-first protocol: the target locator is durably claimed
+    // BEFORE the operator stages any bytes, so the convergence lane can
+    // never ship the staged restore bytes as a fresh source at the
+    // target (the convergence/lifecycle lane race). A refused
+    // reservation surfaces its closed reason token through the trail and
+    // a path-free Notice; the journal stays healthy.
+    let reservation: RestoreReservationResult;
+    try {
+      reservation = await lifecycleCapture.reserveRestoreTarget(
+        selection.localFileId,
+        targetPath,
+      );
+    } catch {
+      this.#journalFailureReporter?.reportJournalFailure("restore_reservation_persist_failed");
+      new Notice("Restore could not be recorded. Check the Sync status.");
+      this.#refreshSyncStatus();
+      return;
+    }
+    if (reservation.outcome === "refused") {
+      this.#journalFailureReporter?.reportJournalFailure(reservation.reason);
+      new Notice(RESTORE_RESERVATION_REFUSAL_NOTICES[reservation.reason]);
+      this.#refreshSyncStatus();
+      return;
+    }
+    const confirmation = await this.#confirmRestoreRequest(selection, targetPath);
+    if (confirmation !== "confirmed") {
+      // Only the explicit Cancel button releases the durable reservation;
+      // a passive dismissal keeps it resumable through the picker.
+      if (confirmation === "cancelled") {
+        await lifecycleCapture.releaseRestoreTarget(selection.localFileId).catch(
+          () => undefined,
+        );
+        this.#refreshSyncStatus();
+        return;
+      }
+      new Notice("Restore target reserved. Re-run the command to resume or cancel.");
+      this.#refreshSyncStatus();
       return;
     }
     try {
@@ -985,9 +1039,13 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       // The lifecycle capture closes the failure as the closed
       // `journal_mutation_failed` `JournalStoreErrorReason`; the
       // rejected bytes hash, missing retained mapping, missing open
-      // tombstone or missing delete predecessor stays local. The sync
-      // status refresh is the single source of truth for the user.
+      // tombstone or missing delete predecessor stays local. The
+      // reservation remains durable and resumable; the sync status
+      // refresh is the single source of truth for the user.
     }
+    // One bounded queue pass ships the recorded restore event — the same
+    // discipline the Vault rename/delete listeners already follow.
+    void this.#boundedQueuePassDispatcher?.request();
     this.#refreshSyncStatus();
   }
 
@@ -1001,7 +1059,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     repository: JournalRepository,
   ): Promise<{ readonly localFileId: string; readonly shortLabel: string } | null> {
     return new Promise((resolve) => {
-      const localFileIds = repository.readTombstonedLocalFileIds();
+      const localFileIds = repository.readRestorableLocalFileIds();
       const candidates: readonly { readonly localFileId: string; readonly shortLabel: string }[] =
         localFileIds.map((localFileId) => ({
           localFileId,
@@ -1034,7 +1092,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       const modal = new TextPromptModal(
         this.app,
         "Restore target path",
-        "Vault path the restored bytes should occupy (no path is recorded yet).",
+        "Vault path the restored bytes should occupy. The path is reserved when you continue; place the restored bytes there before confirming.",
         (value) => resolve(value),
         () => resolve(null),
       );
@@ -1046,7 +1104,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   #confirmRestoreRequest(
     selection: { readonly localFileId: string; readonly shortLabel: string },
     targetPath: string,
-  ): Promise<boolean> {
+  ): Promise<"confirmed" | "cancelled" | "dismissed"> {
     return new Promise((resolve) => {
       const modal = new ConfirmModal(
         this.app,
@@ -1055,8 +1113,9 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           `Restore ${selection.shortLabel} to the chosen Vault path?`,
           "The bytes hash must match the server-committed content hash or the restore is rejected.",
         ].join("\n"),
-        () => resolve(true),
-        () => resolve(false),
+        () => resolve("confirmed"),
+        () => resolve("cancelled"),
+        () => resolve("dismissed"),
       );
       void targetPath;
       modal.open();

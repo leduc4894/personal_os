@@ -104,12 +104,13 @@ The closed token vocabularies are exactly the existing sync vocabularies:
   `retry_schedule_read_failed`, `sync_status_read_failed`,
   `queue_drain_failed`, `snapshot_drain_failed`,
   `settled_admission_failed`, `automatic_snapshot_admission_failed`,
-  `lifecycle_reconcile_persist_failed`. Their safe meanings and emission
+  `lifecycle_reconcile_persist_failed`,
+  `restore_reservation_persist_failed`. Their safe meanings and emission
   bounds are fixed below.
 
 ### Journal orchestration failure tokens
 
-All nine tokens below name only a failed internal operation. They never
+All ten tokens below name only a failed internal operation. They never
 carry the thrown error, a note path, content, identifier, or credential.
 They are appended as a `journal_failure` trail entry through the same bounded
 128-entry ring; a failed trail append remains non-blocking and is counted by
@@ -126,6 +127,7 @@ the existing append-failure counter.
 | `settled_admission_failed` | A settled content-admission operation rejected before its waiters were released. | One token for each rejected settled admission. |
 | `automatic_snapshot_admission_failed` | One or more automatic-snapshot admissions rejected; affected files remain counted as skipped. | At most one token per automatic snapshot scan. |
 | `lifecycle_reconcile_persist_failed` | Persisting the lifecycle `reconcile_required` marker failed; the lifecycle result stays fail-closed. | One token for each failed reconcile-marker persistence attempt. |
+| `restore_reservation_persist_failed` | Persisting an explicit-restore target reservation failed; the restore command refused closed and the tombstone stays open. | One token for each failed reservation persistence attempt. |
 
 The one opaque value that may ride along is the server envelope's
 `request_id` (a UUID), rendered as `request_id=<uuid>`. It is the

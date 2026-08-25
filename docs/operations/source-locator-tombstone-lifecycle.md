@@ -40,7 +40,7 @@ The closed `LifecycleLocalFileState` enum has exactly eight values:
 | `rename_pending`     | `Offline — queued (N)`  | A rename event is queued but not yet acknowledged by the server.                 |
 | `move_pending`       | `Offline — queued (N)`  | A move event is queued but not yet acknowledged by the server.                   |
 | `delete_pending`     | `Offline — queued (N)`  | A delete event is queued but not yet acknowledged by the server.                 |
-| `restore_pending`    | `Offline — queued (N)`  | A restore event is queued but not yet acknowledged by the server.                |
+| `restore_pending`    | `Offline — queued (N)`  | A restore is reserved (target reservation) or its event is queued but not yet acknowledged by the server. |
 | `tombstoned`         | `Offline — queued (N)`  | Server confirmed the delete; the local mapping is retained for explicit restore. |
 | `restored`           | no extra banner         | Server confirmed the restore; the source is live again.                          |
 | `reconcile_required` | `Reconcile required`    | Hard stop; child 6 owns repair before any further sync runs.                     |
@@ -97,23 +97,59 @@ The tombstone is **retained locally** (see "Deletion semantics" below).
 Do NOT delete the row directly; the lifecycle capture owns the only safe
 path to release it (a successful restore successor).
 
-### Explicit restore via command
+### Explicit restore via command (reservation-first protocol)
 
 The **Restore selected tombstone** command (`apps/obsidian-plugin`'s
-command palette) is the only safe path to revive a tombstoned file:
+command palette) is the only safe path to revive a tombstoned file. The
+restore target locator is **reserved durably before any bytes are
+staged**, so the automatic convergence lane can never ship the staged
+restore bytes as a fresh source at the target (the convergence/lifecycle
+lane race fixed 2026-08-25):
 
-1. The picker lists every retained tombstone by its safe
-   plugin-local id (`Tombstone #abcd1234`); paths are never shown.
-2. The user supplies a target Vault path; the bytes at that path must
-   hash to the file's last-committed fingerprint (the bytes the server
-   acknowledged, not the mutable observed fingerprint).
-3. The user confirms; the lifecycle capture records a `restore` event
-   with the predecessor delete event id and consumes the tombstone.
+1. The picker lists every retained restorable tombstone — `tombstoned`
+   rows plus `restore_pending` rows that still hold an open tombstone
+   (a durable reservation or an in-flight restore the operator can
+   resume) — by its safe plugin-local id (`Tombstone #abcd1234`); paths
+   are never shown.
+2. The user supplies a target Vault path. Accepting the prompt records
+   the durable reservation: the row rebinds to the target path and
+   enters `restore_pending` (the journal schema v6 keeps the prior path
+   for an explicit cancel). A refused reservation surfaces one closed
+   token (see the table below) through a path-free Notice and the
+   diagnostics trail, and the journal stays healthy.
+3. The user stages the restored bytes at the reserved target path —
+   between the prompt and the confirmation (or before opening the
+   command, provided the target has not already converged). While the
+   reservation holds, the settle admission and the automatic snapshot
+   both defer the target path: the staged bytes never converge as a new
+   source, and deleting or renaming them is treated as staging action,
+   not a tracked lifecycle transition.
+4. On confirmation the bytes must hash to the file's last-committed
+   fingerprint (the bytes the server acknowledged, not the mutable
+   observed fingerprint); the lifecycle capture records a `restore`
+   event with the predecessor delete event id and requests one bounded
+   queue pass. The tombstone closes only when the server commits; the
+   committed receipt rebinds the local mapping to the target path.
+5. The explicit **Cancel** button releases the reservation (the row
+   returns to its prior path, `tombstoned`). A passive dismissal — the
+   close button, escape, or the app losing focus — keeps the
+   reservation durable and resumable through the picker.
 
-A hash mismatch, a missing retained mapping, a missing open tombstone
-or a missing delete predecessor is rejected with the closed
-`journal_mutation_failed` `JournalStoreErrorReason`. The Sync status
-refresh is the single source of truth for what landed and what did not.
+A hash mismatch at confirmation, a missing retained mapping, a missing
+open tombstone or a missing delete predecessor is rejected with the
+closed `journal_mutation_failed` `JournalStoreErrorReason`; the
+reservation stays resumable. The Sync status refresh is the single
+source of truth for what landed and what did not.
+
+Closed reservation refusal tokens (Notice + one `journal_failure` trail
+entry each; `restore_reservation_persist_failed` — a failed reservation
+persistence — rides the sync-error-tracing runbook's token table):
+
+| Token | Meaning | Operator action |
+| --- | --- | --- |
+| `restore_target_occupied` | The target path already belongs to another tracked source (a converged duplicate or a genuine other note). | Remove the occupying duplicate or choose another target path. |
+| `restore_target_busy` | An upload for the target path is in flight right now. | Retry the command after the current pass settles. |
+| `restore_already_pending` | A restore event for this tombstone is already recorded and not yet committed. | Wait for the queue to drain; re-run the command afterwards. |
 
 Automatic restore is permitted ONLY when the capture detects a
 tombstoned path re-appearing with bytes that hash to the last-committed

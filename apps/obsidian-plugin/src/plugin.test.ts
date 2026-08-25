@@ -195,6 +195,47 @@ describe("Obsidian plugin composition root", () => {
     expect(restoreMethodMatch?.[0]).toContain("#refreshSyncStatus");
   });
 
+  it("wires the restore command through the reservation-first protocol", () => {
+    const restoreMethodMatch = pluginSource.match(
+      /async #runRestoreSelectedTombstone\(\): Promise<void> \{[\s\S]*?\n  \}\n/,
+    );
+    expect(restoreMethodMatch?.[0]).toBeTruthy();
+    const body = restoreMethodMatch?.[0] ?? "";
+    // The durable reservation lands at prompt-accept, strictly before the
+    // confirm step records the restore event.
+    const reserveIndex = body.indexOf("reserveRestoreTarget");
+    const requestIndex = body.indexOf("requestRestore");
+    expect(reserveIndex).toBeGreaterThanOrEqual(0);
+    expect(requestIndex).toBeGreaterThan(reserveIndex);
+    // Explicit cancel releases the reservation; refusals surface closed.
+    expect(body).toContain("releaseRestoreTarget");
+    expect(body).toContain("RESTORE_RESERVATION_REFUSAL_NOTICES");
+    // Each refusal surfaces one trail token through the failure reporter.
+    expect(body).toContain("reportJournalFailure");
+    // After the record, exactly one bounded queue pass ships the event.
+    expect(body).toContain("#boundedQueuePassDispatcher");
+    // The three closed refusal tokens and their path-free Notice texts
+    // exist at the composition source level.
+    for (const refusalToken of [
+      "restore_target_occupied",
+      "restore_target_busy",
+      "restore_already_pending",
+    ]) {
+      expect(pluginSource).toContain(refusalToken);
+    }
+  });
+
+  it("renders the restore reservation refusals with closed Notice texts only", () => {
+    const noticeLines = pluginSource
+      .split("\n")
+      .filter((line) => line.includes("new Notice(") || line.includes("    restore_"));
+    expect(noticeLines.length).toBeGreaterThanOrEqual(4);
+    for (const line of noticeLines) {
+      // No path, locator or identifier interpolation ever reaches a Notice.
+      expect(line).not.toContain("${");
+    }
+  });
+
   it("requests policy convergence only after onboarding trust succeeds", () => {
     const trustIndex = pluginSource.indexOf("await policySession.adoptOnboardingTrust()");
     const requestIndex = pluginSource.indexOf('this.#requestAutomaticSnapshot("policy_accepted")');

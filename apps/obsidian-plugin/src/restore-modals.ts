@@ -104,12 +104,21 @@ export class TextPromptModal extends Modal {
   }
 }
 
-/** A narrow two-button confirmation for one explicit restore request. */
+/**
+ * A narrow two-button confirmation for one explicit restore request.
+ * The third callback separates an explicit Cancel (releases the durable
+ * restore reservation) from a passive dismissal — the close button, the
+ * escape key or the app losing focus — which leaves the reservation in
+ * place so a mobile operator can stage the restored bytes across app
+ * switches and resume through the picker.
+ */
 export class ConfirmModal extends Modal {
   readonly #title: string;
   readonly #body: string;
   readonly #accept: () => void;
   readonly #reject: () => void;
+  readonly #dismiss: () => void;
+  #hasResolved = false;
 
   constructor(
     app: import("obsidian").App,
@@ -117,12 +126,14 @@ export class ConfirmModal extends Modal {
     body: string,
     accept: () => void,
     reject: () => void,
+    dismiss: () => void,
   ) {
     super(app);
     this.#title = title;
     this.#body = body;
     this.#accept = accept;
     this.#reject = reject;
+    this.#dismiss = dismiss;
   }
 
   override onOpen(): void {
@@ -136,7 +147,7 @@ export class ConfirmModal extends Modal {
           .setButtonText("Restore")
           .setCta()
           .onClick(() => {
-            this.#accept();
+            this.#resolveWith(this.#accept);
             this.close();
           }),
       )
@@ -144,11 +155,19 @@ export class ConfirmModal extends Modal {
         button
           .setButtonText("Cancel")
           .onClick(() => {
+            this.#resolveWith(this.#reject);
             this.close();
-            this.#reject();
           }),
       );
-    this.onClose = () => this.#reject();
+    this.onClose = () => this.#resolveWith(this.#dismiss);
+  }
+
+  #resolveWith(callback: () => void): void {
+    if (this.#hasResolved) {
+      return;
+    }
+    this.#hasResolved = true;
+    callback();
   }
 }
 

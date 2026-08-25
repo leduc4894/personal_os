@@ -165,7 +165,7 @@ describe("explicit restore modal settlement", () => {
     expect(outcome).toBe("accepted");
   });
 
-  it("dispatches confirmed restore before close can reject it", () => {
+  it("dispatches confirmed restore before close can dismiss it", () => {
     let outcome = "pending";
     let dispatchCount = 0;
     const modal = new ConfirmModal(
@@ -176,6 +176,7 @@ describe("explicit restore modal settlement", () => {
         settleOnce(() => outcome, (value) => (outcome = value), "accepted");
         dispatchCount += 1;
       },
+      () => settleOnce(() => outcome, (value) => (outcome = value), "cancelled"),
       () => settleOnce(() => outcome, (value) => (outcome = value), "dismissed"),
     );
     modal.open();
@@ -183,6 +184,38 @@ describe("explicit restore modal settlement", () => {
 
     expect(outcome).toBe("accepted");
     expect(dispatchCount).toBe(1);
+  });
+
+  it("keeps a passive dismissal distinct from an explicit cancel", () => {
+    const outcomes: string[] = [];
+    const modal = new ConfirmModal(
+      {} as never,
+      "Confirm restore",
+      "Safe body",
+      () => outcomes.push("accepted"),
+      () => outcomes.push("cancelled"),
+      () => outcomes.push("dismissed"),
+    );
+    modal.open();
+    // A close without any button choice is the passive dismissal — the
+    // durable restore reservation must survive it (a mobile app switch
+    // closes modals without an explicit cancel).
+    modal.close();
+    expect(outcomes).toEqual(["dismissed"]);
+
+    mockState.elements.length = 0;
+    mockState.buttons.length = 0;
+    const cancelledModal = new ConfirmModal(
+      {} as never,
+      "Confirm restore",
+      "Safe body",
+      () => outcomes.push("accepted"),
+      () => outcomes.push("cancelled"),
+      () => outcomes.push("dismissed"),
+    );
+    cancelledModal.open();
+    clickButton("Cancel");
+    expect(outcomes).toEqual(["dismissed", "cancelled"]);
   });
 });
 
