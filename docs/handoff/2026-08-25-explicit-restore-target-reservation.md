@@ -8,8 +8,9 @@
 release`) and the `source-lifecycle-mobile-acceptance` row (`Before Child 6
 acceptance closure`).
 
-**Status: the race is FIXED and live-verified.** Implementation commits
-(base `e153458`):
+**Status: BOTH ITEMS COMPLETE.** The race is fixed and live-verified
+(guarded Desktop WDIO PASS + physical mobile matrix 8/8 PASS), and the
+mobile row is retired. Implementation commits (base `e153458`):
 
 - `bad2747` `feat: reserve explicit-restore targets in the journal` (schema v6
   `restore_prior_path` + v5→v6 migration; `reserveRestoreTarget` /
@@ -21,13 +22,22 @@ acceptance closure`).
   snapshot; strict confirm-on-reserved `requestRestore`;
   `detectAutomaticRestore` refuses reserved rows and no longer consumes the
   tombstone eagerly; delete/rename on a reserved row are quiet no-ops)
-- `<docs commit>` `feat: wire the reservation-first restore command with
-  closed refusals` (reserve at prompt-accept; stage between prompt and
-  confirm; record + one bounded pass on confirm; Cancel releases, dismissal
-  keeps; closed refusals `restore_target_occupied` / `restore_target_busy` /
-  `restore_already_pending` as Notice + trail token;
-  `restore_reservation_persist_failed` joins the composition token list;
-  WDIO journey restaged; runbooks + spec/plan)
+- `1a74a2b` `feat: wire the reservation-first restore command with closed
+  refusals` (+ `ba11e5f` journey restage; reserve at prompt-accept; stage
+  between prompt and confirm; Cancel releases, dismissal keeps; closed
+  refusals as Notice + trail token; runbooks + spec/plan)
+- `7c3b774` `fix: resolve the lifecycle API base URL per commit` (found live
+  on the phone: the origin frozen at plugin load stranded every lifecycle
+  commit on a fresh install whose origin was entered after loading)
+- `839e7b0` `fix: heal uncommitted-transit renames instead of hard-stopping`
+  (found live: every new note transits the locale-default untitled name; a
+  blocked untitled create followed by a rename used to hard-stop the whole
+  journal — now the phantom row self-heals and the file re-admits under its
+  real name)
+- `c3df670` `fix: verify lifecycle-settled notes against the last-committed
+  fingerprint` (found live: the note-status projection compared a lifecycle
+  event's zeros placeholder with real bytes and mislabelled every restored /
+  renamed note as reconciliation required)
 
 ## Root cause (four plugin-side defects; the server is per-spec correct)
 
@@ -63,7 +73,7 @@ acceptance closure`).
 | Guarded Desktop WDIO | PASS | `obsidian_live_acceptance_passed` on the final guarded run (one earlier guarded attempt failed `obsidian_wdio_failed_after_onboarding` — see decisions) |
 | Diagnostic journey evidence | PASS | `SANITIZED_SOURCE_LIFECYCLE_EVIDENCE` stable source+version identity, 4 lifecycle events, 4 locators, 0 pending, 0 blocked |
 | Clean shutdown | PASS | services stopped, ports clear, CI project `stack_down_complete`, `knowledge-local` back to `stack_ready`, diagnostic wrapper + phase files removed |
-| Physical mobile matrix | PENDING | requires the operator + iPhone (next action 1) |
+| Physical mobile matrix | PASS | 8/8 on the physical iPhone (16:08–16:42 UTC, disposable `knowledge-ci-restore-mobile` project, canonical server evidence per scenario); living record updated; device-records contract 5 passed; the `source-lifecycle-mobile-acceptance` BACKLOG row is retired |
 
 ## Decisions and interpretations
 
@@ -110,24 +120,30 @@ acceptance closure`).
   behaviour, outside the race fix's scope; the official guarded PASS is the
   acceptance evidence. Index it only if it recurs on the next guarded run
   (then scope the wait to the fixture row or filter the uniqueness check).
-- **Mobile physical matrix**: PENDING the operator round (below). The
-  `source-lifecycle-mobile-acceptance` BACKLOG row stays until sanitized
-  physical evidence exists; Mobile must never be reported PASS without it.
-- No other rows were created or retired by this plan except the 2026-08-25
-  race row (retired — evidence: the guarded Desktop PASS and the diagnostic
-  journey evidence above).
+- **Plugin has no network-reconnect trigger** (observed in scenario 6:
+  after airplane mode off, queued work waits for the jittered retry or any
+  vault event instead of an immediate reconnect-triggered pass): DEFER —
+  recovery is bounded by the existing retry backoff; consider a
+  reconnect trigger when the sync status surface next changes.
+- **Server-side upload claims abandoned mid-stream by iOS suspension**
+  stay `pending` until their lease rotates (observed in scenarios 6–7;
+  no local effect): DEFER — the expired-pending rotation already reuses
+  such rows; confirm reaping behaviour at the next durable-adapter change.
+- **Deleting journal files while the app is running tears the journal**
+  (the operator's first mobile reset raced a live process; the old
+  in-memory journal kept committing while the reload loaded a torn
+  generation, leaving rows without their committed identities and every
+  later edit a doomed create): DEFER as an operator-procedure rule (always
+  kill the app first — now stated in the living doc); a proper in-app
+  reset surface belongs to a later child.
+- **Mobile matrix**: COMPLETE (8/8 PASS, evidence in the living doc); the
+  `source-lifecycle-mobile-acceptance` row is retired. The rows retired by
+  this plan: that row plus the 2026-08-25 convergence/lifecycle race row.
 
 ## Next actions
 
-1. **Re-run the physical mobile matrix with the operator** (iPhone) under
-   the new staging procedure documented in
-   `docs/operations/source-locator-tombstone-lifecycle.md`: pick tombstone →
-   enter target path (the reservation lands) → stage the exact restored
-   bytes at the reserved target → confirm. Record sanitized evidence in the
-   living doc, flip the Mobile record to PASS, and retire the
-   `source-lifecycle-mobile-acceptance` BACKLOG row. Use a fresh disposable
-   `knowledge-ci-*` project with the rebuilt plugin dist and the standard
-   launcher chain; stand it down and restore `knowledge-local` afterwards.
-2. With both rows retired, Child 6 (`device-cursor-and-manifest-reconciliation`)
-   may start; its acceptance closure no longer depends on the mobile row
-   once action 1 lands.
+1. **Child 6 (`device-cursor-and-manifest-reconciliation`) may start with a
+   clean pre-Child-6 backlog.** Its pull/apply work directly replaces the
+   manual restore staging exercised today; the reservation machinery
+   (locator claim + deferral + ordering) is the foundation its atomic
+   apply builds on.

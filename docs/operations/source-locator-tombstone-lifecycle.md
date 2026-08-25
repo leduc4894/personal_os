@@ -354,31 +354,75 @@ copy child output into acceptance evidence.
 
 ## Mobile live acceptance record
 
-- Status: DEFERRED
-- Reason: The convergence/lifecycle lane race that failed the 2026-08-25
-  explicit-restore scenario is fixed (the explicit-restore target
-  reservation protocol; the mandatory Desktop journey passed guarded the
-  same day). The physical matrix must be re-run under the new staging
-  procedure — the operator stages the restored bytes on the reserved
-  target between the target-path prompt and the confirm — before this
-  record may flip to PASS. Retained as DEFERRED until that physical
-  evidence exists.
-- Source handoff: handoff:source-lifecycle-mobile-deferral
-- Backlog key: source-lifecycle-mobile-acceptance
-- Implement by: Before Child 6 acceptance closure
+- Device: Physical iPhone (Obsidian Mobile, physical device)
+- App version: Obsidian Mobile (physical device)
+- Plugin version: 0.1.0 (build 2026-08-25 c3df670: explicit-restore target
+  reservation, per-commit lifecycle origin resolution, uncommitted-transit
+  heal, lifecycle-settled note-status projection)
+- Recorded at UTC: 2026-08-25T16:42:00Z
+- Operator: operator + Codex (sanitized closed-token evidence only)
+- Status: PASS — the full eight-scenario matrix executed against a
+  disposable `knowledge-ci-*` project after the convergence/lifecycle
+  lane race fix, on a clean journal and canonical state.
 
 | Scenario | Outcome | Evidence |
 | --- | --- | --- |
-| Tracked rename | DEFERRED | handoff:source-lifecycle-mobile-deferral |
-| Tracked move | DEFERRED | handoff:source-lifecycle-mobile-deferral |
-| Delete | DEFERRED | handoff:source-lifecycle-mobile-deferral |
-| Proven automatic restore | DEFERRED | handoff:source-lifecycle-mobile-deferral |
-| Explicit restore | DEFERRED | handoff:source-lifecycle-mobile-deferral |
-| Offline capture and reconnect | DEFERRED | handoff:source-lifecycle-mobile-deferral |
-| Unload and reload | DEFERRED | handoff:source-lifecycle-mobile-deferral |
-| Policy-denied transition | DEFERRED | handoff:source-lifecycle-mobile-deferral |
+| Tracked rename | PASS | operator-record:mobile-live-20260825b |
+| Tracked move | PASS | operator-record:mobile-live-20260825b |
+| Delete | PASS | operator-record:mobile-live-20260825b |
+| Proven automatic restore | PASS | operator-record:mobile-live-20260825b |
+| Explicit restore | PASS | operator-record:mobile-live-20260825b |
+| Offline capture and reconnect | PASS | operator-record:mobile-live-20260825b |
+| Unload and reload | PASS | operator-record:mobile-live-20260825b |
+| Policy-denied transition | PASS | operator-record:mobile-live-20260825b |
 
-### Physical observation 2026-08-25 (sanitized)
+### Physical observation 2026-08-25 second session (sanitized)
+
+Executed 16:08–16:45 UTC against the disposable project with canonical
+server evidence read back for every scenario (closed counts, event chains
+and status codes only).
+
+- **Tracked rename** — lifecycle commit 200 at 16:09:57Z; the source
+  event chain gained `rename`, locator history 2 with 1 active.
+- **Tracked move** — lifecycle commit 200 at 16:10:41Z; chain gained
+  `move`, locator history 3 with 1 active.
+- **Delete** — lifecycle commit 200 at 16:11:35Z; state `deleted`,
+  exactly one new open tombstone, zero active locators.
+- **Proven automatic restore** — lifecycle commit 200 at 16:12:27Z; the
+  same source carries the full `create, rename, move, delete, restore`
+  chain, the tombstone closed and the locator re-activated.
+- **Explicit restore** — the first attempt was refused with the closed
+  `restore_target_occupied` Notice + trail token after the staged bytes
+  converged to a fresh source at the target before confirm (the
+  by-design readable refusal; no hard stop, journal healthy). The
+  completed attempt reserved a free target at prompt-accept, staged the
+  bytes on the reserved path, and committed the restore at 16:27:25Z
+  onto the original source at a different target path — the exact flow
+  that failed the 2026-08-24/25 Desktop journeys and the first mobile
+  session.
+- **Offline capture and reconnect** — airplane-mode edit surfaced
+  `Offline — queued (1)`; after reconnect the update committed at
+  16:31:08Z and the status returned to Ready. Two server-side upload
+  claims abandoned mid-stream by iOS suspension stayed pending (lease
+  garbage, no local effect — noted as a finding).
+- **Unload and reload** — a queued edit survived an offline swipe-kill
+  and drained on reload; the update committed at 16:36:04Z with a clean
+  post-reset startup snapshot.
+- **Policy-denied transition** — after publishing the deny-`.tmp`
+  revision, a matching note surfaced `Policy blocked` with the closed
+  blocker line; zero upload operations reached the server; the queue
+  and other notes were unaffected.
+
+Operational findings added by this session (all fixed or noted in the
+2026-08-25 handoff): the lifecycle API origin was frozen at plugin load
+(fixed — resolved per commit); an uncommitted untitled-transit rename or
+delete now self-heals instead of hard-stopping the journal (fixed); the
+note-status projection mislabelled lifecycle-settled notes (fixed); the
+plugin has no network-reconnect trigger (recovery relies on the jittered
+retry or any vault event — noted); deleting journal files while the app
+is running tears the journal (always kill the app first — noted).
+
+### Physical observation 2026-08-25 first session (sanitized)
 
 A physical iPhone executed the full eight-scenario matrix against a
 disposable `knowledge-ci-*` project. Sanitized record at closed-token,
