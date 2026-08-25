@@ -313,7 +313,7 @@ copy child output into acceptance evidence.
 ## Mobile live acceptance record
 
 - Status: DEFERRED
-- Reason: No physical Mobile device was available for the Task 12 acceptance matrix.
+- Reason: Physical matrix executed 2026-08-25; seven of eight scenarios passed on the physical device; explicit restore is blocked by the pre-existing convergence/lifecycle lane race whose closed token `source_locator_conflict` was observed on both device and server surfaces (the same race currently fails the mandatory Desktop WDIO journey); retained as DEFERRED until that race is fixed.
 - Source handoff: handoff:source-lifecycle-mobile-deferral
 - Backlog key: source-lifecycle-mobile-acceptance
 - Implement by: Before Child 6 acceptance closure
@@ -328,3 +328,67 @@ copy child output into acceptance evidence.
 | Offline capture and reconnect | DEFERRED | handoff:source-lifecycle-mobile-deferral |
 | Unload and reload | DEFERRED | handoff:source-lifecycle-mobile-deferral |
 | Policy-denied transition | DEFERRED | handoff:source-lifecycle-mobile-deferral |
+
+### Physical observation 2026-08-25 (sanitized)
+
+A physical iPhone executed the full eight-scenario matrix against a
+disposable `knowledge-ci-*` project. Sanitized record at closed-token,
+counts and timestamp level only (evidence `operator-record:mobile-live-20260825`);
+per the ruling the Mobile record above stays DEFERRED and no scenario is
+claimed PASS in the contract table.
+
+Passed on the physical device (7 of 8; canonical server commits plus
+device diagnostics):
+
+- **Tracked rename** — rename lifecycle event committed server-side at
+  23:50:00Z with the source active again; device status settled Ready.
+- **Tracked move** — move lifecycle event committed at 23:52:13Z with the
+  source active.
+- **Delete** — delete lifecycle event committed, source state deleted,
+  exactly one new open tombstone, listed by the restore picker.
+- **Proven automatic restore** — the first restore event ever committed
+  in this environment landed at 23:57:03Z, the source returned to active
+  and the device open-tombstone count closed from 4 to 3; the device
+  diagnostics export reported Status Ready with two completed pass
+  outcomes and zero append failures.
+- **Offline capture and reconnect** — a rename captured in airplane mode
+  surfaced `Offline — queued (1)` and committed as the next lifecycle
+  event at 11:41:36Z immediately after WiFi reconnect.
+- **Unload and reload** — the queued event survived an app swipe-kill
+  while offline and drained after reconnect on the reloaded app; a clean
+  post-reset startup snapshot committed at 11:37:08Z.
+- **Policy-denied transition** — device status `Policy blocked` with the
+  closed policy blocker line; enforcement was plugin-side (no upload
+  attempted, no new failed operation, policy snapshot served from a 304
+  cache) and the queue was unaffected.
+
+Failed on the physical device (1 of 8):
+
+- **Explicit restore** — the convergence/lifecycle lane race; the content
+  lane ships restored bytes before the restore lifecycle event lands, so
+  the server answered the restore-command upload with the closed 409
+  conflict family (after one 401 from an expired credential that
+  auto-refreshed) and the operation terminalized failed with
+  `source_locator_conflict`; the device trail recorded
+  `wire_failure · blocked_conflict · source_locator_conflict` at
+  00:24:35Z, then the documented `Reconcile required (3)` hard stop; no
+  delete commit and no tombstone were involved. The same pre-existing
+  race currently fails the mandatory Desktop WDIO journey after delete;
+  it is indexed in `docs/handoff/BACKLOG.md` and Mobile stays DEFERRED
+  until it is fixed.
+
+Operational findings (sanitized; no note names, paths or content):
+
+- Obsidian Mobile creates new notes under a locale-default untitled name
+  before the user names them; the convergence lane ships that default
+  name and, when the workspace already holds it, the server correctly
+  rejects with the closed conflict token and the journal hard-stops —
+  name new notes immediately.
+- One vault must live on exactly one device; a vault replicated across
+  two devices (for example through iCloud) is double-admitted by both
+  journals and the second device always conflicts with the closed
+  conflict token.
+- iOS onboarding requires returning to the app right after the browser
+  approval step; background polling is suspended otherwise.
+- A newly created note stays queued until it has content; an empty note
+  does not upload.
