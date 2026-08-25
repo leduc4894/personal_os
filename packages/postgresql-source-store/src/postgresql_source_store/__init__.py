@@ -23,6 +23,10 @@ from postgresql_source_store.device_event_store import (
     PostgresqlDeviceEventStore,
     hydrate_device_event,
 )
+from postgresql_source_store.device_manifest_store import (
+    PostgresqlDeviceManifestStore,
+    compute_manifest_final_digest,
+)
 from postgresql_source_store.error_mapping import (
     DatabaseRetryPolicy,
     map_database_failure,
@@ -55,6 +59,7 @@ __all__ = [
     "PostgresqlBackupSnapshotStore",
     "PostgresqlCanonicalSourceReadStore",
     "PostgresqlDeviceEventStore",
+    "PostgresqlDeviceManifestStore",
     "PostgresqlIdentityBootstrapStore",
     "PostgresqlPolicyDraftStore",
     "PostgresqlPolicyKeysetStore",
@@ -67,6 +72,7 @@ __all__ = [
     "ProjectionIntentStatus",
     "ProjectionRetryPolicy",
     "classify_replay",
+    "compute_manifest_final_digest",
     "hydrate_canonical_source_reference",
     "hydrate_device_event",
     "map_database_failure",

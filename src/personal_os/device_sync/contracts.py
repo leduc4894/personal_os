@@ -98,6 +98,15 @@ class ManifestActionReason(StrEnum):
     POLICY_EXCLUDED = "device_manifest_policy_excluded"
 
 
+class ManifestMatchKind(StrEnum):
+    """Closed identity-proof vocabulary of one entry resolution (spec 12.2)."""
+
+    CURRENT_LOCATOR = "current_locator"
+    HISTORICAL_LOCATOR_FINGERPRINT = "historical_locator_fingerprint"
+    OPEN_TOMBSTONE_FINGERPRINT = "open_tombstone_fingerprint"
+    UNPROVEN = "unproven"
+
+
 #: The event types whose operation shape requires the resulting locator
 #: (spec 7.1: create, rename, move and restore).
 _EVENT_TYPES_WITH_RESULTING_LOCATOR: Final[frozenset[DeviceEventType]] = frozenset(
@@ -342,6 +351,71 @@ class ManifestEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class ManifestEntryResolution:
+    """One frozen manifest entry identity resolution (spec 6.4/12.2).
+
+    Carries the submitted entry evidence the deterministic planner needs
+    plus the canonical identity proven against the canonical locator
+    history at the run checkpoint: the optional client source/version
+    evidence, the settled-byte fingerprint, the fingerprint of the trusted
+    local base when the client's known version is provable in the
+    workspace, the closed policy decision for the submitted entry subject,
+    and the proven canonical identity with its match kind. The planner
+    consumes it together with the canonical source state at the same
+    checkpoint; ``entry_ordinal`` is the entry's zero-based position in the
+    run's ordered resolutions and becomes the materialized action's index.
+    Fingerprints are private values and never render outside a redacted
+    ``repr``.
+    """
+
+    local_entry_id: str
+    entry_ordinal: int
+    known_source_id: UUID | None
+    known_version_id: UUID | None
+    submitted_fingerprint: SourceFingerprint
+    known_base_fingerprint: SourceFingerprint | None
+    is_policy_allowed: bool
+    match_kind: ManifestMatchKind
+    resolved_source_id: UUID | None
+    resolved_source_version_id: UUID | None
+    resolved_source_locator_id: UUID | None
+    resolved_source_tombstone_id: UUID | None
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(<redacted>)"
+
+    def __post_init__(self) -> None:
+        if not self.local_entry_id or len(self.local_entry_id) > _LOCAL_ENTRY_ID_MAXIMUM_LENGTH:
+            raise ValueError(
+                f"local_entry_id must be 1 to {_LOCAL_ENTRY_ID_MAXIMUM_LENGTH} characters long"
+            )
+        if self.entry_ordinal < 0:
+            raise ValueError("entry_ordinal must be a non-negative run entry order")
+        if self.known_source_id is not None:
+            reject_nil_uuid("known_source_id", self.known_source_id)
+        if self.known_version_id is not None:
+            reject_nil_uuid("known_version_id", self.known_version_id)
+        if self.resolved_source_id is not None:
+            reject_nil_uuid("resolved_source_id", self.resolved_source_id)
+        if self.resolved_source_version_id is not None:
+            reject_nil_uuid("resolved_source_version_id", self.resolved_source_version_id)
+        if self.resolved_source_locator_id is not None:
+            reject_nil_uuid("resolved_source_locator_id", self.resolved_source_locator_id)
+        if self.resolved_source_tombstone_id is not None:
+            reject_nil_uuid("resolved_source_tombstone_id", self.resolved_source_tombstone_id)
+        if self.match_kind is ManifestMatchKind.UNPROVEN:
+            if (
+                self.resolved_source_id is not None
+                or self.resolved_source_version_id is not None
+                or self.resolved_source_locator_id is not None
+                or self.resolved_source_tombstone_id is not None
+            ):
+                raise ValueError("unproven resolution carries no canonical identity")
+        elif self.resolved_source_id is None or self.resolved_source_version_id is None:
+            raise ValueError("proven resolution names its source and version")
+
+
+@dataclass(frozen=True, slots=True)
 class ManifestAction:
     """One frozen deterministic action of a planned manifest run (spec 6.5)."""
 
@@ -558,6 +632,8 @@ __all__ = [
     "ManifestActionReason",
     "ManifestActionsQuery",
     "ManifestEntry",
+    "ManifestEntryResolution",
+    "ManifestMatchKind",
     "ManifestPageReceipt",
     "ManifestRunReceipt",
     "ManifestRunState",

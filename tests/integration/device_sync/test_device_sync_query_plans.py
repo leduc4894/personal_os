@@ -6,13 +6,15 @@ and content objects, the locators each operation-shaped event opened or
 closed, 300 tombstones, one planned manifest run and 10,000 frozen manifest
 actions through schema-qualified Core batch inserts, runs ``ANALYZE`` so the
 planner sees real statistics, and then captures ``EXPLAIN (FORMAT JSON)``
-for the five device sync hot queries:
+for the seven device sync hot queries:
 
 - the pull statement checkpoint (one descending head read)
 - the bounded pull page (hydration joins included)
 - the acknowledge cursor-row lock
 - the workspace compaction floor over active devices
 - the manifest action pagination
+- the manifest run ownership lock (workspace/device index)
+- the manifest page replay point lookup (page primary key)
 
 Every query must use at least one index created by the shipped migrations,
 every index the plans touch must belong to the approved set, and no plan may
@@ -54,6 +56,10 @@ from postgresql_source_store.device_event_store import (
     manifest_action_page_statement,
     workspace_minimum_acknowledged_statement,
 )
+from postgresql_source_store.device_manifest_store import (
+    manifest_page_select_statement,
+    manifest_run_select_statement,
+)
 from postgresql_source_store.engine import (
     create_source_store_engine,
     dispose_source_store_engine,
@@ -63,6 +69,7 @@ from postgresql_source_store.tables import (
     device_cursors,
     devices,
     manifest_actions,
+    manifest_pages,
     manifest_runs,
     source_locators,
     source_tombstones,
@@ -115,6 +122,8 @@ _EXPECTED_INDEX_BY_QUERY: Final[dict[str, frozenset[str]]] = {
     "cursor_lock": frozenset({"uq_device_cursors_workspace_device"}),
     "compaction_floor": frozenset({"uq_device_cursors_workspace_device"}),
     "action_page": frozenset({"pk_manifest_actions"}),
+    "run_lock": frozenset({"ix_manifest_runs__workspace_device"}),
+    "page_replay": frozenset({"pk_manifest_pages"}),
 }
 
 
@@ -447,13 +456,60 @@ async def _seed_population(engine: AsyncEngine) -> DeviceSyncQueryPlanPopulation
             await connection.execute(sa.insert(devices), batch)
         for batch in _batches(background_cursor_rows):
             await connection.execute(sa.insert(device_cursors), batch)
+        # The manifest run/page population: one completed terminal run per
+        # background workspace plus its first page, and the probed run's own
+        # page-zero row, so the ownership lock and the page-replay point
+        # lookup see a populated relation and the planner must use their
+        # shipped indexes instead of a sequential scan.
+        background_run_rows = [
+            {
+                "manifest_run_id": uuid4(),
+                "workspace_id": background_workspace_ids[workspace_index],
+                "device_id": background_device_rows[
+                    workspace_index * _CURSOR_DEVICES_PER_WORKSPACE
+                ]["device_id"],
+                "base_acknowledged_sequence": 0,
+                "checkpoint_sequence": 10,
+                "policy_revision_number": 1,
+                "client_observation_generation": 0,
+                "state": "completed",
+                "next_page_number": 1,
+                "entry_count": 1,
+                "final_digest": hashlib.sha256(f"ds-plan-run-{index}".encode("ascii")).hexdigest(),
+                "completed_at": now,
+                "planned_at": now,
+            }
+            for index, workspace_index in enumerate(range(_CURSOR_WORKSPACE_COUNT))
+        ]
+        background_page_rows = [
+            {
+                "manifest_run_id": row["manifest_run_id"],
+                "page_number": 0,
+                "entry_count": 1,
+                "page_digest": row["final_digest"],
+            }
+            for row in background_run_rows
+        ]
+        for batch in _batches(background_run_rows):
+            await connection.execute(sa.insert(manifest_runs), batch)
+        await connection.execute(
+            sa.insert(manifest_pages).values(
+                manifest_run_id=manifest_run_id,
+                page_number=0,
+                entry_count=1,
+                page_digest=hashlib.sha256(f"ds-plan-page-{nonce}".encode("ascii")).hexdigest(),
+            )
+        )
+        for batch in _batches(background_page_rows):
+            await connection.execute(sa.insert(manifest_pages), batch)
         await connection.execute(
             sa.text(
                 "ANALYZE knowledge.users, knowledge.workspaces, "
                 "knowledge.content_objects, knowledge.sources, "
                 "knowledge.source_versions, knowledge.sync_events, "
                 "knowledge.source_locators, knowledge.source_tombstones, "
-                "knowledge.manifest_runs, knowledge.manifest_actions, "
+                "knowledge.manifest_runs, knowledge.manifest_pages, "
+                "knowledge.manifest_actions, "
                 "knowledge.device_cursors, knowledge.devices"
             )
         )
@@ -660,3 +716,32 @@ async def test_manifest_action_pagination_is_indexed(
     async with populated_device_sync_store.engine.connect() as connection:
         payload = await _explain(connection, statement)
     _assert_indexed_access(payload, "action_page")
+
+
+@pytest.mark.asyncio
+async def test_manifest_run_ownership_lock_is_indexed(
+    populated_device_sync_store: DeviceSyncQueryPlanPopulation,
+) -> None:
+    """The credential-scoped run row lock must use the workspace/device index."""
+
+    statement = manifest_run_select_statement(
+        populated_device_sync_store.workspace_id,
+        populated_device_sync_store.device_id,
+        populated_device_sync_store.manifest_run_id,
+        for_update=True,
+    )
+    async with populated_device_sync_store.engine.connect() as connection:
+        payload = await _explain(connection, statement)
+    _assert_indexed_access(payload, "run_lock")
+
+
+@pytest.mark.asyncio
+async def test_manifest_page_replay_lookup_is_indexed(
+    populated_device_sync_store: DeviceSyncQueryPlanPopulation,
+) -> None:
+    """The exact page replay lookup must walk the page primary key."""
+
+    statement = manifest_page_select_statement(populated_device_sync_store.manifest_run_id, 0)
+    async with populated_device_sync_store.engine.connect() as connection:
+        payload = await _explain(connection, statement)
+    _assert_indexed_access(payload, "page_replay")
