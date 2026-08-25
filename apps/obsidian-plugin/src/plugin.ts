@@ -689,7 +689,11 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         repository,
         lifecycle: repository.lifecycle,
         api: createRequestUrlLifecycleApi({
-          baseUrl:
+          // Resolved afresh per commit so a server-origin edit in settings
+          // applies without a plugin reload (the sync API's resolveOrigin
+          // contract); freezing it at load stranded every lifecycle commit
+          // on a fresh install whose origin was entered after loading.
+          resolveBaseUrl: () =>
             parseServerOrigin(this.#settings.server_origin, {
               allowLoopbackHttp: ALLOW_LOOPBACK_HTTP_ORIGIN,
             }) ?? "",

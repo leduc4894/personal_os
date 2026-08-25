@@ -453,7 +453,7 @@ async function createSession(): Promise<Session> {
   // plugin.ts:512-519: the lifecycle adapter has NO refresh path — it only
   // reads `session.accessCredential` per request.
   const lifecycleApi = createRequestUrlLifecycleApi({
-    baseUrl: ORIGIN,
+    resolveBaseUrl: () => ORIGIN,
     transport: lifecycleServer.fetch,
     resolveAccessToken: () => credentialState.token,
   });

@@ -428,7 +428,7 @@ async function createSession(bindings: SessionBindings): Promise<Session> {
   });
 
   const lifecycleApi = createRequestUrlLifecycleApi({
-    baseUrl: ORIGIN,
+    resolveBaseUrl: () => ORIGIN,
     transport: lifecycleServer.fetch,
     resolveAccessToken: () => credentialState.token,
   });

@@ -115,8 +115,15 @@ export interface LifecycleApi {
 }
 
 export interface LifecycleApiOptions {
-  /** The pre-built openapi-fetch client the adapter drives. */
-  readonly apiClient: ApiClient;
+  /**
+   * Resolved afresh per request so a server-origin edit in settings
+   * applies without a plugin reload — the same live-resolution contract
+   * the sync API's `resolveOrigin` already carries. The 2026-08-25
+   * physical mobile session proved the frozen-at-load variant strands
+   * every lifecycle commit into an empty base URL on a fresh install
+   * (origin entered after load) while the content lane keeps syncing.
+   */
+  readonly resolveApiClient: () => ApiClient;
   /**
    * Resolved afresh per request so settings edits apply without a
    * rebuild; `null` means login is required and the adapter rejects
@@ -148,22 +155,33 @@ export function createLifecycleApi(options: LifecycleApiOptions): LifecycleApi {
 }
 
 /**
- * The Obsidian-specific factory: builds the openapi-fetch client
- * over the injected fetch-shaped transport and hands the bound
- * adapter to the caller. The plugin composition root calls this
- * instead of importing `@workspace/api-client` directly.
+ * The Obsidian-specific factory: builds the openapi-fetch client over the
+ * injected fetch-shaped transport and hands the bound adapter to the
+ * caller. The plugin composition root calls this instead of importing
+ * `@workspace/api-client` directly.
+ *
+ * The base URL is resolved afresh per commit (cached per resolved value)
+ * so a server-origin edit in settings applies without a plugin reload.
  */
 export function createRequestUrlLifecycleApi(options: {
-  readonly baseUrl: string;
+  readonly resolveBaseUrl: () => string;
   readonly transport: LifecycleApiTransport;
   readonly resolveAccessToken: () => string | null;
 }): LifecycleApi {
-  const apiClient: ApiClient = createApiClient({
-    baseUrl: options.baseUrl,
-    transport: options.transport,
-  });
+  let cachedBaseUrl: string | null = null;
+  let cachedClient: ApiClient | null = null;
   return buildLifecycleApi({
-    apiClient,
+    resolveApiClient: () => {
+      const baseUrl = options.resolveBaseUrl();
+      if (cachedClient === null || baseUrl !== cachedBaseUrl) {
+        cachedClient = createApiClient({
+          baseUrl,
+          transport: options.transport,
+        });
+        cachedBaseUrl = baseUrl;
+      }
+      return cachedClient;
+    },
     resolveAccessToken: options.resolveAccessToken,
   });
 }
@@ -368,13 +386,13 @@ function buildBody(
 // --- the adapter factory ---------------------------------------------------------------------
 
 /**
- * Build the lifecycle commit adapter. Every method resolves the
- * access token afresh so settings edits apply without a rebuild;
- * bearer authentication is presented only in the dedicated
- * `Authorization` header.
+ * Build the lifecycle commit adapter. Every method resolves the API
+ * client (and with it the server origin) and the access token afresh so
+ * settings edits apply without a rebuild; bearer authentication is
+ * presented only in the dedicated `Authorization` header.
  */
 function buildLifecycleApi(options: LifecycleApiOptions): LifecycleApi {
-  const { apiClient, resolveAccessToken } = options;
+  const { resolveApiClient, resolveAccessToken } = options;
 
   function bearerHeaders(): Record<string, string> {
     const accessToken = resolveAccessToken();
@@ -394,7 +412,7 @@ function buildLifecycleApi(options: LifecycleApiOptions): LifecycleApi {
       // openapi-fetch exposes the typed `POST` overload for the
       // generated operation; pass the body, headers, and signal
       // through to the underlying transport exactly once.
-      const result = apiClient.POST("/api/sources/lifecycle-events", {
+      const result = resolveApiClient().POST("/api/sources/lifecycle-events", {
         body,
         headers,
         // openapi-fetch accepts the standard RequestInit signal so an

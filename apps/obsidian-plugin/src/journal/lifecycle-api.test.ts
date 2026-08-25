@@ -28,6 +28,7 @@ import { createApiClient, type ApiClient, type ApiTransport } from "@workspace/a
 
 import {
   createLifecycleApi,
+  createRequestUrlLifecycleApi,
   LifecycleApiError,
   type LifecycleApiOptions,
   type LifecycleResult,
@@ -149,7 +150,7 @@ function createHarness(options?: { readonly accessToken?: string | null }): Harn
   });
   const explicitToken = options?.accessToken;
   const apiOptions: LifecycleApiOptions = {
-    apiClient,
+    resolveApiClient: () => apiClient,
     resolveAccessToken: () => (explicitToken === undefined ? ACCESS_TOKEN : explicitToken),
   };
   return {
@@ -195,6 +196,50 @@ function errorEnvelope(status: number, code: string, retryable: boolean): Respon
 }
 
 describe("lifecycle-api generated-client path and authentication", () => {
+  it("resolves the base URL afresh per commit so a settings edit applies without a plugin reload", async () => {
+    // The fresh-install ordering bug (2026-08-25 physical mobile session):
+    // the composition built the lifecycle client over the origin frozen at
+    // plugin load, so a server origin entered AFTER the plugin loaded sent
+    // every lifecycle commit into an empty base URL — the request failed
+    // locally, never reached the server, and parked as retryable while the
+    // content lane (live origin) kept syncing. The factory must resolve the
+    // base URL per commit, exactly like the sync API's resolveOrigin.
+    const transport = createScriptedTransport();
+    let currentBaseUrl = "";
+    const api = createRequestUrlLifecycleApi({
+      resolveBaseUrl: () => currentBaseUrl,
+      transport: transport.fetch,
+      resolveAccessToken: () => ACCESS_TOKEN,
+    });
+    transport.install(async () =>
+      successEnvelope({
+        committed_at: "2026-08-25T00:00:00Z",
+        event_id: EVENT_ID,
+        event_sequence: 1,
+        resulting_locator: "folder/note-renamed.md",
+        source_id: SOURCE_ID,
+        source_version_id: NEW_VERSION_ID,
+        state: "active",
+        tombstone_id: null,
+      }),
+    );
+    const event = frozenEventFor(operandsFor());
+
+    // Before the origin exists: the commit fails closed as a retryable
+    // local failure — no request can be issued against an empty base URL.
+    await expect(api.commit(event, new AbortController().signal)).rejects.toMatchObject({
+      kind: "network_offline",
+    });
+    expect(transport.requests).toHaveLength(0);
+
+    // The origin lands in settings mid-session; the very next commit must
+    // pick it up without any reload.
+    currentBaseUrl = BASE_URL;
+    const result = await api.commit(event, new AbortController().signal);
+    expect(result.eventId).toBe(EVENT_ID);
+    expect(transport.requests[0]?.url).toBe(`${BASE_URL}/api/sources/lifecycle-events`);
+  });
+
   it("uses the openapi-generated POST /api/sources/lifecycle-events path with bearer auth", async () => {
     const harness = createHarness();
     harness.transport.install(async () =>
