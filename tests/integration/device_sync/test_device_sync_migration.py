@@ -105,6 +105,7 @@ async def _insert_manifest_run(
     final_digest: str | None = None,
     planned_at: object | None = None,
     completed_at: object | None = None,
+    safe_error_code: str | None = None,
 ) -> None:
     await connection.execute(
         sa.insert(manifest_runs).values(
@@ -121,6 +122,7 @@ async def _insert_manifest_run(
             final_digest=final_digest,
             planned_at=planned_at,
             completed_at=completed_at,
+            safe_error_code=safe_error_code,
         )
     )
 
@@ -331,6 +333,78 @@ async def _assert_cursor_and_manifest_constraints(
                 ),
             )
             assert _constraint_name(regressed_run) == "ck_manifest_runs__sequences"
+
+            # Every honest terminal shape is writable: a run failing during
+            # collection carries no digest; a run failing or expiring after
+            # planning retains its digest and planning time; an expired run
+            # never carries an error code or completion time.
+            failed_during_collection = uuid4()
+            failed_after_planning = uuid4()
+            expired_during_collection = uuid4()
+            expired_after_planning = uuid4()
+            failed_digest = _digest_text("device-sync-failed-run")
+            for terminal_run_id, terminal_shape in (
+                (failed_during_collection, dict(state="failed")),
+                (
+                    failed_after_planning,
+                    dict(
+                        state="failed",
+                        final_digest=failed_digest,
+                        planned_at=sa.text("CURRENT_TIMESTAMP"),
+                    ),
+                ),
+                (expired_during_collection, dict(state="expired")),
+                (
+                    expired_after_planning,
+                    dict(
+                        state="expired",
+                        final_digest=completed_digest,
+                        planned_at=sa.text("CURRENT_TIMESTAMP"),
+                    ),
+                ),
+            ):
+                await _insert_manifest_run(
+                    connection,
+                    workspace,
+                    manifest_run_id=terminal_run_id,
+                    safe_error_code=(
+                        "device_manifest_replay_mismatch"
+                        if terminal_shape.get("state") == "failed"
+                        else None
+                    ),
+                    **terminal_shape,
+                )
+
+            reasonless_failure = await _expect_integrity_error(
+                connection,
+                sa.insert(manifest_runs).values(
+                    manifest_run_id=uuid4(),
+                    workspace_id=workspace.workspace_id,
+                    device_id=uuid4(),
+                    base_acknowledged_sequence=0,
+                    checkpoint_sequence=0,
+                    policy_revision_number=1,
+                    client_observation_generation=0,
+                    state="failed",
+                ),
+            )
+            assert _constraint_name(reasonless_failure) == "ck_manifest_runs__state_shape"
+
+            expired_with_error = await _expect_integrity_error(
+                connection,
+                sa.insert(manifest_runs).values(
+                    manifest_run_id=uuid4(),
+                    workspace_id=workspace.workspace_id,
+                    device_id=uuid4(),
+                    base_acknowledged_sequence=0,
+                    checkpoint_sequence=0,
+                    policy_revision_number=1,
+                    client_observation_generation=0,
+                    state="expired",
+                    safe_error_code="device_manifest_run_expired",
+                ),
+            )
+            assert _constraint_name(expired_with_error) == "ck_manifest_runs__state_shape"
 
         async with engine.begin() as connection:
             await _insert_manifest_page(connection, unfinished_run_id)

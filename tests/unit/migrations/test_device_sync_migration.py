@@ -314,13 +314,103 @@ def test_upgrade_pins_the_manifest_run_state_vocabulary_and_bounds() -> None:
         == "final_digest IS NULL OR final_digest ~ '^[0-9a-f]{64}$'"
     )
     assert str(constraints["ck_manifest_runs__state_shape"].sqltext) == (
-        "(state = 'failed') = (safe_error_code IS NOT NULL) "
-        "AND (state = 'collecting') = (final_digest IS NULL) "
-        "AND (state IN ('planned', 'applying', 'completed')) "
-        "= (final_digest IS NOT NULL AND planned_at IS NOT NULL) "
-        "AND (state = 'completed') = (completed_at IS NOT NULL)"
+        "(final_digest IS NULL) = (planned_at IS NULL) "
+        "AND (state = 'completed') = (completed_at IS NOT NULL) "
+        "AND (state = 'failed') = (safe_error_code IS NOT NULL) "
+        "AND (state <> 'collecting' "
+        "OR (final_digest IS NULL AND completed_at IS NULL AND safe_error_code IS NULL)) "
+        "AND (state NOT IN ('planned', 'applying', 'completed') "
+        "OR (final_digest IS NOT NULL AND safe_error_code IS NULL))"
     )
     assert str(constraints["ck_manifest_runs__lifetime"].sqltext) == "expires_at > created_at"
+
+
+def test_state_shape_admits_every_honest_terminal_evidence_combination() -> None:
+    """Failed and expired runs stay writable in every honest shape.
+
+    The terminal shape must admit a run failing during collection (no digest
+    yet), a run failing or expiring after planning (digest and planning time
+    retained as evidence), and an expired run that never reached planning —
+    while rejecting every dishonest combination (a completion time or an
+    error code on a state that does not own it, half-present finalized
+    evidence, or a collecting run carrying any terminal evidence).  The
+    constraint SQL itself is evaluated row by row against a throwaway
+    in-memory SQLite database, so the truth table pins exactly what the DDL
+    will enforce.
+    """
+
+    recorder = _replay("upgrade")
+    constraints = _named_constraints(recorder.tables["manifest_runs"])
+    shape_sql = str(constraints["ck_manifest_runs__state_shape"].sqltext)
+    shape_query = sa.text(
+        f"SELECT ({shape_sql}) FROM (SELECT :state AS state, :final_digest AS final_digest,"
+        " :planned_at AS planned_at, :completed_at AS completed_at,"
+        " :safe_error_code AS safe_error_code)"
+    )
+    engine = sa.create_engine("sqlite://")
+
+    def _evaluates_true(
+        state: str,
+        final_digest: str | None,
+        planned_at: str | None,
+        completed_at: str | None,
+        safe_error_code: str | None,
+    ) -> bool:
+        with engine.connect() as connection:
+            return bool(
+                connection.execute(
+                    shape_query,
+                    {
+                        "state": state,
+                        "final_digest": final_digest,
+                        "planned_at": planned_at,
+                        "completed_at": completed_at,
+                        "safe_error_code": safe_error_code,
+                    },
+                ).scalar_one()
+            )
+
+    digest = "a" * 64
+    timestamp = "2026-08-26 12:00:00+00:00"
+    error_token = "device_manifest_replay_mismatch"
+    # Every honest shape must satisfy the constraint.
+    for state, has_digest, has_error, has_completed in (
+        ("collecting", False, None, False),
+        ("planned", True, None, False),
+        ("applying", True, None, False),
+        ("completed", True, None, True),
+        ("failed", False, error_token, False),
+        ("failed", True, error_token, False),
+        ("expired", False, None, False),
+        ("expired", True, None, False),
+    ):
+        assert _evaluates_true(
+            state,
+            digest if has_digest else None,
+            timestamp if has_digest else None,
+            timestamp if has_completed else None,
+            has_error,
+        ), (state, has_digest, has_error, has_completed)
+    # Every dishonest shape must violate it.
+    for state, has_digest, has_error, has_completed in (
+        ("collecting", True, None, False),
+        ("collecting", False, error_token, False),
+        ("planned", False, None, False),
+        ("planned", True, error_token, False),
+        ("completed", True, None, False),
+        ("completed", False, None, True),
+        ("failed", False, None, False),
+        ("expired", False, "device_manifest_run_expired", False),
+        ("expired", True, None, True),
+    ):
+        assert not _evaluates_true(
+            state,
+            digest if has_digest else None,
+            timestamp if has_digest else None,
+            timestamp if has_completed else None,
+            has_error,
+        ), (state, has_digest, has_error, has_completed)
+    engine.dispose()
 
 
 def test_upgrade_enforces_one_unfinished_manifest_run_per_device() -> None:

@@ -63,16 +63,24 @@ _RUN_STATE_CHECK: Final[str] = (
     "state IN ('collecting', 'planned', 'applying', 'completed', 'expired', 'failed')"
 )
 
-#: A failed run records exactly one closed safe error code; a collecting run
-#: carries no finalized digest; the planned evidence (digest and database
-#: planning time) belongs to the finalized states; completion is the only
-#: state with its completion time.
+#: The terminal-state evidence rules, grouped like the small-file operation
+#: terminal shape: finalized evidence (digest and database planning time) is
+#: all-or-nothing and belongs to the states that produced it; only a
+#: completed run carries its completion time; only a failed run carries a
+#: closed safe error code.  A failed run keeps whatever evidence it had when
+#: it failed (a collection failure carries no digest; a planning failure
+#: keeps digest and planning time).  An expired run retains its prior
+#: evidence — expiry is a deadline, not an error — and never carries a
+#: completion time or an error code; it is reachable from both collecting
+#: (evidence-free) and planned/applying (finalized evidence).
 _RUN_STATE_SHAPE_CHECK: Final[str] = (
-    "(state = 'failed') = (safe_error_code IS NOT NULL) "
-    "AND (state = 'collecting') = (final_digest IS NULL) "
-    "AND (state IN ('planned', 'applying', 'completed')) "
-    "= (final_digest IS NOT NULL AND planned_at IS NOT NULL) "
-    "AND (state = 'completed') = (completed_at IS NOT NULL)"
+    "(final_digest IS NULL) = (planned_at IS NULL) "
+    "AND (state = 'completed') = (completed_at IS NOT NULL) "
+    "AND (state = 'failed') = (safe_error_code IS NOT NULL) "
+    "AND (state <> 'collecting' "
+    "OR (final_digest IS NULL AND completed_at IS NULL AND safe_error_code IS NULL)) "
+    "AND (state NOT IN ('planned', 'applying', 'completed') "
+    "OR (final_digest IS NOT NULL AND safe_error_code IS NULL))"
 )
 
 _RESOLUTION_MATCH_KIND_CHECK: Final[str] = (

@@ -19,21 +19,17 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import pytest
-import pytest_asyncio
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
-from tests.integration.source_publication.conftest import (
-    SourcePublicationStack,
-    source_publication_stack,
-)
+from tests.integration.source_publication.conftest import source_publication_stack
 
-from postgresql_source_store.engine import (
-    create_source_store_engine,
-    dispose_source_store_engine,
-)
 from postgresql_source_store.tables import devices, users, workspaces
 
-pytestmark = pytest.mark.local_stack
+__all__ = [
+    "DeviceSyncWorkspace",
+    "seed_device_sync_workspace",
+    "source_publication_stack",
+]
 
 
 def pytest_asyncio_loop_factories(
@@ -47,14 +43,6 @@ def pytest_asyncio_loop_factories(
     """
     del config, item
     return {"selector": asyncio.SelectorEventLoop}
-
-
-__all__ = [
-    "DeviceSyncWorkspace",
-    "device_sync_engine",
-    "seed_device_sync_workspace",
-    "source_publication_stack",
-]
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,16 +89,3 @@ async def seed_device_sync_workspace(engine: AsyncEngine) -> DeviceSyncWorkspace
     return DeviceSyncWorkspace(
         owner_user_id=owner_user_id, workspace_id=workspace_id, device_id=device_id
     )
-
-
-@pytest_asyncio.fixture
-async def device_sync_engine(
-    source_publication_stack: SourcePublicationStack,
-) -> AsyncEngine:
-    engine = create_source_store_engine(
-        source_publication_stack.settings, source_publication_stack.password
-    )
-    try:
-        yield engine
-    finally:
-        await dispose_source_store_engine(engine)
