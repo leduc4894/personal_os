@@ -47,6 +47,7 @@ BASELINE_REVISION: str = "20260813_01"
 POLICY_REVISION: str = "20260817_01"
 SMALL_FILE_REVISION: str = "20260818_01"
 SOURCE_LIFECYCLE_REVISION: str = "20260820_01"
+DEVICE_SYNC_REVISION: str = "20260826_01"
 SCHEMA_NAME: str = "knowledge"
 
 EXPECTED_AUTH_TABLES = {
@@ -724,16 +725,16 @@ def _in_list_values(expression: str) -> frozenset[str]:
 
 
 def test_alembic_graph_has_exactly_one_head_beyond_the_authentication_revision() -> None:
-    # Subsequent policy, small-file and lifecycle revisions stack on this
-    # revision, so the single graph head moved past authentication.
+    # Subsequent policy, small-file, lifecycle and device sync revisions stack
+    # on this revision, so the single graph head moved past authentication.
     script_directory = _script_directory()
-    assert script_directory.get_heads() == [SOURCE_LIFECYCLE_REVISION]
+    assert script_directory.get_heads() == [DEVICE_SYNC_REVISION]
 
 
 def test_authentication_revision_stacks_on_the_canonical_baseline_root() -> None:
     script_directory = _script_directory()
     revisions = list(script_directory.walk_revisions())
-    assert len(revisions) == 5
+    assert len(revisions) == 6
     baseline = script_directory.get_revision(BASELINE_REVISION)
     assert baseline is not None
     assert baseline.down_revision is None
@@ -746,8 +747,8 @@ def test_authentication_revision_stacks_on_the_canonical_baseline_root() -> None
 
 def test_canonical_revision_constant_is_the_current_graph_head() -> None:
     # The canonical revision authority always pins the current graph head; the
-    # source-lifecycle migration ``20260820_01`` is that head now.
-    assert CANONICAL_POSTGRESQL_SCHEMA_REVISION == SOURCE_LIFECYCLE_REVISION
+    # device sync migration ``20260826_01`` is that head now.
+    assert CANONICAL_POSTGRESQL_SCHEMA_REVISION == DEVICE_SYNC_REVISION
 
 
 # ---------------------------------------------------------------------------

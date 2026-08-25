@@ -33,6 +33,7 @@ AUTHENTICATION_REVISION: str = "20260816_01"
 POLICY_REVISION: str = "20260817_01"
 SMALL_FILE_REVISION: str = "20260818_01"
 SOURCE_LIFECYCLE_REVISION: str = "20260820_01"
+DEVICE_SYNC_REVISION: str = "20260826_01"
 SCHEMA_NAME: str = "knowledge"
 
 EXPECTED_TABLES_IN_CREATION_ORDER: tuple[str, ...] = (
@@ -580,13 +581,13 @@ def _script_directory() -> ScriptDirectory:
 
 def test_alembic_graph_has_exactly_one_head_revision() -> None:
     script_directory = _script_directory()
-    assert script_directory.get_heads() == [SOURCE_LIFECYCLE_REVISION]
+    assert script_directory.get_heads() == [DEVICE_SYNC_REVISION]
 
 
 def test_baseline_revision_is_the_single_graph_root() -> None:
     script_directory = _script_directory()
     revisions = list(script_directory.walk_revisions())
-    assert len(revisions) == 5
+    assert len(revisions) == 6
     revision = script_directory.get_revision(BASELINE_REVISION)
     assert revision is not None
     assert revision.down_revision is None
@@ -613,6 +614,11 @@ def test_baseline_revision_is_the_single_graph_root() -> None:
     assert lifecycle.down_revision == SMALL_FILE_REVISION
     assert not lifecycle.branch_labels
     assert lifecycle.dependencies is None
+    device_sync = script_directory.get_revision(DEVICE_SYNC_REVISION)
+    assert device_sync is not None
+    assert device_sync.down_revision == SOURCE_LIFECYCLE_REVISION
+    assert not device_sync.branch_labels
+    assert device_sync.dependencies is None
 
 
 def test_alembic_graph_loads_without_database_settings_or_secrets() -> None:
@@ -623,7 +629,7 @@ def test_alembic_graph_loads_without_database_settings_or_secrets() -> None:
             removed[key] = os.environ.pop(key)
     try:
         script_directory = _script_directory()
-        assert script_directory.get_heads() == [SOURCE_LIFECYCLE_REVISION]
+        assert script_directory.get_heads() == [DEVICE_SYNC_REVISION]
     finally:
         os.environ.update(removed)
 

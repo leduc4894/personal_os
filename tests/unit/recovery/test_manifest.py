@@ -22,9 +22,11 @@ from personal_os.recovery.contracts import (
     MANIFEST_CONTRACT_V1,
     MANIFEST_CONTRACT_V2,
     MANIFEST_CONTRACT_V3,
+    MANIFEST_CONTRACT_V4,
     MAXIMUM_OBJECT_SIZE_BYTES,
     POSTGRESQL_SCHEMA_REVISION,
     V1_CANONICAL_COUNT_TABLES,
+    V3_CANONICAL_COUNT_TABLES,
     ManifestDumpEntry,
     ManifestObjectEntry,
     RecoveryBundleInvalidReason,
@@ -242,13 +244,28 @@ def test_round_trip_accepts_boundary_object_sizes() -> None:
     assert parse_manifest(encode_manifest(manifest)).objects == manifest.objects
 
 
-def test_accepts_the_current_v3_contract_version() -> None:
-    parsed = parse_manifest(canonical_json(manifest_payload(contract=MANIFEST_CONTRACT_V3)))
+def test_accepts_the_current_v4_contract_version() -> None:
+    parsed = parse_manifest(canonical_json(manifest_payload(contract=MANIFEST_CONTRACT_V4)))
+    assert parsed.contract == MANIFEST_CONTRACT_V4
+
+
+def test_accepts_the_historical_v3_contract_with_its_frozen_count_set() -> None:
+    historical_counts = {table: index + 1 for index, table in enumerate(V3_CANONICAL_COUNT_TABLES)}
+    parsed = parse_manifest(
+        canonical_json(
+            manifest_payload(
+                contract=MANIFEST_CONTRACT_V3,
+                postgresql_schema_revision="20260820_01",
+                canonical_counts=historical_counts,
+            )
+        )
+    )
     assert parsed.contract == MANIFEST_CONTRACT_V3
+    assert frozenset(parsed.canonical_counts) == frozenset(V3_CANONICAL_COUNT_TABLES)
 
 
 def test_rejects_unknown_contract_version() -> None:
-    unsupported = canonical_json(manifest_payload(contract="canonical_core_backup/v4"))
+    unsupported = canonical_json(manifest_payload(contract="canonical_core_backup/v5"))
     assert_bundle_invalid(unsupported, "contract_unsupported")
     assert_bundle_invalid(canonical_json(manifest_payload(contract="")), "contract_unsupported")
 
@@ -408,8 +425,8 @@ def test_rejects_out_of_range_object_size() -> None:
 
 
 def test_manifest_contract_constant_is_pinned() -> None:
-    assert MANIFEST_CONTRACT == "canonical_core_backup/v3"
-    assert len(CANONICAL_COUNT_TABLES) == 30
+    assert MANIFEST_CONTRACT == "canonical_core_backup/v4"
+    assert len(CANONICAL_COUNT_TABLES) == 35
     assert CANONICAL_COUNT_TABLES[11:19] == (
         "user_credentials",
         "web_sessions",
@@ -421,4 +438,10 @@ def test_manifest_contract_constant_is_pinned() -> None:
         "authentication_throttle_buckets",
     )
     assert CANONICAL_COUNT_TABLES[7:9] == ("source_locators", "source_tombstones")
-    assert CANONICAL_COUNT_TABLES[-1] == "small_file_upload_operations"
+    assert CANONICAL_COUNT_TABLES[-5:] == (
+        "device_cursors",
+        "manifest_runs",
+        "manifest_pages",
+        "manifest_entry_resolutions",
+        "manifest_actions",
+    )

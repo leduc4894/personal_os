@@ -11,7 +11,8 @@ from __future__ import annotations
 from typing import Final
 
 #: Canonical PostgreSQL schema revision pinned by the acceptance/recovery contract;
-#: readiness accepts exactly this head and nothing else. The small-file sync
-#: revision ``20260820_01`` stacks on the ``20260818_01`` small-file revision,
-#: which stacks on the exclusion-policy, authentication and baseline revisions.
-CANONICAL_POSTGRESQL_SCHEMA_REVISION: Final[str] = "20260820_01"
+#: readiness accepts exactly this head and nothing else. The device sync
+#: revision ``20260826_01`` stacks on the ``20260820_01`` source-lifecycle
+#: revision, which stacks on the small-file, exclusion-policy, authentication
+#: and baseline revisions.
+CANONICAL_POSTGRESQL_SCHEMA_REVISION: Final[str] = "20260826_01"

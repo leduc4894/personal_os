@@ -2,13 +2,14 @@
 
 The Alembic migrations ``20260813_01`` (baseline), ``20260816_01``
 (authentication schema), ``20260817_01`` (exclusion policy schema),
-``20260818_01`` (small-file sync operations) and ``20260820_01`` (source
-lifecycle schema) are the DDL authority. This test
+``20260818_01`` (small-file sync operations), ``20260820_01`` (source
+lifecycle schema) and ``20260826_01`` (device sync schema) are the DDL
+authority. This test
 loads the migration modules, replays their ``upgrade()`` against a recording
 stub of ``alembic.op`` (including the policy migration's
 ``add_column``/``alter_column`` evolution of ``projection_intents``) and
-compares the thirty schema-qualified tables the migrations create with the
-typed DML metadata in ``postgresql_source_store.tables``: identical table
+compares the thirty-seven schema-qualified tables the migrations create with
+the typed DML metadata in ``postgresql_source_store.tables``: identical table
 names, schema, column names, column types and nullability, with full coverage
 in both directions and no ``create_all()`` path anywhere in the adapter
 package.
@@ -37,6 +38,7 @@ MIGRATION_GLOBS: tuple[str, ...] = (
     "20260817_01*.py",
     "20260818_01*.py",
     "20260820_01*.py",
+    "20260826_01*.py",
 )
 MIGRATION_DIRECTORY = REPO_ROOT / "migrations" / "versions"
 PACKAGE_SOURCE_ROOT = (
@@ -91,12 +93,23 @@ SMALL_FILE_TABLE_NAMES = frozenset({"small_file_upload_operations"})
 
 LIFECYCLE_TABLE_NAMES = frozenset({"source_locators", "source_tombstones"})
 
+DEVICE_SYNC_TABLE_NAMES = frozenset(
+    {
+        "device_cursors",
+        "manifest_runs",
+        "manifest_pages",
+        "manifest_entry_resolutions",
+        "manifest_actions",
+    }
+)
+
 EXPECTED_TABLE_NAMES = (
     BASELINE_TABLE_NAMES
     | AUTHENTICATION_TABLE_NAMES
     | POLICY_TABLE_NAMES
     | SMALL_FILE_TABLE_NAMES
     | LIFECYCLE_TABLE_NAMES
+    | DEVICE_SYNC_TABLE_NAMES
 )
 
 
@@ -259,6 +272,26 @@ def test_dml_table_map_is_an_immutable_view_of_the_metadata() -> None:
     assert set(SOURCE_STORE_TABLES.values()) == set(SOURCE_STORE_METADATA.tables.values())
 
 
-def test_lifecycle_tables_are_counted_by_the_canonical_v3_backup_manifest() -> None:
-    assert MANIFEST_CONTRACT == "canonical_core_backup/v3"
+def test_lifecycle_tables_are_counted_by_the_current_backup_manifest() -> None:
+    assert MANIFEST_CONTRACT == "canonical_core_backup/v4"
     assert {"source_locators", "source_tombstones"} <= set(CANONICAL_COUNT_TABLES)
+
+
+def test_device_sync_tables_are_counted_by_the_canonical_v4_backup_manifest() -> None:
+    """Cursor watermarks and manifest evidence join the recoverable snapshot.
+
+    The five device sync tables of migration ``20260826_01`` are canonical
+    PostgreSQL evidence: a restore that drops them would lose every device
+    watermark and the manifest proof trail, so they join the v4 count set and
+    the quiesced lock order.
+    """
+
+    assert MANIFEST_CONTRACT == "canonical_core_backup/v4"
+    assert set(CANONICAL_COUNT_TABLES) >= DEVICE_SYNC_TABLE_NAMES
+    assert CANONICAL_COUNT_TABLES[-5:] == (
+        "device_cursors",
+        "manifest_runs",
+        "manifest_pages",
+        "manifest_entry_resolutions",
+        "manifest_actions",
+    )

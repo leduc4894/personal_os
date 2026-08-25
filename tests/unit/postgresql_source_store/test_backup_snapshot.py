@@ -1,7 +1,7 @@
 """Quiesced exported-snapshot adapter statements and object-set hydration.
 
 These tests pin the pure pieces of the PostgreSQL snapshot adapter (spec 9.2)
-without a database: the fixed 28-table ``SHARE MODE NOWAIT`` lock order, the
+without a database: the fixed 35-table ``SHARE MODE NOWAIT`` lock order, the
 parameter-bound pending-writer probe, the schema-qualified referenced-objects
 and pointer-resolution reads, and the fail-closed hydration of referenced
 content objects into expected-object requests. The snapshot transaction's
@@ -86,6 +86,11 @@ def test_snapshot_lock_order_covers_the_canonical_policy_and_operation_tables() 
         "policy_evaluations",
         "policy_reconciliation_intents",
         "small_file_upload_operations",
+        "device_cursors",
+        "manifest_runs",
+        "manifest_pages",
+        "manifest_entry_resolutions",
+        "manifest_actions",
     )
     assert len(SNAPSHOT_LOCK_ORDER) == len(set(SNAPSHOT_LOCK_ORDER))
 
@@ -105,7 +110,7 @@ def test_snapshot_lock_timeout_is_fifteen_seconds() -> None:
 def test_share_lock_statements_follow_fixed_spec_order() -> None:
     statements = build_share_lock_statements()
     texts = [str(s.compile(dialect=postgresql.dialect())) for s in statements]
-    assert len(texts) == 30
+    assert len(texts) == 35
     for text, table in zip(texts, SNAPSHOT_LOCK_ORDER, strict=True):
         assert f'{SOURCE_STORE_SCHEMA}."{table}"' in text
         assert "SHARE MODE NOWAIT" in text
@@ -293,8 +298,70 @@ def test_lifecycle_tables_are_schema_qualified_in_lock_statements() -> None:
         assert table in text
 
 
-def test_snapshot_lock_order_count_is_thirty() -> None:
-    """The lock order covers 30 tables — the canonical schema size after migration."""
+def test_snapshot_lock_order_count_is_thirty_five() -> None:
+    """The lock order covers 35 tables — the canonical schema size after migration."""
 
-    assert len(SNAPSHOT_LOCK_ORDER) == 30
-    assert len(set(SNAPSHOT_LOCK_ORDER)) == 30
+    assert len(SNAPSHOT_LOCK_ORDER) == 35
+    assert len(set(SNAPSHOT_LOCK_ORDER)) == 35
+
+
+# --- device sync coverage (Child 6 Task 2) -------------------------------------
+
+
+def test_snapshot_lock_order_includes_the_device_sync_tables() -> None:
+    """Cursor watermarks and manifest evidence join the canonical snapshot.
+
+    The 35-table lock order covers the canonical post-device-sync (migration
+    ``20260826_01``) tables: one cursor row per workspace/device and the
+    manifest run/page/resolution/action evidence. They sit after the durable
+    upload-operation table in migration order so a quiesced snapshot carries
+    every device watermark and every planned action the restore must replay.
+    """
+
+    for table_name in (
+        "device_cursors",
+        "manifest_runs",
+        "manifest_pages",
+        "manifest_entry_resolutions",
+        "manifest_actions",
+    ):
+        assert table_name in SNAPSHOT_LOCK_ORDER
+    operations_index = SNAPSHOT_LOCK_ORDER.index("small_file_upload_operations")
+    assert (
+        SNAPSHOT_LOCK_ORDER.index("device_cursors")
+        < SNAPSHOT_LOCK_ORDER.index("manifest_runs")
+        < SNAPSHOT_LOCK_ORDER.index("manifest_pages")
+        < SNAPSHOT_LOCK_ORDER.index("manifest_entry_resolutions")
+        < SNAPSHOT_LOCK_ORDER.index("manifest_actions")
+    )
+    assert (
+        min(
+            SNAPSHOT_LOCK_ORDER.index(table_name)
+            for table_name in (
+                "device_cursors",
+                "manifest_runs",
+                "manifest_pages",
+                "manifest_entry_resolutions",
+                "manifest_actions",
+            )
+        )
+        > operations_index
+    )
+
+
+def test_share_lock_statements_cover_the_device_sync_tables() -> None:
+    """The binding share-lock order covers the device sync tables in the fixed order."""
+
+    statements = build_share_lock_statements()
+    texts = [str(s.compile(dialect=postgresql.dialect())) for s in statements]
+    for table_name in (
+        "device_cursors",
+        "manifest_runs",
+        "manifest_pages",
+        "manifest_entry_resolutions",
+        "manifest_actions",
+    ):
+        matching = [text for text in texts if f'{SOURCE_STORE_SCHEMA}."{table_name}"' in text]
+        assert len(matching) == 1, table_name
+        assert "SHARE MODE NOWAIT" in matching[0]
+        assert matching[0].startswith("LOCK TABLE")

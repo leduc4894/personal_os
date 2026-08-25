@@ -3,13 +3,16 @@
 :class:`PostgresqlBackupSnapshotStore` implements the provider-neutral
 :class:`~personal_os.recovery.ports.CanonicalBackupSnapshotStore` port over the
 canonical baseline (spec 9.2): a ``REPEATABLE READ`` transaction begun before
-its first query, 30 ``LOCK TABLE ... IN SHARE MODE NOWAIT`` statements in
+its first query, 35 ``LOCK TABLE ... IN SHARE MODE NOWAIT`` statements in
 the fixed order, the ``pg_export_snapshot()`` token, the server version, the
-Alembic head, the 30 table counts and the referenced content objects —
+Alembic head, the 35 table counts and the referenced content objects —
 all read from the same snapshot, with no mutation, and a rollback on context
 exit that releases every lock. The canonical policy tables (state, immutable
 revisions/rules, key history and durable intents) join the snapshot; the
-ephemeral preview tables stay reconstructible and excluded. The snapshot token
+ephemeral preview tables stay reconstructible and excluded. The device sync
+tables (cursor watermarks and manifest reconciliation evidence) are canonical
+PostgreSQL state and join the snapshot in migration order after the durable
+upload operations. The snapshot token
 is infrastructure-private: it is carried on the frozen snapshot value and
 flows only to the dump process inside the composition call; this module never
 logs, prints or embeds it in an error.
@@ -65,12 +68,13 @@ from postgresql_source_store.tables import (
     sources,
 )
 
-#: The binding fixed order of the 30 quiescing share locks. The canonical
+#: The binding fixed order of the 35 quiescing share locks. The canonical
 #: baseline tables are followed by the authentication tables in migration/FK
 #: order, the canonical policy tables in foreign-key dependency order
-#: (publication locks workspace_policy_state before drafts and revisions), and
-#: the durable small-file upload-operation table. Reconstructible preview tables
-#: stay out of the canonical snapshot by design.
+#: (publication locks workspace_policy_state before drafts and revisions), the
+#: durable small-file upload-operation table, and the device sync tables in
+#: migration order (cursors before runs, run children after their run).
+#: Reconstructible preview tables stay out of the canonical snapshot by design.
 SNAPSHOT_LOCK_ORDER: Final[tuple[str, ...]] = (
     "users",
     "workspaces",
@@ -102,6 +106,11 @@ SNAPSHOT_LOCK_ORDER: Final[tuple[str, ...]] = (
     "policy_evaluations",
     "policy_reconciliation_intents",
     "small_file_upload_operations",
+    "device_cursors",
+    "manifest_runs",
+    "manifest_pages",
+    "manifest_entry_resolutions",
+    "manifest_actions",
 )
 
 #: The snapshot transaction waits at most this long for each share lock.
@@ -159,7 +168,7 @@ def _map_snapshot_failure(cause: BaseException) -> RecoveryError:
 
 
 def build_share_lock_statements() -> tuple[sa.TextClause, ...]:
-    """Build the 28 quiescing share locks in the binding fixed order.
+    """Build the 35 quiescing share locks in the binding fixed order.
 
     Each statement is a schema-qualified, fully quoted
     ``LOCK TABLE knowledge."<table>" IN SHARE MODE NOWAIT``; the order is the
@@ -174,7 +183,7 @@ def build_share_lock_statements() -> tuple[sa.TextClause, ...]:
 def pending_writer_count_statement() -> sa.TextClause:
     """Build the parameter-bound count of ungranted relation locks.
 
-    Counts lock requests on the 30 canonical tables that PostgreSQL has not
+    Counts lock requests on the 35 canonical tables that PostgreSQL has not
     granted (blocked writers waiting on the quiescing share locks); the table
     names travel only as the bound ``:tables`` array parameter.
     """
@@ -372,7 +381,7 @@ class PostgresqlBackupSnapshotStore:
         )
 
     async def observe_pending_writers(self) -> int:
-        """Count writers still waiting for a lock on the 30 canonical tables.
+        """Count writers still waiting for a lock on the 35 canonical tables.
 
         A non-zero count means a writer was blocked by the quiescing share
         locks at observation time; the caller aborts finalization (spec 9.2).

@@ -29,7 +29,8 @@ from personal_os.error_contracts.exceptions import ApplicationError
 MANIFEST_CONTRACT_V1: Final[str] = "canonical_core_backup/v1"
 MANIFEST_CONTRACT_V2: Final[str] = "canonical_core_backup/v2"
 MANIFEST_CONTRACT_V3: Final[str] = "canonical_core_backup/v3"
-MANIFEST_CONTRACT: Final[str] = MANIFEST_CONTRACT_V3
+MANIFEST_CONTRACT_V4: Final[str] = "canonical_core_backup/v4"
+MANIFEST_CONTRACT: Final[str] = MANIFEST_CONTRACT_V4
 
 #: Compatibility alias: revision authority lives in
 #: :mod:`personal_os.database_schema`; existing recovery imports keep
@@ -113,15 +114,28 @@ V2_CANONICAL_COUNT_TABLES: Final[tuple[str, ...]] = (
     "small_file_upload_operations",
 )
 
-#: The exact closed set of canonical tables counted in every new v3 manifest.
-#: Mirrors the snapshot lock order. Authentication rows, lifecycle history,
-#: policy state and durable upload operations are all canonical PostgreSQL
-#: evidence and therefore cannot be omitted from a recoverable snapshot.
-CANONICAL_COUNT_TABLES: Final[tuple[str, ...]] = (
+#: The complete v3 count set emitted immediately before the device sync
+#: schema.  It remains readable so already-created v3 bundles stay
+#: verifiable/restorable; writers emit v4 from this revision onward.
+V3_CANONICAL_COUNT_TABLES: Final[tuple[str, ...]] = (
     *V2_CANONICAL_COUNT_TABLES[:7],
     "source_locators",
     "source_tombstones",
     *V2_CANONICAL_COUNT_TABLES[7:],
+)
+
+#: The exact closed set of canonical tables counted in every new v4 manifest.
+#: Mirrors the snapshot lock order. Authentication rows, lifecycle history,
+#: policy state, durable upload operations and device sync evidence (cursor
+#: watermarks and manifest reconciliation state) are all canonical PostgreSQL
+#: evidence and therefore cannot be omitted from a recoverable snapshot.
+CANONICAL_COUNT_TABLES: Final[tuple[str, ...]] = (
+    *V3_CANONICAL_COUNT_TABLES,
+    "device_cursors",
+    "manifest_runs",
+    "manifest_pages",
+    "manifest_entry_resolutions",
+    "manifest_actions",
 )
 
 #: Maximum number of retained backup records. The recorder is a bounded ring

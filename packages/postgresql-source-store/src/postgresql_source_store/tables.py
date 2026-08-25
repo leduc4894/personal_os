@@ -1,10 +1,10 @@
 """Schema-qualified SQLAlchemy Core table metadata for DML against the baseline.
 
 The Alembic migrations ``20260813_01``, ``20260816_01``, ``20260817_01``,
-``20260818_01`` and ``20260820_01`` are the DDL authority: they own the schema, columns,
-constraints, indexes and triggers. This module is the typed DML representation
-of exactly the thirty-two migrated tables: identical table names, schema
-(``knowledge``), column names, column types, nullability and primary keys,
+``20260818_01``, ``20260820_01`` and ``20260826_01`` are the DDL authority: they own
+the schema, columns, constraints, indexes and triggers. This module is the typed DML
+representation of exactly the thirty-seven migrated tables: identical table names,
+schema (``knowledge``), column names, column types, nullability and primary keys,
 contract-tested against the migration sources. There is deliberately no
 ``create_all()`` path and no constraint duplication: check, unique and foreign
 key constraints stay owned by the migrations, while reads and writes address
@@ -588,10 +588,94 @@ small_file_upload_operations: Final[Table] = Table(
     sa.PrimaryKeyConstraint("operation_id", name="pk_small_file_upload_operations"),
 )
 
+device_cursors: Final[Table] = Table(
+    "device_cursors",
+    _SOURCE_STORE_METADATA,
+    Column("device_cursor_id", sa.Uuid(), nullable=False),
+    Column("workspace_id", sa.Uuid(), nullable=False),
+    Column("device_id", sa.Uuid(), nullable=False),
+    Column("acknowledged_sequence", sa.BigInteger(), nullable=False),
+    Column("delivered_through_sequence", sa.BigInteger(), nullable=False),
+    Column("created_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("updated_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    sa.PrimaryKeyConstraint("device_cursor_id", name="pk_device_cursors"),
+)
+
+manifest_runs: Final[Table] = Table(
+    "manifest_runs",
+    _SOURCE_STORE_METADATA,
+    Column("manifest_run_id", sa.Uuid(), nullable=False),
+    Column("workspace_id", sa.Uuid(), nullable=False),
+    Column("device_id", sa.Uuid(), nullable=False),
+    Column("base_acknowledged_sequence", sa.BigInteger(), nullable=False),
+    Column("checkpoint_sequence", sa.BigInteger(), nullable=False),
+    Column("policy_revision_number", sa.BigInteger(), nullable=False),
+    Column("client_observation_generation", sa.BigInteger(), nullable=False),
+    Column("state", sa.Text(), nullable=False),
+    Column("next_page_number", sa.Integer(), nullable=False),
+    Column("entry_count", sa.Integer(), nullable=False),
+    Column("final_digest", sa.String(length=64), nullable=True),
+    Column("safe_error_code", sa.String(length=100), nullable=True),
+    Column("created_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("expires_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("planned_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("completed_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    sa.PrimaryKeyConstraint("manifest_run_id", name="pk_manifest_runs"),
+)
+
+manifest_pages: Final[Table] = Table(
+    "manifest_pages",
+    _SOURCE_STORE_METADATA,
+    Column("manifest_run_id", sa.Uuid(), nullable=False),
+    Column("page_number", sa.Integer(), nullable=False),
+    Column("entry_count", sa.Integer(), nullable=False),
+    Column("page_digest", sa.String(length=64), nullable=False),
+    Column("received_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    sa.PrimaryKeyConstraint("manifest_run_id", "page_number", name="pk_manifest_pages"),
+)
+
+manifest_entry_resolutions: Final[Table] = Table(
+    "manifest_entry_resolutions",
+    _SOURCE_STORE_METADATA,
+    Column("manifest_run_id", sa.Uuid(), nullable=False),
+    Column("page_number", sa.Integer(), nullable=False),
+    Column("entry_index", sa.Integer(), nullable=False),
+    Column("local_entry_id", sa.String(length=256), nullable=False),
+    Column("known_source_id", sa.Uuid(), nullable=True),
+    Column("known_version_id", sa.Uuid(), nullable=True),
+    Column("submitted_sha256", sa.String(length=64), nullable=False),
+    Column("submitted_size_bytes", sa.BigInteger(), nullable=False),
+    Column("submitted_media_type", sa.String(length=255), nullable=False),
+    Column("locator_evidence_digest", sa.String(length=64), nullable=False),
+    Column("resolved_source_id", sa.Uuid(), nullable=True),
+    Column("resolved_source_version_id", sa.Uuid(), nullable=True),
+    Column("resolved_source_locator_id", sa.Uuid(), nullable=True),
+    Column("resolved_source_tombstone_id", sa.Uuid(), nullable=True),
+    Column("match_kind", sa.Text(), nullable=False),
+    sa.PrimaryKeyConstraint(
+        "manifest_run_id", "page_number", "entry_index", name="pk_manifest_entry_resolutions"
+    ),
+)
+
+manifest_actions: Final[Table] = Table(
+    "manifest_actions",
+    _SOURCE_STORE_METADATA,
+    Column("manifest_run_id", sa.Uuid(), nullable=False),
+    Column("action_index", sa.Integer(), nullable=False),
+    Column("action_kind", sa.Text(), nullable=False),
+    Column("local_entry_id", sa.String(length=256), nullable=True),
+    Column("source_id", sa.Uuid(), nullable=True),
+    Column("source_version_id", sa.Uuid(), nullable=True),
+    Column("source_locator_id", sa.Uuid(), nullable=True),
+    Column("source_tombstone_id", sa.Uuid(), nullable=True),
+    Column("safe_reason_code", sa.String(length=100), nullable=True),
+    sa.PrimaryKeyConstraint("manifest_run_id", "action_index", name="pk_manifest_actions"),
+)
+
 #: Single frozen metadata collection owning every DML table.
 SOURCE_STORE_METADATA: Final[MetaData] = _SOURCE_STORE_METADATA
 
-#: Immutable name-indexed view of the thirty-two migrated tables, keyed by
+#: Immutable name-indexed view of the thirty-seven migrated tables, keyed by
 #: their unqualified table names (``metadata.tables`` itself is
 #: schema-qualified).
 SOURCE_STORE_TABLES: Final[Mapping[str, Table]] = MappingProxyType(
@@ -630,6 +714,11 @@ SOURCE_STORE_TABLES: Final[Mapping[str, Table]] = MappingProxyType(
             policy_keysets,
             policy_keyset_signatures,
             small_file_upload_operations,
+            device_cursors,
+            manifest_runs,
+            manifest_pages,
+            manifest_entry_resolutions,
+            manifest_actions,
         )
     }
 )
