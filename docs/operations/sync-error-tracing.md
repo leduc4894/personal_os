@@ -159,9 +159,11 @@ Sync self-check: trail_persist_ok · credential_present · origin_unreachable ·
 
 Reading the verdicts:
 
-- `trail_persist_failed` → the plugin cannot durably write its own
-  directory (the trail, and likely the journal sidecars, are unhealthy).
-  Check the settings append-failure counter and the `trail_reset` history.
+- `trail_persist_failed` → either the plugin cannot durably write its own
+  directory (the trail, and likely the journal sidecars, are unhealthy —
+  check the settings append-failure counter and the `trail_reset` history)
+  or the copy command hit its own exceptional rejection, which emits the
+  same token with the counter possibly at 0.
 - `credential_absent` → login first; the pass will end `login_required`
   and queue the work unchanged.
 - `origin_unreachable · network_offline` or `network_timeout` → a
