@@ -333,23 +333,36 @@ copy child output into acceptance evidence.
 - Plugin version: 0.1.0
 - Recorded at UTC: 2026-08-21T18:29:13Z
 - Operator: Codex automated WDIO operator
-- Latest guarded result: PASS (`obsidian_live_acceptance_passed`). The approved
-  bootstrap completed the focused journey after the explicit-restore modal
-  settlement fix. Child diagnostics remained outside the evidence boundary.
+- Latest guarded result: PASS (`obsidian_live_acceptance_passed`,
+  2026-08-25, disposable project `knowledge-ci-restore-reservation`) after
+  the explicit-restore target reservation fix: the journey stages the
+  restored bytes on the reserved target between the prompt and the
+  confirm, and the previously failing explicit-restore phase commits with
+  stable source and version identity, four lifecycle events, four locator
+  rows, zero pending and zero blocked. Earlier guarded PASS 2026-08-22
+  after the modal settlement fix. Child diagnostics remained outside the
+  evidence boundary.
 
 | Scenario | Outcome | Evidence |
 | --- | --- | --- |
-| Tracked rename | PASS | operator-record:desktop-live-20260822 |
-| Tracked move | PASS | operator-record:desktop-live-20260822 |
-| Delete | PASS | operator-record:desktop-live-20260822 |
-| Explicit restore | PASS | operator-record:desktop-live-20260822 |
-| Stable source and version identity | PASS | operator-record:desktop-live-20260822 |
-| Pending lifecycle drain | PASS | operator-record:desktop-live-20260822 |
+| Tracked rename | PASS | operator-record:desktop-live-20260825 |
+| Tracked move | PASS | operator-record:desktop-live-20260825 |
+| Delete | PASS | operator-record:desktop-live-20260825 |
+| Explicit restore | PASS | operator-record:desktop-live-20260825 |
+| Stable source and version identity | PASS | operator-record:desktop-live-20260825 |
+| Pending lifecycle drain | PASS | operator-record:desktop-live-20260825 |
 
 ## Mobile live acceptance record
 
 - Status: DEFERRED
-- Reason: Physical matrix executed 2026-08-25; seven of eight scenarios passed on the physical device; explicit restore is blocked by the pre-existing convergence/lifecycle lane race whose closed token `source_locator_conflict` was observed on both device and server surfaces (the same race currently fails the mandatory Desktop WDIO journey); retained as DEFERRED until that race is fixed.
+- Reason: The convergence/lifecycle lane race that failed the 2026-08-25
+  explicit-restore scenario is fixed (the explicit-restore target
+  reservation protocol; the mandatory Desktop journey passed guarded the
+  same day). The physical matrix must be re-run under the new staging
+  procedure — the operator stages the restored bytes on the reserved
+  target between the target-path prompt and the confirm — before this
+  record may flip to PASS. Retained as DEFERRED until that physical
+  evidence exists.
 - Source handoff: handoff:source-lifecycle-mobile-deferral
 - Backlog key: source-lifecycle-mobile-acceptance
 - Implement by: Before Child 6 acceptance closure
