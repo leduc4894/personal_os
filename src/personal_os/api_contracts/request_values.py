@@ -56,6 +56,14 @@ class ApiRouteTemplate(StrEnum):
     SYNC_JOURNAL_EVENTS_PREFLIGHT = "/api/sync/journal-events/preflight"
     UPLOAD_CONTENT = "/api/uploads/{operation_id}/content"
     SYNC_SOURCE_LIFECYCLE_EVENTS = "/api/sources/lifecycle-events"
+    SYNC_EVENTS = "/api/sync/events"
+    SYNC_CURSOR_ACKNOWLEDGEMENTS = "/api/sync/cursor-acknowledgements"
+    SYNC_MANIFESTS = "/api/sync/manifests"
+    SYNC_MANIFEST_PAGES = "/api/sync/manifests/{manifest_run_id}/pages/{page_number}"
+    SYNC_MANIFEST_FINALIZE = "/api/sync/manifests/{manifest_run_id}/finalize"
+    SYNC_MANIFEST_ACTIONS = "/api/sync/manifests/{manifest_run_id}/actions"
+    SYNC_MANIFEST_COMPLETE = "/api/sync/manifests/{manifest_run_id}/complete"
+    SYNC_SOURCE_VERSION_CONTENT = "/api/sources/{source_id}/versions/{source_version_id}/content"
     OPENAPI_DOCUMENT = "/api/openapi.json"
     UNMATCHED = "unmatched"
 
@@ -138,6 +146,24 @@ SOURCE_LIFECYCLE_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset
     }
 )
 
+#: The closed device sync route set of the device cursor and manifest
+#: reconciliation design (spec 7): event pull, cursor acknowledgement, the
+#: manifest run lifecycle and the verified binary download, all behind the
+#: ``obsidian_sync`` access Bearer credential with workspace, device and user
+#: derived from the resolved token context — never a request field.
+DEVICE_SYNC_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset(
+    {
+        ApiRouteTemplate.SYNC_EVENTS,
+        ApiRouteTemplate.SYNC_CURSOR_ACKNOWLEDGEMENTS,
+        ApiRouteTemplate.SYNC_MANIFESTS,
+        ApiRouteTemplate.SYNC_MANIFEST_PAGES,
+        ApiRouteTemplate.SYNC_MANIFEST_FINALIZE,
+        ApiRouteTemplate.SYNC_MANIFEST_ACTIONS,
+        ApiRouteTemplate.SYNC_MANIFEST_COMPLETE,
+        ApiRouteTemplate.SYNC_SOURCE_VERSION_CONTENT,
+    }
+)
+
 #: The closed sync diagnostics admin route set: the read-only rejection
 #: evidence surface behind the Web session contract. Its payloads are
 #: per-process counters and ring snapshots that must never come from a shared
@@ -172,15 +198,16 @@ EXCLUSION_POLICY_DIAGNOSTICS_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]]
 #: Every route whose responses — success, service rejection and dependency
 #: failure alike — carry ``Cache-Control: no-store`` (spec 16): the
 #: authentication-bound sets plus the exclusion-policy, small-file sync,
-#: source lifecycle and the three diagnostics admin route sets, whose payloads
-#: are per-request policy state, signed envelopes, device-derived sync
-#: results and per-process rejection evidence that must never come from a
-#: shared cache.
+#: source lifecycle, device sync and the three diagnostics admin route sets,
+#: whose payloads are per-request policy state, signed envelopes,
+#: device-derived sync results, verified private bytes and per-process
+#: rejection evidence that must never come from a shared cache.
 NO_STORE_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = (
     AUTHENTICATION_ROUTE_TEMPLATES
     | EXCLUSION_POLICY_ROUTE_TEMPLATES
     | SMALL_FILE_SYNC_ROUTE_TEMPLATES
     | SOURCE_LIFECYCLE_ROUTE_TEMPLATES
+    | DEVICE_SYNC_ROUTE_TEMPLATES
     | SYNC_DIAGNOSTICS_ROUTE_TEMPLATES
     | SOURCE_LIFECYCLE_DIAGNOSTICS_ROUTE_TEMPLATES
     | EXCLUSION_POLICY_DIAGNOSTICS_ROUTE_TEMPLATES

@@ -8,6 +8,17 @@ observation whose fields are closed enum values, the status code and a
 non-negative duration. Raw paths, query strings and header values never enter
 diagnostics. Non-HTTP ASGI scopes (lifespan, websocket handshake extension
 points) pass through untouched without binding a context.
+
+The diagnostic context stays bound for the entire exchange, including an
+exception-generated 5xx response start: when the wrapped app raises before
+sending ``http.response.start``, the middleware itself starts the internal
+error response — the canonical envelope carrying the bound request id, with
+exactly one header per correlation key — and emits the ``failed`` access
+observation while the context is still bound, so the server-generated
+request UUID on ``X-Request-ID``, in the envelope and on the diagnostic line
+is one and the same. The exception itself still propagates so the server
+keeps observing it; no exception text, raw path or rejected value is ever
+retained.
 """
 
 from __future__ import annotations
@@ -16,7 +27,12 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from typing import Any, Final
 
-from personal_os.api_contracts import ApiHttpMethod, ApiRouteTemplate
+from personal_os.api_contracts import (
+    HTTP_ERROR_STATUSES,
+    ApiHttpMethod,
+    ApiRouteTemplate,
+    error_envelope,
+)
 from personal_os.diagnostics.context import (
     DiagnosticContext,
     DiagnosticContextResolution,
@@ -25,6 +41,8 @@ from personal_os.diagnostics.context import (
 )
 from personal_os.diagnostics.events import DiagnosticEventSink, EventName, SafeToken
 from personal_os.diagnostics.trace_context import format_traceparent
+from personal_os.error_contracts.codes import ErrorCode
+from personal_os.error_contracts.exceptions import InternalApplicationError
 
 type Scope = MutableMapping[str, Any]
 type Receive = Callable[[], Awaitable[Mapping[str, Any]]]
@@ -37,6 +55,11 @@ _TRACEPARENT_HEADER: Final = b"traceparent"
 _RESPONSE_REQUEST_ID_HEADER: Final = b"x-request-id"
 _OWNED_RESPONSE_HEADERS: Final = frozenset({_RESPONSE_REQUEST_ID_HEADER, _TRACEPARENT_HEADER})
 _INVALID_FORMAT_REASON: Final = SafeToken.parse("invalid_format")
+_INTERNAL_ERROR_STATUS: Final[int] = HTTP_ERROR_STATUSES[ErrorCode.INTERNAL_ERROR]
+_INTERNAL_ERROR: Final[InternalApplicationError] = InternalApplicationError(
+    ErrorCode.INTERNAL_ERROR
+)
+_APPLICATION_JSON: Final[bytes] = b"application/json"
 
 
 def _header(scope: Scope, name: bytes) -> str | None:
@@ -98,8 +121,11 @@ class RequestContextMiddleware:
 
     No ``BaseHTTPMiddleware`` and no framework imports: the callable takes the
     raw ``scope``/``receive``/``send`` triple. When the wrapped app raises
-    before sending ``http.response.start``, no access observation is emitted;
-    the server's error handling owns that response.
+    before sending ``http.response.start``, the middleware starts the
+    exception-generated 5xx response itself — the canonical internal error
+    envelope carrying the bound request id — emits the ``failed`` access
+    observation while the diagnostic context is still bound, and then
+    re-raises so the server keeps observing the failure.
     """
 
     def __init__(
@@ -136,9 +162,44 @@ class RequestContextMiddleware:
             self._emit_correlation_rejections(resolution)
             try:
                 await self._app(scope, receive, send_with_correlation_headers)
+            except Exception:
+                if status_code is None:
+                    # Exception-generated 5xx: the exchange's response start is
+                    # owned here so the bound request id reaches the client
+                    # and the failed observation; the app's own error handling
+                    # (which normally answers first) stays untouched.
+                    status_code = _INTERNAL_ERROR_STATUS
+                    await self._send_exception_response(
+                        resolution.context, send_with_correlation_headers
+                    )
+                raise
             finally:
                 if status_code is not None:
                     self._emit_access_observation(scope, status_code, started_ns)
+
+    async def _send_exception_response(
+        self, context: DiagnosticContext, send: Send
+    ) -> None:
+        """Start and complete the internal error response for a crashed app.
+
+        The body is the canonical envelope of the registered internal error
+        carrying the bound request id — the same shape the shared exception
+        handlers emit — rendered once here so no framework import is needed.
+        """
+
+        envelope = error_envelope(request_id=context.request_id, error=_INTERNAL_ERROR)
+        body = envelope.model_dump_json().encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": _INTERNAL_ERROR_STATUS,
+                "headers": [
+                    (b"content-type", _APPLICATION_JSON),
+                    (b"content-length", str(len(body)).encode()),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
 
     def _emit_correlation_rejections(self, resolution: DiagnosticContextResolution) -> None:
         """Emit fixed-reason rejection events without the rejected values."""

@@ -25,6 +25,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
+from uuid import UUID
 
 import httpx
 import pytest
@@ -35,8 +36,13 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
-from personal_os.api_contracts import CanonicalDatabaseReadinessProbe
-from personal_os.diagnostics.events import EventName
+from personal_os.api_contracts import (
+    ApiHttpMethod,
+    ApiRouteTemplate,
+    CanonicalDatabaseReadinessProbe,
+)
+from personal_os.diagnostics.context import current_diagnostic_context
+from personal_os.diagnostics.events import EVENT_DEFINITIONS, EventName, ResultCode
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import DatabaseMigrationError
 from personal_os.runtime_configuration.models import RuntimeEnvironment
@@ -90,19 +96,47 @@ class CrashingProbe:
 
 
 @dataclass
-class RecordingEventSink:
-    """Structured-diagnostics capture retaining every emitted event verbatim."""
+class CapturedEvent:
+    """One delivered structured event with the context bound at emit time."""
 
-    events: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    name: str
+    fields: dict[str, Any]
+    context: Any
+    result_code: Any
+
+
+@dataclass
+class RecordingEventSink:
+    """Structured-diagnostics capture retaining every emitted event verbatim.
+
+    Beyond the delivered fields, each capture records the diagnostic context
+    bound at emit time and the registry's result code, so correlation tests
+    can require the same server-generated request UUID that the response
+    headers and the envelope carry.
+    """
+
+    events: list[CapturedEvent] = field(default_factory=list)
 
     def emit(self, event_name: EventName, fields: Mapping[str, object] | None = None) -> None:
-        self.events.append((event_name.value, dict(fields or {})))
+        self.events.append(
+            CapturedEvent(
+                name=event_name.value,
+                fields=dict(fields or {}),
+                context=current_diagnostic_context(),
+                result_code=EVENT_DEFINITIONS[event_name].result_code,
+            )
+        )
 
     def rendered(self) -> str:
-        return json.dumps(self.events, default=str)
+        return json.dumps([(event.name, event.fields) for event in self.events], default=str)
 
     def event_names(self) -> list[str]:
-        return [name for name, _ in self.events]
+        return [event.name for event in self.events]
+
+    def only(self, event_name: EventName) -> CapturedEvent:
+        matches = [event for event in self.events if event.name == event_name.value]
+        assert len(matches) == 1, event_name
+        return matches[0]
 
 
 class AcceptedBody(BaseModel):
@@ -330,3 +364,50 @@ async def test_production_application_serves_no_openapi_document_body() -> None:
     assert '"paths"' not in response.text
     assert '"operationId"' not in response.text
     assert_no_sentinel(http_surface(response), sink.rendered())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("probe", "expected_status"),
+    [
+        (SentinelDatabaseProbe(), 503),
+        (CrashingProbe(), 500),
+    ],
+)
+async def test_failed_request_correlation_keeps_bound_request_id(
+    probe: CanonicalDatabaseReadinessProbe, expected_status: int
+) -> None:
+    """500 and 503 api_request_failed lines keep the bound request UUID.
+
+    The same server-generated request id travels on ``X-Request-ID``, in the
+    error envelope and on the bound context of the emitted failed access
+    observation, whose result code is the registry's ``failed`` — so a plugin
+    trail entry joins with the API's structured diagnostics line without any
+    raw path, body, locator or exception sentinel.
+    """
+
+    sink = RecordingEventSink()
+    app = create_composed_app(probe, sink)
+    response = await request(app, "GET", "/api/health/ready")
+
+    assert response.status_code == expected_status
+    request_id = UUID(response.headers["x-request-id"])
+    assert UUID(response.json()["request_id"]) == request_id
+
+    failed = sink.only(EventName.API_REQUEST_FAILED)
+    assert failed.context is not None
+    assert failed.context.request_id == request_id
+    assert failed.result_code is ResultCode.FAILED
+    assert failed.fields["route"] is ApiRouteTemplate.HEALTH_READY
+    assert failed.fields["status_code"] == expected_status
+    assert failed.fields["http_method"] is ApiHttpMethod.GET
+
+    rendered = sink.rendered() + response.text + "\n".join(
+        f"{name}: {value}" for name, value in response.headers.items()
+    )
+    for sentinel in (
+        _RAW_PATH_SENTINEL,
+        _DATABASE_EXCEPTION_SENTINEL,
+        _UNEXPECTED_EXCEPTION_SENTINEL,
+    ):
+        assert sentinel not in rendered

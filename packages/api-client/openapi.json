@@ -263,6 +263,96 @@
         "title": "ApiEnvelope[AdminDeviceRevokeData]",
         "type": "object"
       },
+      "ApiEnvelope_DeviceCursorReceiptData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeviceCursorReceiptData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[DeviceCursorReceiptData]",
+        "type": "object"
+      },
+      "ApiEnvelope_DeviceEventPageData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeviceEventPageData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[DeviceEventPageData]",
+        "type": "object"
+      },
       "ApiEnvelope_DeviceGrantContextData_": {
         "additionalProperties": false,
         "properties": {
@@ -621,6 +711,141 @@
           "error"
         ],
         "title": "ApiEnvelope[LivenessData]",
+        "type": "object"
+      },
+      "ApiEnvelope_ManifestActionPageData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManifestActionPageData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[ManifestActionPageData]",
+        "type": "object"
+      },
+      "ApiEnvelope_ManifestPageReceiptData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManifestPageReceiptData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[ManifestPageReceiptData]",
+        "type": "object"
+      },
+      "ApiEnvelope_ManifestRunReceiptData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManifestRunReceiptData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[ManifestRunReceiptData]",
         "type": "object"
       },
       "ApiEnvelope_PolicyDraftData_": {
@@ -1406,6 +1631,28 @@
         "title": "ApiWarning",
         "type": "object"
       },
+      "CursorAcknowledgementRequest": {
+        "additionalProperties": false,
+        "description": "The strict cursor acknowledgement body (spec 7.2).\n\nCarries only the expected prior sequence and the applied-through\nwatermark — never a workspace, device or user selector.",
+        "properties": {
+          "applied_through_sequence": {
+            "minimum": 0.0,
+            "title": "Applied Through Sequence",
+            "type": "integer"
+          },
+          "expected_previous_sequence": {
+            "minimum": 0.0,
+            "title": "Expected Previous Sequence",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_previous_sequence",
+          "applied_through_sequence"
+        ],
+        "title": "CursorAcknowledgementRequest",
+        "type": "object"
+      },
       "DeviceAuthorizationGrantState": {
         "description": "Closed browser device-authorization grant states (spec 11.4/12, 15.5).\n\nGrant expiry is decided against ``expires_at`` while pending; it is not a\nstored state.",
         "enum": [
@@ -1415,6 +1662,77 @@
           "exchanged"
         ],
         "title": "DeviceAuthorizationGrantState",
+        "type": "string"
+      },
+      "DeviceCursorReceiptData": {
+        "additionalProperties": false,
+        "description": "The frozen cursor watermarks of one device (spec 7.2/7.3).",
+        "properties": {
+          "acknowledged_sequence": {
+            "title": "Acknowledged Sequence",
+            "type": "integer"
+          },
+          "delivered_through_sequence": {
+            "title": "Delivered Through Sequence",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "acknowledged_sequence",
+          "delivered_through_sequence"
+        ],
+        "title": "DeviceCursorReceiptData",
+        "type": "object"
+      },
+      "DeviceEventPageData": {
+        "additionalProperties": false,
+        "description": "One bounded pull page of immutable events (spec 7.1).",
+        "properties": {
+          "acknowledged_sequence": {
+            "title": "Acknowledged Sequence",
+            "type": "integer"
+          },
+          "delivered_through_sequence": {
+            "title": "Delivered Through Sequence",
+            "type": "integer"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/DeviceSyncEventData"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "page_checkpoint_sequence": {
+            "title": "Page Checkpoint Sequence",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "acknowledged_sequence",
+          "page_checkpoint_sequence",
+          "delivered_through_sequence",
+          "events",
+          "has_more"
+        ],
+        "title": "DeviceEventPageData",
+        "type": "object"
+      },
+      "DeviceEventType": {
+        "description": "Closed vocabulary of canonical sync event types (spec 7.1).",
+        "enum": [
+          "created",
+          "updated",
+          "renamed",
+          "moved",
+          "deleted",
+          "restored"
+        ],
+        "title": "DeviceEventType",
         "type": "string"
       },
       "DeviceGrantContextData": {
@@ -1727,6 +2045,133 @@
         "title": "DeviceSelfRevokeData",
         "type": "object"
       },
+      "DeviceSyncEventData": {
+        "additionalProperties": false,
+        "description": "One immutable canonical sync event with its operation operands.",
+        "properties": {
+          "base_fingerprint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceFingerprintData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "base_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Version Id"
+          },
+          "committed_at": {
+            "format": "date-time",
+            "title": "Committed At",
+            "type": "string"
+          },
+          "current_fingerprint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceFingerprintData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Version Id"
+          },
+          "event_id": {
+            "format": "uuid",
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_sequence": {
+            "title": "Event Sequence",
+            "type": "integer"
+          },
+          "event_type": {
+            "$ref": "#/components/schemas/DeviceEventType"
+          },
+          "origin_device_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin Device Id"
+          },
+          "prior_locator": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prior Locator"
+          },
+          "resulting_locator": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resulting Locator"
+          },
+          "source_id": {
+            "format": "uuid",
+            "title": "Source Id",
+            "type": "string"
+          },
+          "tombstone_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tombstone Id"
+          }
+        },
+        "required": [
+          "event_id",
+          "event_sequence",
+          "event_type",
+          "source_id",
+          "committed_at"
+        ],
+        "title": "DeviceSyncEventData",
+        "type": "object"
+      },
       "ErrorCode": {
         "enum": [
           "configuration_invalid",
@@ -1829,7 +2274,21 @@
           "source_tombstone_not_found",
           "source_tombstone_closed",
           "source_lifecycle_version_conflict",
-          "source_lifecycle_commit_outcome_unknown"
+          "source_lifecycle_commit_outcome_unknown",
+          "device_cursor_gap",
+          "device_cursor_regression",
+          "device_cursor_ack_ahead",
+          "device_event_unavailable",
+          "device_event_integrity_failed",
+          "device_manifest_not_found",
+          "device_manifest_expired",
+          "device_manifest_state_invalid",
+          "device_manifest_page_invalid",
+          "device_manifest_page_replay_mismatch",
+          "device_manifest_digest_mismatch",
+          "device_manifest_policy_advanced",
+          "device_download_integrity_failed",
+          "device_sync_dependency_unavailable"
         ],
         "title": "ErrorCode",
         "type": "string"
@@ -2007,6 +2466,384 @@
           "password"
         ],
         "title": "LoginRequest",
+        "type": "object"
+      },
+      "ManifestActionData": {
+        "additionalProperties": false,
+        "description": "One frozen deterministic action of a planned run (spec 7.3).",
+        "properties": {
+          "action_index": {
+            "title": "Action Index",
+            "type": "integer"
+          },
+          "action_kind": {
+            "$ref": "#/components/schemas/ManifestActionKind"
+          },
+          "local_entry_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Entry Id"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManifestActionReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Id"
+          },
+          "source_locator_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Locator Id"
+          },
+          "source_tombstone_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Tombstone Id"
+          },
+          "source_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Version Id"
+          }
+        },
+        "required": [
+          "action_index",
+          "action_kind"
+        ],
+        "title": "ManifestActionData",
+        "type": "object"
+      },
+      "ManifestActionKind": {
+        "description": "Closed deterministic action kinds of manifest planning (spec 12.3).",
+        "enum": [
+          "upload",
+          "download",
+          "apply_tombstone",
+          "conflict",
+          "no_change",
+          "excluded"
+        ],
+        "title": "ManifestActionKind",
+        "type": "string"
+      },
+      "ManifestActionPageData": {
+        "additionalProperties": false,
+        "description": "One stable ordered page of frozen actions (spec 7.3).",
+        "properties": {
+          "actions": {
+            "items": {
+              "$ref": "#/components/schemas/ManifestActionData"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "manifest_run_id": {
+            "format": "uuid",
+            "title": "Manifest Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "manifest_run_id",
+          "actions",
+          "has_more"
+        ],
+        "title": "ManifestActionPageData",
+        "type": "object"
+      },
+      "ManifestActionReason": {
+        "description": "Closed planner/apply blocker tokens (spec 13).\n\nThese tokens are not route exceptions: they appear only in a conflict,\nexcluded or local repair action/trail surface and never turn one\nambiguous entry into a failed whole-manifest request.",
+        "enum": [
+          "device_manifest_identity_ambiguous",
+          "device_manifest_local_diverged",
+          "device_manifest_target_occupied",
+          "device_manifest_action_stale",
+          "device_manifest_policy_excluded"
+        ],
+        "title": "ManifestActionReason",
+        "type": "string"
+      },
+      "ManifestCompleteRequest": {
+        "additionalProperties": false,
+        "description": "The completion body with the exact planned run's final digest.",
+        "properties": {
+          "final_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Final Digest",
+            "type": "string"
+          }
+        },
+        "required": [
+          "final_digest"
+        ],
+        "title": "ManifestCompleteRequest",
+        "type": "object"
+      },
+      "ManifestEntryRequest": {
+        "additionalProperties": false,
+        "description": "One locally observed manifest entry of one page body (spec 7.3).\n\nCarries the opaque plugin-local entry ID, the optional client\nsource/version evidence, the normalized locator, the settled-byte\nfingerprint and the local observation generation — never a workspace,\ndevice or user selector.",
+        "properties": {
+          "fingerprint": {
+            "$ref": "#/components/schemas/SourceFingerprintData"
+          },
+          "known_source_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Known Source Id"
+          },
+          "known_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Known Version Id"
+          },
+          "local_entry_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Local Entry Id",
+            "type": "string"
+          },
+          "normalized_locator": {
+            "title": "Normalized Locator",
+            "type": "string"
+          },
+          "observation_generation": {
+            "minimum": 0.0,
+            "title": "Observation Generation",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "local_entry_id",
+          "normalized_locator",
+          "fingerprint",
+          "observation_generation"
+        ],
+        "title": "ManifestEntryRequest",
+        "type": "object"
+      },
+      "ManifestFinalizeRequest": {
+        "additionalProperties": false,
+        "description": "The finalize body with its total count and final digest (spec 7.3).",
+        "properties": {
+          "final_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Final Digest",
+            "type": "string"
+          },
+          "total_entry_count": {
+            "maximum": 100000.0,
+            "minimum": 0.0,
+            "title": "Total Entry Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_entry_count",
+          "final_digest"
+        ],
+        "title": "ManifestFinalizeRequest",
+        "type": "object"
+      },
+      "ManifestPageReceiptData": {
+        "additionalProperties": false,
+        "description": "The frozen acceptance of one manifest page (spec 7.3).",
+        "properties": {
+          "accepted_entry_count": {
+            "title": "Accepted Entry Count",
+            "type": "integer"
+          },
+          "manifest_run_id": {
+            "format": "uuid",
+            "title": "Manifest Run Id",
+            "type": "string"
+          },
+          "next_page_number": {
+            "title": "Next Page Number",
+            "type": "integer"
+          },
+          "page_number": {
+            "title": "Page Number",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "manifest_run_id",
+          "page_number",
+          "accepted_entry_count",
+          "next_page_number"
+        ],
+        "title": "ManifestPageReceiptData",
+        "type": "object"
+      },
+      "ManifestPageRequest": {
+        "additionalProperties": false,
+        "description": "The exact next ordered page of one manifest run (spec 7.3).",
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/ManifestEntryRequest"
+            },
+            "maxItems": 500,
+            "title": "Entries",
+            "type": "array"
+          },
+          "page_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Page Digest",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entries",
+          "page_digest"
+        ],
+        "title": "ManifestPageRequest",
+        "type": "object"
+      },
+      "ManifestRunReceiptData": {
+        "additionalProperties": false,
+        "description": "The frozen state of one manifest run (spec 7.3).",
+        "properties": {
+          "base_acknowledged_sequence": {
+            "title": "Base Acknowledged Sequence",
+            "type": "integer"
+          },
+          "checkpoint_sequence": {
+            "title": "Checkpoint Sequence",
+            "type": "integer"
+          },
+          "client_observation_generation": {
+            "title": "Client Observation Generation",
+            "type": "integer"
+          },
+          "entry_count": {
+            "title": "Entry Count",
+            "type": "integer"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "manifest_run_id": {
+            "format": "uuid",
+            "title": "Manifest Run Id",
+            "type": "string"
+          },
+          "next_page_number": {
+            "title": "Next Page Number",
+            "type": "integer"
+          },
+          "policy_revision_number": {
+            "title": "Policy Revision Number",
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/ManifestRunState"
+          }
+        },
+        "required": [
+          "manifest_run_id",
+          "state",
+          "base_acknowledged_sequence",
+          "checkpoint_sequence",
+          "policy_revision_number",
+          "client_observation_generation",
+          "next_page_number",
+          "entry_count",
+          "expires_at"
+        ],
+        "title": "ManifestRunReceiptData",
+        "type": "object"
+      },
+      "ManifestRunState": {
+        "description": "Closed lifecycle states of one manifest run (spec 6.2/7.3).",
+        "enum": [
+          "collecting",
+          "planned",
+          "applying",
+          "completed",
+          "expired",
+          "failed"
+        ],
+        "title": "ManifestRunState",
+        "type": "string"
+      },
+      "ManifestStartRequest": {
+        "additionalProperties": false,
+        "description": "The strict manifest run start body (spec 7.3).",
+        "properties": {
+          "client_observation_generation": {
+            "minimum": 0.0,
+            "title": "Client Observation Generation",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "client_observation_generation"
+        ],
+        "title": "ManifestStartRequest",
         "type": "object"
       },
       "NormalizedLocator": {
@@ -3796,6 +4633,33 @@
         "title": "SmallFileTerminalResultKind",
         "type": "string"
       },
+      "SourceFingerprintData": {
+        "additionalProperties": false,
+        "description": "The settled-byte hash/size/media identity evidence of one version.",
+        "properties": {
+          "media_type": {
+            "title": "Media Type",
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size_bytes": {
+            "minimum": 0.0,
+            "title": "Size Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sha256",
+          "size_bytes",
+          "media_type"
+        ],
+        "title": "SourceFingerprintData",
+        "type": "object"
+      },
       "SourceLifecycleCommitCounterData": {
         "additionalProperties": false,
         "description": "One commit counter: closed labels plus its count.",
@@ -5171,6 +6035,120 @@
         "summary": "Commit Source Lifecycle Event"
       }
     },
+    "/api/sources/{source_id}/versions/{source_version_id}/content": {
+      "get": {
+        "description": "Stream the exact verified bytes of one exact source version.\n\nThe verified content context is entered — and fully verified — by the\nprimed first read below, still inside the endpoint, so membership,\npolicy and integrity failures render the canonical JSON envelope\ninstead of a broken stream. Only then does the response start carry\nthe exact content headers; the context stays open until the streaming\ngenerator closes, and a mid-stream failure terminates the transport\nwithout ever attempting a second JSON body.",
+        "operationId": "downloadDeviceSourceVersion",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Source Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "source_version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Source Version Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The exact verified bytes of the source version as one binary payload with its exact Content-Length, Content-Type and X-Content-SHA256 headers",
+            "headers": {
+              "X-Content-SHA256": {
+                "description": "The exact lowercase SHA-256 of the streamed bytes",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Download Source Version"
+      }
+    },
+    "/api/sync/cursor-acknowledgements": {
+      "post": {
+        "description": "Advance the durable cursor after local terminalization.",
+        "operationId": "acknowledgeDeviceSyncCursor",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CursorAcknowledgementRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_DeviceCursorReceiptData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Acknowledge Cursor"
+      }
+    },
+    "/api/sync/events": {
+      "get": {
+        "description": "Pull one bounded page of immutable events after the acknowledged cursor.",
+        "operationId": "pullDeviceSyncEvents",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_DeviceEventPageData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Pull Events"
+      }
+    },
     "/api/sync/exclusion-policy/keysets": {
       "get": {
         "description": "Return the next bounded ordered keyset chain page (spec 13.3).",
@@ -5267,6 +6245,247 @@
           }
         ],
         "summary": "Preflight Journal Event"
+      }
+    },
+    "/api/sync/manifests": {
+      "post": {
+        "description": "Start or exactly resume the device's manifest run.",
+        "operationId": "startDeviceManifest",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManifestStartRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_ManifestRunReceiptData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Start Manifest"
+      }
+    },
+    "/api/sync/manifests/{manifest_run_id}/actions": {
+      "get": {
+        "description": "Read one deterministic action page of the planned run.",
+        "operationId": "listDeviceManifestActions",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "manifest_run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Manifest Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after_action_index",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "After Action Index",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 500,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_ManifestActionPageData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "List Manifest Actions"
+      }
+    },
+    "/api/sync/manifests/{manifest_run_id}/complete": {
+      "post": {
+        "description": "Complete the exact planned run and advance the cursor.",
+        "operationId": "completeDeviceManifest",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "manifest_run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Manifest Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManifestCompleteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_DeviceCursorReceiptData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Complete Manifest"
+      }
+    },
+    "/api/sync/manifests/{manifest_run_id}/finalize": {
+      "post": {
+        "description": "Finalize one run with its total count and final digest.",
+        "operationId": "finalizeDeviceManifest",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "manifest_run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Manifest Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManifestFinalizeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_ManifestRunReceiptData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Finalize Manifest"
+      }
+    },
+    "/api/sync/manifests/{manifest_run_id}/pages/{page_number}": {
+      "put": {
+        "description": "Put the exact next ordered page of one manifest run.",
+        "operationId": "appendDeviceManifestPage",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "manifest_run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Manifest Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "page_number",
+            "required": true,
+            "schema": {
+              "minimum": 0,
+              "title": "Page Number",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManifestPageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_ManifestPageReceiptData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Append Manifest Page"
       }
     },
     "/api/uploads/{operation_id}/content": {

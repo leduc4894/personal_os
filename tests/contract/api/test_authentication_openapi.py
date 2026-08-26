@@ -40,6 +40,17 @@ CREDENTIAL_ROUTE_SECURITY: Final[dict[tuple[str, str], str]] = {
     ("/api/sync/journal-events/preflight", "post"): "AccessCredential",
     ("/api/uploads/{operation_id}/content", "put"): "AccessCredential",
     ("/api/sources/lifecycle-events", "post"): "AccessCredential",
+    ("/api/sync/events", "get"): "AccessCredential",
+    ("/api/sync/cursor-acknowledgements", "post"): "AccessCredential",
+    ("/api/sync/manifests", "post"): "AccessCredential",
+    ("/api/sync/manifests/{manifest_run_id}/pages/{page_number}", "put"): "AccessCredential",
+    ("/api/sync/manifests/{manifest_run_id}/finalize", "post"): "AccessCredential",
+    ("/api/sync/manifests/{manifest_run_id}/actions", "get"): "AccessCredential",
+    ("/api/sync/manifests/{manifest_run_id}/complete", "post"): "AccessCredential",
+    (
+        "/api/sources/{source_id}/versions/{source_version_id}/content",
+        "get",
+    ): "AccessCredential",
 }
 CREDENTIAL_ROUTE_PATHS: Final[frozenset[str]] = frozenset(
     path for path, _method in CREDENTIAL_ROUTE_SECURITY

@@ -9,14 +9,15 @@ malformed), loads the exclusion-policy signing settings and their Ed25519
 private key through the same secret-file boundary, loads the R2
 object-storage settings and their two credential files through the same
 boundary, configures structured diagnostics, builds the database lifecycle,
-the web-authentication runtime, the exclusion-policy runtime and the
-small-file sync runtime over the real PostgreSQL and R2 adapters (the R2
-client opens lazily at the first store call inside the serving loop), and
+the web-authentication runtime, the exclusion-policy runtime, the
+small-file sync runtime and the device sync runtime over the real PostgreSQL
+and R2 adapters (each R2 client opens lazily at the first store call inside
+the serving loop), and
 builds the FastAPI application (wiring the lifecycle into the application
 lifespan so the engine starts on startup, the keyring-reference verification
 refuses startup when PostgreSQL references a key ID the keyring omits, the
 exclusion-policy signer proof refuses startup when the derived key ID is not
-the current key of the latest canonical keyset, the R2 client closes on
+the current key of the latest canonical keyset, the R2 clients close on
 shutdown, and the engine is disposed on shutdown), then runs
 Uvicorn in single-process mode with the approved flags: no server header, no
 proxy headers, no access log, no reload and exactly one worker.
@@ -51,6 +52,7 @@ from api_runtime.authentication_composition import (
 from api_runtime.authentication_crypto import load_authentication_keyring
 from api_runtime.authentication_settings import load_authentication_settings
 from api_runtime.database_lifecycle import DatabaseRuntimeLifecycle
+from api_runtime.device_sync_composition import compose_device_sync
 from api_runtime.exclusion_policy_composition import compose_exclusion_policy
 from api_runtime.exclusion_policy_crypto import TrustAnchorEd25519Verifier
 from api_runtime.exclusion_policy_settings import (
@@ -191,6 +193,16 @@ def run_server(
                 metrics=lifecycle_metrics,
                 web_authentication=web_authentication,
             )
+            # The device sync runtime owns its own lazy R2 client manager so
+            # the verified download reader stays independently disposable;
+            # the client opens only at the first download inside the serving
+            # loop and closes with the process on shutdown.
+            device_sync = compose_device_sync(
+                engine=engine,
+                object_storage_settings=object_storage_settings,
+                object_storage_credentials=object_storage_credentials,
+                logger=logger,
+            )
 
             @asynccontextmanager
             async def database_lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -216,6 +228,8 @@ def run_server(
                 finally:
                     if small_file_sync.aclose is not None:
                         await small_file_sync.aclose()
+                    if device_sync.aclose is not None:
+                        await device_sync.aclose()
                     await lifecycle.stop()
 
             application = create_api_application(
@@ -225,6 +239,7 @@ def run_server(
                 exclusion_policy=exclusion_policy,
                 small_file_sync=small_file_sync,
                 source_lifecycle=source_lifecycle,
+                device_sync=device_sync,
                 event_sink=logger,
                 lifespan=database_lifespan,
             )

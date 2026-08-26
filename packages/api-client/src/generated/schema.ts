@@ -646,6 +646,74 @@ export type paths = {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/sources/{source_id}/versions/{source_version_id}/content": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Download Source Version
+         * @description Stream the exact verified bytes of one exact source version.
+         *
+         *     The verified content context is entered — and fully verified — by the
+         *     primed first read below, still inside the endpoint, so membership,
+         *     policy and integrity failures render the canonical JSON envelope
+         *     instead of a broken stream. Only then does the response start carry
+         *     the exact content headers; the context stays open until the streaming
+         *     generator closes, and a mid-stream failure terminates the transport
+         *     without ever attempting a second JSON body.
+         */
+        readonly get: operations["downloadDeviceSourceVersion"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/sync/cursor-acknowledgements": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Acknowledge Cursor
+         * @description Advance the durable cursor after local terminalization.
+         */
+        readonly post: operations["acknowledgeDeviceSyncCursor"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/sync/events": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Pull Events
+         * @description Pull one bounded page of immutable events after the acknowledged cursor.
+         */
+        readonly get: operations["pullDeviceSyncEvents"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/sync/exclusion-policy/keysets": {
         readonly parameters: {
             readonly query?: never;
@@ -700,6 +768,106 @@ export type paths = {
          * @description Run one journal-event preflight and render its typed outcome.
          */
         readonly post: operations["preflightJournalEventUpload"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/sync/manifests": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Start Manifest
+         * @description Start or exactly resume the device's manifest run.
+         */
+        readonly post: operations["startDeviceManifest"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/sync/manifests/{manifest_run_id}/actions": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * List Manifest Actions
+         * @description Read one deterministic action page of the planned run.
+         */
+        readonly get: operations["listDeviceManifestActions"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/sync/manifests/{manifest_run_id}/complete": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Complete Manifest
+         * @description Complete the exact planned run and advance the cursor.
+         */
+        readonly post: operations["completeDeviceManifest"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/sync/manifests/{manifest_run_id}/finalize": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Finalize Manifest
+         * @description Finalize one run with its total count and final digest.
+         */
+        readonly post: operations["finalizeDeviceManifest"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/sync/manifests/{manifest_run_id}/pages/{page_number}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        /**
+         * Append Manifest Page
+         * @description Put the exact next ordered page of one manifest run.
+         */
+        readonly put: operations["appendDeviceManifestPage"];
+        readonly post?: never;
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -832,6 +1000,36 @@ export type components = {
              */
             readonly warnings: readonly components["schemas"]["ApiWarning"][];
         };
+        /** ApiEnvelope[DeviceCursorReceiptData] */
+        readonly ApiEnvelope_DeviceCursorReceiptData_: {
+            readonly data: components["schemas"]["DeviceCursorReceiptData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[DeviceEventPageData] */
+        readonly ApiEnvelope_DeviceEventPageData_: {
+            readonly data: components["schemas"]["DeviceEventPageData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
         /** ApiEnvelope[DeviceGrantContextData] */
         readonly ApiEnvelope_DeviceGrantContextData_: {
             readonly data: components["schemas"]["DeviceGrantContextData"] | null;
@@ -940,6 +1138,51 @@ export type components = {
         /** ApiEnvelope[LivenessData] */
         readonly ApiEnvelope_LivenessData_: {
             readonly data: components["schemas"]["LivenessData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[ManifestActionPageData] */
+        readonly ApiEnvelope_ManifestActionPageData_: {
+            readonly data: components["schemas"]["ManifestActionPageData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[ManifestPageReceiptData] */
+        readonly ApiEnvelope_ManifestPageReceiptData_: {
+            readonly data: components["schemas"]["ManifestPageReceiptData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[ManifestRunReceiptData] */
+        readonly ApiEnvelope_ManifestRunReceiptData_: {
+            readonly data: components["schemas"]["ManifestRunReceiptData"] | null;
             readonly error: components["schemas"]["ApiErrorBody"] | null;
             /**
              * Request Id
@@ -1226,6 +1469,19 @@ export type components = {
             readonly message: string;
         };
         /**
+         * CursorAcknowledgementRequest
+         * @description The strict cursor acknowledgement body (spec 7.2).
+         *
+         *     Carries only the expected prior sequence and the applied-through
+         *     watermark — never a workspace, device or user selector.
+         */
+        readonly CursorAcknowledgementRequest: {
+            /** Applied Through Sequence */
+            readonly applied_through_sequence: number;
+            /** Expected Previous Sequence */
+            readonly expected_previous_sequence: number;
+        };
+        /**
          * DeviceAuthorizationGrantState
          * @description Closed browser device-authorization grant states (spec 11.4/12, 15.5).
          *
@@ -1234,6 +1490,38 @@ export type components = {
          * @enum {string}
          */
         readonly DeviceAuthorizationGrantState: "pending" | "approved" | "denied" | "exchanged";
+        /**
+         * DeviceCursorReceiptData
+         * @description The frozen cursor watermarks of one device (spec 7.2/7.3).
+         */
+        readonly DeviceCursorReceiptData: {
+            /** Acknowledged Sequence */
+            readonly acknowledged_sequence: number;
+            /** Delivered Through Sequence */
+            readonly delivered_through_sequence: number;
+        };
+        /**
+         * DeviceEventPageData
+         * @description One bounded pull page of immutable events (spec 7.1).
+         */
+        readonly DeviceEventPageData: {
+            /** Acknowledged Sequence */
+            readonly acknowledged_sequence: number;
+            /** Delivered Through Sequence */
+            readonly delivered_through_sequence: number;
+            /** Events */
+            readonly events: readonly components["schemas"]["DeviceSyncEventData"][];
+            /** Has More */
+            readonly has_more: boolean;
+            /** Page Checkpoint Sequence */
+            readonly page_checkpoint_sequence: number;
+        };
+        /**
+         * DeviceEventType
+         * @description Closed vocabulary of canonical sync event types (spec 7.1).
+         * @enum {string}
+         */
+        readonly DeviceEventType: "created" | "updated" | "renamed" | "moved" | "deleted" | "restored";
         /**
          * DeviceGrantContextData
          * @description The approval-page display context of one pending grant (spec 11.3).
@@ -1431,10 +1719,48 @@ export type components = {
             readonly token_family_id: string;
         };
         /**
+         * DeviceSyncEventData
+         * @description One immutable canonical sync event with its operation operands.
+         */
+        readonly DeviceSyncEventData: {
+            readonly base_fingerprint?: components["schemas"]["SourceFingerprintData"] | null;
+            /** Base Version Id */
+            readonly base_version_id?: string | null;
+            /**
+             * Committed At
+             * Format: date-time
+             */
+            readonly committed_at: string;
+            readonly current_fingerprint?: components["schemas"]["SourceFingerprintData"] | null;
+            /** Current Version Id */
+            readonly current_version_id?: string | null;
+            /**
+             * Event Id
+             * Format: uuid
+             */
+            readonly event_id: string;
+            /** Event Sequence */
+            readonly event_sequence: number;
+            readonly event_type: components["schemas"]["DeviceEventType"];
+            /** Origin Device Id */
+            readonly origin_device_id?: string | null;
+            /** Prior Locator */
+            readonly prior_locator?: string | null;
+            /** Resulting Locator */
+            readonly resulting_locator?: string | null;
+            /**
+             * Source Id
+             * Format: uuid
+             */
+            readonly source_id: string;
+            /** Tombstone Id */
+            readonly tombstone_id?: string | null;
+        };
+        /**
          * ErrorCode
          * @enum {string}
          */
-        readonly ErrorCode: "configuration_invalid" | "configuration_unknown_key" | "configuration_secret_invalid" | "secret_file_missing" | "secret_file_outside_root" | "secret_file_invalid_type" | "secret_file_insecure_permissions" | "secret_file_too_large" | "secret_file_invalid_encoding" | "secret_file_empty" | "diagnostic_context_invalid" | "diagnostic_payload_rejected" | "internal_error" | "database_migration_configuration_invalid" | "database_connection_unavailable" | "database_migration_busy" | "database_schema_contract_invalid" | "database_destructive_downgrade_refused" | "object_storage_configuration_invalid" | "object_storage_input_invalid" | "object_storage_busy" | "object_storage_unavailable" | "object_storage_access_denied" | "object_storage_contract_invalid" | "object_storage_object_missing" | "object_storage_integrity_failed" | "object_storage_metadata_conflict" | "source_publish_input_invalid" | "source_not_found" | "source_already_exists" | "source_state_invalid" | "source_version_conflict" | "source_idempotency_mismatch" | "source_event_identity_mismatch" | "source_verified_receipt_stale" | "source_content_object_conflict" | "source_concurrency_busy" | "source_concurrency_invariant_failed" | "source_commit_outcome_unknown" | "projection_dispatch_unavailable" | "projection_intent_contract_invalid" | "identity_bootstrap_input_invalid" | "identity_bootstrap_state_conflict" | "canonical_read_state_invalid" | "canonical_recovery_environment_refused" | "canonical_recovery_configuration_invalid" | "canonical_recovery_snapshot_busy" | "canonical_recovery_bundle_exists" | "canonical_recovery_bundle_invalid" | "canonical_recovery_target_not_empty" | "canonical_recovery_dependency_unavailable" | "canonical_recovery_integrity_failed" | "canonical_recovery_restore_failed" | "api_request_malformed" | "api_request_validation_failed" | "api_route_not_found" | "api_method_not_allowed" | "authentication_required" | "authentication_failed" | "authentication_rate_limited" | "recent_authentication_required" | "csrf_validation_failed" | "authorization_scope_denied" | "totp_enrollment_state_invalid" | "device_authorization_pending" | "device_authorization_slow_down" | "device_authorization_denied" | "device_authorization_expired" | "device_authorization_state_invalid" | "device_revocation_confirmation_invalid" | "device_credential_invalid" | "device_revoked" | "device_token_reuse_detected" | "plugin_version_unsupported" | "exclusion_policy_input_invalid" | "exclusion_policy_not_initialized" | "exclusion_policy_draft_conflict" | "exclusion_policy_preview_pending" | "exclusion_policy_preview_failed" | "exclusion_policy_preview_expired" | "exclusion_policy_preview_stale" | "exclusion_policy_confirmation_invalid" | "exclusion_policy_denied" | "exclusion_policy_indeterminate" | "exclusion_policy_snapshot_outdated" | "exclusion_policy_signing_unavailable" | "exclusion_policy_commit_outcome_unknown" | "small_file_preflight_invalid" | "small_file_operation_not_found" | "small_file_operation_expired" | "small_file_operation_identity_mismatch" | "small_file_size_limit_exceeded" | "small_file_content_integrity_failed" | "small_file_upload_state_invalid" | "source_lifecycle_input_invalid" | "source_locator_missing" | "source_locator_conflict" | "source_tombstone_not_found" | "source_tombstone_closed" | "source_lifecycle_version_conflict" | "source_lifecycle_commit_outcome_unknown";
+        readonly ErrorCode: "configuration_invalid" | "configuration_unknown_key" | "configuration_secret_invalid" | "secret_file_missing" | "secret_file_outside_root" | "secret_file_invalid_type" | "secret_file_insecure_permissions" | "secret_file_too_large" | "secret_file_invalid_encoding" | "secret_file_empty" | "diagnostic_context_invalid" | "diagnostic_payload_rejected" | "internal_error" | "database_migration_configuration_invalid" | "database_connection_unavailable" | "database_migration_busy" | "database_schema_contract_invalid" | "database_destructive_downgrade_refused" | "object_storage_configuration_invalid" | "object_storage_input_invalid" | "object_storage_busy" | "object_storage_unavailable" | "object_storage_access_denied" | "object_storage_contract_invalid" | "object_storage_object_missing" | "object_storage_integrity_failed" | "object_storage_metadata_conflict" | "source_publish_input_invalid" | "source_not_found" | "source_already_exists" | "source_state_invalid" | "source_version_conflict" | "source_idempotency_mismatch" | "source_event_identity_mismatch" | "source_verified_receipt_stale" | "source_content_object_conflict" | "source_concurrency_busy" | "source_concurrency_invariant_failed" | "source_commit_outcome_unknown" | "projection_dispatch_unavailable" | "projection_intent_contract_invalid" | "identity_bootstrap_input_invalid" | "identity_bootstrap_state_conflict" | "canonical_read_state_invalid" | "canonical_recovery_environment_refused" | "canonical_recovery_configuration_invalid" | "canonical_recovery_snapshot_busy" | "canonical_recovery_bundle_exists" | "canonical_recovery_bundle_invalid" | "canonical_recovery_target_not_empty" | "canonical_recovery_dependency_unavailable" | "canonical_recovery_integrity_failed" | "canonical_recovery_restore_failed" | "api_request_malformed" | "api_request_validation_failed" | "api_route_not_found" | "api_method_not_allowed" | "authentication_required" | "authentication_failed" | "authentication_rate_limited" | "recent_authentication_required" | "csrf_validation_failed" | "authorization_scope_denied" | "totp_enrollment_state_invalid" | "device_authorization_pending" | "device_authorization_slow_down" | "device_authorization_denied" | "device_authorization_expired" | "device_authorization_state_invalid" | "device_revocation_confirmation_invalid" | "device_credential_invalid" | "device_revoked" | "device_token_reuse_detected" | "plugin_version_unsupported" | "exclusion_policy_input_invalid" | "exclusion_policy_not_initialized" | "exclusion_policy_draft_conflict" | "exclusion_policy_preview_pending" | "exclusion_policy_preview_failed" | "exclusion_policy_preview_expired" | "exclusion_policy_preview_stale" | "exclusion_policy_confirmation_invalid" | "exclusion_policy_denied" | "exclusion_policy_indeterminate" | "exclusion_policy_snapshot_outdated" | "exclusion_policy_signing_unavailable" | "exclusion_policy_commit_outcome_unknown" | "small_file_preflight_invalid" | "small_file_operation_not_found" | "small_file_operation_expired" | "small_file_operation_identity_mismatch" | "small_file_size_limit_exceeded" | "small_file_content_integrity_failed" | "small_file_upload_state_invalid" | "source_lifecycle_input_invalid" | "source_locator_missing" | "source_locator_conflict" | "source_tombstone_not_found" | "source_tombstone_closed" | "source_lifecycle_version_conflict" | "source_lifecycle_commit_outcome_unknown" | "device_cursor_gap" | "device_cursor_regression" | "device_cursor_ack_ahead" | "device_event_unavailable" | "device_event_integrity_failed" | "device_manifest_not_found" | "device_manifest_expired" | "device_manifest_state_invalid" | "device_manifest_page_invalid" | "device_manifest_page_replay_mismatch" | "device_manifest_digest_mismatch" | "device_manifest_policy_advanced" | "device_download_integrity_failed" | "device_sync_dependency_unavailable";
         /**
          * EvaluationMetricOutcome
          * @description The closed evaluation outcomes used as metric labels.
@@ -1513,6 +1839,167 @@ export type components = {
             readonly password: string;
             /** Username */
             readonly username: string;
+        };
+        /**
+         * ManifestActionData
+         * @description One frozen deterministic action of a planned run (spec 7.3).
+         */
+        readonly ManifestActionData: {
+            /** Action Index */
+            readonly action_index: number;
+            readonly action_kind: components["schemas"]["ManifestActionKind"];
+            /** Local Entry Id */
+            readonly local_entry_id?: string | null;
+            readonly reason?: components["schemas"]["ManifestActionReason"] | null;
+            /** Source Id */
+            readonly source_id?: string | null;
+            /** Source Locator Id */
+            readonly source_locator_id?: string | null;
+            /** Source Tombstone Id */
+            readonly source_tombstone_id?: string | null;
+            /** Source Version Id */
+            readonly source_version_id?: string | null;
+        };
+        /**
+         * ManifestActionKind
+         * @description Closed deterministic action kinds of manifest planning (spec 12.3).
+         * @enum {string}
+         */
+        readonly ManifestActionKind: "upload" | "download" | "apply_tombstone" | "conflict" | "no_change" | "excluded";
+        /**
+         * ManifestActionPageData
+         * @description One stable ordered page of frozen actions (spec 7.3).
+         */
+        readonly ManifestActionPageData: {
+            /** Actions */
+            readonly actions: readonly components["schemas"]["ManifestActionData"][];
+            /** Has More */
+            readonly has_more: boolean;
+            /**
+             * Manifest Run Id
+             * Format: uuid
+             */
+            readonly manifest_run_id: string;
+        };
+        /**
+         * ManifestActionReason
+         * @description Closed planner/apply blocker tokens (spec 13).
+         *
+         *     These tokens are not route exceptions: they appear only in a conflict,
+         *     excluded or local repair action/trail surface and never turn one
+         *     ambiguous entry into a failed whole-manifest request.
+         * @enum {string}
+         */
+        readonly ManifestActionReason: "device_manifest_identity_ambiguous" | "device_manifest_local_diverged" | "device_manifest_target_occupied" | "device_manifest_action_stale" | "device_manifest_policy_excluded";
+        /**
+         * ManifestCompleteRequest
+         * @description The completion body with the exact planned run's final digest.
+         */
+        readonly ManifestCompleteRequest: {
+            /** Final Digest */
+            readonly final_digest: string;
+        };
+        /**
+         * ManifestEntryRequest
+         * @description One locally observed manifest entry of one page body (spec 7.3).
+         *
+         *     Carries the opaque plugin-local entry ID, the optional client
+         *     source/version evidence, the normalized locator, the settled-byte
+         *     fingerprint and the local observation generation — never a workspace,
+         *     device or user selector.
+         */
+        readonly ManifestEntryRequest: {
+            readonly fingerprint: components["schemas"]["SourceFingerprintData"];
+            /** Known Source Id */
+            readonly known_source_id?: string | null;
+            /** Known Version Id */
+            readonly known_version_id?: string | null;
+            /** Local Entry Id */
+            readonly local_entry_id: string;
+            /** Normalized Locator */
+            readonly normalized_locator: string;
+            /** Observation Generation */
+            readonly observation_generation: number;
+        };
+        /**
+         * ManifestFinalizeRequest
+         * @description The finalize body with its total count and final digest (spec 7.3).
+         */
+        readonly ManifestFinalizeRequest: {
+            /** Final Digest */
+            readonly final_digest: string;
+            /** Total Entry Count */
+            readonly total_entry_count: number;
+        };
+        /**
+         * ManifestPageReceiptData
+         * @description The frozen acceptance of one manifest page (spec 7.3).
+         */
+        readonly ManifestPageReceiptData: {
+            /** Accepted Entry Count */
+            readonly accepted_entry_count: number;
+            /**
+             * Manifest Run Id
+             * Format: uuid
+             */
+            readonly manifest_run_id: string;
+            /** Next Page Number */
+            readonly next_page_number: number;
+            /** Page Number */
+            readonly page_number: number;
+        };
+        /**
+         * ManifestPageRequest
+         * @description The exact next ordered page of one manifest run (spec 7.3).
+         */
+        readonly ManifestPageRequest: {
+            /** Entries */
+            readonly entries: readonly components["schemas"]["ManifestEntryRequest"][];
+            /** Page Digest */
+            readonly page_digest: string;
+        };
+        /**
+         * ManifestRunReceiptData
+         * @description The frozen state of one manifest run (spec 7.3).
+         */
+        readonly ManifestRunReceiptData: {
+            /** Base Acknowledged Sequence */
+            readonly base_acknowledged_sequence: number;
+            /** Checkpoint Sequence */
+            readonly checkpoint_sequence: number;
+            /** Client Observation Generation */
+            readonly client_observation_generation: number;
+            /** Entry Count */
+            readonly entry_count: number;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            readonly expires_at: string;
+            /**
+             * Manifest Run Id
+             * Format: uuid
+             */
+            readonly manifest_run_id: string;
+            /** Next Page Number */
+            readonly next_page_number: number;
+            /** Policy Revision Number */
+            readonly policy_revision_number: number;
+            readonly state: components["schemas"]["ManifestRunState"];
+        };
+        /**
+         * ManifestRunState
+         * @description Closed lifecycle states of one manifest run (spec 6.2/7.3).
+         * @enum {string}
+         */
+        readonly ManifestRunState: "collecting" | "planned" | "applying" | "completed" | "expired" | "failed";
+        /**
+         * ManifestStartRequest
+         * @description The strict manifest run start body (spec 7.3).
+         */
+        readonly ManifestStartRequest: {
+            /** Client Observation Generation */
+            readonly client_observation_generation: number;
         };
         /**
          * NormalizedLocator
@@ -2338,6 +2825,18 @@ export type components = {
          * @enum {string}
          */
         readonly SmallFileTerminalResultKind: "committed" | "no_change";
+        /**
+         * SourceFingerprintData
+         * @description The settled-byte hash/size/media identity evidence of one version.
+         */
+        readonly SourceFingerprintData: {
+            /** Media Type */
+            readonly media_type: string;
+            /** Sha256 */
+            readonly sha256: string;
+            /** Size Bytes */
+            readonly size_bytes: number;
+        };
         /**
          * SourceLifecycleCommitCounterData
          * @description One commit counter: closed labels plus its count.
@@ -3301,6 +3800,75 @@ export interface operations {
             };
         };
     };
+    readonly downloadDeviceSourceVersion: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly source_id: string;
+                readonly source_version_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description The exact verified bytes of the source version as one binary payload with its exact Content-Length, Content-Type and X-Content-SHA256 headers */
+            readonly 200: {
+                headers: {
+                    /** @description The exact lowercase SHA-256 of the streamed bytes */
+                    readonly "X-Content-SHA256"?: string;
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/octet-stream": string;
+                };
+            };
+        };
+    };
+    readonly acknowledgeDeviceSyncCursor: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["CursorAcknowledgementRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_DeviceCursorReceiptData_"];
+                };
+            };
+        };
+    };
+    readonly pullDeviceSyncEvents: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_DeviceEventPageData_"];
+                };
+            };
+        };
+    };
     readonly listExclusionPolicyKeysets: {
         readonly parameters: {
             readonly query?: {
@@ -3370,6 +3938,134 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["ApiEnvelope_SmallFilePreflightData_"];
+                };
+            };
+        };
+    };
+    readonly startDeviceManifest: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ManifestStartRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_ManifestRunReceiptData_"];
+                };
+            };
+        };
+    };
+    readonly listDeviceManifestActions: {
+        readonly parameters: {
+            readonly query?: {
+                readonly after_action_index?: number;
+                readonly limit?: number;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly manifest_run_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_ManifestActionPageData_"];
+                };
+            };
+        };
+    };
+    readonly completeDeviceManifest: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly manifest_run_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ManifestCompleteRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_DeviceCursorReceiptData_"];
+                };
+            };
+        };
+    };
+    readonly finalizeDeviceManifest: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly manifest_run_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ManifestFinalizeRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_ManifestRunReceiptData_"];
+                };
+            };
+        };
+    };
+    readonly appendDeviceManifestPage: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly manifest_run_id: string;
+                readonly page_number: number;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ManifestPageRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_ManifestPageReceiptData_"];
                 };
             };
         };

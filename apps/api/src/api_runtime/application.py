@@ -4,11 +4,12 @@ The factory composes exactly two health routes plus the five session/password
 routes, six TOTP/recovery routes, seven browser device-authorization and
 device-token routes, two Admin device routes of the injected
 web-authentication runtime, the optional runtime-gated exclusion-policy,
-small-file sync and source-lifecycle route sets — including the read-only
-sync rejection diagnostics Admin route of the small-file-sync runtime and the
-read-only policy diagnostics Admin route of the exclusion-policy runtime —
-and the local/test-only OpenAPI document route, registers the four envelope
-exception handlers,
+small-file sync, source-lifecycle and device-sync route sets — including the
+read-only sync rejection diagnostics Admin route of the small-file-sync
+runtime, the read-only policy diagnostics Admin route of the
+exclusion-policy runtime, the eight device sync routes of the device
+reconciliation surface and the local/test-only OpenAPI document route —
+registers the four envelope exception handlers,
 strips FastAPI's default validation-error response from the generated
 document (the shared handler emits the canonical error envelope instead),
 declares the dedicated device Bearer schemes of spec 16 the routes have not
@@ -61,6 +62,15 @@ from api_runtime.device_authorization_routes import (
     POLLING_BEARER_SCHEME,
     create_device_authorization_route_endpoints,
 )
+from api_runtime.device_sync_composition import DeviceSyncRuntime
+from api_runtime.device_sync_models import (
+    DeviceCursorReceiptData,
+    DeviceEventPageData,
+    ManifestActionPageData,
+    ManifestPageReceiptData,
+    ManifestRunReceiptData,
+)
+from api_runtime.device_sync_routes import create_device_sync_route_endpoints
 from api_runtime.exclusion_policy_composition import ExclusionPolicyRuntime
 from api_runtime.exclusion_policy_diagnostics_models import ExclusionPolicyDiagnosticsData
 from api_runtime.exclusion_policy_diagnostics_routes import (
@@ -149,6 +159,13 @@ _DECLARED_DEVICE_BEARER_SCHEMES: Final[tuple[HTTPBearer, ...]] = (
 #: route-template membership the correlation middleware uses.
 _NO_STORE_HEADERS: Final[Mapping[str, str]] = MappingProxyType({"cache-control": "no-store"})
 
+#: The operations whose documented success is the binary exception to the
+#: JSON envelope (spec 7.4). The document hook below keeps their success
+#: content exactly the one ``application/octet-stream`` payload the route
+#: declared, because FastAPI unconditionally merges a default
+#: ``application/json`` schema into every custom response entry.
+_BINARY_SUCCESS_OPERATION_IDS: Final[frozenset[str]] = frozenset({"downloadDeviceSourceVersion"})
+
 #: Closed status-to-code table for framework ``HTTPException`` responses. The
 #: two dependency statuses (503) are absent on purpose: a bare status cannot
 #: name which registry error the framework meant, so typed readiness failures
@@ -174,16 +191,18 @@ def create_api_application(
     exclusion_policy: ExclusionPolicyRuntime | None = None,
     small_file_sync: SmallFileSyncRuntime | None = None,
     source_lifecycle: SourceLifecycleRuntime | None = None,
+    device_sync: DeviceSyncRuntime | None = None,
     event_sink: DiagnosticEventSink | None = None,
     lifespan: Lifespan[FastAPI] | None = None,
 ) -> FastAPI:
     """Compose the runnable API application for one runtime environment.
 
-    The exclusion-policy, small-file-sync and source-lifecycle runtimes are
-    optional only so the authentication-only contract compositions of the
-    earlier children stay constructible; the serve graph and the full
-    contract document always compose them, and the routes register only when
-    the runtime is present — never through router auto-discovery.
+    The exclusion-policy, small-file-sync, source-lifecycle and device-sync
+    runtimes are optional only so the authentication-only contract
+    compositions of the earlier children stay constructible; the serve graph
+    and the full contract document always compose them, and the routes
+    register only when the runtime is present — never through router
+    auto-discovery.
     """
     app = FastAPI(
         title="Personal Knowledge API",
@@ -229,6 +248,8 @@ def create_api_application(
         _register_source_lifecycle_diagnostics_admin_route(
             app, web_authentication, source_lifecycle
         )
+    if device_sync is not None:
+        _register_device_sync_routes(app, web_authentication, device_sync)
     _classify_openapi_route(app)
     _suppress_framework_validation_error_document(app)
     # The pure-ASGI correlation middleware declares read-only ``Mapping``
@@ -680,6 +701,99 @@ def _register_sync_diagnostics_admin_route(
     )
 
 
+def _register_device_sync_routes(
+    app: FastAPI,
+    web_authentication: WebAuthenticationRuntime,
+    device_sync: DeviceSyncRuntime,
+) -> None:
+    """Register the closed device sync route set (spec 7.1-7.4).
+
+    Each route carries its manually assigned semantic operation id and the
+    envelope response model of its strict payload; the access Bearer
+    dependency, the credential-derived device scope and the closed error
+    mapping live in the endpoint factory. The binary download documents its
+    success as exactly one ``application/octet-stream`` binary payload with
+    its exact content headers — the one documented exception to the JSON
+    envelope (spec 7.4) — and never a form, callback or presigned target.
+    """
+    endpoints = create_device_sync_route_endpoints(
+        web_authentication=web_authentication, device_sync=device_sync
+    )
+    app.add_api_route(
+        "/api/sync/events",
+        endpoints.pull_events,
+        methods=["GET"],
+        operation_id="pullDeviceSyncEvents",
+        response_model=ApiEnvelope[DeviceEventPageData],
+    )
+    app.add_api_route(
+        "/api/sync/cursor-acknowledgements",
+        endpoints.acknowledge_cursor,
+        methods=["POST"],
+        operation_id="acknowledgeDeviceSyncCursor",
+        response_model=ApiEnvelope[DeviceCursorReceiptData],
+    )
+    app.add_api_route(
+        "/api/sync/manifests",
+        endpoints.start_manifest,
+        methods=["POST"],
+        operation_id="startDeviceManifest",
+        response_model=ApiEnvelope[ManifestRunReceiptData],
+    )
+    app.add_api_route(
+        "/api/sync/manifests/{manifest_run_id}/pages/{page_number}",
+        endpoints.append_manifest_page,
+        methods=["PUT"],
+        operation_id="appendDeviceManifestPage",
+        response_model=ApiEnvelope[ManifestPageReceiptData],
+    )
+    app.add_api_route(
+        "/api/sync/manifests/{manifest_run_id}/finalize",
+        endpoints.finalize_manifest,
+        methods=["POST"],
+        operation_id="finalizeDeviceManifest",
+        response_model=ApiEnvelope[ManifestRunReceiptData],
+    )
+    app.add_api_route(
+        "/api/sync/manifests/{manifest_run_id}/actions",
+        endpoints.list_manifest_actions,
+        methods=["GET"],
+        operation_id="listDeviceManifestActions",
+        response_model=ApiEnvelope[ManifestActionPageData],
+    )
+    app.add_api_route(
+        "/api/sync/manifests/{manifest_run_id}/complete",
+        endpoints.complete_manifest,
+        methods=["POST"],
+        operation_id="completeDeviceManifest",
+        response_model=ApiEnvelope[DeviceCursorReceiptData],
+    )
+    app.add_api_route(
+        "/api/sources/{source_id}/versions/{source_version_id}/content",
+        endpoints.download_source_version,
+        methods=["GET"],
+        operation_id="downloadDeviceSourceVersion",
+        responses={
+            "200": {
+                "description": (
+                    "The exact verified bytes of the source version as one binary "
+                    "payload with its exact Content-Length, Content-Type and "
+                    "X-Content-SHA256 headers"
+                ),
+                "content": {
+                    "application/octet-stream": {"schema": {"type": "string", "format": "binary"}}
+                },
+                "headers": {
+                    "X-Content-SHA256": {
+                        "description": "The exact lowercase SHA-256 of the streamed bytes",
+                        "schema": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    },
+                },
+            }
+        },
+    )
+
+
 def _as_http_handler(
     handler: Callable[[Request, Any], Awaitable[JSONResponse]],
 ) -> ExceptionHandler:
@@ -755,10 +869,38 @@ def _suppress_framework_validation_error_document(app: FastAPI) -> None:
             for schema_name in _FRAMEWORK_VALIDATION_SCHEMA_NAMES:
                 schemas.pop(schema_name, None)
         _declare_device_bearer_schemes(document)
+        _strip_binary_success_default_json_media(document)
         app.openapi_schema = document
         return document
 
     app.openapi = openapi  # type: ignore[method-assign]
+
+
+def _strip_binary_success_default_json_media(document: dict[str, Any]) -> None:
+    """Keep the binary success content exactly its one octet-stream payload.
+
+    FastAPI merges a default ``application/json`` schema into every custom
+    response entry regardless of the route's response class, but the
+    documented binary-success exception (spec 7.4) answers exactly one
+    ``application/octet-stream`` payload — never a JSON component schema —
+    so the merged default is dropped here for the operations that declared
+    the binary success.
+    """
+
+    for path_item in document.get("paths", {}).values():
+        if not isinstance(path_item, dict):
+            continue
+        for operation in path_item.values():
+            if not isinstance(operation, dict):
+                continue
+            if operation.get("operationId") not in _BINARY_SUCCESS_OPERATION_IDS:
+                continue
+            success = operation.get("responses", {}).get("200")
+            if not isinstance(success, dict):
+                continue
+            content = success.get("content")
+            if isinstance(content, dict) and "application/octet-stream" in content:
+                content.pop("application/json", None)
 
 
 def _declare_device_bearer_schemes(document: dict[str, Any]) -> None:

@@ -141,6 +141,14 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
         "/api/sync/journal-events/preflight",
         "/api/uploads/{operation_id}/content",
         "/api/sources/lifecycle-events",
+        "/api/sync/events",
+        "/api/sync/cursor-acknowledgements",
+        "/api/sync/manifests",
+        "/api/sync/manifests/{manifest_run_id}/pages/{page_number}",
+        "/api/sync/manifests/{manifest_run_id}/finalize",
+        "/api/sync/manifests/{manifest_run_id}/actions",
+        "/api/sync/manifests/{manifest_run_id}/complete",
+        "/api/sources/{source_id}/versions/{source_version_id}/content",
     }
     assert document["paths"]["/api/health/live"]["get"]["operationId"] == "getApiLiveness"
     assert document["paths"]["/api/health/ready"]["get"]["operationId"] == "getApiReadiness"

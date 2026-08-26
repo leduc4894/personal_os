@@ -63,6 +63,27 @@ ROUTE_OPERATION_IDS: dict[str, dict[str, str]] = {
     "/api/sync/journal-events/preflight": {"post": "preflightJournalEventUpload"},
     "/api/uploads/{operation_id}/content": {"put": "uploadSmallFileContent"},
     "/api/sources/lifecycle-events": {"post": "commitSourceLifecycleEvent"},
+    "/api/sync/events": {"get": "pullDeviceSyncEvents"},
+    "/api/sync/cursor-acknowledgements": {"post": "acknowledgeDeviceSyncCursor"},
+    "/api/sync/manifests": {"post": "startDeviceManifest"},
+    "/api/sync/manifests/{manifest_run_id}/pages/{page_number}": {
+        "put": "appendDeviceManifestPage"
+    },
+    "/api/sync/manifests/{manifest_run_id}/finalize": {"post": "finalizeDeviceManifest"},
+    "/api/sync/manifests/{manifest_run_id}/actions": {"get": "listDeviceManifestActions"},
+    "/api/sync/manifests/{manifest_run_id}/complete": {"post": "completeDeviceManifest"},
+    "/api/sources/{source_id}/versions/{source_version_id}/content": {
+        "get": "downloadDeviceSourceVersion"
+    },
+}
+
+#: The one documented binary-success exception to the JSON envelope (spec
+#: 7.4): the verified device download answers ``application/octet-stream``
+#: with its exact content headers, never a named JSON component.
+_BINARY_SUCCESS_OPERATIONS: dict[tuple[str, str], dict[str, Any]] = {
+    ("/api/sources/{source_id}/versions/{source_version_id}/content", "get"): {
+        "200": {"type": "string", "format": "binary"}
+    }
 }
 
 #: Component schema names emitted for every frozen ``extra="forbid"`` model.
@@ -138,6 +159,20 @@ STRICT_MODEL_SCHEMA_NAMES: tuple[str, ...] = (
     "SourceLifecycleCommitCounterData",
     "SourceLifecycleDiagnosticsData",
     "SourceLifecycleRejectionRecordData",
+    "CursorAcknowledgementRequest",
+    "DeviceCursorReceiptData",
+    "DeviceEventPageData",
+    "DeviceSyncEventData",
+    "ManifestActionData",
+    "ManifestActionPageData",
+    "ManifestCompleteRequest",
+    "ManifestEntryRequest",
+    "ManifestFinalizeRequest",
+    "ManifestPageReceiptData",
+    "ManifestPageRequest",
+    "ManifestRunReceiptData",
+    "ManifestStartRequest",
+    "SourceFingerprintData",
 )
 
 _URL_PATTERN = re.compile(r"\w+://")
@@ -209,7 +244,20 @@ def test_every_response_references_a_named_component_schema(
                 path,
                 method,
             )
+            binary_responses = _BINARY_SUCCESS_OPERATIONS.get((path, method), {})
             for status, response in operation["responses"].items():
+                if status in binary_responses:
+                    # The documented binary-success exception (spec 7.4): one
+                    # ``application/octet-stream`` payload with its exact
+                    # content headers, never a JSON component schema.
+                    assert set(response["content"]) == {"application/octet-stream"}, (
+                        path,
+                        method,
+                        status,
+                    )
+                    schema = response["content"]["application/octet-stream"]["schema"]
+                    assert schema == binary_responses[status], (path, method, status)
+                    continue
                 if status == "304":
                     # The snapshot's not-modified response carries headers
                     # only: the entity tag replaces the body (spec 16.2).
