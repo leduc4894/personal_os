@@ -35,6 +35,7 @@
 import { sha256Hex } from "../exclusion-policy/canonical-json";
 import type { RepairActionRecheckInput, RepairActionRecheckOutcome } from "../journal/capture";
 import type { JournalStoreErrorReason } from "../journal/sqlite-database";
+import { JOURNAL_STORE_ERROR_REASONS } from "../journal/sqlite-database";
 import type {
   ManifestActionProgressRecord,
   ManifestPageProgressRecord,
@@ -61,6 +62,7 @@ import type {
   DeviceSyncDiagnostics,
   DeviceSyncReason,
   DeviceSyncRepository,
+  DeviceSyncState,
   ReconcileFailureStage,
 } from "./contracts";
 import type { ManifestCapture, ManifestEntry, ManifestPageDigestRecord } from "./manifest-capture";
@@ -84,9 +86,10 @@ export type ReconcileReason =
  * The closed barrier reason each reconcile reason binds the repair
  * barrier to (the Task 8 barrier carries a `DeviceSyncReason`, spec 12.1):
  * the repair-family token that best names why local state must be
- * re-proven against the server.
+ * re-proven against the server. Frozen mapping, pinned row by row by
+ * test.
  */
-const RECONCILE_BARRIER_REASONS: Readonly<Record<ReconcileReason, DeviceSyncReason>> = {
+export const RECONCILE_BARRIER_REASONS: Readonly<Record<ReconcileReason, DeviceSyncReason>> = {
   onboarding: "device_manifest_state_invalid",
   sqlite_rebuilt: "journal_image_invalid",
   cursor_gap: "device_cursor_gap",
@@ -220,11 +223,18 @@ interface ClosedFailure {
   readonly wireErrorCode: string | null;
 }
 
+/** The closed store reasons a repository throw may legitimately carry. */
+const CLOSED_JOURNAL_STORE_ERROR_REASONS: ReadonlySet<string> = new Set<string>(
+  JOURNAL_STORE_ERROR_REASONS,
+);
+
 /** The closed store reason of one repository throw, when it carries one. */
 function storeReasonOf(error: unknown): JournalStoreErrorReason | null {
   if (error !== null && typeof error === "object" && "reason" in error) {
     const reason = (error as { reason?: unknown }).reason;
-    if (typeof reason === "string") {
+    // A foreign string is never adopted as a closed token: only the frozen
+    // store-reason vocabulary may reach an outcome or a trail observation.
+    if (typeof reason === "string" && CLOSED_JOURNAL_STORE_ERROR_REASONS.has(reason)) {
       return reason as JournalStoreErrorReason;
     }
   }
@@ -372,6 +382,13 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
       } catch (error) {
         return runFailure("actions", error);
       }
+      if (reason !== null) {
+        // Fix round 1 I3: the completion legitimately discards the run's
+        // page/action progress rows, so one closed observation keeps the
+        // settle reason readable on the trail afterwards — the canonical
+        // `reconcile_failure` lane at the `actions` stage, no new kind.
+        diagnostics.reconcileFailure("actions", reason);
+      }
       terminalActionIndexes.add(action.actionIndex);
       return null;
     };
@@ -441,7 +458,12 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
       return terminal("device_manifest_identity_ambiguous");
     }
 
-    const state = repository.readState();
+    let state: DeviceSyncState;
+    try {
+      state = repository.readState();
+    } catch (error) {
+      return runFailure("actions", error);
+    }
     const eventSequence = state.appliedSequence + 1;
     if (eventSequence > checkpointSequence) {
       // The local apply lattice cannot fit below the run checkpoint: the
@@ -450,10 +472,16 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
       return blocked("actions", "device_cursor_gap");
     }
 
+    let eventId: string;
+    try {
+      eventId = await deterministicActionEventId(manifestRunId, action.actionIndex);
+    } catch (error) {
+      return runFailure("actions", error);
+    }
     let event: DeviceSyncEvent;
     if (action.actionKind === "apply_tombstone") {
       event = {
-        eventId: await deterministicActionEventId(manifestRunId, action.actionIndex),
+        eventId,
         eventSequence,
         operation: "deleted",
         sourceId: action.sourceId,
@@ -484,7 +512,7 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
         return runFailure("actions", error);
       }
       event = {
-        eventId: await deterministicActionEventId(manifestRunId, action.actionIndex),
+        eventId,
         eventSequence,
         operation: "updated",
         sourceId: action.sourceId,
@@ -526,7 +554,12 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
     if (runReceipt.clientObservationGeneration !== barrierGeneration) {
       return blocked("start", "device_manifest_state_invalid");
     }
-    const boundState = repository.readState();
+    let boundState: DeviceSyncState;
+    try {
+      boundState = repository.readState();
+    } catch (error) {
+      return runFailure("start", error);
+    }
     if (
       (boundState.activeManifestRunId !== null &&
         boundState.activeManifestRunId !== manifestRunId) ||
@@ -537,40 +570,81 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
     }
 
     // --- capture and upload the ordered pages, exactly resuming the durable progress.
-    const recordedPages = journal.readManifestPageProgress();
+    let recordedPages: readonly ManifestPageProgressRecord[];
+    try {
+      recordedPages = journal.readManifestPageProgress();
+    } catch (error) {
+      return runFailure("page", error);
+    }
     const recordedByNumber = new Map(recordedPages.map((page) => [page.pageNumber, page]));
     const entriesByLocalId = new Map<string, ManifestEntry>();
     const pages: ManifestPageDigestRecord[] = [];
     let lastPage: ManifestPageDigestRecord | null = null;
     let serverNextPageNumber = runReceipt.nextPageNumber;
-    for await (const page of capture.capturePages(barrierGeneration)) {
-      for (const entry of page.entries) {
-        entriesByLocalId.set(entry.localEntryId, entry);
-      }
-      const record: ManifestPageDigestRecord = {
-        pageNumber: page.pageNumber,
-        entryCount: page.entries.length,
-        pageDigest: page.pageDigest,
-      };
-      const recorded = recordedByNumber.get(page.pageNumber);
-      if (recorded !== undefined) {
-        if (
-          recorded.entryCount !== record.entryCount ||
-          recorded.pageDigest !== record.pageDigest
-        ) {
-          // The re-capture diverged from the durable page evidence: the
-          // Vault moved beyond what the action rechecks absorb. Discard
-          // the temporary run progress and start a fresh checkpoint-bound
-          // run whose capture reflects the newer bytes.
-          return restartRun("page", "device_manifest_page_replay_mismatch");
+    try {
+      for await (const page of capture.capturePages(barrierGeneration)) {
+        for (const entry of page.entries) {
+          entriesByLocalId.set(entry.localEntryId, entry);
         }
-        pages.push(recorded);
-        lastPage = recorded;
-        continue;
-      }
-      if (page.pageNumber < serverNextPageNumber) {
-        // The server accepted this page inside the crash window before
-        // the local receipt landed: record the exact evidence now.
+        const record: ManifestPageDigestRecord = {
+          pageNumber: page.pageNumber,
+          entryCount: page.entries.length,
+          pageDigest: page.pageDigest,
+        };
+        const recorded = recordedByNumber.get(page.pageNumber);
+        if (recorded !== undefined) {
+          if (
+            recorded.entryCount !== record.entryCount ||
+            recorded.pageDigest !== record.pageDigest
+          ) {
+            // The re-capture diverged from the durable page evidence: the
+            // Vault moved beyond what the action rechecks absorb. Discard
+            // the temporary run progress and start a fresh checkpoint-bound
+            // run whose capture reflects the newer bytes.
+            return restartRun("page", "device_manifest_page_replay_mismatch");
+          }
+          pages.push(recorded);
+          lastPage = recorded;
+          continue;
+        }
+        if (page.pageNumber < serverNextPageNumber) {
+          // The server accepted this page inside the crash window before
+          // the local receipt landed: record the exact evidence now.
+          try {
+            await repository.recordManifestPage({
+              manifestRunId,
+              pageNumber: record.pageNumber,
+              entryCount: record.entryCount,
+              pageDigest: record.pageDigest,
+              checkpointSequence,
+              finalDigest: null,
+            });
+          } catch (error) {
+            return runFailure("page", error);
+          }
+          pages.push(record);
+          lastPage = record;
+          continue;
+        }
+        let receipt: ManifestPageReceipt;
+        try {
+          receipt = await api.appendManifestPage({
+            manifestRunId,
+            pageNumber: page.pageNumber,
+            entries: wireEntries(page.entries),
+            pageDigest: page.pageDigest,
+          });
+        } catch (error) {
+          return runFailure("page", error);
+        }
+        if (
+          receipt.acceptedEntryCount !== page.entries.length ||
+          receipt.nextPageNumber !== page.pageNumber + 1 ||
+          receipt.manifestRunId !== manifestRunId
+        ) {
+          return blocked("page", "device_manifest_state_invalid");
+        }
+        serverNextPageNumber = receipt.nextPageNumber;
         try {
           await repository.recordManifestPage({
             manifestRunId,
@@ -585,46 +659,22 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
         }
         pages.push(record);
         lastPage = record;
-        continue;
       }
-      let receipt: ManifestPageReceipt;
-      try {
-        receipt = await api.appendManifestPage({
-          manifestRunId,
-          pageNumber: page.pageNumber,
-          entries: wireEntries(page.entries),
-          pageDigest: page.pageDigest,
-        });
-      } catch (error) {
-        return runFailure("page", error);
-      }
-      if (
-        receipt.acceptedEntryCount !== page.entries.length ||
-        receipt.nextPageNumber !== page.pageNumber + 1 ||
-        receipt.manifestRunId !== manifestRunId
-      ) {
-        return blocked("page", "device_manifest_state_invalid");
-      }
-      serverNextPageNumber = receipt.nextPageNumber;
-      try {
-        await repository.recordManifestPage({
-          manifestRunId,
-          pageNumber: record.pageNumber,
-          entryCount: record.entryCount,
-          pageDigest: record.pageDigest,
-          checkpointSequence,
-          finalDigest: null,
-        });
-      } catch (error) {
-        return runFailure("page", error);
-      }
-      pages.push(record);
-      lastPage = record;
+    } catch (error) {
+      // Capture-stage closed failures — the 100,000-entry run cap, an
+      // unreadable store — surface exactly like every other reconcile
+      // failure, never as a raw escape out of reconcile()/resume().
+      return runFailure("page", error);
     }
 
     // --- finalize with the total count and the canonical final digest.
     const totalEntryCount = pages.reduce((sum, page) => sum + page.entryCount, 0);
-    const finalDigest = await computeManifestFinalDigest(pages);
+    let finalDigest: string;
+    try {
+      finalDigest = await computeManifestFinalDigest(pages);
+    } catch (error) {
+      return runFailure("page", error);
+    }
     if (lastPage !== null) {
       // The final digest persists as the last page's exact replay receipt
       // (the Task 8 repository binds it with the identical page evidence).
@@ -652,12 +702,16 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
     }
 
     // --- apply every planned action to terminal-safe (spec 12.4).
-    const terminalActionIndexes = new Set(
-      journal
+    let settledActionIndexes: readonly number[];
+    try {
+      settledActionIndexes = journal
         .readManifestActionProgress()
         .filter((progress) => progress.outcome === "terminal_safe")
-        .map((progress) => progress.actionIndex),
-    );
+        .map((progress) => progress.actionIndex);
+    } catch (error) {
+      return runFailure("actions", error);
+    }
+    const terminalActionIndexes = new Set<number>(settledActionIndexes);
     let afterActionIndex: number | undefined = undefined;
     let hasMoreActions = true;
     while (hasMoreActions) {
@@ -747,7 +801,12 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
   }
 
   async function reconcile(reason: ReconcileReason): Promise<ManifestReconcileOutcome> {
-    let barrierGeneration = repository.readState().barrierGeneration;
+    let barrierGeneration: number | null;
+    try {
+      barrierGeneration = repository.readState().barrierGeneration;
+    } catch (error) {
+      return asOutcome(runFailure("start", error));
+    }
     if (barrierGeneration === null) {
       try {
         barrierGeneration = await repository.nextObservationGeneration();
@@ -765,7 +824,12 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
   }
 
   async function resume(): Promise<ManifestReconcileOutcome> {
-    const barrierGeneration = repository.readState().barrierGeneration;
+    let barrierGeneration: number | null;
+    try {
+      barrierGeneration = repository.readState().barrierGeneration;
+    } catch (error) {
+      return asOutcome(runFailure("start", error));
+    }
     if (barrierGeneration === null) {
       return asOutcome(blocked("start", "device_manifest_state_invalid"));
     }

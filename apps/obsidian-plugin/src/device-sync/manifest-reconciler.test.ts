@@ -25,6 +25,7 @@ import type { CapturePolicySubject } from "../exclusion-policy/policy-session";
 import { JournalCapture } from "../journal/capture";
 import type { CapturePolicyGate } from "../journal/capture";
 import type { FrozenFingerprint, JournalMeta } from "../journal/contracts";
+import { MAX_PENDING_EVENTS } from "../journal/contracts";
 import { JournalPersistence } from "../journal/persistence";
 import type { JournalFileStore } from "../journal/persistence";
 import { JournalRepository } from "../journal/repository";
@@ -58,8 +59,16 @@ import type {
   DeviceSyncState,
   ReconcileFailureStage,
 } from "./contracts";
-import { computeManifestFinalDigest, createManifestCapture } from "./manifest-capture";
-import { createManifestReconciler, createManifestReconcilerJournal } from "./manifest-reconciler";
+import {
+    MAX_MANIFEST_TOTAL_ENTRIES,
+    computeManifestFinalDigest,
+    createManifestCapture,
+  } from "./manifest-capture";
+import {
+  RECONCILE_BARRIER_REASONS,
+  createManifestReconciler,
+  createManifestReconcilerJournal,
+} from "./manifest-reconciler";
 import type {
   ManifestReconciler,
   ManifestReconcilerJournal,
@@ -1030,6 +1039,257 @@ describe("ManifestReconciler closed failure surface (spec 14.1)", () => {
     for (const token of tokens) {
       expect(token).not.toContain("very-secret-locator");
     }
+  });
+});
+
+
+// --- closed capture-stage failures (fix round 1 I1) ----------------------------------------------------
+
+describe("ManifestReconciler closed capture-stage failures (fix round 1 I1)", () => {
+  it(
+    "surfaces the 100,000-entry capture cap as one blocked page-stage observation",
+    async () => {
+      const sharedBytes = bytesOf("x");
+      const files = Array.from(
+        { length: MAX_MANIFEST_TOTAL_ENTRIES + 1 },
+        (_, index) => ({ locator: `notes/cap-${index}.md`, bytes: sharedBytes }),
+      );
+      const harness = createReconcilerHarness({ files });
+
+      const outcome = await harness.reconciler.reconcile("explicit_repair");
+
+      expect(outcome).toEqual({ kind: "blocked", reason: "device_manifest_capture_failed" });
+      expect(harness.diagnostics.reconcileFailures).toEqual([
+        { stage: "page", reason: "device_manifest_capture_failed" },
+      ]);
+      // No page was sent and the barrier stays retained for the next attempt.
+      expect(harness.api.appendedPages).toEqual([]);
+      expect(harness.deviceSync.readState().barrierGeneration).not.toBeNull();
+      expect(harness.deviceSync.readState().activeManifestRunId).toBeNull();
+    },
+    30_000,
+  );
+
+  it("surfaces an unreadable page-progress read as one closed page-stage observation", async () => {
+    const harness = createReconcilerHarness({
+      files: [{ locator: "notes/synced.md", bytes: STALE_BYTES }],
+    });
+    const journal = harness.journal as ManifestReconcilerJournal & {
+      readManifestPageProgress: () => readonly ManifestActionProgressRecord[];
+    };
+    journal.readManifestPageProgress = () => {
+      throw journalStoreError("journal_query_failed");
+    };
+
+    const outcome = await harness.reconciler.reconcile("explicit_repair");
+
+    expect(outcome).toEqual({ kind: "blocked", reason: "journal_query_failed" });
+    expect(harness.diagnostics.reconcileFailures).toEqual([
+      { stage: "page", reason: "journal_query_failed" },
+    ]);
+  });
+
+  it("surfaces an unreadable reconciliation state as one closed start-stage observation", async () => {
+    const harness = createReconcilerHarness({
+      files: [{ locator: "notes/synced.md", bytes: STALE_BYTES }],
+    });
+    (harness.deviceSync as unknown as { readState: () => DeviceSyncState }).readState = () => {
+      throw journalStoreError("journal_image_invalid");
+    };
+
+    const outcome = await harness.reconciler.reconcile("explicit_repair");
+
+    expect(outcome).toEqual({ kind: "blocked", reason: "journal_image_invalid" });
+    expect(harness.diagnostics.reconcileFailures).toEqual([
+      { stage: "start", reason: "journal_image_invalid" },
+    ]);
+  });
+});
+
+// --- upload refusal and the synthetic-sequence lattice (fix round 1 I2) ---------------------------------
+
+describe("ManifestReconciler upload refusal and apply lattice (fix round 1 I2)", () => {
+  /** Seed `count` queued events directly inside one serialized transaction. */
+  async function seedPendingEvents(
+    harness: ReconcilerHarness,
+    count: number,
+  ): Promise<void> {
+    await harness.database.runSerializedMutation((session) => {
+      session.exec(
+        Array.from(
+          { length: count },
+          (_, index) =>
+            `insert into local_files (local_file_id, normalized_path, source_id, observed_sha256, observed_size_bytes, observed_media_type, base_version_id, policy_revision) values ('seed-file-${index}', 'seed/file-${index}.md', null, '${String(index).padStart(64, "0")}', 1, 'text/plain', null, 1);`,
+        ).join(""),
+      );
+      session.exec(
+        Array.from(
+          { length: count },
+          (_, index) =>
+            `insert into journal_events (event_id, local_file_id, idempotency_key, operation, sha256, size_bytes, media_type, state, is_fingerprint_frozen, attempt_count, next_eligible_retry_epoch_ms, safe_error, operation_id, created_at_epoch_ms) values ('seed-event-${index}', 'seed-file-${index}', 'seed-key-${index}', 'create', '${String(index).padStart(64, "0")}', 1, 'text/plain', 'queued', 0, 0, null, null, null, ${index});`,
+        ).join(""),
+      );
+    });
+  }
+
+  it(
+    "blocks the run when the journal refuses the upload at its queue limits",
+    async () => {
+      const harness = createReconcilerHarness({
+        files: [{ locator: "notes/upload.md", bytes: FRESH_BYTES }],
+      });
+      await seedPendingEvents(harness, MAX_PENDING_EVENTS);
+      const localEntryId = await entryIdOfLocator("notes/upload.md");
+      harness.api.plan = [
+        {
+          actionIndex: 0,
+          actionKind: "upload",
+          localEntryId,
+          sourceId: null,
+          sourceVersionId: null,
+          sourceLocatorId: null,
+          sourceTombstoneId: null,
+          reason: null,
+        },
+      ];
+
+      const outcome = await harness.reconciler.reconcile("explicit_repair");
+
+      expect(outcome).toEqual({ kind: "blocked", reason: "journal_mutation_failed" });
+      expect(harness.diagnostics.reconcileFailures).toEqual([
+        { stage: "actions", reason: "journal_mutation_failed" },
+      ]);
+      // The barrier and the durable page progress stay retained: the next
+      // attempt resumes instead of restarting from scratch.
+      expect(harness.deviceSync.readState().barrierGeneration).not.toBeNull();
+      expect(harness.deviceSync.readState().activeManifestRunId).toBe(RUN_ID);
+      // No outbound event was recorded for the refused upload.
+      const trackedFile = harness.journalRepository.readLocalFileByPath("notes/upload.md");
+      expect(trackedFile).toBeNull();
+    },
+    20_000,
+  );
+
+  it("blocks a download whose synthetic sequence cannot fit below the checkpoint", async () => {
+    const harness = createReconcilerHarness({
+      files: [{ locator: "notes/late.md", bytes: STALE_BYTES }],
+    });
+    harness.api.scriptRuns([{ manifestRunId: RUN_ID, checkpointSequence: 1 }]);
+    // The local cursor already sits at the checkpoint: the next contiguous
+    // synthetic sequence (2) would pass it.
+    await harness.deviceSync.terminalizeEvent({
+      eventSequence: 1,
+      outcome: "excluded",
+      reason: null,
+    });
+    const localEntryId = await entryIdOfLocator("notes/late.md");
+    harness.api.plan = [downloadAction(localEntryId)];
+
+    const outcome = await harness.reconciler.reconcile("explicit_repair");
+
+    expect(outcome).toEqual({ kind: "blocked", reason: "device_cursor_gap" });
+    expect(harness.diagnostics.reconcileFailures).toEqual([
+      { stage: "actions", reason: "device_cursor_gap" },
+    ]);
+    expect(harness.vault.writeCount).toBe(0);
+    expect(harness.deviceSync.readState().appliedSequence).toBe(1);
+  });
+
+  it("pins every reconcile reason's closed barrier-reason mapping", () => {
+    expect(RECONCILE_BARRIER_REASONS).toEqual({
+      onboarding: "device_manifest_state_invalid",
+      sqlite_rebuilt: "journal_image_invalid",
+      cursor_gap: "device_cursor_gap",
+      history_compacted: "device_event_unavailable",
+      unknown_event: "device_event_integrity_failed",
+      local_invariant: "device_manifest_state_invalid",
+      explicit_repair: "device_manifest_state_invalid",
+      periodic: "device_manifest_state_invalid",
+    });
+  });
+});
+
+// --- settle-reason observations (fix round 1 I3) --------------------------------------------------------
+
+describe("ManifestReconciler settle-reason observations (fix round 1 I3)", () => {
+  it("leaves a closed actions-stage observation for a canonical-only settle that survives completion", async () => {
+    const harness = createReconcilerHarness();
+    const progressAtCompletion = captureActionProgressAtCompletion(harness);
+    harness.api.plan = [
+      {
+        actionIndex: 0,
+        actionKind: "download",
+        localEntryId: null,
+        sourceId: SOURCE_ID,
+        sourceVersionId: SOURCE_VERSION_ID,
+        sourceLocatorId: "12345678-1234-4781-8123-123456789012",
+        sourceTombstoneId: null,
+        reason: null,
+      },
+    ];
+
+    const outcome = await harness.reconciler.reconcile("onboarding");
+
+    expect(outcome.kind).toBe("completed");
+    expect(progressAtCompletion.read()[0]?.reason).toBe("device_manifest_identity_ambiguous");
+    // The progress rows are legitimately discarded at completion; the one
+    // closed observation is the durable readable record that remains.
+    expect(harness.journal.readManifestActionProgress()).toEqual([]);
+    expect(harness.diagnostics.reconcileFailures).toEqual([
+      { stage: "actions", reason: "device_manifest_identity_ambiguous" },
+    ]);
+  });
+
+  it("observes the settle reason of a stale download without a second observation", async () => {
+    const harness = createReconcilerHarness({
+      files: [{ locator: "notes/late-edit.md", bytes: STALE_BYTES }],
+    });
+    const localEntryId = await entryIdOfLocator("notes/late-edit.md");
+    harness.api.plan = [downloadAction(localEntryId)];
+    let admitted = false;
+    harness.api.onActionRead = async () => {
+      if (admitted) {
+        return;
+      }
+      admitted = true;
+      await harness.journalRepository.recordCapture({
+        normalizedPath: "notes/late-edit.md",
+        fingerprint: await fingerprintOf(FRESH_BYTES),
+        policyRevisionNumber: 1,
+        admission: "policy_allowed",
+      });
+    };
+
+    const outcome = await harness.reconciler.reconcile("explicit_repair");
+
+    expect(outcome.kind).toBe("completed");
+    expect(harness.diagnostics.reconcileFailures).toEqual([
+      { stage: "actions", reason: "device_manifest_action_stale" },
+    ]);
+    expect(harness.vault.writeCount).toBe(0);
+  });
+});
+
+// --- foreign reason rejection (fix round 1 minor) --------------------------------------------------------
+
+describe("ManifestReconciler foreign reason rejection (fix round 1 minor)", () => {
+  it("never adopts a foreign reason string from a thrown store-like error", async () => {
+    const harness = createReconcilerHarness({
+      files: [{ locator: "notes/synced.md", bytes: STALE_BYTES }],
+    });
+    const journal = harness.journal as ManifestReconcilerJournal & {
+      completeDeviceSyncRepair: (input: unknown) => Promise<void>;
+    };
+    journal.completeDeviceSyncRepair = async () => {
+      throw { reason: "definitely-not-a-closed-token" };
+    };
+
+    const outcome = await harness.reconciler.reconcile("explicit_repair");
+
+    expect(outcome).toEqual({ kind: "retry", reason: "server_error" });
+    expect(harness.diagnostics.reconcileFailures).toEqual([
+      { stage: "complete", reason: "server_error" },
+    ]);
   });
 });
 
