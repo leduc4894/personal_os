@@ -27,6 +27,7 @@
 
 import { normalizePolicyLocator } from "../exclusion-policy/evaluator";
 import type { CapturePolicyEvaluation, CapturePolicySubject } from "../exclusion-policy/policy-session";
+import type { EchoSuppressor } from "../device-sync/echo-suppression";
 import type {
   ExistingFilesScanSummary,
   JournalCaptureAdmission,
@@ -95,6 +96,14 @@ export interface JournalCaptureOptions {
    * create / update surface here stays composition-free.
    */
   readonly lifecycleCapture: LifecycleCapture;
+  /**
+   * The exact echo suppressor (device cursor child 6, task 10): a
+   * settled watcher observation that exactly matches the durable marker
+   * of our own remote apply is consumed here and never recorded as a
+   * journal capture event. Absent means no remote apply pipeline is
+   * wired and nothing is suppressed.
+   */
+  readonly echoSuppressor?: EchoSuppressor | null;
   /** Snapshot ceiling override; defaults to {@link EXISTING_FILES_SCAN_MAXIMUM_FILES}. */
   readonly scanMaximumFiles?: number | undefined;
   /** Snapshot batch size override; defaults to {@link EXISTING_FILES_SCAN_BATCH_FILES}. */
@@ -177,6 +186,7 @@ export class JournalCapture {
   readonly #vaultReader: CaptureVaultReader;
   readonly #policyGate: CapturePolicyGate;
   readonly #lifecycleCapture: LifecycleCapture;
+  readonly #echoSuppressor: EchoSuppressor | null;
   readonly #scanMaximumFiles: number;
   readonly #scanBatchFiles: number;
   readonly #failureReporter: JournalFailureReporter | null;
@@ -197,6 +207,7 @@ export class JournalCapture {
     this.#vaultReader = options.vaultReader;
     this.#policyGate = options.policyGate;
     this.#lifecycleCapture = options.lifecycleCapture;
+    this.#echoSuppressor = options.echoSuppressor ?? null;
     this.#scanMaximumFiles = options.scanMaximumFiles ?? EXISTING_FILES_SCAN_MAXIMUM_FILES;
     this.#scanBatchFiles = options.scanBatchFiles ?? EXISTING_FILES_SCAN_BATCH_FILES;
     this.#failureReporter = options.failureReporter ?? null;
@@ -276,11 +287,26 @@ export class JournalCapture {
    * Observe one delete notification (spec 7.1): the lifecycle capture
    * owns the durable delete event; an untracked path stays untouched and
    * an uncommitted file (no source identity) fails closed after freezing
-   * its pending content work.
+   * its pending content work. An exact echo marker of our own remote
+   * tombstone consumes the observation here — the lifecycle capture is
+   * never reached (device cursor child 6, task 10).
    */
   async notifyPathDeleted(file: VaultTargetFile): Promise<void> {
     if (this.#isDisposed) {
       return;
+    }
+    if (this.#echoSuppressor !== null) {
+      const normalizedPath = this.#normalizePathOrNull(file.path);
+      if (normalizedPath !== null) {
+        const trackedFile = this.#repository.readLocalFileByPath(normalizedPath);
+        const consumed = await this.#echoSuppressor.consumeDeleteObservation({
+          priorLocator: normalizedPath,
+          sourceId: trackedFile?.sourceId ?? null,
+        });
+        if (consumed) {
+          return;
+        }
+      }
     }
     try {
       await this.#lifecycleCapture.captureDelete(file);
@@ -531,6 +557,20 @@ export class JournalCapture {
     const fingerprint = await deriveFrozenFingerprint(contentBytes);
     if (this.#isSnapshotStopped(signal)) {
       return null;
+    }
+    // Exact echo suppression (device cursor child 6, task 10): a settled
+    // observation whose locator, source identity and fingerprint match
+    // the durable marker of our own remote apply is consumed here — a
+    // mismatch keeps the marker and remains a real watcher event.
+    if (this.#echoSuppressor !== null) {
+      const consumed = await this.#echoSuppressor.consumeContentObservation({
+        normalizedLocator: normalizedPath,
+        sourceId: trackedFile?.sourceId ?? null,
+        fingerprint,
+      });
+      if (consumed) {
+        return null;
+      }
     }
     const evaluation = this.#policyGate.evaluateForCapture({
       sourceId: trackedFile?.sourceId ?? null,

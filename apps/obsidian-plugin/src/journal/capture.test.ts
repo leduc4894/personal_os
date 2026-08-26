@@ -3,6 +3,7 @@ import initSqlJs from "sql.js";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { CapturePolicySubject } from "../exclusion-policy/policy-session";
+import { createEchoSuppressor } from "../device-sync/echo-suppression";
 import type { JournalMeta } from "./contracts";
 import { FILE_SETTLE_DELAY_MS, MAX_FILE_SIZE_BYTES } from "./contracts";
 import { deriveFrozenFingerprint } from "./fingerprint";
@@ -968,5 +969,153 @@ describe("JournalCapture module safety", () => {
     for (const forbiddenText of ["fetch(", "requestUrl", "XMLHttpRequest", "WebSocket"]) {
       expect(captureSource).not.toContain(forbiddenText);
     }
+  });
+});
+
+// --- exact echo suppression integration (task 10) --------------------------------------------------
+
+describe("JournalCapture exact echo suppression", () => {
+  const ECHO_SOURCE_ID = "99999999-9999-4999-8999-999999999999";
+  const ECHO_EVENT_SEQUENCE = 1;
+
+  /** A capture harness wired with the exact echo suppressor over the same writer. */
+  function createEchoHarness(): CaptureHarness & Pick<AutomaticSnapshotTestHarness, "eventsFor"> {
+    const database = SqliteDatabase.createEmpty(engineModule, {
+      schemaVersion: JOURNAL_SCHEMA_VERSION,
+      dirtyGeneration: 1,
+      lastVerifiedGeneration: 1,
+      isReconcileRequired: false,
+      recoveryState: "verified_generation_loaded",
+    } satisfies JournalMeta);
+    const repository = new JournalRepository({ database });
+    const vault = new FakeCaptureVault();
+    const gate = createFakePolicyGate(() => "allowed");
+    const { fake: lifecycleCapture, state: lifecycleState } = createFakeLifecycleCapture();
+    const capture = new JournalCapture({
+      repository,
+      vaultReader: vault,
+      policyGate: gate,
+      lifecycleCapture,
+      echoSuppressor: createEchoSuppressor({ repository: repository.deviceSync, database }),
+    });
+    return {
+      capture,
+      repository,
+      database,
+      vault,
+      gate,
+      lifecycleState,
+      failureTokens: [],
+      eventsFor(normalizedPath: string) {
+        const localFile = repository.readLocalFileByPath(normalizedPath);
+        return localFile === null ? [] : repository.readEventsByLocalFileId(localFile.localFileId);
+      },
+    };
+  }
+
+  /** Track + commit one file so its mapping carries the echo source identity. */
+  async function commitTrackedFile(harness: CaptureHarness, path: string): Promise<void> {
+    const bytes = bytesOf("committed bytes");
+    const capture = await harness.repository.recordCapture({
+      normalizedPath: path,
+      fingerprint: await deriveFrozenFingerprint(bytes),
+      policyRevisionNumber: 1,
+      admission: "policy_allowed",
+    });
+    if (capture.outcome === "capture_refused") {
+      throw new Error("expected a recorded capture");
+    }
+    await harness.repository.recordCommittedReceipt({
+      eventId: capture.event.eventId,
+      sourceId: ECHO_SOURCE_ID,
+      baseVersionId: "12345678-1234-4123-8123-123456789123",
+    });
+  }
+
+  it("settles a watcher observation of our own remote apply without recording a capture event", async () => {
+    useSettleFakeTimers();
+    const harness = createEchoHarness();
+    await commitTrackedFile(harness, "notes/echo.md");
+    // The remote apply landed NEW bytes at the path; the marker pins them.
+    const remoteBytes = bytesOf("remote applied bytes");
+    harness.vault.setFileBytes("notes/echo.md", remoteBytes);
+    await harness.repository.deviceSync.recordEchoMarker({
+      eventSequence: ECHO_EVENT_SEQUENCE,
+      sourceId: ECHO_SOURCE_ID,
+      operation: "updated",
+      priorLocator: "notes/echo.md",
+      targetLocator: null,
+      finalFingerprint: await deriveFrozenFingerprint(remoteBytes),
+    });
+    const eventsBefore = harness.eventsFor("notes/echo.md").length;
+
+    const settled = harness.capture.notifyPathChanged("notes/echo.md");
+    await settlePastDelay(harness);
+    await settled;
+
+    expect(harness.eventsFor("notes/echo.md").length).toBe(eventsBefore);
+    expect(harness.repository.deviceSync.readEchoMarker(ECHO_EVENT_SEQUENCE)).toBeNull();
+  });
+
+  it("records the event when the settled bytes differ from the echo marker", async () => {
+    useSettleFakeTimers();
+    const harness = createEchoHarness();
+    await commitTrackedFile(harness, "notes/echo.md");
+    harness.vault.setFileBytes("notes/echo.md", bytesOf("locally edited bytes"));
+    await harness.repository.deviceSync.recordEchoMarker({
+      eventSequence: ECHO_EVENT_SEQUENCE,
+      sourceId: ECHO_SOURCE_ID,
+      operation: "updated",
+      priorLocator: "notes/echo.md",
+      targetLocator: null,
+      finalFingerprint: await deriveFrozenFingerprint(bytesOf("remote applied bytes")),
+    });
+    const eventsBefore = harness.eventsFor("notes/echo.md").length;
+
+    const settled = harness.capture.notifyPathChanged("notes/echo.md");
+    await settlePastDelay(harness);
+    await settled;
+
+    // A mismatch remains a real watcher event; the marker stays retained.
+    expect(harness.eventsFor("notes/echo.md").length).toBe(eventsBefore + 1);
+    expect(harness.repository.deviceSync.readEchoMarker(ECHO_EVENT_SEQUENCE)).not.toBeNull();
+  });
+
+  it("suppresses a watcher delete echo of our own remote tombstone", async () => {
+    useSettleFakeTimers();
+    const harness = createEchoHarness();
+    await commitTrackedFile(harness, "notes/echo.md");
+    await harness.repository.deviceSync.recordEchoMarker({
+      eventSequence: ECHO_EVENT_SEQUENCE,
+      sourceId: ECHO_SOURCE_ID,
+      operation: "deleted",
+      priorLocator: "notes/echo.md",
+      targetLocator: null,
+      finalFingerprint: null,
+    });
+
+    await harness.capture.notifyPathDeleted({ path: "notes/echo.md", parent: { path: "notes" } });
+
+    expect(harness.lifecycleState.deleteCalls).toEqual([]);
+    expect(harness.repository.deviceSync.readEchoMarker(ECHO_EVENT_SEQUENCE)).toBeNull();
+  });
+
+  it("routes a foreign delete through the lifecycle capture untouched", async () => {
+    useSettleFakeTimers();
+    const harness = createEchoHarness();
+    await commitTrackedFile(harness, "notes/echo.md");
+    await harness.repository.deviceSync.recordEchoMarker({
+      eventSequence: ECHO_EVENT_SEQUENCE,
+      sourceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      operation: "deleted",
+      priorLocator: "notes/echo.md",
+      targetLocator: null,
+      finalFingerprint: null,
+    });
+
+    await harness.capture.notifyPathDeleted({ path: "notes/echo.md", parent: { path: "notes" } });
+
+    expect(harness.lifecycleState.deleteCalls).toEqual([{ path: "notes/echo.md" }]);
+    expect(harness.repository.deviceSync.readEchoMarker(ECHO_EVENT_SEQUENCE)).not.toBeNull();
   });
 });

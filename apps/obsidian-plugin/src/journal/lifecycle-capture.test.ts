@@ -19,6 +19,7 @@ import initSqlJs from "sql.js";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { FrozenFingerprint, JournalEvent, LocalFile } from "./contracts";
+import { createEchoSuppressor } from "../device-sync/echo-suppression";
 import { JournalRepository } from "./repository";
 import {
   LifecycleCaptureImpl,
@@ -105,6 +106,7 @@ function createHarness(options?: {
   readonly createId?: () => string;
   readonly nowEpochMs?: () => number;
   readonly settleDelayMs?: number;
+  readonly withEchoSuppressor?: boolean;
 }): Harness {
   const database = SqliteDatabase.createEmpty(engineModule, {
     schemaVersion: JOURNAL_SCHEMA_VERSION,
@@ -134,6 +136,10 @@ function createHarness(options?: {
       failureTokens.push(token);
     },
   };
+  const echoSuppressor =
+    options?.withEchoSuppressor === true
+      ? createEchoSuppressor({ repository: repository.deviceSync, database })
+      : null;
   const capture = new LifecycleCaptureImpl({
     repository,
     lifecycle,
@@ -141,6 +147,7 @@ function createHarness(options?: {
     nowEpochMs,
     policyRevision,
     failureReporter,
+    ...(echoSuppressor !== null ? { echoSuppressor } : {}),
     ...(options?.settleDelayMs !== undefined ? { settleDelayMs: options.settleDelayMs } : {}),
   });
   return {
@@ -1199,6 +1206,77 @@ describe("LifecycleCapture UUIDv7 helpers", () => {
     expect(uuidVersion(fifth)).toBe(7);
     expect(first).not.toBe(second);
     expect(second).not.toBe(fourth);
+  });
+});
+
+// --- exact rename echo suppression (task 10) -------------------------------------------------------
+
+describe("LifecycleCapture exact rename echo suppression", () => {
+  const ECHO_EVENT_SEQUENCE = 1;
+  const ECHO_SOURCE_ID = "11111111-1111-7111-8111-111111111111";
+
+  it("consumes an exact rename echo without recording a lifecycle event", async () => {
+    const harness = createHarness({ withEchoSuppressor: true });
+    const real = await realFingerprintOf("rename echo content");
+    await captureAndCommit(harness, "notes/echo-old.md", real.fingerprint);
+    const fileBefore = requireLocalFile(
+      harness.repository.readLocalFileByPath("notes/echo-old.md"),
+    );
+    harness.vault.setFileBytes("notes/echo-new.md", real.bytes);
+    await harness.repository.deviceSync.recordEchoMarker({
+      eventSequence: ECHO_EVENT_SEQUENCE,
+      sourceId: ECHO_SOURCE_ID,
+      operation: "renamed",
+      priorLocator: "notes/echo-old.md",
+      targetLocator: "notes/echo-new.md",
+      finalFingerprint: real.fingerprint,
+    });
+    const eventsBefore = eventCount(harness.database);
+
+    const result = await harness.capture.captureRename(
+      fakeFile("notes/echo-new.md", "notes"),
+      "notes/echo-old.md",
+    );
+
+    expect(result).toBeNull();
+    expect(eventCount(harness.database)).toBe(eventsBefore);
+    expect(harness.repository.deviceSync.readEchoMarker(ECHO_EVENT_SEQUENCE)).toBeNull();
+    // The mapping row is untouched: reconciliation, not capture, owns it.
+    expect(
+      harness.repository.readLocalFileByPath("notes/echo-old.md")?.localFileId,
+    ).toBe(fileBefore.localFileId);
+  });
+
+  it("records the rename when the target bytes do not match the marker", async () => {
+    const harness = createHarness({ withEchoSuppressor: true });
+    const real = await realFingerprintOf("rename echo content");
+    await captureAndCommit(harness, "notes/echo-old.md", real.fingerprint);
+    const fileBefore = requireLocalFile(
+      harness.repository.readLocalFileByPath("notes/echo-old.md"),
+    );
+    harness.vault.setFileBytes("notes/echo-new.md", real.bytes);
+    const other = await realFingerprintOf("different bytes entirely");
+    await harness.repository.deviceSync.recordEchoMarker({
+      eventSequence: ECHO_EVENT_SEQUENCE,
+      sourceId: ECHO_SOURCE_ID,
+      operation: "renamed",
+      priorLocator: "notes/echo-old.md",
+      targetLocator: "notes/echo-new.md",
+      finalFingerprint: other.fingerprint,
+    });
+    const eventsBefore = eventCount(harness.database);
+
+    const result = await harness.capture.captureRename(
+      fakeFile("notes/echo-new.md", "notes"),
+      "notes/echo-old.md",
+    );
+
+    // A mismatch remains a real watcher event; the marker stays retained.
+    expect(result).not.toBeNull();
+    expect(result?.operation).toBe("rename");
+    expect(eventCount(harness.database)).toBe(eventsBefore + 1);
+    expect(harness.repository.deviceSync.readEchoMarker(ECHO_EVENT_SEQUENCE)).not.toBeNull();
+    void fileBefore;
   });
 });
 

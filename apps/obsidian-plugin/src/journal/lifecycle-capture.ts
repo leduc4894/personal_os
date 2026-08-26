@@ -29,6 +29,7 @@
  */
 
 import { normalizePolicyLocator } from "../exclusion-policy/evaluator";
+import type { EchoSuppressor } from "../device-sync/echo-suppression";
 import type { JournalStoreErrorReason } from "./sqlite-database";
 import { journalStoreError } from "./sqlite-database";
 import { FILE_SETTLE_DELAY_MS, JOURNAL_PENDING_EVENT_STATES } from "./contracts";
@@ -159,6 +160,13 @@ export interface LifecycleCaptureOptions {
   readonly settleDelayMs?: number;
   /** Closed-token reporter owned by the plugin composition root. */
   readonly failureReporter?: JournalFailureReporter | null;
+  /**
+   * The exact echo suppressor (device cursor child 6, task 10): a
+   * rename/move notification that exactly matches the durable marker of
+   * our own remote apply is consumed and never recorded as a lifecycle
+   * event. Absent means nothing is suppressed.
+   */
+  readonly echoSuppressor?: EchoSuppressor | null;
 }
 
 // --- helpers -------------------------------------------------------------------------------
@@ -216,6 +224,7 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
   readonly #policyRevision: number;
   readonly #settleDelayMs: number;
   readonly #failureReporter: JournalFailureReporter | null;
+  readonly #echoSuppressor: EchoSuppressor | null;
 
   readonly #settleTimers = new Map<string, ReturnType<typeof setTimeout>>();
   readonly #settleWaiters = new Map<string, Set<() => void>>();
@@ -237,6 +246,7 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
     this.#policyRevision = options.policyRevision;
     this.#settleDelayMs = options.settleDelayMs ?? FILE_SETTLE_DELAY_MS;
     this.#failureReporter = options.failureReporter ?? null;
+    this.#echoSuppressor = options.echoSuppressor ?? null;
   }
 
   /**
@@ -714,6 +724,21 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
       return null;
     }
     const targetFingerprint = await deriveFrozenFingerprint(targetBytes);
+    // Exact echo suppression (device cursor child 6, task 10): a rename
+    // whose prior/target locators, source identity and fingerprint match
+    // the durable marker of our own remote apply is consumed here — a
+    // mismatch keeps the marker and records the real lifecycle event.
+    if (this.#echoSuppressor !== null) {
+      const consumed = await this.#echoSuppressor.consumeRenameObservation({
+        priorLocator: priorPath,
+        targetLocator: newPath,
+        sourceId: localFile.sourceId,
+        fingerprint: targetFingerprint,
+      });
+      if (consumed) {
+        return null;
+      }
+    }
     const result = await this.#lifecycle.recordLifecycleEventWithFreeze({
       operands: this.#buildOperands({
         operation,
