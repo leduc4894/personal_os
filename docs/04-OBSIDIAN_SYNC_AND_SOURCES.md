@@ -40,14 +40,38 @@ và restore đóng đúng tombstone rồi mở locator do người dùng chọn.
 event lifecycle bất biến trong journal, gửi theo thứ tự của từng source và chỉ
 xóa trạng thái pending sau receipt canonical. Automatic restore chỉ hợp lệ khi
 bytes tái xuất hiện khớp fingerprint đã commit; explicit restore là command có
-xác nhận. Repair của `reconcile_required` thuộc Child 6, không được triển khai
-trước trong lifecycle client.
+xác nhận. Repair của `reconcile_required` đã thuộc Child 6: lệnh `Repair sync`
+và manifest reconciliation dọn cờ này qua `markReconcileComplete`, không bao giờ
+tự clear sau một pass thường.
 
 ## 4. Manifest reconciliation
 
 Plugin gửi manifest phân trang gồm stable ID, path, hash, size và local version. Backend trả action plan: `upload`, `download`, `apply_tombstone`, `conflict`, `no_change`, `excluded`.
 
 Reconciliation chạy sau onboarding, cursor gap, theo lịch định kỳ và khi người dùng repair. Filesystem watcher chỉ giảm latency; manifest reconciliation mới là correctness mechanism.
+
+Child 6 hoàn thiện mechanism này thành manifest run checkpoint-bound: mỗi run
+đóng băng một event checkpoint và một active policy revision tại PostgreSQL
+(`device_cursors`, `manifest_runs`, `manifest_pages`,
+`manifest_entry_resolutions`, `manifest_actions`; migration heads
+`20260826_01` + `20260826_02`), page/digest replay là no-op khi khớp chính xác,
+policy advance giữa chừng invalidates run bằng `device_manifest_policy_advanced`
+và một run mới thay thế. Action `download` carry checkpoint locator trên wire
+actions (hydrate lúc đọc; không có locator text nào persist trong các bảng
+manifest), và chỉ download canonical-only mới thiếu `local_entry_id` — download
+catch-up theo entry vẫn echo entry của nó. Cursor pull chạy mỗi 30 giây
+foreground, full reconciliation mỗi 6 giờ active tích lũy; cursor local chỉ
+tiến khi kết quả terminal-safe đã durable trong generation commit, và transaction
+manifest-completion là ngoại lệ duy nhất cho cursor server. Runbook vận hành:
+`docs/operations/device-cursor-manifest-reconciliation.md`.
+
+Remote apply là state machine crash-safe (temp sibling verified, atomic replace,
+verify final hash); remote delete đưa file proven-unchanged vào Obsidian local
+trash qua `Vault.trash(file, false)` — không có hard-delete fallback. Sau khi
+mất SQLite journal, identity chỉ được chứng minh theo thứ tự: current locator
+khớp, historical locator duy nhất cộng exact fingerprint, hoặc open tombstone
+cộng retained fingerprint; hash-only không bao giờ bind identity, và plugin
+không bao giờ tự mint source ID.
 
 ## 5. Exclusion policy
 

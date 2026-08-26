@@ -9,7 +9,34 @@ the minimum artifacts the Obsidian loader requires (`dist/main.js` plus the
 manifest). `src/plugin.ts` only wires real adapters — Obsidian `requestUrl`,
 `Platform`, the app `SecretStorage`, plugin data persistence and `window.open`;
 every behavior lives in the tested modules under `src/authentication/`,
-`src/exclusion-policy/` and `src/journal/`.
+`src/exclusion-policy/`, `src/journal/` and `src/device-sync/`.
+
+## Release compatibility (0.2.0)
+
+Release `0.2.0` is the Child 6 device cursor and manifest reconciliation
+feature release (server-side pull, cursors, manifest repair, remote apply,
+`Repair sync`). Upgrading a device to `0.2.0` applies exactly two local
+migrations and one recovery behavior, all lossless:
+
+- The diagnostics trail sidecar migrates from
+  `obsidian_sync_diagnostics_trail/v1` to
+  `obsidian_sync_diagnostics_trail/v2` — known v1 entries are rewritten
+  losslessly; a foreign token still resets through the closed
+  `trail_reset` behavior.
+- The sync journal migrates from schema `v6` to `v7` — both cursor values
+  start at zero and no active manifest/apply marker is left behind, while
+  every file mapping, pending event, lifecycle row, tombstone and restore
+  reservation is preserved; a journal already flagged
+  `reconcile_required` keeps the flag.
+- Losing the SQLite journal no longer strands the device: an empty journal
+  rebuild sets `reconcile_required`, and manifest repair (`Repair sync` or
+  an automatic correctness trigger) re-proves source identity from
+  canonical locator/tombstone evidence — the plugin never invents a source
+  identity, and local bytes never silently overwrite canonical bytes.
+
+There is no `versions.json` release artifact in this repository; the
+manifest version above is the release authority. Operator runbook:
+[`docs/operations/device-cursor-manifest-reconciliation.md`](../../docs/operations/device-cursor-manifest-reconciliation.md).
 
 ## API transport
 
@@ -102,8 +129,8 @@ WebAssembly with journal-scoped sessions, `persistence.ts` publishes every
 commit as a digest-verified immutable generation with crash-safe recovery
 and the synchronous unload flush probe, `repository.ts` owns the durable
 records and the redacted status histogram, `capture.ts` turns settled Vault
-observations into journal intent (plus the confirmed `Sync existing files`
-scan), `sync-api.ts` is the hand-mirrored small-file API client and
+observations into journal intent through the automatic snapshot
+coordinator, `sync-api.ts` is the hand-mirrored small-file API client and
 `queue-driver.ts` runs the bounded foreground pass. `status.ts` projects the
 closed sync status of the minimal plugin UX (spec 11).
 
@@ -116,13 +143,15 @@ the redacted journal histogram, credential existence and the active pass.
 The settings tab repeats the same closed status plus the fixed blocker
 guidance (the 16 MiB/multipart boundary, the authorized-only policy
 refresh, the no-overwrite conflict/lifecycle deferrals, the queue-preserving
-browser login, and the child-6 repair of a `reconcile_required` journal).
-Exactly two sync commands exist: `Sync now` (one bounded foreground pass of
-currently eligible events, never bypassing the one-active-request guarantee
-or the bounded retry backoff) and `Sync existing files` (a snapshot scan
-that queues nothing until the user confirms). A `reconcile_required`
-journal is a hard stop: the status refresh stops the driver and no pass
-runs until child 6 repairs the journal.
+browser login, and the Child 6 repair of a `reconcile_required` journal),
+a "Device sync" section (repair state, cursor lag, pending actions —
+closed tokens only), and the journal schema v7 note above. The command
+palette owns four closed commands: `Run sync self-check`, `Copy sync
+diagnostics` (redacted diagnostics — never Vault content), `Restore
+selected tombstone`, and the Child 6 `Repair sync`. A
+`reconcile_required` journal is a hard stop for ordinary passes; the Child
+6 reconciliation repairs it through the manifest run, and the status
+guidance names the `Repair sync` command.
 
 Instrumentation is limited to the redacted status counts and closed labels
 above — no path, digest or credential ever reaches the status or its
@@ -149,15 +178,10 @@ reconcile_required`) and the closed blocked reason codes
 `tombstone_not_found`, `tombstone_closed`, `commit_outcome_unknown`,
 `integrity_failed`) are the only strings the surface exposes.
 
-The narrow command surface owns exactly three commands:
+The lifecycle write path is automatic — there is no manual content-sync
+command; convergence (snapshots, passes, retries) runs by itself. The one
+explicit lifecycle command is:
 
-- **`Sync now`** — schedules an immediate bounded foreground pass.
-  The trigger funnels through the same `#runBoundedQueuePass` wrapper
-  the Vault listeners use, so the one-active-request guarantee and the
-  bounded retry backoff (one second to five minutes, jittered) are
-  preserved.
-- **`Sync existing files`** — a confirmed snapshot scan; queues
-  nothing before the user confirms.
 - **`Restore selected tombstone`** — the explicit user-driven restore.
   The user picks a retained tombstone by its safe plugin-local id (the
   path is never displayed), supplies a target Vault path, confirms, and
@@ -202,17 +226,16 @@ No source maps, test fixtures or secrets are emitted.
 The following are deliberately absent and belong to later children of the
 journal design:
 
-- cursor pull, remote apply, offline registration and the repair of a
-  `reconcile_required` journal (child 6);
 - multipart/resumable uploads and files above 16 MiB (child 7);
 - candidate preservation, Conflict Inbox, merge and visible conflict
   resolution (child 8);
 - any view, markdown post-processor, workspace hook or ribbon icon;
-- any background sync daemon, timer or automatic retry loop — queue work
-  is foreground and bounded, triggered only by plugin load, a Vault event
-  or `Sync now`;
+- any background sync daemon — device-sync work is foreground, bounded and
+  coalesced by the single coordinator (30-second pull cadence, bounded
+  retries), triggered only by plugin lifecycle, Vault activity, its own
+  timers or `Repair sync`;
 - any automatic full-Vault upload: no control implies one, and the
-  snapshot scan queues nothing before an explicit confirmation;
+  manifest run only plans what the server proves;
 - any listing of paths or locators on the status surface — the
   redacted telemetry carries only the closed enum states, the closed
   blocked reason codes and counts.

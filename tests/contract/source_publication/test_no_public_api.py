@@ -43,6 +43,13 @@ TYPESCRIPT_ROOTS: Final[tuple[Path, ...]] = (
 SANCTIONED_PLUGIN_JOURNAL_ROOT: Final[Path] = (
     REPO_ROOT / "apps" / "obsidian-plugin" / "src" / "journal"
 )
+#: The plugin device-sync client directory — the Obsidian-side surface of
+#: the sanctioned device cursor and manifest reconciliation design (spec
+#: 7.1-7.4), whose wire shapes and transport tests legitimately name
+#: canonical source and version identity (see ``_is_sanctioned_policy_surface``).
+SANCTIONED_DEVICE_SYNC_PLUGIN_ROOT: Final[Path] = (
+    REPO_ROOT / "apps" / "obsidian-plugin" / "src" / "device-sync"
+)
 SANCTIONED_SOURCE_LIFECYCLE_API_FILES: Final[frozenset[Path]] = frozenset(
     {
         REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "source_lifecycle_composition.py",
@@ -94,6 +101,13 @@ SANCTIONED_SURFACE_LINE_MARKERS: Final[tuple[str, ...]] = (
     "exact-replay",
     "exact replay",
     "/api/sources/lifecycle-events",
+    # The device-sync verified exact-version download endpoint (spec 7.4) —
+    # the one canonical download declaration inside the scanned API
+    # application, its endpoint member, and the one synthetic URL of its
+    # Obsidian transport test. Arbitrary ``/sources`` routes stay forbidden.
+    "/api/sources/{source_id}/versions/{source_version_id}/content",
+    "download_source_version",
+    "/api/sources/a/versions/b/content",
 )
 
 
@@ -137,6 +151,8 @@ def _is_sanctioned_policy_surface(path: Path) -> bool:
     if path.name.startswith(("device_sync", "device-sync")):
         return True
     if SANCTIONED_PLUGIN_JOURNAL_ROOT in path.parents:
+        return True
+    if SANCTIONED_DEVICE_SYNC_PLUGIN_ROOT in path.parents:
         return True
     if path in SANCTIONED_SOURCE_LIFECYCLE_API_FILES:
         return True

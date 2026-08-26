@@ -74,21 +74,38 @@ function fakeAbstractFile(path: string, parentPath: string | null): VaultTargetF
 interface FakeVault extends LifecycleVaultReader {
   setFileBytes(normalizedPath: string, bytes: Uint8Array): void;
   removeFileBytes(normalizedPath: string): void;
+  /**
+   * Test seam: when non-null, the NEXT `readRegularFileBytes` awaits this
+   * promise before answering. The burst-coalescing test gates the first
+   * settle commit's byte read with it so the second notification of the
+   * burst deterministically observes the not-yet-rebound mapping — without
+   * the gate the outcome depends on whether the first commit's real async
+   * fingerprint/journal chain lands before the second settle fires, which
+   * flips under coverage-instrumented parallel runs.
+   */
+  holdNextRead: Promise<void> | null;
 }
 
 function createFakeVault(): FakeVault {
   const files = new Map<string, Uint8Array>();
-  return {
+  const vault: FakeVault = {
     setFileBytes(normalizedPath, contentBytes) {
       files.set(normalizedPath, contentBytes);
     },
     removeFileBytes(normalizedPath) {
       files.delete(normalizedPath);
     },
+    holdNextRead: null,
     async readRegularFileBytes(normalizedPath) {
+      if (vault.holdNextRead !== null) {
+        const gate = vault.holdNextRead;
+        vault.holdNextRead = null;
+        await gate;
+      }
       return files.get(normalizedPath) ?? null;
     },
   };
+  return vault;
 }
 
 interface Harness {
@@ -487,6 +504,14 @@ describe("LifecycleCapture settled/bursty rename notifications (spec 7.1)", () =
       harness.vault.setFileBytes("notes/burst-renamed.md", real.bytes);
       harness.vault.setFileBytes("archive/burst.md", real.bytes);
 
+      // Gate the first settle commit's target byte read so the second
+      // notification of the burst deterministically observes the
+      // not-yet-rebound mapping (see FakeVault.holdNextRead).
+      let releaseFirstRead!: () => void;
+      harness.vault.holdNextRead = new Promise<void>((resolve) => {
+        releaseFirstRead = resolve;
+      });
+
       // First rename fires and starts settling.
       const firstPromise = harness.capture.captureRename(
         fakeFile("notes/burst-renamed.md", "notes"),
@@ -499,7 +524,12 @@ describe("LifecycleCapture settled/bursty rename notifications (spec 7.1)", () =
         "notes/burst-renamed.md",
       );
       await vi.advanceTimersByTimeAsync(300);
-      await Promise.all([firstPromise, secondPromise]);
+      // The second settle fired while the first commit was still gated: it
+      // found no mapping at the intermediate path and recorded nothing.
+      releaseFirstRead();
+      const [firstResult, secondResult] = await Promise.all([firstPromise, secondPromise]);
+      expect(firstResult?.operation).toBe("rename");
+      expect(secondResult).toBeNull();
 
       const events = harness.repository.readEventsByLocalFileId(fileBefore.localFileId);
       const renameEvents = events.filter((entry) => entry.operation === "rename");

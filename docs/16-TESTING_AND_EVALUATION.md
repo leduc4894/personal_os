@@ -110,3 +110,18 @@ local_stack -q` (evaluator/verify/preview/reconciliation budgets) và
 reference-device evidence; fail khi records còn thiếu). CI workflow
 `.github/workflows/exclusion-policy-acceptance.yml` chạy cùng các gates này
 trên disposable stack.
+
+Device-sync child 6 (2026-08-26, device cursor and manifest reconciliation)
+đóng bộ gates riêng: `uv run poe device-sync-test` (device-sync unit,
+api-runtime unit, adapter unit, sensitive sentinel contract, API contract và
+disposable-stack integration — marker override bật `local_stack`, harness
+từ chối chạy khi thiếu `CI=true` và project `knowledge-ci-*` độc nhất;
+fail, không skip); plugin suite `pnpm --dir apps/obsidian-plugin exec vitest
+run` kèm `tsc --noEmit`, `lint`, `build`; và `uv run poe
+device-sync-device-verification` — gate recorded evidence fail (không skip)
+khi file `docs/operations/device-sync-device-verification.md` còn thiếu
+Desktop/Mobile rows. Hai mandatory live gates — Desktop WDIO qua
+`wdio-obsidian-service` và ma trận Mobile vật lý (design 18.1) — chưa chạy:
+mock, unit inference hay Desktop evidence không thay được Mobile vật lý,
+thiếu gate nào thì Child 6 vẫn BLOCKED và không có completion claim. Runbook
+vận hành: `docs/operations/device-cursor-manifest-reconciliation.md`.

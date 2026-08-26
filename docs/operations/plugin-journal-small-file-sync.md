@@ -92,11 +92,14 @@ passes, interleaved ahead of the next content event for the same file.
 An interrupted pass needs no operator action: the journal is the durable
 truth and the next trigger resumes through ordinary eligibility.
 
-There is no manual sync command. The plugin's command palette registers
-only `Run sync self-check` and `Copy sync diagnostics` — closed-token
-diagnostics owned by `docs/operations/sync-error-tracing.md` — and
-`Restore selected tombstone`, the single remaining explicit lifecycle
-command, covered by `docs/operations/source-locator-tombstone-lifecycle.md`.
+The plugin's command palette registers four closed commands: `Run sync
+self-check` and `Copy sync diagnostics` (closed-token diagnostics owned by
+`docs/operations/sync-error-tracing.md`), `Restore selected tombstone`
+(the single explicit lifecycle command, covered by
+`docs/operations/source-locator-tombstone-lifecycle.md`), and `Repair
+sync` (the Child 6 explicit reconciliation trigger, covered by
+`docs/operations/device-cursor-manifest-reconciliation.md`). There is no
+manual content-sync command: convergence stays automatic.
 
 ## Server upload-operation claim and expiry
 
@@ -200,9 +203,20 @@ per-change rows are refused; in-flight evidence is retained — (b) the
 recovery path buffer overflows, or (c) nothing verified at startup. The
 flag is sticky across every later verified generation. While it is set the
 composition stops the queue driver (nothing syncs) and capture refuses new
-rows; the status bar shows the reconcile guidance. Clearing it is a
-deliberate repair action owned by the reconciliation child: it is never
-auto-cleared by a successful pass.
+rows; the status bar shows the reconcile guidance.
+
+Clearing the flag is now owned by Child 6 (device cursor and manifest
+reconciliation): the `Repair sync` command — or an automatic correctness
+trigger — runs one checkpoint-bound manifest reconciliation, and the
+completion path clears `reconcile_required` durably through
+`markReconcileComplete` (the flag never re-clobbers after close/reopen,
+and a barrier left by a lost run is repaired, not ignored). It is still
+never auto-cleared by a successful ordinary pass. Journal schema v7
+upgrades a v6 image losslessly (both cursor values start at zero; every
+file mapping, pending event, lifecycle row, tombstone and restore
+reservation is preserved; a pre-existing `reconcile_required` flag stays
+set). The full repair procedure, cadence and recovery table live at
+`docs/operations/device-cursor-manifest-reconciliation.md`.
 
 ## Size block
 

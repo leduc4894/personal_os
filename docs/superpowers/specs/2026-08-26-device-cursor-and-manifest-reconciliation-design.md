@@ -282,7 +282,8 @@ Finalization inserts an ordered immutable row per action:
 manifest_run_id, action_index      primary key
 action_kind                        upload | download | apply_tombstone |
                                    conflict | no_change | excluded
-local_entry_id                     nullable for canonical-only downloads
+local_entry_id                     nullable only for the canonical-only
+                                   download (amendment below)
 source_id, source_version_id       nullable by action shape
 source_locator_id                  nullable exact checkpoint locator
 source_tombstone_id                nullable exact open tombstone
@@ -292,6 +293,21 @@ safe_reason_code                   nullable closed conflict/exclusion reason
 Database constraints enforce the required and forbidden columns of every
 action kind. Pagination is stable by `action_index`; a later canonical event
 cannot rewrite a planned action.
+
+**Amendment (2026-08-26, Task 11b/14):** `local_entry_id` is nullable for
+exactly one shape — the canonical-only `download` of a source absent from
+the device manifest. The per-entry catch-up download keeps its manifest
+entry's `local_entry_id` echo. The `20260826_01` migration had pinned the
+stricter reading (every download entry-less); migration `20260826_02`
+rewrites that one clause of the action-shape constraint and restates every
+other clause verbatim. Correspondingly, a `download` action exposes its
+checkpoint-ACTIVE locator on the action read wire (`checkpoint_locator`),
+hydrated at read time by joining the stored `source_locator_id` to the
+canonical locator row, workspace-scoped. No locator text persists in any
+`manifest_*` table (section 6.4 discipline holds), and a download whose
+locator cannot be hydrated — dangling/foreign id or un-normalized stored
+text — fails closed with the registered `device_manifest_state_invalid`
+code. Replayed action reads return identical rows.
 
 ## 7. Public API contracts
 
@@ -347,7 +363,10 @@ The route set supports:
 1. start/resume a run with the local observation generation;
 2. put the exact next ordered page of at most 500 entries;
 3. finalize with total count and final digest;
-4. read deterministic action pages;
+4. read deterministic action pages — every `download` action carries its
+   checkpoint-active locator on this wire (hydrated at read time per the
+   section 6.5 amendment; never persisted in a manifest table), so a
+   canonical-only download names the path the bytes belong at;
 5. complete after every action is terminal-safe locally.
 
 Completion requires the exact planned run and final digest. It atomically

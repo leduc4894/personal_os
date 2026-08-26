@@ -11,10 +11,15 @@ silent failure — with one paste and one lookup.
 The operator surface is small and deliberately redacted:
 
 - One **sidecar ring** (`sync-diagnostics-trail.json`, inside the Vault's
-  plugin directory) holding at most 128 durable closed-token entries.
+  plugin directory) holding at most 128 durable closed-token entries under
+  the versioned contract `obsidian_sync_diagnostics_trail/v2`; a legacy v1
+  sidecar is migrated losslessly (its known entries parse under the same
+  closed gates) and a foreign token still resets through `trail_reset`.
 - Two **commands**: `Run sync self-check` and `Copy sync diagnostics`,
-  alongside the `Restore selected tombstone` command — exactly these
-  three commands are registered in the plugin's command palette.
+  alongside the `Restore selected tombstone` command and the Child 6
+  `Repair sync` command — exactly these four commands are registered in the
+  plugin's command palette (`Repair sync` is owned by
+  [`device-cursor-manifest-reconciliation.md`](device-cursor-manifest-reconciliation.md)).
 - One **settings section**: `Sync diagnostics trail`, plus the settings
   **detail lines** that render the closed failure reasons of the
   composition and auth layers (journal startup failure, policy state,
@@ -64,13 +69,26 @@ counter).
 
 | Kind              | Recorded when                                                                                   |
 | ----------------- | ----------------------------------------------------------------------------------------------- |
-| `wire_failure`    | One sync HTTP request failed; carries the closed `SyncApiFailureKind` label and, when the server answered with an envelope, the opaque `request_id` token. |
+| `wire_failure`    | One sync HTTP attempt actually reached the transport and failed; carries the closed `SyncApiFailureKind` label and, when the server answered with an envelope, the opaque `request_id` token. A missing credential or a failed refresh BEFORE contact records `credential_failure` instead (Child 6 taxonomy split). |
 | `pass_outcome`    | Every finished queue pass; carries the closed `QueuePassOutcome`. A success that returned a server envelope may sample its `request_id` onto the entry. |
 | `journal_failure` | A journal mutation inside the pass loop failed; carries the closed `JournalStoreErrorReason`. It also carries the closed journal-orchestration failure tokens listed below when composition, scheduling, drain, capture or reconcile work fails closed. |
 | `publish_failure` | A journal generation publish failed; carries the closed `JournalStoreErrorReason`.               |
 | `trail_reset`     | The sidecar was unreadable or corrupt and the trail reset to empty.                             |
 | `self_check`      | A `Run sync self-check` step closed; carries the fixed self-check verdict tokens. The trail itself also records one `trail_persist_failed` entry per persist-failure episode, and the copy command records one on its own exceptional rejection (below). |
 | `startup_failure` | The journal startup chain (engine load, wasm read, journal recovery, or a fire-and-forget startup action) threw and capture failed closed; carries exactly one startup stage token, plus the closed `JournalStoreErrorReason` when the throw is a store error. The same tokens persist in the settings snapshot as the `lastStartupFailureTokens` field. |
+| `credential_failure` | Child 6: the device-sync lane could not even contact the wire because no access credential exists (`access_missing`) or a refresh failed (`refresh_failed`). |
+| `cursor_failure`  | Child 6: a device cursor phase closed failed; carries one stage `pull` or `acknowledge` plus the closed reason. |
+| `apply_failure`   | Child 6: a remote apply closed failed; carries one stage of `prepare`, `download`, `verify_temp`, `vault_mutation`, `verify_final`, `local_commit`, `recovery`, `trash` plus the closed reason. |
+| `reconcile_failure` | Child 6: a manifest reconciliation phase closed failed; carries one stage of `start`, `page`, `finalize`, `actions`, `complete` plus the closed reason. |
+| `composition_read_failure` | Child 6: a once-per-session settings/status projection read failed and used its fail-closed fallback; carries one stage of `status_read`, `note_status_read`, `retry_schedule_read`, `sync_status_read`. Deliberately excluded from the derived settings stop-reason line — these reads never stop sync. |
+
+The Child 6 failure kinds append, in order: the stage token, the closed
+reason, then the gated correlation facts — a registered server error code
+(the `device_*` family or the journal-lane envelope subset) and the
+UUID-gated `request_id` of a parsed server envelope; an untrusted value of
+either records nothing. Reading the device-sync surfaces (cursor lag,
+repair state, action counts) is owned by
+[`device-cursor-manifest-reconciliation.md`](device-cursor-manifest-reconciliation.md).
 
 The closed token vocabularies are exactly the existing sync vocabularies:
 
@@ -186,10 +204,11 @@ block and places it on the clipboard; when the clipboard is unavailable
 the same block is shown in a read-only preformatted modal. The block is
 assembled ONLY from already-redacted closed surfaces — the current status
 line, the blocker guidance, the journal-store diagnostics, the aggregate
-trail counts and the last five trail entries — so it is safe to paste
-anywhere.
+trail counts and the five newest trail entries rendered newest first — so
+it is safe to paste anywhere.
 
-Sanitized example (shape only; tokens and counts vary):
+Sanitized example (shape only; tokens and counts vary; the tail renders
+newest first — the Child 6 pinned order):
 
 ```text
 obsidian_sync_diagnostics_export/v1
@@ -201,11 +220,11 @@ Journal store diagnostics:
 Trail entries: 42
 Trail append failures: 1
 Trail tail (last 5):
-2026-08-23T09:41:18.000Z · wire_failure · server_error · request_id=018f6c2e-8a1f-7b3c-9d2e-4f5a6b7c8d9e
-2026-08-23T09:41:19.000Z · pass_outcome · login_required
-2026-08-23T09:52:02.000Z · journal_failure · journal_mutation_failed
-2026-08-23T09:52:02.000Z · publish_failure · journal_generation_write_failed
 2026-08-23T09:55:40.000Z · self_check · origin_unreachable · network_timeout
+2026-08-23T09:52:02.000Z · publish_failure · journal_generation_write_failed
+2026-08-23T09:52:02.000Z · journal_failure · journal_mutation_failed
+2026-08-23T09:41:19.000Z · pass_outcome · login_required
+2026-08-23T09:41:18.000Z · wire_failure · server_error · request_id=018f6c2e-8a1f-7b3c-9d2e-4f5a6b7c8d9e
 ```
 
 All timestamps are ISO-8601 UTC by design: the block is a shareable
@@ -232,7 +251,8 @@ durable trail into three lines:
 - **Trail entries / append failures** — the total durable entry count and
   the bounded swallowed-append-failure counter (a non-zero counter means
   the sidecar write path is failing even though sync continues).
-- **The last five entries** — the same closed lines the export renders.
+- **The last five entries** — the same closed lines the export renders,
+  newest first.
 
 ## Settings detail lines (startup, policy state, auth reasons)
 
@@ -641,6 +661,9 @@ Two more closed surfaces close the remaining "silent reason" classes of the
   structured-events-only logging posture.
 - Redacted operator surface of the sync lifecycle
   ([`source-locator-tombstone-lifecycle.md`](source-locator-tombstone-lifecycle.md)).
+- Device cursor and manifest reconciliation surfaces — the Child 6
+  cursor/apply/reconcile/credential/composition kinds and stages above
+  ([`device-cursor-manifest-reconciliation.md`](device-cursor-manifest-reconciliation.md)).
 - Live launcher / secrets — [`.local/RESTART.md`](../../.local/RESTART.md)
   (NEVER copy launcher details or secrets into this guide).
 

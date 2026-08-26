@@ -114,13 +114,25 @@ Tầng thiết bị (Obsidian plugin) là nơi người dùng gặp lỗi trư�
 có service nào chạy thường trực; observability của nó là pattern closed-token
 tại chỗ, không phụ thuộc stack Phần 1:
 
-- **Durable sync diagnostics trail**: ring 128 entry `{kind, atEpochMs, tokens}`
+- **Durable sync diagnostics trail (v2)**: sidecar ghi contract
+  `obsidian_sync_diagnostics_trail/v2` — ring 128 entry `{kind, atEpochMs, tokens}`
   chỉ chứa nhãn đóng (`QueuePassOutcome`, `JournalSafeErrorLabel`,
   `JournalStoreErrorReason`, sync failure kinds, lifecycle outcomes, server
   envelope error codes, opaque `request_id`), persist qua restart qua sidecar
   `sync-diagnostics-trail.json` qua vault adapter; hỏng thì reset + ghi
-  `trail_reset`. Trail observe-only: không đổi semantics sync, append
-  fire-and-forget, không bao giờ chặn pass.
+  `trail_reset`. Loader chấp nhận sidecar v1 và losslessly rewrite các entry
+  đã biết lên v2; foreign token vẫn reset qua `trail_reset`. Child 6 thêm các
+  kind đóng `credential_failure` (`access_missing` / `refresh_failed`),
+  `cursor_failure` (pull / acknowledge), `apply_failure` (prepare / download /
+  verify_temp / vault_mutation / verify_final / local_commit / recovery /
+  trash), `reconcile_failure` (start / page / finalize / actions / complete)
+  và `composition_read_failure` (status_read / note_status_read /
+  retry_schedule_read / sync_status_read — bị loại khỏi derived stop reasons
+  vì các read một-lần-mỗi-session này không dừng sync). `wire_failure` giờ
+  chỉ nghĩa là một HTTP attempt thực sự chạm transport và thất bại; thiếu
+  credential hay refresh fail trước contact ghi `credential_failure`. Trail
+  observe-only: không đổi semantics sync, append fire-and-forget, không bao
+  giờ chặn pass.
 - **Wire correlation**: mọi wire failure mang `request_id` từ response envelope
   (UUID-gated) để join với access observation của API; nâng cấp tự nhiên là đọc
   header `traceparent` (W3C) API đã trả.
@@ -136,7 +148,12 @@ tại chỗ, không phụ thuộc stack Phần 1:
   trail/settings — không nuốt im lặng (khởi nguồn: bug park 2 ngày ẩn sau
   `journal_mutation_failed` bị catch bỏ qua).
 
-Runbook vận hành: `docs/operations/sync-error-tracing.md`.
+Runbook vận hành: `docs/operations/sync-error-tracing.md`. Toàn bộ mặt
+cursor/apply/reconcile của Child 6 (cách đọc các kind mới, cursor lag,
+repair state, reason tokens) có runbook riêng tại
+`docs/operations/device-cursor-manifest-reconciliation.md`. API structured
+diagnostics (`api_request_failed` gồm cả 5xx exception) đã ghi kèm
+server-generated `request_id` của request correlation middleware.
 
 ## 8. Retention
 

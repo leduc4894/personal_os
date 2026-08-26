@@ -10,7 +10,7 @@ PostgreSQL là canonical application state và correctness authority cho source 
 |---|---|
 | Identity | `users`, `workspaces`, `devices`, `device_tokens`, `web_sessions` |
 | Sources | `sources`, `source_versions`, `content_objects`, `source_locators`, `source_tombstones`, `source_conflicts` |
-| Sync | `sync_events`, `device_cursors`, `manifest_runs`, `multipart_uploads`, `multipart_parts` |
+| Sync | `sync_events`, `device_cursors`, `manifest_runs`, `manifest_pages`, `manifest_entry_resolutions`, `manifest_actions`, `multipart_uploads`, `multipart_parts` |
 | Metadata | `source_metadata`, `metadata_values`, `property_definitions`, `schema_revisions` |
 | Policy | `source_policies`, `policy_rules`, `policy_evaluations` |
 | Projection | `projection_deployments`, `projection_routes`, `projection_checkpoints`, `projection_manifests`, `projection_failures`, `embedding_cache` |
@@ -67,6 +67,32 @@ move, delete và restore không insert `source_versions` và không đổi
 projection intents cùng canonical mutation; policy deny/indeterminate vẫn ghi
 trạng thái thật nhưng chọn projection delete. Exact replay trả receipt cũ và
 không tạo thêm row.
+
+### Device cursor and manifest reconciliation (Child 6)
+
+Migration heads `20260826_01` + `20260826_02` tạo năm bảng:
+`device_cursors` (một row watermark mỗi workspace/device; delivered ≥
+acknowledged, acknowledge monotonic, fence regression/ack-ahead), và nhóm
+manifest tạm thời `manifest_runs` / `manifest_pages` /
+`manifest_entry_resolutions` / `manifest_actions` (collecting → planned →
+applying → completed | expired | failed; tối đa 100.000 entry/run, page 500
+entry, lifetime đúng one hour — một giờ — theo database time). Bản sửa `20260826_02`
+nới shape constraint của `manifest_actions`: chỉ canonical-only download mới
+được thiếu `local_entry_id` — per-entry catch-up download vẫn echo entry của
+nó; mọi action kind khác bắt buộc entry.
+
+Manifest rows là bounded temporary protocol state: cleanup của exact expired
+run cascade qua pages/resolutions/actions, nhưng source, version, event,
+locator, tombstone và audit lineage không bao giờ cascade qua child này.
+Cursor chỉ advance qua exact acknowledgement sau khi local generation của
+device durable; transaction của manifest completion là sole exception — cùng
+transaction chuyển một exact `applying` run thành `completed` mới được đưa
+cursor tới checkpoint của run mà không cần delivered watermark trước đó.
+Sync-event compaction không được vượt quá minimum acknowledged cursor của
+device còn active; nếu retained history không đáp ứng, pull trả closed gap
+outcome chứ không fabricate event. Trên wire, action download mang checkpoint
+locator được hydrated at read time từ locator row canonical (workspace-scoped;
+hydrate thất bại fail-closed `device_manifest_state_invalid`) — no locator text persists trong bất kỳ bảng manifest nào.
 
 ### Activate projection
 

@@ -44,10 +44,17 @@ FORBIDDEN_RUNTIME_IMPORT_ROOTS: Final[frozenset[str]] = frozenset(
 #: files may import the provider package only — they never call an
 #: object-store port member (the member-call gate below enforces that
 #: mechanically), and the cloud SDK roots stay forbidden for them as for
-#: every other runtime module.
+#: every other runtime module. The device sync serve composition (spec 5/7.4
+#: of the device cursor and manifest reconciliation design) is the same
+#: serving-path class: it binds the same lazy R2 client behind the guarded
+#: verified-reader service of ``device_sync_content.py`` (the approved
+#: member-caller above); it constructs the adapter but never calls an
+#: object-store port member, which the member-call gate below still enforces
+#: mechanically exactly as for every other module.
 APPROVED_PROVIDER_COMPOSITIONS: Final[frozenset[Path]] = frozenset(
     {
         REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "small_file_sync_composition.py",
+        REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "device_sync_composition.py",
         REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "server.py",
     }
 )

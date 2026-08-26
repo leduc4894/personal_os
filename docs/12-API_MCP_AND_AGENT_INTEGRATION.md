@@ -30,6 +30,54 @@ client. Các group ở trên thuộc các child spec sau theo sequence trong
 `2026-08-15-phase-two-obsidian-sync-design.md` (section 17). Operator
 runbook: `docs/operations/api-runtime-contract.md`.
 
+### Device sync routes (Child 6, spec 7.1-7.4)
+
+Tám route đã đăng ký, mỗi route một semantic operation id, đều yêu cầu active
+`obsidian_sync` device Bearer credential (workspace/device derive từ
+credential; request field không bao giờ chọn scope) và trả canonical envelope
+kèm `Cache-Control: no-store`:
+
+| Route | Operation id |
+|---|---|
+| `GET /api/sync/events` | `pullDeviceSyncEvents` |
+| `POST /api/sync/cursor-acknowledgements` | `acknowledgeDeviceSyncCursor` |
+| `POST /api/sync/manifests` | `startDeviceManifest` |
+| `PUT /api/sync/manifests/{manifest_run_id}/pages/{page_number}` | `appendDeviceManifestPage` |
+| `POST /api/sync/manifests/{manifest_run_id}/finalize` | `finalizeDeviceManifest` |
+| `GET /api/sync/manifests/{manifest_run_id}/actions` | `listDeviceManifestActions` |
+| `POST /api/sync/manifests/{manifest_run_id}/complete` | `completeDeviceManifest` |
+| `GET /api/sources/{source_id}/versions/{source_version_id}/content` | `downloadDeviceSourceVersion` |
+
+Binary download là ngoại lệ envelope được tài liệu hóa duy nhất của group
+này: success stream exact verified bytes với `Content-Length`, `Content-Type`
+và `X-Content-SHA256`; lỗi trước khi stream vẫn là JSON envelope canonical.
+
+Closed error registry của domain `device_sync` (spec 13; mỗi code map đúng
+một HTTP status đã test, không nhận safe detail — lý do đọc được đi qua
+structured diagnostics và plugin trail):
+
+| Code | HTTP status |
+|---|---|
+| `device_cursor_gap` | 409 |
+| `device_cursor_regression` | 409 |
+| `device_cursor_ack_ahead` | 409 |
+| `device_event_unavailable` | 404 |
+| `device_event_integrity_failed` | 409 |
+| `device_manifest_not_found` | 404 |
+| `device_manifest_expired` | 410 |
+| `device_manifest_state_invalid` | 409 |
+| `device_manifest_page_invalid` | 422 |
+| `device_manifest_page_replay_mismatch` | 409 |
+| `device_manifest_digest_mismatch` | 422 |
+| `device_manifest_policy_advanced` | 409 |
+| `device_download_integrity_failed` | 422 |
+| `device_sync_dependency_unavailable` | 503 |
+
+Mọi code đều terminal cho request kích hoạt ngoại lệ duy nhất:
+`device_sync_dependency_unavailable` (503) là retryable — plugin backoff
+bounded rồi retry với cùng identity. Operator runbook của toàn bộ mặt
+đồng bộ thiết bị: `docs/operations/device-cursor-manifest-reconciliation.md`.
+
 ## 3. Response envelope
 
 ```json

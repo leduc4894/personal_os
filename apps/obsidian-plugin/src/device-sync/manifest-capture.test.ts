@@ -253,20 +253,30 @@ describe("ManifestCapture ordered capture (spec 12.1)", () => {
     expect(byLocator.get("notes/fresh.md")?.knownVersionId).toBeNull();
   });
 
-  it("splits entries into 500-entry pages and pins the frozen page bound", async () => {
-    expect(MANIFEST_PAGE_ENTRIES).toBe(500);
-    const harness = createHarness();
-    for (let index = 0; index < 501; index += 1) {
-      harness.vault.setFileBytes(`notes/file-${String(index).padStart(4, "0")}.md`, bytesOf(`f${index}`));
-    }
+  it(
+    "splits entries into 500-entry pages and pins the frozen page bound",
+    async () => {
+      expect(MANIFEST_PAGE_ENTRIES).toBe(500);
+      const harness = createHarness();
+      for (let index = 0; index < 501; index += 1) {
+        harness.vault.setFileBytes(
+          `notes/file-${String(index).padStart(4, "0")}.md`,
+          bytesOf(`f${index}`),
+        );
+      }
 
-    const pages = await pagesOf(harness.capture, 1);
+      const pages = await pagesOf(harness.capture, 1);
 
-    expect(pages.map((page) => page.entries.length)).toEqual([500, 1]);
-    expect(pages.map((page) => page.pageNumber)).toEqual([0, 1]);
-    expect(pages[0]?.entries[499]?.normalizedLocator).toBe("notes/file-0499.md");
-    expect(pages[1]?.entries[0]?.normalizedLocator).toBe("notes/file-0500.md");
-  });
+      expect(pages.map((page) => page.entries.length)).toEqual([500, 1]);
+      expect(pages.map((page) => page.pageNumber)).toEqual([0, 1]);
+      expect(pages[0]?.entries[499]?.normalizedLocator).toBe("notes/file-0499.md");
+      expect(pages[1]?.entries[0]?.normalizedLocator).toBe("notes/file-0500.md");
+    },
+    // 501 real fingerprints through the sql.js journal: the vitest 5 s
+    // default overflows under coverage-instrumented parallel runs, so the
+    // bound gets the same explicit headroom as the 100,000-entry cap test.
+    60_000,
+  );
 
   it("yields exactly one empty page for an empty vault", async () => {
     const harness = createHarness();
