@@ -447,6 +447,31 @@ describe("RemoteEventApplier apply outcomes", () => {
     expect(harness.repository.readState().barrierGeneration).toBeNull();
     expect(harness.diagnostics.applyFailures).toEqual([]);
   });
+
+  it("replays a settled conflict with its durable outcome and closed reason", async () => {
+    const harness = createApplierHarness({
+      seedFiles: [{ locator: "notes/created.md", bytes: bytesOf("already occupied") }],
+    });
+    const first = await harness.applier.apply(CREATED_EVENT());
+    expect(first.outcome).toBe("conflict");
+
+    const replay = await harness.applier.apply(CREATED_EVENT());
+    expect(replay).toEqual({
+      eventSequence: 1,
+      outcome: "conflict",
+      reason: "device_manifest_target_occupied",
+    });
+    expect(harness.repository.readState().barrierGeneration).toBeNull();
+  });
+
+  it("replays a settled tombstone with its durable outcome", async () => {
+    const harness = createApplierHarness({ seedFiles: seedFilesOf(DELETED_EVENT()) });
+    const first = await harness.applier.apply(DELETED_EVENT());
+    expect(first.outcome).toBe("tombstone_handled");
+
+    const replay = await harness.applier.apply(DELETED_EVENT());
+    expect(replay).toEqual({ eventSequence: 1, outcome: "tombstone_handled", reason: null });
+  });
 });
 
 // --- cursor guards and stage surfacing --------------------------------------------------------------------
@@ -628,6 +653,28 @@ describe("RemoteEventApplier stage surfacing", () => {
       { stage: "trash", reason: "device_apply_vault_failed" },
     ]);
   });
+
+  it("surfaces a thrown cleanup seam failure at the trash stage and still completes", async () => {
+    const harness = createApplierHarness({ seedFiles: seedFilesOf(UPDATED_EVENT()) });
+    // The rollback-sibling trash arms a readback failure inside the
+    // post-mutation recovery pass: `writer.recover` itself throws.
+    harness.vault.onAction = (method, from) => {
+      if (method === "trashLocator" && from === rollbackLocatorOf("notes/a.md")) {
+        harness.vault.readBytes = async (): Promise<Uint8Array | null> => {
+          throw new Error("vault read failed during cleanup");
+        };
+      }
+    };
+
+    const outcome = await harness.applier.apply(UPDATED_EVENT());
+
+    expect(outcome.outcome).toBe("applied");
+    expect(harness.repository.readState().appliedSequence).toBe(1);
+    expect(harness.repository.readUnfinishedApply()?.state).toBe("locally_applied");
+    expect(harness.diagnostics.applyFailures).toEqual([
+      { stage: "trash", reason: "device_apply_vault_failed" },
+    ]);
+  });
 });
 
 // --- the crash-injection matrix -----------------------------------------------------------------------------
@@ -676,10 +723,41 @@ describe("RemoteEventApplier crash-injection matrix", () => {
     expect(restarted.vault.files.has(tempLocatorOf("notes/created.md"))).toBe(false);
     expect(restarted.repository.readUnfinishedApply()?.state).toBe("prepared");
     expect(restarted.repository.readState().appliedSequence).toBe(0);
+    // The absent target IS the verified pre-mutation expectation of a
+    // create: recovery is clean — no barrier, no failure observation.
+    expect(restarted.repository.readState().barrierReason).toBeNull();
+    expect(restarted.diagnostics.applyFailures).toEqual([]);
+    expect(restarted.diagnostics.otherFailures).toEqual([]);
 
     const outcome = await restarted.applier.apply(event);
     expect(outcome.outcome).toBe("applied");
     expect(restarted.repository.readState().appliedSequence).toBe(1);
+  });
+
+  it("crash at prepared before any staging of a created event: recovery is clean with no barrier", async () => {
+    const event = CREATED_EVENT();
+    const harness = createApplierHarness();
+    // The durable crash point: prepared + marker landed, no Vault effect.
+    await harness.repository.prepareRemoteApply({
+      eventSequence: event.eventSequence,
+      eventId: event.eventId,
+      sourceId: event.sourceId,
+      operation: "created",
+      priorLocator: null,
+      targetLocator: "notes/created.md",
+      baseFingerprint: null,
+      finalFingerprint: NEXT_FINGERPRINT,
+      tempToken: event.eventId,
+      rollbackToken: null,
+    });
+
+    await harness.applier.recoverUnfinishedApply();
+
+    expect(harness.repository.readUnfinishedApply()?.state).toBe("prepared");
+    expect(harness.repository.readState().appliedSequence).toBe(0);
+    expect(harness.repository.readState().barrierReason).toBeNull();
+    expect(harness.diagnostics.applyFailures).toEqual([]);
+    expect(harness.diagnostics.otherFailures).toEqual([]);
   });
 
   it("crash after the rename-in of a created event: recovery completes and terminalizes", async () => {
@@ -797,6 +875,79 @@ describe("RemoteEventApplier crash-injection matrix", () => {
     expect(restarted.vault.files.has(rollbackLocatorOf("notes/a.md"))).toBe(false);
   });
 
+  /** A repository decoration that crashes right after the vault_mutated persist. */
+  function crashAfterVaultMutatedPersist(
+    repository: DeviceSyncRepositoryPort,
+  ): DeviceSyncRepositoryPort {
+    return decorateRepository(repository, {
+      afterTransitionRemoteApply: (input) => {
+        const transition = input as { readonly state?: string };
+        if (transition.state === "vault_mutated") {
+          throw new CrashSignal();
+        }
+      },
+    });
+  }
+
+  it("crash after the vault_mutated persist of a deleted event: recovery settles the tombstone", async () => {
+    const event = DELETED_EVENT();
+    const harness = createApplierHarness({
+      seedFiles: seedFilesOf(event),
+      repositoryOverrides: (repository) => crashAfterVaultMutatedPersist(repository),
+    });
+
+    await applyUntilCrash(harness, event);
+    expect(harness.repository.readUnfinishedApply()?.state).toBe("vault_mutated");
+    const restarted = restartApplier(harness);
+    await restarted.applier.recoverUnfinishedApply();
+
+    expect(restarted.repository.readState().appliedSequence).toBe(1);
+    expect(restarted.repository.readUnfinishedApply()?.state).toBe("locally_applied");
+    expect(restarted.repository.readUnfinishedApply()?.safeErrorCode).toBeNull();
+    expect(restarted.vault.files.has("notes/doomed.md")).toBe(false);
+    expect(restarted.diagnostics.applyFailures).toEqual([]);
+  });
+
+  it("crash after the vault_mutated persist of a renamed event: recovery proves and terminalizes", async () => {
+    const event = RENAMED_EVENT();
+    const harness = createApplierHarness({
+      seedFiles: seedFilesOf(event),
+      repositoryOverrides: (repository) => crashAfterVaultMutatedPersist(repository),
+    });
+
+    await applyUntilCrash(harness, event);
+    expect(harness.repository.readUnfinishedApply()?.state).toBe("vault_mutated");
+    const restarted = restartApplier(harness);
+    await restarted.applier.recoverUnfinishedApply();
+
+    expect(restarted.repository.readState().appliedSequence).toBe(1);
+    expect(restarted.repository.readUnfinishedApply()?.state).toBe("locally_applied");
+    expect(restarted.vault.files.has("notes/old.md")).toBe(false);
+    expect(
+      new TextDecoder().decode(restarted.vault.files.get("notes/new.md") ?? new Uint8Array()),
+    ).toBe("base content");
+    expect(restarted.diagnostics.applyFailures).toEqual([]);
+  });
+
+  it("crash after the vault_mutated persist of a moved event: recovery proves and terminalizes", async () => {
+    const event = MOVED_EVENT();
+    const harness = createApplierHarness({
+      seedFiles: seedFilesOf(event),
+      repositoryOverrides: (repository) => crashAfterVaultMutatedPersist(repository),
+    });
+
+    await applyUntilCrash(harness, event);
+    expect(harness.repository.readUnfinishedApply()?.state).toBe("vault_mutated");
+    const restarted = restartApplier(harness);
+    await restarted.applier.recoverUnfinishedApply();
+
+    expect(restarted.repository.readState().appliedSequence).toBe(1);
+    expect(restarted.repository.readUnfinishedApply()?.state).toBe("locally_applied");
+    expect(restarted.vault.files.has("notes/old.md")).toBe(false);
+    expect(restarted.vault.files.has("archive/new.md")).toBe(true);
+    expect(restarted.diagnostics.applyFailures).toEqual([]);
+  });
+
   it("crash after the local commit of an updated event, before server acknowledgement", async () => {
     const event = UPDATED_EVENT();
     const harness = createApplierHarness({
@@ -912,6 +1063,12 @@ describe("RemoteEventApplier crash-injection matrix", () => {
     const restarted = restartApplier(harness);
     await restarted.applier.recoverUnfinishedApply();
     expect(restarted.vault.files.has(tempLocatorOf("notes/restored.md"))).toBe(false);
+    expect(restarted.repository.readUnfinishedApply()?.state).toBe("prepared");
+    // The absent target is the verified pre-mutation expectation of a
+    // restore: recovery is clean — no barrier, no failure observation.
+    expect(restarted.repository.readState().barrierReason).toBeNull();
+    expect(restarted.diagnostics.applyFailures).toEqual([]);
+    expect(restarted.diagnostics.otherFailures).toEqual([]);
 
     const outcome = await restarted.applier.apply(event);
     expect(outcome.outcome).toBe("applied");

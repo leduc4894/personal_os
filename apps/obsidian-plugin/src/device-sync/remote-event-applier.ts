@@ -155,8 +155,23 @@ export function createRemoteEventApplier(options: RemoteEventApplierOptions): Re
   async function apply(event: DeviceSyncEvent): Promise<TerminalDeviceEvent> {
     const state = repository.readState();
     if (event.eventSequence <= state.appliedSequence) {
-      // Idempotent replay of an already-settled event: the durable row
-      // and cursor are the truth; nothing is re-run.
+      // Idempotent replay of an already-settled event: nothing is re-run,
+      // and the replay answers with the durable row's settled outcome
+      // while it is still locally known (a conflict closes with its
+      // closed reason, a delete as a handled tombstone).
+      const settled = repository.readUnfinishedApply();
+      if (settled !== null && settled.eventSequence === event.eventSequence) {
+        if (settled.safeErrorCode !== null) {
+          return {
+            eventSequence: event.eventSequence,
+            outcome: "conflict",
+            reason: settled.safeErrorCode,
+          };
+        }
+        if (settled.operation === "deleted") {
+          return { eventSequence: event.eventSequence, outcome: "tombstone_handled", reason: null };
+        }
+      }
       return { eventSequence: event.eventSequence, outcome: "applied", reason: null };
     }
     if (event.eventSequence !== state.appliedSequence + 1) {
@@ -322,12 +337,20 @@ export function createRemoteEventApplier(options: RemoteEventApplierOptions): Re
     if (mutatedRow !== null && mutatedRow.eventSequence === event.eventSequence) {
       try {
         const recovery = await writer.recover(mutatedRow);
-        if (recovery.kind !== "blocked" && recovery.cleanupFailure !== null) {
+        if (recovery.kind === "blocked") {
+          // The durable proof no longer verifies — surface the closed
+          // reason; the already-mutated apply still completes.
+          diagnostics.applyFailure("recovery", recovery.reason);
+        } else if (recovery.cleanupFailure !== null) {
           diagnostics.applyFailure("trash", recovery.cleanupFailure);
         }
-      } catch {
+      } catch (error) {
         // The apply is already durably mutated; a failed cleanup is a
-        // leftover hidden sibling, never data loss.
+        // leftover hidden sibling, never data loss — but it still
+        // surfaces exactly one closed trash-stage observation.
+        const cleanupReason =
+          error instanceof AtomicVaultWriterError ? error.reason : "device_apply_vault_failed";
+        diagnostics.applyFailure("trash", cleanupReason);
       }
     }
 

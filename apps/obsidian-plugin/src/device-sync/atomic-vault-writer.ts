@@ -570,6 +570,14 @@ export class AtomicVaultWriterImpl implements AtomicVaultWriter {
           cleanupFailure,
         };
       }
+      // A created/restored apply whose target is STILL ABSENT sits at its
+      // verified pre-mutation expectation — the crash happened before any
+      // rename-in (a completed rename-in would leave the final bytes,
+      // caught above), so the event awaits redelivery. An updated apply
+      // with an absent target is genuine divergence and stays blocked.
+      if (operation.operation !== "updated" && targetBytes === null) {
+        return { kind: "clean", eventSequence: operation.eventSequence, cleanupFailure };
+      }
       return blocked;
     }
     if (operation.operation === "deleted") {
