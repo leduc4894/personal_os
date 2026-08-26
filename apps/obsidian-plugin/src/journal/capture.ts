@@ -28,6 +28,7 @@
 import { normalizePolicyLocator } from "../exclusion-policy/evaluator";
 import type { CapturePolicyEvaluation, CapturePolicySubject } from "../exclusion-policy/policy-session";
 import type { EchoSuppressor } from "../device-sync/echo-suppression";
+import type { DeviceSyncReason } from "../device-sync/contracts";
 import type {
   ExistingFilesScanSummary,
   JournalCaptureAdmission,
@@ -65,6 +66,29 @@ export const EXISTING_FILES_SCAN_MAXIMUM_FILES = MAX_PENDING_EVENTS;
 export const EXISTING_FILES_SCAN_BATCH_FILES = 100;
 
 // --- ports ---------------------------------------------------------------------------------
+
+/** The action kinds whose apply must recheck the current Vault state first (spec 12.4). */
+export type ManifestRepairActionKind = "download" | "apply_tombstone" | "upload";
+
+/** One planned manifest action's target recheck input (spec 12.4). */
+export interface RepairActionRecheckInput {
+  readonly normalizedLocator: string;
+  readonly entryFingerprint: LocalFile["observedFingerprint"];
+  readonly actionKind: ManifestRepairActionKind;
+}
+
+/**
+ * The closed outcome of one planned action's target recheck: `safe`, or
+ * the closed action-reason token that settles the action as a durable
+ * conflict without any Vault mutation — a newer local journal event or a
+ * vanished target (`device_manifest_action_stale`), locally diverged
+ * bytes (`device_manifest_local_diverged`), a restore reservation holding
+ * the target (`device_manifest_target_occupied`) or the current policy
+ * forbidding the transfer (`device_manifest_policy_excluded`).
+ */
+export type RepairActionRecheckOutcome =
+  | { readonly kind: "safe" }
+  | { readonly kind: "blocked"; readonly reason: DeviceSyncReason };
 
 /**
  * The narrow read-only Vault slice capture needs: the current bytes of one
@@ -399,6 +423,82 @@ export class JournalCapture {
       return stoppedSummary();
     }
     return this.#captureSnapshot(options.signal, true);
+  }
+
+  /**
+   * The repair admission of one planned `upload` action (task 11, spec
+   * 12.4): runs the SAME settle admission path as the watcher — re-read
+   * the settled bytes, gate by the current accepted policy, echo-suppress
+   * our own remote apply — and returns the durable capture outcome. An
+   * `event_recorded`/`event_coalesced` outcome is the durably created or
+   * reauthorized outbound event that terminalizes the action; `null`
+   * means nothing is owed (the bytes match the committed proof, the
+   * observation was our own echo, or a lifecycle deferral owns the path).
+   */
+  async admitForRepair(normalizedPath: string): Promise<JournalCaptureResult | null> {
+    return this.#admitNormalizedPath(normalizedPath);
+  }
+
+  /**
+   * The mandatory pre-apply recheck of one planned manifest action (task
+   * 11, spec 12.4): the restore reservation, any newer local journal
+   * event, the current path/fingerprint and the current accepted policy
+   * are all re-proven BEFORE any mutation. An upload's own pending event
+   * is the terminalization itself, so only its presence (not a pending
+   * event) is rechecked; a vanished or diverged target blocks with its
+   * closed action-reason token and no Vault write happens.
+   */
+  async recheckForRepair(input: RepairActionRecheckInput): Promise<RepairActionRecheckOutcome> {
+    const normalizedPath = this.#normalizePathOrNull(input.normalizedLocator);
+    if (normalizedPath === null) {
+      return { kind: "blocked", reason: "device_manifest_action_stale" };
+    }
+    const trackedFile = this.#repository.readLocalFileByPath(normalizedPath);
+    if (
+      trackedFile !== null &&
+      this.#readLifecycleStateOf(trackedFile.localFileId) === "restore_pending"
+    ) {
+      // The explicit-restore reservation protocol holds the target.
+      return { kind: "blocked", reason: "device_manifest_target_occupied" };
+    }
+    if (input.actionKind !== "upload") {
+      const events =
+        trackedFile === null
+          ? []
+          : this.#repository.readEventsByLocalFileId(trackedFile.localFileId);
+      const hasNewerLocalEdit = events.some(
+        (event) =>
+          isPendingEventState(event.state) &&
+          (event.operation === "create" || event.operation === "update"),
+      );
+      if (hasNewerLocalEdit) {
+        // A local event newer than the manifest entry was captured: the
+        // local edit wins and the planned remote mutation must not run.
+        return { kind: "blocked", reason: "device_manifest_action_stale" };
+      }
+    }
+    const contentBytes = await this.#vaultReader.readRegularFileBytes(normalizedPath);
+    if (contentBytes === null) {
+      // The entry's target vanished: the manifest no longer describes it.
+      return { kind: "blocked", reason: "device_manifest_action_stale" };
+    }
+    const currentFingerprint = await deriveFrozenFingerprint(contentBytes);
+    if (
+      input.actionKind !== "upload" &&
+      !fingerprintsMatch(input.entryFingerprint, currentFingerprint)
+    ) {
+      return { kind: "blocked", reason: "device_manifest_local_diverged" };
+    }
+    const evaluation = this.#policyGate.evaluateForCapture({
+      sourceId: trackedFile?.sourceId ?? null,
+      normalizedLocator: normalizedPath,
+      mediaType: currentFingerprint.mediaType,
+      sizeBytes: currentFingerprint.sizeBytes,
+    });
+    if (evaluation.decision.enforced !== "allowed") {
+      return { kind: "blocked", reason: "device_manifest_policy_excluded" };
+    }
+    return { kind: "safe" };
   }
 
   /** Enumerate and admit one deterministic bounded regular-file snapshot. */

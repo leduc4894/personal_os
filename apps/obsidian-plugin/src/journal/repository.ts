@@ -43,7 +43,18 @@ import {
 } from "./lifecycle-contracts";
 import { LifecycleRepository as JournalLifecycleRepository } from "./lifecycle-repository";
 import { DeviceSyncRepository } from "../device-sync/repository";
-import type { DeviceSyncRepository as DeviceSyncRepositoryPort } from "../device-sync/contracts";
+import type {
+  CompleteLocalRepair,
+  DeviceSyncReason,
+  DeviceSyncRepository as DeviceSyncRepositoryPort,
+  ManifestActionKind,
+  ManifestActionProgressOutcome,
+} from "../device-sync/contracts";
+import {
+  MANIFEST_ACTION_KINDS,
+  MANIFEST_ACTION_PROGRESS_OUTCOMES,
+} from "../device-sync/contracts";
+import { isDeviceSyncReason, readDeviceSyncState } from "../device-sync/schema";
 import {
   JOURNAL_CAPTURE_ADMISSIONS,
   JOURNAL_COALESCABLE_EVENT_STATES,
@@ -105,6 +116,30 @@ export interface JournalCommittedReceiptInput {
   readonly baseVersionId: string;
 }
 
+/**
+ * One durable manifest page progress row of the active repair run (task
+ * 11, spec 7.3): the ordered page number, its accepted entry count and
+ * page digest — the exact-resume evidence of the pages already accepted
+ * server-side.
+ */
+export interface ManifestPageProgressRecord {
+  readonly pageNumber: number;
+  readonly entryCount: number;
+  readonly pageDigest: string;
+}
+
+/**
+ * One durable manifest action progress row of the active repair run
+ * (task 11, spec 12.4): the planned action index/kind, its local progress
+ * outcome and the closed reason a terminal-safe blocker settled under.
+ */
+export interface ManifestActionProgressRecord {
+  readonly actionIndex: number;
+  readonly actionKind: ManifestActionKind;
+  readonly outcome: ManifestActionProgressOutcome;
+  readonly reason: DeviceSyncReason | null;
+}
+
 /** One bounded, redacted attempt-audit row (spec 6.3). */
 export interface JournalAttemptInput {
   readonly eventId: string;
@@ -145,14 +180,22 @@ export interface JournalRepositoryOptions {
   }) => JournalLifecycleRepository;
   /**
    * Optional device-sync factory (task 8); the shared facade constructs
-   * the {@link DeviceSyncRepositoryPort} over the same `database` slice
-   * so the schema-v7 reconciliation state composes into the existing
-   * writer without a parallel SQL channel. Defaults to the canonical
+   * the {@link DeviceSyncRepositoryPort} over the same `database` slice so
+   * the schema-v7 reconciliation state composes into the existing writer
+   * without a parallel SQL channel. Defaults to the canonical
    * device-sync repository wired against `database`.
    */
   readonly createDeviceSyncRepository?: (deps: {
     readonly database: JournalRepositoryDatabase;
   }) => DeviceSyncRepositoryPort;
+  /**
+   * The reconcile-complete notification of the device repair completion
+   * (task 11, spec 12.4): invoked BEFORE the completion commits so a
+   * persistence-composed journal can honor the repository-transaction
+   * clear of `journal_meta.is_reconcile_required` (the composition root
+   * wires `JournalPersistence.markReconcileComplete` here).
+   */
+  readonly onDeviceSyncRepairComplete?: () => void;
 }
 
 // --- closed value validation -------------------------------------------------------------------
@@ -517,6 +560,7 @@ export class JournalRepository {
   readonly #nowEpochMs: () => number;
   readonly #lifecycle: JournalLifecycleRepository;
   readonly #deviceSync: DeviceSyncRepositoryPort;
+  readonly #onDeviceSyncRepairComplete: (() => void) | null;
 
   constructor(options: JournalRepositoryOptions) {
     this.#database = options.database;
@@ -538,6 +582,7 @@ export class JournalRepository {
     this.#deviceSync = options.createDeviceSyncRepository
       ? options.createDeviceSyncRepository({ database: this.#database })
       : new DeviceSyncRepository({ database: this.#database });
+    this.#onDeviceSyncRepairComplete = options.onDeviceSyncRepairComplete ?? null;
   }
 
   /** The lifecycle repository wired against the same writer. */
@@ -552,6 +597,128 @@ export class JournalRepository {
    */
   get deviceSync(): DeviceSyncRepositoryPort {
     return this.#deviceSync;
+  }
+
+  // --- device-sync manifest reconciliation (task 11, spec 12.4, 8.2) ----------------------
+
+  /**
+   * Complete one device repair run and clear the journal's
+   * `reconcile_required` flag (spec 12.4): the composition's
+   * reconcile-complete notification fires FIRST (so a persistence-composed
+   * journal honors the clear through its sticky merge), the device-sync
+   * completion advances both cursors to the checkpoint and clears the
+   * barrier/run fields, and one following transaction clears the flag and
+   * retires every echo marker at or below the newly acknowledged cursor
+   * (spec 8.2 — no time-based expiry exists).
+   */
+  async completeDeviceSyncRepair(input: CompleteLocalRepair): Promise<void> {
+    this.#onDeviceSyncRepairComplete?.();
+    await this.#deviceSync.completeRepair(input);
+    await this.#database.runSerializedMutation((session) => {
+      const meta = session.readJournalMeta();
+      if (meta.isReconcileRequired) {
+        session.writeJournalMeta({ ...meta, isReconcileRequired: false });
+      }
+      session.exec(
+        [
+          "delete from echo_markers where event_sequence <=",
+          "(select acknowledged_sequence from device_sync_state where singleton_key = 1);",
+        ].join(" "),
+      );
+    });
+  }
+
+  /**
+   * Discard ONLY the temporary run progress of the active manifest run
+   * (spec 7.3, 9.1 — a one-hour expiry or a policy advance): the active
+   * run fields and every page/action progress row clear while the repair
+   * barrier, the cursors and every local edit stay untouched, so the next
+   * run starts checkpoint-bound from the current barrier.
+   */
+  async discardActiveManifestRun(): Promise<void> {
+    await this.#database.runSerializedMutation((session) => {
+      const state = readDeviceSyncState({ readAll: (sql) => session.readRows(sql) });
+      if (state.barrierGeneration === null) {
+        // Without an active barrier there is no run to discard: fail
+        // closed instead of wiping progress of a completed journal.
+        throw journalStoreError("journal_mutation_failed");
+      }
+      session.exec(
+        [
+          "update device_sync_state set active_manifest_run_id = null,",
+          "manifest_checkpoint_sequence = null, manifest_final_digest = null",
+          "where singleton_key = 1;",
+        ].join(" "),
+      );
+      session.exec("delete from manifest_page_progress;");
+      session.exec("delete from manifest_action_progress;");
+    });
+  }
+
+  /** One recorded page of the active manifest run: ordered number, entry count, digest. */
+  readManifestPageProgress(): readonly ManifestPageProgressRecord[] {
+    const state = this.#deviceSync.readState();
+    if (state.activeManifestRunId === null) {
+      return [];
+    }
+    const result = this.#database.readAll(
+      [
+        "select page_number, entry_count, page_digest from manifest_page_progress",
+        `where manifest_run_id = ${sqlText(state.activeManifestRunId)}`,
+        "order by page_number asc;",
+      ].join(" "),
+    );
+    return (result[0]?.values ?? []).map((row) => {
+      const [pageNumber, entryCount, pageDigest] = row;
+      if (
+        typeof pageNumber !== "number" ||
+        !Number.isInteger(pageNumber) ||
+        pageNumber < 0 ||
+        typeof entryCount !== "number" ||
+        !Number.isInteger(entryCount) ||
+        entryCount < 0 ||
+        typeof pageDigest !== "string"
+      ) {
+        throw journalStoreError("journal_image_invalid");
+      }
+      return { pageNumber, entryCount, pageDigest };
+    });
+  }
+
+  /** One recorded action progress row of the active manifest run (ordered by action index). */
+  readManifestActionProgress(): readonly ManifestActionProgressRecord[] {
+    const state = this.#deviceSync.readState();
+    if (state.activeManifestRunId === null) {
+      return [];
+    }
+    const result = this.#database.readAll(
+      [
+        "select action_index, action_kind, outcome, safe_reason_code from manifest_action_progress",
+        `where manifest_run_id = ${sqlText(state.activeManifestRunId)}`,
+        "order by action_index asc;",
+      ].join(" "),
+    );
+    return (result[0]?.values ?? []).map((row) => {
+      const [actionIndex, actionKind, outcome, reason] = row;
+      if (
+        typeof actionIndex !== "number" ||
+        !Number.isInteger(actionIndex) ||
+        actionIndex < 0 ||
+        typeof actionKind !== "string" ||
+        !(MANIFEST_ACTION_KINDS as readonly string[]).includes(actionKind) ||
+        typeof outcome !== "string" ||
+        !(MANIFEST_ACTION_PROGRESS_OUTCOMES as readonly string[]).includes(outcome) ||
+        (reason !== null && !isDeviceSyncReason(reason))
+      ) {
+        throw journalStoreError("journal_image_invalid");
+      }
+      return {
+        actionIndex,
+        actionKind: actionKind as ManifestActionKind,
+        outcome: outcome as ManifestActionProgressOutcome,
+        reason: reason as ManifestActionProgressRecord["reason"],
+      };
+    });
   }
 
   // --- capture (spec 6.3, 7.1, 7.2) ---------------------------------------------------------

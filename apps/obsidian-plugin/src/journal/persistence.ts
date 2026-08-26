@@ -283,6 +283,17 @@ export class JournalPersistence {
   #priorVerifiedGeneration: VerifiedJournalGeneration | null = null;
   #isReconcileRequired = false;
   /**
+   * The reconcile-complete request of the device-sync repair completion
+   * (task 11, spec 12.4): once the reconciler has proven the journal
+   * healthy again, the sticky in-memory `#isReconcileRequired` view must
+   * stop re-clobbering the repository-transaction clear of
+   * `journal_meta.is_reconcile_required`. In reconcile-complete mode the
+   * session meta is authoritative — a later queue-limit refusal that sets
+   * the flag inside a transaction is still adopted, because the merge
+   * reads the session meta AFTER the operation ran.
+   */
+  #isReconcileComplete = false;
+  /**
    * Fix round 5 diagnostics: the bounded in-memory record of generation
    * PUBLISH failures (the file-store/publish path after a committed
    * transaction). Closed reason tokens only — the live torn-publish
@@ -332,6 +343,34 @@ export class JournalPersistence {
   }
 
   get isReconcileRequired(): boolean {
+    return this.#isReconcileRequired;
+  }
+
+  /**
+   * Request that the NEXT and every later generation commit honor a
+   * repository-transaction clear of `journal_meta.is_reconcile_required`
+   * (task 11, spec 12.4): the sticky merge defers to the session meta
+   * instead of re-setting the in-memory view. The composition root wires
+   * this as the `onDeviceSyncRepairComplete` callback of the journal
+   * repository, so completing a device repair durably clears the flag.
+   */
+  markReconcileComplete(): void {
+    this.#isReconcileComplete = true;
+    this.#isReconcileRequired = false;
+  }
+
+  /**
+   * Merge, never clobber — except across an explicit reconcile-complete
+   * request: a repository that set `reconcile_required` inside this
+   * transaction keeps the flag through the meta rewrite (spec 6.4), while
+   * a proven-healthy journal's clear survives it (spec 12.4).
+   */
+  #mergeReconcileRequired(sessionMetaIsReconcileRequired: boolean): boolean {
+    if (this.#isReconcileComplete) {
+      this.#isReconcileRequired = sessionMetaIsReconcileRequired;
+      return this.#isReconcileRequired;
+    }
+    this.#isReconcileRequired ||= sessionMetaIsReconcileRequired;
     return this.#isReconcileRequired;
   }
 
@@ -701,12 +740,10 @@ export class JournalPersistence {
     const nextGenerationNumber = (this.#verifiedGeneration?.generationNumber ?? 0) + 1;
     const result = await database.runSerializedMutation(async (session) => {
       const operationResult = await operation(session);
-      // Merge, never clobber: a repository that set `reconcile_required`
-      // inside this transaction keeps the flag through the meta rewrite
-      // (spec 6.4), and the sticky in-memory view adopts it for every
-      // later generation.
+      // Merge, never clobber (spec 6.4) — unless a reconcile-complete
+      // request (spec 12.4) made the session meta authoritative.
       const sessionMeta = session.readJournalMeta();
-      this.#isReconcileRequired ||= sessionMeta.isReconcileRequired;
+      this.#mergeReconcileRequired(sessionMeta.isReconcileRequired);
       session.writeJournalMeta({
         ...sessionMeta,
         dirtyGeneration: nextGenerationNumber,
@@ -793,7 +830,7 @@ export class JournalPersistence {
     this.#verifiedGeneration = manifest.current;
     await database.runSerializedMutation((session) => {
       const meta = session.readJournalMeta();
-      this.#isReconcileRequired ||= meta.isReconcileRequired;
+      this.#mergeReconcileRequired(meta.isReconcileRequired);
       session.writeJournalMeta({
         ...meta,
         dirtyGeneration: generationNumber,

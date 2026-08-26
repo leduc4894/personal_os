@@ -1045,3 +1045,183 @@ describe("JournalRepository device-sync composition (task 8)", () => {
     expect(observedDatabase).toBe(database);
   });
 });
+
+describe("JournalRepository manifest repair completion (task 11, spec 12.4)", () => {
+  const MANIFEST_RUN_ID = "018f47a0-7b00-7000-8000-0000000000b1";
+  const MARKER_SOURCE_ID = "99999999-9999-4999-8999-999999999999";
+  const PAGE_DIGEST = "a".repeat(64);
+
+  interface SeededRepair {
+    readonly repository: JournalRepository;
+    readonly database: SqliteDatabase;
+  }
+
+  async function seedActiveRepairRun(flagReconcileRequired = true): Promise<SeededRepair> {
+    const { repository, database } = createOpenedJournal();
+    const deviceSync = repository.deviceSync;
+    await deviceSync.startRepairBarrier({ generation: 0, reason: "device_cursor_gap" });
+    await deviceSync.recordManifestPage({
+      manifestRunId: MANIFEST_RUN_ID,
+      pageNumber: 0,
+      entryCount: 2,
+      pageDigest: PAGE_DIGEST,
+      checkpointSequence: 7,
+      finalDigest: null,
+    });
+    await deviceSync.recordManifestPage({
+      manifestRunId: MANIFEST_RUN_ID,
+      pageNumber: 1,
+      entryCount: 1,
+      pageDigest: "b".repeat(64),
+      checkpointSequence: 7,
+      finalDigest: null,
+    });
+    await deviceSync.recordManifestAction({
+      manifestRunId: MANIFEST_RUN_ID,
+      actionIndex: 0,
+      actionKind: "download",
+      outcome: "received",
+      reason: null,
+    });
+    await deviceSync.recordEchoMarker({
+      eventSequence: 3,
+      sourceId: MARKER_SOURCE_ID,
+      operation: "created",
+      priorLocator: null,
+      targetLocator: "notes/swept.md",
+      finalFingerprint: fingerprintOf("33"),
+    });
+    await deviceSync.recordEchoMarker({
+      eventSequence: 9,
+      sourceId: MARKER_SOURCE_ID,
+      operation: "updated",
+      priorLocator: "notes/retained.md",
+      targetLocator: null,
+      finalFingerprint: fingerprintOf("34"),
+    });
+    if (flagReconcileRequired) {
+      await database.runSerializedMutation((session) => {
+        session.writeJournalMeta({ ...session.readJournalMeta(), isReconcileRequired: true });
+      });
+    }
+    return { repository, database };
+  }
+
+  it("advances both cursors to the checkpoint, clears the flag and discards run progress", async () => {
+    const { repository, database } = await seedActiveRepairRun();
+
+    await repository.completeDeviceSyncRepair({
+      manifestRunId: MANIFEST_RUN_ID,
+      checkpointSequence: 7,
+      barrierGeneration: 0,
+    });
+
+    expect(repository.deviceSync.readState()).toEqual({
+      appliedSequence: 7,
+      acknowledgedSequence: 7,
+      observationGeneration: 0,
+      barrierGeneration: null,
+      barrierReason: null,
+      activeManifestRunId: null,
+      manifestCheckpointSequence: null,
+      manifestFinalDigest: null,
+    });
+    expect(database.readJournalMeta().isReconcileRequired).toBe(false);
+    expect(repository.readManifestPageProgress()).toEqual([]);
+    expect(repository.readManifestActionProgress()).toEqual([]);
+  });
+
+  it("sweeps acknowledged echo markers and retains the ones still owed", async () => {
+    const { repository } = await seedActiveRepairRun();
+
+    await repository.completeDeviceSyncRepair({
+      manifestRunId: MANIFEST_RUN_ID,
+      checkpointSequence: 7,
+      barrierGeneration: 0,
+    });
+
+    // Sequence 3 sits at/below the acknowledged cursor 7: swept.
+    expect(repository.deviceSync.readEchoMarker(3)).toBeNull();
+    // Sequence 9 is still owed: retained.
+    expect(repository.deviceSync.readEchoMarker(9)).not.toBeNull();
+  });
+
+  it("keeps the reconcile flag clear when it was never set", async () => {
+    const { repository, database } = await seedActiveRepairRun(false);
+
+    await repository.completeDeviceSyncRepair({
+      manifestRunId: MANIFEST_RUN_ID,
+      checkpointSequence: 7,
+      barrierGeneration: 0,
+    });
+
+    expect(database.readJournalMeta().isReconcileRequired).toBe(false);
+  });
+
+  it("notifies the composition's reconcile-complete surface before clearing", async () => {
+    const { database } = createOpenedJournal();
+    const notifications: number[] = [];
+    const repository = new JournalRepository({
+      database,
+      onDeviceSyncRepairComplete: () => notifications.push(1),
+    });
+    await repository.deviceSync.startRepairBarrier({ generation: 0, reason: "device_cursor_gap" });
+    await repository.deviceSync.recordManifestPage({
+      manifestRunId: MANIFEST_RUN_ID,
+      pageNumber: 0,
+      entryCount: 0,
+      pageDigest: PAGE_DIGEST,
+      checkpointSequence: 4,
+      finalDigest: null,
+    });
+
+    await repository.completeDeviceSyncRepair({
+      manifestRunId: MANIFEST_RUN_ID,
+      checkpointSequence: 4,
+      barrierGeneration: 0,
+    });
+
+    expect(notifications).toEqual([1]);
+  });
+
+  it("discards only the temporary run progress while keeping the barrier", async () => {
+    const { repository } = await seedActiveRepairRun();
+
+    await repository.discardActiveManifestRun();
+
+    const state = repository.deviceSync.readState();
+    expect(state.barrierGeneration).toBe(0);
+    expect(state.barrierReason).toBe("device_cursor_gap");
+    expect(state.activeManifestRunId).toBeNull();
+    expect(state.manifestCheckpointSequence).toBeNull();
+    expect(state.manifestFinalDigest).toBeNull();
+    expect(repository.readManifestPageProgress()).toEqual([]);
+    expect(repository.readManifestActionProgress()).toEqual([]);
+    // Echo markers are not temporary run progress: untouched.
+    expect(repository.deviceSync.readEchoMarker(3)).not.toBeNull();
+  });
+
+  it("reads the durable page and action progress of the active run", async () => {
+    const { repository } = await seedActiveRepairRun();
+
+    expect(repository.readManifestPageProgress()).toEqual([
+      { pageNumber: 0, entryCount: 2, pageDigest: PAGE_DIGEST },
+      { pageNumber: 1, entryCount: 1, pageDigest: "b".repeat(64) },
+    ]);
+    await repository.deviceSync.recordManifestAction({
+      manifestRunId: MANIFEST_RUN_ID,
+      actionIndex: 0,
+      actionKind: "download",
+      outcome: "terminal_safe",
+      reason: "device_manifest_action_stale",
+    });
+    expect(repository.readManifestActionProgress()).toEqual([
+      {
+        actionIndex: 0,
+        actionKind: "download",
+        outcome: "terminal_safe",
+        reason: "device_manifest_action_stale",
+      },
+    ]);
+  });
+});

@@ -147,3 +147,53 @@ export class AutomaticSnapshotCoordinator {
     }
   }
 }
+
+// --- the periodic reconciliation cadence (task 11, spec 9.1) -------------------------------
+
+/**
+ * The accumulated-foreground-active interval between periodic full
+ * reconciliations (spec 9.1): six hours. The reconciler receives the
+ * closed `periodic` reason when the cadence elapses.
+ */
+export const PERIODIC_RECONCILE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * The six-hour accumulated-foreground-active cadence of the periodic full
+ * reconciliation (task 11, spec 9.1). Foreground time accumulates in
+ * increments; each elapsed interval requests ONE periodic reconciliation
+ * (consuming exactly one interval, so the cadence repeats); a completed
+ * reconciliation resets the accumulator. Suspend time never accumulates.
+ */
+export class ForegroundReconcileCadence {
+  #accumulatedForegroundActiveMs = 0;
+
+  /**
+   * Accumulate foreground-active time; whether the six-hour cadence
+   * elapsed (consuming exactly one interval per elapsed request).
+   */
+  recordForegroundActiveMs(deltaMilliseconds: number): boolean {
+    if (
+      typeof deltaMilliseconds !== "number" ||
+      !Number.isInteger(deltaMilliseconds) ||
+      deltaMilliseconds < 0
+    ) {
+      throw new TypeError("foreground-active delta must be a non-negative integer");
+    }
+    this.#accumulatedForegroundActiveMs += deltaMilliseconds;
+    if (this.#accumulatedForegroundActiveMs < PERIODIC_RECONCILE_INTERVAL_MS) {
+      return false;
+    }
+    this.#accumulatedForegroundActiveMs -= PERIODIC_RECONCILE_INTERVAL_MS;
+    return true;
+  }
+
+  /** Reset the accumulator after a completed reconciliation. */
+  reset(): void {
+    this.#accumulatedForegroundActiveMs = 0;
+  }
+
+  /** The currently accumulated foreground-active milliseconds. */
+  readAccumulatedForegroundActiveMs(): number {
+    return this.#accumulatedForegroundActiveMs;
+  }
+}

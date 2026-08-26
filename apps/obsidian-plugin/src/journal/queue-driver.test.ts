@@ -2354,3 +2354,76 @@ describe("queue driver + lifecycle lane separation (task 9 fix round 1 I3, M3)",
     expect(parkedContent?.safeError).toBe("login_required");
   });
 });
+
+describe("queue driver repair barrier pause (task 11, spec 12.1, 12.4)", () => {
+  const MANIFEST_RUN_ID = "018f47a0-7b00-7000-8000-0000000000b2";
+
+  it("holds outbound dispatch while the repair barrier is active", async () => {
+    const harness = createHarness();
+    await captureBytes(harness, "notes/held.md", new TextEncoder().encode("held content"));
+    await harness.repository.deviceSync.startRepairBarrier({
+      generation: 0,
+      reason: "device_cursor_gap",
+    });
+    const scripted = harness.installTransport({
+      preflight: async () => {
+        throw new Error("no dispatch may happen under the barrier");
+      },
+    });
+
+    const summary = await runPass(harness.driver);
+
+    expect(summary).toEqual({ outcome: "completed", processedEventCount: 0 });
+    expect(scripted.preflightRequests).toHaveLength(0);
+    // The row stays exactly as captured: pending and untouched.
+    const [event] = eventsOfPath(harness, "notes/held.md");
+    expect(event?.state).toBe("queued");
+    expect(event?.attemptCount).toBe(0);
+  });
+
+  it("dispatches held rows and planner uploads once the barrier clears", async () => {
+    const harness = createHarness();
+    const heldEvent = await captureBytes(harness, "notes/held.md", new TextEncoder().encode("held content"));
+    await harness.repository.deviceSync.startRepairBarrier({
+      generation: 0,
+      reason: "device_cursor_gap",
+    });
+    await harness.repository.deviceSync.recordManifestPage({
+      manifestRunId: MANIFEST_RUN_ID,
+      pageNumber: 0,
+      entryCount: 0,
+      pageDigest: "a".repeat(64),
+      checkpointSequence: 4,
+      finalDigest: null,
+    });
+    // A planner upload recorded under the barrier (the upload action's
+    // outbound row) must dispatch after completion too.
+    const uploadEvent = await captureBytes(harness, "notes/planned-upload.md", new TextEncoder().encode("upload content"));
+
+    await harness.repository.completeDeviceSyncRepair({
+      manifestRunId: MANIFEST_RUN_ID,
+      checkpointSequence: 4,
+      barrierGeneration: 0,
+    });
+
+    const dispatched: string[] = [];
+    const scripted = harness.installTransport({
+      preflight: async (body) => {
+        dispatched.push(String(body["normalized_locator"]));
+        return { status: 200, bodyText: SINGLE_PART_BODY };
+      },
+      content: async () => ({ status: 200, bodyText: COMMITTED_RECEIPT }),
+    });
+
+    const first = await runPass(harness.driver);
+    expect(first).toEqual({ outcome: "completed", processedEventCount: 2 });
+    // Oldest-first: the pre-barrier row, then the planner upload.
+    expect(dispatched).toEqual(["notes/held.md", "notes/planned-upload.md"]);
+    expect(scripted.preflightRequests).toHaveLength(2);
+    expect(harness.repository.readEvent(heldEvent.eventId)?.state).toBe("committed");
+    expect(harness.repository.readEvent(uploadEvent.eventId)?.state).toBe("committed");
+    const second = await runPass(harness.driver);
+    expect(second).toEqual({ outcome: "completed", processedEventCount: 0 });
+    expect(dispatched).toEqual(["notes/held.md", "notes/planned-upload.md"]);
+  });
+});

@@ -319,6 +319,25 @@ export class JournalQueueDriver {
   }
 
   /**
+   * Whether outbound dispatch is paused by an active repair barrier
+   * (task 11, spec 12.1): a reconciliation run freezes observation
+   * generation G and holds every outbound row until the completion
+   * releases them. An unreadable reconciliation state fails CLOSED — no
+   * dispatch may race an unknown barrier — and the closed store reason
+   * surfaces through the existing bounded ring and `journal_failure`
+   * trail entry instead of being swallowed.
+   */
+  #isOutboundDispatchPaused(): boolean {
+    try {
+      return this.#repository.deviceSync.readState().barrierGeneration !== null;
+    } catch (error) {
+      this.#recordJournalFailureReason(error);
+      this.#recordJournalFailureTrailEntry(error);
+      return true;
+    }
+  }
+
+  /**
    * Stop the driver (plugin unload / mobile suspension): no new pass
    * starts, and any in-flight `requestUrl` result arriving afterwards is
    * discarded rather than applied to the journal. The pass-scoped
@@ -370,6 +389,12 @@ export class JournalQueueDriver {
     let passEndReason: PassEndReason | null = null;
     try {
       while (!this.#isStopped && this.#nowEpochMs() < passDeadlineEpochMs) {
+        // The repair barrier pauses outbound dispatch (spec 12.1): both
+        // lanes hold until the reconciliation completes and releases
+        // every row — watcher capture keeps recording meanwhile.
+        if (this.#isOutboundDispatchPaused()) {
+          break;
+        }
         // Drain the lifecycle lane to IDLE before each content-lane
         // selection. The previous one-call-per-iteration design let
         // the content lane re-select a queued lifecycle event when

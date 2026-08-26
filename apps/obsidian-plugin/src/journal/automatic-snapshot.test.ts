@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   AutomaticSnapshotCoordinator,
   CoalescingQueuePassDispatcher,
+  ForegroundReconcileCadence,
+  PERIODIC_RECONCILE_INTERVAL_MS,
   refreshVerifiedPolicyAndRequestSnapshot,
   type AutomaticSnapshotResult,
   type AutomaticSnapshotRunner,
@@ -203,5 +205,34 @@ describe("AutomaticSnapshotCoordinator", () => {
     });
 
     expect(reasons).toEqual(["policy_revision_advanced"]);
+  });
+});
+
+describe("ForegroundReconcileCadence (task 11, spec 9.1)", () => {
+  it("requests the periodic reconciliation only at the six-hour boundary", () => {
+    const cadence = new ForegroundReconcileCadence();
+    expect(PERIODIC_RECONCILE_INTERVAL_MS).toBe(6 * 60 * 60 * 1000);
+
+    expect(cadence.recordForegroundActiveMs(PERIODIC_RECONCILE_INTERVAL_MS - 1)).toBe(false);
+    expect(cadence.recordForegroundActiveMs(1)).toBe(true);
+  });
+
+  it("accumulates across sub-interval increments and repeats the cadence", () => {
+    const cadence = new ForegroundReconcileCadence();
+
+    for (let index = 0; index < 5; index += 1) {
+      expect(cadence.recordForegroundActiveMs(60 * 60 * 1000)).toBe(false);
+    }
+    expect(cadence.recordForegroundActiveMs(60 * 60 * 1000)).toBe(true);
+    // The cadence repeats: another six accumulated hours request again.
+    expect(cadence.recordForegroundActiveMs(PERIODIC_RECONCILE_INTERVAL_MS)).toBe(true);
+  });
+
+  it("resets the accumulated time after a completed reconciliation", () => {
+    const cadence = new ForegroundReconcileCadence();
+    cadence.recordForegroundActiveMs(PERIODIC_RECONCILE_INTERVAL_MS);
+    cadence.reset();
+    expect(cadence.readAccumulatedForegroundActiveMs()).toBe(0);
+    expect(cadence.recordForegroundActiveMs(PERIODIC_RECONCILE_INTERVAL_MS - 1)).toBe(false);
   });
 });

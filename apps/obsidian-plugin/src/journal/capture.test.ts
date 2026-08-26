@@ -1119,3 +1119,196 @@ describe("JournalCapture exact echo suppression", () => {
     expect(harness.repository.deviceSync.readEchoMarker(ECHO_EVENT_SEQUENCE)).not.toBeNull();
   });
 });
+
+describe("JournalCapture repair admission and action rechecks (task 11, spec 12.4)", () => {
+  async function commitTrackedFile(
+    harness: CaptureHarness,
+    normalizedPath: string,
+    bytes: Uint8Array,
+  ): Promise<void> {
+    harness.vault.setFileBytes(normalizedPath, bytes);
+    const capture = await harness.repository.recordCapture({
+      normalizedPath,
+      fingerprint: await deriveFrozenFingerprint(bytes),
+      policyRevisionNumber: 1,
+      admission: "policy_allowed",
+    });
+    if (capture.outcome !== "event_recorded") {
+      throw new Error("expected a recorded capture");
+    }
+    await harness.repository.recordCommittedReceipt({
+      eventId: capture.event.eventId,
+      sourceId: "99999999-9999-4999-8999-999999999999",
+      baseVersionId: "88888888-8888-4888-8888-888888888888",
+    });
+  }
+
+  it("durably records the outbound event of a repair upload", async () => {
+    const harness = createHarness();
+    await commitTrackedFile(harness, "notes/upload.md", bytesOf("committed"));
+    harness.vault.setFileBytes("notes/upload.md", bytesOf("newer bytes"));
+
+    const admission = await harness.capture.admitForRepair("notes/upload.md");
+
+    expect(admission?.outcome).toBe("event_recorded");
+    const trackedFile = harness.repository.readLocalFileByPath("notes/upload.md");
+    const events = harness.repository.readEventsByLocalFileId(trackedFile?.localFileId ?? "");
+    expect(events.filter((event) => event.state === "queued")).toHaveLength(1);
+  });
+
+  it("reauthorizes the existing pending event instead of recording a second one", async () => {
+    const harness = createHarness();
+    await commitTrackedFile(harness, "notes/upload.md", bytesOf("committed"));
+    harness.vault.setFileBytes("notes/upload.md", bytesOf("newer bytes"));
+    const watcherAdmission = await harness.repository.recordCapture({
+      normalizedPath: "notes/upload.md",
+      fingerprint: await deriveFrozenFingerprint(bytesOf("newer bytes")),
+      policyRevisionNumber: 1,
+      admission: "policy_allowed",
+    });
+    expect(watcherAdmission.outcome).toBe("event_recorded");
+    harness.vault.setFileBytes("notes/upload.md", bytesOf("newer bytes still"));
+
+    const admission = await harness.capture.admitForRepair("notes/upload.md");
+
+    expect(admission?.outcome).toBe("event_coalesced");
+    const trackedFile = harness.repository.readLocalFileByPath("notes/upload.md");
+    const events = harness.repository.readEventsByLocalFileId(trackedFile?.localFileId ?? "");
+    expect(events.filter((event) => event.state === "queued")).toHaveLength(1);
+  });
+
+  it("reports an upload already current when the bytes match the committed proof", async () => {
+    const harness = createHarness();
+    await commitTrackedFile(harness, "notes/current.md", bytesOf("committed"));
+
+    const admission = await harness.capture.admitForRepair("notes/current.md");
+
+    expect(admission).toBeNull();
+  });
+
+  it("rechecks a safe download against unchanged bytes, policy and reservations", async () => {
+    const harness = createHarness();
+    const bytes = bytesOf("settled bytes");
+    await commitTrackedFile(harness, "notes/safe.md", bytes);
+
+    const recheck = await harness.capture.recheckForRepair({
+      normalizedLocator: "notes/safe.md",
+      entryFingerprint: await deriveFrozenFingerprint(bytes),
+      actionKind: "download",
+    });
+
+    expect(recheck).toEqual({ kind: "safe" });
+  });
+
+  it("flags a vanished target and a locally diverged target as blocked", async () => {
+    const harness = createHarness();
+    const bytes = bytesOf("settled bytes");
+    await commitTrackedFile(harness, "notes/changed.md", bytes);
+    await commitTrackedFile(harness, "notes/gone.md", bytes);
+    harness.vault.setFileBytes("notes/changed.md", bytesOf("diverged"));
+    harness.vault.removeFileBytes("notes/gone.md");
+
+    const diverged = await harness.capture.recheckForRepair({
+      normalizedLocator: "notes/changed.md",
+      entryFingerprint: await deriveFrozenFingerprint(bytes),
+      actionKind: "download",
+    });
+    const vanished = await harness.capture.recheckForRepair({
+      normalizedLocator: "notes/gone.md",
+      entryFingerprint: await deriveFrozenFingerprint(bytes),
+      actionKind: "download",
+    });
+
+    expect(diverged).toEqual({ kind: "blocked", reason: "device_manifest_local_diverged" });
+    expect(vanished).toEqual({ kind: "blocked", reason: "device_manifest_action_stale" });
+  });
+
+  it("flags a newer local journal event as a stale action", async () => {
+    const harness = createHarness();
+    const bytes = bytesOf("settled bytes");
+    await commitTrackedFile(harness, "notes/edited.md", bytes);
+    const pendingCapture = await harness.repository.recordCapture({
+      normalizedPath: "notes/edited.md",
+      fingerprint: await deriveFrozenFingerprint(bytesOf("newer bytes")),
+      policyRevisionNumber: 1,
+      admission: "policy_allowed",
+    });
+    expect(pendingCapture.outcome).toBe("event_recorded");
+
+    const recheck = await harness.capture.recheckForRepair({
+      normalizedLocator: "notes/edited.md",
+      entryFingerprint: await deriveFrozenFingerprint(bytes),
+      actionKind: "download",
+    });
+
+    expect(recheck).toEqual({ kind: "blocked", reason: "device_manifest_action_stale" });
+  });
+
+  it("flags a restore reservation as an occupied target", async () => {
+    const harness = createHarness();
+    const bytes = bytesOf("settled bytes");
+    await commitTrackedFile(harness, "notes/reserved.md", bytes);
+    const trackedFile = harness.repository.readLocalFileByPath("notes/reserved.md");
+    await harness.database.runSerializedMutation((session) => {
+      session.exec(
+        `update local_files set lifecycle_state = 'restore_pending' where local_file_id = '${trackedFile?.localFileId}';`,
+      );
+    });
+
+    const recheck = await harness.capture.recheckForRepair({
+      normalizedLocator: "notes/reserved.md",
+      entryFingerprint: await deriveFrozenFingerprint(bytes),
+      actionKind: "download",
+    });
+
+    expect(recheck).toEqual({ kind: "blocked", reason: "device_manifest_target_occupied" });
+  });
+
+  it("flags a policy-excluded target without reading it for mutation", async () => {
+    const harness = createHarness();
+    const bytes = bytesOf("settled bytes");
+    await commitTrackedFile(harness, "notes/excluded.md", bytes);
+    harness.gate.evaluateForCapture = (subject) => {
+      if (subject.normalizedLocator === "notes/excluded.md") {
+        return { decision: { raw: "excluded", enforced: "excluded" }, revisionNumber: 2 };
+      }
+      return { decision: { raw: "allowed", enforced: "allowed" }, revisionNumber: 2 };
+    };
+
+    const recheck = await harness.capture.recheckForRepair({
+      normalizedLocator: "notes/excluded.md",
+      entryFingerprint: await deriveFrozenFingerprint(bytes),
+      actionKind: "download",
+    });
+
+    expect(recheck).toEqual({ kind: "blocked", reason: "device_manifest_policy_excluded" });
+  });
+
+  it("keeps an upload safe while its own pending event exists, stale once vanished", async () => {
+    const harness = createHarness();
+    const bytes = bytesOf("settled bytes");
+    await commitTrackedFile(harness, "notes/upload.md", bytes);
+    const pendingCapture = await harness.repository.recordCapture({
+      normalizedPath: "notes/upload.md",
+      fingerprint: await deriveFrozenFingerprint(bytesOf("newer bytes")),
+      policyRevisionNumber: 1,
+      admission: "policy_allowed",
+    });
+    expect(pendingCapture.outcome).toBe("event_recorded");
+
+    const safe = await harness.capture.recheckForRepair({
+      normalizedLocator: "notes/upload.md",
+      entryFingerprint: await deriveFrozenFingerprint(bytesOf("newer bytes")),
+      actionKind: "upload",
+    });
+    harness.vault.removeFileBytes("notes/upload.md");
+    const vanished = await harness.capture.recheckForRepair({
+      normalizedLocator: "notes/upload.md",
+      entryFingerprint: await deriveFrozenFingerprint(bytesOf("newer bytes")),
+      actionKind: "upload",
+    });
+
+    expect(safe).toEqual({ kind: "safe" });
+    expect(vanished).toEqual({ kind: "blocked", reason: "device_manifest_action_stale" });
+  });
+});
