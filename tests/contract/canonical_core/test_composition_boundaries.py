@@ -180,6 +180,7 @@ def test_no_new_alembic_revision() -> None:
         "20260818_01",
         "20260820_01",
         "20260826_01",
+        "20260826_02",
     }, (
         f"the Alembic graph must stay exactly at the baseline, authentication, "
         f"exclusion policy, small-file sync, source-lifecycle and device sync "

@@ -31,7 +31,7 @@ from postgresql_source_store.tables import (
 pytestmark = pytest.mark.local_stack
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-_REVISION = "20260826_01"
+_REVISION = "20260826_02"
 _PREDECESSOR_REVISION = "20260820_01"
 _MIGRATION_COMMAND_TIMEOUT_SECONDS = 60
 _PAGE_DIGEST = hashlib.sha256(b"device-sync-page-zero").hexdigest()
@@ -529,24 +529,23 @@ async def _assert_cursor_and_manifest_constraints(
                     connection, unfinished_run_id, action_index=action_index, **action
                 )
 
-            local_download = await _expect_integrity_error(
+            # The Task 11b amendment: the per-entry catch-up download keeps its
+            # manifest entry echo, so this honest shape now persists.
+            await _insert_manifest_action(
                 connection,
-                sa.insert(manifest_actions).values(
-                    manifest_run_id=unfinished_run_id,
-                    action_index=6,
-                    action_kind="download",
-                    local_entry_id="device-sync-entry-0",
-                    source_id=canonical_source_id,
-                    source_version_id=canonical_version_id,
-                ),
+                unfinished_run_id,
+                action_index=6,
+                action_kind="download",
+                local_entry_id="device-sync-entry-0",
+                source_id=canonical_source_id,
+                source_version_id=canonical_version_id,
             )
-            assert _constraint_name(local_download) == "ck_manifest_actions__shape"
 
             reasonless_conflict = await _expect_integrity_error(
                 connection,
                 sa.insert(manifest_actions).values(
                     manifest_run_id=unfinished_run_id,
-                    action_index=6,
+                    action_index=7,
                     action_kind="conflict",
                     local_entry_id="device-sync-entry-0",
                 ),
@@ -557,7 +556,7 @@ async def _assert_cursor_and_manifest_constraints(
                 connection,
                 sa.insert(manifest_actions).values(
                     manifest_run_id=unfinished_run_id,
-                    action_index=6,
+                    action_index=7,
                     action_kind="apply_tombstone",
                     local_entry_id="device-sync-entry-0",
                     source_id=canonical_source_id,
@@ -569,7 +568,7 @@ async def _assert_cursor_and_manifest_constraints(
                 connection,
                 sa.insert(manifest_actions).values(
                     manifest_run_id=unfinished_run_id,
-                    action_index=6,
+                    action_index=7,
                     action_kind="upload",
                     local_entry_id=None,
                 ),
@@ -580,7 +579,7 @@ async def _assert_cursor_and_manifest_constraints(
                 connection,
                 sa.insert(manifest_actions).values(
                     manifest_run_id=unfinished_run_id,
-                    action_index=6,
+                    action_index=7,
                     action_kind="replicate",
                     local_entry_id="device-sync-entry-0",
                 ),

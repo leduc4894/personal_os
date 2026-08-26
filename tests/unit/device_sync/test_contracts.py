@@ -411,6 +411,63 @@ def test_manifest_action_bounds_its_indices_and_uuids() -> None:
         replace(action, source_id=UUID(int=0))
 
 
+def test_download_action_requires_its_checkpoint_locator() -> None:
+    """The download placement operand is the checkpoint-active locator text
+    the device must place bytes at (spec 12.3, task 11b): a download action
+    without it can never converge, so the shape fails closed."""
+
+    with pytest.raises(ValueError, match="download action shape invalid"):
+        ManifestAction(
+            action_index=0,
+            action_kind=ManifestActionKind.DOWNLOAD,
+            local_entry_id=None,
+            source_id=uuid4(),
+            source_version_id=uuid4(),
+            source_locator_id=uuid4(),
+            source_tombstone_id=None,
+            reason=None,
+        )
+
+
+def test_non_download_actions_forbid_the_checkpoint_locator() -> None:
+    action = ManifestAction(
+        action_index=0,
+        action_kind=ManifestActionKind.UPLOAD,
+        local_entry_id="entry-1",
+        source_id=None,
+        source_version_id=None,
+        source_locator_id=None,
+        source_tombstone_id=None,
+        reason=None,
+    )
+    with pytest.raises(ValueError, match="upload action shape invalid"):
+        replace(action, checkpoint_locator=LOCATOR)
+    with pytest.raises(ValueError, match="conflict action shape invalid"):
+        replace(
+            action,
+            action_kind=ManifestActionKind.CONFLICT,
+            reason=None,
+            checkpoint_locator=LOCATOR,
+        )
+
+
+def test_manifest_action_repr_never_renders_the_locator() -> None:
+    action = ManifestAction(
+        action_index=0,
+        action_kind=ManifestActionKind.DOWNLOAD,
+        local_entry_id=None,
+        source_id=uuid4(),
+        source_version_id=uuid4(),
+        source_locator_id=uuid4(),
+        source_tombstone_id=None,
+        reason=None,
+        checkpoint_locator=LOCATOR,
+    )
+    rendered = repr(action)
+    assert LOCATOR.value not in rendered
+    assert "<redacted>" in rendered
+
+
 def test_start_command_rejects_negative_observation_generation() -> None:
     with pytest.raises(ValueError, match="client_observation_generation"):
         StartManifestCommand(

@@ -575,8 +575,11 @@ def test_list_manifest_actions_returns_the_seeded_page_and_bounds_the_query(
         "source_locator_id",
         "source_tombstone_id",
         "reason",
+        "checkpoint_locator",
     }
     assert action["action_kind"] == "upload"
+    # The checkpoint locator renders closed on every non-download action.
+    assert action["checkpoint_locator"] is None
     assert harness.state.actions_calls[0].after_action_index == 0
     assert harness.state.actions_calls[0].limit == MAX_MANIFEST_PAGE_ENTRIES
 

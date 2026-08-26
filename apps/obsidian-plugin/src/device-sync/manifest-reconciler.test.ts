@@ -465,6 +465,25 @@ function downloadAction(localEntryId: string, actionIndex = 0): ManifestAction {
     sourceLocatorId: null,
     sourceTombstoneId: null,
     reason: null,
+    checkpointLocator: null,
+  };
+}
+
+/**
+ * One canonical-only download action: no manifest entry, placement proven
+ * only through the checkpoint locator the Task 11b wire carries.
+ */
+function canonicalOnlyDownloadAction(locator: string | null, actionIndex = 0): ManifestAction {
+  return {
+    actionIndex,
+    actionKind: "download",
+    localEntryId: null,
+    sourceId: SOURCE_ID,
+    sourceVersionId: SOURCE_VERSION_ID,
+    sourceLocatorId: "12345678-1234-4781-8123-123456789012",
+    sourceTombstoneId: null,
+    reason: null,
+    checkpointLocator: locator,
   };
 }
 
@@ -501,6 +520,7 @@ describe("ManifestReconciler happy path (spec 12.1, 12.4)", () => {
         sourceLocatorId: null,
         sourceTombstoneId: null,
         reason: null,
+        checkpointLocator: null,
       },
     ];
 
@@ -719,24 +739,85 @@ describe("ManifestReconciler action rechecks (spec 12.4)", () => {
     expect(progressAtCompletion.read()[0]?.reason).toBe("device_manifest_policy_excluded");
   });
 
-  it("settles a canonical-only download as a durable identity conflict", async () => {
+  it("places a canonical-only download at its checkpoint locator (task 11b)", async () => {
+    const harness = createReconcilerHarness();
+    const progressAtCompletion = captureActionProgressAtCompletion(harness);
+    harness.api.plan = [canonicalOnlyDownloadAction("notes/absent.md")];
+
+    const outcome = await harness.reconciler.reconcile("onboarding");
+
+    // The verified remote bytes landed at the wire's checkpoint locator
+    // through the synthetic-create remote-apply state machine, with no
+    // local entry ever involved.
+    expect(outcome).toEqual({ kind: "completed", checkpointSequence: CHECKPOINT_SEQUENCE });
+    expect(harness.vault.fileBytes("notes/absent.md")).toEqual(FRESH_BYTES);
+    expect(progressAtCompletion.read()).toEqual([
+      {
+        actionIndex: 0,
+        actionKind: "download",
+        outcome: "terminal_safe",
+        reason: null,
+      },
+    ]);
+    expect(harness.diagnostics.reconcileFailures).toEqual([]);
+  });
+
+  it("fails a canonical-only download closed when the wire carries no locator", async () => {
+    const harness = createReconcilerHarness();
+    const progressAtCompletion = captureActionProgressAtCompletion(harness);
+    harness.api.plan = [canonicalOnlyDownloadAction(null)];
+
+    const outcome = await harness.reconciler.reconcile("onboarding");
+
+    // Defensive fail-closed for a legacy/erroneous wire: a canonical-only
+    // download without its checkpoint locator can never place bytes, so it
+    // settles durably with the closed invalid-state reason — never a guess
+    // and never the identity-ambiguous token.
+    expect(outcome.kind).toBe("completed");
+    expect(harness.vault.writeCount).toBe(0);
+    expect(progressAtCompletion.read()[0]?.reason).toBe("device_manifest_state_invalid");
+  });
+
+  it("settles an occupied canonical-only target as a durable conflict without clobbering it", async () => {
+    const harness = createReconcilerHarness({
+      files: [{ locator: "notes/occupied.md", bytes: STALE_BYTES }],
+    });
+    const progressAtCompletion = captureActionProgressAtCompletion(harness);
+    harness.api.plan = [canonicalOnlyDownloadAction("notes/occupied.md")];
+
+    const outcome = await harness.reconciler.reconcile("onboarding");
+
+    // The untracked occupant wins: the synthetic create proves the target
+    // occupied and settles as a conflict; the local bytes stay untouched.
+    expect(outcome.kind).toBe("completed");
+    expect(harness.vault.fileBytes("notes/occupied.md")).toEqual(STALE_BYTES);
+    expect(progressAtCompletion.read()[0]?.outcome).toBe("terminal_safe");
+    expect(harness.diagnostics.others).toContain(
+      "apply:vault_mutation:device_manifest_target_occupied",
+    );
+  });
+
+  it("settles an entry-bound action whose entry vanished mid-run as a durable identity conflict", async () => {
     const harness = createReconcilerHarness();
     const progressAtCompletion = captureActionProgressAtCompletion(harness);
     harness.api.plan = [
       {
         actionIndex: 0,
-        actionKind: "download",
-        localEntryId: null,
+        actionKind: "apply_tombstone",
+        localEntryId: "me1-vanished-entry",
         sourceId: SOURCE_ID,
-        sourceVersionId: SOURCE_VERSION_ID,
-        sourceLocatorId: "12345678-1234-4781-8123-123456789012",
-        sourceTombstoneId: null,
+        sourceVersionId: null,
+        sourceLocatorId: null,
+        sourceTombstoneId: "12345678-1234-4781-8123-123456789013",
         reason: null,
+        checkpointLocator: null,
       },
     ];
 
-    const outcome = await harness.reconciler.reconcile("onboarding");
+    const outcome = await harness.reconciler.reconcile("explicit_repair");
 
+    // A planned entry the capture cannot prove is a genuine identity
+    // conflict — the token stays reserved for exactly this ambiguity.
     expect(outcome.kind).toBe("completed");
     expect(harness.vault.writeCount).toBe(0);
     expect(progressAtCompletion.read()[0]?.reason).toBe("device_manifest_identity_ambiguous");
@@ -793,6 +874,7 @@ describe("ManifestReconciler uploads and barrier release (spec 12.4)", () => {
         sourceLocatorId: null,
         sourceTombstoneId: null,
         reason: null,
+        checkpointLocator: null,
       },
     ];
     const progressAtCompletion = captureActionProgressAtCompletion(harness);
@@ -822,6 +904,7 @@ describe("ManifestReconciler uploads and barrier release (spec 12.4)", () => {
         sourceLocatorId: null,
         sourceTombstoneId: null,
         reason: null,
+        checkpointLocator: null,
       },
     ];
     // The watcher admitted the same newer bytes during the run: the planner
@@ -865,6 +948,7 @@ describe("ManifestReconciler uploads and barrier release (spec 12.4)", () => {
         sourceLocatorId: null,
         sourceTombstoneId: null,
         reason: null,
+        checkpointLocator: null,
       },
     ];
     // An edit observed while the barrier is active: watcher capture
@@ -1150,6 +1234,7 @@ describe("ManifestReconciler upload refusal and apply lattice (fix round 1 I2)",
           sourceLocatorId: null,
           sourceTombstoneId: null,
           reason: null,
+          checkpointLocator: null,
         },
       ];
 
@@ -1212,31 +1297,20 @@ describe("ManifestReconciler upload refusal and apply lattice (fix round 1 I2)",
 // --- settle-reason observations (fix round 1 I3) --------------------------------------------------------
 
 describe("ManifestReconciler settle-reason observations (fix round 1 I3)", () => {
-  it("leaves a closed actions-stage observation for a canonical-only settle that survives completion", async () => {
+  it("leaves a closed actions-stage observation for a defensive canonical-only settle that survives completion", async () => {
     const harness = createReconcilerHarness();
     const progressAtCompletion = captureActionProgressAtCompletion(harness);
-    harness.api.plan = [
-      {
-        actionIndex: 0,
-        actionKind: "download",
-        localEntryId: null,
-        sourceId: SOURCE_ID,
-        sourceVersionId: SOURCE_VERSION_ID,
-        sourceLocatorId: "12345678-1234-4781-8123-123456789012",
-        sourceTombstoneId: null,
-        reason: null,
-      },
-    ];
+    harness.api.plan = [canonicalOnlyDownloadAction(null)];
 
     const outcome = await harness.reconciler.reconcile("onboarding");
 
     expect(outcome.kind).toBe("completed");
-    expect(progressAtCompletion.read()[0]?.reason).toBe("device_manifest_identity_ambiguous");
+    expect(progressAtCompletion.read()[0]?.reason).toBe("device_manifest_state_invalid");
     // The progress rows are legitimately discarded at completion; the one
     // closed observation is the durable readable record that remains.
     expect(harness.journal.readManifestActionProgress()).toEqual([]);
     expect(harness.diagnostics.reconcileFailures).toEqual([
-      { stage: "actions", reason: "device_manifest_identity_ambiguous" },
+      { stage: "actions", reason: "device_manifest_state_invalid" },
     ]);
   });
 

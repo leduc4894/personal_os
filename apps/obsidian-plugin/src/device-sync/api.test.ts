@@ -229,9 +229,21 @@ function manifestActionPageBody(): string {
         source_locator_id: null,
         source_tombstone_id: null,
         reason: null,
+        checkpoint_locator: "notes/catch-up.md",
       },
       {
         action_index: 1,
+        action_kind: "download",
+        local_entry_id: null,
+        source_id: SOURCE_ID,
+        source_version_id: SOURCE_VERSION_ID,
+        source_locator_id: null,
+        source_tombstone_id: null,
+        reason: null,
+        checkpoint_locator: "notes/absent.md",
+      },
+      {
+        action_index: 2,
         action_kind: "conflict",
         local_entry_id: null,
         source_id: null,
@@ -239,6 +251,7 @@ function manifestActionPageBody(): string {
         source_locator_id: null,
         source_tombstone_id: TOMBSTONE_ID,
         reason: "device_manifest_target_occupied",
+        checkpoint_locator: null,
       },
     ],
   });
@@ -521,9 +534,21 @@ describe("device sync wire client strict response parsing", () => {
           sourceLocatorId: null,
           sourceTombstoneId: null,
           reason: null,
+          checkpointLocator: "notes/catch-up.md",
         },
         {
           actionIndex: 1,
+          actionKind: "download",
+          localEntryId: null,
+          sourceId: SOURCE_ID,
+          sourceVersionId: SOURCE_VERSION_ID,
+          sourceLocatorId: null,
+          sourceTombstoneId: null,
+          reason: null,
+          checkpointLocator: "notes/absent.md",
+        },
+        {
+          actionIndex: 2,
           actionKind: "conflict",
           localEntryId: null,
           sourceId: null,
@@ -531,6 +556,7 @@ describe("device sync wire client strict response parsing", () => {
           sourceLocatorId: null,
           sourceTombstoneId: TOMBSTONE_ID,
           reason: "device_manifest_target_occupied",
+          checkpointLocator: null,
         },
       ],
     });
@@ -541,6 +567,7 @@ describe("device sync wire client strict response parsing", () => {
     ["an unregistered action reason", { action_index: 0, action_kind: "conflict", reason: "device_manifest_reason_unknown" }],
     ["a non-UUID source id", { action_index: 0, action_kind: "download", source_id: "source" }],
     ["a non-integer action index", { action_index: -1, action_kind: "no_change" }],
+    ["a non-string checkpoint locator", { action_index: 0, action_kind: "download", checkpoint_locator: 42 }],
   ])("rejects an action page carrying %s", async (_label, override) => {
     const defaultAction: Record<string, unknown> = { action_index: 0, action_kind: "no_change" };
     const data = {

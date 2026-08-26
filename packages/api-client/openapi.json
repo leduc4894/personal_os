@@ -2470,7 +2470,7 @@
       },
       "ManifestActionData": {
         "additionalProperties": false,
-        "description": "One frozen deterministic action of a planned run (spec 7.3).",
+        "description": "One frozen deterministic action of a planned run (spec 7.3).\n\nA ``download`` action publishes the checkpoint-active locator text the\ndevice must place its bytes at — hydrated at read time from the\ncanonical locator row, never persisted on a manifest table; every other\nkind renders the field closed.",
         "properties": {
           "action_index": {
             "title": "Action Index",
@@ -2478,6 +2478,17 @@
           },
           "action_kind": {
             "$ref": "#/components/schemas/ManifestActionKind"
+          },
+          "checkpoint_locator": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checkpoint Locator"
           },
           "local_entry_id": {
             "anyOf": [

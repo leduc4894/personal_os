@@ -73,6 +73,7 @@ from postgresql_source_store.engine import (
 from postgresql_source_store.tables import (
     content_objects,
     device_cursors,
+    manifest_actions,
     manifest_entry_resolutions,
     manifest_runs,
     policy_drafts,
@@ -1361,9 +1362,15 @@ async def test_finalize_materializes_the_deterministic_action_plan(
     assert no_change.source_id == population.match_source.source_id
     assert no_change.source_version_id == population.match_source.version_ids[0]
     assert no_change.reason is None
-    assert stale_download.local_entry_id is None
+    # Only download actions hydrate the checkpoint-active locator text at
+    # read time (task 11b): the catch-up download echoes its manifest entry,
+    # the canonical-only download carries no entry, and both name the locator
+    # row open at the run checkpoint.
+    assert no_change.checkpoint_locator is None
+    assert stale_download.local_entry_id == "entry-stale"
     assert stale_download.source_id == population.stale_source.source_id
     assert stale_download.source_version_id == population.stale_source.version_ids[1]
+    assert stale_download.checkpoint_locator == NormalizedLocator(STALE_LOCATOR)
     assert diverged.reason is not None
     assert diverged.reason.value == "device_manifest_local_diverged"
     assert tombstone.source_tombstone_id == population.deleted_source.tombstone_id
@@ -1376,6 +1383,7 @@ async def test_finalize_materializes_the_deterministic_action_plan(
     assert foreign.reason.value == "device_manifest_identity_ambiguous"
     assert absent_download.source_id == population.absent_source.source_id
     assert absent_download.local_entry_id is None
+    assert absent_download.checkpoint_locator == NormalizedLocator(ABSENT_LOCATOR)
     # The policy-forbidden canonical source absent locally plans no action.
     assert all(action.source_id != population.forbidden_source.source_id for action in page.actions)
 
@@ -1489,6 +1497,36 @@ async def test_first_action_read_transitions_planned_to_applying_and_replays_sta
     ).actions
     assert [action.action_index for action in replayed.actions] == list(range(8))
     assert (await manifest_store.run_row(run.manifest_run_id)).state == "applying"
+
+
+@pytest.mark.asyncio
+async def test_download_action_with_unhydratable_locator_fails_closed(
+    manifest_store: ManifestStoreHarness,
+) -> None:
+    """A persisted download action whose ``source_locator_id`` resolves to no
+    in-workspace locator row (a dangling or foreign reference) fails closed at
+    the read boundary with the invalid-state code: a download action can never
+    reach the wire without its placement operand (task 11b)."""
+
+    population = await seed_reconciliation_population(manifest_store.engine)
+    context = population.workspace.context()
+    run, _ = await manifest_store.drive_planned_run(population)
+    # Point the canonical-only download's locator reference at a row no
+    # workspace owns — nothing rewrites planned actions through the store, so
+    # only the read-time hydration join observes the unresolvable operand.
+    async with manifest_store.engine.begin() as connection:
+        updated = await connection.execute(
+            sa.update(manifest_actions)
+            .values(source_locator_id=uuid4())
+            .where(
+                manifest_actions.c.manifest_run_id == run.manifest_run_id,
+                manifest_actions.c.local_entry_id.is_(None),
+            )
+        )
+        assert updated.rowcount == 1
+    with pytest.raises(DeviceSyncError) as raised:
+        await manifest_store.read_actions(context, run.manifest_run_id)
+    assert raised.value.code is DeviceSyncErrorCode.MANIFEST_STATE_INVALID
 
 
 @pytest.mark.asyncio

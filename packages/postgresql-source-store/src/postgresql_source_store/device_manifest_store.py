@@ -27,7 +27,12 @@ ceiling and merges its rows, and the canonical-only exclusion binds the
 whole resolved-id set as one array-typed parameter so its statement's
 parameter count never grows with the run. The first successful
 ``read_manifest_actions`` moves ``planned`` to ``applying`` and later reads
-are state-preserving replays; every action read and completion rechecks the
+are state-preserving replays; each download action's checkpoint placement
+locator hydrates at read time through a workspace-scoped join onto the
+canonical locator row its ``source_locator_id`` names (locator text never
+persists on a manifest table), and a download action whose locator cannot
+hydrate fails closed as invalid manifest state; every action read and
+completion rechecks the
 active policy revision and invalidates a stale run with the closed
 policy-advanced reason persisted on the run row. ``complete_manifest`` is
 the completion fence: exactly the transaction that changes the exact
@@ -1655,6 +1660,13 @@ class PostgresqlDeviceManifestStore:
                 continue
             if not self._source_is_policy_allowed(revision, workspace_id, state):
                 continue
+            try:
+                active_locator = NormalizedLocator(str(row.active_locator))
+            except ValueError:
+                # A stored locator outside the normalized grammar violates the
+                # persisted shape: invalid manifest state, never a placement
+                # guess.
+                raise DeviceSyncError(DeviceSyncErrorCode.MANIFEST_STATE_INVALID) from None
             action = ManifestAction(
                 action_index=download_index,
                 action_kind=ManifestActionKind.DOWNLOAD,
@@ -1664,6 +1676,7 @@ class PostgresqlDeviceManifestStore:
                 source_locator_id=row.active_locator_id,
                 source_tombstone_id=None,
                 reason=None,
+                checkpoint_locator=active_locator,
             )
             action_rows.append(self._action_row(run.manifest_run_id, action))
             download_index += 1
@@ -1682,6 +1695,29 @@ class PostgresqlDeviceManifestStore:
             "source_tombstone_id": action.source_tombstone_id,
             "safe_reason_code": action.reason.value if action.reason is not None else None,
         }
+
+    @staticmethod
+    def _hydrate_checkpoint_locator(row: RowMapping) -> NormalizedLocator | None:
+        """Hydrate one action row's checkpoint placement locator at read time.
+
+        Only a download action names the locator row open at its run
+        checkpoint, joined inside the credential workspace so a foreign
+        locator id never crosses the boundary. A download action whose
+        locator cannot be hydrated — a dangling or foreign locator
+        reference, or a stored text outside the normalized grammar — fails
+        closed here as invalid manifest state: an action never reaches the
+        wire without its placement operand.
+        """
+
+        if str(row.action_kind) != ManifestActionKind.DOWNLOAD.value:
+            return None
+        text = row.checkpoint_locator
+        if text is None:
+            raise DeviceSyncError(DeviceSyncErrorCode.MANIFEST_STATE_INVALID)
+        try:
+            return NormalizedLocator(str(text))
+        except ValueError:
+            raise DeviceSyncError(DeviceSyncErrorCode.MANIFEST_STATE_INVALID) from None
 
     def _source_is_policy_allowed(
         self,
@@ -1805,6 +1841,7 @@ class PostgresqlDeviceManifestStore:
                     await connection.execute(
                         manifest_action_page_statement(
                             query.manifest_run_id,
+                            workspace_id=context.workspace_id,
                             # The query cursor is inclusive (its floor is
                             # zero), while the shared run-scoped statement
                             # pages on a strictly-greater index: shift by one
@@ -1830,6 +1867,7 @@ class PostgresqlDeviceManifestStore:
                         if row.safe_reason_code is None
                         else _action_reason(str(row.safe_reason_code))
                     ),
+                    checkpoint_locator=self._hydrate_checkpoint_locator(row),
                 )
                 for row in rows[: query.limit]
             )

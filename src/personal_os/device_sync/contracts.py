@@ -417,7 +417,13 @@ class ManifestEntryResolution:
 
 @dataclass(frozen=True, slots=True)
 class ManifestAction:
-    """One frozen deterministic action of a planned manifest run (spec 6.5)."""
+    """One frozen deterministic action of a planned manifest run (spec 6.5).
+
+    A ``download`` action carries the checkpoint-active locator text the
+    device must place its bytes at; every other kind carries none. The
+    locator is a private value that travels on the operational action wire
+    only and never renders outside a redacted ``repr``.
+    """
 
     action_index: int
     action_kind: ManifestActionKind
@@ -427,6 +433,10 @@ class ManifestAction:
     source_locator_id: UUID | None
     source_tombstone_id: UUID | None
     reason: ManifestActionReason | None
+    checkpoint_locator: NormalizedLocator | None = None
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(<redacted>)"
 
     def __post_init__(self) -> None:
         if self.action_index < 0:
@@ -439,6 +449,13 @@ class ManifestAction:
             reject_nil_uuid("source_locator_id", self.source_locator_id)
         if self.source_tombstone_id is not None:
             reject_nil_uuid("source_tombstone_id", self.source_tombstone_id)
+        if self.action_kind is ManifestActionKind.DOWNLOAD:
+            if self.checkpoint_locator is None:
+                raise ValueError("download action shape invalid: checkpoint locator is required")
+        elif self.checkpoint_locator is not None:
+            raise ValueError(
+                f"{self.action_kind.value} action shape invalid: checkpoint locator is forbidden"
+            )
 
 
 def compute_manifest_run_expiry(created_at: datetime) -> datetime:

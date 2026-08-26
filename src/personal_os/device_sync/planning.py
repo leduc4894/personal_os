@@ -177,9 +177,9 @@ def plan_manifest_action(
     is excluded with its local bytes preserved; matching current bytes are
     no-change; a trusted base that is still current with changed bytes
     uploads; local bytes still equal to a stale trusted base download the
-    canonical advance (the only action without a local entry); every other
-    divergence is the local-diverged conflict — untrusted bytes are never
-    automatically uploaded or downloaded.
+    canonical advance; every other divergence is the local-diverged
+    conflict — untrusted bytes are never automatically uploaded or
+    downloaded.
 
     The ``source_locator_id`` operand of the file-placement actions
     (``no_change``, ``upload``, ``download``) is the canonical source's
@@ -261,16 +261,20 @@ def plan_manifest_action(
         )
     if trusted_base and resolution.submitted_fingerprint == resolution.known_base_fingerprint:
         # Local bytes still equal a stale trusted base while the canonical
-        # source advanced: the canonical catch-up download.
+        # source advanced: the canonical catch-up download. It keeps its
+        # manifest entry's echo — the nullable column exists for the
+        # canonical-only downloads without any entry — and carries the
+        # checkpoint-active locator the device places the bytes at.
         return ManifestAction(
             action_index=resolution.entry_ordinal,
             action_kind=ManifestActionKind.DOWNLOAD,
-            local_entry_id=None,
+            local_entry_id=resolution.local_entry_id,
             source_id=canonical.source_id,
             source_version_id=canonical.current_version_id,
             source_locator_id=canonical.active_locator_id,
             source_tombstone_id=None,
             reason=None,
+            checkpoint_locator=canonical.locator,
         )
     return _conflict(resolution, ManifestActionReason.LOCAL_DIVERGED)
 

@@ -19,6 +19,7 @@ MIGRATION_PATH = (
 )
 
 DEVICE_SYNC_REVISION = "20260826_01"
+DOWNLOAD_ENTRY_ECHO_REVISION = "20260826_02"
 SOURCE_LIFECYCLE_REVISION = "20260820_01"
 
 CURSOR_COLUMNS = frozenset(
@@ -130,6 +131,7 @@ class _Op:
         self.events: list[tuple[str, str]] = []
         self.tables: dict[str, Any] = {}
         self.indexes: dict[str, tuple[tuple[Any, ...], dict[str, Any]]] = {}
+        self.checks: dict[str, str] = {}
         self.bind = _Bind(protected_rows)
         self.context = SimpleNamespace(
             config=SimpleNamespace(cmd_opts=SimpleNamespace(x=x_arguments or []))
@@ -150,6 +152,15 @@ class _Op:
 
     def drop_table(self, name: str, *args: Any, **kwargs: Any) -> None:
         self.events.append(("drop_table", name))
+
+    def drop_constraint(self, name: str, *args: Any, **kwargs: Any) -> None:
+        self.events.append(("drop_constraint", name))
+
+    def create_check_constraint(
+        self, name: str, table_name: str, condition: str, **kwargs: Any
+    ) -> None:
+        self.events.append(("create_check_constraint", name))
+        self.checks[name] = condition
 
     def execute(self, statement: Any, **kwargs: Any) -> None:
         self.events.append(("execute", str(statement)))
@@ -215,10 +226,147 @@ def test_device_sync_revision_extends_source_lifecycle_head() -> None:
 
 def test_device_sync_revision_is_the_single_alembic_head() -> None:
     scripts = ScriptDirectory.from_config(Config(str(ALEMBIC_INI_PATH)))
-    assert scripts.get_heads() == [DEVICE_SYNC_REVISION]
-    revision = scripts.get_revision(DEVICE_SYNC_REVISION)
+    assert scripts.get_heads() == [DOWNLOAD_ENTRY_ECHO_REVISION]
+    revision = scripts.get_revision(DOWNLOAD_ENTRY_ECHO_REVISION)
     assert revision is not None
-    assert revision.down_revision == SOURCE_LIFECYCLE_REVISION
+    assert revision.down_revision == DEVICE_SYNC_REVISION
+
+
+def test_download_entry_echo_revision_pins_its_chain_link() -> None:
+    module = load_revision("20260826_02_allow_manifest_download_entry_echo.py")
+    assert module.revision == "20260826_02"
+    assert module.down_revision == "20260826_01"
+
+
+def test_download_entry_echo_upgrade_rewrites_only_the_action_shape() -> None:
+    module = load_revision("20260826_02_allow_manifest_download_entry_echo.py")
+    recorder = _Op()
+    module.op = recorder
+    module.upgrade()
+    assert recorder.events == [
+        ("drop_constraint", "ck_manifest_actions__shape"),
+        ("create_check_constraint", "ck_manifest_actions__shape"),
+    ]
+    assert recorder.checks["ck_manifest_actions__shape"] == (
+        "(local_entry_id IS NOT NULL OR action_kind = 'download') "
+        "AND (action_kind IN ('conflict', 'excluded')) = (safe_reason_code IS NOT NULL) "
+        "AND (action_kind NOT IN ('download', 'no_change') "
+        "OR (source_id IS NOT NULL AND source_version_id IS NOT NULL)) "
+        "AND (action_kind <> 'apply_tombstone' OR source_tombstone_id IS NOT NULL) "
+        "AND (action_kind <> 'apply_tombstone' OR source_id IS NOT NULL) "
+        "AND (source_version_id IS NULL OR source_id IS NOT NULL) "
+        "AND (source_locator_id IS NULL OR source_id IS NOT NULL) "
+        "AND (source_tombstone_id IS NULL OR source_id IS NOT NULL)"
+    )
+
+
+def test_download_entry_echo_downgrade_restores_the_strict_shape_under_the_gate() -> None:
+    module = load_revision("20260826_02_allow_manifest_download_entry_echo.py")
+    # No echoed rows: the strict shape returns with no destructive delete.
+    quiet = _Op()
+    module.op = quiet
+    module.downgrade()
+    assert quiet.events == [
+        ("drop_constraint", "ck_manifest_actions__shape"),
+        ("create_check_constraint", "ck_manifest_actions__shape"),
+    ]
+    assert quiet.checks["ck_manifest_actions__shape"] == (
+        "(action_kind = 'download') = (local_entry_id IS NULL) "
+        "AND (action_kind IN ('conflict', 'excluded')) = (safe_reason_code IS NOT NULL) "
+        "AND (action_kind NOT IN ('download', 'no_change') "
+        "OR (source_id IS NOT NULL AND source_version_id IS NOT NULL)) "
+        "AND (action_kind <> 'apply_tombstone' OR source_tombstone_id IS NOT NULL) "
+        "AND (action_kind <> 'apply_tombstone' OR source_id IS NOT NULL) "
+        "AND (source_version_id IS NULL OR source_id IS NOT NULL) "
+        "AND (source_locator_id IS NULL OR source_id IS NOT NULL) "
+        "AND (source_tombstone_id IS NULL OR source_id IS NOT NULL)"
+    )
+    # Echoed rows without the explicit gate refuse the downgrade outright.
+    gated = _Op(protected_rows=1)
+    module.op = gated
+    with pytest.raises(RuntimeError, match="explicit_gate"):
+        module.downgrade()
+    assert gated.events == []
+    # The explicit destructive gate discards the echoed rows first.
+    destructive = _Op(protected_rows=1, x_arguments=["allow_destructive=true"])
+    module.op = destructive
+    module.downgrade()
+    assert destructive.events == [
+        ("execute", "DELETE FROM knowledge.manifest_actions"
+        " WHERE action_kind = 'download' AND local_entry_id IS NOT NULL"),
+        ("drop_constraint", "ck_manifest_actions__shape"),
+        ("create_check_constraint", "ck_manifest_actions__shape"),
+    ]
+
+
+def test_amended_action_shape_admits_the_catch_up_echo_and_rejects_entry_less_kinds() -> None:
+    """The amended shape truth table, evaluated like the DDL will enforce it.
+
+    A download may carry its manifest entry (the Task 11b catch-up echo) or
+    none (the canonical-only download); every other kind still requires its
+    entry. The constraint SQL itself is evaluated row by row against a
+    throwaway in-memory SQLite database.
+    """
+
+    module = load_revision("20260826_02_allow_manifest_download_entry_echo.py")
+    shape_sql = module._AMENDED_ACTION_SHAPE_CHECK
+    shape_query = sa.text(
+        f"SELECT ({shape_sql}) FROM (SELECT :action_kind AS action_kind,"
+        " :local_entry_id AS local_entry_id, :safe_reason_code AS safe_reason_code,"
+        " :source_id AS source_id, :source_version_id AS source_version_id,"
+        " :source_locator_id AS source_locator_id,"
+        " :source_tombstone_id AS source_tombstone_id)"
+    )
+    engine = sa.create_engine("sqlite://")
+
+    def _evaluates_true(action_kind: str, local_entry_id: str | None) -> bool:
+        # Every operand outside the entry clause is shaped honestly for the
+        # kind, so each verdict below isolates the entry clause alone.
+        with engine.connect() as connection:
+            return bool(
+                connection.execute(
+                    shape_query,
+                    {
+                        "action_kind": action_kind,
+                        "local_entry_id": local_entry_id,
+                        "safe_reason_code": (
+                            "device_manifest_policy_excluded"
+                            if action_kind in ("conflict", "excluded")
+                            else None
+                        ),
+                        "source_id": (
+                            None
+                            if action_kind in ("conflict", "excluded")
+                            else "4960b7a8-283b-4d92-8186-ca0d8f894f8c"
+                        ),
+                        "source_locator_id": None,
+                        "source_version_id": (
+                            None
+                            if action_kind in ("conflict", "excluded", "apply_tombstone")
+                            else "f88d9045-28d1-41ba-90b2-503ec1f4984d"
+                        ),
+                        "source_tombstone_id": (
+                            "018f47a0-7b00-7000-8000-000000000009"
+                            if action_kind == "apply_tombstone"
+                            else None
+                        ),
+                    },
+                ).scalar_one()
+            )
+
+    # Every honest entry shape must satisfy the constraint.
+    assert _evaluates_true("download", None)  # canonical-only download
+    assert _evaluates_true("download", "entry-stale")  # catch-up echo (task 11b)
+    assert _evaluates_true("upload", "entry-upload")
+    assert _evaluates_true("no_change", "entry-match")
+    assert _evaluates_true("conflict", "entry-diverged")
+    assert _evaluates_true("apply_tombstone", "entry-gone")
+    # Every entry-less non-download kind must violate it.
+    assert not _evaluates_true("upload", None)
+    assert not _evaluates_true("no_change", None)
+    assert not _evaluates_true("apply_tombstone", None)
+    assert not _evaluates_true("conflict", None)
+    engine.dispose()
 
 
 # --- upgrade shape ------------------------------------------------------------

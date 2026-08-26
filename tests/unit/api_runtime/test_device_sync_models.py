@@ -343,14 +343,41 @@ def test_manifest_action_page_renderer_projects_the_closed_action_shape() -> Non
             source_tombstone_id=None,
             reason=ManifestActionReason.IDENTITY_AMBIGUOUS,
         ),
+        ManifestAction(
+            action_index=2,
+            action_kind=ManifestActionKind.DOWNLOAD,
+            local_entry_id=None,
+            source_id=uuid4(),
+            source_version_id=uuid4(),
+            source_locator_id=uuid4(),
+            source_tombstone_id=None,
+            reason=None,
+            checkpoint_locator=NormalizedLocator("notes/absent.md"),
+        ),
     )
     data = manifest_action_page_data(
         ManifestActionPage(manifest_run_id=uuid4(), actions=actions, has_more=False)
     )
     assert isinstance(data, ManifestActionPageData)
     assert data.has_more is False
-    first, second = data.actions
+    first, second, download = data.actions
     assert isinstance(first, ManifestActionData)
     assert first.action_kind is ManifestActionKind.UPLOAD
     assert first.source_version_id is not None
     assert second.reason is ManifestActionReason.IDENTITY_AMBIGUOUS
+    # Only the download action publishes its checkpoint locator text — the
+    # placement operand the device applies bytes at (task 11b); every other
+    # kind renders the field closed.
+    assert first.checkpoint_locator is None
+    assert second.checkpoint_locator is None
+    assert download.checkpoint_locator == "notes/absent.md"
+
+
+def test_manifest_action_wire_model_closes_extra_properties() -> None:
+    with pytest.raises(ValidationError):
+        ManifestActionData(
+            action_index=0,
+            action_kind=ManifestActionKind.DOWNLOAD,
+            checkpoint_locator="notes/absent.md",
+            display_locator="notes/absent.md",
+        )

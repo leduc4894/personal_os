@@ -379,16 +379,15 @@ def test_upload_and_download_carry_the_checkpoint_active_locator() -> None:
         submitted_fingerprint=FINGERPRINT,
         known_base_fingerprint=FINGERPRINT,
     )
-    download = plan_manifest_action(
-        download_resolution,
-        canonical_source(
-            version_id=_VERSION_ID,
-            fingerprint=OTHER_FINGERPRINT,
-            active_locator_id=_ACTIVE_LOCATOR_ID,
-        ),
+    download_canonical = canonical_source(
+        version_id=_VERSION_ID,
+        fingerprint=OTHER_FINGERPRINT,
+        active_locator_id=_ACTIVE_LOCATOR_ID,
     )
+    download = plan_manifest_action(download_resolution, download_canonical)
     assert download.action_kind is ManifestActionKind.DOWNLOAD
     assert download.source_locator_id == _ACTIVE_LOCATOR_ID
+    assert download.checkpoint_locator == download_canonical.locator
 
 
 def test_unowned_new_locator_plans_upload() -> None:
@@ -416,19 +415,29 @@ def test_trusted_current_base_with_changed_bytes_plans_upload() -> None:
 
 
 def test_stale_trusted_base_with_equal_local_bytes_plans_download() -> None:
+    """The per-entry catch-up download keeps its manifest entry's echo
+    (spec 6.5: the column is nullable for canonical-only downloads only)
+    and names the checkpoint-active locator the device places bytes at."""
+
     resolution = planned_entry_resolution(
         known_source_id=_SOURCE_ID,
         known_version_id=_SECOND_VERSION_ID,
         submitted_fingerprint=FINGERPRINT,
         known_base_fingerprint=FINGERPRINT,
     )
-    canonical = canonical_source(version_id=_VERSION_ID, fingerprint=OTHER_FINGERPRINT)
+    canonical = canonical_source(
+        version_id=_VERSION_ID,
+        fingerprint=OTHER_FINGERPRINT,
+        locator=_OTHER_LOCATOR,
+        active_locator_id=_ACTIVE_LOCATOR_ID,
+    )
     action = plan_manifest_action(resolution, canonical)
     assert action.action_kind is ManifestActionKind.DOWNLOAD
-    assert action.local_entry_id is None
+    assert action.local_entry_id == "entry-1"
     assert action.source_id == _SOURCE_ID
     assert action.source_version_id == _VERSION_ID
-    assert action.source_locator_id == _LOCATOR_ID
+    assert action.source_locator_id == _ACTIVE_LOCATOR_ID
+    assert action.checkpoint_locator == _OTHER_LOCATOR
     assert action.reason is None
 
 

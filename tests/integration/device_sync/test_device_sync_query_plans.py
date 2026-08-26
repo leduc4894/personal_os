@@ -710,6 +710,7 @@ async def test_manifest_action_pagination_is_indexed(
 
     statement = manifest_action_page_statement(
         populated_device_sync_store.manifest_run_id,
+        workspace_id=populated_device_sync_store.workspace_id,
         after_action_index=5_000,
         limit=501,
     )

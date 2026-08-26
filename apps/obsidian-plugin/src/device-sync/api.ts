@@ -137,7 +137,11 @@ export interface ManifestPageReceipt {
   readonly nextPageNumber: number;
 }
 
-/** One frozen deterministic action of a planned run. */
+/**
+ * One frozen deterministic action of a planned run. A `download` action
+ * carries the checkpoint-active locator text the device places its bytes
+ * at (task 11b); every other kind renders the field closed (null).
+ */
 export interface ManifestAction {
   readonly actionIndex: number;
   readonly actionKind: ManifestActionKind;
@@ -147,6 +151,7 @@ export interface ManifestAction {
   readonly sourceLocatorId: string | null;
   readonly sourceTombstoneId: string | null;
   readonly reason: ManifestActionReason | null;
+  readonly checkpointLocator: string | null;
 }
 
 /** One stable ordered page of frozen actions. */
@@ -565,6 +570,9 @@ function parseManifestAction(value: unknown): ManifestAction {
       value["reason"] === null || value["reason"] === undefined
         ? null
         : (requireClosedMember(value["reason"], MANIFEST_ACTION_REASON_SET) as ManifestActionReason),
+    // The download placement locator parses with the same strictness as an
+    // event locator: a string or nothing, never any other shape.
+    checkpointLocator: optionalText(value["checkpoint_locator"]),
   };
 }
 

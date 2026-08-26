@@ -12,9 +12,12 @@
  * reauthorizing an outbound journal event under the barrier; download and
  * tombstone actions apply through the Task 10 remote-apply state machine
  * with contiguous synthetic event sequences that never pass the run
- * checkpoint; conflict/no-change/excluded actions persist their blocker
- * evidence without any network mutation. Once every action is
- * terminal-safe, the exact server completion is recorded, the local
+ * checkpoint — a canonical-only download (no manifest entry) applies as a
+ * synthetic create at the checkpoint locator its action wire carries
+ * (task 11b), and a wire that carries none settles fail-closed with the
+ * closed invalid-state reason; conflict/no-change/excluded actions persist
+ * their blocker evidence without any network mutation. Once every action
+ * is terminal-safe, the exact server completion is recorded, the local
  * cursors become the checkpoint C, the barrier and the
  * `reconcile_required` flag clear, and every outbound row — the ones
  * observed after G plus the planner uploads — becomes dispatchable again.
@@ -405,53 +408,65 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
 
     const entry =
       action.localEntryId === null ? null : (entriesByLocalId.get(action.localEntryId) ?? null);
-    if (entry === null) {
-      // The action names no entry this capture knows — for a canonical-only
-      // download the wire carries no locator the plugin could ever place
-      // bytes at, and a planned entry that vanished mid-run is equally
-      // unresolvable: a durable identity conflict, never a guess.
+    // Only a download may place through the wire's checkpoint locator; a
+    // locator riding any other kind is never an entry substitute.
+    const canonicalOnlyLocator =
+      entry === null && action.actionKind === "download" ? action.checkpointLocator : null;
+    if (entry === null && canonicalOnlyLocator === null) {
+      if (action.actionKind === "download") {
+        // Defensive fail-closed for a legacy/erroneous wire (task 11b): a
+        // canonical-only download without its checkpoint locator can never
+        // place bytes. The closed invalid-state reason settles it durably —
+        // never a guess, and never the identity-ambiguous token, which
+        // stays reserved for genuinely ambiguous identity proof.
+        return terminal("device_manifest_state_invalid");
+      }
+      // A planned entry this capture cannot prove is a genuine identity
+      // conflict, never a guess.
       return terminal("device_manifest_identity_ambiguous");
     }
 
-    let recheck: RepairActionRecheckOutcome;
-    try {
-      recheck = await journal.recheckManifestActionTarget({
-        normalizedLocator: entry.normalizedLocator,
-        entryFingerprint: entry.fingerprint,
-        actionKind:
-          action.actionKind === "upload"
-            ? "upload"
-            : action.actionKind === "apply_tombstone"
-              ? "apply_tombstone"
-              : "download",
-      });
-    } catch (error) {
-      return runFailure("actions", error);
-    }
-    if (recheck.kind === "blocked") {
-      // A stale action becomes a durable conflict/repair blocker without
-      // invalidating any unrelated safe action (spec 12.4).
-      return terminal(recheck.reason);
-    }
-
-    if (action.actionKind === "upload") {
-      let admission: RepairUploadAdmission;
+    if (entry !== null) {
+      let recheck: RepairActionRecheckOutcome;
       try {
-        admission = await journal.admitRepairUpload({
+        recheck = await journal.recheckManifestActionTarget({
           normalizedLocator: entry.normalizedLocator,
+          entryFingerprint: entry.fingerprint,
+          actionKind:
+            action.actionKind === "upload"
+              ? "upload"
+              : action.actionKind === "apply_tombstone"
+                ? "apply_tombstone"
+                : "download",
         });
       } catch (error) {
         return runFailure("actions", error);
       }
-      if (admission === "refused") {
-        // The journal durably refused new outbound rows (its spec-6.4 soft
-        // limits): the action cannot terminalize — the run stays blocked
-        // with the barrier and progress retained for the next attempt.
-        return blocked("actions", "journal_mutation_failed");
+      if (recheck.kind === "blocked") {
+        // A stale action becomes a durable conflict/repair blocker without
+        // invalidating any unrelated safe action (spec 12.4).
+        return terminal(recheck.reason);
       }
-      // recorded (created or reauthorized) and already_current both
-      // terminalize: the outbound intent is durably proven.
-      return terminal(null);
+
+      if (action.actionKind === "upload") {
+        let admission: RepairUploadAdmission;
+        try {
+          admission = await journal.admitRepairUpload({
+            normalizedLocator: entry.normalizedLocator,
+          });
+        } catch (error) {
+          return runFailure("actions", error);
+        }
+        if (admission === "refused") {
+          // The journal durably refused new outbound rows (its spec-6.4 soft
+          // limits): the action cannot terminalize — the run stays blocked
+          // with the barrier and progress retained for the next attempt.
+          return blocked("actions", "journal_mutation_failed");
+        }
+        // recorded (created or reauthorized) and already_current both
+        // terminalize: the outbound intent is durably proven.
+        return terminal(null);
+      }
     }
 
     if (action.sourceId === null) {
@@ -480,6 +495,12 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
     }
     let event: DeviceSyncEvent;
     if (action.actionKind === "apply_tombstone") {
+      // Reaching the synthetic events with a tombstone always implies a
+      // proven entry (the guard above settled every entry-less action);
+      // the re-guard keeps the invariant explicit for the type checker.
+      if (entry === null) {
+        return terminal("device_manifest_identity_ambiguous");
+      }
       event = {
         eventId,
         eventSequence,
@@ -511,25 +532,55 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
       } catch (error) {
         return runFailure("actions", error);
       }
-      event = {
-        eventId,
-        eventSequence,
-        operation: "updated",
-        sourceId: action.sourceId,
-        originDeviceId: null,
-        baseVersionId: entry.knownVersionId,
-        currentVersionId: action.sourceVersionId,
-        baseFingerprint: entry.fingerprint,
-        currentFingerprint: {
-          sha256: verified.declaredSha256,
-          sizeBytes: verified.sizeBytes,
-          mediaType: verified.mediaType,
-        },
-        priorLocator: entry.normalizedLocator,
-        resultingLocator: entry.normalizedLocator,
-        tombstoneId: null,
-        committedAt: SYNTHETIC_EVENT_COMMITTED_AT,
+      const verifiedFingerprint = {
+        sha256: verified.declaredSha256,
+        sizeBytes: verified.sizeBytes,
+        mediaType: verified.mediaType,
       };
+      if (entry !== null) {
+        // The per-entry catch-up download: the entry's own locator is where
+        // the device already keeps the file, so the synthetic update proves
+        // the pinned base bytes before replacing them.
+        event = {
+          eventId,
+          eventSequence,
+          operation: "updated",
+          sourceId: action.sourceId,
+          originDeviceId: null,
+          baseVersionId: entry.knownVersionId,
+          currentVersionId: action.sourceVersionId,
+          baseFingerprint: entry.fingerprint,
+          currentFingerprint: verifiedFingerprint,
+          priorLocator: entry.normalizedLocator,
+          resultingLocator: entry.normalizedLocator,
+          tombstoneId: null,
+          committedAt: SYNTHETIC_EVENT_COMMITTED_AT,
+        };
+      } else {
+        // The canonical-only download (task 11b): no entry exists and the
+        // target's absence is the expected pre-mutation state, so a
+        // synthetic create places the verified bytes at the wire's
+        // checkpoint locator. The Task 10 state machine proves the target
+        // unoccupied before any mutation — an untracked occupant settles as
+        // a durable conflict instead of being clobbered (the entry recheck
+        // above deliberately does not run: it would read the same absent
+        // target as a stale entry).
+        event = {
+          eventId,
+          eventSequence,
+          operation: "created",
+          sourceId: action.sourceId,
+          originDeviceId: null,
+          baseVersionId: null,
+          currentVersionId: action.sourceVersionId,
+          baseFingerprint: null,
+          currentFingerprint: verifiedFingerprint,
+          priorLocator: null,
+          resultingLocator: canonicalOnlyLocator,
+          tombstoneId: null,
+          committedAt: SYNTHETIC_EVENT_COMMITTED_AT,
+        };
+      }
     }
 
     try {

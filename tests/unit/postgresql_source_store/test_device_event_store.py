@@ -482,6 +482,7 @@ def test_action_page_statement_is_run_scoped_and_index_ordered() -> None:
     text = str(
         manifest_action_page_statement(
             _MANIFEST_RUN_ID,
+            workspace_id=_WORKSPACE_ID,
             after_action_index=500,
             limit=MAX_PULL_EVENTS + 1,
         ).compile(dialect=postgresql.dialect())
@@ -490,6 +491,13 @@ def test_action_page_statement_is_run_scoped_and_index_ordered() -> None:
     assert _bind_marker(text, "after_action_index")
     assert "LIMIT %(pull_limit)s" in text
     assert "ORDER BY knowledge.manifest_actions.action_index ASC" in text
+    # The checkpoint locator hydrates at read time only for download actions,
+    # through a workspace-scoped outer join on the canonical locator row so a
+    # foreign locator id never crosses the credential boundary (task 11b).
+    assert "LEFT OUTER JOIN knowledge.source_locators ON" in text
+    assert _bind_marker(text, "workspace_id_1")
+    assert "CASE WHEN (knowledge.manifest_actions.action_kind = 'download')" in text
+    assert str(_WORKSPACE_ID) not in text
 
 
 # --- domain database retry policy ---------------------------------------------

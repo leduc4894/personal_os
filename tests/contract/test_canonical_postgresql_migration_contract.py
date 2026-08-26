@@ -34,6 +34,7 @@ POLICY_REVISION: str = "20260817_01"
 SMALL_FILE_REVISION: str = "20260818_01"
 SOURCE_LIFECYCLE_REVISION: str = "20260820_01"
 DEVICE_SYNC_REVISION: str = "20260826_01"
+DOWNLOAD_ENTRY_ECHO_REVISION: str = "20260826_02"
 SCHEMA_NAME: str = "knowledge"
 
 EXPECTED_TABLES_IN_CREATION_ORDER: tuple[str, ...] = (
@@ -581,13 +582,13 @@ def _script_directory() -> ScriptDirectory:
 
 def test_alembic_graph_has_exactly_one_head_revision() -> None:
     script_directory = _script_directory()
-    assert script_directory.get_heads() == [DEVICE_SYNC_REVISION]
+    assert script_directory.get_heads() == [DOWNLOAD_ENTRY_ECHO_REVISION]
 
 
 def test_baseline_revision_is_the_single_graph_root() -> None:
     script_directory = _script_directory()
     revisions = list(script_directory.walk_revisions())
-    assert len(revisions) == 6
+    assert len(revisions) == 7
     revision = script_directory.get_revision(BASELINE_REVISION)
     assert revision is not None
     assert revision.down_revision is None
@@ -619,6 +620,11 @@ def test_baseline_revision_is_the_single_graph_root() -> None:
     assert device_sync.down_revision == SOURCE_LIFECYCLE_REVISION
     assert not device_sync.branch_labels
     assert device_sync.dependencies is None
+    download_entry_echo = script_directory.get_revision(DOWNLOAD_ENTRY_ECHO_REVISION)
+    assert download_entry_echo is not None
+    assert download_entry_echo.down_revision == DEVICE_SYNC_REVISION
+    assert not download_entry_echo.branch_labels
+    assert download_entry_echo.dependencies is None
 
 
 def test_alembic_graph_loads_without_database_settings_or_secrets() -> None:
@@ -629,7 +635,7 @@ def test_alembic_graph_loads_without_database_settings_or_secrets() -> None:
             removed[key] = os.environ.pop(key)
     try:
         script_directory = _script_directory()
-        assert script_directory.get_heads() == [DEVICE_SYNC_REVISION]
+        assert script_directory.get_heads() == [DOWNLOAD_ENTRY_ECHO_REVISION]
     finally:
         os.environ.update(removed)
 

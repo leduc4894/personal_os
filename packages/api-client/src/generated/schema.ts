@@ -1843,11 +1843,18 @@ export type components = {
         /**
          * ManifestActionData
          * @description One frozen deterministic action of a planned run (spec 7.3).
+         *
+         *     A ``download`` action publishes the checkpoint-active locator text the
+         *     device must place its bytes at — hydrated at read time from the
+         *     canonical locator row, never persisted on a manifest table; every other
+         *     kind renders the field closed.
          */
         readonly ManifestActionData: {
             /** Action Index */
             readonly action_index: number;
             readonly action_kind: components["schemas"]["ManifestActionKind"];
+            /** Checkpoint Locator */
+            readonly checkpoint_locator?: string | null;
             /** Local Entry Id */
             readonly local_entry_id?: string | null;
             readonly reason?: components["schemas"]["ManifestActionReason"] | null;

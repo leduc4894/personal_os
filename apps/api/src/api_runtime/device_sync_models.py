@@ -197,7 +197,13 @@ class ManifestPageReceiptData(BaseModel):
 
 
 class ManifestActionData(BaseModel):
-    """One frozen deterministic action of a planned run (spec 7.3)."""
+    """One frozen deterministic action of a planned run (spec 7.3).
+
+    A ``download`` action publishes the checkpoint-active locator text the
+    device must place its bytes at — hydrated at read time from the
+    canonical locator row, never persisted on a manifest table; every other
+    kind renders the field closed.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -209,6 +215,7 @@ class ManifestActionData(BaseModel):
     source_locator_id: UUID | None = None
     source_tombstone_id: UUID | None = None
     reason: ManifestActionReason | None = None
+    checkpoint_locator: str | None = None
 
 
 class ManifestActionPageData(BaseModel):
@@ -378,6 +385,9 @@ def _action_data(action: ManifestAction) -> ManifestActionData:
         source_locator_id=action.source_locator_id,
         source_tombstone_id=action.source_tombstone_id,
         reason=action.reason,
+        checkpoint_locator=(
+            action.checkpoint_locator.value if action.checkpoint_locator is not None else None
+        ),
     )
 
 

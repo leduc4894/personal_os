@@ -39,6 +39,7 @@ MIGRATION_GLOBS: tuple[str, ...] = (
     "20260818_01*.py",
     "20260820_01*.py",
     "20260826_01*.py",
+    "20260826_02*.py",
 )
 MIGRATION_DIRECTORY = REPO_ROOT / "migrations" / "versions"
 PACKAGE_SOURCE_ROOT = (

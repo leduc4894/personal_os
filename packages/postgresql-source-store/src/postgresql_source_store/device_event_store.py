@@ -523,18 +523,24 @@ def workspace_minimum_acknowledged_statement(
 def manifest_action_page_statement(
     manifest_run_id: UUID,
     *,
+    workspace_id: UUID,
     after_action_index: int,
     limit: int,
 ) -> sa.Select[tuple[Any, ...]]:
     """Build the stable ordered manifest action page after one index.
 
-    The manifest store (the next child) reads its frozen actions through
-    this page; the statement walks the primary-key index in ``action_index``
-    order with a parameter-bound limit and never rewrites a planned action.
-    The statement is run-scoped only: Task 4's store must compose it with
-    the credential-derived workspace/device ownership of the run (resolving
-    the run through the ``DeviceSyncContext`` first) so no foreign run's
-    actions ever cross the credential boundary.
+    The manifest store reads its frozen actions through this page; the
+    statement walks the primary-key index in ``action_index`` order with a
+    parameter-bound limit and never rewrites a planned action. The statement
+    is run-scoped: Task 4's store composes it with the credential-derived
+    workspace/device ownership of the run (resolving the run through the
+    ``DeviceSyncContext`` first) so no foreign run's actions ever cross the
+    credential boundary. A ``download`` action's checkpoint placement
+    locator text hydrates at read time through a workspace-scoped outer
+    join onto the canonical locator row its ``source_locator_id`` names —
+    never through persisted locator text — so a foreign or dangling
+    locator reference stays unhydrated and fails closed at the store
+    boundary.
     """
 
     return (
@@ -547,6 +553,21 @@ def manifest_action_page_statement(
             manifest_actions.c.source_locator_id,
             manifest_actions.c.source_tombstone_id,
             manifest_actions.c.safe_reason_code,
+            sa.case(
+                (
+                    manifest_actions.c.action_kind == sa.literal_column("'download'"),
+                    source_locators.c.normalized_locator,
+                ),
+                else_=None,
+            ).label("checkpoint_locator"),
+        )
+        .select_from(manifest_actions)
+        .outerjoin(
+            source_locators,
+            sa.and_(
+                source_locators.c.workspace_id == workspace_id,
+                source_locators.c.source_locator_id == manifest_actions.c.source_locator_id,
+            ),
         )
         .where(
             manifest_actions.c.manifest_run_id == manifest_run_id,
