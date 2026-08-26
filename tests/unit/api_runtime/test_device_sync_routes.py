@@ -826,9 +826,7 @@ def test_offline_state_defaults_are_zero_cursor_and_empty_pages(
     assert data["events"] == []
     assert data["has_more"] is False
 
-    actions = harness.client.get(
-        f"/api/sync/manifests/{uuid4()}/actions", headers=bearer(harness)
-    )
+    actions = harness.client.get(f"/api/sync/manifests/{uuid4()}/actions", headers=bearer(harness))
     assert actions.json()["data"]["actions"] == []
     assert actions.json()["data"]["has_more"] is False
 

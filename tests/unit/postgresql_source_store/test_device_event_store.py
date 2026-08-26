@@ -245,9 +245,7 @@ def test_hydrated_events_never_leak_private_operands_in_repr() -> None:
 
 
 def test_hydration_carries_the_origin_device_from_the_canonical_row() -> None:
-    hydrated = hydrate_device_event(
-        row_for(DeviceEventType.CREATED) | {"origin_device_id": None}
-    )
+    hydrated = hydrate_device_event(row_for(DeviceEventType.CREATED) | {"origin_device_id": None})
     assert hydrated.origin_device_id is None
 
 
@@ -322,9 +320,7 @@ def test_missing_tombstone_operand_raises_integrity() -> None:
 
 def test_fingerprint_operand_with_invalid_digest_fails_integrity() -> None:
     with pytest.raises(DeviceSyncError) as raised:
-        hydrate_device_event(
-            row_for(DeviceEventType.CREATED) | {"current_sha256": "not-a-digest"}
-        )
+        hydrate_device_event(row_for(DeviceEventType.CREATED) | {"current_sha256": "not-a-digest"})
     assert raised.value.code is DeviceSyncErrorCode.EVENT_INTEGRITY_FAILED
 
 
@@ -449,9 +445,9 @@ def test_checkpoint_statement_reads_one_descending_head_row() -> None:
 
 def test_cursor_select_statement_locks_the_exact_workspace_device_row() -> None:
     locked_text = str(
-        device_cursor_select_statement(
-            _WORKSPACE_ID, _DEVICE_ID, for_update=True
-        ).compile(dialect=postgresql.dialect())
+        device_cursor_select_statement(_WORKSPACE_ID, _DEVICE_ID, for_update=True).compile(
+            dialect=postgresql.dialect()
+        )
     )
     assert _bind_marker(locked_text, "workspace_id")
     assert _bind_marker(locked_text, "device_id")

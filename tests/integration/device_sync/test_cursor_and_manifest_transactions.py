@@ -170,24 +170,53 @@ async def publish_workspace_policy(
     signing_key_id = uuid4()
     payload = hashlib.sha256(nonce.encode("ascii")).digest()
     async with engine.begin() as connection:
-        await connection.execute(
-            sa.insert(policy_drafts).values(
-                policy_draft_id=draft_id,
-                workspace_id=workspace.workspace_id,
-                draft_version=1,
-                base_policy_revision_id=None,
-                created_by_user_id=workspace.owner_user_id,
-                updated_by_user_id=workspace.owner_user_id,
-                created_at=now,
-                updated_at=now,
+        # The publication grammar keeps exactly ONE draft per workspace
+        # (``uq_policy_drafts__workspace``): a later revision evolves that
+        # single draft instead of inserting a second row, exactly the way
+        # the real publish flow advances a workspace's draft. The lineage
+        # check (``ck_source_policies__parent_lineage``) likewise forces
+        # every revision after the first to name its parent: chain the new
+        # revision onto the workspace's currently active one.
+        active_revision_id = (
+            await connection.execute(
+                sa.select(workspace_policy_state.c.active_policy_revision_id).where(
+                    workspace_policy_state.c.workspace_id == workspace.workspace_id
+                )
             )
-        )
+        ).scalar_one_or_none()
+        existing_draft_id = (
+            await connection.execute(
+                sa.select(policy_drafts.c.policy_draft_id).where(
+                    policy_drafts.c.workspace_id == workspace.workspace_id
+                )
+            )
+        ).scalar_one_or_none()
+        if existing_draft_id is None:
+            await connection.execute(
+                sa.insert(policy_drafts).values(
+                    policy_draft_id=draft_id,
+                    workspace_id=workspace.workspace_id,
+                    draft_version=revision_number,
+                    base_policy_revision_id=None,
+                    created_by_user_id=workspace.owner_user_id,
+                    updated_by_user_id=workspace.owner_user_id,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        else:
+            draft_id = existing_draft_id
+            await connection.execute(
+                sa.update(policy_drafts)
+                .values(draft_version=revision_number, updated_at=now)
+                .where(policy_drafts.c.policy_draft_id == draft_id)
+            )
         await connection.execute(
             sa.insert(policy_previews).values(
                 policy_preview_id=preview_id,
                 workspace_id=workspace.workspace_id,
                 policy_draft_id=draft_id,
-                draft_version=1,
+                draft_version=revision_number,
                 draft_sha256=hashlib.sha256(b"manifest-fixture-draft").hexdigest(),
                 base_policy_revision_id=None,
                 source_checkpoint_event_sequence=0,
@@ -221,7 +250,7 @@ async def publish_workspace_policy(
                 policy_revision_id=policy_revision_id,
                 workspace_id=workspace.workspace_id,
                 revision_number=revision_number,
-                parent_policy_revision_id=None,
+                parent_policy_revision_id=(active_revision_id if revision_number > 1 else None),
                 default_decision="allowed",
                 source_checkpoint_event_sequence=0,
                 policy_preview_id=preview_id,
@@ -618,9 +647,9 @@ RENAMED_OLD_LOCATOR = "notes/renamed-old.md"
 RENAMED_NEW_LOCATOR = "notes/renamed-new.md"
 RENAMED_JOURNEY_DELETED_LOCATOR = "notes/renamed-journey-gone.md"
 
+
 def unique_fingerprint(label: str, *, media_type: str = "text/markdown") -> SourceFingerprint:
     return fingerprint(label, media_type=media_type)
-
 
 
 async def seed_reconciliation_population(engine: AsyncEngine) -> ReconciliationPopulation:
@@ -851,22 +880,20 @@ class ManifestStoreHarness:
     async def resolution_rows(self, manifest_run_id: UUID) -> list[Any]:
         async with self.engine.connect() as connection:
             return list(
-                
-                    await connection.execute(
-                        sa.select(
-                            manifest_entry_resolutions.c.local_entry_id,
-                            manifest_entry_resolutions.c.match_kind,
-                            manifest_entry_resolutions.c.locator_evidence_digest,
-                            manifest_entry_resolutions.c.resolved_source_id,
-                            manifest_entry_resolutions.c.resolved_source_locator_id,
-                        )
-                        .where(manifest_entry_resolutions.c.manifest_run_id == manifest_run_id)
-                        .order_by(
-                            manifest_entry_resolutions.c.page_number,
-                            manifest_entry_resolutions.c.entry_index,
-                        )
+                await connection.execute(
+                    sa.select(
+                        manifest_entry_resolutions.c.local_entry_id,
+                        manifest_entry_resolutions.c.match_kind,
+                        manifest_entry_resolutions.c.locator_evidence_digest,
+                        manifest_entry_resolutions.c.resolved_source_id,
+                        manifest_entry_resolutions.c.resolved_source_locator_id,
                     )
-                
+                    .where(manifest_entry_resolutions.c.manifest_run_id == manifest_run_id)
+                    .order_by(
+                        manifest_entry_resolutions.c.page_number,
+                        manifest_entry_resolutions.c.entry_index,
+                    )
+                )
             )
 
     async def set_entry_count(self, manifest_run_id: UUID, entry_count: int) -> None:
@@ -1422,9 +1449,7 @@ async def test_remote_rename_journey_binds_historically_and_places_at_the_active
 
     run = await manifest_store.start(context)
     entries = (
-        manifest_entry(
-            "entry-renamed", locator=RENAMED_OLD_LOCATOR, observed=renamed_fingerprint
-        ),
+        manifest_entry("entry-renamed", locator=RENAMED_OLD_LOCATOR, observed=renamed_fingerprint),
         manifest_entry(
             "entry-gone",
             locator=RENAMED_JOURNEY_DELETED_LOCATOR,
@@ -1476,6 +1501,83 @@ async def test_remote_rename_journey_binds_historically_and_places_at_the_active
 
 
 @pytest.mark.asyncio
+async def test_commit_between_start_and_finalize_stays_outside_the_plan_and_fence(
+    manifest_store: ManifestStoreHarness,
+) -> None:
+    """One durable race pin: a canonical source committed strictly between a
+    run's start and its finalize is invisible to the plan — the planner's
+    canonical universe is the run checkpoint, so the fresh source earns no
+    canonical-only download and the completion fence acknowledges exactly
+    the checkpoint, leaving the new event sequences for the next pull."""
+
+    population = await seed_reconciliation_population(manifest_store.engine)
+    context = population.workspace.context()
+    checkpoint = await workspace_checkpoint(manifest_store.engine, context.workspace_id)
+
+    run = await manifest_store.start(context)
+    assert run.checkpoint_sequence == checkpoint
+    post_checkpoint_source = await seed_canonical_source(
+        manifest_store.engine,
+        population.workspace,
+        locator_text="notes/committed-mid-run.md",
+        fingerprints=(unique_fingerprint("mid-run"),),
+    )
+
+    entry = manifest_entry(
+        "entry-match", locator=MATCH_LOCATOR, observed=population.match_fingerprint
+    )
+    page_digest = _digest("mid-run-page-0")
+    await manifest_store.append_page(
+        context, run.manifest_run_id, page_number=0, entries=(entry,), page_digest=page_digest
+    )
+    final_digest = ContentDigest.parse(
+        compute_manifest_final_digest(((0, 1, page_digest.hexadecimal),))
+    )
+    planned = await manifest_store.finalize(
+        context, run.manifest_run_id, total_entry_count=1, final_digest=final_digest
+    )
+    assert planned.state is ManifestRunState.PLANNED
+
+    page = await manifest_store.read_actions(context, run.manifest_run_id, limit=200)
+    kinds = [action.action_kind for action in page.actions]
+    # The one manifest entry resolves to exactly one no_change action. Every
+    # other planned action is a canonical-only catch-up download (task 12's
+    # action-wire convergence) for a live PRE-checkpoint source the single
+    # entry did not represent: stale, diverged and absent. The tombstoned
+    # delete and the policy-forbidden source earn nothing.
+    assert kinds.count(ManifestActionKind.NO_CHANGE) == 1
+    assert set(kinds) <= {ManifestActionKind.NO_CHANGE, ManifestActionKind.DOWNLOAD}
+    no_change = next(
+        action for action in page.actions if action.action_kind is ManifestActionKind.NO_CHANGE
+    )
+    assert no_change.source_id == population.match_source.source_id
+    downloads = [
+        action for action in page.actions if action.action_kind is ManifestActionKind.DOWNLOAD
+    ]
+    assert {action.source_id for action in downloads} == {
+        population.stale_source.source_id,
+        population.diverged_source.source_id,
+        population.absent_source.source_id,
+    }
+    assert all(action.local_entry_id is None for action in downloads)
+    # The mid-run commit never joins the checkpoint-bounded plan: its source
+    # is outside the run's canonical universe, so no canonical-only download
+    # and no upload references it.
+    assert all(action.source_id != post_checkpoint_source.source_id for action in page.actions)
+    assert all(
+        action.checkpoint_locator != NormalizedLocator("notes/committed-mid-run.md")
+        for action in downloads
+    )
+    assert page.has_more is False
+
+    receipt = await manifest_store.complete(context, run.manifest_run_id, final_digest=final_digest)
+    assert receipt.acknowledged_sequence == checkpoint
+    assert receipt.delivered_through_sequence < await workspace_checkpoint(
+        manifest_store.engine, context.workspace_id
+    )
+
+
+@pytest.mark.asyncio
 async def test_first_action_read_transitions_planned_to_applying_and_replays_stably(
     manifest_store: ManifestStoreHarness,
 ) -> None:
@@ -1492,9 +1594,10 @@ async def test_first_action_read_transitions_planned_to_applying_and_replays_sta
     assert [action.action_index for action in rest.actions] == [2, 3, 4, 5, 6, 7]
     assert rest.has_more is False
     replayed = await manifest_store.read_actions(context, run.manifest_run_id, limit=200)
-    assert replayed.actions == (
-        await manifest_store.read_actions(context, run.manifest_run_id, limit=200)
-    ).actions
+    assert (
+        replayed.actions
+        == (await manifest_store.read_actions(context, run.manifest_run_id, limit=200)).actions
+    )
     assert [action.action_index for action in replayed.actions] == list(range(8))
     assert (await manifest_store.run_row(run.manifest_run_id)).state == "applying"
 
@@ -1673,9 +1776,7 @@ async def test_lost_completion_response_exact_replay_returns_the_same_cursor(
     run, final_digest = await manifest_store.drive_planned_run(population)
     await manifest_store.read_actions(context, run.manifest_run_id, limit=1)
 
-    first = await manifest_store.complete(
-        context, run.manifest_run_id, final_digest=final_digest
-    )
+    first = await manifest_store.complete(context, run.manifest_run_id, final_digest=final_digest)
     replayed = await manifest_store.complete(
         context, run.manifest_run_id, final_digest=final_digest
     )

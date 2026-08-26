@@ -26,8 +26,8 @@
  * Privacy (spec 9, 14): thrown failures carry the closed reason token
  * only — no path, locator, digest or provider detail ever reaches a
  * thrown error. Like the other device-sync modules this file imports no
- * Node.js, Electron or `FileSystemAdapter` API at module load time, so it
- * stays loadable on mobile.
+ * Node.js, Electron or Obsidian file-system adapter API at module load
+ * time, so it stays loadable on mobile.
  */
 
 import { normalizePolicyLocator } from "../exclusion-policy/evaluator";

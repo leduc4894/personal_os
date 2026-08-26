@@ -110,9 +110,7 @@ class DeviceEventStoreHarness:
                     committed_version_id=history.version_ids[1],
                     base_version_id=history.version_ids[1],
                     idempotency_key=idempotency_key,
-                    request_fingerprint=hashlib.sha256(
-                        idempotency_key.encode("ascii")
-                    ).hexdigest(),
+                    request_fingerprint=hashlib.sha256(idempotency_key.encode("ascii")).hexdigest(),
                     event_type="update",
                 )
                 .returning(sync_events.c.event_sequence)
@@ -391,9 +389,10 @@ async def test_events_committed_after_a_pull_wait_for_the_next_checkpoint(
     second = await store.pull_events(context, limit=200, diagnostic_context=_diagnostic())
     assert second.page_checkpoint_sequence == later_sequence
     assert second.delivered_through_sequence == later_sequence
-    assert [
-        event.event_sequence for event in second.events
-    ] == [history.event_sequences["trailing_update"], later_sequence]
+    assert [event.event_sequence for event in second.events] == [
+        history.event_sequences["trailing_update"],
+        later_sequence,
+    ]
 
 
 @pytest.mark.asyncio
@@ -402,17 +401,13 @@ async def test_pull_updates_only_the_delivered_watermark(
 ) -> None:
     history = await device_event_store.seed_history()
     context = history.workspace.context()
-    await device_event_store.store.pull_events(
-        context, limit=200, diagnostic_context=_diagnostic()
-    )
+    await device_event_store.store.pull_events(context, limit=200, diagnostic_context=_diagnostic())
     trailing = history.event_sequences["trailing_update"]
     assert await device_event_store.read_cursor_row(history.workspace, context.device_id) == (
         0,
         trailing,
     )
-    await device_event_store.store.pull_events(
-        context, limit=200, diagnostic_context=_diagnostic()
-    )
+    await device_event_store.store.pull_events(context, limit=200, diagnostic_context=_diagnostic())
     assert await device_event_store.read_cursor_row(history.workspace, context.device_id) == (
         0,
         trailing,
@@ -425,9 +420,7 @@ async def test_acknowledge_advances_and_exact_replay_returns_frozen_receipt(
 ) -> None:
     history = await device_event_store.seed_history()
     context = history.workspace.context()
-    await device_event_store.store.pull_events(
-        context, limit=200, diagnostic_context=_diagnostic()
-    )
+    await device_event_store.store.pull_events(context, limit=200, diagnostic_context=_diagnostic())
     trailing = history.event_sequences["trailing_update"]
     advanced = await device_event_store.store.acknowledge_cursor(
         context,
@@ -634,9 +627,7 @@ async def test_total_history_loss_above_floor_raises_cursor_gap(
         applied_through_sequence=trailing,
         diagnostic_context=_diagnostic(),
     )
-    assert await store.minimum_acknowledged_sequence(history.workspace.workspace_id) == (
-        trailing
-    )
+    assert await store.minimum_acknowledged_sequence(history.workspace.workspace_id) == (trailing)
     caught_up = await store.pull_events(context, limit=200, diagnostic_context=_diagnostic())
     assert caught_up.events == ()
     assert caught_up.acknowledged_sequence == trailing

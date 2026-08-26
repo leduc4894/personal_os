@@ -95,9 +95,9 @@ def test_run_select_statement_locks_the_exact_credential_scoped_row() -> None:
     assert str(_DEVICE_ID) not in locked_text
     assert str(_MANIFEST_RUN_ID) not in locked_text
     unlocked_text = str(
-        manifest_run_select_statement(
-            _WORKSPACE_ID, _DEVICE_ID, _MANIFEST_RUN_ID
-        ).compile(dialect=postgresql.dialect())
+        manifest_run_select_statement(_WORKSPACE_ID, _DEVICE_ID, _MANIFEST_RUN_ID).compile(
+            dialect=postgresql.dialect()
+        )
     )
     assert "FOR UPDATE" not in unlocked_text
 
@@ -175,9 +175,7 @@ def test_completion_transition_is_guarded_on_the_exact_applying_state() -> None:
 
 def test_page_select_statement_is_keyed_by_run_and_page() -> None:
     text = str(
-        manifest_page_select_statement(_MANIFEST_RUN_ID, 4).compile(
-            dialect=postgresql.dialect()
-        )
+        manifest_page_select_statement(_MANIFEST_RUN_ID, 4).compile(dialect=postgresql.dialect())
     )
     assert "FROM knowledge.manifest_pages" in text
     assert _bind_marker(text, "manifest_run_id")
@@ -368,9 +366,7 @@ def _engineless_store() -> PostgresqlDeviceManifestStore:
 async def test_canonical_state_lookup_merges_chunked_rows_without_loss() -> None:
     source_ids = [uuid4() for _ in range(2 * MANIFEST_ID_LOOKUP_CHUNK_SIZE + 3)]
     rows = {
-        source_id: _RowMappingStub(
-            {"source_id": source_id, "active_locator_id": uuid4()}
-        )
+        source_id: _RowMappingStub({"source_id": source_id, "active_locator_id": uuid4()})
         for source_id in source_ids
     }
     connection = _ChunkedConnectionStub(rows, bind_name="source_ids")
@@ -392,9 +388,7 @@ async def test_canonical_state_lookup_merges_chunked_rows_without_loss() -> None
 async def test_known_base_fingerprint_lookup_merges_chunked_rows_without_loss() -> None:
     version_ids = [uuid4() for _ in range(MANIFEST_ID_LOOKUP_CHUNK_SIZE + 1)]
     rows = {
-        version_id: _RowMappingStub(
-            {"source_version_id": version_id, "content_hash": "a" * 64}
-        )
+        version_id: _RowMappingStub({"source_version_id": version_id, "content_hash": "a" * 64})
         for version_id in version_ids
     }
     connection = _ChunkedConnectionStub(rows, bind_name="version_ids")

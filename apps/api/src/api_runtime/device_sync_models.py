@@ -316,9 +316,7 @@ def _event_data(event: DeviceSyncEvent) -> DeviceSyncEventData:
             if event.current_fingerprint is not None
             else None
         ),
-        prior_locator=(
-            event.prior_locator.value if event.prior_locator is not None else None
-        ),
+        prior_locator=(event.prior_locator.value if event.prior_locator is not None else None),
         resulting_locator=(
             event.resulting_locator.value if event.resulting_locator is not None else None
         ),

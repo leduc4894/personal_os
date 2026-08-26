@@ -116,9 +116,7 @@ def test_every_request_model_is_frozen_and_closed(
 
 
 def test_cursor_acknowledgement_body_admits_no_identity_selector() -> None:
-    body = CursorAcknowledgementRequest(
-        expected_previous_sequence=3, applied_through_sequence=7
-    )
+    body = CursorAcknowledgementRequest(expected_previous_sequence=3, applied_through_sequence=7)
     assert body.expected_previous_sequence == 3
     assert body.applied_through_sequence == 7
     with pytest.raises(ValidationError):
@@ -198,9 +196,7 @@ def test_to_domain_entries_converts_strict_entries_exactly() -> None:
 
 
 def test_to_domain_entries_maps_nil_evidence_and_bad_grammar_to_page_invalid() -> None:
-    nil_known = ManifestEntryRequest.model_validate(
-        _entry_wire(known_source_id=str(UUID(int=0)))
-    )
+    nil_known = ManifestEntryRequest.model_validate(_entry_wire(known_source_id=str(UUID(int=0))))
     with pytest.raises(DeviceSyncError) as raised:
         to_domain_entries([nil_known])
     assert raised.value.code is DeviceSyncErrorCode.MANIFEST_PAGE_INVALID

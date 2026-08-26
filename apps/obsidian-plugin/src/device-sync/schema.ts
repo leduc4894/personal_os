@@ -11,7 +11,7 @@
  * barrier reason token is image corruption, never a passthrough value.
  *
  * Like the journal modules it depends on, this module imports no Node.js,
- * Electron or `FileSystemAdapter` API at module load time: the only
+ * Electron or Obsidian file-system adapter API at module load time: the only
  * runtime dependency is the journal's own closed vocabulary constants
  * (sql.js-backed), so the whole `src/device-sync` tree stays loadable on
  * mobile.

@@ -279,9 +279,7 @@ def plan_manifest_action(
     return _conflict(resolution, ManifestActionReason.LOCAL_DIVERGED)
 
 
-def _conflict(
-    resolution: ManifestEntryResolution, reason: ManifestActionReason
-) -> ManifestAction:
+def _conflict(resolution: ManifestEntryResolution, reason: ManifestActionReason) -> ManifestAction:
     return ManifestAction(
         action_index=resolution.entry_ordinal,
         action_kind=ManifestActionKind.CONFLICT,

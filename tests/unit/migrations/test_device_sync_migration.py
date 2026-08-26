@@ -292,8 +292,11 @@ def test_download_entry_echo_downgrade_restores_the_strict_shape_under_the_gate(
     module.op = destructive
     module.downgrade()
     assert destructive.events == [
-        ("execute", "DELETE FROM knowledge.manifest_actions"
-        " WHERE action_kind = 'download' AND local_entry_id IS NOT NULL"),
+        (
+            "execute",
+            "DELETE FROM knowledge.manifest_actions"
+            " WHERE action_kind = 'download' AND local_entry_id IS NOT NULL",
+        ),
         ("drop_constraint", "ck_manifest_actions__shape"),
         ("create_check_constraint", "ck_manifest_actions__shape"),
     ]

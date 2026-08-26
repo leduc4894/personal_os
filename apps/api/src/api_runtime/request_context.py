@@ -177,9 +177,7 @@ class RequestContextMiddleware:
                 if status_code is not None:
                     self._emit_access_observation(scope, status_code, started_ns)
 
-    async def _send_exception_response(
-        self, context: DiagnosticContext, send: Send
-    ) -> None:
+    async def _send_exception_response(self, context: DiagnosticContext, send: Send) -> None:
         """Start and complete the internal error response for a crashed app.
 
         The body is the canonical envelope of the registered internal error

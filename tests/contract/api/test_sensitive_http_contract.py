@@ -402,8 +402,10 @@ async def test_failed_request_correlation_keeps_bound_request_id(
     assert failed.fields["status_code"] == expected_status
     assert failed.fields["http_method"] is ApiHttpMethod.GET
 
-    rendered = sink.rendered() + response.text + "\n".join(
-        f"{name}: {value}" for name, value in response.headers.items()
+    rendered = (
+        sink.rendered()
+        + response.text
+        + "\n".join(f"{name}: {value}" for name, value in response.headers.items())
     )
     for sentinel in (
         _RAW_PATH_SENTINEL,

@@ -31,9 +31,7 @@ DEVICE_SYNC_ROUTE_METHODS: Final[dict[str, frozenset[str]]] = {
     "/api/sync/events": frozenset({"GET"}),
     "/api/sync/cursor-acknowledgements": frozenset({"POST"}),
     "/api/sync/manifests": frozenset({"POST"}),
-    "/api/sync/manifests/{manifest_run_id}/pages/{page_number}": (
-        frozenset({"PUT"})
-    ),
+    "/api/sync/manifests/{manifest_run_id}/pages/{page_number}": (frozenset({"PUT"})),
     "/api/sync/manifests/{manifest_run_id}/finalize": frozenset({"POST"}),
     "/api/sync/manifests/{manifest_run_id}/actions": frozenset({"GET"}),
     "/api/sync/manifests/{manifest_run_id}/complete": frozenset({"POST"}),
@@ -171,9 +169,9 @@ def test_the_action_query_is_bounded_by_the_server_owned_ceilings(
 def test_the_binary_download_is_documented_as_one_octet_stream(
     document: dict[str, Any],
 ) -> None:
-    operation = document["paths"][
-        "/api/sources/{source_id}/versions/{source_version_id}/content"
-    ]["get"]
+    operation = document["paths"]["/api/sources/{source_id}/versions/{source_version_id}/content"][
+        "get"
+    ]
     success = operation["responses"]["200"]
     assert set(success["content"]) == {"application/octet-stream"}
     schema = success["content"]["application/octet-stream"]["schema"]

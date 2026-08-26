@@ -336,9 +336,7 @@ def create_device_sync_route_endpoints(
         receipt = await service.complete_manifest(command)
         return _success_json(device_cursor_receipt_data(receipt))
 
-    async def _continued(
-        primed: bytes, stream: AsyncIterator[bytes]
-    ) -> AsyncIterator[bytes]:
+    async def _continued(primed: bytes, stream: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
         """Yield the primed first chunk, then the remainder of the stream."""
 
         if primed:

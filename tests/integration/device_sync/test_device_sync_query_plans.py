@@ -34,7 +34,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -46,9 +46,32 @@ import pytest_asyncio
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
-from tests.integration.device_sync.conftest import seed_device_sync_workspace
+from tests.integration.device_sync.conftest import (
+    DeviceSyncWorkspace,
+    seed_device_sync_workspace,
+)
+from tests.integration.device_sync.test_cursor_and_manifest_transactions import (
+    publish_workspace_policy,
+)
 from tests.integration.source_publication.conftest import SourcePublicationStack
 
+from personal_os.device_sync.contracts import (
+    MAX_MANIFEST_PAGE_ENTRIES,
+    AppendManifestPageCommand,
+    CompleteManifestCommand,
+    DeviceSyncContext,
+    FinalizeManifestCommand,
+    ManifestActionsQuery,
+    ManifestEntry,
+    ManifestRunState,
+    NormalizedLocator,
+    SourceFingerprint,
+    StartManifestCommand,
+)
+from personal_os.device_sync.errors import DeviceSyncError, DeviceSyncErrorCode
+from personal_os.diagnostics.context import DiagnosticContext, TraceContext
+from personal_os.diagnostics.trace_context import SpanId, TraceId
+from personal_os.object_storage import ContentDigest
 from postgresql_source_store.device_event_store import (
     device_cursor_select_statement,
     device_event_checkpoint_statement,
@@ -57,6 +80,8 @@ from postgresql_source_store.device_event_store import (
     workspace_minimum_acknowledged_statement,
 )
 from postgresql_source_store.device_manifest_store import (
+    PostgresqlDeviceManifestStore,
+    compute_manifest_final_digest,
     manifest_page_select_statement,
     manifest_run_select_statement,
 )
@@ -166,6 +191,18 @@ class DeviceSyncQueryPlanPopulation:
     median_event_sequence: int
     maximum_event_sequence: int
     row_counts: dict[str, int]
+
+
+_LOAD_TRACE = TraceContext(
+    trace_id=TraceId("0123456789abcdef0123456789abcdef"),
+    remote_parent_span_id=None,
+    local_span_id=SpanId("0123456789abcdef"),
+    trace_flags=0,
+)
+
+
+def _diagnostic() -> DiagnosticContext:
+    return DiagnosticContext(request_id=uuid4(), client_request_id=None, trace=_LOAD_TRACE)
 
 
 def _batches(rows: list[dict[str, Any]]) -> Iterator[list[dict[str, Any]]]:
@@ -628,8 +665,7 @@ def _assert_indexed_access(payload: list[dict[str, Any]], query_name: str) -> No
     assert used, f"{query_name}: the plan must use at least one index"
     unapproved = used - approved
     assert not unapproved, (
-        f"{query_name}: plan uses indexes absent from the shipped migrations: "
-        f"{sorted(unapproved)}"
+        f"{query_name}: plan uses indexes absent from the shipped migrations: {sorted(unapproved)}"
     )
     assert used & _EXPECTED_INDEX_BY_QUERY[query_name], (
         f"{query_name}: expected one of {sorted(_EXPECTED_INDEX_BY_QUERY[query_name])}, "
@@ -694,9 +730,7 @@ async def test_workspace_compaction_floor_is_indexed(
 ) -> None:
     """The active-device minimum acknowledgement must use the cursor unique index."""
 
-    statement = workspace_minimum_acknowledged_statement(
-        populated_device_sync_store.workspace_id
-    )
+    statement = workspace_minimum_acknowledged_statement(populated_device_sync_store.workspace_id)
     async with populated_device_sync_store.engine.connect() as connection:
         payload = await _explain(connection, statement)
     _assert_indexed_access(payload, "compaction_floor")
@@ -746,3 +780,168 @@ async def test_manifest_page_replay_lookup_is_indexed(
     async with populated_device_sync_store.engine.connect() as connection:
         payload = await _explain(connection, statement)
     _assert_indexed_access(payload, "page_replay")
+
+
+# --- the bounded-load manifest run (task 13, step 3) --------------------------------------
+
+
+#: The bounded-load population: the manifest run's frozen total-entry cap
+#: (100,000 entries) delivered as exact full pages of the frozen page bound
+#: (500), so the pagination and planner paths see every bound live.
+_LOAD_TOTAL_ENTRIES: Final[int] = 100_000
+_LOAD_PAGE_ENTRIES: Final[int] = 500
+
+
+@pytest_asyncio.fixture
+async def bounded_load_manifest_store(
+    source_publication_stack: SourcePublicationStack,
+) -> AsyncIterator[tuple[AsyncEngine, DeviceSyncWorkspace, DeviceSyncContext]]:
+    """One disposable engine with a seeded workspace, its active published
+    policy and the production manifest store for the bounded-load run."""
+
+    engine = create_source_store_engine(
+        source_publication_stack.settings, source_publication_stack.password
+    )
+    workspace = await seed_device_sync_workspace(engine)
+    await publish_workspace_policy(engine, workspace)
+    try:
+        yield engine, workspace, workspace.context()
+    finally:
+        await dispose_source_store_engine(engine)
+
+
+def _load_entry(index: int) -> ManifestEntry:
+    return ManifestEntry(
+        local_entry_id=f"load-{index:06d}",
+        known_source_id=None,
+        known_version_id=None,
+        normalized_locator=NormalizedLocator(f"notes/load/{index // 500:03d}/{index:06d}.md"),
+        fingerprint=SourceFingerprint(
+            sha256=hashlib.sha256(f"bounded-load-{index}".encode("ascii")).hexdigest(),
+            size_bytes=32,
+            media_type="text/markdown",
+        ),
+        observation_generation=3,
+    )
+
+
+@pytest.mark.asyncio
+async def test_manifest_run_bounds_one_hundred_thousand_entries_and_action_pages(
+    bounded_load_manifest_store: tuple[AsyncEngine, DeviceSyncWorkspace, DeviceSyncContext],
+) -> None:
+    """The frozen run and page bounds hold under a full-scale load.
+
+    The store accepts exactly the 100,000-entry run cap as 200 full pages of
+    the 500-entry page bound, rejects the first entry beyond the cap with
+    the closed page-invalid reason, finalizes the run over every page with
+    the canonical final digest, and answers every action page bounded: no
+    page ever exceeds the limit, the action indexes paginate strictly
+    forward, and the pages terminate. The assertions deliberately do NOT
+    require every manifest entry to become an outbound row — the planner
+    owns which entries materialize actions; this gate pins the bounds, not
+    the plan's composition.
+    """
+
+    engine, _workspace, context = bounded_load_manifest_store
+    store = PostgresqlDeviceManifestStore(engine)
+    run = await store.start_manifest(
+        StartManifestCommand(
+            context=context,
+            client_observation_generation=3,
+            diagnostic_context=_diagnostic(),
+        )
+    )
+    assert run.state is ManifestRunState.COLLECTING
+
+    page_digests: list[tuple[int, int, str]] = []
+    for page_number in range(_LOAD_TOTAL_ENTRIES // _LOAD_PAGE_ENTRIES):
+        entries = tuple(
+            _load_entry(page_number * _LOAD_PAGE_ENTRIES + offset)
+            for offset in range(_LOAD_PAGE_ENTRIES)
+        )
+        page_digest = ContentDigest.parse(
+            hashlib.sha256(f"bounded-load-page-{page_number}".encode("ascii")).hexdigest()
+        )
+        receipt = await store.append_manifest_page(
+            AppendManifestPageCommand(
+                context=context,
+                manifest_run_id=run.manifest_run_id,
+                page_number=page_number,
+                entries=entries,
+                page_digest=page_digest,
+                diagnostic_context=_diagnostic(),
+            )
+        )
+        assert receipt.accepted_entry_count == _LOAD_PAGE_ENTRIES
+        page_digests.append((page_number, len(entries), page_digest.hexadecimal))
+
+    # The first entry beyond the frozen run cap is the closed page rejection.
+    with pytest.raises(DeviceSyncError) as raised:
+        await store.append_manifest_page(
+            AppendManifestPageCommand(
+                context=context,
+                manifest_run_id=run.manifest_run_id,
+                page_number=len(page_digests),
+                entries=(_load_entry(_LOAD_TOTAL_ENTRIES),),
+                page_digest=ContentDigest.parse(
+                    hashlib.sha256(
+                        f"bounded-load-page-{len(page_digests)}".encode("ascii")
+                    ).hexdigest()
+                ),
+                diagnostic_context=_diagnostic(),
+            )
+        )
+    assert raised.value.code is DeviceSyncErrorCode.MANIFEST_PAGE_INVALID
+
+    final_digest = ContentDigest.parse(compute_manifest_final_digest(page_digests))
+    planned = await store.finalize_manifest(
+        FinalizeManifestCommand(
+            context=context,
+            manifest_run_id=run.manifest_run_id,
+            total_entry_count=_LOAD_TOTAL_ENTRIES,
+            final_digest=final_digest,
+            diagnostic_context=_diagnostic(),
+        )
+    )
+    assert planned.state is ManifestRunState.PLANNED
+    assert planned.entry_count == _LOAD_TOTAL_ENTRIES
+
+    # Every action page answers bounded: each page carries at most the
+    # requested limit, indexes paginate strictly forward, and the pages end.
+    seen_action_indexes: list[int] = []
+    after_action_index = 0
+    page_count = 0
+    while True:
+        page = await store.read_manifest_actions(
+            ManifestActionsQuery(
+                context=context,
+                manifest_run_id=run.manifest_run_id,
+                after_action_index=after_action_index,
+                limit=MAX_MANIFEST_PAGE_ENTRIES,
+                diagnostic_context=_diagnostic(),
+            )
+        )
+        page_count += 1
+        assert len(page.actions) <= MAX_MANIFEST_PAGE_ENTRIES
+        if page.actions:
+            # The after cursor is inclusive: page zero starts at index 0.
+            assert page.actions[0].action_index >= after_action_index
+            indexes = [action.action_index for action in page.actions]
+            assert indexes == sorted(indexes)
+            assert len(set(indexes)) == len(indexes)
+            seen_action_indexes.extend(indexes)
+            after_action_index = indexes[-1] + 1
+        if not page.has_more:
+            break
+    assert page_count >= 1
+    assert len(seen_action_indexes) >= 1
+
+    receipt = await store.complete_manifest(
+        CompleteManifestCommand(
+            context=context,
+            manifest_run_id=run.manifest_run_id,
+            final_digest=final_digest,
+            diagnostic_context=_diagnostic(),
+        )
+    )
+    assert receipt.acknowledged_sequence == run.checkpoint_sequence

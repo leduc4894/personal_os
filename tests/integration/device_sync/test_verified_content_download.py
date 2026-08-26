@@ -56,7 +56,13 @@ from postgresql_source_store.engine import (
     create_source_store_engine,
     dispose_source_store_engine,
 )
-from postgresql_source_store.tables import content_objects, source_versions, sources
+from postgresql_source_store.tables import (
+    content_objects,
+    source_locators,
+    source_versions,
+    sources,
+    sync_events,
+)
 
 pytestmark = pytest.mark.local_stack
 
@@ -142,19 +148,23 @@ async def seed_exact_version(
     payload: bytes,
     *,
     media_type: str = _MEDIA_TYPE,
+    locator_text: str | None = None,
 ) -> tuple[UUID, UUID]:
     """Seed one canonical source/version whose object row names ``payload``.
 
     The content object row keeps the full canonical shape — including the
     object key the catalog must never surface — while the descriptor the
     catalog resolves derives from the digest, size and media type of the
-    exact payload bytes.
+    exact payload bytes. ``locator_text`` optionally also opens the source's
+    active locator row through a create event (the sentinel journeys seed a
+    locator-carrying source; the catalog path itself never reads it).
     """
 
     digest_hexadecimal = hashlib.sha256(payload).hexdigest()
     content_object_id = uuid4()
     source_id = uuid4()
     source_version_id = uuid4()
+    create_event_id = uuid4()
     committed_at = datetime.now(UTC)
     async with engine.begin() as connection:
         await connection.execute(
@@ -204,6 +214,36 @@ async def seed_exact_version(
                 sources.c.source_id == source_id,
             )
         )
+        if locator_text is not None:
+            create_result = await connection.execute(
+                sa.insert(sync_events)
+                .values(
+                    event_id=create_event_id,
+                    workspace_id=workspace.workspace_id,
+                    source_id=source_id,
+                    device_id=workspace.device_id,
+                    committed_version_id=source_version_id,
+                    base_version_id=None,
+                    idempotency_key=f"verified-content-{uuid4().hex}",
+                    request_fingerprint=hashlib.sha256(
+                        f"verified-content-{source_id.hex}".encode("ascii")
+                    ).hexdigest(),
+                    event_type="create",
+                )
+                .returning(sync_events.c.event_sequence)
+            )
+            create_sequence = int(create_result.scalar_one())
+            await connection.execute(
+                sa.insert(source_locators).values(
+                    source_locator_id=uuid4(),
+                    workspace_id=workspace.workspace_id,
+                    source_id=source_id,
+                    normalized_locator=locator_text,
+                    display_locator=locator_text,
+                    opened_event_id=create_event_id,
+                    opened_sequence=create_sequence,
+                )
+            )
     return source_id, source_version_id
 
 
@@ -455,3 +495,130 @@ async def test_corrupt_object_is_the_closed_download_integrity_failure(
     rendered = str(raised.value) + repr(raised.value)
     for provider_string in ("r2", "bucket", "etag", "objects/sha256", "endpoint"):
         assert provider_string not in rendered.lower()
+
+
+# --- the sentinel-laden journey (task 13, step 2) -----------------------------------------
+
+
+#: Unique sentinels injected through every operand of the verified-download
+#: boundary; none may survive into any error rendering, receipt or call
+#: evidence the surfaces above produce.
+_DEVICE_SYNC_SENTINELS: tuple[str, ...] = (
+    "do-not-emit-device-sync-content",
+    "do-not-emit-device-sync-locator",
+    "do-not-emit-device-sync-path",
+    "do-not-emit-device-sync-digest",
+    "do-not-emit-device-sync-temp-name",
+    "do-not-emit-device-sync-object-key",
+    "do-not-emit-device-sync-credential",
+    "do-not-emit-device-sync-response-body",
+    "do-not-emit-device-sync-provider-exception",
+)
+
+
+class ProviderCrashingObjectStore(VerifiedMemoryObjectStore):
+    """The object-store double whose adapter-shaped provider failure carries
+    every sentinel: an ``ObjectStorageError`` mapped from a provider
+    exception whose text embeds the content, locator, digest, temp name,
+    object key, credential, response body and endpoint sentinels."""
+
+    def open_verified_reader(
+        self, expected: ExpectedObject
+    ) -> AbstractAsyncContextManager[VerifiedObjectReader]:
+        self.open_calls.append(expected)
+
+        @asynccontextmanager
+        async def _reader() -> AsyncIterator[VerifiedObjectReader]:
+            try:
+                raise RuntimeError(
+                    "provider failed "
+                    "content=do-not-emit-device-sync-content "
+                    "locator=do-not-emit-device-sync-locator "
+                    "path=do-not-emit-device-sync-path "
+                    "digest=do-not-emit-device-sync-digest "
+                    "temp=do-not-emit-device-sync-temp-name "
+                    "key=do-not-emit-device-sync-object-key "
+                    "credential=do-not-emit-device-sync-credential "
+                    "body=do-not-emit-device-sync-response-body"
+                )
+            except RuntimeError as cause:
+                raise ObjectStorageError(ErrorCode.OBJECT_STORAGE_UNAVAILABLE) from cause
+            yield _VerifiedBufferReader(b"")  # pragma: no cover - never reached
+
+        return _reader()
+
+
+@pytest.mark.asyncio
+async def test_sentinel_laden_operands_never_leak_off_the_verified_path(
+    content_stack: tuple[AsyncEngine, PostgresqlDeviceContentCatalog],
+) -> None:
+    """One journey carrying every sentinel through the verified download.
+
+    The canonical bytes embed the content sentinel, the locator text embeds
+    the locator/path sentinels, the object key derives from a digest-shaped
+    seed and a provider failure embeds the temp-name, object-key, credential
+    and response-body sentinels. The resolved descriptor, the mapped typed
+    error and every rendering of it may carry none of them: the content
+    sentinel may exist ONLY inside the canonical payload bytes the caller
+    asked to download, never on any failure surface.
+    """
+
+    engine, catalog = content_stack
+    workspace = await seed_device_sync_workspace(engine)
+    await publish_workspace_policy(engine, workspace)
+    payload = (
+        b"# note\ncontent do-not-emit-device-sync-content bytes\n"
+        b"locator do-not-emit-device-sync-locator\n"
+    )
+    sentinel_locator = "notes/do-not-emit-device-sync-path.md"
+    source_id, source_version_id = await seed_exact_version(
+        engine, workspace, payload, locator_text=sentinel_locator
+    )
+    objects = ProviderCrashingObjectStore()
+    service = _service(catalog, objects)
+
+    with pytest.raises(DeviceSyncError) as raised:
+        async with service.open_content(
+            workspace.context(),
+            source_id=source_id,
+            source_version_id=source_version_id,
+            diagnostic_context=_diagnostic(),
+        ):
+            raise AssertionError("the content context must never be entered")
+
+    # A provider outage is the retryable dependency reason (only the four
+    # verification signals map onto the download-integrity failure).
+    assert raised.value.code is DeviceSyncErrorCode.DEPENDENCY_UNAVAILABLE
+    rendered_surfaces = str(raised.value) + repr(raised.value)
+    assert raised.value.__cause__ is not None
+    # The provider failure sits at the deepest cause level: the mapped
+    # ObjectStorageError directly chains the sentinel-laden provider
+    # exception, so walk the whole chain for the mootness proof — the chain
+    # is the source, never a sink; only the rendered surfaces must stay
+    # clean.
+    provider_cause = raised.value.__cause__
+    chain_rendered = ""
+    while provider_cause is not None:
+        chain_rendered += str(provider_cause) + repr(provider_cause)
+        provider_cause = provider_cause.__cause__
+    assert "do-not-emit-device-sync-content" in chain_rendered
+    for sentinel in _DEVICE_SYNC_SENTINELS:
+        assert sentinel not in rendered_surfaces, f"sentinel leaked: {sentinel}"
+
+    # The resolved descriptor surface stays clean of the locator text (the
+    # operational wire carries digest/size/media type only) and the store
+    # double saw exactly one request shaped by the descriptor's digest.
+    descriptor = await catalog.resolve_descriptor(
+        workspace.context(),
+        source_id=source_id,
+        source_version_id=source_version_id,
+        diagnostic_context=_diagnostic(),
+    )
+    descriptor_rendered = repr(descriptor)
+    for sentinel in (
+        "do-not-emit-device-sync-locator",
+        "do-not-emit-device-sync-path",
+    ):
+        assert sentinel not in descriptor_rendered
+    assert len(objects.open_calls) == 1
+    assert objects.open_calls[0].content_digest == descriptor.content_digest

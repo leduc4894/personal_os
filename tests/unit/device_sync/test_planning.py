@@ -222,9 +222,7 @@ def test_multiple_historical_candidates_are_ambiguous() -> None:
 
 def test_open_tombstone_with_retained_fingerprint_binds_the_deleted_source() -> None:
     result = resolve_manifest_identity(
-        evidence(
-            tombstones=(canonical_source(tombstone_id=_TOMBSTONE_ID, version_id=_VERSION_ID),)
-        )
+        evidence(tombstones=(canonical_source(tombstone_id=_TOMBSTONE_ID, version_id=_VERSION_ID),))
     )
     assert result == ManifestIdentityResolution(
         source_id=_SOURCE_ID,
@@ -238,9 +236,7 @@ def test_open_tombstone_with_divergent_fingerprint_never_binds() -> None:
     result = resolve_manifest_identity(
         evidence(
             tombstones=(
-                canonical_source(
-                    tombstone_id=_TOMBSTONE_ID, fingerprint=OTHER_FINGERPRINT
-                ),
+                canonical_source(tombstone_id=_TOMBSTONE_ID, fingerprint=OTHER_FINGERPRINT),
             )
         )
     )
@@ -347,9 +343,7 @@ def test_remote_rename_no_change_carries_the_checkpoint_active_locator() -> None
         # resolved operand the action must NOT carry.
         resolved_source_locator_id=_LOCATOR_ID,
     )
-    canonical = canonical_source(
-        locator=_OTHER_LOCATOR, active_locator_id=_ACTIVE_LOCATOR_ID
-    )
+    canonical = canonical_source(locator=_OTHER_LOCATOR, active_locator_id=_ACTIVE_LOCATOR_ID)
     action = plan_manifest_action(resolution, canonical)
     assert action.action_kind is ManifestActionKind.NO_CHANGE
     assert action.source_locator_id == _ACTIVE_LOCATOR_ID
@@ -542,12 +536,8 @@ def test_planner_matrix_is_total_over_every_action_kind() -> None:
             planned_entry_resolution(submitted_fingerprint=OTHER_FINGERPRINT),
             canonical_source(),
         ),
-        plan_manifest_action(
-            unproven_entry_resolution(known_source_id=_SECOND_SOURCE_ID), None
-        ),
-        plan_manifest_action(
-            planned_entry_resolution(), canonical_source(is_policy_allowed=False)
-        ),
+        plan_manifest_action(unproven_entry_resolution(known_source_id=_SECOND_SOURCE_ID), None),
+        plan_manifest_action(planned_entry_resolution(), canonical_source(is_policy_allowed=False)),
         plan_manifest_action(unproven_entry_resolution(is_policy_allowed=False), None),
     )
     for action in scenarios:
@@ -564,12 +554,8 @@ def test_action_indices_follow_the_entry_ordinal() -> None:
 
 
 def test_locator_evidence_digest_is_deterministic_over_equal_evidence() -> None:
-    first = compute_locator_evidence_digest(
-        _LOCATOR, evidence(current=(canonical_source(),))
-    )
-    second = compute_locator_evidence_digest(
-        _LOCATOR, evidence(current=(canonical_source(),))
-    )
+    first = compute_locator_evidence_digest(_LOCATOR, evidence(current=(canonical_source(),)))
+    second = compute_locator_evidence_digest(_LOCATOR, evidence(current=(canonical_source(),)))
     assert first == second
     assert len(first) == 64
     assert first == first.lower()

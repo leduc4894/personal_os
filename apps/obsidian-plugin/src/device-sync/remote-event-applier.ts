@@ -19,8 +19,8 @@
  * doubles it.
  *
  * Like the other device-sync modules this file imports no Node.js,
- * Electron or `FileSystemAdapter` API at module load time, so it stays
- * loadable on mobile.
+ * Electron or Obsidian file-system adapter API at module load time, so it
+ * stays loadable on mobile.
  */
 
 import type { FrozenFingerprint } from "../journal/contracts";

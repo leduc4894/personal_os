@@ -258,9 +258,7 @@ class OfflineDeviceManifestStore:
         )
 
     async def start_manifest(self, command: StartManifestCommand) -> ManifestRunReceipt:
-        self._state.start_calls.append(
-            (command.context, command.client_observation_generation)
-        )
+        self._state.start_calls.append((command.context, command.client_observation_generation))
         if self._state.start_error is not None:
             raise self._state.start_error
         return self._run_receipt(
@@ -270,9 +268,7 @@ class OfflineDeviceManifestStore:
             observation_generation=command.client_observation_generation,
         )
 
-    async def append_manifest_page(
-        self, command: AppendManifestPageCommand
-    ) -> ManifestPageReceipt:
+    async def append_manifest_page(self, command: AppendManifestPageCommand) -> ManifestPageReceipt:
         self._state.append_calls.append((command.context, command))
         if self._state.append_error is not None:
             raise self._state.append_error
@@ -302,9 +298,7 @@ class OfflineDeviceManifestStore:
             raise self._state.actions_error
         if self._state.actions_page is not None:
             return self._state.actions_page
-        return ManifestActionPage(
-            manifest_run_id=query.manifest_run_id, actions=(), has_more=False
-        )
+        return ManifestActionPage(manifest_run_id=query.manifest_run_id, actions=(), has_more=False)
 
     async def complete_manifest(self, command: CompleteManifestCommand) -> DeviceCursorReceipt:
         self._state.complete_calls.append((command.context, command.manifest_run_id))

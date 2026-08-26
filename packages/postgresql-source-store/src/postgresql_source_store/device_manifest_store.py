@@ -155,9 +155,7 @@ __all__ = [
 #: The manifest run states that still own the per-device unfinished slot
 #: (exactly the partial unique index vocabulary of the ``20260826_01``
 #: migration).
-MANIFEST_UNFINISHED_STATES: Final[frozenset[str]] = frozenset(
-    {"collecting", "planned", "applying"}
-)
+MANIFEST_UNFINISHED_STATES: Final[frozenset[str]] = frozenset({"collecting", "planned", "applying"})
 
 #: One page record of the canonical final-digest grammar: the zero-based
 #: page number, its accepted entry count and its page digest hex.
@@ -418,9 +416,7 @@ def device_cursor_completion_bootstrap_statement(
             device_cursor_id=device_cursor_id,
             workspace_id=workspace_id,
             device_id=device_id,
-            acknowledged_sequence=sa.bindparam(
-                "acknowledged_sequence", checkpoint_sequence
-            ),
+            acknowledged_sequence=sa.bindparam("acknowledged_sequence", checkpoint_sequence),
             delivered_through_sequence=sa.bindparam(
                 "delivered_through_sequence", checkpoint_sequence
             ),
@@ -444,9 +440,7 @@ def device_cursor_completion_advance_statement(
     watermark.
     """
 
-    checkpoint: sa.BindParameter[int] = sa.bindparam(
-        "checkpoint_sequence", checkpoint_sequence
-    )
+    checkpoint: sa.BindParameter[int] = sa.bindparam("checkpoint_sequence", checkpoint_sequence)
     return (
         sa.update(device_cursors)
         .values(
@@ -485,8 +479,7 @@ def bound_policy_revision_statement(
         source_policies.c.revision_number,
     ).where(
         source_policies.c.workspace_id == workspace_id,
-        source_policies.c.revision_number
-        == sa.bindparam("revision_number", revision_number),
+        source_policies.c.revision_number == sa.bindparam("revision_number", revision_number),
     )
 
 
@@ -586,9 +579,7 @@ def known_base_fingerprints_statement(
         .where(
             source_versions.c.workspace_id == workspace_id,
             source_versions.c.source_version_id.in_(
-                sa.bindparam(
-                    "version_ids", list(version_ids), type_=sa.Uuid(), expanding=True
-                )
+                sa.bindparam("version_ids", list(version_ids), type_=sa.Uuid(), expanding=True)
             ),
         )
     )
@@ -710,8 +701,7 @@ def manifest_canonical_source_state_statement(
             sa.and_(
                 source_versions.c.workspace_id == sources.c.workspace_id,
                 source_versions.c.source_id == sources.c.source_id,
-                source_versions.c.source_version_id
-                == checkpoint_version.c.committed_version_id,
+                source_versions.c.source_version_id == checkpoint_version.c.committed_version_id,
             ),
         )
         .outerjoin(
@@ -726,9 +716,7 @@ def manifest_canonical_source_state_statement(
     if source_ids:
         statement = statement.where(
             sources.c.source_id.in_(
-                sa.bindparam(
-                    "source_ids", list(source_ids), type_=sa.Uuid(), expanding=True
-                )
+                sa.bindparam("source_ids", list(source_ids), type_=sa.Uuid(), expanding=True)
             )
         )
     return statement
@@ -813,8 +801,7 @@ def manifest_tombstone_candidates_statement(
             retained_version,
             sa.and_(
                 retained_version.c.workspace_id == source_tombstones.c.workspace_id,
-                retained_version.c.source_version_id
-                == source_tombstones.c.retained_version_id,
+                retained_version.c.source_version_id == source_tombstones.c.retained_version_id,
             ),
         )
         .join(
@@ -880,8 +867,7 @@ def manifest_canonical_only_downloads_statement(
             sa.and_(
                 source_versions.c.workspace_id == sources.c.workspace_id,
                 source_versions.c.source_id == sources.c.source_id,
-                source_versions.c.source_version_id
-                == checkpoint_version.c.committed_version_id,
+                source_versions.c.source_version_id == checkpoint_version.c.committed_version_id,
             ),
         )
         .outerjoin(
@@ -981,9 +967,7 @@ class PostgresqlDeviceManifestStore:
             ).one_or_none()
             database_now = await self._database_now(connection)
             if unfinished is not None and unfinished.expires_at <= database_now:
-                await connection.execute(
-                    manifest_run_expire_statement(unfinished.manifest_run_id)
-                )
+                await connection.execute(manifest_run_expire_statement(unfinished.manifest_run_id))
                 unfinished = None
             if unfinished is not None:
                 return self._resume_or_reject(unfinished, command)
@@ -992,13 +976,9 @@ class PostgresqlDeviceManifestStore:
             )
             acknowledged = await self._read_acknowledged_sequence(connection, context)
             checkpoint_value = (
-                await connection.execute(
-                    device_event_checkpoint_statement(context.workspace_id)
-                )
+                await connection.execute(device_event_checkpoint_statement(context.workspace_id))
             ).one_or_none()
-            checkpoint = (
-                acknowledged if checkpoint_value is None else int(checkpoint_value[0])
-            )
+            checkpoint = acknowledged if checkpoint_value is None else int(checkpoint_value[0])
             run_id = self._identity_generator()
             await connection.execute(
                 postgresql_insert(manifest_runs)
@@ -1014,16 +994,12 @@ class PostgresqlDeviceManifestStore:
                 )
                 .on_conflict_do_nothing(
                     index_elements=["workspace_id", "device_id"],
-                    index_where=sa.text(
-                        "state in ('collecting', 'planned', 'applying')"
-                    ),
+                    index_where=sa.text("state in ('collecting', 'planned', 'applying')"),
                 )
             )
             created = (
                 await connection.execute(
-                    manifest_run_select_statement(
-                        context.workspace_id, context.device_id, run_id
-                    )
+                    manifest_run_select_statement(context.workspace_id, context.device_id, run_id)
                 )
             ).one_or_none()
             if created is not None:
@@ -1067,9 +1043,7 @@ class PostgresqlDeviceManifestStore:
         self, connection: AsyncConnection, workspace_id: UUID
     ) -> int:
         row = (
-            await connection.execute(
-                workspace_active_policy_revision_statement(workspace_id)
-            )
+            await connection.execute(workspace_active_policy_revision_statement(workspace_id))
         ).one_or_none()
         if (
             row is None
@@ -1093,9 +1067,7 @@ class PostgresqlDeviceManifestStore:
 
     # -- append ---------------------------------------------------------------
 
-    async def append_manifest_page(
-        self, command: AppendManifestPageCommand
-    ) -> ManifestPageReceipt:
+    async def append_manifest_page(self, command: AppendManifestPageCommand) -> ManifestPageReceipt:
         """Accept the exact next ordered page with checkpoint identity proof."""
 
         return await self._retry.run(lambda _attempt: self._append_once(command))
@@ -1203,24 +1175,20 @@ class PostgresqlDeviceManifestStore:
         if locator_texts:
             for row in (
                 await connection.execute(
-                    manifest_locator_candidates_statement(
-                        workspace_id, checkpoint, locator_texts
-                    )
+                    manifest_locator_candidates_statement(workspace_id, checkpoint, locator_texts)
                 )
             ).mappings():
                 matched_source_ids.add(row.source_id)
-                closed_at_or_before_checkpoint = row.closed_event_id is not None and int(
-                    row.closed_sequence
-                ) <= checkpoint
+                closed_at_or_before_checkpoint = (
+                    row.closed_event_id is not None and int(row.closed_sequence) <= checkpoint
+                )
                 bucket = (
                     historical_by_locator if closed_at_or_before_checkpoint else current_by_locator
                 )
                 bucket.setdefault(str(row.normalized_locator), []).append(dict(row))
             for row in (
                 await connection.execute(
-                    manifest_tombstone_candidates_statement(
-                        workspace_id, checkpoint, locator_texts
-                    )
+                    manifest_tombstone_candidates_statement(workspace_id, checkpoint, locator_texts)
                 )
             ).mappings():
                 matched_source_ids.add(row.source_id)
@@ -1279,9 +1247,7 @@ class PostgresqlDeviceManifestStore:
         return resolution_rows
 
     @staticmethod
-    def _matched_locator_row(
-        rows: list[dict[str, Any]], source_id: UUID | None
-    ) -> dict[str, Any]:
+    def _matched_locator_row(rows: list[dict[str, Any]], source_id: UUID | None) -> dict[str, Any]:
         for row in rows:
             if row["source_id"] == source_id:
                 return row
@@ -1387,7 +1353,7 @@ class PostgresqlDeviceManifestStore:
             return None
         try:
             locator = NormalizedLocator(str(state["active_locator"]))
-        except (KeyError, ValueError):
+        except KeyError, ValueError:
             return None
         return CanonicalManifestSource(
             source_id=state["source_id"],
@@ -1465,9 +1431,7 @@ class PostgresqlDeviceManifestStore:
                 await connection.commit()
                 raise DeviceSyncError(DeviceSyncErrorCode.MANIFEST_DIGEST_MISMATCH)
             page_rows = (
-                await connection.execute(
-                    manifest_page_records_statement(command.manifest_run_id)
-                )
+                await connection.execute(manifest_page_records_statement(command.manifest_run_id))
             ).all()
             expected_digest = compute_manifest_final_digest(
                 tuple(
@@ -1488,9 +1452,7 @@ class PostgresqlDeviceManifestStore:
             revision = await self._load_bound_policy_revision(
                 connection, context.workspace_id, int(run.policy_revision_number)
             )
-            action_rows = await self._plan_actions(
-                connection, context.workspace_id, run, revision
-            )
+            action_rows = await self._plan_actions(connection, context.workspace_id, run, revision)
             if action_rows:
                 await connection.execute(sa.insert(manifest_actions), action_rows)
             await connection.execute(
@@ -1522,9 +1484,7 @@ class PostgresqlDeviceManifestStore:
         self, connection: AsyncConnection, workspace_id: UUID, revision_number: int
     ) -> ExclusionPolicyRevision:
         revision_row = (
-            await connection.execute(
-                bound_policy_revision_statement(workspace_id, revision_number)
-            )
+            await connection.execute(bound_policy_revision_statement(workspace_id, revision_number))
         ).one_or_none()
         if revision_row is None:
             # The bound revision is immutable published state; its absence
@@ -1555,9 +1515,7 @@ class PostgresqlDeviceManifestStore:
         checkpoint = int(run.checkpoint_sequence)
         resolution_rows = list(
             (
-                await connection.execute(
-                    manifest_resolution_rows_statement(run.manifest_run_id)
-                )
+                await connection.execute(manifest_resolution_rows_statement(run.manifest_run_id))
             ).mappings()
         )
         resolved_source_ids = sorted(
@@ -1571,11 +1529,7 @@ class PostgresqlDeviceManifestStore:
             connection, workspace_id, checkpoint, resolved_source_ids
         )
         known_version_ids = sorted(
-            {
-                row.known_version_id
-                for row in resolution_rows
-                if row.known_version_id is not None
-            }
+            {row.known_version_id for row in resolution_rows if row.known_version_id is not None}
         )
         base_fingerprints = await self._known_base_fingerprints(
             connection, workspace_id, known_version_ids
@@ -1598,8 +1552,7 @@ class PostgresqlDeviceManifestStore:
                 _fingerprint(
                     base_state["content_hash"], base_state["byte_size"], base_state["media_type"]
                 )
-                if base_state is not None
-                and base_state["source_id"] == row.known_source_id
+                if base_state is not None and base_state["source_id"] == row.known_source_id
                 else None
             )
             resolution = ManifestEntryResolution(
@@ -1732,9 +1685,7 @@ class PostgresqlDeviceManifestStore:
             normalized_locator=str(locator) if locator is not None else None,
             source_type=self._source_type(state.get("source_type")),
             media_type=self._media_type(state.get("media_type")),
-            size_bytes=(
-                int(state["byte_size"]) if state.get("byte_size") is not None else None
-            ),
+            size_bytes=(int(state["byte_size"]) if state.get("byte_size") is not None else None),
         )
         outcome = evaluate_policy(revision=revision, subject=subject)
         return outcome.enforced is EnforcedPolicyDecision.ALLOWED
@@ -1790,9 +1741,7 @@ class PostgresqlDeviceManifestStore:
         fingerprints: dict[UUID, dict[str, Any]] = {}
         for chunk in chunk_id_lookups(version_ids):
             rows = (
-                await connection.execute(
-                    known_base_fingerprints_statement(workspace_id, chunk)
-                )
+                await connection.execute(known_base_fingerprints_statement(workspace_id, chunk))
             ).mappings()
             fingerprints.update({row.source_version_id: dict(row) for row in rows})
         return fingerprints
@@ -1999,12 +1948,8 @@ class PostgresqlDeviceManifestStore:
             await connection.commit()
             raise DeviceSyncError(DeviceSyncErrorCode.MANIFEST_EXPIRED)
 
-    async def _reject_policy_stale_run(
-        self, connection: AsyncConnection, run: RowMapping
-    ) -> None:
-        active = await self._read_active_policy_revision_number(
-            connection, run.workspace_id
-        )
+    async def _reject_policy_stale_run(self, connection: AsyncConnection, run: RowMapping) -> None:
+        active = await self._read_active_policy_revision_number(connection, run.workspace_id)
         if active != int(run.policy_revision_number):
             # The closed reason persists on the run row beyond the rejected
             # request: the failure mark commits before the typed raise.

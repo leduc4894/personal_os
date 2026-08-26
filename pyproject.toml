@@ -220,9 +220,28 @@ cmd = "pytest tests/unit/exclusion_policy tests/unit/api_runtime tests/unit/post
 # and Mobile Obsidian reference-device evidence file. It stays out of the
 # default marker expression and out of CI because the evidence is gathered on
 # physical devices; absence of either record fails this gate and blocks the
-# final exclusion-policy handoff.
+# final device-sync handoff.
 [tool.poe.tasks.exclusion-policy-device-verification]
 cmd = "pytest tests/contract/exclusion_policy/test_reference_device_records.py -m device_records -q"
+
+# Device cursor and manifest reconciliation acceptance feature gate
+# (device-sync child 6, Task 13): the device-sync unit, api-runtime unit,
+# adapter unit, sensitive device-sync contract, API contract and
+# disposable-stack integration suites. The marker override enables
+# ``local_stack`` — fail, never skip: the integration conftest refuses to
+# run without ``CI=true`` and a unique ``knowledge-ci-*`` project name, and
+# the device-sync contract conftest keeps the physical-device records gate
+# out of this composed run (its evidence blocks only the final handoff).
+[tool.poe.tasks.device-sync-test]
+cmd = "pytest tests/unit/device_sync tests/unit/postgresql_source_store tests/unit/api_runtime tests/contract/device_sync tests/contract/api tests/integration/device_sync -m \"not r2_live\" -q"
+
+# Device-sync reference-device verification record gate: validates the
+# recorded Desktop and Mobile Obsidian evidence of the design 18.1 live
+# gates. Absence of either record fails this gate and blocks the final
+# device-sync handoff (run it explicitly; it never runs by default).
+[tool.poe.tasks.device-sync-device-verification]
+cmd = "pytest tests/contract/device_sync/test_reference_device_records.py -m device_records -q"
+
 
 [tool.poe.tasks.python-build]
 cmd = "uv build --all-packages --clear"

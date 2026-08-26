@@ -642,3 +642,89 @@ def test_file_collects_sentinel_scanning_tests() -> None:
     assert result.returncode == 0, result.stderr
     collected = [line for line in result.stdout.splitlines() if "::" in line]
     assert len(collected) >= 10
+
+
+# --- device-sync boundary (child six) ----------------------------------------
+
+
+_DEVICE_SYNC_SENTINELS = (
+    "do-not-emit-device-sync-locator",
+    "do-not-emit-device-sync-content",
+    "do-not-emit-device-sync-digest",
+    "do-not-emit-device-sync-object-key",
+    "do-not-emit-device-sync-credential",
+    "do-not-emit-device-sync-response-body",
+    "do-not-emit-device-sync-provider-exception",
+)
+
+
+def test_device_sync_error_and_event_fields_never_leak(
+    runtime_settings: RuntimeSettings,
+) -> None:
+    """A device-sync failure carries closed tokens only (child six, task 13).
+
+    A typed device sync error chained to a provider exception that embeds
+    the locator, content, digest, object key, credential, response body and
+    provider exception sentinels renders its closed reason everywhere; the
+    registered device sync events accept only the operation/reason/duration
+    fields, so a sentinel-bearing operand is rejected as a payload drift
+    instead of ever being emitted.
+    """
+
+    from personal_os.device_sync.errors import DeviceSyncError, DeviceSyncErrorCode
+
+    provider_exception = RuntimeError(
+        "device sync provider failed "
+        "locator=do-not-emit-device-sync-locator "
+        "content=do-not-emit-device-sync-content "
+        "digest=do-not-emit-device-sync-digest "
+        "key=do-not-emit-device-sync-object-key "
+        "credential=do-not-emit-device-sync-credential "
+        "body=do-not-emit-device-sync-response-body "
+        "exception=do-not-emit-device-sync-provider-exception"
+    )
+    try:
+        raise provider_exception
+    except RuntimeError as cause:
+        try:
+            raise DeviceSyncError(DeviceSyncErrorCode.DOWNLOAD_INTEGRITY_FAILED) from cause
+        except DeviceSyncError as error:
+            captured = error
+
+    # The source chain carries every sentinel; otherwise the test is moot.
+    assert "do-not-emit-device-sync-provider-exception" in str(captured.__cause__)
+
+    logger, stdout, stderr = _configure(runtime_settings)
+    logger.emit_application_error(captured)
+
+    # The registered device sync events accept only the closed fields: a
+    # sentinel operand (the locator a real caller might try to attach) is
+    # rejected, never emitted.
+    logger.emit(
+        EventName.DEVICE_SYNC_OPERATION_COMPLETED,
+        {
+            "operation": "do-not-emit-device-sync-locator",
+            "duration_ms": 12,
+        },
+    )
+    logger.emit(
+        EventName.DEVICE_SYNC_OPERATION_REJECTED,
+        {
+            "operation": SafeToken.parse("pull"),
+            "reason": SafeToken.parse("device_cursor_regression"),
+            "duration_ms": 5,
+            "locator": "do-not-emit-device-sync-locator",
+        },
+    )
+
+    _all_records_parsable(stdout, stderr)
+    _assert_no_sentinel(
+        _blob(stdout, stderr),
+        str(captured),
+        repr(captured),
+        sentinels=_DEVICE_SYNC_SENTINELS,
+    )
+    # The closed reason token IS emitted; the sentinel operands are not.
+    blob = _blob(stdout, stderr)
+    assert "device_download_integrity_failed" in blob
+    assert "do-not-emit-device-sync-locator" not in blob

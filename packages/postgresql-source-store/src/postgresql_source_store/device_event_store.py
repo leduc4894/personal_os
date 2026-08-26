@@ -214,9 +214,7 @@ def hydrate_device_event(row: _MappedRow) -> DeviceSyncEvent:
     )
     delete_tombstone_id = row["delete_tombstone_id"]
     restore_tombstone_id = row["restore_tombstone_id"]
-    tombstone_id = (
-        delete_tombstone_id if delete_tombstone_id is not None else restore_tombstone_id
-    )
+    tombstone_id = delete_tombstone_id if delete_tombstone_id is not None else restore_tombstone_id
     prior_locator = _hydrate_locator(row["prior_locator"])
     resulting_locator = _hydrate_locator(row["resulting_locator"])
     if event_type is DeviceEventType.UPDATED and resulting_locator is None:
@@ -278,9 +276,7 @@ def validate_pull_limit(limit: int) -> None:
     """Reject any pull window outside ``1 .. MAX_PULL_EVENTS``."""
 
     if not 1 <= limit <= MAX_PULL_EVENTS:
-        raise ValueError(
-            f"limit must be between 1 and {MAX_PULL_EVENTS} events per pull page"
-        )
+        raise ValueError(f"limit must be between 1 and {MAX_PULL_EVENTS} events per pull page")
 
 
 # --- statement builders --------------------------------------------------------
@@ -447,8 +443,7 @@ def device_pull_page_statement(
         .where(
             sync_events.c.workspace_id == workspace_id,
             sync_events.c.event_sequence > sa.bindparam("after_sequence", after_sequence),
-            sync_events.c.event_sequence
-            <= sa.bindparam("through_sequence", through_sequence),
+            sync_events.c.event_sequence <= sa.bindparam("through_sequence", through_sequence),
         )
         .order_by(sync_events.c.event_sequence.asc())
         .limit(sa.bindparam("pull_limit", limit))
@@ -750,9 +745,7 @@ class PostgresqlDeviceEventStore:
         validate_pull_limit(limit)
         return await self._retry.run(lambda _attempt: self._pull_once(context, limit))
 
-    async def _pull_once(
-        self, context: DeviceSyncContext, limit: int
-    ) -> DeviceEventPage:
+    async def _pull_once(self, context: DeviceSyncContext, limit: int) -> DeviceEventPage:
         async with (
             self._engine.connect() as connection,
             connection.begin(),
@@ -827,9 +820,7 @@ class PostgresqlDeviceEventStore:
         return int(row.acknowledged_sequence), int(row.delivered_through_sequence)
 
     async def _read_floor(self, connection: AsyncConnection, workspace_id: UUID) -> int:
-        result = await connection.execute(
-            workspace_minimum_acknowledged_statement(workspace_id)
-        )
+        result = await connection.execute(workspace_minimum_acknowledged_statement(workspace_id))
         floor = result.scalar_one_or_none()
         return 0 if floor is None else int(floor)
 
@@ -919,9 +910,7 @@ class PostgresqlDeviceEventStore:
                         delivered_through_sequence=0,
                     )
                 )
-                return DeviceCursorReceipt(
-                    acknowledged_sequence=0, delivered_through_sequence=0
-                )
+                return DeviceCursorReceipt(acknowledged_sequence=0, delivered_through_sequence=0)
             acknowledged = int(row.acknowledged_sequence)
             delivered = int(row.delivered_through_sequence)
             if applied_through_sequence < acknowledged:

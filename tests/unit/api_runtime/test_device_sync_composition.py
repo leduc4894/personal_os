@@ -131,9 +131,7 @@ async def test_offline_double_pull_and_acknowledge_follow_the_seeded_state() -> 
     state.acknowledge_receipt = DeviceCursorReceipt(2, 5)
     runtime = compose_offline_device_sync(state=state)
 
-    page = await runtime.service.pull_events(
-        context=_context(), diagnostic_context=_DIAGNOSTIC
-    )
+    page = await runtime.service.pull_events(context=_context(), diagnostic_context=_DIAGNOSTIC)
     assert page.acknowledged_sequence == 0
     assert state.pull_contexts == [_context()]
 
