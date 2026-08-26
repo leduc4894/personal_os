@@ -217,11 +217,25 @@ def test_events_with_resulting_locators_require_them(event_type: DeviceEventType
         replace(event, resulting_locator=None)
 
 
-@pytest.mark.parametrize("event_type", [DeviceEventType.UPDATED, DeviceEventType.DELETED])
+@pytest.mark.parametrize("event_type", [DeviceEventType.DELETED])
 def test_events_without_resulting_locators_forbid_them(event_type: DeviceEventType) -> None:
     event = build_device_sync_event(event_type)
     with pytest.raises(ValueError, match=_shape_error(event_type)):
         replace(event, resulting_locator=LOCATOR)
+
+
+def test_update_events_may_carry_their_active_locator() -> None:
+    """The update shape is MAY-carry: the store always hydrates the active
+    locator at the event's sequence, and the contract accepts the wire event
+    with or without it (only the store's unresolvable-locator rule fails
+    closed). A locator-less update is therefore constructible here while the
+    PostgreSQL store treats it as an integrity failure."""
+
+    locator_less = build_device_sync_event(DeviceEventType.UPDATED)
+    assert locator_less.resulting_locator is None
+    with_locator = replace(locator_less, resulting_locator=LOCATOR)
+    assert with_locator.resulting_locator is not None
+    assert with_locator.resulting_locator.value == LOCATOR.value
 
 
 @pytest.mark.parametrize(

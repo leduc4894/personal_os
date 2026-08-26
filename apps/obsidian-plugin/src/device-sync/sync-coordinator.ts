@@ -389,7 +389,14 @@ export function createSyncCoordinator(options: SyncCoordinatorOptions): SyncCoor
       // never closes a local row either.
       return false;
     }
-    const normalizedLocator = event.operation === "updated" ? event.priorLocator : event.resultingLocator;
+    // The evidence locator is the wire's own echo target: every content
+    // operation (create, update, restore — and a rename/move's new path)
+    // carries it as the resulting locator, while a delete carries only the
+    // prior locator it removed. An update never carries a prior locator
+    // (it changes no path), so keying its branch there would leave the
+    // dominant own-upload echo unsuppressed.
+    const normalizedLocator =
+      event.operation === "deleted" ? event.priorLocator : event.resultingLocator;
     if (normalizedLocator === null || event.currentVersionId === null || event.currentFingerprint === null) {
       return false;
     }

@@ -551,7 +551,9 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
           currentVersionId: action.sourceVersionId,
           baseFingerprint: entry.fingerprint,
           currentFingerprint: verifiedFingerprint,
-          priorLocator: entry.normalizedLocator,
+          // The wire's update shape: the resulting locator is the content
+          // target and no prior locator exists (an update changes no path).
+          priorLocator: null,
           resultingLocator: entry.normalizedLocator,
           tombstoneId: null,
           committedAt: SYNTHETIC_EVENT_COMMITTED_AT,

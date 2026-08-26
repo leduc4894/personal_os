@@ -42,8 +42,10 @@ from postgresql_source_store.tables import (
 
 __all__ = [
     "DeviceEventHistory",
+    "DeviceRenameUpdateHistory",
     "DeviceSyncWorkspace",
     "seed_device_event_history",
+    "seed_device_rename_update_history",
     "seed_device_sync_workspace",
     "source_publication_stack",
 ]
@@ -165,6 +167,162 @@ class DeviceEventHistory:
     event_sequences: dict[str, int]
     locator_ids: dict[str, UUID]
     tombstone_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceRenameUpdateHistory:
+    """One canonical create → rename → update history for at-sequence pins.
+
+    ``locator_paths`` keys the opened locators by path suffix; the update
+    commits strictly after the rename, so the locator active at its own
+    sequence is the post-rename path.
+    """
+
+    workspace: DeviceSyncWorkspace
+    source_id: UUID
+    version_id: UUID
+    event_ids: tuple[UUID, UUID, UUID]
+    event_sequences: dict[str, int]
+    locator_paths: dict[str, str]
+
+
+async def seed_device_rename_update_history(
+    engine: AsyncEngine,
+) -> DeviceRenameUpdateHistory:
+    """Seed one source whose update commits after a rename.
+
+    The history commits, in order: create (opens ``alpha.md``), rename
+    (``alpha.md`` -> ``beta.md``) and one update with no locator operand of
+    its own — the exact live shape whose hydrated ``resulting_locator``
+    must resolve the post-rename active locator at the update's sequence
+    (never the pre-rename path and never a null operand).
+    """
+
+    workspace = await seed_device_sync_workspace(engine)
+    nonce = uuid4().hex
+    source_id = uuid4()
+    content_object_id = uuid4()
+    version_id = uuid4()
+    event_ids = (uuid4(), uuid4(), uuid4())
+    committed_at = datetime.now(UTC)
+
+    async with engine.begin() as connection:
+        salt = f"device-rename-update-history-{nonce}"
+        content_hash = hashlib.sha256(salt.encode("ascii")).hexdigest()
+        await connection.execute(
+            sa.insert(content_objects).values(
+                content_object_id=content_object_id,
+                content_hash=content_hash,
+                object_key=f"objects/sha256/{content_hash[:2]}/{content_hash[2:4]}/{content_hash}",
+                byte_size=len(salt),
+                media_type="text/markdown",
+                verified_at=committed_at,
+            )
+        )
+        await connection.execute(
+            sa.insert(sources).values(
+                source_id=source_id,
+                workspace_id=workspace.workspace_id,
+                source_type="markdown",
+                title=f"Device rename update history {nonce[:12]}",
+                sync_state="pending",
+                current_version_id=None,
+            )
+        )
+        await connection.execute(
+            sa.insert(source_versions).values(
+                source_version_id=version_id,
+                workspace_id=workspace.workspace_id,
+                source_id=source_id,
+                content_object_id=content_object_id,
+                content_version=1,
+                parent_version_id=None,
+                author_kind="device",
+                author_id=workspace.device_id,
+                committed_at=committed_at,
+            )
+        )
+        await connection.execute(
+            sa.update(sources)
+            .values(
+                sync_state="active",
+                current_version_id=version_id,
+                updated_at=sa.text("CURRENT_TIMESTAMP"),
+            )
+            .where(
+                sources.c.workspace_id == workspace.workspace_id,
+                sources.c.source_id == source_id,
+            )
+        )
+
+        async def commit_event(
+            *,
+            event_id: UUID,
+            event_type: str,
+            base_version_id: UUID | None,
+        ) -> int:
+            return await _insert_sync_event(
+                connection,
+                workspace=workspace,
+                source_id=source_id,
+                event_id=event_id,
+                idempotency_key=f"device-rename-update-{nonce}-{event_id.hex[:16]}",
+                event_type=event_type,
+                committed_version_id=version_id,
+                base_version_id=base_version_id,
+                origin_device_id=workspace.device_id,
+            )
+
+        sequence_create = await commit_event(
+            event_id=event_ids[0], event_type="create", base_version_id=None
+        )
+        sequence_rename = await commit_event(
+            event_id=event_ids[1], event_type="rename", base_version_id=version_id
+        )
+        sequence_update = await commit_event(
+            event_id=event_ids[2], event_type="update", base_version_id=version_id
+        )
+
+        alpha_path = f"notes/{nonce}/alpha.md"
+        beta_path = f"notes/{nonce}/beta.md"
+        await connection.execute(
+            sa.insert(source_locators).values(
+                source_locator_id=uuid4(),
+                workspace_id=workspace.workspace_id,
+                source_id=source_id,
+                normalized_locator=alpha_path,
+                display_locator=alpha_path,
+                opened_event_id=event_ids[0],
+                opened_sequence=sequence_create,
+                closed_event_id=event_ids[1],
+                closed_sequence=sequence_rename,
+                closed_at=sa.text("CURRENT_TIMESTAMP"),
+            )
+        )
+        await connection.execute(
+            sa.insert(source_locators).values(
+                source_locator_id=uuid4(),
+                workspace_id=workspace.workspace_id,
+                source_id=source_id,
+                normalized_locator=beta_path,
+                display_locator=beta_path,
+                opened_event_id=event_ids[1],
+                opened_sequence=sequence_rename,
+            )
+        )
+
+    return DeviceRenameUpdateHistory(
+        workspace=workspace,
+        source_id=source_id,
+        version_id=version_id,
+        event_ids=event_ids,
+        event_sequences={
+            "create": sequence_create,
+            "rename": sequence_rename,
+            "update": sequence_update,
+        },
+        locator_paths={"alpha": alpha_path, "beta": beta_path},
+    )
 
 
 async def seed_device_event_history(engine: AsyncEngine) -> DeviceEventHistory:

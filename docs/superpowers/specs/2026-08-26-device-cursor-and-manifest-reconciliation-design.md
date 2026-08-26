@@ -318,7 +318,11 @@ has_more
 Each event contains the immutable event ID/sequence/type, nullable origin
 device ID, source ID, base/current version IDs, base/current fingerprint
 evidence, committed time and the operation-shaped locator/tombstone operands.
-Create, rename, move and restore include the resulting locator. Rename, move
+Create, rename, move, restore and update include the resulting locator; an
+update's resulting locator is the locator the source held open at the event's
+own sequence (updates change no locator, so they never include a prior
+locator, and an update whose active locator cannot be resolved at its
+sequence is the closed integrity error). Rename, move
 and delete include the prior locator. Delete/restore include the exact
 tombstone ID. The payload is hydrated from canonical event, version, object,
 locator and tombstone rows; it is not stored as a second event body.

@@ -10,11 +10,16 @@ the credential-scoped workspace — pages at most ``MAX_PULL_EVENTS`` events
 strictly above the delivered watermark and only through that checkpoint,
 hydrates every event's operation-shaped operands from the joined canonical
 event, version, object, locator and tombstone rows, and then advances
-nothing but the delivered watermark through a guarded monotonic update. An
-event is never skipped: a missing retained predecessor operand raises the
-closed cursor gap, an impossible hydrated shape raises the closed integrity
-failure, and retained history that falls below a cursor above the workspace
-compaction floor raises the closed cursor gap instead of fabricating events.
+nothing but the delivered watermark through a guarded monotonic update.
+An update event opens no locator of its own, so its resulting locator
+hydrates from the locator state the source held open at the event's own
+sequence — the path the edit committed against, not merely the current
+one. An event is never skipped: a missing retained predecessor operand
+raises the closed cursor gap, an impossible hydrated shape (including an
+update whose active locator cannot be resolved at its sequence) raises the
+closed integrity failure, and retained history that falls below a cursor
+above the workspace compaction floor raises the closed cursor gap instead
+of fabricating events.
 
 ``acknowledge_cursor`` locks the exact workspace/device cursor row, rejects
 a regression and an acknowledgement above the delivered watermark, requires
@@ -52,6 +57,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.sql.selectable import LateralFromClause
 
 from personal_os.device_sync.contracts import (
     MAX_PULL_EVENTS,
@@ -165,12 +171,15 @@ def hydrate_device_event(row: _MappedRow) -> DeviceSyncEvent:
     """Hydrate one canonical operation-shaped event from its joined row.
 
     The row is the pull page projection of ``sync_events`` left-joined with
-    the locator it opened and closed, the tombstone it opened and closed,
-    and the base/current versions' content objects. An unknown event-type
-    token, a naive committed time, an invalid operand grammar or any shape
-    the domain contract forbids is the closed integrity failure; a base
-    version operand whose content evidence row is gone is the closed cursor
-    gap (the retained predecessor is missing), and no row is ever skipped.
+    the locator it opened and closed, the locator the source held open at
+    the event's own sequence (an update's resulting locator), the
+    tombstone it opened and closed, and the base/current versions' content
+    objects. An unknown event-type token, a naive committed time, an
+    invalid operand grammar, an update with no resolvable active locator
+    or any shape the domain contract forbids is the closed integrity
+    failure; a base version operand whose content evidence row is gone is
+    the closed cursor gap (the retained predecessor is missing), and no
+    row is ever skipped.
     """
 
     event_type = EVENT_TYPE_BY_DATABASE_TOKEN.get(str(row["event_type"]))
@@ -208,6 +217,15 @@ def hydrate_device_event(row: _MappedRow) -> DeviceSyncEvent:
     tombstone_id = (
         delete_tombstone_id if delete_tombstone_id is not None else restore_tombstone_id
     )
+    prior_locator = _hydrate_locator(row["prior_locator"])
+    resulting_locator = _hydrate_locator(row["resulting_locator"])
+    if event_type is DeviceEventType.UPDATED and resulting_locator is None:
+        # An update resolves its content target from the locator the
+        # source held open at the event's own sequence; the lifecycle
+        # invariant guarantees one exists for every live source, so a
+        # locator-less update row is an impossible hydrated shape — never
+        # a skip and never a null pass the applier would reject.
+        raise _integrity_failed()
     try:
         hydrated = DeviceSyncEvent(
             event_id=row["event_id"],
@@ -219,8 +237,8 @@ def hydrate_device_event(row: _MappedRow) -> DeviceSyncEvent:
             current_version_id=current_version_id,
             base_fingerprint=base_fingerprint,
             current_fingerprint=current_fingerprint,
-            prior_locator=_hydrate_locator(row["prior_locator"]),
-            resulting_locator=_hydrate_locator(row["resulting_locator"]),
+            prior_locator=prior_locator,
+            resulting_locator=resulting_locator,
             tombstone_id=tombstone_id,
             committed_at=committed_at,
         )
@@ -284,6 +302,36 @@ def device_event_checkpoint_statement(workspace_id: UUID) -> sa.Select[tuple[Any
     )
 
 
+def _event_active_locator_lateral() -> LateralFromClause:
+    """The per-event locator the source holds open at the event's sequence.
+
+    The candidate shape is the manifest store's planning lateral
+    (``device_manifest_store._active_locator_lateral``) scoped to one
+    event row instead of a frozen run checkpoint: the locator opened at or
+    before the event's own sequence and not yet closed there — newest
+    first, exactly one row. An update event hydrates its resulting locator
+    from this state (updates open no locator of their own), so the operand
+    always resolves the path the source carried when the edit committed,
+    never merely the path it carries now.
+    """
+
+    return (
+        sa.select(source_locators.c.normalized_locator)
+        .where(
+            source_locators.c.workspace_id == sync_events.c.workspace_id,
+            source_locators.c.source_id == sync_events.c.source_id,
+            source_locators.c.opened_sequence <= sync_events.c.event_sequence,
+            sa.or_(
+                source_locators.c.closed_event_id.is_(None),
+                source_locators.c.closed_sequence > sync_events.c.event_sequence,
+            ),
+        )
+        .order_by(source_locators.c.opened_sequence.desc())
+        .limit(1)
+        .lateral("active_locator")
+    )
+
+
 def device_pull_page_statement(
     workspace_id: UUID,
     *,
@@ -296,9 +344,10 @@ def device_pull_page_statement(
     The statement pages strictly above ``after_sequence`` and only through
     ``through_sequence`` in canonical sequence order with a parameter-bound
     ``LIMIT``; every operand is hydrated from the canonical lifecycle rows
-    (the locators the event opened and closed, the tombstones it opened and
-    closed, and the base/current versions' content objects) instead of a
-    second stored event body.
+    (the locators the event opened and closed, the locator the source held
+    open at an update's own sequence, the tombstones it opened and closed,
+    and the base/current versions' content objects) instead of a second
+    stored event body.
     """
 
     opened_locator = source_locators.alias("opened_locator")
@@ -309,6 +358,7 @@ def device_pull_page_statement(
     base_version = source_versions.alias("base_version")
     current_object = content_objects.alias("current_object")
     base_object = content_objects.alias("base_object")
+    active_locator = _event_active_locator_lateral()
     return (
         sa.select(
             sync_events.c.event_id,
@@ -319,7 +369,13 @@ def device_pull_page_statement(
             sync_events.c.base_version_id,
             sync_events.c.committed_version_id.label("current_version_id"),
             sync_events.c.committed_at,
-            opened_locator.c.normalized_locator.label("resulting_locator"),
+            sa.case(
+                (
+                    sync_events.c.event_type == sa.literal_column("'update'"),
+                    active_locator.c.normalized_locator,
+                ),
+                else_=opened_locator.c.normalized_locator,
+            ).label("resulting_locator"),
             closed_locator.c.normalized_locator.label("prior_locator"),
             delete_tombstone.c.source_tombstone_id.label("delete_tombstone_id"),
             restore_tombstone.c.source_tombstone_id.label("restore_tombstone_id"),
@@ -347,6 +403,7 @@ def device_pull_page_statement(
                 closed_locator.c.closed_event_id == sync_events.c.event_id,
             ),
         )
+        .outerjoin(active_locator, sa.true())
         .outerjoin(
             delete_tombstone,
             sa.and_(

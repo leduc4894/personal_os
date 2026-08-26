@@ -25,8 +25,10 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
 from tests.integration.device_sync.conftest import (
     DeviceEventHistory,
+    DeviceRenameUpdateHistory,
     DeviceSyncWorkspace,
     seed_device_event_history,
+    seed_device_rename_update_history,
     seed_device_sync_workspace,
 )
 from tests.integration.source_publication.conftest import SourcePublicationStack
@@ -71,6 +73,9 @@ class DeviceEventStoreHarness:
 
     async def seed_history(self) -> DeviceEventHistory:
         return await seed_device_event_history(self.engine)
+
+    async def seed_rename_update_history(self) -> DeviceRenameUpdateHistory:
+        return await seed_device_rename_update_history(self.engine)
 
     async def seed_workspace(self) -> DeviceSyncWorkspace:
         return await seed_device_sync_workspace(self.engine)
@@ -248,7 +253,11 @@ async def test_pull_hydrates_every_operation_shape_in_sequence_order(
     assert updated.current_version_id == history.version_ids[1]
     assert updated.base_fingerprint is not None
     assert updated.current_fingerprint is not None
-    assert updated.resulting_locator is None
+    # The update's content target is the locator the source held open at
+    # the event's own sequence: alpha.md (post-create, pre-rename) — not
+    # the current gamma.md path and never a null operand.
+    assert updated.resulting_locator is not None
+    assert updated.resulting_locator.value.endswith("alpha.md")
     assert updated.prior_locator is None
     assert updated.tombstone_id is None
 
@@ -269,8 +278,75 @@ async def test_pull_hydrates_every_operation_shape_in_sequence_order(
     assert restored.tombstone_id == history.tombstone_id
 
     assert trailing_update.base_version_id == history.version_ids[1]
-    assert trailing_update.resulting_locator is None
+    # The trailing update commits after the restore, so its active locator
+    # at its own sequence is the post-restore gamma.md path.
+    assert trailing_update.resulting_locator is not None
+    assert trailing_update.resulting_locator.value.endswith("gamma.md")
     assert trailing_update.tombstone_id is None
+
+
+@pytest.mark.asyncio
+async def test_update_after_rename_hydrates_the_post_rename_active_locator(
+    device_event_store: DeviceEventStoreHarness,
+) -> None:
+    """create -> rename -> update: the at-sequence resolution proof.
+
+    The update commits strictly after the rename, so its resulting locator
+    must be the post-rename path — the locator the source held open at the
+    update's own sequence, never the pre-rename path and never a null
+    operand the applier would reject.
+    """
+
+    history = await device_event_store.seed_rename_update_history()
+    page = await device_event_store.store.pull_events(
+        history.workspace.context(), limit=200, diagnostic_context=_diagnostic()
+    )
+    assert [event.event_type for event in page.events] == [
+        DeviceEventType.CREATED,
+        DeviceEventType.RENAMED,
+        DeviceEventType.UPDATED,
+    ]
+    created, renamed, updated = page.events
+    assert created.resulting_locator is not None
+    assert created.resulting_locator.value == history.locator_paths["alpha"]
+    assert renamed.prior_locator is not None
+    assert renamed.prior_locator.value == history.locator_paths["alpha"]
+    assert renamed.resulting_locator is not None
+    assert renamed.resulting_locator.value == history.locator_paths["beta"]
+    assert updated.resulting_locator is not None
+    assert updated.resulting_locator.value == history.locator_paths["beta"]
+    assert updated.prior_locator is None
+
+
+@pytest.mark.asyncio
+async def test_update_without_a_resolvable_active_locator_fails_integrity(
+    device_event_store: DeviceEventStoreHarness,
+) -> None:
+    """An update whose active locator cannot be resolved never null-passes.
+
+    The first bounded pull delivers only through the rename, so the second
+    page hydrates exactly the update; removing the workspace's locator
+    rows then leaves that update with no resolvable active locator at its
+    sequence — the closed integrity failure, never a skipped row and
+    never a locator-less update the plugin would reject downstream.
+    """
+
+    history = await device_event_store.seed_rename_update_history()
+    store = device_event_store.store
+    context = history.workspace.context()
+    first = await store.pull_events(context, limit=2, diagnostic_context=_diagnostic())
+    assert first.delivered_through_sequence == history.event_sequences["rename"]
+
+    async with device_event_store.engine.begin() as connection:
+        await connection.execute(
+            sa.delete(source_locators).where(
+                source_locators.c.workspace_id == history.workspace.workspace_id
+            )
+        )
+
+    with pytest.raises(DeviceSyncError) as raised:
+        await store.pull_events(context, limit=200, diagnostic_context=_diagnostic())
+    assert raised.value.code is DeviceSyncErrorCode.EVENT_INTEGRITY_FAILED
 
 
 @pytest.mark.asyncio

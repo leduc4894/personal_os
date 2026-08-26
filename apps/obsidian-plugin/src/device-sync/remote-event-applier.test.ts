@@ -317,7 +317,9 @@ function eventOf(overrides: Partial<DeviceSyncEvent> = {}): DeviceSyncEvent {
     currentVersionId: "22222222-2222-4222-8222-222222222222",
     baseFingerprint: BASE_FINGERPRINT,
     currentFingerprint: NEXT_FINGERPRINT,
-    priorLocator: "notes/a.md",
+    // The REAL wire shape: an update carries its resulting locator (the
+    // path active at the event's sequence) and never a prior locator.
+    priorLocator: null,
     resultingLocator: "notes/a.md",
     tombstoneId: null,
     committedAt: "2026-08-26T00:00:00Z",
@@ -489,6 +491,23 @@ describe("RemoteEventApplier cursor guards", () => {
     ]);
     expect(harness.repository.readState().appliedSequence).toBe(0);
     expect(harness.repository.readState().barrierReason).toBeNull();
+  });
+
+  it("fails a genuinely locator-less update closed at the prepare stage", async () => {
+    // The hydrated wire always carries the update's resulting locator
+    // (task 12b); the missing-operand guard stays for the impossible
+    // locator-less shape and never stages any mutation.
+    const harness = createApplierHarness({ seedFiles: seedFilesOf(UPDATED_EVENT()) });
+    const event = eventOf({ resultingLocator: null });
+
+    await expect(harness.applier.apply(event)).rejects.toMatchObject({
+      reason: "device_event_unavailable",
+    });
+    expect(harness.diagnostics.applyFailures).toEqual([
+      { stage: "prepare", reason: "device_event_unavailable" },
+    ]);
+    expect(harness.repository.readState().appliedSequence).toBe(0);
+    expect(harness.repository.readEchoMarker(1)).toBeNull();
   });
 });
 

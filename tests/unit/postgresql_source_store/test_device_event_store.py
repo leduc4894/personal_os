@@ -133,6 +133,7 @@ def row_for(event_type: DeviceEventType) -> dict[str, Any]:
             event_type=token,
             base_version_id=_BASE_VERSION_ID,
             **_fingerprint_columns("base"),
+            resulting_locator="notes/active.md",
         )
     if event_type in {DeviceEventType.RENAMED, DeviceEventType.MOVED}:
         return _base_row(
@@ -164,7 +165,13 @@ def row_for(event_type: DeviceEventType) -> dict[str, Any]:
 def assert_event_shape(hydrated: Any) -> None:
     """Assert the operation-shaped operand contract of one hydrated event."""
 
-    if hydrated.event_type in _EVENT_TYPES_WITH_RESULTING_LOCATOR:
+    if hydrated.event_type is DeviceEventType.UPDATED:
+        # The pull wire always carries the update's content target: the
+        # locator active at the event's own sequence (never the prior
+        # locator — an update changes no locator).
+        assert hydrated.resulting_locator is not None
+        assert hydrated.prior_locator is None
+    elif hydrated.event_type in _EVENT_TYPES_WITH_RESULTING_LOCATOR:
         assert hydrated.resulting_locator is not None
     else:
         assert hydrated.resulting_locator is None
@@ -195,6 +202,37 @@ def test_hydrates_operation_shaped_event(event_type: DeviceEventType) -> None:
         assert hydrated.current_version_id == _CURRENT_VERSION_ID
         assert hydrated.base_fingerprint is not None
         assert hydrated.current_fingerprint is not None
+        assert hydrated.resulting_locator is not None
+        assert hydrated.resulting_locator.value == "notes/active.md"
+
+
+def test_update_hydrates_the_active_locator_not_a_prior_locator() -> None:
+    """The update's resulting locator is its content target (spec 7.1).
+
+    An update changes no locator, so the prior operand stays null and the
+    resulting operand carries the source's locator active at the event's
+    own sequence — the operand the Task 10 applier stages the replacement
+    at.
+    """
+
+    hydrated = hydrate_device_event(row_for(DeviceEventType.UPDATED))
+    assert hydrated.resulting_locator is not None
+    assert hydrated.resulting_locator.value == "notes/active.md"
+    assert hydrated.prior_locator is None
+
+
+def test_update_without_a_resolvable_active_locator_fails_integrity() -> None:
+    """An update whose active locator cannot be resolved is never null-passed.
+
+    The lifecycle invariant guarantees every live source holds a locator
+    open, so a locator-less update row is an impossible hydrated shape:
+    the closed integrity failure, never a silent skip or a null operand
+    that would reject every remote content edit downstream.
+    """
+
+    with pytest.raises(DeviceSyncError) as raised:
+        hydrate_device_event(row_for(DeviceEventType.UPDATED) | {"resulting_locator": None})
+    assert raised.value.code is DeviceSyncErrorCode.EVENT_INTEGRITY_FAILED
 
 
 def test_hydrated_events_never_leak_private_operands_in_repr() -> None:
@@ -386,8 +424,14 @@ def test_page_statement_is_credential_scoped_bounded_and_ordered() -> None:
         "base_version",
         "current_object",
         "base_object",
+        "active_locator",
     ):
         assert f"AS {alias}" in text, f"missing hydration join alias {alias}"
+    # An update's resulting locator hydrates from the locator open at the
+    # event's own sequence, gated on the update token so every other event
+    # type keeps its opened-locator operand untouched.
+    assert "CASE WHEN (knowledge.sync_events.event_type = 'update')" in text
+    assert "LATERAL" in text
     # No literal credential-scope value appears in the compiled SQL.
     assert str(_WORKSPACE_ID) not in text
 

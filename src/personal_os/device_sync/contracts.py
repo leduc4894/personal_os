@@ -118,6 +118,15 @@ _EVENT_TYPES_WITH_RESULTING_LOCATOR: Final[frozenset[DeviceEventType]] = frozens
     }
 )
 
+#: The event types whose operation shape forbids the resulting locator
+#: (spec 7.1: delete). An update MAY carry it: the pull wire always
+#: hydrates the locator active at the event's own sequence as the update's
+#: content target, so the contract stays permissive here while the store
+#: treats an unresolvable active locator as the closed integrity failure.
+_EVENT_TYPES_FORBIDDING_RESULTING_LOCATOR: Final[frozenset[DeviceEventType]] = frozenset(
+    {DeviceEventType.DELETED}
+)
+
 #: The event types whose operation shape requires the prior locator
 #: (spec 7.1: rename, move and delete).
 _EVENT_TYPES_WITH_PRIOR_LOCATOR: Final[frozenset[DeviceEventType]] = frozenset(
@@ -192,7 +201,10 @@ class DeviceSyncEvent:
     Field requirements follow spec 7.1 exactly: create, rename, move and
     restore carry the resulting locator; rename, move and delete carry the
     prior locator; delete and restore carry the exact tombstone ID; no other
-    type carries a tombstone operand. Locators and fingerprints are private
+    type carries a tombstone operand. An update MAY carry the resulting
+    locator — the pull wire always populates it with the locator active at
+    the event's own sequence — while its prior locator stays null (an
+    update changes no locator). Locators and fingerprints are private
     values and never render outside a redacted ``repr``.
     """
 
@@ -230,7 +242,10 @@ class DeviceSyncEvent:
         if self.event_type in _EVENT_TYPES_WITH_RESULTING_LOCATOR:
             if self.resulting_locator is None:
                 raise ValueError(f"{phrase} event shape invalid: resulting locator is required")
-        elif self.resulting_locator is not None:
+        elif (
+            self.event_type in _EVENT_TYPES_FORBIDDING_RESULTING_LOCATOR
+            and self.resulting_locator is not None
+        ):
             raise ValueError(f"{phrase} event shape invalid: resulting locator is forbidden")
         if self.event_type in _EVENT_TYPES_WITH_PRIOR_LOCATOR:
             if self.prior_locator is None:

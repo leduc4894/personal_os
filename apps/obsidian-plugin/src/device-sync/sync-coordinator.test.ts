@@ -386,7 +386,10 @@ function eventOf(overrides: Partial<DeviceSyncEvent> & { eventSequence: number }
     currentVersionId: null,
     baseFingerprint: null,
     currentFingerprint: FINGERPRINT_B,
-    priorLocator: "notes/a.md",
+    // The REAL wire shape: an update carries its resulting locator (the
+    // path active at the event's sequence) and never a prior locator —
+    // an update changes no locator.
+    priorLocator: null,
     resultingLocator: "notes/a.md",
     tombstoneId: null,
     committedAt: "2026-01-01T00:00:00Z",
@@ -428,6 +431,8 @@ interface Harness {
     readonly phases: readonly string[];
     readonly maximumConcurrentMutations: number;
   };
+  /** Every locator the self-origin evidence read was keyed on, in order. */
+  readonly evidenceLocatorQueries: readonly string[];
   readonly discardExpiredManifestRunCalls: () => number;
 }
 
@@ -443,6 +448,7 @@ function createHarness(options: {
   const reconciler = new FakeReconciler(repository);
   const outbound = new FakeOutboundLane();
   const diagnostics = new RecordingDiagnostics();
+  const evidenceLocatorQueries: string[] = [];
   let discardCalls = 0;
 
   // The phase probe wraps every mutating foreground phase so the tests can
@@ -489,7 +495,10 @@ function createHarness(options: {
     isJournalReconcileRequired: () => options.isJournalReconcileRequired ?? false,
     resolveOwnDeviceId: () => options.ownDeviceId ?? null,
     outboundEvidence: {
-      readCommittedOutboundRowByLocator: () => options.committedRowByLocator ?? null,
+      readCommittedOutboundRowByLocator: (normalizedLocator: string) => {
+        evidenceLocatorQueries.push(normalizedLocator);
+        return options.committedRowByLocator ?? null;
+      },
     },
     discardExpiredManifestRun: () => {
       discardCalls += 1;
@@ -518,6 +527,7 @@ function createHarness(options: {
         return probeState.maximumConcurrentMutations;
       },
     },
+    evidenceLocatorQueries,
     discardExpiredManifestRunCalls: () => discardCalls,
   };
 }
@@ -913,6 +923,70 @@ describe("SyncCoordinator self-origin and acknowledgement (task 12 step 3)", () 
     ]);
     expect(harness.repository.state.appliedSequence).toBe(1);
     expect(harness.repository.state.acknowledgedSequence).toBe(1);
+    // The update's evidence read keys on its resulting locator — the wire's
+    // only locator operand for an update (the dominant own-upload echo).
+    expect(harness.evidenceLocatorQueries).toEqual(["notes/a.md"]);
+  });
+
+  it("proves a self-origin delete through its prior locator", async () => {
+    // Fix (task 12b, critical 1 blocker B): the deleted branch keyed the
+    // resulting locator, but a delete carries only its prior locator — the
+    // exact-evidence no-op stayed dead for own deletes.
+    const harness = createHarness({
+      ownDeviceId: OWN_DEVICE_ID,
+      committedRowByLocator: {
+        sourceId: SOURCE_ID,
+        baseVersionId: COMMITTED_VERSION_ID,
+        lastCommittedFingerprint: FINGERPRINT_B,
+      },
+    });
+    harness.api.pages.push(
+      pageOf([
+        eventOf({
+          eventSequence: 1,
+          operation: "deleted",
+          originDeviceId: OWN_DEVICE_ID,
+          currentVersionId: COMMITTED_VERSION_ID,
+          currentFingerprint: FINGERPRINT_B,
+          priorLocator: "notes/gone.md",
+          resultingLocator: null,
+          tombstoneId: "55555555-5555-4555-8555-555555555555",
+        }),
+      ]),
+    );
+    harness.coordinator.request("pull_interval");
+    await flushMicrotasks();
+    expect(harness.applier.appliedEvents).toEqual([]);
+    expect(harness.repository.terminalizedEvents).toEqual([
+      { eventSequence: 1, outcome: "self_origin_no_op", reason: null },
+    ]);
+    expect(harness.repository.state.acknowledgedSequence).toBe(1);
+    expect(harness.evidenceLocatorQueries).toEqual(["notes/gone.md"]);
+  });
+
+  it("applies a deleted event whose evidence does not match the prior locator row", async () => {
+    const harness = createHarness({
+      ownDeviceId: OWN_DEVICE_ID,
+      committedRowByLocator: null,
+    });
+    harness.api.pages.push(
+      pageOf([
+        eventOf({
+          eventSequence: 1,
+          operation: "deleted",
+          originDeviceId: OWN_DEVICE_ID,
+          currentVersionId: COMMITTED_VERSION_ID,
+          currentFingerprint: FINGERPRINT_B,
+          priorLocator: "notes/gone.md",
+          resultingLocator: null,
+          tombstoneId: "55555555-5555-4555-8555-555555555555",
+        }),
+      ]),
+    );
+    harness.coordinator.request("pull_interval");
+    await flushMicrotasks();
+    expect(harness.applier.appliedEvents.map((event) => event.eventSequence)).toEqual([1]);
+    expect(harness.repository.terminalizedEvents).toEqual([]);
   });
 
   it("requires every evidence member: a diverging version still applies", async () => {
