@@ -241,6 +241,14 @@ function normalizeSettings(loaded: unknown): DeviceAuthenticationSettings {
     UUID_PATTERN.test(candidate["client_instance_id"])
       ? candidate["client_instance_id"]
       : null;
+  // Fix round 1 (blocker A): the server-minted device id the grant
+  // exchange delivered. It round-trips behind the same UUID gate so a
+  // restart keeps it; null before the first completed exchange (and then
+  // the device-sync self-origin check simply never suppresses).
+  const loadedServerDeviceId =
+    typeof candidate["device_id"] === "string" && UUID_PATTERN.test(candidate["device_id"])
+      ? candidate["device_id"]
+      : null;
   return {
     server_origin: typeof candidate["server_origin"] === "string" ? candidate["server_origin"] : "",
     device_name:
@@ -248,6 +256,7 @@ function normalizeSettings(loaded: unknown): DeviceAuthenticationSettings {
         ? validateDeviceName(candidate["device_name"]) ?? DEFAULT_DEVICE_NAME
         : DEFAULT_DEVICE_NAME,
     client_instance_id: loadedClientId ?? crypto.randomUUID(),
+    device_id: loadedServerDeviceId,
     secret_record_name: loadedRecordName === null ? null : DEVICE_CREDENTIAL_RECORD_NAME,
     pending_grant: normalizePendingGrant(candidate["pending_grant"]),
   };
@@ -258,6 +267,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     server_origin: "",
     device_name: DEFAULT_DEVICE_NAME,
     client_instance_id: "",
+    device_id: null,
     secret_record_name: null,
     pending_grant: null,
   };
@@ -377,6 +387,14 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       nowEpochMs: () => Date.now(),
       onStateChange: (state, detail) => this.#setConnectionState(state, detail),
       onExchange: async (exchange) => {
+        // Fix round 1 (blocker A): persist the server-minted device id
+        // (uuid7) the exchange delivered BEFORE the session adopts the
+        // credential — it is the ONLY identity the device-event
+        // origin_device_id namespace uses, and persisting it here makes
+        // the self-origin evidence survive restarts. The session itself
+        // keeps only the memory-only access credential.
+        this.#settings.device_id = exchange.device_id;
+        await this.#persistSettings();
         session.adoptExchange(exchange);
         // Initial policy trust exists ONLY immediately after the
         // authenticated onboarding exchange (spec 13.2). The controller
@@ -888,13 +906,13 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         // The active manifest run's action progress feeds the pending
         // action count of the closed status projection.
         readManifestActionProgress: () => repository.readManifestActionProgress(),
-        // The plugin's stable instance identity (presented at device
-        // authorization) is the only device identity the plugin holds.
-        // When the server's origin device namespace differs, the
-        // self-origin check simply never fires and every pulled event
-        // walks the full crash-safe apply machine — correct by
-        // construction, never a silent suppression.
-        resolveOwnDeviceId: () => this.#settings.client_instance_id,
+        // The server-minted device id (uuid7, persisted at grant
+        // exchange) is the identity the device-event origin_device_id
+        // namespace carries; the client_instance_id is a disjoint
+        // client-minted namespace that can never match. Null before the
+        // first exchange: the self-origin check then never suppresses and
+        // every pulled event walks the full crash-safe apply machine.
+        resolveOwnDeviceId: () => this.#settings.device_id,
         outboundEvidence: {
           readCommittedOutboundRowByLocator: (normalizedLocator) =>
             repository.readLocalFileByPath(normalizedLocator),

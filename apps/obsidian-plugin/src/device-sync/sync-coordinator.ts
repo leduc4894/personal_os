@@ -31,11 +31,13 @@
  * BEFORE the next pull of the same cycle chain.
  *
  * The coordinator catches only typed failures: every phase reports its own
- * closed observation through the Task 7 diagnostics facade, and the two
- * repository calls the coordinator itself owns (the self-origin settle and
- * the local acknowledgement record) report their exact stage and reason
- * here. Failures schedule a retry or settle into the readable repair
- * state of the status projection — never a silent stop.
+ * closed observation through the Task 7 diagnostics facade, and the
+ * repository calls and state reads the coordinator itself owns report
+ * their exact stage — the acknowledgement path (the owed-debt state read
+ * and the acknowledgement record) reports `acknowledge`, the self-origin
+ * settle reports `local_commit`, and every other bookkeeping state read
+ * reports `pull`. Failures schedule a retry or settle into the readable
+ * repair state of the status projection — never a silent stop.
  *
  * Like the other device-sync modules this file imports no Node.js,
  * Electron, Obsidian or `obsidian` API at module load time, so it stays
@@ -54,6 +56,7 @@ import type {
   DeviceSyncEvent,
 } from "./api";
 import type {
+  CursorFailureStage,
   DeviceSyncDiagnostics,
   DeviceSyncReason,
   DeviceSyncRepository,
@@ -270,15 +273,17 @@ export function createSyncCoordinator(options: SyncCoordinatorOptions): SyncCoor
   }
 
   /**
-   * Arm the foreground pull tick if it is not already armed. The tick
-   * anchors at its own scheduled time — after a firing the next tick sits
-   * at `last tick + 30 s`, so a clock that moved ahead (a fast test clock,
-   * a late foreground callback) catches up instead of drifting — while an
-   * armed backoff (a retryable failure) or `stop()` cancels the cadence
-   * and re-anchors it at the present when it resumes.
+   * Arm the foreground pull tick if it is not already armed and no retry
+   * backoff owns the schedule — an armed backoff (a retryable failure)
+   * PAUSED the cadence, and a mid-outage trigger (a local commit) must
+   * not silently resume it; the first successful cycle re-arms the tick
+   * anchored at the present. The tick anchors at its own scheduled time —
+   * after a firing the next tick sits at `last tick + 30 s`, so a clock
+   * that moved ahead (a fast test clock, a late foreground callback)
+   * catches up instead of drifting.
    */
   function armCadenceTimer(): void {
-    if (isStopped || cadenceCanceller !== null) {
+    if (isStopped || cadenceCanceller !== null || retryCanceller !== null) {
       return;
     }
     const nowEpoch = nowEpochMs();
@@ -320,12 +325,19 @@ export function createSyncCoordinator(options: SyncCoordinatorOptions): SyncCoor
 
   // --- the cycle -----------------------------------------------------------------------------------
 
-  function readState(): DeviceSyncState {
+  /**
+   * Read the durable state for one phase of the cycle. A failing read
+   * reports its closed observation at the cursor stage OF THE PHASE THAT
+   * READ IT: the acknowledgement path reports `acknowledge`, every other
+   * bookkeeping read (repair gating, drain eligibility, event settling)
+   * reports `pull` — the cursor bookkeeping those reads serve.
+   */
+  function readState(stage: CursorFailureStage): DeviceSyncState {
     try {
       return repository.readState();
     } catch (error) {
       const reason = storeReasonOf(error) ?? "server_error";
-      diagnostics.cursorFailure("pull", reason);
+      diagnostics.cursorFailure(stage, reason);
       throw new DeviceSyncApiError(reason, false);
     }
   }
@@ -336,7 +348,7 @@ export function createSyncCoordinator(options: SyncCoordinatorOptions): SyncCoor
    * debt is retried here BEFORE the next pull.
    */
   async function acknowledgeOwedCursor(): Promise<void> {
-    const state = readState();
+    const state = readState("acknowledge");
     if (state.appliedSequence <= state.acknowledgedSequence) {
       return;
     }
@@ -422,7 +434,7 @@ export function createSyncCoordinator(options: SyncCoordinatorOptions): SyncCoor
    * repair request (or the barrier clearing elsewhere) retries it.
    */
   async function runRepairIfRequired(): Promise<"none" | "settled" | "retry"> {
-    const state = readState();
+    const state = readState("pull");
     const isRepairOwed =
       state.barrierGeneration !== null ||
       state.activeManifestRunId !== null ||
@@ -485,7 +497,7 @@ export function createSyncCoordinator(options: SyncCoordinatorOptions): SyncCoor
         // the reconciler starts a fresh checkpoint-bound run under the
         // SAME barrier.
         hasExpiredSuspension = false;
-        const suspendedState = readState();
+        const suspendedState = readState("pull");
         if (
           suspendedState.activeManifestRunId !== null &&
           options.discardExpiredManifestRun !== undefined
@@ -504,7 +516,7 @@ export function createSyncCoordinator(options: SyncCoordinatorOptions): SyncCoor
       // Phase: eligible outbound drain — dispatchable only outside an
       // active repair (a surviving barrier keeps every outbound row
       // frozen; the reconciliation planner owns their uploads).
-      const postRepairState = readState();
+      const postRepairState = readState("pull");
       if (
         postRepairState.barrierGeneration === null &&
         postRepairState.activeManifestRunId === null
@@ -517,7 +529,7 @@ export function createSyncCoordinator(options: SyncCoordinatorOptions): SyncCoor
       // Phase: ONE inbound page.
       const page = await api.pullEvents();
       for (const event of page.events) {
-        const state = readState();
+        const state = readState("pull");
         if (event.eventSequence <= state.appliedSequence) {
           // An already-settled redelivery is an idempotent skip.
           continue;

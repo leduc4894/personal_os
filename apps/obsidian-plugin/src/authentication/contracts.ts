@@ -398,6 +398,15 @@ export interface DeviceAuthenticationSettings {
   server_origin: string;
   device_name: string;
   client_instance_id: string;
+  /**
+   * The server-minted device id (uuid7) the grant exchange assigned to
+   * this plugin instance (fix round 1, blocker A): the ONLY identity the
+   * device-event `origin_device_id` namespace uses, so the device-sync
+   * coordinator's self-origin evidence binds it — never
+   * `client_instance_id`, a disjoint client-minted v4 namespace. Null
+   * before the first completed exchange.
+   */
+  device_id: string | null;
   secret_record_name: string | null;
   pending_grant: PendingGrantSettings | null;
 }

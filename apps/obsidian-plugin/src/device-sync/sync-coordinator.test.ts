@@ -139,8 +139,22 @@ class FakeDeviceSyncRepository implements DeviceSyncRepository {
   readonly acknowledgedSequences: number[] = [];
   failTerminalizeWithReason: string | null = null;
   failAcknowledgeWithReason: string | null = null;
+  /**
+   * Fails the NEXT state read that sees an owed acknowledgement debt
+   * (applied > acknowledged) — exactly the reads the coordinator's
+   * acknowledgement path performs.
+   */
+  failReadStateWhenAckOwedWithReason: string | null = null;
 
   readState(): DeviceSyncState {
+    if (
+      this.failReadStateWhenAckOwedWithReason !== null &&
+      this.state.appliedSequence > this.state.acknowledgedSequence
+    ) {
+      const reason = this.failReadStateWhenAckOwedWithReason;
+      this.failReadStateWhenAckOwedWithReason = null;
+      throw Object.assign(new Error("store"), { reason });
+    }
     return { ...this.state };
   }
 
@@ -759,6 +773,45 @@ describe("SyncCoordinator cadence, backoff and suspension (task 12 step 2)", () 
     expect(harness.api.pullCount).toBe(2);
   });
 
+  it("keeps the pull cadence paused while a backoff owns the retry schedule (fix round 1, minor 3)", async () => {
+    const harness = createHarness();
+    harness.coordinator.request("startup");
+    await flushMicrotasks();
+    expect(harness.api.pullCount).toBe(1);
+    harness.api.pullError = new DeviceSyncApiError("network_offline", true);
+    harness.scheduler.advance(DEVICE_SYNC_PULL_INTERVAL_MS);
+    await flushMicrotasks();
+    // The failed cycle paused the cadence: only the 1 s backoff retry is
+    // outstanding.
+    expect(harness.api.pullCount).toBe(2);
+    expect(harness.scheduler.outstandingTimerCount).toBe(1);
+    // A local commit arriving during the outage must NOT re-arm the
+    // paused pull tick — the backoff owns the retry schedule.
+    harness.coordinator.request("local_commit");
+    expect(harness.scheduler.outstandingTimerCount).toBe(1);
+    // The commit's own cycle fails too (the outage persists), so the
+    // backoff doubles and stays the only timer.
+    await flushMicrotasks();
+    expect(harness.api.pullCount).toBe(3);
+    expect(harness.scheduler.outstandingTimerCount).toBe(1);
+    harness.scheduler.advance(2_000);
+    await flushMicrotasks();
+    expect(harness.api.pullCount).toBe(4);
+    // The first success resumes the cadence anchored at the success, and
+    // exactly one pull tick exists again.
+    harness.api.pullError = null;
+    harness.scheduler.advance(4_000);
+    await flushMicrotasks();
+    expect(harness.api.pullCount).toBe(5);
+    expect(harness.scheduler.outstandingTimerCount).toBe(1);
+    harness.scheduler.advance(DEVICE_SYNC_PULL_INTERVAL_MS - 1);
+    await flushMicrotasks();
+    expect(harness.api.pullCount).toBe(5);
+    harness.scheduler.advance(1);
+    await flushMicrotasks();
+    expect(harness.api.pullCount).toBe(6);
+  });
+
   it("stops cleanly on unload: timers cancel and the running cycle settles", async () => {
     const harness = createHarness();
     const gate = createDeferred();
@@ -910,6 +963,36 @@ describe("SyncCoordinator self-origin and acknowledgement (task 12 step 3)", () 
     expect(harness.applier.appliedEvents.map((event) => event.eventSequence)).toEqual([1]);
   });
 
+  it("never matches a client-instance uuid against the server's uuid7 device origin", async () => {
+    // Fix round 1 (blocker A): the server mints origin_device_id as a
+    // uuid7 at grant exchange while client_instance_id is a client-minted
+    // v4 uuid — two disjoint namespaces. Exact evidence alone must never
+    // close the row across them.
+    const harness = createHarness({
+      ownDeviceId: "2f0c7d1e-6b3a-4c8e-9d2f-1a2b3c4d5e6f",
+      committedRowByLocator: {
+        sourceId: SOURCE_ID,
+        baseVersionId: COMMITTED_VERSION_ID,
+        lastCommittedFingerprint: FINGERPRINT_B,
+      },
+    });
+    const serverMintedDeviceId = "018f6b2e-7a1e-7abc-9def-0123456789ab";
+    harness.api.pages.push(
+      pageOf([
+        eventOf({
+          eventSequence: 1,
+          originDeviceId: serverMintedDeviceId,
+          currentVersionId: COMMITTED_VERSION_ID,
+          currentFingerprint: FINGERPRINT_B,
+        }),
+      ]),
+    );
+    harness.coordinator.request("pull_interval");
+    await flushMicrotasks();
+    expect(harness.applier.appliedEvents.map((event) => event.eventSequence)).toEqual([1]);
+    expect(harness.repository.terminalizedEvents).toEqual([]);
+  });
+
   it("keeps a lost acknowledgement owed and retries it before another pull", async () => {
     const harness = createHarness();
     harness.api.acknowledgeError = new DeviceSyncApiError("network_offline", true);
@@ -950,6 +1033,31 @@ describe("SyncCoordinator self-origin and acknowledgement (task 12 step 3)", () 
       stage: "acknowledge",
       reason: "journal_mutation_failed",
     });
+  });
+
+  it("reports the closed acknowledge stage when the ack-path state read fails (fix round 1, minor 5)", async () => {
+    const harness = createHarness();
+    harness.repository.failReadStateWhenAckOwedWithReason = "journal_query_failed";
+    harness.api.pages.push(pageOf([eventOf({ eventSequence: 1 })]));
+    harness.coordinator.request("pull_interval");
+    await flushMicrotasks();
+    // The failing read belongs to the acknowledgement path (it sees the
+    // owed debt after the apply), so its observation names the
+    // acknowledge stage — never the pull stage.
+    expect(harness.diagnostics.observations).toContainEqual({
+      lane: "cursor",
+      stage: "acknowledge",
+      reason: "journal_query_failed",
+    });
+    expect(
+      harness.diagnostics.observations.some(
+        (observation) =>
+          observation.lane === "cursor" && observation.reason === "journal_query_failed" && observation.stage !== "acknowledge",
+      ),
+    ).toBe(false);
+    // The store error is non-retryable: no backoff timer joins the
+    // cadence after the failed cycle.
+    expect(harness.scheduler.outstandingTimerCount).toBe(1);
   });
 
   it("reports the closed local-commit stage when a self-origin settle fails", async () => {

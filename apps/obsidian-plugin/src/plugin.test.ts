@@ -978,6 +978,36 @@ describe("Obsidian plugin composition root", () => {
     expect(repairCommandBody).toContain('#requestDeviceSyncCycle("explicit_repair")');
   });
 
+  it("persists the exchanged server device id and feeds it to the coordinator (fix round 1, blocker A)", () => {
+    // The server mints origin_device_id as a uuid7 at grant exchange
+    // (device_tokens.py) while client_instance_id is a client-minted v4
+    // uuid — two disjoint namespaces. The self-origin evidence check must
+    // bind the SERVER-minted device id the exchange delivers, persist it
+    // so it survives restarts, and never fall back to client_instance_id.
+    const exchangeIndex = pluginSource.indexOf("onExchange: async (exchange) => {");
+    expect(exchangeIndex).toBeGreaterThanOrEqual(0);
+    const exchangeBody = pluginSource.slice(exchangeIndex, exchangeIndex + 600);
+    expect(exchangeBody).toContain("this.#settings.device_id = exchange.device_id");
+    // The persist lands inside the awaited exchange handler, so the id is
+    // durable before the Connected state.
+    expect(exchangeBody).toContain("await this.#persistSettings()");
+    // The persisted id round-trips through the settings document: a
+    // restart re-parses it behind the same UUID gate as every identity.
+    const normalizeIndex = pluginSource.indexOf("function normalizeSettings(");
+    expect(normalizeIndex).toBeGreaterThanOrEqual(0);
+    const normalizeBody = pluginSource.slice(normalizeIndex, normalizeIndex + 1_600);
+    expect(normalizeBody).toContain('candidate["device_id"]');
+    // The coordinator's self-origin identity is the server device id —
+    // never the client_instance_id.
+    const coordinatorIndex = pluginSource.indexOf("createSyncCoordinator({");
+    expect(coordinatorIndex).toBeGreaterThanOrEqual(0);
+    const coordinatorBody = pluginSource.slice(coordinatorIndex, coordinatorIndex + 1_800);
+    expect(coordinatorBody).toContain("resolveOwnDeviceId: () => this.#settings.device_id");
+    expect(coordinatorBody).not.toContain(
+      "resolveOwnDeviceId: () => this.#settings.client_instance_id",
+    );
+  });
+
   it("carries the device-sync status onto the settings snapshot and the diagnostics export (task 12)", () => {
     const snapshotIndex = pluginSource.indexOf("getSnapshot: () => {");
     expect(snapshotIndex).toBeGreaterThanOrEqual(0);

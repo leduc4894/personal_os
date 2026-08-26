@@ -118,6 +118,7 @@ function createHarness(overrides: Partial<DeviceAuthenticationSettings> = {}): T
     server_origin: SERVER_ORIGIN,
     device_name: "Personal vault",
     client_instance_id: "11111111-1111-4111-8111-111111111111",
+    device_id: null,
     secret_record_name: null,
     pending_grant: null,
     ...overrides,

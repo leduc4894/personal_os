@@ -74,6 +74,7 @@ function createSessionHarness(
     server_origin: "https://vault.example.com",
     device_name: "Personal vault",
     client_instance_id: "11111111-1111-4111-8111-111111111111",
+    device_id: null,
     secret_record_name: initialRecord === null ? null : DEVICE_CREDENTIAL_RECORD_NAME,
     pending_grant: null,
   };

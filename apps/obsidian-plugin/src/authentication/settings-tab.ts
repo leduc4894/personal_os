@@ -291,7 +291,8 @@ function deviceSyncStatusDescription(status: DeviceSyncStatus | null): string {
 }
 
 /** The status line plus each blocker guidance line, joined in closed order. */
-function syncStatusDescription(snapshot: DeviceAuthenticationSnapshot): string {  const lines: string[] = [];
+function syncStatusDescription(snapshot: DeviceAuthenticationSnapshot): string {
+  const lines: string[] = [];
   if (snapshot.syncStatusText !== null) {
     lines.push(snapshot.syncStatusText);
   }
