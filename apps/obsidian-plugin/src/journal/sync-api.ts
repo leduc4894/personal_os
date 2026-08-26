@@ -117,18 +117,27 @@ export type SyncApiEnvelopeErrorCode =
  * being discarded. The code stays out of the static message; the diagnostics
  * trail boundary whitelists it against the declared runtime vocabulary
  * before it is ever recorded.
+ *
+ * `isCredentialAbsent` (trail v2 taxonomy, task 7) marks the ONE pre-contact
+ * login rejection: the resolved access credential was missing or empty, so
+ * the call failed BEFORE any transport was attempted. Callers classify that
+ * failure as `credential_failure` on the diagnostics trail instead of a
+ * wire failure; every mapped failure above keeps the flag false because an
+ * HTTP attempt actually reached the transport.
  */
 export class SyncApiError extends Error {
   readonly kind: SyncApiFailureKind;
   readonly canResumeClaimedOperation: boolean;
   readonly requestId: string | null;
   readonly wireErrorCode: string | null;
+  readonly isCredentialAbsent: boolean;
 
   constructor(
     kind: SyncApiFailureKind,
     canResumeClaimedOperation = false,
     requestId: string | null = null,
     wireErrorCode: string | null = null,
+    isCredentialAbsent = false,
   ) {
     super(`sync api failed: ${kind}`);
     this.name = "SyncApiError";
@@ -136,6 +145,7 @@ export class SyncApiError extends Error {
     this.canResumeClaimedOperation = canResumeClaimedOperation;
     this.requestId = requestId;
     this.wireErrorCode = wireErrorCode;
+    this.isCredentialAbsent = isCredentialAbsent;
   }
 }
 
@@ -144,8 +154,9 @@ function syncApiError(
   canResumeClaimedOperation = false,
   requestId: string | null = null,
   wireErrorCode: string | null = null,
+  isCredentialAbsent = false,
 ): SyncApiError {
-  return new SyncApiError(kind, canResumeClaimedOperation, requestId, wireErrorCode);
+  return new SyncApiError(kind, canResumeClaimedOperation, requestId, wireErrorCode, isCredentialAbsent);
 }
 
 // --- hand-mirrored wire shapes (spec 10.1, 10.3) --------------------------------------------------
@@ -349,7 +360,9 @@ export function createJournalSyncApi(options: JournalSyncApiOptions): JournalSyn
   function requireAccessToken(): string {
     const accessToken = getAccessToken();
     if (accessToken === null || accessToken.length === 0) {
-      throw syncApiError("login_required");
+      // Pre-contact rejection: no transport was attempted, so the callers
+      // classify this as credential_failure on the trail, not wire_failure.
+      throw syncApiError("login_required", false, null, null, true);
     }
     return accessToken;
   }

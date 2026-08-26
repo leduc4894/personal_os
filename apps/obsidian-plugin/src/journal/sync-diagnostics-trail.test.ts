@@ -22,6 +22,7 @@ import {
   MAX_SYNC_DIAGNOSTICS_TRAIL_TOKENS_PER_ENTRY,
   SYNC_COMPOSITION_READ_FAILURE_TOKENS,
   SYNC_DIAGNOSTIC_KINDS,
+  SYNC_DIAGNOSTICS_TRAIL_CONTRACT,
   SYNC_DIAGNOSTICS_TRAIL_FILE_NAME,
   SYNC_PARK_SITE_TOKENS,
   SYNC_SELF_CHECK_VERDICT_TOKENS,
@@ -267,13 +268,178 @@ describe("sync diagnostics trail sidecar persistence", () => {
     const store = new FakeTrailFileStore();
     store.files.set(SYNC_DIAGNOSTICS_TRAIL_FILE_NAME, new ArrayBuffer(4));
     store.accessedFileNames.length = 0;
-    const readBinary = store.readBinary.bind(store);
     store.readBinary = async () => {
       throw new Error("adapter failure");
     };
-    void readBinary;
     const trail = await createLoadedTrail(store);
     expect(trail.readEntries().map((entry) => entry.kind)).toEqual(["trail_reset"]);
+  });
+});
+
+// --- the trail contract v2 (device cursor and manifest reconciliation task 7) --------------------------
+
+/** One well-formed v1 sidecar: two known entries, nothing foreign. */
+const V1_TRAIL_DOCUMENT = JSON.stringify({
+  contract: "obsidian_sync_diagnostics_trail/v1",
+  entries: [
+    { kind: "pass_outcome", at_epoch_ms: 1_784_000_000_000, tokens: ["completed"] },
+    {
+      kind: "wire_failure",
+      at_epoch_ms: 1_784_000_000_001,
+      tokens: ["server_error", { request_id: REQUEST_ID }],
+    },
+  ],
+});
+
+const V1_FIRST_ENTRY = {
+  kind: "pass_outcome",
+  atEpochMs: 1_784_000_000_000,
+  tokens: ["completed"],
+} as const;
+
+/** Seed one fake store with a raw sidecar body. */
+function seededTrailStore(sidecarBody: string): FakeTrailFileStore {
+  const store = new FakeTrailFileStore();
+  store.files.set(
+    SYNC_DIAGNOSTICS_TRAIL_FILE_NAME,
+    new TextEncoder().encode(sidecarBody).buffer as ArrayBuffer,
+  );
+  return store;
+}
+
+/** Parse the persisted sidecar record of one fake store. */
+function parsePersisted(store: FakeTrailFileStore): { contract: string; entries: unknown[] } {
+  const bytes = store.files.get(SYNC_DIAGNOSTICS_TRAIL_FILE_NAME);
+  if (bytes === undefined) {
+    throw new Error("expected a persisted trail sidecar");
+  }
+  return JSON.parse(new TextDecoder().decode(bytes)) as { contract: string; entries: unknown[] };
+}
+
+describe("sync diagnostics trail contract v2 (device cursor and manifest reconciliation task 7)", () => {
+  it("pins the v2 contract identifier", () => {
+    expect(SYNC_DIAGNOSTICS_TRAIL_CONTRACT).toBe("obsidian_sync_diagnostics_trail/v2");
+  });
+
+  it("loads v1 and rewrites known entries as v2", async () => {
+    const store = seededTrailStore(V1_TRAIL_DOCUMENT);
+    const trail = createSyncDiagnosticsTrail({ fileStore: store });
+    await trail.load();
+    await trail.append({ kind: "cursor_failure", tokens: ["pull", "device_cursor_gap"] });
+    expect(parsePersisted(store).contract).toBe("obsidian_sync_diagnostics_trail/v2");
+    expect(trail.readEntries()[0]).toEqual(V1_FIRST_ENTRY);
+  });
+
+  it("keeps every loaded v1 entry losslessly through the v2 rewrite", async () => {
+    const store = seededTrailStore(V1_TRAIL_DOCUMENT);
+    const trail = await createLoadedTrail(store);
+    await trail.append({ kind: "credential_failure", tokens: ["access_missing", "login_required"] });
+    const reloaded = await createLoadedTrail(store);
+    // The v1 wire entry (closed kind, closed token, gated request id) and
+    // the appended v2 entry survive byte-for-byte at the record level.
+    expect(reloaded.readEntries()).toEqual([
+      { kind: "pass_outcome", atEpochMs: 1_784_000_000_000, tokens: ["completed"] },
+      {
+        kind: "wire_failure",
+        atEpochMs: 1_784_000_000_001,
+        tokens: ["server_error", { requestId: REQUEST_ID }],
+      },
+      {
+        kind: "credential_failure",
+        atEpochMs: 1_784_000_000_000,
+        tokens: ["access_missing", "login_required"],
+      },
+    ]);
+  });
+
+  it("admits the five new kinds into the closed kind vocabulary", () => {
+    expect(SYNC_DIAGNOSTIC_KINDS).toEqual([
+      "wire_failure",
+      "pass_outcome",
+      "journal_failure",
+      "publish_failure",
+      "trail_reset",
+      "self_check",
+      "startup_failure",
+      "credential_failure",
+      "cursor_failure",
+      "apply_failure",
+      "reconcile_failure",
+      "composition_read_failure",
+    ]);
+  });
+
+  it("persists and reloads every new kind with its stage and reason tokens", async () => {
+    const store = new FakeTrailFileStore();
+    const trail = await createLoadedTrail(store);
+    await trail.append({ kind: "cursor_failure", tokens: ["acknowledge", "device_cursor_ack_ahead"] });
+    await trail.append({
+      kind: "apply_failure",
+      tokens: ["vault_mutation", "device_apply_vault_failed"],
+    });
+    await trail.append({
+      kind: "reconcile_failure",
+      tokens: ["finalize", "device_manifest_digest_mismatch"],
+    });
+    await trail.append({ kind: "credential_failure", tokens: ["refresh_failed", "login_required"] });
+    await trail.append({
+      kind: "composition_read_failure",
+      tokens: ["note_status_read", "note_status_read_failed"],
+    });
+    const reloaded = await createLoadedTrail(store);
+    expect(reloaded.readEntries().map((entry) => [entry.kind, ...entry.tokens])).toEqual([
+      ["cursor_failure", "acknowledge", "device_cursor_ack_ahead"],
+      ["apply_failure", "vault_mutation", "device_apply_vault_failed"],
+      ["reconcile_failure", "finalize", "device_manifest_digest_mismatch"],
+      ["credential_failure", "refresh_failed", "login_required"],
+      ["composition_read_failure", "note_status_read", "note_status_read_failed"],
+    ]);
+  });
+
+  it("admits every device-sync closed reason and stage as a trail token", async () => {
+    const store = new FakeTrailFileStore();
+    const trail = await createLoadedTrail(store);
+    // One member of each new family type-checks and round-trips as a token.
+    await trail.append({ kind: "cursor_failure", tokens: ["pull", "device_sync_dependency_unavailable"] });
+    await trail.append({
+      kind: "apply_failure",
+      tokens: ["verify_temp", "device_manifest_identity_ambiguous"],
+    });
+    await trail.append({
+      kind: "reconcile_failure",
+      tokens: ["page", "device_apply_recovery_ambiguous"],
+    });
+    const reloaded = await createLoadedTrail(store);
+    expect(reloaded.readEntries().map((entry) => [...entry.tokens])).toEqual([
+      ["pull", "device_sync_dependency_unavailable"],
+      ["verify_temp", "device_manifest_identity_ambiguous"],
+      ["page", "device_apply_recovery_ambiguous"],
+    ]);
+  });
+
+  it("resets a v2 sidecar carrying a foreign kind, stage or reason", async () => {
+    for (const foreignBody of [
+      JSON.stringify({
+        contract: "obsidian_sync_diagnostics_trail/v2",
+        entries: [{ kind: "cursor_failing", at_epoch_ms: 1, tokens: ["pull", "device_cursor_gap"] }],
+      }),
+      JSON.stringify({
+        contract: "obsidian_sync_diagnostics_trail/v2",
+        entries: [
+          { kind: "cursor_failure", at_epoch_ms: 1, tokens: ["preflight", "device_cursor_gap"] },
+        ],
+      }),
+      JSON.stringify({
+        contract: "obsidian_sync_diagnostics_trail/v2",
+        entries: [
+          { kind: "apply_failure", at_epoch_ms: 1, tokens: ["download", "device_made_up_reason"] },
+        ],
+      }),
+    ]) {
+      const store = seededTrailStore(foreignBody);
+      const trail = await createLoadedTrail(store);
+      expect(trail.readEntries().map((entry) => entry.kind)).toEqual(["trail_reset"]);
+    }
   });
 });
 

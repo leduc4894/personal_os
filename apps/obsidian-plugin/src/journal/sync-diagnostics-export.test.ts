@@ -246,7 +246,7 @@ describe("renderSyncDiagnosticsExportBlock", () => {
     expect(tailLine ?? "").not.toContain(" · · ");
   });
 
-  it("keeps only the last five tail entries and reports the shown count", () => {
+  it("keeps only the last five tail entries newest-first and reports the shown count", () => {
     const entries = Array.from({ length: 7 }, (_, index) =>
       trailEntry("pass_outcome", 1_784_000_000_000 + index * 1_000, ["completed"]),
     );
@@ -268,9 +268,13 @@ describe("renderSyncDiagnosticsExportBlock", () => {
       .split("\n")
       .filter((line) => line.includes("pass_outcome"));
     expect(renderedTailLines).toHaveLength(5);
-    // The newest five survive; the two oldest do not.
-    expect(renderedTailLines[0]).toContain(new Date(1_784_000_002_000).toISOString());
-    expect(renderedTailLines.at(-1)).toContain(new Date(1_784_000_006_000).toISOString());
+    // The newest five survive in NEWEST-FIRST element order (child six
+    // residual remediation): the newest line comes first, the oldest of the
+    // five last; the two evicted oldest entries appear nowhere.
+    expect(renderedTailLines[0]).toContain(new Date(1_784_000_006_000).toISOString());
+    expect(renderedTailLines.at(-1)).toContain(new Date(1_784_000_002_000).toISOString());
+    expect(block).not.toContain(new Date(1_784_000_000_000).toISOString());
+    expect(block).not.toContain(new Date(1_784_000_001_000).toISOString());
   });
 
   it("renders the no-journal and empty-trail states with closed text only", () => {
@@ -346,11 +350,13 @@ describe("renderSyncDiagnosticsTrailSection", () => {
     const lines = section.split("\n");
     expect(lines[0]).toBe("Stop reasons: journal_query_failed, server_error");
     expect(lines[1]).toBe("Trail entries: 42 · Append failures: 3");
+    // The tail renders NEWEST FIRST (child six residual remediation): the
+    // newer wire failure line precedes the older pass outcome line.
     expect(lines[2]).toBe(
-      `${new Date(1_784_000_000_000).toISOString()} · pass_outcome · completed`,
+      `${new Date(1_784_000_001_000).toISOString()} · wire_failure · server_error · request_id=${REQUEST_ID}`,
     );
     expect(lines[3]).toBe(
-      `${new Date(1_784_000_001_000).toISOString()} · wire_failure · server_error · request_id=${REQUEST_ID}`,
+      `${new Date(1_784_000_000_000).toISOString()} · pass_outcome · completed`,
     );
   });
 
@@ -415,6 +421,32 @@ describe("deriveSyncStopReasonTokens", () => {
       ]),
     ).toEqual([]);
     expect(deriveSyncStopReasonTokens([])).toEqual([]);
+  });
+
+  it("does not derive composition reads as sync stop reasons", () => {
+    expect(
+      deriveSyncStopReasonTokens([
+        trailEntry("composition_read_failure", 1, ["status_read", "status_read_failed"]),
+      ]),
+    ).toEqual([]);
+  });
+
+  it("does not derive a legacy v1 composition read token riding the journal_failure kind", () => {
+    // A v1 sidecar loaded losslessly keeps its historical journal_failure
+    // kind; the once-per-session settings reads must still never occupy the
+    // derived stop-reason line while sync runs fine.
+    expect(
+      deriveSyncStopReasonTokens([
+        trailEntry("journal_failure", 1, ["status_read_failed"]),
+        trailEntry("journal_failure", 2, ["note_status_read_failed"]),
+        trailEntry("journal_failure", 3, ["retry_schedule_read_failed"]),
+        trailEntry("journal_failure", 4, ["sync_status_read_failed"]),
+      ]),
+    ).toEqual([]);
+    // A genuine journal failure still derives.
+    expect(
+      deriveSyncStopReasonTokens([trailEntry("journal_failure", 5, ["journal_query_failed"])]),
+    ).toEqual(["journal_query_failed"]);
   });
 });
 

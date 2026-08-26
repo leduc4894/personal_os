@@ -51,6 +51,7 @@ import { LifecycleApiError, type LifecycleApiError as LifecycleApiErrorType } fr
 import type { LifecycleResult } from "./lifecycle-api";
 import { LifecycleRepository, type FrozenLifecycleEvent } from "./lifecycle-repository";
 import type { JournalRepository } from "./repository";
+import type { SyncDiagnosticsTrail } from "./sync-diagnostics-trail";
 
 // --- retry bounds (spec 8) --------------------------------------------------------------
 
@@ -145,6 +146,13 @@ export interface LifecycleDriverOptions {
   readonly randomJitter?: () => number;
   /** Clock for deadlines, retries and attempt timestamps; defaults to `Date.now`. */
   readonly nowEpochMs?: () => number;
+  /**
+   * The optional durable diagnostics trail (trail v2 taxonomy, task 7).
+   * The driver appends fire-and-forget and the trail never rejects, so a
+   * pre-contact credential absence is observed without ever blocking or
+   * breaking the dispatch lane.
+   */
+  readonly diagnosticTrail?: SyncDiagnosticsTrail | undefined;
 }
 
 // --- the driver --------------------------------------------------------------------------
@@ -162,6 +170,7 @@ export class LifecycleDriverImpl implements LifecycleDriver {
   readonly #createCorrelationId: () => string;
   readonly #randomJitter: () => number;
   readonly #nowEpochMs: () => number;
+  readonly #diagnosticTrail: SyncDiagnosticsTrail | null;
   readonly #disposeController: AbortController;
   #isDisposed = false;
 
@@ -172,6 +181,7 @@ export class LifecycleDriverImpl implements LifecycleDriver {
     this.#createCorrelationId = options.createCorrelationId ?? (() => crypto.randomUUID());
     this.#randomJitter = options.randomJitter ?? (() => Math.random());
     this.#nowEpochMs = options.nowEpochMs ?? (() => Date.now());
+    this.#diagnosticTrail = options.diagnosticTrail ?? null;
     this.#disposeController = new AbortController();
   }
 
@@ -286,6 +296,24 @@ export class LifecycleDriverImpl implements LifecycleDriver {
 
   // --- error mapping --------------------------------------------------------------------
 
+  /**
+   * Append ONE `credential_failure` trail entry when the login rejection
+   * happened BEFORE any transport contact — the adapter's marked
+   * missing-credential throw (trail v2 taxonomy, task 7). A
+   * server-answerable 401/403 records nothing here: contact happened, so
+   * the failure belongs to the wire taxonomy of the lanes that observed
+   * it. Fire-and-forget, never blocking the dispatch.
+   */
+  #recordCredentialAbsenceTrailEntry(apiError: LifecycleApiErrorType): void {
+    if (this.#diagnosticTrail === null || !apiError.isCredentialAbsent) {
+      return;
+    }
+    void this.#diagnosticTrail.append({
+      kind: "credential_failure",
+      tokens: ["access_missing", "login_required"],
+    });
+  }
+
   async #mapApiError(
     frozen: FrozenLifecycleEvent,
     error: unknown,
@@ -317,6 +345,7 @@ export class LifecycleDriverImpl implements LifecycleDriver {
         // `blocked_conflict` verdict is reserved for actual server-side
         // conflict responses and must never destroy a durable lifecycle
         // intent without any server contact.
+        this.#recordCredentialAbsenceTrailEntry(apiError);
         await this.#scheduleRetry(frozen.event.eventId, "login_required", correlationId);
         return "login_required";
       case "network_offline":

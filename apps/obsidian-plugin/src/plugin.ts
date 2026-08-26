@@ -700,6 +700,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           transport: createRequestUrlTransport((request) => requestUrl(request)),
           resolveAccessToken: () => session.accessCredential,
         }),
+        diagnosticTrail,
       });
       const queueDriver = new JournalQueueDriver({
         repository,
@@ -927,9 +928,11 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   }
 
   /**
-   * Record the pending-count read swallow (C1 P5): ONE `journal_failure`
-   * trail entry carrying the closed `status_read_failed` token, at most
-   * once per session — no per-render spam.
+   * Record the pending-count read swallow (C1 P5): ONE
+   * `composition_read_failure` trail entry carrying the closed
+   * `status_read` stage and the `status_read_failed` token, at most once
+   * per session — no per-render spam, and never a derived stop reason
+   * (trail v2 taxonomy, task 7).
    */
   #recordStatusReadFailureOnce(): void {
     if (this.#hasRecordedStatusReadFailure) {
@@ -938,14 +941,19 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     this.#hasRecordedStatusReadFailure = true;
     const trail = this.#diagnosticTrail;
     if (trail !== null) {
-      void trail.append({ kind: "journal_failure", tokens: ["status_read_failed"] });
+      void trail.append({
+        kind: "composition_read_failure",
+        tokens: ["status_read", "status_read_failed"],
+      });
     }
   }
 
   /**
-   * Record the note-status read swallow (C1 P5): ONE `journal_failure`
-   * trail entry carrying the closed `note_status_read_failed` token, at
-   * most once per session — no per-render spam.
+   * Record the note-status read swallow (C1 P5): ONE
+   * `composition_read_failure` trail entry carrying the closed
+   * `note_status_read` stage and the `note_status_read_failed` token, at
+   * most once per session — no per-render spam, and never a derived stop
+   * reason (trail v2 taxonomy, task 7).
    */
   #recordNoteStatusReadFailureOnce(): void {
     if (this.#hasRecordedNoteStatusReadFailure) {
@@ -954,7 +962,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     this.#hasRecordedNoteStatusReadFailure = true;
     const trail = this.#diagnosticTrail;
     if (trail !== null) {
-      void trail.append({ kind: "journal_failure", tokens: ["note_status_read_failed"] });
+      void trail.append({
+        kind: "composition_read_failure",
+        tokens: ["note_status_read", "note_status_read_failed"],
+      });
     }
   }
 
@@ -963,7 +974,13 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       return;
     }
     this.#hasReportedRetryScheduleReadFailure = true;
-    this.#journalFailureReporter?.reportJournalFailure("retry_schedule_read_failed");
+    const trail = this.#diagnosticTrail;
+    if (trail !== null) {
+      void trail.append({
+        kind: "composition_read_failure",
+        tokens: ["retry_schedule_read", "retry_schedule_read_failed"],
+      });
+    }
   }
 
   #reportSyncStatusReadFailureOnce(): void {
@@ -971,7 +988,13 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       return;
     }
     this.#hasReportedSyncStatusReadFailure = true;
-    this.#journalFailureReporter?.reportJournalFailure("sync_status_read_failed");
+    const trail = this.#diagnosticTrail;
+    if (trail !== null) {
+      void trail.append({
+        kind: "composition_read_failure",
+        tokens: ["sync_status_read", "sync_status_read_failed"],
+      });
+    }
   }
 
   /**

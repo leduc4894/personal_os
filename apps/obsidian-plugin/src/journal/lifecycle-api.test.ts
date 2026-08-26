@@ -499,6 +499,25 @@ describe("lifecycle-api response mapping", () => {
     ).rejects.toMatchObject({ kind: "login_required" });
   });
 
+  it("marks the pre-contact login rejection of an absent credential (trail v2 taxonomy)", async () => {
+    // A null resolved access credential rejects the commit BEFORE any HTTP
+    // request is issued; the thrown error carries the closed marker so the
+    // callers can record credential_failure instead of a wire failure.
+    const harness = createHarness({ accessToken: null });
+    await expect(
+      harness.api.commit(frozenEventFor(operandsFor()), new AbortController().signal),
+    ).rejects.toMatchObject({ kind: "login_required", isCredentialAbsent: true });
+    expect(harness.transport.requests).toHaveLength(0);
+    // A server-answerable 401 stays unmarked: contact happened.
+    const wireHarness = createHarness();
+    wireHarness.transport.install(async () =>
+      errorEnvelope(401, "access_token_expired", false),
+    );
+    await expect(
+      wireHarness.api.commit(frozenEventFor(operandsFor()), new AbortController().signal),
+    ).rejects.toMatchObject({ kind: "login_required", isCredentialAbsent: false });
+  });
+
   it("throws a typed network_offline error when the transport fails", async () => {
     const harness = createHarness();
     harness.transport.install(async () => {

@@ -79,12 +79,25 @@ export type LifecycleApiFailureKind =
 export class LifecycleApiError extends Error {
   readonly kind: LifecycleApiFailureKind;
   readonly label: JournalSafeErrorLabel | null;
+  /**
+   * Whether the login rejection happened BEFORE any transport contact —
+   * the resolved access credential was missing or empty (trail v2
+   * taxonomy, task 7). Callers classify a marked error as
+   * `credential_failure` on the diagnostics trail; a server-answerable
+   * 401/403 keeps the flag false because an HTTP attempt reached the wire.
+   */
+  readonly isCredentialAbsent: boolean;
 
-  constructor(kind: LifecycleApiFailureKind, label: JournalSafeErrorLabel | null = null) {
+  constructor(
+    kind: LifecycleApiFailureKind,
+    label: JournalSafeErrorLabel | null = null,
+    isCredentialAbsent = false,
+  ) {
     super(`lifecycle api failed: ${kind}`);
     this.name = "LifecycleApiError";
     this.kind = kind;
     this.label = label;
+    this.isCredentialAbsent = isCredentialAbsent;
   }
 }
 
@@ -397,7 +410,9 @@ function buildLifecycleApi(options: LifecycleApiOptions): LifecycleApi {
   function bearerHeaders(): Record<string, string> {
     const accessToken = resolveAccessToken();
     if (accessToken === null || accessToken.length === 0) {
-      throw new LifecycleApiError("login_required");
+      // Pre-contact rejection: no transport was attempted, so the callers
+      // classify this as credential_failure on the trail, not wire_failure.
+      throw new LifecycleApiError("login_required", null, true);
     }
     return {
       authorization: `Bearer ${accessToken}`,

@@ -859,17 +859,21 @@ describe("Obsidian plugin composition root", () => {
     const noteBody = pluginSource.slice(noteIndex, noteIndex + 600);
     expect(noteBody).toContain("#recordNoteStatusReadFailureOnce");
     // Each site records AT MOST one trail entry per session (no per-render
-    // spam) and rides the existing journal_failure kind with its closed
-    // token.
+    // spam) and rides the trail v2 composition_read_failure kind with its
+    // closed stage and failure token (task 7 backlog remediation).
     const statusOnceIndex = pluginSource.indexOf("#recordStatusReadFailureOnce(): void");
     expect(statusOnceIndex).toBeGreaterThanOrEqual(0);
     const statusOnceBody = pluginSource.slice(statusOnceIndex, statusOnceIndex + 600);
     expect(statusOnceBody).toContain("#hasRecordedStatusReadFailure");
+    expect(statusOnceBody).toContain("composition_read_failure");
+    expect(statusOnceBody).toContain('"status_read"');
     expect(statusOnceBody).toContain('"status_read_failed"');
     const noteOnceIndex = pluginSource.indexOf("#recordNoteStatusReadFailureOnce(): void");
     expect(noteOnceIndex).toBeGreaterThanOrEqual(0);
     const noteOnceBody = pluginSource.slice(noteOnceIndex, noteOnceIndex + 600);
     expect(noteOnceBody).toContain("#hasRecordedNoteStatusReadFailure");
+    expect(noteOnceBody).toContain("composition_read_failure");
+    expect(noteOnceBody).toContain('"note_status_read"');
     expect(noteOnceBody).toContain('"note_status_read_failed"');
   });
 
@@ -877,12 +881,36 @@ describe("Obsidian plugin composition root", () => {
     const retryReadIndex = pluginSource.indexOf("repository.readEarliestPendingRetryEpochMs()");
     expect(retryReadIndex).toBeGreaterThanOrEqual(0);
     const retryReadCatchBody = pluginSource.slice(retryReadIndex, retryReadIndex + 500);
-    expect(retryReadCatchBody).toContain('"retry_schedule_read_failed"');
+    expect(retryReadCatchBody).toContain("#reportRetryScheduleReadFailureOnce");
 
     const statusReadIndex = pluginSource.indexOf("#projectSyncStatus(): JournalSyncStatusSnapshot | null");
     expect(statusReadIndex).toBeGreaterThanOrEqual(0);
     const statusReadCatchBody = pluginSource.slice(statusReadIndex, statusReadIndex + 2_000);
-    expect(statusReadCatchBody).toContain('"sync_status_read_failed"');
+    expect(statusReadCatchBody).toContain("#reportSyncStatusReadFailureOnce");
+
+    // Both once-per-session reporters ride the trail v2
+    // composition_read_failure kind with their closed stage tokens.
+    const retryOnceIndex = pluginSource.indexOf("#reportRetryScheduleReadFailureOnce(): void");
+    expect(retryOnceIndex).toBeGreaterThanOrEqual(0);
+    const retryOnceBody = pluginSource.slice(retryOnceIndex, retryOnceIndex + 700);
+    expect(retryOnceBody).toContain("composition_read_failure");
+    expect(retryOnceBody).toContain('"retry_schedule_read"');
+    expect(retryOnceBody).toContain('"retry_schedule_read_failed"');
+    const statusOnceIndex = pluginSource.indexOf("#reportSyncStatusReadFailureOnce(): void");
+    expect(statusOnceIndex).toBeGreaterThanOrEqual(0);
+    const statusOnceBody = pluginSource.slice(statusOnceIndex, statusOnceIndex + 700);
+    expect(statusOnceBody).toContain("composition_read_failure");
+    expect(statusOnceBody).toContain('"sync_status_read"');
+    expect(statusOnceBody).toContain('"sync_status_read_failed"');
+  });
+
+  it("wires the durable trail into the lifecycle driver composition (trail v2 credential taxonomy)", () => {
+    // The lifecycle lane's pre-contact credential absences report through
+    // the same trail every other seam uses.
+    const lifecycleDriverIndex = pluginSource.indexOf("new LifecycleDriverImpl({");
+    expect(lifecycleDriverIndex).toBeGreaterThanOrEqual(0);
+    const lifecycleDriverBody = pluginSource.slice(lifecycleDriverIndex, lifecycleDriverIndex + 900);
+    expect(lifecycleDriverBody).toContain("diagnosticTrail");
   });
 
   it("touches no forbidden runtime capability at load time", () => {

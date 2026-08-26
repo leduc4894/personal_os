@@ -33,6 +33,11 @@ import {
 import { LifecycleRepository } from "./lifecycle-repository";
 import { JOURNAL_SCHEMA_VERSION, SqliteDatabase } from "./sqlite-database";
 import type { SqliteEngineModule } from "./sqlite-database";
+import type {
+  SyncDiagnosticsTrail,
+  SyncDiagnosticsTrailAppendInput,
+  SyncDiagnosticTrailEntry,
+} from "./sync-diagnostics-trail";
 
 let engineModule: SqliteEngineModule;
 
@@ -121,12 +126,39 @@ function createFakeApi(): FakeApi {
   } as FakeApi;
 }
 
+/**
+ * The in-memory diagnostics trail recorder of the taxonomy tests: every
+ * append lands synchronously so the tests can pin the closed tokens of
+ * each recorded entry without a file store.
+ */
+class RecordingDiagnosticsTrail implements SyncDiagnosticsTrail {
+  readonly entries: SyncDiagnosticTrailEntry[] = [];
+
+  async load(): Promise<void> {
+    // The driver never loads the trail; the composition root does.
+  }
+
+  append(input: SyncDiagnosticsTrailAppendInput): Promise<void> {
+    this.entries.push({ kind: input.kind, atEpochMs: 0, tokens: [...input.tokens] });
+    return Promise.resolve();
+  }
+
+  readEntries(): readonly SyncDiagnosticTrailEntry[] {
+    return [...this.entries];
+  }
+
+  readAppendFailureCount(): number {
+    return 0;
+  }
+}
+
 interface Harness {
   readonly database: SqliteDatabase;
   readonly repository: JournalRepository;
   readonly lifecycle: LifecycleRepository;
   readonly driver: LifecycleDriverImpl;
   readonly api: FakeApi;
+  readonly diagnosticTrail: RecordingDiagnosticsTrail;
   readonly nowEpochMs: () => number;
   advanceClock: (milliseconds: number) => void;
   /** Seeds a tracked file whose lifecycle operands can be reused. */
@@ -170,6 +202,7 @@ function createHarness(options?: {
     createId,
   });
   const api = createFakeApi();
+  const diagnosticTrail = new RecordingDiagnosticsTrail();
   const driver = new LifecycleDriverImpl({
     repository,
     lifecycle,
@@ -177,6 +210,7 @@ function createHarness(options?: {
     createCorrelationId: () => `corr-${idCounter += 1}`,
     randomJitter: options?.randomJitter ?? (() => 0),
     nowEpochMs: driverNow,
+    diagnosticTrail,
   });
   return {
     database,
@@ -184,6 +218,7 @@ function createHarness(options?: {
     lifecycle,
     driver,
     api,
+    diagnosticTrail,
     nowEpochMs: driverNow,
     advanceClock: (milliseconds) => {
       driverClockMs += milliseconds;
@@ -732,6 +767,72 @@ describe("lifecycle driver login_required parking (spec 8, 12)", () => {
     expect(Number.isInteger(parked?.nextEligibleRetryEpochMs)).toBe(true);
     // round(1000 + 1000 * 0.25 * 0.123456789) = round(1030.864...) = 1031.
     expect(parked?.nextEligibleRetryEpochMs).toBe(before + 1_031);
+  });
+});
+
+// --- credential-failure taxonomy (trail v2, device cursor and manifest reconciliation task 7) ---------
+
+describe("lifecycle driver credential-failure taxonomy (trail v2)", () => {
+  it("records a pre-contact missing credential as credential_failure access_missing", async () => {
+    const harness = createHarness({ randomJitter: () => 0 });
+    await harness.seedTrackedFile("notes/login-absent.md");
+    const recorded = await harness.recordLifecycle(
+      createLifecycleEventOperands({
+        operation: "rename",
+        sourceId: SOURCE_ID,
+        expectedVersionId: VERSION_ID,
+        expectedLocator: "notes/login-absent.md",
+        targetLocator: "notes/login-absent-renamed.md",
+        policyRevision: 1,
+        predecessorEventId: null,
+      }),
+      { newPath: "notes/login-absent-renamed.md" },
+    );
+    // The pre-HTTP missing credential of a startup refresh race: the
+    // adapter rejects before any transport contact and marks the error.
+    harness.api.install(async () => {
+      throw new LifecycleApiError("login_required", null, true);
+    });
+
+    const outcome = await harness.driver.runOne(activeSignal());
+
+    // Park semantics are unchanged: retryable under the login_required label.
+    expect(outcome).toBe("login_required");
+    expect(harness.repository.readEvent(recorded.event.eventId)?.safeError).toBe("login_required");
+    // The trail names the credential absence BEFORE any network contact as
+    // credential_failure with the closed access_missing stage — never a
+    // wire failure.
+    expect(harness.diagnosticTrail.entries.map((entry) => [entry.kind, ...entry.tokens])).toEqual([
+      ["credential_failure", "access_missing", "login_required"],
+    ]);
+  });
+
+  it("records no credential_failure for a server-answerable login verdict", async () => {
+    const harness = createHarness({ randomJitter: () => 0 });
+    await harness.seedTrackedFile("notes/login-wire.md");
+    await harness.recordLifecycle(
+      createLifecycleEventOperands({
+        operation: "rename",
+        sourceId: SOURCE_ID,
+        expectedVersionId: VERSION_ID,
+        expectedLocator: "notes/login-wire.md",
+        targetLocator: "notes/login-wire-renamed.md",
+        policyRevision: 1,
+        predecessorEventId: null,
+      }),
+      { newPath: "notes/login-wire-renamed.md" },
+    );
+    // A genuine server login verdict (401/403 answered the request): the
+    // unmarked kind parks exactly as before and the lifecycle lane records
+    // no credential_failure entry of its own.
+    harness.api.install(async () => {
+      throw new LifecycleApiError("login_required");
+    });
+
+    const outcome = await harness.driver.runOne(activeSignal());
+
+    expect(outcome).toBe("login_required");
+    expect(harness.diagnosticTrail.entries).toEqual([]);
   });
 });
 

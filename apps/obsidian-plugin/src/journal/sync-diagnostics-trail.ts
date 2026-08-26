@@ -18,6 +18,14 @@
  * entry at the type level, and the sidecar parser rejects any token that
  * is not a declared vocabulary member or a well-formed request id record.
  *
+ * Trail contract v2 (device cursor and manifest reconciliation, task 7)
+ * adds the five device-sync failure kinds — `credential_failure`,
+ * `cursor_failure`, `apply_failure`, `reconcile_failure`,
+ * `composition_read_failure` — with the closed device-sync reason and
+ * stage vocabularies of `src/device-sync/contracts.ts`. The loader accepts
+ * a legacy v1 sidecar losslessly (its entries parse under the same closed
+ * gates) and the next persist rewrites the sidecar under the v2 contract.
+ *
  * The trail persists as ONE JSON sidecar (`sync-diagnostics-trail.json`)
  * through the journal file store port bound to the Vault's plugin
  * directory. A corrupt or unreadable sidecar resets the trail to empty
@@ -28,6 +36,25 @@
  * detail may reach an entry, the sidecar or a diagnostic surface.
  */
 
+import {
+  DEVICE_SYNC_ACTION_REASONS,
+  DEVICE_SYNC_APPLY_STAGES,
+  DEVICE_SYNC_COMPOSITION_READ_STAGES,
+  DEVICE_SYNC_CREDENTIAL_STAGES,
+  DEVICE_SYNC_CURSOR_STAGES,
+  DEVICE_SYNC_LOCAL_REASONS,
+  DEVICE_SYNC_RECONCILE_STAGES,
+  DEVICE_SYNC_SERVER_REASONS,
+  DEVICE_SYNC_TRANSPORT_REASONS,
+} from "../device-sync/contracts";
+import type {
+  ApplyFailureStage,
+  CompositionReadStage,
+  CredentialFailureStage,
+  CursorFailureStage,
+  DeviceSyncReason,
+  ReconcileFailureStage,
+} from "../device-sync/contracts";
 import { JOURNAL_SAFE_ERROR_LABELS } from "./contracts";
 import type { JournalSafeErrorLabel } from "./contracts";
 import type { RestoreReservationRefusal } from "./lifecycle-contracts";
@@ -44,8 +71,21 @@ import type { JournalStoreErrorReason } from "./sqlite-database";
 /** The one JSON sidecar holding the trail, inside the Vault plugin directory. */
 export const SYNC_DIAGNOSTICS_TRAIL_FILE_NAME = "sync-diagnostics-trail.json";
 
-/** The sidecar record contract identifier. */
-export const SYNC_DIAGNOSTICS_TRAIL_CONTRACT = "obsidian_sync_diagnostics_trail/v1";
+/**
+ * The sidecar record contract identifier (v2 since the device cursor and
+ * manifest reconciliation child; the loader still accepts the v1 record
+ * losslessly and rewrites it on the next persist).
+ */
+export const SYNC_DIAGNOSTICS_TRAIL_CONTRACT = "obsidian_sync_diagnostics_trail/v2";
+
+/**
+ * The legacy sidecar record identifiers the loader accepts and rewrites as
+ * {@link SYNC_DIAGNOSTICS_TRAIL_CONTRACT}: a v1 sidecar carries entries of
+ * the same closed vocabularies, so its known entries load losslessly.
+ */
+const LEGACY_SYNC_DIAGNOSTICS_TRAIL_CONTRACTS: ReadonlySet<string> = new Set([
+  "obsidian_sync_diagnostics_trail/v1",
+]);
 
 /** The entry count cap; the oldest entries are evicted beyond it. */
 export const MAX_SYNC_DIAGNOSTICS_TRAIL_ENTRIES = 128;
@@ -69,7 +109,12 @@ export const MAX_SYNC_DIAGNOSTICS_TRAIL_APPEND_FAILURES = 999;
 
 // --- the closed kind vocabulary -------------------------------------------------------------------
 
-/** The closed diagnostic kinds the trail records. */
+/**
+ * The closed diagnostic kinds the trail records. The five device-sync
+ * kinds (task 7, spec 14.1) name the credential/cursor/apply/reconcile
+ * failure surfaces of the device-sync operations and the composition
+ * reads that never stop sync.
+ */
 export const SYNC_DIAGNOSTIC_KINDS = [
   "wire_failure",
   "pass_outcome",
@@ -78,6 +123,11 @@ export const SYNC_DIAGNOSTIC_KINDS = [
   "trail_reset",
   "self_check",
   "startup_failure",
+  "credential_failure",
+  "cursor_failure",
+  "apply_failure",
+  "reconcile_failure",
+  "composition_read_failure",
 ] as const;
 
 export type SyncDiagnosticKind = (typeof SYNC_DIAGNOSTIC_KINDS)[number];
@@ -101,7 +151,13 @@ export type SyncDiagnosticClosedToken =
   | SyncStartupStageToken
   | SyncCompositionReadFailureToken
   | RestoreReservationRefusal
-  | SyncApiEnvelopeErrorCode;
+  | SyncApiEnvelopeErrorCode
+  | DeviceSyncReason
+  | CursorFailureStage
+  | ApplyFailureStage
+  | ReconcileFailureStage
+  | CredentialFailureStage
+  | CompositionReadStage;
 
 /**
  * The closed row-state tokens a `journal_failure` entry may carry when a
@@ -329,6 +385,16 @@ const CLOSED_DIAGNOSTIC_TOKEN_SET: ReadonlySet<string> = new Set<string>([
   ...SYNC_STARTUP_STAGE_TOKENS,
   ...SYNC_COMPOSITION_READ_FAILURE_TOKENS,
   ...SYNC_API_ENVELOPE_ERROR_CODES,
+  // The device-sync reason families and stage vocabularies (task 7).
+  ...DEVICE_SYNC_SERVER_REASONS,
+  ...DEVICE_SYNC_ACTION_REASONS,
+  ...DEVICE_SYNC_TRANSPORT_REASONS,
+  ...DEVICE_SYNC_LOCAL_REASONS,
+  ...DEVICE_SYNC_CURSOR_STAGES,
+  ...DEVICE_SYNC_APPLY_STAGES,
+  ...DEVICE_SYNC_RECONCILE_STAGES,
+  ...DEVICE_SYNC_CREDENTIAL_STAGES,
+  ...DEVICE_SYNC_COMPOSITION_READ_STAGES,
 ]);
 
 const SYNC_API_ENVELOPE_ERROR_CODE_SET: ReadonlySet<string> = new Set<string>(
@@ -364,7 +430,12 @@ function parseTrailToken(value: unknown): SyncDiagnosticToken | null {
   return null;
 }
 
-/** Parse the sidecar bytes; any malformed or foreign record answers null. */
+/**
+ * Parse the sidecar bytes; any malformed or foreign record answers null.
+ * The current v2 contract and every legacy contract identifier load under
+ * the SAME closed kind/token gates — a legacy v1 sidecar's known entries
+ * load losslessly and the next persist rewrites the record as v2.
+ */
 function parseTrailSidecar(bytes: Uint8Array): readonly SyncDiagnosticTrailEntry[] | null {
   let parsed: unknown;
   try {
@@ -372,7 +443,11 @@ function parseTrailSidecar(bytes: Uint8Array): readonly SyncDiagnosticTrailEntry
   } catch {
     return null;
   }
-  if (!isRecord(parsed) || parsed["contract"] !== SYNC_DIAGNOSTICS_TRAIL_CONTRACT) {
+  if (
+    !isRecord(parsed) ||
+    (parsed["contract"] !== SYNC_DIAGNOSTICS_TRAIL_CONTRACT &&
+      !LEGACY_SYNC_DIAGNOSTICS_TRAIL_CONTRACTS.has(parsed["contract"] as string))
+  ) {
     return null;
   }
   const rawEntries = parsed["entries"];

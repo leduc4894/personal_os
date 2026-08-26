@@ -25,16 +25,6 @@ export const SYNC_DIAGNOSTICS_TRAIL_TAIL_ENTRY_LIMIT = 5;
 /** The one contract identifier line of the export block. */
 export const SYNC_DIAGNOSTICS_EXPORT_CONTRACT = "obsidian_sync_diagnostics_export/v1";
 
-/**
- * The trail kinds whose newest closed token becomes a derived stop reason
- * on the settings snapshot, in the fixed rendering order.
- */
-const STOP_REASON_KIND_ORDER: readonly SyncDiagnosticKind[] = [
-  "journal_failure",
-  "publish_failure",
-  "wire_failure",
-];
-
 // --- the journal store diagnostics line (fix round 5) ----------------------------------------------
 
 /** The closed inputs of the journal store diagnostics line. */
@@ -77,11 +67,39 @@ export function renderJournalStoreDiagnosticsLine(
 // --- the derived stop-reason tokens -----------------------------------------------------------------
 
 /**
+ * The trail kinds whose newest closed token becomes a derived stop reason
+ * on the settings snapshot, in the fixed rendering order. The trail v2
+ * `composition_read_failure` kind (and every other non-failure kind) is
+ * deliberately absent: the once-per-session composition reads do not stop
+ * sync, so they must never occupy the stop-reason line.
+ */
+const STOP_REASON_KIND_ORDER: readonly SyncDiagnosticKind[] = [
+  "journal_failure",
+  "publish_failure",
+  "wire_failure",
+];
+
+/**
+ * The composition read-site failure tokens that can never become derived
+ * stop reasons (task 7 backlog remediation): these once-per-session
+ * settings reads ride the `composition_read_failure` kind, and a legacy
+ * v1 sidecar loaded losslessly may still carry them under the historical
+ * `journal_failure` kind — the exclusion covers both eras.
+ */
+const COMPOSITION_READ_STOP_REASON_EXCLUDED_TOKENS: ReadonlySet<string> = new Set([
+  "status_read_failed",
+  "note_status_read_failed",
+  "retry_schedule_read_failed",
+  "sync_status_read_failed",
+]);
+
+/**
  * Derive the closed stop-reason tokens of the settings snapshot from the
  * durable trail: the NEWEST closed token of each failure kind
  * (`journal_failure`, `publish_failure`, `wire_failure`), in that fixed
- * order. Pass outcomes, resets and the opaque request-id token never
- * become stop reasons; an empty trail derives no tokens.
+ * order. Pass outcomes, resets, composition reads and the opaque
+ * request-id token never become stop reasons; an empty trail derives no
+ * tokens.
  */
 export function deriveSyncStopReasonTokens(
   entries: readonly SyncDiagnosticTrailEntry[],
@@ -93,7 +111,10 @@ export function deriveSyncStopReasonTokens(
     }
     let closedToken: SyncDiagnosticClosedToken | undefined;
     for (const token of entry.tokens) {
-      if (typeof token === "string") {
+      if (
+        typeof token === "string" &&
+        !COMPOSITION_READ_STOP_REASON_EXCLUDED_TOKENS.has(token)
+      ) {
         closedToken = token;
         break;
       }
@@ -145,7 +166,8 @@ export interface SyncDiagnosticsTrailSectionInput {
 /**
  * Render the settings trail section (sync error tracing task 2): the
  * derived stop reasons, the total entry count with the bounded
- * append-failure counter, and the last five trail entry lines. Closed
+ * append-failure counter, and the last five trail entry lines in
+ * NEWEST-FIRST element order (task 7 backlog remediation). Closed
  * tokens, counts and timestamps only — never a path, credential or raw
  * error text.
  */
@@ -159,11 +181,13 @@ export function renderSyncDiagnosticsTrailSection(
   lines.push(
     `Trail entries: ${input.totalEntryCount} · Append failures: ${input.appendFailureCount}`,
   );
-  const tail = input.entries.slice(-SYNC_DIAGNOSTICS_TRAIL_TAIL_ENTRY_LIMIT);
-  if (tail.length === 0) {
+  const newestFirstTail = input.entries
+    .slice(-SYNC_DIAGNOSTICS_TRAIL_TAIL_ENTRY_LIMIT)
+    .reverse();
+  if (newestFirstTail.length === 0) {
     lines.push("No trail entries recorded yet.");
   } else {
-    lines.push(...tail.map(renderTrailEntryLine));
+    lines.push(...newestFirstTail.map(renderTrailEntryLine));
   }
   return lines.join("\n");
 }
@@ -190,8 +214,9 @@ export interface SyncDiagnosticsExportInput {
  * Build the sanitized export block of the `Copy sync diagnostics`
  * command: the current status snapshot line, the blocker guidance, the
  * journal-store diagnostics line, the aggregate counts and the trail tail
- * (kind + ISO-8601 UTC timestamp + tokens only). The block is the whole
- * egress surface — closed tokens, counts and timestamps, nothing else.
+ * (kind + ISO-8601 UTC timestamp + tokens only) in NEWEST-FIRST element
+ * order (task 7 backlog remediation). The block is the whole egress
+ * surface — closed tokens, counts and timestamps, nothing else.
  */
 export function renderSyncDiagnosticsExportBlock(
   input: SyncDiagnosticsExportInput,
@@ -210,12 +235,14 @@ export function renderSyncDiagnosticsExportBlock(
   }
   lines.push(`Trail entries: ${input.trailEntryCount}`);
   lines.push(`Trail append failures: ${input.trailAppendFailureCount}`);
-  const tail = input.trailTail.slice(-SYNC_DIAGNOSTICS_TRAIL_TAIL_ENTRY_LIMIT);
-  if (tail.length === 0) {
+  const newestFirstTail = input.trailTail
+    .slice(-SYNC_DIAGNOSTICS_TRAIL_TAIL_ENTRY_LIMIT)
+    .reverse();
+  if (newestFirstTail.length === 0) {
     lines.push("Trail tail: none recorded");
   } else {
-    lines.push(`Trail tail (last ${tail.length}):`);
-    lines.push(...tail.map(renderTrailEntryLine));
+    lines.push(`Trail tail (last ${newestFirstTail.length}):`);
+    lines.push(...newestFirstTail.map(renderTrailEntryLine));
   }
   return lines.join("\n");
 }

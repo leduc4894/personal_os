@@ -422,6 +422,7 @@ export class JournalQueueDriver {
                 didRefresh = true;
               } catch {
                 refreshBudget.requiresLogin = true;
+                this.#recordCredentialRefreshFailureTrailEntry();
               }
               if (this.#isStopped) {
                 break;
@@ -581,20 +582,32 @@ export class JournalQueueDriver {
   }
 
   /**
-   * Append one `wire_failure` trail entry for one failed wire request
-   * outcome that reached the failure hook (sync error tracing task 1): the
-   * closed failure kind, plus the failing envelope's opaque request id when
-   * the server sent a CANONICAL UUID (the trail's constructor gate nulls
-   * any non-conforming value — the rejected value records nothing). A
-   * local (non-wire) failure records nothing. Diagnostic round U1: when
-   * the failing body parsed as the canonical envelope, its closed server
-   * error code rides along as one additional closed token between the kind
-   * and the request id — whitelisted at the trail boundary against the
-   * declared runtime vocabulary, so a null code (an edge HTML body), a
-   * foreign code, or a non-conforming code records nothing extra.
+   * Append one failure trail entry for one failed wire request outcome
+   * that reached the failure hook (sync error tracing task 1). Trail v2
+   * taxonomy (task 7): a credential absence BEFORE any transport contact —
+   * the sync client's pre-contact `login_required` rejection — records the
+   * `credential_failure` kind with the closed `access_missing` stage; it is
+   * never a wire failure, because no HTTP attempt reached the transport.
+   * Every other `SyncApiError` keeps the `wire_failure` kind: the closed
+   * failure kind, plus the failing envelope's opaque request id when the
+   * server sent a CANONICAL UUID (the trail's constructor gate nulls any
+   * non-conforming value — the rejected value records nothing). A local
+   * (non-wire) failure records nothing. Diagnostic round U1: when the
+   * failing body parsed as the canonical envelope, its closed server error
+   * code rides along as one additional closed token between the kind and
+   * the request id — whitelisted at the trail boundary against the declared
+   * runtime vocabulary, so a null code (an edge HTML body), a foreign code,
+   * or a non-conforming code records nothing extra.
    */
   #recordWireFailureTrailEntry(error: unknown): void {
     if (this.#diagnosticTrail === null || !(error instanceof SyncApiError)) {
+      return;
+    }
+    if (error.isCredentialAbsent) {
+      void this.#diagnosticTrail.append({
+        kind: "credential_failure",
+        tokens: ["access_missing", error.kind],
+      });
       return;
     }
     const tokens: SyncDiagnosticToken[] = [error.kind];
@@ -611,6 +624,20 @@ export class JournalQueueDriver {
       }
     }
     void this.#diagnosticTrail.append({ kind: "wire_failure", tokens });
+  }
+
+  /**
+   * Append one `credential_failure` trail entry for a failed credential
+   * refresh (trail v2 taxonomy, task 7): the refresh seam threw before any
+   * retried transport contact, so the swallowed failure surfaces as the
+   * closed `refresh_failed` stage instead of disappearing into the pass's
+   * login verdict. Fire-and-forget, never blocking the pass.
+   */
+  #recordCredentialRefreshFailureTrailEntry(): void {
+    void this.#diagnosticTrail?.append({
+      kind: "credential_failure",
+      tokens: ["refresh_failed", "login_required"],
+    });
   }
 
   /**
@@ -824,6 +851,7 @@ export class JournalQueueDriver {
         await this.#refreshAccessToken();
       } catch {
         refreshBudget.requiresLogin = true;
+        this.#recordCredentialRefreshFailureTrailEntry();
         throw error;
       }
       if (this.#isStopped) {

@@ -265,6 +265,7 @@ function createHarness(options?: {
   readonly diagnosticTrailAppendBehavior?: () => Promise<void>;
   readonly diagnosticTrailFileStore?: JournalFileStore;
   readonly randomJitter?: () => number;
+  readonly accessToken?: string | null;
 }): DriverHarness {
   const database = SqliteDatabase.createEmpty(engineModule, {
     schemaVersion: JOURNAL_SCHEMA_VERSION,
@@ -289,7 +290,7 @@ function createHarness(options?: {
   const vaultBytes = new Map<string, Uint8Array>();
   const refreshCalls = { count: 0 };
   let refreshImplementation: () => Promise<void> = () => Promise.resolve();
-  const accessToken: string | null = ACCESS_TOKEN;
+  const accessToken: string | null = options?.accessToken === undefined ? ACCESS_TOKEN : options.accessToken;
   let activeTransport: ((request: SyncHttpRequest) => Promise<RawResponse>) | null = null;
   let correlationCounter = 0;
   const driverNowEpochMs = options?.useWallClock === true ? () => Date.now() : () => driverClockMs;
@@ -1458,6 +1459,115 @@ describe("queue driver diagnostics trail wiring (sync error tracing task 1)", ()
   });
 });
 
+// --- credential-failure taxonomy (trail v2, device cursor and manifest reconciliation task 7) ---------
+
+describe("queue driver credential-failure taxonomy (trail v2)", () => {
+  it("records a missing access credential as credential_failure, never wire_failure, with no transport contact", async () => {
+    const harness = createHarness({ accessToken: null });
+    const event = await captureBytes(harness, "notes/no-access.md", new TextEncoder().encode("no access"));
+    const scripted = harness.installTransport({
+      preflight: async () => {
+        throw new Error("the transport must never be contacted without a credential");
+      },
+    });
+
+    const summary = await runPass(harness.driver);
+
+    // Pass semantics are unchanged: the event parks retryable under the
+    // login_required safe label and the pass ends login_required.
+    expect(summary.outcome).toBe("login_required");
+    expect(scripted.preflightRequests).toHaveLength(0);
+    expect(harness.repository.readEvent(event.eventId)?.safeError).toBe("login_required");
+    // Trail taxonomy (child six residual remediation): the credential
+    // absence BEFORE any network contact records `credential_failure` with
+    // the closed access_missing stage — it is NOT a wire failure, because
+    // no HTTP attempt ever reached the transport.
+    expect(harness.diagnosticTrail.entries.map((entry) => entry.kind)).toEqual([
+      "credential_failure",
+      "pass_outcome",
+    ]);
+    expect(harness.diagnosticTrail.entries[0]?.tokens).toEqual([
+      "access_missing",
+      "login_required",
+    ]);
+    expect(harness.diagnosticTrail.entries[1]?.tokens).toEqual(["login_required"]);
+  });
+
+  it("records a failed content-lane refresh as credential_failure refresh_failed", async () => {
+    const harness = createHarness();
+    harness.setRefreshImplementation(() => Promise.reject(new Error("revoked device credential")));
+    const event = await captureBytes(harness, "notes/refresh-fails.md", new TextEncoder().encode("refresh fails"));
+    harness.installTransport({
+      preflight: async () => ({ status: 401, bodyText: errorBody("device_credential_invalid") }),
+    });
+
+    const summary = await runPass(harness.driver);
+
+    expect(summary.outcome).toBe("login_required");
+    expect(harness.repository.readEvent(event.eventId)?.state).toBe("waiting_retry");
+    // The trail separates the two facts: the 401 that DID reach the wire
+    // stays a wire_failure (contact happened), and the refresh failure
+    // before the retried contact lands as credential_failure refresh_failed.
+    expect(harness.diagnosticTrail.entries.map((entry) => entry.kind)).toEqual([
+      "credential_failure",
+      "wire_failure",
+      "pass_outcome",
+    ]);
+    expect(harness.diagnosticTrail.entries[0]?.tokens).toEqual([
+      "refresh_failed",
+      "login_required",
+    ]);
+    expect(harness.diagnosticTrail.entries[1]?.tokens).toEqual([
+      "access_expired",
+      "device_credential_invalid",
+      { requestId: "66666666-6666-4666-8666-666666666666" },
+    ]);
+  });
+
+  it("records a failed lifecycle-lane refresh as credential_failure refresh_failed", async () => {
+    const harness = createHarnessWithLifecycle({
+      refreshImplementation: () => Promise.reject(new Error("revoked device credential")),
+    });
+    await harness.seedTrackedFile(
+      "notes/lifecycle-refresh.md",
+      new TextEncoder().encode("seed bytes"),
+    );
+    await harness.recordLifecycleEvent(
+      createLifecycleEventOperands({
+        operation: "rename",
+        sourceId: SOURCE_ID,
+        expectedVersionId: SOURCE_VERSION_ID,
+        expectedLocator: "notes/lifecycle-refresh.md",
+        targetLocator: "notes/lifecycle-refresh-renamed.md",
+        policyRevision: 2,
+        predecessorEventId: null,
+      }),
+      { newPath: "notes/lifecycle-refresh-renamed.md" },
+    );
+    harness.installLifecycleHandler(async () => {
+      throw new LifecycleApiError("login_required");
+    });
+
+    const summary = await runPass(harness.driver);
+
+    // Fix round 4's discipline is unchanged: the failed refresh ends the
+    // pass login_required with the lifecycle event parked retryable.
+    expect(summary.outcome).toBe("login_required");
+    expect(harness.refreshCalls.count).toBe(1);
+    // The swallowed refresh failure is readable on the trail: one bounded
+    // credential_failure entry with the closed refresh_failed stage.
+    expect(harness.diagnosticTrail.entries.map((entry) => entry.kind)).toEqual([
+      "credential_failure",
+      "pass_outcome",
+    ]);
+    expect(harness.diagnosticTrail.entries[0]?.tokens).toEqual([
+      "refresh_failed",
+      "login_required",
+    ]);
+    expect(harness.diagnosticTrail.entries[1]?.tokens).toEqual(["login_required"]);
+  });
+});
+
 // --- retry-park failure state capture (sync error tracing park diagnosis round) ------------------------------
 
 describe("queue driver retry-park failure state capture (sync error tracing park diagnosis round)", () => {
@@ -1715,6 +1825,7 @@ interface LifecycleDriverHarness {
   readonly repository: JournalRepository;
   readonly lifecycle: LifecycleRepository;
   readonly driver: JournalQueueDriver;
+  readonly diagnosticTrail: RecordingDiagnosticsTrail;
   readonly vaultBytes: Map<string, Uint8Array>;
   readonly lifecycleCommits: FrozenLifecycleEventForTest[];
   readonly preflightBodies: Record<string, unknown>[];
@@ -1724,6 +1835,7 @@ interface LifecycleDriverHarness {
   installTransport: (
     handlers: { preflight: PreflightHandler; content?: ContentHandler },
   ) => ScriptedTransport;
+  setRefreshImplementation: (implementation: () => Promise<void>) => void;
   /** Seed a tracked file with a committed create so the file has a known source id. */
   seedTrackedFile: (path: string, bytes: Uint8Array) => Promise<JournalEvent>;
   recordLifecycleEvent: (
@@ -1739,7 +1851,9 @@ type FrozenLifecycleEventForTest = {
   readonly operands: { readonly operation: string };
 };
 
-function createHarnessWithLifecycle(): LifecycleDriverHarness {
+function createHarnessWithLifecycle(options?: {
+  readonly refreshImplementation?: () => Promise<void>;
+}): LifecycleDriverHarness {
   const database = SqliteDatabase.createEmpty(engineModule, {
     schemaVersion: JOURNAL_SCHEMA_VERSION,
     dirtyGeneration: 1,
@@ -1769,6 +1883,9 @@ function createHarnessWithLifecycle(): LifecycleDriverHarness {
   const preflightBodies: Record<string, unknown>[] = [];
   const lifecycleCommits: FrozenLifecycleEventForTest[] = [];
   const refreshCalls = { count: 0 };
+  const diagnosticTrail = new RecordingDiagnosticsTrail();
+  let refreshImplementation: () => Promise<void> =
+    options?.refreshImplementation ?? (() => Promise.resolve());
   let lifecycleHandler: LifecycleHandler | null = null;
   let activeTransport: ((request: SyncHttpRequest) => Promise<RawResponse>) | null = null;
   const syncApi = createJournalSyncApi({
@@ -1802,6 +1919,7 @@ function createHarnessWithLifecycle(): LifecycleDriverHarness {
     createCorrelationId: () => `corr-${idCounter}`,
     randomJitter: () => 0,
     nowEpochMs: () => driverClockMs,
+    diagnosticTrail,
   });
   const driver = new JournalQueueDriver({
     repository,
@@ -1812,16 +1930,18 @@ function createHarnessWithLifecycle(): LifecycleDriverHarness {
     lifecycleDriver,
     refreshAccessToken: () => {
       refreshCalls.count += 1;
-      return Promise.resolve();
+      return refreshImplementation();
     },
     nowEpochMs: () => driverClockMs,
     createCorrelationId: () => `corr-${idCounter}`,
     randomJitter: () => 0,
+    diagnosticTrail,
   });
   return {
     repository,
     lifecycle,
     driver,
+    diagnosticTrail,
     vaultBytes,
     lifecycleCommits,
     preflightBodies,
@@ -1839,6 +1959,9 @@ function createHarnessWithLifecycle(): LifecycleDriverHarness {
       });
       activeTransport = scripted.transport;
       return scripted;
+    },
+    setRefreshImplementation: (implementation) => {
+      refreshImplementation = implementation;
     },
     seedTrackedFile: async (path, bytes) => {
       const capture = await repository.recordCapture({
