@@ -1009,3 +1009,39 @@ describe("JournalRepository status histogram (spec 11)", () => {
     expect(aggregateTelemetry).not.toContain("notes/current-status.md");
   });
 });
+
+describe("JournalRepository device-sync composition (task 8)", () => {
+  it("exposes the device-sync repository over the same database slice", async () => {
+    const { repository } = createOpenedJournal();
+
+    expect(repository.deviceSync.readState()).toEqual({
+      appliedSequence: 0,
+      acknowledgedSequence: 0,
+      observationGeneration: 0,
+      barrierGeneration: null,
+      barrierReason: null,
+      activeManifestRunId: null,
+      manifestCheckpointSequence: null,
+      manifestFinalDigest: null,
+    });
+    // The device-sync repository mutates through the same serialized writer:
+    // one observation generation increment lands in the shared image.
+    await repository.deviceSync.nextObservationGeneration();
+    expect(repository.deviceSync.readState().observationGeneration).toBe(1);
+  });
+
+  it("honors a custom device-sync repository factory over the shared writer", () => {
+    const { database } = createOpenedJournal();
+    const stubDeviceSync = createOpenedJournal().repository.deviceSync;
+    let observedDatabase: unknown = null;
+    const composed = new JournalRepository({
+      database,
+      createDeviceSyncRepository: (deps) => {
+        observedDatabase = deps.database;
+        return stubDeviceSync;
+      },
+    });
+    expect(composed.deviceSync).toBe(stubDeviceSync);
+    expect(observedDatabase).toBe(database);
+  });
+});

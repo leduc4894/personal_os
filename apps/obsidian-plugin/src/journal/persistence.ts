@@ -27,16 +27,21 @@ import type { JournalMeta, JournalRecoveryState } from "./contracts";
 import {
   JOURNAL_SCHEMA_VERSION,
   JournalStoreError,
+  RESTORE_RESERVATION_SCHEMA_VERSION,
   type JournalStoreErrorReason,
   journalStoreError,
   SqliteDatabase,
+  migrateRestoreReservationJournalToDeviceSyncSchema,
 } from "./sqlite-database";
 import type {
   SqliteEngineModule,
   SqliteMutationSession,
   SqliteQueryResult,
 } from "./sqlite-database";
-import type { SyncDiagnosticsTrail } from "./sync-diagnostics-trail";
+import type {
+  SyncDiagnosticClosedToken,
+  SyncDiagnosticsTrail,
+} from "./sync-diagnostics-trail";
 
 // --- frozen file vocabulary and buffer bound (spec 6.1, 6.2) --------------------------
 
@@ -162,7 +167,14 @@ function parseVerifiedGeneration(value: unknown): VerifiedJournalGeneration | nu
   if (typeof sha256 !== "string" || !SHA256_HEX_PATTERN.test(sha256)) {
     return null;
   }
-  if (schemaVersion !== JOURNAL_SCHEMA_VERSION) {
+  // The migration source version (v6) is accepted beside the current one
+  // (task 8, spec 8): a verified v6 generation is migrated in memory
+  // before it may serve any read. Any other version — older, foreign or
+  // newer — fails closed here.
+  if (
+    schemaVersion !== JOURNAL_SCHEMA_VERSION &&
+    schemaVersion !== RESTORE_RESERVATION_SCHEMA_VERSION
+  ) {
     return null;
   }
   return { generationNumber, sizeBytes, sha256, schemaVersion };
@@ -367,7 +379,7 @@ export class JournalPersistence {
     const { manifest, isManifestPresent } = await this.#readManifestState();
     const recovered = await this.#recoverVerifiedDatabase(manifest);
     if (recovered !== null) {
-      const { database, verifiedGeneration, recoveryState } = recovered;
+      const { database, verifiedGeneration, recoveryState, wasMigrated } = recovered;
       this.#isReconcileRequired ||= database.readJournalMeta().isReconcileRequired;
       await this.#refreshRecoveredMeta(database, verifiedGeneration, recoveryState);
       this.#database = database;
@@ -380,6 +392,19 @@ export class JournalPersistence {
         manifest !== null && isSameVerifiedGeneration(manifest.current, verifiedGeneration)
           ? manifest.prior
           : null;
+      if (wasMigrated) {
+        // A verified v6 generation was migrated in memory (task 8, spec
+        // 8): publish the migrated v7 image as the next verified
+        // generation BEFORE the journal is exposed, so the v6 generation
+        // stays retained as the prior recovery image and a crash never
+        // leaves the store without a verified v7 generation.
+        try {
+          await this.#executeGenerationCommit(() => undefined);
+        } catch (error) {
+          this.close();
+          throw error;
+        }
+      }
       return;
     }
     await this.#rebuildEmptyJournal(isManifestPresent);
@@ -436,18 +461,23 @@ export class JournalPersistence {
   }
 
   /**
-   * The required lifecycle table names that must be present on every
-   * verified generation (spec 6.3, child 5): the keyed operands extension
-   * is part of the durable schema, so a torn / missing table is image
-   * corruption that recovery must surface as `journal_image_invalid`
-   * instead of silently passing verification.
+   * The required table names that must be present on every verified
+   * generation (spec 6.3, child 5; task 8 adds the five device-sync
+   * tables of spec 8): a torn / missing table is image corruption that
+   * recovery must surface as `journal_image_invalid` instead of silently
+   * passing verification.
    */
-  static readonly #LIFECYCLE_REQUIRED_TABLES = [
+  static readonly #REQUIRED_JOURNAL_TABLES = [
     "journal_meta",
     "local_files",
     "journal_events",
     "journal_attempts",
     "lifecycle_event_operands",
+    "device_sync_state",
+    "manifest_page_progress",
+    "manifest_action_progress",
+    "remote_apply_operations",
+    "echo_markers",
   ] as const;
 
   /**
@@ -484,6 +514,7 @@ export class JournalPersistence {
     database: SqliteDatabase;
     verifiedGeneration: VerifiedJournalGeneration;
     recoveryState: JournalRecoveryState;
+    wasMigrated: boolean;
   } | null> {
     const candidates: readonly (VerifiedJournalGeneration & {
       readonly recoveryState: JournalRecoveryState;
@@ -496,22 +527,31 @@ export class JournalPersistence {
             : [{ ...manifest.prior, recoveryState: "prior_generation_recovered" as const }]),
         ];
     for (const candidate of candidates) {
-      const database = await this.#openVerifiedGeneration(candidate);
-      if (database !== null) {
+      const opened = await this.#openVerifiedGeneration(candidate);
+      if (opened !== null) {
         return {
-          database,
+          database: opened.database,
           verifiedGeneration: candidate,
           recoveryState: candidate.recoveryState,
+          wasMigrated: opened.wasMigrated,
         };
       }
     }
     return null;
   }
 
-  /** Read one candidate generation back, verify it byte-exactly and open it. */
+  /**
+   * Read one candidate generation back, verify it byte-exactly and open
+   * it. A generation whose manifest entry names the migration source
+   * version (v6) is migrated in memory first (task 8, spec 8): the
+   * migrated v7 image is what recovery opens, and any migration failure
+   * records the existing `startup_failure`/`journal_recovery` trail
+   * surface before recovery falls back — never a silent partial upgrade.
+   */
   async #openVerifiedGeneration(
     candidate: VerifiedJournalGeneration,
-  ): Promise<SqliteDatabase | null> {
+  ): Promise<{ readonly database: SqliteDatabase; readonly wasMigrated: boolean } | null> {
+    let migrationWasAttempted = false;
     try {
       const fileName = generationFileName(candidate.generationNumber);
       if (!(await this.#fileStore.exists(fileName))) {
@@ -524,25 +564,62 @@ export class JournalPersistence {
       if ((await sha256Hex(imageBytes)) !== candidate.sha256) {
         return null;
       }
-      const database = SqliteDatabase.openFromImage(this.#engineModule, imageBytes);
-      if (!JournalPersistence.#databaseHasLifecycleSurface(database)) {
+      let database: SqliteDatabase;
+      try {
+        database = SqliteDatabase.openFromImage(this.#engineModule, imageBytes);
+      } catch (error) {
+        if (
+          !(error instanceof JournalStoreError) ||
+          error.reason !== "journal_schema_unsupported" ||
+          candidate.schemaVersion !== RESTORE_RESERVATION_SCHEMA_VERSION
+        ) {
+          throw error;
+        }
+        migrationWasAttempted = true;
+        const migratedImage = migrateRestoreReservationJournalToDeviceSyncSchema(
+          this.#engineModule,
+          imageBytes,
+        );
+        database = SqliteDatabase.openFromImage(this.#engineModule, migratedImage);
+      }
+      if (!JournalPersistence.#databaseHasRequiredSurface(database)) {
         database.close();
         return null;
       }
-      return database;
-    } catch {
+      return { database, wasMigrated: migrationWasAttempted };
+    } catch (error) {
+      if (migrationWasAttempted) {
+        this.#recordSchemaMigrationFailure(error);
+      }
       return null;
     }
   }
 
   /**
-   * Verify the lifecycle surface is intact on a freshly-opened verified
-   * generation: every required table — including
-   * `lifecycle_event_operands` — must be present. A missing table means
-   * the generation is corrupt and recovery must fall back instead of
-   * trusting it.
+   * The production v6-to-v7 migration/recovery catch (task 8): one
+   * fire-and-forget `startup_failure` entry carrying the closed
+   * `journal_recovery` stage token plus the closed store reason, recorded
+   * on the existing trail surface BEFORE recovery falls back to a prior
+   * generation or rebuilds empty. Operation-specific `apply_failure` /
+   * `reconcile_failure` entries belong to their own call sites (tasks
+   * 10-11), never here.
    */
-  static #databaseHasLifecycleSurface(database: SqliteDatabase): boolean {
+  #recordSchemaMigrationFailure(error: unknown): void {
+    const tokens: SyncDiagnosticClosedToken[] = ["journal_recovery"];
+    if (error instanceof JournalStoreError) {
+      tokens.push(error.reason);
+    }
+    void this.#diagnosticTrail?.append({ kind: "startup_failure", tokens });
+  }
+
+  /**
+   * Verify the required journal surface is intact on a freshly-opened
+   * verified generation: every required table — including
+   * `lifecycle_event_operands` and the five device-sync tables of
+   * spec 8 — must be present. A missing table means the generation is
+   * corrupt and recovery must fall back instead of trusting it.
+   */
+  static #databaseHasRequiredSurface(database: SqliteDatabase): boolean {
     try {
       const tables = database.readAll(
         "select name from sqlite_master where type = 'table' order by name;",
@@ -550,7 +627,7 @@ export class JournalPersistence {
       const present = new Set<string>(
         (tables[0]?.values ?? []).map((row) => String(row[0])),
       );
-      for (const required of JournalPersistence.#LIFECYCLE_REQUIRED_TABLES) {
+      for (const required of JournalPersistence.#REQUIRED_JOURNAL_TABLES) {
         if (!present.has(required)) {
           return false;
         }

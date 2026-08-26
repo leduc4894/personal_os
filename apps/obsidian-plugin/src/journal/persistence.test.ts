@@ -667,3 +667,194 @@ describe("JournalPersistence diagnostics trail wiring (sync error tracing task 1
     journal.close();
   });
 });
+
+// --- v6 → v7 migration of the loader (device cursor and manifest reconciliation, task 8) ------------------------
+
+/** The five device-sync tables schema v7 adds on top of the v6 journal. */
+const DEVICE_SYNC_V7_TABLES = [
+  "device_sync_state",
+  "manifest_page_progress",
+  "manifest_action_progress",
+  "remote_apply_operations",
+  "echo_markers",
+] as const;
+
+const V6_SEEDED_LOCAL_FILE_SQL = [
+  "insert into local_files (local_file_id, normalized_path, source_id,",
+  "observed_sha256, observed_size_bytes, observed_media_type, base_version_id,",
+  `policy_revision) values ('11111111-1111-4111-8111-111111111111', 'notes/kept.md',`,
+  `'22222222-2222-4222-8222-222222222222', '${"a".repeat(64)}', 120, 'text/markdown',`,
+  "null, 4);",
+].join(" ");
+
+/**
+ * Turn a freshly opened v7 store into a verified v6 store: the generation-1
+ * image is downgraded with a raw engine (device-sync tables dropped,
+ * bookkeeping pinned to 6) plus one seeded local file row, and the manifest
+ * is rewritten so generation 1 verifies byte-exactly as a v6 image.
+ */
+async function writeVerifiedV6Store(
+  store: InMemoryJournalFileStore,
+  options: { isReconcileRequired: boolean; isMigrationBroken?: boolean },
+): Promise<void> {
+  const journal = new JournalPersistence({ fileStore: store, engineModule });
+  await journal.open();
+  journal.close();
+  const v7Image = new Uint8Array(await store.readBinary(generationFileName(1)));
+  const engine = new engineModule.Database(v7Image);
+  try {
+    engine.exec("begin immediate;");
+    for (const table of DEVICE_SYNC_V7_TABLES) {
+      engine.exec(`drop table ${table};`);
+    }
+    engine.exec(
+      `update journal_meta set schema_version = 6, is_reconcile_required = ${options.isReconcileRequired ? 1 : 0} where singleton_key = 1;`,
+    );
+    engine.exec("pragma user_version = 6;");
+    engine.exec(V6_SEEDED_LOCAL_FILE_SQL);
+    if (options.isMigrationBroken === true) {
+      // A v6 image missing a required journal table is image corruption the
+      // migration must fail closed on — never a silent partial upgrade.
+      engine.exec("drop table lifecycle_event_operands;");
+    }
+    engine.exec("commit;");
+    const v6Image = engine.export();
+    const sha256 = await sha256Hex(v6Image);
+    const manifest = {
+      contract: "obsidian_journal_manifest/v1",
+      current: {
+        generationNumber: 1,
+        sizeBytes: v6Image.byteLength,
+        sha256,
+        schemaVersion: 6,
+      },
+      prior: null,
+    };
+    await store.writeBinary(
+      JOURNAL_MANIFEST_FILE_NAME,
+      new TextEncoder().encode(JSON.stringify(manifest)).buffer as ArrayBuffer,
+    );
+    await store.writeBinary(
+      generationFileName(1),
+      v6Image.buffer.slice(
+        v6Image.byteOffset,
+        v6Image.byteOffset + v6Image.byteLength,
+      ) as ArrayBuffer,
+    );
+  } finally {
+    engine.close();
+  }
+}
+
+describe("JournalPersistence v6 to v7 migration (task 8, spec 8)", () => {
+  it("migrates a verified v6 generation and publishes the v7 generation before exposing the journal", async () => {
+    const store = new InMemoryJournalFileStore();
+    await writeVerifiedV6Store(store, { isReconcileRequired: true });
+
+    const journal = await openedPersistence(store);
+    expect(journal.recoveryState).toBe("verified_generation_loaded");
+    expect(journal.verifiedGenerationNumber).toBe(2);
+
+    const manifest = await readManifest(store);
+    expect(manifest.current.generationNumber).toBe(2);
+    expect(manifest.current.schemaVersion).toBe(7);
+    expect(manifest.prior).toMatchObject({ generationNumber: 1, schemaVersion: 6 });
+    // The v6 generation stays on disk as the prior recovery image.
+    expect(await store.exists(generationFileName(1))).toBe(true);
+    expect(await store.exists(generationFileName(2))).toBe(true);
+
+    expect(journal.readJournalMeta().schemaVersion).toBe(7);
+    expect(journal.readJournalMeta().isReconcileRequired).toBe(true);
+
+    // Every v6 row survived: the seeded local file reads back on the v7 image.
+    const fileCount = journal.readAll("select count(*) from local_files;")[0]?.values[0]?.[0];
+    expect(fileCount).toBe(1);
+
+    // The migrated image carries the zeroed device-sync singleton.
+    const stateRow = journal.readAll(
+      "select applied_sequence, acknowledged_sequence, observation_generation, barrier_generation, active_manifest_run_id from device_sync_state where singleton_key = 1;",
+    )[0]?.values[0];
+    expect(stateRow).toEqual([0, 0, 0, null, null]);
+    journal.close();
+  });
+
+  it("reopens the migrated v7 generation without migrating again", async () => {
+    const store = new InMemoryJournalFileStore();
+    await writeVerifiedV6Store(store, { isReconcileRequired: false });
+    const first = await openedPersistence(store);
+    first.close();
+
+    const reopened = await openedPersistence(store);
+    expect(reopened.recoveryState).toBe("verified_generation_loaded");
+    expect(reopened.verifiedGenerationNumber).toBe(2);
+    const manifest = await readManifest(store);
+    expect(manifest.current).toMatchObject({ generationNumber: 2, schemaVersion: 7 });
+    expect(manifest.prior).toMatchObject({ generationNumber: 1, schemaVersion: 6 });
+    reopened.close();
+  });
+
+  it("falls back to the retained v6 prior generation and migrates it when the v7 image is torn", async () => {
+    const store = new InMemoryJournalFileStore();
+    await writeVerifiedV6Store(store, { isReconcileRequired: false });
+    const migrated = await openedPersistence(store);
+    migrated.close();
+    // Tear the newest v7 generation: recovery must fall back to the retained
+    // v6 prior generation and migrate that image again.
+    const tornBytes = (await store.readBinary(generationFileName(2))).slice(0, 64);
+    await store.writeBinary(generationFileName(2), tornBytes);
+
+    const reopened = await openedPersistence(store);
+    expect(reopened.recoveryState).toBe("prior_generation_recovered");
+    expect(reopened.verifiedGenerationNumber).toBe(2);
+    const manifest = await readManifest(store);
+    expect(manifest.current.schemaVersion).toBe(7);
+    expect(manifest.prior).toMatchObject({ generationNumber: 1, schemaVersion: 6 });
+    const fileCount = reopened.readAll("select count(*) from local_files;")[0]?.values[0]?.[0];
+    expect(fileCount).toBe(1);
+    reopened.close();
+  });
+
+  it("records the closed migration failure on the trail before rebuilding", async () => {
+    const store = new InMemoryJournalFileStore();
+    await writeVerifiedV6Store(store, { isReconcileRequired: false, isMigrationBroken: true });
+    const diagnosticTrail = new RecordingDiagnosticsTrail();
+    const journal = new JournalPersistence({
+      fileStore: store,
+      engineModule,
+      diagnosticTrail,
+    });
+
+    await journal.open();
+    // The corrupt v6 image never opens: recovery rebuilds empty and flags
+    // reconcile_required, and the failure surface is the existing
+    // startup_failure/journal_recovery trail entry with the closed reason.
+    expect(journal.recoveryState).toBe("empty_journal_rebuilt");
+    expect(journal.isReconcileRequired).toBe(true);
+    expect(diagnosticTrail.entries).toEqual([
+      { kind: "startup_failure", atEpochMs: 0, tokens: ["journal_recovery", "journal_image_invalid"] },
+    ]);
+    journal.close();
+  });
+
+  it("fails closed on a manifest of a foreign or newer schema version", async () => {
+    for (const foreignSchemaVersion of [5, 8]) {
+      const store = new InMemoryJournalFileStore();
+      await writeVerifiedV6Store(store, { isReconcileRequired: false });
+      const manifest = await readManifest(store);
+      const foreign = {
+        contract: manifest.contract,
+        current: { ...manifest.current, schemaVersion: foreignSchemaVersion },
+        prior: null,
+      };
+      await store.writeBinary(
+        JOURNAL_MANIFEST_FILE_NAME,
+        new TextEncoder().encode(JSON.stringify(foreign)).buffer as ArrayBuffer,
+      );
+
+      const journal = await openedPersistence(store);
+      expect(journal.recoveryState).toBe("empty_journal_rebuilt");
+      expect(journal.isReconcileRequired).toBe(true);
+      journal.close();
+    }
+  });
+});

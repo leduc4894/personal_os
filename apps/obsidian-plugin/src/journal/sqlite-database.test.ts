@@ -206,3 +206,48 @@ describe("SqliteDatabase closed meta validation (spec 6.3, 9)", () => {
     database.close();
   });
 });
+
+describe("SqliteDatabase device-sync schema v7 (task 8, spec 8)", () => {
+  it("creates the five device-sync tables and seeds the zeroed state singleton", () => {
+    const database = SqliteDatabase.createEmpty(engineModule, createJournalMeta());
+
+    const tables = database.readAll(
+      "select name from sqlite_master where type = 'table' order by name;",
+    );
+    const tableNames = (tables[0]?.values ?? []).map((row) => String(row[0]));
+    for (const table of [
+      "device_sync_state",
+      "manifest_page_progress",
+      "manifest_action_progress",
+      "remote_apply_operations",
+      "echo_markers",
+    ]) {
+      expect(tableNames).toContain(table);
+    }
+
+    const stateRow = database.readAll(
+      [
+        "select applied_sequence, acknowledged_sequence, observation_generation,",
+        "barrier_generation, barrier_reason, active_manifest_run_id,",
+        "manifest_checkpoint_sequence, manifest_final_digest from device_sync_state",
+        "where singleton_key = 1;",
+      ].join(" "),
+    )[0]?.values[0];
+    expect(stateRow).toEqual([0, 0, 0, null, null, null, null, null]);
+    database.close();
+  });
+
+  it("keeps the device-sync state row single", async () => {
+    const database = SqliteDatabase.createEmpty(engineModule, createJournalMeta());
+
+    await expect(
+      database.runSerializedMutation((session) => {
+        session.exec("insert into device_sync_state (singleton_key) values (2)");
+      }),
+    ).rejects.toMatchObject({
+      name: "JournalStoreError",
+      reason: "journal_mutation_failed",
+    });
+    database.close();
+  });
+});

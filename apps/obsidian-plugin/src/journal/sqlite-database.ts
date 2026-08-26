@@ -61,8 +61,22 @@ import type { JournalMeta, JournalRecoveryState } from "./contracts";
  * row to its prior path and a committed restore can clear it. Every v5
  * row reads back with `restore_prior_path = null` until the first
  * reservation lands.
+ *
+ * Version 7 (device cursor and manifest reconciliation, task 8) adds the
+ * five device-sync reconciliation tables of spec 8: the
+ * `device_sync_state` singleton (local applied cursor, last
+ * server-acknowledged cursor, monotonic Vault observation generation,
+ * active repair barrier generation/reason and the resumable manifest run
+ * checkpoint/final digest), `manifest_page_progress`,
+ * `manifest_action_progress`, `remote_apply_operations` and
+ * `echo_markers`. The v6 → v7 migration
+ * (`migrateRestoreReservationJournalToDeviceSyncSchema`) is lossless:
+ * every file mapping, pending event, lifecycle operand, tombstone,
+ * restore reservation and attempt survives, both cursor values start at
+ * zero, no barrier/apply/echo row exists and a pre-existing
+ * `is_reconcile_required = 1` stays set.
  */
-export const JOURNAL_SCHEMA_VERSION = 6;
+export const JOURNAL_SCHEMA_VERSION = 7;
 
 // --- closed failure reasons ---------------------------------------------------------------
 
@@ -275,12 +289,128 @@ create index if not exists lifecycle_operands_predecessor_idx
   on lifecycle_event_operands (predecessor_event_id);
 `;
 
+// --- device-sync reconciliation schema (spec 8, task 8) --------------------------------------
+
+/**
+ * The zeroed device-sync reconciliation singleton of spec 8: the local
+ * applied cursor, the last server-acknowledged cursor (never ahead of the
+ * applied one), the monotonic Vault observation generation, the active
+ * repair barrier generation/reason and the resumable manifest run
+ * checkpoint/final digest. One row, enforced single by the singleton key;
+ * every field is a count, closed token or opaque protocol identity — never
+ * raw content, credentials or provider detail.
+ */
+const DEVICE_SYNC_STATE_DDL = `
+create table if not exists device_sync_state (
+  singleton_key integer primary key check (singleton_key = 1),
+  applied_sequence integer not null check (applied_sequence >= 0),
+  acknowledged_sequence integer not null check (acknowledged_sequence >= 0
+    and acknowledged_sequence <= applied_sequence),
+  observation_generation integer not null check (observation_generation >= 0),
+  barrier_generation integer check (barrier_generation >= 0),
+  barrier_reason text,
+  active_manifest_run_id text,
+  manifest_checkpoint_sequence integer check (manifest_checkpoint_sequence >= 0),
+  manifest_final_digest text
+);
+`;
+
+/** The contiguous zero-based accepted-page progress of one manifest run. */
+const MANIFEST_PAGE_PROGRESS_DDL = `
+create table if not exists manifest_page_progress (
+  manifest_run_id text not null,
+  page_number integer not null check (page_number >= 0),
+  entry_count integer not null check (entry_count >= 0),
+  page_digest text not null,
+  primary key (manifest_run_id, page_number)
+);
+`;
+
+/**
+ * The per-action progress of one manifest run: the frozen planned action
+ * kind plus whether the action has already reached its terminal-safe
+ * local outcome. Same-index replays must carry the same planned kind.
+ */
+const MANIFEST_ACTION_PROGRESS_DDL = `
+create table if not exists manifest_action_progress (
+  manifest_run_id text not null,
+  action_index integer not null check (action_index >= 0),
+  action_kind text not null check (action_kind in ('upload', 'download',
+    'apply_tombstone', 'conflict', 'no_change', 'excluded')),
+  outcome text not null check (outcome in ('received', 'terminal_safe')),
+  safe_reason_code text,
+  primary key (manifest_run_id, action_index)
+);
+`;
+
+/**
+ * One crash-safe remote apply operation of spec 8.1: only local
+ * correctness evidence — the server event identity, the operation-shaped
+ * locator operands, the expected base/final fingerprints, the opaque
+ * temporary/rollback tokens, the closed state and the nullable closed
+ * error. No bytes, credential, object key, URL or provider response is
+ * stored.
+ */
+const REMOTE_APPLY_OPERATIONS_DDL = `
+create table if not exists remote_apply_operations (
+  event_sequence integer primary key check (event_sequence >= 1),
+  event_id text not null,
+  source_id text not null,
+  operation text not null check (operation in ('created', 'updated',
+    'renamed', 'moved', 'deleted', 'restored')),
+  prior_locator text,
+  target_locator text,
+  base_sha256 text,
+  base_size_bytes integer check (base_size_bytes >= 0),
+  base_media_type text,
+  final_sha256 text,
+  final_size_bytes integer check (final_size_bytes >= 0),
+  final_media_type text,
+  temp_token text,
+  rollback_token text,
+  state text not null check (state in ('prepared', 'temp_verified',
+    'vault_mutated', 'locally_applied', 'server_acknowledged')),
+  safe_error_code text
+);
+`;
+
+/**
+ * One exact echo marker of spec 8.2: the server event sequence, source,
+ * operation and applicable prior/target locator operands plus the
+ * expected final fingerprint. A watcher observation is suppressed only
+ * when every applicable member matches; delete carries no final
+ * fingerprint (its proof is the absent prior locator plus the retained
+ * tombstone mapping).
+ */
+const ECHO_MARKERS_DDL = `
+create table if not exists echo_markers (
+  event_sequence integer primary key check (event_sequence >= 1),
+  source_id text not null,
+  operation text not null check (operation in ('created', 'updated',
+    'renamed', 'moved', 'deleted', 'restored')),
+  prior_locator text,
+  target_locator text,
+  final_sha256 text,
+  final_size_bytes integer check (final_size_bytes >= 0),
+  final_media_type text
+);
+`;
+
+/** The zeroed singleton row every fresh v7 journal (and migration) seeds. */
+const DEVICE_SYNC_STATE_SEED_SQL =
+  "insert into device_sync_state (singleton_key, applied_sequence, acknowledged_sequence, observation_generation) values (1, 0, 0, 0);";
+
 const JOURNAL_SCHEMA_DDL = [
   JOURNAL_META_DDL,
   LOCAL_FILES_DDL,
   JOURNAL_EVENTS_DDL,
   JOURNAL_ATTEMPTS_DDL,
   LIFECYCLE_EVENT_OPERANDS_DDL,
+  DEVICE_SYNC_STATE_DDL,
+  MANIFEST_PAGE_PROGRESS_DDL,
+  MANIFEST_ACTION_PROGRESS_DDL,
+  REMOTE_APPLY_OPERATIONS_DDL,
+  ECHO_MARKERS_DDL,
 ].join("");
 
 /**
@@ -305,6 +435,14 @@ export const CHILD_FIVE_FIX_SCHEMA_VERSION = 4;
  * it accepts.
  */
 export const SERVER_RECEIPT_SCHEMA_VERSION = 5;
+
+/**
+ * The restore-reservation schema version (6). The v6 → v7 migration
+ * (`migrateRestoreReservationJournalToDeviceSyncSchema`, task 8) adds the
+ * five device-sync reconciliation tables of spec 8; the function pins this
+ * constant as the source version it accepts.
+ */
+export const RESTORE_RESERVATION_SCHEMA_VERSION = 6;
 
 // --- closed failure reasons ---------------------------------------------------------------
 
@@ -412,6 +550,7 @@ export class SqliteDatabase {
           `${initialMeta.isReconcileRequired ? 1 : 0}, '${initialMeta.recoveryState}');`,
         ].join(" "),
       );
+      database.#engine.exec(DEVICE_SYNC_STATE_SEED_SQL);
       database.#engine.exec(`pragma user_version = ${JOURNAL_SCHEMA_VERSION};`);
       return database;
     } catch {
@@ -563,5 +702,123 @@ export class SqliteDatabase {
         ? error
         : journalStoreError("journal_mutation_failed");
     }
+  }
+}
+
+// --- the v6 → v7 device-sync schema migration (task 8, spec 8) ------------------------------
+
+/**
+ * The v6 → v7 migration DDL: the five device-sync tables of spec 8 plus
+ * the zeroed state singleton and the schema bookkeeping bump. The
+ * destination version is pinned to `7` here (NOT interpolated from
+ * {@link JOURNAL_SCHEMA_VERSION}) so a future v7 → v8 migration can layer
+ * on top of this block without rewriting this DDL.
+ */
+const DEVICE_SYNC_MIGRATION_DDL = [
+  DEVICE_SYNC_STATE_DDL,
+  MANIFEST_PAGE_PROGRESS_DDL,
+  MANIFEST_ACTION_PROGRESS_DDL,
+  REMOTE_APPLY_OPERATIONS_DDL,
+  ECHO_MARKERS_DDL,
+  DEVICE_SYNC_STATE_SEED_SQL,
+  "update journal_meta set schema_version = 7 where singleton_key = 1;",
+  "pragma user_version = 7;",
+].join("");
+
+function readUserVersionOf(engine: SqliteDatabaseEngine): number {
+  const result = engine.exec("pragma user_version;");
+  const value = result[0]?.values[0]?.[0];
+  return typeof value === "number" ? value : Number.NaN;
+}
+
+/**
+ * Whether one candidate v6 image carries the full journal surface the
+ * migration builds on: the meta row and every v6 table (content, attempt
+ * and lifecycle operands). A missing table is image corruption the
+ * migration must fail closed on, never a silent partial upgrade.
+ */
+function restoreReservationJournalImageLooksValid(engine: SqliteDatabaseEngine): boolean {
+  try {
+    const metaRows = engine.exec(
+      "select schema_version from journal_meta where singleton_key = 1;",
+    );
+    if (metaRows[0]?.values[0] === undefined) {
+      return false;
+    }
+    const tables = engine.exec(
+      "select name from sqlite_master where type = 'table' order by name;",
+    );
+    const tableNames = (tables[0]?.values ?? []).map((row) => row[0]);
+    const required = [
+      "journal_attempts",
+      "journal_events",
+      "journal_meta",
+      "lifecycle_event_operands",
+      "local_files",
+    ];
+    for (const name of required) {
+      if (!(tableNames as readonly unknown[]).includes(name)) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Migrate one restore-reservation (`pragma user_version = 6`) journal image
+ * to the v7 device-sync schema in memory (task 8, spec 8). The migration
+ * creates the five reconciliation tables, seeds the zeroed state singleton
+ * and stamps the schema bookkeeping; every existing v6 row — file mapping,
+ * journal event, attempt, lifecycle operand, tombstone and restore
+ * reservation — survives untouched, and a pre-existing
+ * `is_reconcile_required = 1` stays set. The input image is never mutated;
+ * the function returns the upgraded image and runs the DDL inside one
+ * `begin immediate ... commit` transaction so a torn migration leaves the
+ * original image intact.
+ */
+export function migrateRestoreReservationJournalToDeviceSyncSchema(
+  engineModule: SqliteEngineModule,
+  image: ArrayLike<number>,
+): Uint8Array {
+  let engine: SqliteDatabaseEngine;
+  try {
+    engine = new engineModule.Database(image);
+  } catch {
+    // Bytes that are not a SQLite image at all never execute a statement.
+    throw journalStoreError("journal_image_invalid");
+  }
+  try {
+    const currentVersion = readUserVersionOf(engine);
+    if (currentVersion !== RESTORE_RESERVATION_SCHEMA_VERSION) {
+      throw journalStoreError("journal_schema_unsupported");
+    }
+    if (!restoreReservationJournalImageLooksValid(engine)) {
+      throw journalStoreError("journal_image_invalid");
+    }
+    engine.exec("begin immediate;");
+    try {
+      engine.exec(DEVICE_SYNC_MIGRATION_DDL);
+      engine.exec("commit;");
+    } catch (error) {
+      try {
+        engine.exec("rollback;");
+      } catch {
+        // Best-effort rollback: the closed reason below is the answer.
+      }
+      throw error instanceof JournalStoreError
+        ? error
+        : journalStoreError("journal_mutation_failed");
+    }
+    return engine.export();
+  } catch (error) {
+    // sql.js surfaces lazy open failures ("file is not a database") at the
+    // first statement, not at construction: those bytes are not a journal
+    // image. Closed store reasons pass through untouched.
+    throw error instanceof JournalStoreError ? error : journalStoreError("journal_image_invalid");
+  } finally {
+    engine.close();
   }
 }

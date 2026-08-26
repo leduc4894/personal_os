@@ -42,6 +42,8 @@ import {
   type LifecycleLocalFileState,
 } from "./lifecycle-contracts";
 import { LifecycleRepository as JournalLifecycleRepository } from "./lifecycle-repository";
+import { DeviceSyncRepository } from "../device-sync/repository";
+import type { DeviceSyncRepository as DeviceSyncRepositoryPort } from "../device-sync/contracts";
 import {
   JOURNAL_CAPTURE_ADMISSIONS,
   JOURNAL_COALESCABLE_EVENT_STATES,
@@ -141,6 +143,16 @@ export interface JournalRepositoryOptions {
     readonly createId: () => string;
     readonly nowEpochMs: () => number;
   }) => JournalLifecycleRepository;
+  /**
+   * Optional device-sync factory (task 8); the shared facade constructs
+   * the {@link DeviceSyncRepositoryPort} over the same `database` slice
+   * so the schema-v7 reconciliation state composes into the existing
+   * writer without a parallel SQL channel. Defaults to the canonical
+   * device-sync repository wired against `database`.
+   */
+  readonly createDeviceSyncRepository?: (deps: {
+    readonly database: JournalRepositoryDatabase;
+  }) => DeviceSyncRepositoryPort;
 }
 
 // --- closed value validation -------------------------------------------------------------------
@@ -504,6 +516,7 @@ export class JournalRepository {
   readonly #createId: () => string;
   readonly #nowEpochMs: () => number;
   readonly #lifecycle: JournalLifecycleRepository;
+  readonly #deviceSync: DeviceSyncRepositoryPort;
 
   constructor(options: JournalRepositoryOptions) {
     this.#database = options.database;
@@ -522,11 +535,23 @@ export class JournalRepository {
         nowEpochMs: this.#nowEpochMs,
       });
     }
+    this.#deviceSync = options.createDeviceSyncRepository
+      ? options.createDeviceSyncRepository({ database: this.#database })
+      : new DeviceSyncRepository({ database: this.#database });
   }
 
   /** The lifecycle repository wired against the same writer. */
   get lifecycle(): JournalLifecycleRepository {
     return this.#lifecycle;
+  }
+
+  /**
+   * The device-sync reconciliation repository (task 8) wired against the
+   * same writer: cursor, barrier, manifest progress, remote apply and
+   * echo state persist through the single serialized queue.
+   */
+  get deviceSync(): DeviceSyncRepositoryPort {
+    return this.#deviceSync;
   }
 
   // --- capture (spec 6.3, 7.1, 7.2) ---------------------------------------------------------
