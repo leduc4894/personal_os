@@ -472,6 +472,45 @@ describe("sync diagnostics export closed vocabulary (type level)", () => {
 // --- the privacy source contract -----------------------------------------------------------------------
 
 describe("sync diagnostics export privacy source contract", () => {
+  it("renders the closed device-sync status line when present (device cursor task 12)", () => {
+    const block = renderSyncDiagnosticsExportBlock({
+      syncStatusLine: "Ready",
+      syncBlockerGuidance: [],
+      journalStoreDiagnostics: {
+        lastJournalFailureReasons: [],
+        generationPublishFailureCount: 0,
+        lastGenerationPublishFailureReasons: [],
+      },
+      trailEntryCount: 0,
+      trailAppendFailureCount: 0,
+      trailTail: [],
+      deviceSyncStatusLine:
+        "Repair: Required (device_cursor_gap) · Applied: 7 · Acknowledged: 4 · Cursor lag: 3 · Pending actions: 2",
+    });
+
+    expect(block).toContain(
+      "Device sync: Repair: Required (device_cursor_gap) · Applied: 7 · Acknowledged: 4 · Cursor lag: 3 · Pending actions: 2",
+    );
+  });
+
+  it("renders the not-running device-sync line when the status is unavailable (device cursor task 12)", () => {
+    const block = renderSyncDiagnosticsExportBlock({
+      syncStatusLine: null,
+      syncBlockerGuidance: [],
+      journalStoreDiagnostics: {
+        lastJournalFailureReasons: [],
+        generationPublishFailureCount: 0,
+        lastGenerationPublishFailureReasons: [],
+      },
+      trailEntryCount: 0,
+      trailAppendFailureCount: 0,
+      trailTail: [],
+      deviceSyncStatusLine: null,
+    });
+
+    expect(block).toContain("Device sync: not running on this device");
+  });
+
   it("keeps the export module free of path-shaped and credential-shaped substrings", () => {
     const exportSource = readFileSync(
       new URL("./sync-diagnostics-export.ts", import.meta.url),

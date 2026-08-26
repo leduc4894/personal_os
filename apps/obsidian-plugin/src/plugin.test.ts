@@ -162,12 +162,14 @@ describe("Obsidian plugin composition root", () => {
     expect(pluginSource).not.toContain('id: "sync-now"');
     expect(pluginSource).not.toContain('id: "sync-existing-files"');
     expect(pluginSource).toContain('id: "restore-selected-tombstone"');
-    // Sync error tracing task 2 adds the ONE sanitized export command and
-    // task 3 the ONE bounded self-check command; the restore command stays
-    // the only other explicit surface.
+    // Sync error tracing task 2 adds the ONE sanitized export command,
+    // task 3 the ONE bounded self-check command, and device cursor and
+    // manifest reconciliation task 12 the ONE explicit repair command.
     expect(pluginSource).toContain('id: "copy-sync-diagnostics"');
     expect(pluginSource).toContain('id: "run-sync-self-check"');
-    expect(pluginSource.match(/addCommand\(/g)?.length ?? 0).toBe(3);
+    expect(pluginSource).toContain('id: "repair-sync"');
+    expect(pluginSource).toContain('"Repair sync"');
+    expect(pluginSource.match(/addCommand\(/g)?.length ?? 0).toBe(4);
     expect(pluginSource).not.toContain("#runExistingFilesScan");
     expect(pluginSource).not.toContain("#drainExistingFilesScanQueue");
     expect(pluginSource).not.toContain("#confirmExistingFilesScan");
@@ -721,18 +723,20 @@ describe("Obsidian plugin composition root", () => {
   });
 
   it("stops the queue driver, disposes listeners and attempts the journal flush before closing", () => {
+    const deviceSyncStopIndex = pluginSource.indexOf("this.#syncCoordinator?.stop()");
     const automaticStopIndex = pluginSource.indexOf("this.#automaticSnapshotCoordinator?.stop()");
     const stopIndex = pluginSource.indexOf("this.#queueDriver?.stop()");
     const disposeIndex = pluginSource.indexOf("this.#capture?.dispose()");
     const flushIndex = pluginSource.indexOf("this.#journalPersistence?.attemptFinalFlush()");
     const closeIndex = pluginSource.indexOf("this.#journalPersistence?.close()");
-    expect(automaticStopIndex).toBeGreaterThanOrEqual(0);
+    expect(deviceSyncStopIndex).toBeGreaterThanOrEqual(0);
+    expect(automaticStopIndex).toBeGreaterThan(deviceSyncStopIndex);
     expect(stopIndex).toBeGreaterThan(automaticStopIndex);
     expect(disposeIndex).toBeGreaterThan(stopIndex);
     expect(flushIndex).toBeGreaterThan(disposeIndex);
     expect(closeIndex).toBeGreaterThan(flushIndex);
     expect(pluginSource).toContain(
-      "Promise.all([automaticSnapshotStop, boundedQueuePassStop, captureQuiescence])",
+      "Promise.all([deviceSyncCoordinatorStop, automaticSnapshotStop, boundedQueuePassStop, captureQuiescence])",
     );
     // Unload never awaits async journal work; the flush attempt stays
     // synchronous and bounded.
@@ -911,6 +915,87 @@ describe("Obsidian plugin composition root", () => {
     expect(lifecycleDriverIndex).toBeGreaterThanOrEqual(0);
     const lifecycleDriverBody = pluginSource.slice(lifecycleDriverIndex, lifecycleDriverIndex + 900);
     expect(lifecycleDriverBody).toContain("diagnosticTrail");
+  });
+
+  it("composes the single device-sync coordinator after the journal and diagnostic trail are ready (task 12)", () => {
+    // One coordinator owns every mutating foreground network phase: the
+    // repository, wire client, applier and reconciler of tasks 8-11 bind
+    // behind it, built only after the journal recovery and the trail load.
+    const trailLoadIndex = pluginSource.indexOf("await diagnosticTrail.load()");
+    const queueDriverIndex = pluginSource.indexOf("new JournalQueueDriver({");
+    const coordinatorIndex = pluginSource.indexOf("createSyncCoordinator({");
+    expect(trailLoadIndex).toBeGreaterThanOrEqual(0);
+    expect(queueDriverIndex).toBeGreaterThan(trailLoadIndex);
+    expect(coordinatorIndex).toBeGreaterThan(queueDriverIndex);
+    const coordinatorBody = pluginSource.slice(coordinatorIndex, coordinatorIndex + 1_600);
+    for (const requiredComposition of [
+      "repository: deviceSyncRepository",
+      "api: deviceSyncApi",
+      "applier: remoteEventApplier",
+      "reconciler: manifestReconciler",
+      "outbound: boundedQueuePassDispatcher",
+      "diagnostics: deviceSyncDiagnostics",
+      "nowEpochMs: () => Date.now()",
+      "isJournalReconcileRequired",
+      "readManifestActionProgress",
+    ]) {
+      expect(coordinatorBody).toContain(requiredComposition);
+    }
+    // The Task 7 facade rides the SAME durable trail as every journal seam.
+    const facadeIndex = pluginSource.indexOf("createDeviceSyncDiagnostics(");
+    expect(facadeIndex).toBeGreaterThan(trailLoadIndex);
+    expect(facadeIndex).toBeLessThan(coordinatorIndex);
+    // The Task 9 wire client binds the Obsidian requestUrl surface through
+    // the same transport family the other lanes use.
+    expect(pluginSource).toContain("createObsidianDeviceSyncHttpTransport()");
+    // The Task 10 vault seam binds through the structural app.vault
+    // surface (no obsidian import inside src/device-sync); the composition
+    // narrows Obsidian's richer member types at one named boundary.
+    expect(pluginSource).toContain("createStructuralVaultMutationSeam(");
+    expect(pluginSource).toContain("#createStructuralVaultSurfaceForDeviceSync()");
+    // The outbound drain rides the SAME coalescing dispatcher every other
+    // trigger uses; the coordinator never bypasses the bounded pass.
+    expect(pluginSource).not.toContain("queueDriver.requestPass()");
+  });
+
+  it("registers the coordinator triggers: startup after layout, local commits, resume on visibility (task 12)", () => {
+    // Startup convergence of the device cursor is requested inside the
+    // layout-ready block, after the listener registration.
+    const lastListenerIndex = pluginSource.lastIndexOf("this.registerEvent(");
+    const startupRequestIndex = pluginSource.indexOf('this.#requestDeviceSyncCycle("startup")');
+    expect(startupRequestIndex).toBeGreaterThan(lastListenerIndex);
+    // Every settled Vault event listener forwards the local_commit trigger
+    // to the coordinator alongside its bounded queue pass.
+    expect(pluginSource.match(/#requestDeviceSyncCycle\("local_commit"\)/g)?.length ?? 0).toBe(4);
+    // The resume trigger binds to the document visibility surface so a
+    // device returning from suspension re-enters the cadence.
+    expect(pluginSource).toContain('registerDomEvent(document, "visibilitychange"');
+    expect(pluginSource).toContain('#requestDeviceSyncCycle("resume")');
+    // The repair command routes through the same coordinator request.
+    const repairCommandIndex = pluginSource.indexOf('id: "repair-sync"');
+    expect(repairCommandIndex).toBeGreaterThanOrEqual(0);
+    const repairCommandBody = pluginSource.slice(repairCommandIndex, repairCommandIndex + 260);
+    expect(repairCommandBody).toContain('#requestDeviceSyncCycle("explicit_repair")');
+  });
+
+  it("carries the device-sync status onto the settings snapshot and the diagnostics export (task 12)", () => {
+    const snapshotIndex = pluginSource.indexOf("getSnapshot: () => {");
+    expect(snapshotIndex).toBeGreaterThanOrEqual(0);
+    const snapshotBody = pluginSource.slice(snapshotIndex, snapshotIndex + 3_800);
+    expect(snapshotBody).toContain("deviceSyncStatus:");
+    // The read is fail-closed: a throwing projection never breaks the
+    // settings render and reports the closed composition-read failure
+    // instead of a stop reason.
+    const readerIndex = pluginSource.indexOf("#readDeviceSyncStatus(): DeviceSyncStatus | null");
+    expect(readerIndex).toBeGreaterThanOrEqual(0);
+    const readerBody = pluginSource.slice(readerIndex, readerIndex + 900);
+    expect(readerBody).toContain("#reportSyncStatusReadFailureOnce");
+    // The export block renders the same closed status line.
+    const builderIndex = pluginSource.indexOf("#buildSyncDiagnosticsExportBlock(): string");
+    expect(builderIndex).toBeGreaterThanOrEqual(0);
+    const builderBody = pluginSource.slice(builderIndex, builderIndex + 1_800);
+    expect(builderBody).toContain("renderDeviceSyncStatusText");
+    expect(builderBody).toContain("deviceSyncStatusLine");
   });
 
   it("touches no forbidden runtime capability at load time", () => {

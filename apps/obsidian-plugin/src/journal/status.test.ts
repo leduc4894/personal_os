@@ -269,7 +269,7 @@ describe("sync status projection vocabulary (spec 11)", () => {
     expect(SYNC_BLOCKER_GUIDANCE_TEXT.login_required).toContain("browser login");
     expect(SYNC_BLOCKER_GUIDANCE_TEXT.login_required).toContain("unchanged");
     expect(SYNC_BLOCKER_GUIDANCE_TEXT.reconcile_required).toContain("reconciliation");
-    expect(SYNC_BLOCKER_GUIDANCE_TEXT.reconcile_required).toContain("child 6");
+    expect(SYNC_BLOCKER_GUIDANCE_TEXT.reconcile_required).toContain("Repair sync");
   });
 });
 
@@ -561,7 +561,7 @@ describe("reconcile-required hard stop (spec 11)", () => {
     );
     expect(snapshot.kind).toBe("reconcile_required");
     expect(snapshot.blockers).toContain("reconcile_required");
-    expect(SYNC_BLOCKER_GUIDANCE_TEXT.reconcile_required).toContain("child 6");
+    expect(SYNC_BLOCKER_GUIDANCE_TEXT.reconcile_required).toContain("Repair sync");
 
     // The plugin wiring rule: the projection verdict stops the driver.
     const { driver, installTransport } = createDriver(repository, new Map());

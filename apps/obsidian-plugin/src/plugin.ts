@@ -11,7 +11,7 @@
 import { Modal, Notice, Platform, Plugin, requestUrl, Setting, TFile } from "obsidian";
 import type { TAbstractFile } from "obsidian";
 
-import { createObsidianPolicyHttpTransport, createObsidianSyncHttpTransport } from "./api/obsidian-api-transport";
+import { createObsidianDeviceSyncHttpTransport, createObsidianPolicyHttpTransport, createObsidianSyncHttpTransport } from "./api/obsidian-api-transport";
 import { createRequestUrlTransport } from "./api/request-url-transport";
 import {
   createDeviceApiTransport,
@@ -92,6 +92,24 @@ import { createUuidv7Factory } from "./journal/uuidv7";
 import { PolicySession } from "./exclusion-policy/policy-session";
 import type { PolicyCacheAdapter } from "./exclusion-policy/policy-cache";
 import type { PolicyIntegrityState } from "./exclusion-policy/contracts";
+import {
+  AtomicVaultWriterImpl,
+  createStructuralVaultMutationSeam,
+} from "./device-sync/atomic-vault-writer";
+import type { StructuralVaultSurface } from "./device-sync/atomic-vault-writer";
+import { createDeviceSyncApi } from "./device-sync/api";
+import { createDeviceSyncDiagnostics } from "./device-sync/diagnostics";
+import { createManifestCapture } from "./device-sync/manifest-capture";
+import {
+  createManifestReconciler,
+  createManifestReconcilerJournal,
+} from "./device-sync/manifest-reconciler";
+import { createRemoteEventApplier } from "./device-sync/remote-event-applier";
+import { DeviceSyncRepository } from "./device-sync/repository";
+import { renderDeviceSyncStatusText } from "./device-sync/status";
+import type { DeviceSyncStatus } from "./device-sync/status";
+import { createSyncCoordinator } from "./device-sync/sync-coordinator";
+import type { SyncCoordinator, SyncTrigger } from "./device-sync/sync-coordinator";
 
 /**
  * The explicit development-build flag of spec 19. Production builds accept
@@ -284,6 +302,12 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   #hasReportedSyncStatusReadFailure = false;
   #automaticSnapshotCoordinator: AutomaticSnapshotCoordinator | null = null;
   #boundedQueuePassDispatcher: CoalescingQueuePassDispatcher | null = null;
+  /**
+   * The single device-sync coordinator (task 12): owns every mutating
+   * foreground network phase of the device cursor and manifest
+   * reconciliation stack. Null before the journal starts or after unload.
+   */
+  #syncCoordinator: SyncCoordinator | null = null;
   #pendingAutomaticSnapshotReason: AutomaticSnapshotReason | null = null;
   #isQueuePassActive = false;
   #lastQueuePassOutcome: QueuePassOutcome | null = null;
@@ -419,6 +443,9 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           // null before the first failure, never a fake success token.
           lastStartupFailureTokens: this.#lastStartupFailureTokens,
           localNoteSyncStatuses: this.#readLocalNoteSyncStatuses(),
+          // Device cursor task 12: the closed device-sync status (or null
+          // while no coordinator runs / the read failed closed).
+          deviceSyncStatus: this.#readDeviceSyncStatus(),
         };
       },
       setServerOrigin: (origin) => {
@@ -511,11 +538,16 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   }
 
   override onunload(): void {
-    // Stop and await the two coordinators before closing the journal. The
-    // capture receives the snapshot abort signal, while the queue driver is
-    // stopped immediately so its active request exits without mutating late.
-    // The one-shot scheduled retry trigger never outlives the plugin.
+    // Stop and await the coordinators before closing the journal. The
+    // device-sync coordinator stops FIRST: its running cycle may still
+    // await the queue dispatcher below, so its stop must begin before the
+    // dispatcher's. The capture receives the snapshot abort signal, while
+    // the queue driver is stopped immediately so its active request exits
+    // without mutating late. The one-shot scheduled retry trigger never
+    // outlives the plugin.
     this.#clearScheduledRetryPassTrigger();
+    const deviceSyncCoordinatorStop = this.#syncCoordinator?.stop() ?? Promise.resolve();
+    this.#syncCoordinator = null;
     const automaticSnapshotStop = this.#automaticSnapshotCoordinator?.stop() ?? Promise.resolve();
     this.#automaticSnapshotCoordinator = null;
     const boundedQueuePassStop = this.#boundedQueuePassDispatcher?.stop() ?? Promise.resolve();
@@ -524,7 +556,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     this.#lifecycleCapture?.dispose();
     this.#capture?.dispose();
     const captureQuiescence = this.#capture?.whenIdle() ?? Promise.resolve();
-    void Promise.all([automaticSnapshotStop, boundedQueuePassStop, captureQuiescence]).then(() => {
+    void Promise.all([deviceSyncCoordinatorStop, automaticSnapshotStop, boundedQueuePassStop, captureQuiescence]).then(() => {
       this.#releaseJournalResources();
     });
     this.#controller?.stop();
@@ -545,6 +577,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     this.#capture = null;
     this.#queueRepository = null;
     this.#diagnosticTrail = null;
+    this.#syncCoordinator = null;
     this.#syncStatusBarItem = null;
   }
 
@@ -582,6 +615,39 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       return;
     }
     coordinator.request(reason);
+  }
+
+  /**
+   * Forward one closed device-sync trigger to the single coordinator
+   * (task 12). Null-safe by construction: triggers from Vault events, the
+   * visibility surface and the repair command may arrive before the
+   * journal starts or after unload, and a missing coordinator simply
+   * drops the trigger (the cadence re-requests the work).
+   */
+  #requestDeviceSyncCycle(trigger: SyncTrigger): void {
+    this.#syncCoordinator?.request(trigger);
+  }
+
+  /**
+   * The closed device-sync status of the settings snapshot and the
+   * diagnostics export (task 12), or null when no coordinator runs. The
+   * read is fail-closed: a throwing projection reports the once-per-
+   * session closed `composition_read_failure` observation through the
+   * existing sync-status read site and never becomes a stop reason — the
+   * settings render keeps its "not running" line instead of a partial or
+   * wrong status.
+   */
+  #readDeviceSyncStatus(): DeviceSyncStatus | null {
+    const coordinator = this.#syncCoordinator;
+    if (coordinator === null) {
+      return null;
+    }
+    try {
+      return coordinator.readStatus();
+    } catch {
+      this.#reportSyncStatusReadFailureOnce();
+      return null;
+    }
   }
 
   async #persistSettings(): Promise<void> {
@@ -764,6 +830,82 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           await boundedQueuePassDispatcher.request();
         },
       }, journalFailureReporter);
+      // Device cursor and manifest reconciliation (task 12): the single
+      // coordinator that owns every mutating foreground network phase —
+      // recovery, repair, the eligible outbound drain, one inbound page
+      // and the cursor acknowledgement. Built only after the journal and
+      // the diagnostics trail are ready; every behavior lives in the
+      // tested ./device-sync modules, this block only binds real adapters.
+      const deviceSyncDiagnostics = createDeviceSyncDiagnostics(diagnosticTrail);
+      const deviceSyncRepository = new DeviceSyncRepository({ database: journalDatabase });
+      const deviceSyncApi = createDeviceSyncApi({
+        transport: createObsidianDeviceSyncHttpTransport(),
+        resolveOrigin: () =>
+          parseServerOrigin(this.#settings.server_origin, {
+            allowLoopbackHttp: ALLOW_LOOPBACK_HTTP_ORIGIN,
+          }) ?? "",
+        getAccessToken: () => session.accessCredential,
+        diagnostics: deviceSyncDiagnostics,
+      });
+      const remoteEventApplier = createRemoteEventApplier({
+        repository: deviceSyncRepository,
+        writer: new AtomicVaultWriterImpl({
+          repository: deviceSyncRepository,
+          seam: createStructuralVaultMutationSeam(
+            this.#createStructuralVaultSurfaceForDeviceSync(),
+          ),
+        }),
+        downloader: (input) => deviceSyncApi.downloadSourceVersion(input),
+        diagnostics: deviceSyncDiagnostics,
+      });
+      const manifestReconcilerJournal = createManifestReconcilerJournal({
+        repository,
+        capture,
+      });
+      const manifestReconciler = createManifestReconciler({
+        repository: deviceSyncRepository,
+        api: deviceSyncApi,
+        capture: createManifestCapture({
+          vaultReader,
+          identityReader: repository,
+        }),
+        journal: manifestReconcilerJournal,
+        applier: remoteEventApplier,
+        diagnostics: deviceSyncDiagnostics,
+        downloader: (input) => deviceSyncApi.downloadSourceVersion(input),
+      });
+      const syncCoordinator = createSyncCoordinator({
+        repository: deviceSyncRepository,
+        api: deviceSyncApi,
+        applier: remoteEventApplier,
+        reconciler: manifestReconciler,
+        outbound: boundedQueuePassDispatcher,
+        diagnostics: deviceSyncDiagnostics,
+        nowEpochMs: () => Date.now(),
+        // The journal's sticky reconcile flag joins the repair-if-required
+        // decision of every cycle.
+        isJournalReconcileRequired: () => persistence.isReconcileRequired,
+        // The active manifest run's action progress feeds the pending
+        // action count of the closed status projection.
+        readManifestActionProgress: () => repository.readManifestActionProgress(),
+        // The plugin's stable instance identity (presented at device
+        // authorization) is the only device identity the plugin holds.
+        // When the server's origin device namespace differs, the
+        // self-origin check simply never fires and every pulled event
+        // walks the full crash-safe apply machine — correct by
+        // construction, never a silent suppression.
+        resolveOwnDeviceId: () => this.#settings.client_instance_id,
+        outboundEvidence: {
+          readCommittedOutboundRowByLocator: (normalizedLocator) =>
+            repository.readLocalFileByPath(normalizedLocator),
+        },
+        // After a suspension of one hour or more, an active manifest run's
+        // temporary progress is discarded before the resume starts a
+        // fresh checkpoint-bound run under the same barrier.
+        discardExpiredManifestRun: () =>
+          manifestReconcilerJournal.discardActiveManifestRun(),
+      });
+      this.#syncCoordinator = syncCoordinator;
       this.#journalPersistence = persistence;
       this.#capture = capture;
       this.#queueDriver = queueDriver;
@@ -782,6 +924,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           void capture.notifyPathChanged(file.path).then(
             () => {
               void boundedQueuePassDispatcher.request();
+              this.#requestDeviceSyncCycle("local_commit");
             },
             () => undefined,
           );
@@ -795,6 +938,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
             void capture.notifyPathChanged(file.path).then(
               () => {
                 void boundedQueuePassDispatcher.request();
+                this.#requestDeviceSyncCycle("local_commit");
               },
               () => undefined,
             );
@@ -812,6 +956,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
             void capture.notifyPathDeleted(this.#toVaultTargetFile(file)).then(
               () => {
                 void boundedQueuePassDispatcher.request();
+                this.#requestDeviceSyncCycle("local_commit");
               },
               () => undefined,
             );
@@ -828,6 +973,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
             void capture.notifyPathRenamed(this.#toVaultRenameTarget(file), oldPath).then(
               () => {
                 void boundedQueuePassDispatcher.request();
+                this.#requestDeviceSyncCycle("local_commit");
               },
               () => undefined,
             );
@@ -838,6 +984,20 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           automaticSnapshotCoordinator.request(this.#pendingAutomaticSnapshotReason);
           this.#pendingAutomaticSnapshotReason = null;
         }
+        // Device cursor task 12: the coordinator's startup trigger follows
+        // the same layout-ready boundary as capture convergence — the
+        // first bounded cycle runs recovery, repair-if-required, one
+        // outbound drain and one inbound page.
+        this.#requestDeviceSyncCycle("startup");
+        // A device returning from suspension (a backgrounded mobile
+        // session, a reopened desktop window) re-enters the cadence: the
+        // coordinator measures the idle gap itself, so a suspension of one
+        // hour or more expires an active manifest run before the resume.
+        this.registerDomEvent(document, "visibilitychange", () => {
+          if (document.visibilityState === "visible") {
+            this.#requestDeviceSyncCycle("resume");
+          }
+        });
       });
       // Explicit restore surface (Task 10, spec 6.3 + 7.1): the user
       // picks one retained tombstone by its plugin-local id (the only
@@ -854,6 +1014,17 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         name: "Restore selected tombstone",
         callback: () => {
           void this.#runRestoreSelectedTombstone();
+        },
+      });
+      // Device cursor task 12: the ONE explicit repair surface. The
+      // command only forwards the closed trigger — the coordinator owns
+      // the bounded repair cycle, and the settings tab renders its closed
+      // status without any repair control of its own.
+      this.addCommand({
+        id: "repair-sync",
+        name: "Repair sync",
+        callback: () => {
+          this.#requestDeviceSyncCycle("explicit_repair");
         },
       });
     } catch (error) {
@@ -1203,6 +1374,9 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     const generationPublishFailures =
       this.#journalPersistence?.readGenerationPublishFailureSummary() ?? null;
     const trailEntries = this.#diagnosticTrail?.readEntries() ?? [];
+    // Device cursor task 12: the same closed device-sync status line the
+    // settings tab renders joins the sanitized export block.
+    const deviceSyncStatus = this.#readDeviceSyncStatus();
     return renderSyncDiagnosticsExportBlock({
       syncStatusLine: syncStatus === null ? null : renderJournalSyncStatusText(syncStatus),
       syncBlockerGuidance:
@@ -1215,6 +1389,8 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       trailEntryCount: trailEntries.length,
       trailAppendFailureCount: this.#diagnosticTrail?.readAppendFailureCount() ?? 0,
       trailTail: trailEntries.slice(-SYNC_DIAGNOSTICS_TRAIL_TAIL_ENTRY_LIMIT),
+      deviceSyncStatusLine:
+        deviceSyncStatus === null ? null : renderDeviceSyncStatusText(deviceSyncStatus),
     });
   }
 
@@ -1497,6 +1673,33 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   /** Narrow an Obsidian file into the lifecycle capture's rename target. */
   #toVaultRenameTarget(file: TAbstractFile): VaultRenameTarget {
     return this.#toVaultTargetFile(file) as VaultRenameTarget;
+  }
+
+  /**
+   * The narrow structural `Vault` slice the Task 10 atomic writer's seam
+   * binds to (device cursor task 12): `app.vault` narrowed member by
+   * member, because the Obsidian `Vault.createBinary` returns the created
+   * `TFile` where the mobile-loadable structural surface expects `void`.
+   * The rename/trash narrowing is safe by construction: the seam only
+   * ever passes files it obtained from `getAbstractFileByPath` itself.
+   */
+  #createStructuralVaultSurfaceForDeviceSync(): StructuralVaultSurface {
+    const vault = this.app.vault;
+    return {
+      getAbstractFileByPath: (path) => vault.getAbstractFileByPath(path),
+      createBinary: async (path, data) => {
+        await vault.createBinary(path, data);
+      },
+      readBinary: async (path) => {
+        const file = vault.getAbstractFileByPath(path);
+        if (!(file instanceof TFile)) {
+          throw new Error("device sync read target is not a regular file");
+        }
+        return vault.readBinary(file);
+      },
+      rename: (file, newPath) => vault.rename(file as TAbstractFile, newPath),
+      trash: (file, system) => vault.trash(file as TAbstractFile, system),
+    };
   }
 
   /** Narrow an Obsidian file into the lifecycle capture's delete target. */

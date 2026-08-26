@@ -208,6 +208,11 @@ export interface SyncDiagnosticsExportInput {
   readonly trailAppendFailureCount: number;
   /** The trail entries available for the tail render (oldest first). */
   readonly trailTail: readonly SyncDiagnosticTrailEntry[];
+  /**
+   * The rendered device-sync status line (device cursor task 12), or null
+   * when no device-sync coordinator runs on the device.
+   */
+  readonly deviceSyncStatusLine?: string | null | undefined;
 }
 
 /**
@@ -235,6 +240,9 @@ export function renderSyncDiagnosticsExportBlock(
   }
   lines.push(`Trail entries: ${input.trailEntryCount}`);
   lines.push(`Trail append failures: ${input.trailAppendFailureCount}`);
+  // Device cursor task 12: the closed device-sync status line joins the
+  // block with the same closed-token guarantee as every other line.
+  lines.push(`Device sync: ${input.deviceSyncStatusLine ?? "not running on this device"}`);
   const newestFirstTail = input.trailTail
     .slice(-SYNC_DIAGNOSTICS_TRAIL_TAIL_ENTRY_LIMIT)
     .reverse();

@@ -106,7 +106,7 @@ export const SYNC_BLOCKER_GUIDANCE_TEXT: Readonly<Record<JournalSyncBlocker, str
   login_required:
     "Login required: open the existing browser login from the plugin settings. Queued work is kept unchanged.",
   reconcile_required:
-    "Sync stopped: journal reconciliation is required before syncing can continue. Repair and reconciliation are owned by child 6.",
+    "Sync stopped: journal reconciliation is required before syncing can continue. Run the plugin command \"Repair sync\" to reconcile this device; queued work resumes after the repair completes.",
 };
 
 /**

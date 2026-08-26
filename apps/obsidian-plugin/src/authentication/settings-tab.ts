@@ -12,6 +12,8 @@ import { CONNECTION_STATUS_TEXT, resolveAuthenticationControls } from "./contrac
 import type { ConnectionState } from "./contracts";
 import type { ClearedReason } from "./secret-storage-record";
 import type { PolicyIntegrityState } from "../exclusion-policy/contracts";
+import type { DeviceSyncStatus } from "../device-sync/status";
+import { renderDeviceSyncStatusText } from "../device-sync/status";
 import type { LifecycleStateCounts, LifecycleBlockedReasonCode } from "../journal/status";
 import { LIFECYCLE_LOCAL_FILE_STATES } from "../journal/lifecycle-contracts";
 import type { LifecycleLocalFileState } from "../journal/lifecycle-contracts";
@@ -102,6 +104,12 @@ export interface DeviceAuthenticationSnapshot {
   readonly lastStartupFailureTokens: readonly SyncDiagnosticClosedToken[] | null;
   /** Local-only per-note statuses; paths must never leave this settings tab. */
   readonly localNoteSyncStatuses: readonly LocalNoteSyncStatus[];
+  /**
+   * The closed device-sync status (device cursor task 12): repair state,
+   * closed reason, cursor watermarks, cursor lag and the pending action
+   * count — or null when no device-sync coordinator runs on the device.
+   */
+  readonly deviceSyncStatus: DeviceSyncStatus | null;
 }
 
 export interface DeviceAuthenticationTabView {
@@ -191,6 +199,15 @@ export class DeviceAuthenticationSettingTab extends PluginSettingTab {
         }),
       );
 
+    // Device cursor task 12: the closed device-sync status — repair state,
+    // closed reason, counts and cursor lag — rendered through the SAME
+    // closed projection the diagnostics export uses. No repair control
+    // lives here: the plugin command `Repair sync` owns the explicit
+    // repair trigger.
+    new Setting(containerEl)
+      .setName("Device sync")
+      .setDesc(deviceSyncStatusDescription(snapshot.deviceSyncStatus));
+
     // Vault paths are intentionally limited to this local settings surface.
     // The aggregate sync status and status bar remain redacted.
     new Setting(containerEl)
@@ -261,9 +278,20 @@ export class DeviceAuthenticationSettingTab extends PluginSettingTab {
   }
 }
 
+/**
+ * The closed device-sync status description (device cursor task 12): the
+ * projection's own renderer — repair state label, closed reason token,
+ * cursor watermarks, cursor lag and the pending action count — or one
+ * fixed line when no coordinator runs. Closed tokens and counts only.
+ */
+function deviceSyncStatusDescription(status: DeviceSyncStatus | null): string {
+  return status === null
+    ? "Device sync is not running on this device"
+    : renderDeviceSyncStatusText(status);
+}
+
 /** The status line plus each blocker guidance line, joined in closed order. */
-function syncStatusDescription(snapshot: DeviceAuthenticationSnapshot): string {
-  const lines: string[] = [];
+function syncStatusDescription(snapshot: DeviceAuthenticationSnapshot): string {  const lines: string[] = [];
   if (snapshot.syncStatusText !== null) {
     lines.push(snapshot.syncStatusText);
   }

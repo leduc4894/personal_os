@@ -135,6 +135,22 @@ describe("DeviceAuthenticationSettingTab source contract", () => {
     }
   });
 
+  it("renders the closed device-sync status section (device cursor task 12)", () => {
+    // The settings snapshot accepts the device-sync status and renders it
+    // through the SAME closed projection the export uses: repair state,
+    // closed reason, counts and cursor lag only — never a path, locator,
+    // source id, tombstone id, fingerprint or credential.
+    expect(tabSource).toContain("deviceSyncStatus");
+    expect(tabSource).toContain("renderDeviceSyncStatusText");
+    expect(tabSource).toContain("Device sync");
+    const sectionIndex = tabSource.indexOf('"Device sync"');
+    expect(sectionIndex).toBeGreaterThanOrEqual(0);
+    const sectionSnippet = tabSource.slice(sectionIndex, sectionIndex + 320);
+    for (const forbidden of [".md", "notes/", "at1.", "secret", "https://"]) {
+      expect(sectionSnippet).not.toContain(forbidden);
+    }
+  });
+
   it("carries the closed policy state and startup-failure tokens on the snapshot (closed-reason surfacing C1)", () => {
     // C1 P3: the closed `policyState` (including `policy_integrity_failed`)
     // joins the settings snapshot and renders one fixed guidance line per
