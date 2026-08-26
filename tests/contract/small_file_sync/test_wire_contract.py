@@ -5,17 +5,20 @@ precedent applied to the two sync surfaces. The golden corpus under
 ``tests/fixtures/small_file_sync/wire-golden.json`` carries the canonical
 envelope of every preflight outcome, the committed terminal result and the
 closed error envelopes with their registered statuses plus the plugin-side
-closed landing of each shape. This gate pins the corpus hash, proves the
-Obsidian plugin's vitest replay reads exactly these bytes and passes them
-through the real hand-mirrored client, and replays every route-reachable
-entry against the real application factory so the served envelopes and the
-corpus cannot drift apart. Two entries are unreachable through the served
-routes of this harness by design — the defensive
-``small_file_upload_state_invalid`` mapping (a committed identity always
-replays its frozen receipt first) and the typed create-time
+closed landing of each shape, and — since the reconciliation child's task 9
+— three device-sync error envelopes (cursor gap, manifest policy advance,
+download integrity) replayed through the hand-mirrored device client. This
+gate pins the corpus hash, proves the Obsidian plugin's vitest replay reads
+exactly these bytes and passes them through the real hand-mirrored clients,
+and replays every route-reachable entry against the real application
+factory so the served envelopes and the corpus cannot drift apart. Five
+entries are unreachable through the served routes of this harness by design
+— the defensive ``small_file_upload_state_invalid`` mapping (a committed
+identity always replays its frozen receipt first), the typed create-time
 ``source_locator_conflict`` (produced only by the durable publication
 store's guarded locator pre-check, which the offline harness double does not
-model) — and stay corpus-only plugin-side coverage.
+model), and the three device-sync entries that ride the reconciliation
+child's own route family — and stay corpus-only plugin-side coverage.
 """
 
 from __future__ import annotations
@@ -44,6 +47,8 @@ from tests.integration.small_file_sync.conftest import (
     revoke_device_through_admin_route,
 )
 
+from personal_os.api_contracts.errors import HTTP_ERROR_STATUSES
+from personal_os.error_contracts.codes import ERROR_DEFINITIONS, ErrorCode
 from personal_os.object_storage import CanonicalMediaType, ContentDigest, ExpectedObject
 from personal_os.small_file_sync.contracts import MAX_SINGLE_PART_FILE_SIZE_BYTES
 from personal_os.sources.commands import SourceType
@@ -74,7 +79,7 @@ def policy_harness() -> Iterator[SmallFileWireHarness]:
 #: The cross-language contract hash: both language replays consume these
 #: exact bytes; changing the corpus means updating this registry in the same
 #: commit.
-WIRE_GOLDEN_SHA256: Final[str] = "b8683dccb406c98ffead888697531d09fce91442768396d388364bd4386c2d38"
+WIRE_GOLDEN_SHA256: Final[str] = "25a165179cefc77578593554ee15967495762309ab79ea1377f633f033ab85c3"
 
 #: The TypeScript replay suite that must read the fixture file.
 TS_REPLAY_SOURCE: Final[str] = "apps/obsidian-plugin/src/journal/sync-wire-contract.test.ts"
@@ -92,8 +97,24 @@ _CURRENT_BASE_COMMITTED_AT: Final[datetime] = datetime(2026, 8, 18, 0, 0, 0, tzi
 #: publication double models no active-locator unique index — so
 #: ``content_source_locator_conflict`` stays corpus/plugin-side coverage while
 #: its registered status mapping is pinned by the API error-contract suite.
+#: The three device-sync entries ride the device-sync route family of the
+#: reconciliation child, not this harness's two small-file routes, so they
+#: stay corpus/plugin-side coverage too; the device-sync route replay owns
+#: their served envelopes.
 _ROUTE_UNREACHABLE_ENTRIES: Final[frozenset[str]] = frozenset(
-    {"error_small_file_upload_state_invalid", "content_source_locator_conflict"}
+    {
+        "error_small_file_upload_state_invalid",
+        "content_source_locator_conflict",
+        "device_error_cursor_gap",
+        "device_error_manifest_policy_advanced",
+        "device_error_download_integrity_failed",
+    }
+)
+
+#: The device-sync surfaces the corpus replays through the hand-mirrored
+#: device client (task 9 of the reconciliation child).
+_DEVICE_SYNC_SURFACES: Final[frozenset[str]] = frozenset(
+    {"device_events", "manifest_finalize", "device_download"}
 )
 
 
@@ -371,12 +392,49 @@ def test_route_unreachable_entries_stay_corpus_only_plugin_coverage() -> None:
     request sequence reaches ``small_file_upload_state_invalid``; and the
     typed create-time ``source_locator_conflict`` answers only from the
     durable publication store's guarded locator pre-check, which the offline
-    harness double does not model. Both entries exist so their plugin-side
-    landings are still pinned in the TypeScript replay.
+    harness double does not model. The three device-sync entries ride the
+    reconciliation child's device-sync route family, not this harness's two
+    small-file routes. Every entry exists so its plugin-side landing is
+    still pinned in the TypeScript replay.
     """
 
     names = {entry["name"] for entry in _entries()}
     assert names >= _ROUTE_UNREACHABLE_ENTRIES
+
+
+def test_the_device_sync_entries_pin_their_exact_closed_landings() -> None:
+    """The device-sync corpus entries are the plugin's cross-language pin.
+
+    Each entry carries the canonical error envelope of one registered
+    device-sync code with its registered status, the registry's exact safe
+    message and retryability, a UUID-shaped request id, and names the closed
+    plugin reason the TypeScript replay must land through the hand-mirrored
+    device client — the cursor gap of a pull, the policy advance of a
+    finalize and the pre-stream download integrity rejection.
+    """
+
+    expected: Final[dict[str, str]] = {
+        "device_error_cursor_gap": "device_cursor_gap",
+        "device_error_manifest_policy_advanced": "device_manifest_policy_advanced",
+        "device_error_download_integrity_failed": "device_download_integrity_failed",
+    }
+    by_name = {str(entry["name"]): entry for entry in _entries()}
+    assert expected.keys() <= by_name.keys()
+    for name, code in expected.items():
+        entry = by_name[name]
+        golden = json.loads(str(entry["body_text"]))
+        definition = ERROR_DEFINITIONS[ErrorCode(code)]
+        assert entry["surface"] in _DEVICE_SYNC_SURFACES, name
+        assert entry["status"] == HTTP_ERROR_STATUSES[ErrorCode(code)], name
+        assert golden["data"] is None, name
+        assert UUID(str(golden["request_id"])), name
+        assert golden["error"] == {
+            "code": code,
+            "message": definition.safe_message,
+            "retryable": definition.is_retryable,
+            "details": {},
+        }, name
+        assert entry["plugin_expectation"] == {"kind": "device_sync_failure", "reason": code}, name
 
 
 # --- replay semantics -------------------------------------------------------------------

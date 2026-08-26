@@ -24,12 +24,17 @@ import type { FrozenFingerprint, JournalOperation } from "./contracts";
 
 // --- the raw sync transport port -------------------------------------------------------------
 
-/** One raw sync HTTP request: a JSON text body or an exact byte buffer. */
+/**
+ * One raw sync HTTP request: a JSON text body, an exact byte buffer or no
+ * body at all (the GET pulls of the device-sync routes, whose client shares
+ * this request grammar). The body member is optional so a GET request never
+ * carries an empty-string payload the server could misread as a body.
+ */
 export interface SyncHttpRequest {
   readonly url: string;
-  readonly method: "POST" | "PUT";
+  readonly method: "GET" | "POST" | "PUT";
   readonly headers: Readonly<Record<string, string>>;
-  readonly body: string | ArrayBuffer;
+  readonly body?: string | ArrayBuffer | undefined;
 }
 
 /** One raw sync HTTP response: the status and the response text. */

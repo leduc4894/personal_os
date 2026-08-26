@@ -1,5 +1,6 @@
 import type { RequestUrlParam, RequestUrlResponse } from "obsidian";
 import type { ApiTransport } from "@workspace/api-client";
+import type { DeviceSyncHttpTransport } from "../device-sync/api";
 import type { PolicyHttpTransport } from "../exclusion-policy/contracts";
 import type { SyncHttpTransport } from "../journal/sync-api";
 
@@ -71,10 +72,44 @@ export function createRequestUrlSyncTransport(
       method: request.method,
       headers: { ...request.headers },
       throw: false,
-      body: request.body,
+      ...(request.body === undefined ? {} : { body: request.body }),
     };
     const result = await requestUrlFunction(param);
     return { status: result.status, bodyText: result.text };
+  };
+}
+
+/**
+ * The pure binary-capable adapter for the device-sync routes (spec 7): the
+ * shared request grammar in, and out come the status, the response text,
+ * the exact response bytes and the response headers with lower-cased names
+ * — the binary members feed the verified download's length/digest
+ * verification. Like the sync adapter it adds no automatic retry and
+ * re-checks nothing about the bytes it passes through; the device client
+ * owns every verification and retry decision.
+ */
+export function createRequestUrlDeviceSyncTransport(
+  requestUrlFunction: RequestUrlFunction,
+): DeviceSyncHttpTransport {
+  return async (request) => {
+    const param: RequestUrlParam = {
+      url: request.url,
+      method: request.method,
+      headers: { ...request.headers },
+      throw: false,
+      ...(request.body === undefined ? {} : { body: request.body }),
+    };
+    const result = await requestUrlFunction(param);
+    const headers: Record<string, string> = {};
+    for (const [name, value] of Object.entries(result.headers ?? {})) {
+      headers[name.toLowerCase()] = value;
+    }
+    return {
+      status: result.status,
+      bodyText: result.text,
+      bodyBytes: result.arrayBuffer,
+      headers,
+    };
   };
 }
 

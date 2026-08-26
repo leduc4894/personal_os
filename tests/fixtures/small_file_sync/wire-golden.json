@@ -1,6 +1,6 @@
 {
   "contract": "small_file_sync_wire_golden/v1",
-  "description": "The shared Python/TypeScript wire contract of the two small-file sync surfaces (spec 10.1-10.3, 12): the canonical envelope of every preflight outcome and terminal result, the closed error envelopes with their registered statuses, and the plugin-side closed mapping each shape must land on. The Python contract suite replays these entries against the real route stack; the Obsidian plugin's vitest suite replays the identical bytes through the hand-mirrored sync client.",
+  "description": "The shared Python/TypeScript wire contract of the two small-file sync surfaces (spec 10.1-10.3, 12) and the device-sync reconciliation surfaces (spec 7): the canonical envelope of every preflight outcome and terminal result, the closed error envelopes with their registered statuses, and the plugin-side closed mapping each shape must land on. The Python contract suite replays these entries against the real route stack; the Obsidian plugin's vitest suite replays the identical bytes through the hand-mirrored sync and device-sync clients.",
   "entries": [
     {
       "name": "preflight_single_part_upload",
@@ -113,6 +113,27 @@
       "status": 409,
       "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d10\",\"data\":null,\"warnings\":[],\"error\":{\"code\":\"source_locator_conflict\",\"message\":\"Source lifecycle locator conflicts with existing canonical state\",\"retryable\":false,\"details\":{}}}",
       "plugin_expectation": { "kind": "failure", "failureKind": "blocked_conflict" }
+    },
+    {
+      "name": "device_error_cursor_gap",
+      "surface": "device_events",
+      "status": 409,
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d11\",\"data\":null,\"warnings\":[],\"error\":{\"code\":\"device_cursor_gap\",\"message\":\"The retained event history cannot satisfy the device cursor\",\"retryable\":false,\"details\":{}}}",
+      "plugin_expectation": { "kind": "device_sync_failure", "reason": "device_cursor_gap" }
+    },
+    {
+      "name": "device_error_manifest_policy_advanced",
+      "surface": "manifest_finalize",
+      "status": 409,
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d12\",\"data\":null,\"warnings\":[],\"error\":{\"code\":\"device_manifest_policy_advanced\",\"message\":\"The active policy advanced past the manifest checkpoint\",\"retryable\":false,\"details\":{}}}",
+      "plugin_expectation": { "kind": "device_sync_failure", "reason": "device_manifest_policy_advanced" }
+    },
+    {
+      "name": "device_error_download_integrity_failed",
+      "surface": "device_download",
+      "status": 422,
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d13\",\"data\":null,\"warnings\":[],\"error\":{\"code\":\"device_download_integrity_failed\",\"message\":\"Device content failed integrity verification\",\"retryable\":false,\"details\":{}}}",
+      "plugin_expectation": { "kind": "device_sync_failure", "reason": "device_download_integrity_failed" }
     }
   ]
 }

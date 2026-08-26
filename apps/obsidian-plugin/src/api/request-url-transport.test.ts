@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RequestUrlParam, RequestUrlResponse } from "obsidian";
 
 import {
+  createRequestUrlDeviceSyncTransport,
   createRequestUrlPolicyHttpTransport,
   createRequestUrlTransport,
 } from "./request-url-transport";
@@ -155,6 +156,86 @@ describe("createRequestUrlTransport", () => {
       body: "request-body-content",
     });
     await response.arrayBuffer();
+    for (const spy of consoleSpies) {
+      expect(spy).not.toHaveBeenCalled();
+    }
+  });
+});
+
+describe("createRequestUrlDeviceSyncTransport", () => {
+  it("exposes the response bytes and lower-cased headers of a binary download", async () => {
+    const calls: RequestUrlParam[] = [];
+    const requestUrlFunction: RequestUrlFunction = async (request) => {
+      calls.push(request);
+      return {
+        status: 200,
+        headers: {
+          "Content-Length": "38",
+          "X-Content-SHA256": "a".repeat(64),
+          "X-Request-ID": "77777777-7777-4777-8777-777777777777",
+          "Content-Type": "text/markdown",
+        },
+        arrayBuffer: new Uint8Array([1, 2, 3, 4]).buffer,
+        json: undefined,
+        text: "",
+      };
+    };
+    const transport = createRequestUrlDeviceSyncTransport(requestUrlFunction);
+    const response = await transport({
+      url: "https://vault.example.com/api/sources/a/versions/b/content",
+      method: "GET",
+      headers: { authorization: "Bearer at1-x", accept: "application/octet-stream" },
+    });
+    expect(response.status).toBe(200);
+    expect(response.bodyText).toBe("");
+    expect([...new Uint8Array(response.bodyBytes as ArrayBuffer)]).toEqual([1, 2, 3, 4]);
+    expect(response.headers).toEqual({
+      "content-length": "38",
+      "x-content-sha256": "a".repeat(64),
+      "x-request-id": "77777777-7777-4777-8777-777777777777",
+      "content-type": "text/markdown",
+    });
+    expect(calls[0]?.body).toBeUndefined();
+  });
+
+  it("serves the decoded text of one JSON envelope response", async () => {
+    const requestUrlFunction: RequestUrlFunction = async () => ({
+      status: 409,
+      headers: { "content-type": "application/json" },
+      arrayBuffer: new Uint8Array([7, 8]).buffer,
+      json: undefined,
+      text: '{"request_id":"77777777-7777-4777-8777-777777777777","data":null}',
+    });
+    const transport = createRequestUrlDeviceSyncTransport(requestUrlFunction);
+    const response = await transport({
+      url: "https://vault.example.com/api/sync/events",
+      method: "GET",
+      headers: { authorization: "Bearer at1-x", accept: "application/json" },
+    });
+    expect(response.status).toBe(409);
+    expect(response.bodyText).toContain("request_id");
+    expect([...new Uint8Array(response.bodyBytes as ArrayBuffer)]).toEqual([7, 8]);
+    expect(response.headers["content-type"]).toBe("application/json");
+  });
+
+  it("passes the exact byte body through and never logs content", async () => {
+    const consoleSpies = [
+      vi.spyOn(console, "log"),
+      vi.spyOn(console, "info"),
+      vi.spyOn(console, "debug"),
+      vi.spyOn(console, "warn"),
+      vi.spyOn(console, "error"),
+    ];
+    const requestUrlFunction: RequestUrlFunction = async () =>
+      responseWithBytes([9, 9, 9], { "content-type": "application/octet-stream" });
+    const transport = createRequestUrlDeviceSyncTransport(requestUrlFunction);
+    const response = await transport({
+      url: "https://vault.example.com/api/uploads/op/content",
+      method: "PUT",
+      headers: { authorization: "Bearer secret-token" },
+      body: new Uint8Array([5, 6]).buffer,
+    });
+    expect(response.status).toBe(206);
     for (const spy of consoleSpies) {
       expect(spy).not.toHaveBeenCalled();
     }
