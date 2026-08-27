@@ -33,6 +33,13 @@ const trashedPath = `.trash/${fixturePath}`;
 const localContent = `# Device reconciliation fixture\n\nlocal ${fixtureIdentity}\n`;
 const remoteEditContent = `# Device reconciliation fixture\n\nremote ${fixtureIdentity}\n`;
 const remoteEditContentBytes = Buffer.from(remoteEditContent, "utf8");
+// The gap-time remote create: committed AFTER the induced cursor gap, its
+// event carries exactly the induced delivered watermark's sequence, so it
+// is delivered but never redelivered (the pull pages only above the
+// watermark) and re-converges only through the manifest repair's
+// canonical-only download — the design's §12.3 gap-recovery path.
+const gapCreatePath = `device-reconciliation-witness-${fixtureIdentity}.md`;
+const gapCreateContent = `# Device reconciliation witness\n\nremote ${fixtureIdentity}\n`;
 const databaseEnvironmentKeys = [
   "KNOWLEDGE_SECRET_ROOT",
   "KNOWLEDGE_DATABASE_HOST",
@@ -57,6 +64,7 @@ interface CanonicalReconciliationEvidence {
   readonly activeLocatorCount: number;
   readonly retainedEventCount: number;
   readonly completedManifestRunCount: number;
+  readonly activeManifestRunCount: number;
   readonly acknowledgedSequence: number;
   readonly deliveredSequence: number;
 }
@@ -66,6 +74,8 @@ interface JournalReconciliationEvidence {
   readonly mappedVersionId: string | null;
   readonly appliedSequence: number;
   readonly acknowledgedSequence: number;
+  readonly barrierGeneration: number | null;
+  readonly activeManifestRunPresent: boolean;
 }
 
 interface RemoteDeviceActor {
@@ -203,6 +213,9 @@ try:
                 where event.workspace_id = source.workspace_id),
               (select count(*) from knowledge.manifest_runs run
                 where run.workspace_id = source.workspace_id and run.state = 'completed'),
+              (select count(*) from knowledge.manifest_runs run
+                where run.workspace_id = source.workspace_id
+                  and run.state in ('collecting', 'planned', 'applying')),
               (select coalesce(max(cursor_row.acknowledged_sequence), 0)
                  from knowledge.device_cursors cursor_row
                 where cursor_row.workspace_id = source.workspace_id
@@ -234,15 +247,16 @@ try:
             "activeLocatorCount": int(row[10]),
             "retainedEventCount": int(row[11]),
             "completedManifestRunCount": int(row[12]),
-            "acknowledgedSequence": int(row[13]),
-            "deliveredSequence": int(row[14]),
+            "activeManifestRunCount": int(row[13]),
+            "acknowledgedSequence": int(row[14]),
+            "deliveredSequence": int(row[15]),
         }, separators=(",", ":")))
 except BaseException:
     print(json.dumps({"state": "server_evidence_unavailable"}, separators=(",", ":")))
     raise SystemExit(1)
 `;
 
-const deleteRetainedEventsScript = String.raw`
+const induceCursorGapScript = String.raw`
 import json
 import os
 import re
@@ -257,8 +271,10 @@ try:
     ).resolve(strict=True)
     if not password_path.is_relative_to(secret_root):
         raise ValueError
-    locator = os.environ["DEVICE_SYNC_EVIDENCE_LOCATOR"]
-    if re.fullmatch(r"[^\s]+", locator) is None:
+    device_id = os.environ["DEVICE_SYNC_EVIDENCE_DEVICE_ID"]
+    if re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", device_id
+    ) is None:
         raise ValueError
     password = password_path.read_text(encoding="ascii").strip()
     with psycopg.connect(
@@ -270,22 +286,22 @@ try:
         connect_timeout=5,
         options="-c statement_timeout=5000 -c lock_timeout=1000",
     ) as connection:
-        deleted = connection.execute(
+        bumped = connection.execute(
             """
-            delete from knowledge.sync_events event
-             using knowledge.sources source
-             join knowledge.small_file_upload_operations operation
-               on operation.result_source_id = source.source_id
-              and operation.normalized_locator = %(locator)s
-              and operation.state = 'committed'
-             where event.workspace_id = source.workspace_id
+            update knowledge.device_cursors cursor_row
+               set delivered_through_sequence = history.head + 1
+              from (
+                select coalesce(max(event.event_sequence), 0) as head
+                  from knowledge.sync_events event
+              ) as history
+             where cursor_row.device_id = %(device_id)s
             """,
-            {"locator": locator},
+            {"device_id": device_id},
         ).rowcount
         connection.commit()
-    print(json.dumps({"deletedEventCount": int(deleted)}, separators=(",", ":")))
+    print(json.dumps({"bumpedCursorCount": int(bumped)}, separators=(",", ":")))
 except BaseException:
-    print(json.dumps({"deletedEventCount": -1}, separators=(",", ":")))
+    print(json.dumps({"bumpedCursorCount": -1}, separators=(",", ":")))
     raise SystemExit(1)
 `;
 
@@ -331,6 +347,7 @@ async function readCanonicalEvidence(): Promise<CanonicalReconciliationEvidence 
     "activeLocatorCount",
     "retainedEventCount",
     "completedManifestRunCount",
+    "activeManifestRunCount",
     "acknowledgedSequence",
     "deliveredSequence",
   ] as const;
@@ -372,18 +389,32 @@ async function waitForCanonicalEvidence(
   throw new Error(`${failureMessage}: ${JSON.stringify(lastSafeState)}`);
 }
 
-async function deleteRetainedWorkspaceEvents(): Promise<number> {
+/**
+ * Induce the server-side cursor gap the design's compaction story names:
+ * the device's delivered watermark is moved exactly one sequence above the
+ * retained head, so retained history can no longer satisfy the cursor and
+ * the next pull must answer the closed `device_cursor_gap` (deleting the
+ * referenced events is impossible — projection intents hold RESTRICT
+ * foreign keys into them, which is exactly why compaction stays a
+ * dedicated deferred owner). The bump stays at +1 because the watermarks
+ * are monotonic: the gap heals only when a canonical commit carries the
+ * induced watermark's sequence (the retained checkpoint reaches the
+ * watermark) and a manifest repair's completion fence raises the
+ * acknowledged cursor to the delivered one — a larger bump could never
+ * converge.
+ */
+async function induceCursorGapBeyondRetainedHistory(): Promise<void> {
+  const deviceId = await readDesktopDeviceId();
   const { stdout } = await runFromE2eRepositoryRoot(
     "uv",
-    ["run", "python", "-c", deleteRetainedEventsScript],
+    ["run", "python", "-c", induceCursorGapScript],
     import.meta.url,
-    { ...process.env, DEVICE_SYNC_EVIDENCE_LOCATOR: fixturePath },
+    { ...process.env, DEVICE_SYNC_EVIDENCE_DEVICE_ID: deviceId },
   );
   const parsed = JSON.parse(stdout) as Record<string, unknown>;
-  if (!Number.isSafeInteger(parsed["deletedEventCount"]) || Number(parsed["deletedEventCount"]) < 0) {
-    throw new Error("retained event deletion evidence was unavailable");
+  if (parsed["bumpedCursorCount"] !== 1) {
+    throw new Error("the cursor-gap induction did not update the device cursor");
   }
-  return Number(parsed["deletedEventCount"]);
 }
 
 async function journalDirectoryPath(): Promise<string> {
@@ -434,10 +465,9 @@ async function readTrailTokens(): Promise<string[]> {
       typeof entry.kind === "string" &&
       Array.isArray(entry.tokens)
     ) {
-      for (const token of entry.tokens) {
-        if (typeof token === "string") {
-          tokens.push(`${entry.kind}:${token}`);
-        }
+      const entryTokens = entry.tokens.filter((token) => typeof token === "string");
+      if (entryTokens.length > 0) {
+        tokens.push(`${entry.kind}:${entryTokens.join(":")}`);
       }
     }
   }
@@ -445,8 +475,13 @@ async function readTrailTokens(): Promise<string[]> {
 }
 
 async function waitForTrailToken(token: string, failureMessage: string): Promise<void> {
+  // A server-rejected lane appends its closed correlation tokens (the wire
+  // error code, the envelope request id) after the stage and reason, so the
+  // expected token is a PREFIX of the rendered entry, never the whole
+  // string — an exact-element match can never succeed on the real wire.
+  const isMatch = (entry: string): boolean => entry === token || entry.startsWith(`${token}:`);
   for (let attempt = 0; attempt < 60; attempt += 1) {
-    if ((await readTrailTokens()).includes(token)) {
+    if ((await readTrailTokens()).some(isMatch)) {
       return;
     }
     await browser.pause(1_000);
@@ -487,7 +522,10 @@ async function readJournalEvidence(): Promise<JournalReconciliationEvidence | nu
         }
       }
       const stateStatement = database.prepare(
-        "select applied_sequence, acknowledged_sequence from device_sync_state where singleton_key = 1",
+        [
+          "select applied_sequence, acknowledged_sequence, barrier_generation,",
+          "active_manifest_run_id from device_sync_state where singleton_key = 1",
+        ].join(" "),
       );
       try {
         if (!stateStatement.step()) {
@@ -499,6 +537,8 @@ async function readJournalEvidence(): Promise<JournalReconciliationEvidence | nu
           mappedVersionId,
           appliedSequence: Number(stateRow[0]),
           acknowledgedSequence: Number(stateRow[1]),
+          barrierGeneration: stateRow[2] === null ? null : Number(stateRow[2]),
+          activeManifestRunPresent: stateRow[3] !== null,
         };
       } finally {
         stateStatement.free();
@@ -534,6 +574,25 @@ async function waitForJournalEvidence(
     await browser.pause(1_000);
   }
   throw new Error(`${failureMessage}: ${JSON.stringify(lastSafeState)}`);
+}
+
+async function waitForVaultContent(
+  notePath: string,
+  accepts: (text: string | null) => boolean,
+  failureMessage: string,
+): Promise<void> {
+  let lastContent: string | null = null;
+  // 150 attempts: the reconciler's periodic retry cadence is about thirty
+  // seconds, so a repair-gated apply (for example the post-rebuild
+  // tombstone behind stale-protected actions) can need several rounds.
+  for (let attempt = 0; attempt < 150; attempt += 1) {
+    lastContent = await readVaultFileText(notePath);
+    if (accepts(lastContent)) {
+      return;
+    }
+    await browser.pause(1_000);
+  }
+  throw new Error(`${failureMessage}: ${JSON.stringify(lastContent?.slice(0, 40) ?? null)}`);
 }
 
 // --- the remote second-device actor (Node-side wire client) -----------------------------------------
@@ -802,6 +861,86 @@ async function remoteCommitSourceUpdate(
   return { sourceId: receipt.source_id, sourceVersionId: receipt.source_version_id };
 }
 
+async function remoteCommitSourceCreate(
+  actor: RemoteDeviceActor,
+  locator: string,
+  contentBytes: Buffer,
+): Promise<RemoteUploadReceipt> {
+  const preflightResponse = await remoteAuthorizedFetch(
+    actor,
+    "/api/sync/journal-events/preflight",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "accept": "application/json",
+      },
+      body: JSON.stringify({
+        event_id: crypto.randomUUID(),
+        idempotency_key: crypto.randomUUID(),
+        operation: "create",
+        local_file_id: crypto.randomUUID(),
+        normalized_locator: locator,
+        sha256: sha256Hex(contentBytes),
+        size_bytes: contentBytes.byteLength,
+        media_type: "text/plain",
+        policy_revision: actor.policyRevision,
+      }),
+    },
+  );
+  if (!preflightResponse.ok) {
+    throw new Error(`remote create preflight failed: ${preflightResponse.status}`);
+  }
+  const preflight = ((await preflightResponse.json()) as {
+    data: { outcome?: unknown; operation_id?: unknown };
+  }).data;
+  if (preflight.outcome !== "single_part_upload" || typeof preflight.operation_id !== "string") {
+    throw new Error("remote create preflight did not continue the upload");
+  }
+  const uploadResponse = await remoteAuthorizedFetch(
+    actor,
+    `/api/uploads/${encodeURIComponent(preflight.operation_id)}/content`,
+    {
+      method: "PUT",
+      headers: {
+        "content-type": "application/octet-stream",
+        "accept": "application/json",
+      },
+      body: new Uint8Array(contentBytes),
+    },
+  );
+  if (!uploadResponse.ok) {
+    throw new Error(`remote create upload failed: ${uploadResponse.status}`);
+  }
+  const receipt = ((await uploadResponse.json()) as {
+    data: { result_kind?: unknown; source_id?: unknown; source_version_id?: unknown };
+  }).data;
+  if (
+    receipt.result_kind !== "committed" ||
+    typeof receipt.source_id !== "string" ||
+    typeof receipt.source_version_id !== "string"
+  ) {
+    throw new Error("remote create upload did not commit");
+  }
+  return { sourceId: receipt.source_id, sourceVersionId: receipt.source_version_id };
+}
+
+/**
+ * One RFC 9562 UUIDv7: the source lifecycle endpoint requires the stable
+ * time-ordered event identity (`event_id must be a UUIDv7` — the live gate
+ * proved the v4 `crypto.randomUUID()` shape is a closed 422 there).
+ */
+function uuidv7(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  const view = new DataView(bytes.buffer);
+  const unixTimeMs = BigInt(Date.now());
+  view.setBigUint64(0, (unixTimeMs << 16n) | (view.getBigUint64(0) & 0xffffn));
+  bytes[6] = (bytes[6] & 0x0f) | 0x70;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 async function remoteCommitSourceTombstone(
   actor: RemoteDeviceActor,
   sourceId: string,
@@ -814,7 +953,7 @@ async function remoteCommitSourceTombstone(
       accept: "application/json",
     },
     body: JSON.stringify({
-      event_id: crypto.randomUUID(),
+      event_id: uuidv7(),
       idempotency_key: crypto.randomUUID(),
       source_id: sourceId,
       operation: "delete",
@@ -872,6 +1011,35 @@ async function triggerExplicitRepair(): Promise<void> {
     ).app;
     app.commands.executeCommandById("knowledge-workspace:repair-sync");
   });
+}
+
+/**
+ * Wait for the memory-only device access credential to return after the
+ * journal rebuild's plugin reload. The startup refresh is fire-and-forget
+ * at load, and a repair triggered before it lands fails closed with
+ * `login_required` and never auto-retries, so the journey proves the
+ * credential through the plugin's own closed self-check verdict (the
+ * `self_check` trail entry's credential-presence token) before any repair.
+ */
+async function waitForDeviceCredentialAfterJournalRebuild(): Promise<void> {
+  const isCredentialPresent = (tokens: string[]): number =>
+    tokens.filter((token) => token.startsWith("self_check:credential_present")).length;
+  const presentBefore = isCredentialPresent(await readTrailTokens());
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    await browser.execute(() => {
+      const app = (
+        window as unknown as {
+          app: { commands: { executeCommandById: (commandId: string) => void } };
+        }
+      ).app;
+      app.commands.executeCommandById("knowledge-workspace:run-sync-self-check");
+    });
+    await browser.pause(1_000);
+    if (isCredentialPresent(await readTrailTokens()) > presentBefore) {
+      return;
+    }
+  }
+  throw new Error("the device credential did not return after the journal rebuild");
 }
 
 async function createFixtureNote(): Promise<void> {
@@ -951,61 +1119,42 @@ async function removePluginJournalGenerations(): Promise<void> {
   });
 }
 
-async function readDeviceSyncStatusText(): Promise<string | null> {
-  await browser.execute(() => {
-    const app = (
-      window as unknown as {
-        app: { commands: { executeCommandById: (commandId: string) => void } };
-      }
-    ).app;
-    app.commands.executeCommandById("app:open-settings");
-  });
-  await browser.pause(400);
-  const didSwitch = await browser.execute(() => {
-    const candidate =
-      document.querySelector('.vertical-tab-header-item[data-id="knowledge-workspace"]') ??
-      Array.from(document.querySelectorAll(".vertical-tab-header-item")).find((element) =>
-        element.textContent?.includes("Knowledge Workspace"),
-      );
-    if (!(candidate instanceof HTMLElement)) {
-      return false;
-    }
-    candidate.click();
-    return true;
-  });
-  if (!didSwitch) {
-    throw new Error("the knowledge settings tab was unavailable");
-  }
-  await browser.pause(400);
-  const statusText = await browser.execute(() => {
-    const setting = Array.from(document.querySelectorAll(".setting-item")).find(
-      (element) => element.querySelector(".setting-item-name")?.textContent?.trim() === "Device sync",
-    );
-    return setting?.querySelector(".setting-item-description")?.textContent?.trim() ?? null;
-  });
-  await browser.execute(() => {
-    const closeButton = document.querySelector(".modal-close-button");
-    if (closeButton instanceof HTMLElement) {
-      closeButton.click();
-    }
-  });
-  return statusText;
-}
-
-async function waitForDeviceSyncStatus(
-  accepts: (statusText: string) => boolean,
-  failureMessage: string,
-): Promise<string> {
-  let lastStatusText: string | null = null;
+/**
+ * Wait for the closed READY projection of the device-sync surface. The
+ * settings line (`Repair: Ready · Applied: N · Acknowledged: N · Cursor
+ * lag: 0 · Pending actions: 0`) is the pure render of exactly these
+ * durable facts — no repair debt (no barrier, no active run) and a fully
+ * acknowledged cursor — read here race-free from the journal image the
+ * render itself projects from. (The settings modal proved not
+ * programmatically drivable in the harness: `openTabById` lands on the
+ * default tab.)
+ */
+async function waitForReadyProjection(failureMessage: string): Promise<void> {
+  let lastSafeState: Record<string, number | string | boolean | null> | null = null;
   for (let attempt = 0; attempt < 45; attempt += 1) {
-    const statusText = await readDeviceSyncStatusText();
-    if (statusText !== null && accepts(statusText)) {
-      return statusText;
+    try {
+      const evidence = await readJournalEvidence();
+      if (evidence !== null) {
+        lastSafeState = {
+          appliedSequence: evidence.appliedSequence,
+          acknowledgedSequence: evidence.acknowledgedSequence,
+          barrierGeneration: evidence.barrierGeneration,
+          activeManifestRunPresent: evidence.activeManifestRunPresent,
+        };
+        if (
+          evidence.barrierGeneration === null &&
+          !evidence.activeManifestRunPresent &&
+          evidence.acknowledgedSequence === evidence.appliedSequence
+        ) {
+          return;
+        }
+      }
+    } catch {
+      // The verified-generation manifest may briefly lead the immutable image.
     }
-    lastStatusText = statusText;
     await browser.pause(1_000);
   }
-  throw new Error(`${failureMessage}: ${JSON.stringify(lastStatusText)}`);
+  throw new Error(`${failureMessage}: ${JSON.stringify(lastSafeState)}`);
 }
 
 describe("device cursor and manifest reconciliation (live server)", () => {
@@ -1040,6 +1189,41 @@ describe("device cursor and manifest reconciliation (live server)", () => {
       // tokens, cursor watermarks and the settings projection only — so a
       // failed gate names its layer without any content or locator. Each
       // piece logs independently; a failing read never masks the others.
+      // The guarded bootstrap suppresses child stdout, so the closed
+      // failure message is ALSO written beside the phase-status file, with
+      // the sanitized trail tokens appended (the guarded bootstrap
+      // suppresses the console dumps, so the file is the surviving copy).
+      try {
+        const failureMessage = error instanceof Error ? error.message : String(error);
+        let trailSection = "";
+        try {
+          trailSection = `\nTRAIL ${JSON.stringify((await readTrailTokens()).slice(-30))}`;
+        } catch {
+          // The trail read must not mask the original failure.
+        }
+        let journalSection = "";
+        try {
+          const journalDump = await readJournalEvidence();
+          journalSection = `\nJOURNAL ${JSON.stringify({
+            appliedSequence: journalDump?.appliedSequence ?? null,
+            acknowledgedSequence: journalDump?.acknowledgedSequence ?? null,
+            barrierGeneration: journalDump?.barrierGeneration ?? null,
+            activeManifestRunPresent: journalDump?.activeManifestRunPresent ?? null,
+            mappedSourcePresent: journalDump?.mappedSourceId !== null,
+          })}`;
+        } catch {
+          // The journal read must not mask the original failure.
+        }
+        if (livePhaseStatusFile !== undefined) {
+          fs.writeFileSync(
+            `${livePhaseStatusFile}.failure.txt`,
+            failureMessage + trailSection + journalSection,
+            { encoding: "utf8", mode: 0o600 },
+          );
+        }
+      } catch {
+        // Diagnostics never mask the original failure.
+      }
       try {
         console.log(
           "SANITIZED_DEVICE_RECONCILIATION_FAILURE_TRAIL",
@@ -1062,9 +1246,13 @@ describe("device cursor and manifest reconciliation (live server)", () => {
         // Diagnostics never mask the original failure.
       }
       try {
+        const journalDump = await readJournalEvidence();
         console.log(
-          "SANITIZED_DEVICE_RECONCILIATION_FAILURE_STATUS",
-          JSON.stringify(await readDeviceSyncStatusText()),
+          "SANITIZED_DEVICE_RECONCILIATION_FAILURE_BARRIER",
+          JSON.stringify({
+            barrierGeneration: journalDump?.barrierGeneration ?? null,
+            activeManifestRunPresent: journalDump?.activeManifestRunPresent ?? null,
+          }),
         );
       } catch {
         // Diagnostics never mask the original failure.
@@ -1112,6 +1300,13 @@ describe("device cursor and manifest reconciliation (live server)", () => {
         evidence.versionCount === 2,
       "the remote edit did not advance the canonical source",
     );
+    // The convergence signal is the APPLIED Vault content — the canonical
+    // commit and the cursor watermarks race ahead of the local apply.
+    await waitForVaultContent(
+      fixturePath,
+      (text) => text === remoteEditContent,
+      "the remote edit did not apply to the local vault",
+    );
     // Exact no-echo: the applied edit never echoes back as a third version
     // and no second locator-bound upload operation exists for the fixture
     // (the remote actor's update operation carries no locator — only the
@@ -1120,57 +1315,92 @@ describe("device cursor and manifest reconciliation (live server)", () => {
       (evidence) =>
         evidence.versionCount === 2 &&
         evidence.committedUploadCount === 1 &&
-        evidence.currentVersionId === remoteEdit.sourceVersionId,
+        evidence.currentVersionId === remoteEdit.sourceVersionId &&
+        evidence.acknowledgedSequence === evidence.deliveredSequence,
       "the desktop echoed the applied remote edit back as a new version",
     );
     await waitForJournalEvidence(
       (evidence) =>
-        evidence.acknowledgedSequence >= afterRemoteEdit.deliveredSequence &&
-        evidence.acknowledgedSequence === evidence.appliedSequence,
+        evidence.acknowledgedSequence === evidence.appliedSequence &&
+        evidence.acknowledgedSequence >= afterRemoteEdit.deliveredSequence,
       "the desktop cursor did not settle after the remote edit",
     );
     expect(await readVaultFileText(fixturePath)).toBe(remoteEditContent);
     expect(settledNoEcho.canonicalSourceCount).toBe(1);
-    await waitForDeviceSyncStatus(
-      (text) => text.includes("Repair: Ready"),
-      "the device-sync status did not settle to Ready after the remote edit",
+    await waitForReadyProjection(
+      "the device-sync surface did not settle to the Ready projection after the remote edit",
     );
     recordLivePhase("device_sync_remote_edit_no_echo_completed");
 
     // --- scenario 2: cursor gap to manifest repair -------------------------
-    const deletedEventCount = await deleteRetainedWorkspaceEvents();
-    if (deletedEventCount <= 0) {
-      throw new Error("the retained-history deletion did not remove any event");
-    }
+    await induceCursorGapBeyondRetainedHistory();
     await triggerSyncNow();
     await waitForTrailToken(
       "cursor_failure:pull:device_cursor_gap",
       "the server cursor gap never surfaced on the closed diagnostics trail",
     );
+    // Repair 1: the manifest reconciliation proves the universe through the
+    // retained head while the gap stands — the closed repair path exists
+    // exactly for this verdict.
+    await triggerExplicitRepair();
+    await waitForCanonicalEvidence(
+      (evidence) =>
+        evidence.completedManifestRunCount >= 1 &&
+        evidence.activeManifestRunCount === 0 &&
+        evidence.versionCount === 2 &&
+        evidence.canonicalSourceCount === 1,
+      "the manifest repair did not complete over the induced cursor gap",
+    );
+    // The gap heals through the design's own §12.3 path. The remote actor
+    // creates a SECOND source whose event carries exactly the induced
+    // watermark's sequence: the retained checkpoint reaches the watermark
+    // (the witness stops firing) while the create event is never
+    // redelivered (the pull pages only above the watermark). The SECOND
+    // manifest repair then plans that source as a canonical-only download
+    // (it is active at the checkpoint and absent locally), the synthetic
+    // apply places its verified bytes at the checkpoint locator, and the
+    // completion fence raises the acknowledged cursor to the delivered
+    // watermark — the gap's lost delivery re-converged and the cursor
+    // settled without any event redelivery.
+    const gapCreateBytes = Buffer.from(gapCreateContent, "utf8");
+    await remoteCommitSourceCreate(remoteActor, gapCreatePath, gapCreateBytes);
+    await waitForCanonicalEvidence(
+      (evidence) => evidence.retainedEventCount === afterRemoteEdit.retainedEventCount + 1,
+      "the gap-time remote create did not commit canonically",
+    );
     await triggerExplicitRepair();
     const afterGapRepair = await waitForCanonicalEvidence(
       (evidence) =>
-        evidence.completedManifestRunCount >= 1 &&
+        evidence.completedManifestRunCount >= 2 &&
+        evidence.activeManifestRunCount === 0 &&
         evidence.acknowledgedSequence === evidence.deliveredSequence &&
         evidence.versionCount === 2 &&
+        evidence.committedUploadCount === 1 &&
+        evidence.currentVersionId === remoteEdit.sourceVersionId &&
         evidence.canonicalSourceCount === 1,
       "the manifest repair did not converge the cursor gap",
     );
-    await waitForDeviceSyncStatus(
-      (text) => text.includes("Repair: Ready"),
-      "the device-sync status did not return to Ready after the gap repair",
+    await waitForVaultContent(
+      gapCreatePath,
+      (text) => text === gapCreateContent,
+      "the canonical-only download did not place the gap-time create in the vault",
     );
     expect(await readVaultFileText(fixturePath)).toBe(remoteEditContent);
+    await waitForReadyProjection(
+      "the device-sync surface did not return to the Ready projection after the gap repair",
+    );
     recordLivePhase("device_sync_cursor_gap_repair_completed");
 
     // --- scenario 3: SQLite loss without a duplicate canonical source ------
     await removePluginJournalGenerations();
+    await waitForDeviceCredentialAfterJournalRebuild();
     await triggerExplicitRepair();
     const afterSqliteLoss = await waitForCanonicalEvidence(
       (evidence) =>
         evidence.completedManifestRunCount >= Number(afterGapRepair.completedManifestRunCount) + 1 &&
         evidence.canonicalSourceCount === 1 &&
         evidence.versionCount === 2 &&
+        evidence.currentVersionId === remoteEdit.sourceVersionId &&
         evidence.syncState === "active",
       "the lost-SQLite repair did not rebind to the single canonical source",
     );
@@ -1180,9 +1410,8 @@ describe("device cursor and manifest reconciliation (live server)", () => {
         evidence.acknowledgedSequence >= afterGapRepair.acknowledgedSequence,
       "the rebuilt journal cursor did not settle after the repair",
     );
-    await waitForDeviceSyncStatus(
-      (text) => text.includes("Repair: Ready"),
-      "the device-sync status did not return to Ready after the SQLite-loss repair",
+    await waitForReadyProjection(
+      "the device-sync surface did not return to the Ready projection after the SQLite-loss repair",
     );
     expect(await readVaultFileText(fixturePath)).toBe(remoteEditContent);
     expect(afterSqliteLoss.canonicalSourceCount).toBe(1);
@@ -1195,7 +1424,10 @@ describe("device cursor and manifest reconciliation (live server)", () => {
       created.sourceId as string,
       remoteEdit.sourceVersionId,
     );
-    await triggerSyncNow();
+    // No sync-now rewrite here: the rebuilt journal holds no committed
+    // fingerprint for the fixture yet, so every local rewrite admits a
+    // fresh pending outbound row and keeps the tombstone's manifest action
+    // stale-protected. The reconciliation loop owns the convergence.
     const afterTombstone = await waitForCanonicalEvidence(
       (evidence) =>
         evidence.syncState === "deleted" &&
@@ -1204,13 +1436,24 @@ describe("device cursor and manifest reconciliation (live server)", () => {
         evidence.activeLocatorCount === 0,
       "the remote tombstone did not commit canonically",
     );
+    // The local trash apply converges after the canonical commit: wait on
+    // the Vault evidence itself (fixture gone, exact bytes in local trash).
+    await waitForVaultContent(
+      fixturePath,
+      (text) => text === null,
+      "the remote tombstone did not remove the local file",
+    );
+    await waitForVaultContent(
+      trashedPath,
+      (text) => text === remoteEditContent,
+      "the remote tombstone did not reach the Obsidian local trash",
+    );
     const trashedContent = await readVaultFileText(trashedPath);
     expect(await readVaultFileText(fixturePath)).toBeNull();
     expect(trashedContent).toBe(remoteEditContent);
     expect(afterTombstone.canonicalSourceCount).toBe(1);
-    await waitForDeviceSyncStatus(
-      (text) => text.includes("Repair: Ready"),
-      "the device-sync status did not settle to Ready after the tombstone apply",
+    await waitForReadyProjection(
+      "the device-sync surface did not settle to the Ready projection after the tombstone apply",
     );
     recordLivePhase("device_sync_remote_tombstone_completed");
 

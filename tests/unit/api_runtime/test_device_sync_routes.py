@@ -646,7 +646,10 @@ def test_download_streams_verified_bytes_with_exact_headers(
         f"/api/sources/{source_id}/versions/{version_id}/content", headers=bearer(harness)
     )
     assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/markdown")
+    # The exact canonical media type, verbatim: Starlette's media_type helper
+    # would append "; charset=utf-8" to text/* and the client's closed
+    # fingerprint check rejects any parameterized value.
+    assert response.headers["content-type"] == "text/markdown"
     assert response.headers["content-length"] == str(len(_OFFLINE_CONTENT))
     assert response.headers["x-content-sha256"] == _SHA256
     assert response.headers["x-request-id"]

@@ -29,6 +29,7 @@ import {
 import type {
   AtomicVaultWriterError,
   ContentApplyInput,
+  StructuralVaultAdapterSurface,
   StructuralVaultSurface,
   VaultMutationSeam,
 } from "./atomic-vault-writer";
@@ -723,5 +724,145 @@ describe("AtomicVaultWriter structural Vault binding", () => {
     expect(trashCalls.length).toBe(1);
     expect(trashCalls[0]?.args[1]).toBe(false);
     expect(calls.some((call) => call.method === "delete" || call.method === "remove")).toBe(false);
+  });
+
+  it("routes hidden siblings through the data adapter the Vault index cannot see", async () => {
+    // The live Desktop gate (2026-08-27) proved the Vault index never lists
+    // dot-prefixed paths — `createBinary` succeeds while `getAbstractFileByPath`
+    // stays null and `readBinary` throws — so every hidden-sibling operation
+    // must ride the adapter surface instead.
+    const { vault, calls } = createStructuralFake();
+    const adapterFiles = new Map<string, Uint8Array>();
+    const adapterCalls: string[] = [];
+    const adapter: StructuralVaultAdapterSurface = {
+      async exists(path) {
+        adapterCalls.push(`exists:${path}`);
+        return adapterFiles.has(path);
+      },
+      async readBinary(path) {
+        adapterCalls.push(`readBinary:${path}`);
+        const bytes = adapterFiles.get(path);
+        if (bytes === undefined) {
+          throw new Error("adapter file not found");
+        }
+        return bytes.buffer.slice(
+          bytes.byteOffset,
+          bytes.byteOffset + bytes.byteLength,
+        ) as ArrayBuffer;
+      },
+      async writeBinary(path, data) {
+        adapterCalls.push(`writeBinary:${path}`);
+        adapterFiles.set(path, new Uint8Array(data));
+      },
+      async rename(fromPath, toPath) {
+        adapterCalls.push(`rename:${fromPath}`);
+        const bytes = adapterFiles.get(fromPath);
+        if (bytes === undefined) {
+          throw new Error("adapter file not found");
+        }
+        adapterFiles.delete(fromPath);
+        adapterFiles.set(toPath, bytes);
+      },
+      async remove(path) {
+        adapterCalls.push(`remove:${path}`);
+        adapterFiles.delete(path);
+      },
+    };
+    const seam = createStructuralVaultMutationSeam(vault, adapter);
+    const temp = "notes/.a.md.device-sync-tmp-token";
+    const rollback = "notes/.a.md.device-sync-rbk-token";
+    // The visible target exists on disk (the adapter sees it) and in the
+    // Vault index — the narrow replace's first rename moves it to the
+    // hidden rollback sibling through the adapter.
+    await vault.createBinary("notes/a.md", bytesOf("base bytes").buffer as ArrayBuffer);
+    adapterFiles.set("notes/a.md", bytesOf("base bytes"));
+
+    // The Vault fake above happily tracks dot-paths; the seam must not ask
+    // it to — every hidden-sibling operation rides the adapter.
+    await seam.createFile(temp, bytesOf("staged"));
+    expect(await seam.locatorExists(temp)).toBe(true);
+    expect(new TextDecoder().decode((await seam.readBytes(temp)) ?? new Uint8Array())).toBe(
+      "staged",
+    );
+    await seam.renameLocator("notes/a.md", rollback);
+    await seam.renameLocator(temp, "notes/a.md");
+    expect(await seam.locatorExists("notes/a.md")).toBe(true);
+    await seam.trashLocator(rollback);
+
+    const vaultMethodsOnHidden = calls.filter(
+      (call) => call.args.some((arg) => typeof arg === "string" && arg.startsWith("notes/.")),
+    );
+    expect(vaultMethodsOnHidden).toEqual([]);
+    expect(adapterCalls).toEqual([
+      `writeBinary:${temp}`,
+      `exists:${temp}`,
+      `exists:${temp}`,
+      `readBinary:${temp}`,
+      `rename:notes/a.md`,
+      `rename:${temp}`,
+      `remove:${rollback}`,
+    ]);
+  });
+
+  it("fails closed when a hidden sibling is touched without an adapter surface", async () => {
+    const { vault } = createStructuralFake();
+    const seam = createStructuralVaultMutationSeam(vault);
+    await expect(seam.locatorExists("notes/.a.md.device-sync-tmp-token")).rejects.toThrow(
+      "atomic vault writer failed: device_apply_vault_failed",
+    );
+  });
+
+  it("serves an index-lagged visible target through the data adapter", async () => {
+    // The live Desktop gate (2026-08-27) proved the Vault index lags an
+    // adapter-level rename-in: `getAbstractFileByPath` stays null for a
+    // moment after the bytes already sit on disk, so the final
+    // verification of every apply's first attempt failed with
+    // `device_apply_vault_failed` until the index caught up. The bytes on
+    // disk are the truth: the existence check and the read of a
+    // VISIBLE locator the index misses ride the raw adapter whenever one
+    // is bound (without an adapter the index stays the only truth).
+    const { vault } = createStructuralFake();
+    const adapterFiles = new Map<string, Uint8Array>([
+      ["notes/renamed-in.md", bytesOf("just renamed bytes")],
+    ]);
+    const adapter: StructuralVaultAdapterSurface = {
+      async exists(path) {
+        return adapterFiles.has(path);
+      },
+      async readBinary(path) {
+        const fileBytes = adapterFiles.get(path);
+        if (fileBytes === undefined) {
+          throw new Error("adapter file not found");
+        }
+        return fileBytes.buffer.slice(
+          fileBytes.byteOffset,
+          fileBytes.byteOffset + fileBytes.byteLength,
+        ) as ArrayBuffer;
+      },
+      async writeBinary(path, data) {
+        adapterFiles.set(path, new Uint8Array(data));
+      },
+      async rename(fromPath, toPath) {
+        const fileBytes = adapterFiles.get(fromPath);
+        if (fileBytes === undefined) {
+          throw new Error("adapter file not found");
+        }
+        adapterFiles.delete(fromPath);
+        adapterFiles.set(toPath, fileBytes);
+      },
+      async remove(path) {
+        adapterFiles.delete(path);
+      },
+    };
+    const seam = createStructuralVaultMutationSeam(vault, adapter);
+    // The Vault fake's index has never seen the file; the adapter has it.
+    expect(vault.getAbstractFileByPath("notes/renamed-in.md")).toBeNull();
+    expect(await seam.locatorExists("notes/renamed-in.md")).toBe(true);
+    expect(new TextDecoder().decode((await seam.readBytes("notes/renamed-in.md")) ?? new Uint8Array())).toBe(
+      "just renamed bytes",
+    );
+    // An absent locator stays absent through the adapter fallback.
+    expect(await seam.locatorExists("notes/absent.md")).toBe(false);
+    expect(await seam.readBytes("notes/absent.md")).toBeNull();
   });
 });

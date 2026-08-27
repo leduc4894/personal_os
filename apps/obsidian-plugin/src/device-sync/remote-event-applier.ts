@@ -388,10 +388,44 @@ export function createRemoteEventApplier(options: RemoteEventApplierOptions): Re
     }
 
     switch (recovery.kind) {
-      case "clean":
-        // The Vault sits at the verified pre-mutation expectation; the
-        // pull loop redelivers the event and re-applies it.
+      case "clean": {
+        if (
+          operation.state === "locally_applied" ||
+          operation.state === "server_acknowledged"
+        ) {
+          // Post-commit clean: the event already terminalized locally and
+          // only the server acknowledgement is owed — the coordinator's
+          // acknowledgement phase owns that debt; nothing else to do.
+          return;
+        }
+        // Pre-mutation clean (a `prepared` row proven at the verified
+        // pre-mutation expectation): the pull NEVER redelivers an
+        // already-delivered event (the server's delivered watermark
+        // advanced when the page was sent), and the durable prepared row
+        // would block both a fresh prepare and the reconciler's synthetic
+        // apply at the same sequence. The live Desktop gate proved the old
+        // "await redelivery" behavior as a permanent silent stall (and,
+        // once a repair ran, as the endless `device_apply_recovery_ambiguous`
+        // prepare-collision loop). The proven-clean intent is abandoned and
+        // a repair barrier requires the manifest reconciliation that
+        // re-converges the event.
+        try {
+          await repository.abandonRemoteApply(operation.eventSequence);
+          const generation = await repository.nextObservationGeneration();
+          await repository.startRepairBarrier({
+            generation,
+            reason: "device_apply_recovery_abandoned",
+          });
+        } catch (error) {
+          if (error instanceof DeviceSyncApiError) {
+            throw error;
+          }
+          const mapped = closedStoreReasonOf(error);
+          diagnostics.applyFailure("recovery", mapped);
+          throwMapped(mapped, false);
+        }
         return;
+      }
       case "mutated": {
         if (
           operation.state !== "vault_mutated" &&

@@ -161,15 +161,17 @@ describe("device sync diagnostics facade", () => {
 
   it("surfaces every stage combination with every Child 6 closed reason", () => {
     const { diagnostics, trail } = recordingFacade();
-    // Two reasons per stage combination covers every reason exactly once
-    // (30 reasons over 15 stages) while exercising every stage.
-    const expectedRows: (readonly [string, DeviceSyncReason])[] = [];
-    for (const [combinationIndex, combination] of CORRELATED_STAGE_COMBINATIONS.entries()) {
-      for (const slot of [0, 1]) {
-        const reason = ALL_DEVICE_SYNC_REASONS[combinationIndex * 2 + slot];
-        if (reason === undefined) {
-          throw new Error("table construction error: reason slot is empty");
-        }
+    // Every reason is exercised exactly once, distributed round-robin over
+    // the stage combinations so every stage is exercised too (the reason
+    // count no longer divides the stage count evenly — 31 over 15).
+    const expectedRows: (readonly [string, string, DeviceSyncReason])[] = [];
+    for (const [reasonIndex, reason] of ALL_DEVICE_SYNC_REASONS.entries()) {
+      const combination =
+        CORRELATED_STAGE_COMBINATIONS[reasonIndex % CORRELATED_STAGE_COMBINATIONS.length];
+      if (combination === undefined) {
+        throw new Error("table construction error: stage combination is missing");
+      }
+      {
         const correlation: DeviceSyncFailureCorrelation = {
           requestId: REQUEST_ID,
           wireErrorCode: null,
@@ -189,15 +191,15 @@ describe("device sync diagnostics facade", () => {
             correlation,
           );
         }
-        expectedRows.push([combination.stage, reason]);
+        expectedRows.push([combination.kind, combination.stage, reason]);
       }
     }
 
     // The exact tokens of every table row: the kind, the stage, the closed
     // reason, then the gated request id — never a free-form string.
     expect(trail.entries.map((entry) => [entry.kind, ...entry.tokens])).toEqual(
-      expectedRows.map(([stage, reason], rowIndex) => [
-        CORRELATED_STAGE_COMBINATIONS[Math.floor(rowIndex / 2)]?.kind,
+      expectedRows.map(([kind, stage, reason]) => [
+        kind,
         stage,
         reason,
         { requestId: REQUEST_ID },

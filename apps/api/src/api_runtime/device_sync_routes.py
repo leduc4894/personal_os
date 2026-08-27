@@ -383,17 +383,22 @@ def create_device_sync_route_endpoints(
         return StreamingResponse(
             _continued(primed, stream),
             status_code=200,
-            media_type=descriptor.media_type.value,
+            # The wire contract carries the descriptor's EXACT canonical
+            # media type: the client verifies the header equals the frozen
+            # fingerprint's closed `type/subtype` value. Starlette's
+            # `media_type` helper would append `; charset=utf-8` to every
+            # text/* type — a parameterized value the client's closed check
+            # (correctly) rejects, which the live Desktop gate proved as
+            # `device_download_integrity_failed`. Setting the header
+            # explicitly keeps it verbatim.
             headers={
+                "content-type": descriptor.media_type.value,
                 "content-length": str(descriptor.size_bytes),
                 _CONTENT_SHA256_HEADER: descriptor.content_digest.hexadecimal,
-                # The live Desktop gate proved a compressing intermediary
-                # (the public HTTPS origin's edge) rewrites text/* payload
-                # streams to content-encoding gzip and DROPS the explicit
-                # Content-Length, failing the client's exact byte/size
-                # verification. The verified byte stream is exact by
-                # contract: `no-transform` forbids every intermediary
-                # re-encoding and keeps the declared length authoritative.
+                # The exact byte stream also forbids intermediary
+                # re-encoding: the live Desktop gate proved a compressing
+                # edge response drops the explicit Content-Length and fails
+                # the client's size verification.
                 "cache-control": "no-store, no-transform",
             },
         )

@@ -228,6 +228,21 @@ export interface StructuralVaultFile {
   readonly path: string;
 }
 
+/**
+ * The raw filesystem slice of the Obsidian data adapter for the writer's
+ * hidden siblings. The live Desktop gate proved the Vault's own index never
+ * sees dot-prefixed paths (`createBinary` succeeds, `getAbstractFileByPath`
+ * stays null, `readBinary` throws), so every hidden-sibling staging step
+ * must ride the adapter — the one surface that can see them.
+ */
+export interface StructuralVaultAdapterSurface {
+  exists(path: string): Promise<boolean>;
+  readBinary(path: string): Promise<ArrayBuffer>;
+  writeBinary(path: string, data: ArrayBuffer): Promise<void>;
+  rename(fromPath: string, toPath: string): Promise<void>;
+  remove(path: string): Promise<void>;
+}
+
 export interface StructuralVaultSurface {
   getAbstractFileByPath(path: string): StructuralVaultFile | null;
   createBinary(path: string, data: ArrayBuffer): Promise<void>;
@@ -241,29 +256,88 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 }
 
 /**
- * Bind the mutation seam to the structural Obsidian `Vault` surface.
- * Every removal goes through `Vault.trash(file, false)` — the system
- * trash is never used and no permanent-delete method exists on the
- * seam.
+ * Whether one locator is one of the writer's own hidden siblings: the Vault
+ * index never lists dot-prefixed paths, so they ride the adapter instead.
  */
-export function createStructuralVaultMutationSeam(vault: StructuralVaultSurface): VaultMutationSeam {
+function isHiddenSiblingLocator(locator: string): boolean {
+  return baseNameOf(locator).startsWith(".");
+}
+
+/**
+ * Bind the mutation seam to the structural Obsidian `Vault` surface. Every
+ * removal of VISIBLE content goes through `Vault.trash(file, false)` — the
+ * system trash is never used and no permanent-delete method exists for it.
+ * The writer's own dot-prefixed hidden siblings were proven invisible to
+ * the Vault index on the live wire: staging, verifying, renaming and
+ * cleaning them ride the raw data adapter instead (an internal staging
+ * file is not user content and has no Vault trash surface).
+ */
+export function createStructuralVaultMutationSeam(
+  vault: StructuralVaultSurface,
+  adapter?: StructuralVaultAdapterSurface,
+): VaultMutationSeam {
+  const adapterOf = (): StructuralVaultAdapterSurface => {
+    if (adapter === undefined) {
+      throw writerError("vault_mutation", "device_apply_vault_failed", true);
+    }
+    return adapter;
+  };
   return {
     async locatorExists(locator: string): Promise<boolean> {
-      return vault.getAbstractFileByPath(locator) !== null;
+      if (isHiddenSiblingLocator(locator)) {
+        return await adapterOf().exists(locator);
+      }
+      if (vault.getAbstractFileByPath(locator) !== null) {
+        return true;
+      }
+      // The Vault index lags adapter-level renames on the real Electron
+      // wire (the live Desktop gate proved a just-renamed-in target stays
+      // index-invisible for a moment), so the authoritative existence
+      // check for a visible locator is the raw adapter whenever one is
+      // bound; without an adapter the index remains the only truth.
+      return adapter === undefined ? false : await adapter.exists(locator);
     },
 
     async createFile(locator: string, bytes: Uint8Array): Promise<void> {
+      if (isHiddenSiblingLocator(locator)) {
+        await adapterOf().writeBinary(locator, toArrayBuffer(bytes));
+        return;
+      }
       await vault.createBinary(locator, toArrayBuffer(bytes));
     },
 
     async readBytes(locator: string): Promise<Uint8Array | null> {
-      if (vault.getAbstractFileByPath(locator) === null) {
+      if (isHiddenSiblingLocator(locator)) {
+        if (!(await adapterOf().exists(locator))) {
+          return null;
+        }
+        return new Uint8Array(await adapterOf().readBinary(locator));
+      }
+      if (vault.getAbstractFileByPath(locator) !== null) {
+        return new Uint8Array(await vault.readBinary(locator));
+      }
+      // The index-lagged read of a just-renamed-in target: the bytes on
+      // disk are the truth, so the adapter serves the read whenever one is
+      // bound (the live Desktop gate proved the final verification of an
+      // adapter rename otherwise fails the first attempt and forces the
+      // retry/recovery lattice to unstick it).
+      if (adapter === undefined) {
         return null;
       }
-      return new Uint8Array(await vault.readBinary(locator));
+      if (!(await adapter.exists(locator))) {
+        return null;
+      }
+      return new Uint8Array(await adapter.readBinary(locator));
     },
 
     async renameLocator(fromLocator: string, toLocator: string): Promise<void> {
+      if (isHiddenSiblingLocator(fromLocator) || isHiddenSiblingLocator(toLocator)) {
+        // The narrow replace's staging edges (temp -> target, target ->
+        // rollback): one side is a hidden sibling the Vault index cannot
+        // name, so the rename rides the adapter for the whole edge.
+        await adapterOf().rename(fromLocator, toLocator);
+        return;
+      }
       const file = vault.getAbstractFileByPath(fromLocator);
       if (file === null) {
         throw writerError("vault_mutation", "device_apply_vault_failed", true);
@@ -272,6 +346,12 @@ export function createStructuralVaultMutationSeam(vault: StructuralVaultSurface)
     },
 
     async trashLocator(locator: string): Promise<void> {
+      if (isHiddenSiblingLocator(locator)) {
+        // An internal staging sibling is not user content and was never
+        // Vault-visible: adapter removal is the only truthful cleanup.
+        await adapterOf().remove(locator);
+        return;
+      }
       const file = vault.getAbstractFileByPath(locator);
       if (file === null) {
         throw writerError("trash", "device_apply_trash_failed", true);

@@ -199,6 +199,10 @@ class FakeDeviceSyncRepository implements DeviceSyncRepository {
     return undefined;
   }
 
+  async abandonRemoteApply(): Promise<void> {
+    return undefined;
+  }
+
   async transitionRemoteApply(): Promise<void> {
     return undefined;
   }

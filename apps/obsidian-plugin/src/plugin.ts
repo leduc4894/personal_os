@@ -96,7 +96,10 @@ import {
   AtomicVaultWriterImpl,
   createStructuralVaultMutationSeam,
 } from "./device-sync/atomic-vault-writer";
-import type { StructuralVaultSurface } from "./device-sync/atomic-vault-writer";
+import type {
+  StructuralVaultAdapterSurface,
+  StructuralVaultSurface,
+} from "./device-sync/atomic-vault-writer";
 import { createDeviceSyncApi } from "./device-sync/api";
 import { createDeviceSyncDiagnostics } from "./device-sync/diagnostics";
 import { createManifestCapture } from "./device-sync/manifest-capture";
@@ -871,6 +874,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           repository: deviceSyncRepository,
           seam: createStructuralVaultMutationSeam(
             this.#createStructuralVaultSurfaceForDeviceSync(),
+            this.#createStructuralVaultAdapterSurfaceForDeviceSync(),
           ),
         }),
         downloader: (input) => deviceSyncApi.downloadSourceVersion(input),
@@ -1717,6 +1721,23 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       },
       rename: (file, newPath) => vault.rename(file as TAbstractFile, newPath),
       trash: (file, system) => vault.trash(file as TAbstractFile, system),
+    };
+  }
+
+  /**
+   * The raw data-adapter slice for the writer's hidden siblings: the live
+   * Desktop gate proved the Vault index never lists dot-prefixed paths, so
+   * their staging/verify/rename/cleanup must ride the adapter. Structurally
+   * typed — no `obsidian` import needed beyond the vault instance itself.
+   */
+  #createStructuralVaultAdapterSurfaceForDeviceSync(): StructuralVaultAdapterSurface {
+    const adapter = this.app.vault.adapter;
+    return {
+      exists: (path) => adapter.exists(path),
+      readBinary: (path) => adapter.readBinary(path),
+      writeBinary: (path, data) => adapter.writeBinary(path, data),
+      rename: (fromPath, toPath) => adapter.rename(fromPath, toPath),
+      remove: (path) => adapter.remove(path),
     };
   }
 

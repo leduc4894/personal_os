@@ -740,11 +740,15 @@ describe("RemoteEventApplier crash-injection matrix", () => {
 
     // Exact-temp cleanup: the durable tempToken names the one sibling.
     expect(restarted.vault.files.has(tempLocatorOf("notes/created.md"))).toBe(false);
-    expect(restarted.repository.readUnfinishedApply()?.state).toBe("prepared");
-    expect(restarted.repository.readState().appliedSequence).toBe(0);
     // The absent target IS the verified pre-mutation expectation of a
-    // create: recovery is clean — no barrier, no failure observation.
-    expect(restarted.repository.readState().barrierReason).toBeNull();
+    // create: recovery is clean — the intent is abandoned and the repair
+    // barrier requires the reconciliation that re-converges the (never
+    // redelivered) event.
+    expect(restarted.repository.readUnfinishedApply()).toBeNull();
+    expect(restarted.repository.readState().appliedSequence).toBe(0);
+    expect(restarted.repository.readState().barrierReason).toBe(
+      "device_apply_recovery_abandoned",
+    );
     expect(restarted.diagnostics.applyFailures).toEqual([]);
     expect(restarted.diagnostics.otherFailures).toEqual([]);
 
@@ -753,7 +757,7 @@ describe("RemoteEventApplier crash-injection matrix", () => {
     expect(restarted.repository.readState().appliedSequence).toBe(1);
   });
 
-  it("crash at prepared before any staging of a created event: recovery is clean with no barrier", async () => {
+  it("crash at prepared before any staging of a created event: clean recovery abandons the intent behind a barrier", async () => {
     const event = CREATED_EVENT();
     const harness = createApplierHarness();
     // The durable crash point: prepared + marker landed, no Vault effect.
@@ -772,11 +776,44 @@ describe("RemoteEventApplier crash-injection matrix", () => {
 
     await harness.applier.recoverUnfinishedApply();
 
-    expect(harness.repository.readUnfinishedApply()?.state).toBe("prepared");
+    expect(harness.repository.readUnfinishedApply()).toBeNull();
     expect(harness.repository.readState().appliedSequence).toBe(0);
-    expect(harness.repository.readState().barrierReason).toBeNull();
+    expect(harness.repository.readState().barrierReason).toBe(
+      "device_apply_recovery_abandoned",
+    );
     expect(harness.diagnostics.applyFailures).toEqual([]);
     expect(harness.diagnostics.otherFailures).toEqual([]);
+  });
+
+  it("failed download of an updated event: clean recovery abandons the intent and requires reconciliation", async () => {
+    // The exact live Desktop-gate shape (2026-08-27): the verified download
+    // failed AFTER the durable prepare (integrity rejection), the Vault file
+    // still holds the BASE bytes and no temp was ever staged. The server
+    // never redelivers an already-delivered event, so recovery must ABANDON
+    // the proven-clean intent and require the manifest reconciliation that
+    // re-converges it — the old "await redelivery" behavior stalled the
+    // device forever (and its lingering prepared row later collided with
+    // the reconciler's synthetic prepare as an endless
+    // `device_apply_recovery_ambiguous` loop).
+    const event = UPDATED_EVENT();
+    const harness = createApplierHarness({
+      seedFiles: [{ locator: "notes/a.md", bytes: BASE_BYTES }],
+      downloader: () => {
+        throw new DeviceSyncApiError("device_download_integrity_failed", false);
+      },
+    });
+
+    await expect(harness.applier.apply(event)).rejects.toThrow();
+    expect(harness.repository.readUnfinishedApply()?.state).toBe("prepared");
+
+    await harness.applier.recoverUnfinishedApply();
+
+    expect(harness.repository.readUnfinishedApply()).toBeNull();
+    expect(harness.repository.readState().barrierReason).toBe(
+      "device_apply_recovery_abandoned",
+    );
+    expect(harness.repository.readEchoMarker(event.eventSequence)).toBeNull();
+    expect(harness.diagnostics.applyFailures).toEqual([]);
   });
 
   it("crash after the rename-in of a created event: recovery completes and terminalizes", async () => {
@@ -820,7 +857,12 @@ describe("RemoteEventApplier crash-injection matrix", () => {
       "base content",
     );
     expect(restarted.vault.files.has(tempLocatorOf("notes/a.md"))).toBe(false);
-    expect(restarted.repository.readUnfinishedApply()?.state).toBe("prepared");
+    // Clean recovery over the proven base bytes: the intent is abandoned
+    // behind the repair barrier that re-converges the event.
+    expect(restarted.repository.readUnfinishedApply()).toBeNull();
+    expect(restarted.repository.readState().barrierReason).toBe(
+      "device_apply_recovery_abandoned",
+    );
   });
 
   it("crash between the two renames of an updated event: recovery resumes the replace", async () => {
@@ -1082,10 +1124,13 @@ describe("RemoteEventApplier crash-injection matrix", () => {
     const restarted = restartApplier(harness);
     await restarted.applier.recoverUnfinishedApply();
     expect(restarted.vault.files.has(tempLocatorOf("notes/restored.md"))).toBe(false);
-    expect(restarted.repository.readUnfinishedApply()?.state).toBe("prepared");
     // The absent target is the verified pre-mutation expectation of a
-    // restore: recovery is clean — no barrier, no failure observation.
-    expect(restarted.repository.readState().barrierReason).toBeNull();
+    // restore: recovery is clean — the intent is abandoned behind the
+    // repair barrier that re-converges the never-redelivered event.
+    expect(restarted.repository.readUnfinishedApply()).toBeNull();
+    expect(restarted.repository.readState().barrierReason).toBe(
+      "device_apply_recovery_abandoned",
+    );
     expect(restarted.diagnostics.applyFailures).toEqual([]);
     expect(restarted.diagnostics.otherFailures).toEqual([]);
 

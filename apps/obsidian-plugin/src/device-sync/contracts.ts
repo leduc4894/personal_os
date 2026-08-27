@@ -76,6 +76,7 @@ export const DEVICE_SYNC_TRANSPORT_REASONS = [
 export const DEVICE_SYNC_LOCAL_REASONS = [
   "device_apply_trash_failed",
   "device_apply_vault_failed",
+  "device_apply_recovery_abandoned",
   "device_apply_recovery_ambiguous",
   "device_manifest_capture_failed",
 ] as const;
@@ -436,6 +437,7 @@ export interface DeviceSyncRepository {
   recordManifestPage(input: LocalManifestPageReceipt): Promise<void>;
   recordManifestAction(input: LocalManifestActionProgress): Promise<void>;
   prepareRemoteApply(input: PreparedRemoteApply): Promise<void>;
+  abandonRemoteApply(eventSequence: number): Promise<void>;
   transitionRemoteApply(input: RemoteApplyTransition): Promise<void>;
   terminalizeEvent(input: TerminalDeviceEvent): Promise<void>;
   recordServerAcknowledgement(sequence: number): Promise<void>;

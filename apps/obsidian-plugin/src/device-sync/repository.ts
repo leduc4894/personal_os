@@ -548,6 +548,34 @@ export class DeviceSyncRepository implements DeviceSyncRepositoryPort {
   }
 
   /**
+   * Abandon one `prepared` remote apply intent together with its echo
+   * marker. The caller must have PROVEN the Vault sits at the operation's
+   * verified pre-mutation expectation first (the crash-safe recovery's
+   * clean verdict): nothing was mutated, so the durable intent and its
+   * suppression marker are safe to drop — which unblocks both a fresh
+   * prepare and the reconciler's synthetic apply at the same sequence (the
+   * server never redelivers an already-delivered event, so the abandoned
+   * intent is re-converged through manifest reconciliation instead).
+   */
+  async abandonRemoteApply(eventSequence: number): Promise<void> {
+    if (!isNonNegativeInteger(eventSequence)) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    await this.#database.runSerializedMutation((session) => {
+      const operation = this.#readRemoteApplyRow(session, eventSequence);
+      if (operation === null || operation.state !== "prepared") {
+        // Only a proven-clean prepared intent may be abandoned: any later
+        // state carries a Vault effect the durable lattice still owns.
+        throw journalStoreError("journal_mutation_failed");
+      }
+      session.exec(
+        `delete from remote_apply_operations where event_sequence = ${eventSequence};`,
+      );
+      session.exec(`delete from echo_markers where event_sequence = ${eventSequence};`);
+    });
+  }
+
+  /**
    * Transition one remote apply operation along the legal lattice of
    * spec 8.1/11, persisting the opaque staging/rollback tokens that
    * become durable with the state. Illegal, backwards or unknown-

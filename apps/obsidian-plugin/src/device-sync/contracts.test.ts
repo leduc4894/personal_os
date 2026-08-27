@@ -104,6 +104,7 @@ describe("device sync reason contracts", () => {
     expect(DEVICE_SYNC_LOCAL_REASONS).toEqual([
       "device_apply_trash_failed",
       "device_apply_vault_failed",
+      "device_apply_recovery_abandoned",
       "device_apply_recovery_ambiguous",
       "device_manifest_capture_failed",
     ]);
