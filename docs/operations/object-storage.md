@@ -147,3 +147,29 @@ size, digest and media type before a single byte reaches a consumer.
 - Phase 1 object-storage activation: **live gate satisfied** on the recorded
   commit. Production activation remains a deliberate deployment decision
   (secret files, spool volume and the runtime check), not a test status.
+
+## Hosted proof of the sanitized JUnit harness (2026-08-27)
+
+The protected workflow's sanitized-JUnit path has now been exercised and
+recorded on the fully hardened harness (the JUnit sanitization chain through
+`1ec3a01` and the zero-byte diagnostics hardening through `37d1def`, plus the
+`run_nonce` removal at `49ba212`):
+
+- Workflow run
+  [33069347334](https://github.com/leduc4894/personal_os/actions/runs/33069347334)
+  ("object storage live R2", job "Ubuntu dedicated-bucket R2 contract"),
+  triggered on `master` at commit
+  `49ba212a05ae789a377cf3027661d2d8dee9e08e`, completed 2026-08-27 11:54 UTC
+  with conclusion **success** — every step green, including the
+  unsanitized-staging removal and secret-file removal steps.
+- Case count/outcome: **9 passed** (`9 passed in 26.31s`) — the full design
+  16.2 live set, zero failures.
+- Published artifacts: exactly **one** — the sanitizer upload
+  `object-storage-live-junit-33069347334-1`. The downloaded report contains
+  only suite/case identity and statuses: nine passed testcases, no
+  failure/error nodes, no `system-out`/`system-err`/`properties`, and no case
+  text. No credentials, endpoint, bucket name or raw JUnit output was
+  recorded anywhere.
+
+Sanitized evidence and the `run_nonce` disposition live in
+`docs/handoff/2026-08-27-object-storage-hosted-proof.md`.
