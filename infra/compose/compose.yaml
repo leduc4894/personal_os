@@ -4,7 +4,7 @@ services:
   postgresql:
     image: postgres:18.4-bookworm@sha256:882236b897e39051d2368c5ccc6cda944904723506b2dfc97f2a8f5bc9afa382
     platform: linux/amd64
-    restart: unless-stopped
+    restart: "no"
     mem_limit: 1536m
     cpus: 1.5
     environment:
@@ -51,7 +51,7 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.18.2@sha256:75eab8c4ba42096724fdcfde8b4de0b5713d529dde32f285a1f86fdcb2c9e50c
     platform: linux/amd64
-    restart: unless-stopped
+    restart: "no"
     mem_limit: 3g
     cpus: 2.0
     secrets:
@@ -86,7 +86,7 @@ services:
   neo4j:
     image: neo4j:5.26.28-community@sha256:ff32db30b2baff97971e441b46bfd9c832c1b62c970398ef579244c06b21d357
     platform: linux/amd64
-    restart: unless-stopped
+    restart: "no"
     mem_limit: 2560m
     cpus: 2.0
     user: root
@@ -128,7 +128,7 @@ services:
   redis:
     image: redis:8.6.4@sha256:a051e4f48a5d0ceda6554974f3ad0f5369f4479197f36829332c1325cecad2b7
     platform: linux/amd64
-    restart: unless-stopped
+    restart: "no"
     mem_limit: 256m
     cpus: 0.5
     secrets:
@@ -171,7 +171,7 @@ services:
   temporal:
     image: temporalio/server:1.31.2@sha256:b5ecdb8282bededae2a10c36e8d862e27d0bc2d247fc73c5416025997ab4a1da
     platform: linux/amd64
-    restart: unless-stopped
+    restart: "no"
     mem_limit: 1g
     cpus: 1.5
     user: root
@@ -215,7 +215,7 @@ services:
   temporal-ui:
     image: temporalio/ui:2.53.0@sha256:810eba47f77a89b0e64e2e751478ca585d037bbd90c0951a2974a92a6c5adeb9
     platform: linux/amd64
-    restart: unless-stopped
+    restart: "no"
     mem_limit: 256m
     cpus: 0.5
     environment:
@@ -239,7 +239,7 @@ services:
   temporal-cli:
     image: temporalio/temporal:1.8.0@sha256:2c344b4a39b4489fc6944db095f628f0c30659836faf11780a4dc435599e80e3
     platform: linux/amd64
-    restart: unless-stopped
+    restart: "no"
     mem_limit: 128m
     cpus: 0.25
     environment:

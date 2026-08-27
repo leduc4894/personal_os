@@ -165,7 +165,9 @@ section 17). Trạng thái từng child:
   runbook: `docs/operations/source-locator-tombstone-lifecycle.md`; handoff:
   `docs/handoff/2026-08-20-source-locator-and-tombstone-lifecycle.md`.
 - Child 6 `device-cursor-and-manifest-reconciliation-design.md` —
-  **triển khai hoàn tất (2026-08-26), chờ live acceptance**: domain
+  **triển khai hoàn tất (2026-08-26); Desktop WDIO live gate PASSED
+  (2026-08-27, verdict `obsidian_live_acceptance_passed`, đủ 4 kịch bản);
+  còn ma trận Mobile vật lý**: domain
   `device_sync` (cursor/manifest/verified-download PostgreSQL schema
   `20260826_01`+`20260826_02`, tám route `/api/sync` + binary download,
   closed `device_*` error registry), plugin coordinator (journal v7, remote
@@ -173,9 +175,10 @@ section 17). Trạng thái từng child:
   sync`, trail v2) và release candidate plugin 0.2.0 đã đóng với offline
   gates xanh (`poe verify`, `poe api-contract-check`, `poe
   device-sync-test`, plugin vitest/tsc/lint/build). Child 6 CHƯA đóng: hai
-  mandatory live gate — Desktop WDIO journey và ma trận Mobile vật lý — còn
-  chờ chạy và ghi records; mock/unit/Desktop evidence không thay được
-  Mobile vật lý, nên chưa có completion claim. Spec:
+  Desktop WDIO journey đã chạy và PASS; ma trận Mobile vật lý còn chờ
+  operator ghi records (một dòng BACKLOG giữ chỗ, blocks Child 7);
+  mock/unit/Desktop evidence không thay được Mobile vật lý, nên chưa có
+  completion claim. Spec:
   `docs/superpowers/specs/2026-08-26-device-cursor-and-manifest-reconciliation-design.md`;
   plan:
   `docs/superpowers/plans/2026-08-26-device-cursor-and-manifest-reconciliation.md`;

@@ -120,8 +120,9 @@ fail, không skip); plugin suite `pnpm --dir apps/obsidian-plugin exec vitest
 run` kèm `tsc --noEmit`, `lint`, `build`; và `uv run poe
 device-sync-device-verification` — gate recorded evidence fail (không skip)
 khi file `docs/operations/device-sync-device-verification.md` còn thiếu
-Desktop/Mobile rows. Hai mandatory live gates — Desktop WDIO qua
-`wdio-obsidian-service` và ma trận Mobile vật lý (design 18.1) — chưa chạy:
-mock, unit inference hay Desktop evidence không thay được Mobile vật lý,
-thiếu gate nào thì Child 6 vẫn BLOCKED và không có completion claim. Runbook
+Desktop/Mobile rows. Hai mandatory live gates: Desktop WDIO qua
+`wdio-obsidian-service` đã PASS (2026-08-27, verdict
+`obsidian_live_acceptance_passed`); ma trận Mobile vật lý (design 18.1) còn
+chờ operator — mock, unit inference hay Desktop evidence không thay được
+Mobile vật lý, thiếu gate nào thì Child 6 vẫn không có completion claim. Runbook
 vận hành: `docs/operations/device-cursor-manifest-reconciliation.md`.

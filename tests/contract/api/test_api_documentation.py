@@ -185,12 +185,15 @@ def test_implementation_plan_records_child_six_implementation_complete_not_close
     )
     assert child_six is not None, "the plan must carry a Child 6 status bullet"
     bullet = child_six.group(0)
-    assert "triển khai hoàn tất (2026-08-26), chờ live acceptance" in bullet, (
-        "the Child 6 bullet must state implementation complete with live acceptance still pending"
+    assert "Desktop WDIO live gate PASSED" in bullet, (
+        "the Child 6 bullet must state the Desktop WDIO live gate outcome"
+    )
+    assert "còn ma trận Mobile vật lý" in bullet, (
+        "the Child 6 bullet must state the physical Mobile matrix is still pending"
     )
     assert "hoàn thành" not in bullet.replace("triển khai hoàn tất", ""), (
         "the Child 6 bullet must not claim the child complete while the "
-        "Desktop WDIO journey and the physical Mobile matrix remain"
+        "physical Mobile matrix remains unrecorded"
     )
     assert "Desktop WDIO" in bullet and "Mobile" in bullet, (
         "the Child 6 bullet must name the two remaining mandatory live gates"

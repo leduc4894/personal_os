@@ -14,20 +14,20 @@ the closed diagnostics vocabulary by
 [`sync-error-tracing.md`](sync-error-tracing.md).
 
 Status (2026-08-27): implementation complete and offline-verified; the Desktop
-WDIO live gate ran for the first time against the disposable local stack and
-is BLOCKED — the remote-apply verified download fails the plugin's exact
-integrity verification on the real wire (`apply_failure:download` →
-`device_download_integrity_failed`, then a permanent
-`apply_failure:recovery` → `device_apply_recovery_ambiguous` loop; bootstrap
-verdict `obsidian_wdio_failed_after_device_sync_onboarding`). Two real
-transport defects the gate exposed are already fixed and tested: the
-device-sync client now sends `content-type: application/json` on JSON bodies
-(the server 422-rejected every cursor acknowledgement without it), and the
-verified byte stream now carries `Cache-Control: no-store, no-transform`
-(a compressing edge response re-encoded text payloads to gzip and dropped
-the explicit `Content-Length`). The physical Mobile matrix has not run
-(operator unavailable). Child 6 stays open: make no completion claim until
-both gates pass and the records exist at
+WDIO live gate **PASSED** on the disposable local stack (bootstrap verdict
+`obsidian_live_acceptance_passed`, all four scenarios: remote edit + exact
+no-echo, cursor gap → repair, SQLite loss without duplicate source, remote
+tombstone → Obsidian local trash). Getting there fixed three real
+wire defects, all unit-pinned: the device-sync client now sends
+`content-type: application/json` on JSON bodies; the verified byte stream
+carries `Cache-Control: no-store, no-transform` and a verbatim Content-Type
+(no charset suffix) — a compressing edge re-encoded text payloads to gzip and
+dropped the explicit `Content-Length`; and the Electron wire's real shapes
+are honored (hidden dot-sibling staging rides the data adapter, and a
+crash-interrupted `prepared` apply is abandoned with a readable repair
+barrier instead of awaiting redelivery). The physical Mobile matrix has not
+run (operator unavailable) — one BACKLOG row holds it. Child 6 stays open:
+make no completion claim until the Mobile records exist at
 [`device-sync-device-verification.md`](device-sync-device-verification.md).
 
 ## The route set (operator reference)

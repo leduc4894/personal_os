@@ -505,7 +505,7 @@ def test_services_have_exact_storage_and_resource_contracts() -> None:
         service = services[service_name]
         assert service["mem_limit"] == memory
         assert service["cpus"] == cpus
-        assert service["restart"] == "unless-stopped"
+        assert service["restart"] == "no"
     for service_name, mount in expected_mounts.items():
         assert services[service_name].get("volumes", []) == mount
 
