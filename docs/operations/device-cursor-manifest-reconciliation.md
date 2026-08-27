@@ -17,18 +17,20 @@ Status (2026-08-27): implementation complete and offline-verified; the Desktop
 WDIO live gate **PASSED** on the disposable local stack (bootstrap verdict
 `obsidian_live_acceptance_passed`, all four scenarios: remote edit + exact
 no-echo, cursor gap → repair, SQLite loss without duplicate source, remote
-tombstone → Obsidian local trash). Getting there fixed three real
-wire defects, all unit-pinned: the device-sync client now sends
-`content-type: application/json` on JSON bodies; the verified byte stream
-carries `Cache-Control: no-store, no-transform` and a verbatim Content-Type
-(no charset suffix) — a compressing edge re-encoded text payloads to gzip and
-dropped the explicit `Content-Length`; and the Electron wire's real shapes
-are honored (hidden dot-sibling staging rides the data adapter, and a
-crash-interrupted `prepared` apply is abandoned with a readable repair
-barrier instead of awaiting redelivery). The physical Mobile matrix has not
-run (operator unavailable) — one BACKLOG row holds it. Child 6 stays open:
-make no completion claim until the Mobile records exist at
-[`device-sync-device-verification.md`](device-sync-device-verification.md).
+tombstone → Obsidian local trash). The **physical Mobile matrix also RAN and
+PASSED** (2026-08-27 evening session on a physical iPhone against the
+disposable stack; operator-confirmed sanitized rows recorded in
+[`device-sync-device-verification.md`](device-sync-device-verification.md);
+`uv run poe device-sync-device-verification` exits 0). The matrix surfaced
+five real physical-device findings, all recorded in the handoff with staged
+or deferred fixes: the finalize-transition suspension deadlock (supersede
+fix staged), the missing access-token refresh while the app stays resident,
+the rebuild-without-reconcile-first create-poisoning cascade, the snapshot
+echo race at initial reconcile, and the sequence-burn of retried
+poisoned creates. No byte of operator data was lost or overwritten in any
+of them — every failure mode failed closed. The standing no completion claim
+rule held until both records existed; with both gates now passed, the
+Child 6 completion claim is unlocked pending the final whole-branch review.
 
 ## The route set (operator reference)
 
@@ -149,7 +151,11 @@ enumerates the manifest in normalized-locator order and ships it as
 contiguous pages (at most 500 entries each, 100,000 entries per run). The
 server freezes one event checkpoint and one policy revision; a policy
 advance mid-run invalidates the run (`device_manifest_policy_advanced`)
-and a fresh run replaces it.
+and a fresh run replaces it. A start carrying a newer client observation
+generation (an explicit repair after an interrupted run, or a rebuilt
+journal) likewise supersedes the abandoned unfinished run — expired with
+its evidence retained — instead of dead-locking the device until the
+one-hour deadline.
 
 After every action is terminal-safe locally, completion marks the run
 completed, advances the server cursor to the checkpoint (the sole

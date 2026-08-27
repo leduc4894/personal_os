@@ -1055,9 +1055,18 @@ async def test_start_exactly_resumes_the_one_unfinished_run(
     assert resumed.next_page_number == 1
     assert resumed.entry_count == 1
 
-    with pytest.raises(DeviceSyncError) as raised:
-        await manifest_store.start(context, generation=6)
-    assert raised.value.code is DeviceSyncErrorCode.MANIFEST_STATE_INVALID
+    # A different observation generation means the client minted a newer
+    # barrier and abandoned this run's local progress (explicit repair after
+    # an interrupted run, or a rebuilt journal): the stale unfinished run is
+    # superseded — expired with its evidence retained — and a fresh run
+    # starts under the new generation instead of dead-locking the device
+    # until the one-hour database deadline.
+    superseded = await manifest_store.start(context, generation=6)
+    assert superseded.manifest_run_id != first.manifest_run_id
+    assert superseded.state is ManifestRunState.COLLECTING
+    assert superseded.client_observation_generation == 6
+    again = await manifest_store.start(context, generation=6)
+    assert again.manifest_run_id == superseded.manifest_run_id
 
 
 @pytest.mark.asyncio

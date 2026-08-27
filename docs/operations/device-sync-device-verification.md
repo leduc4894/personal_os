@@ -28,19 +28,19 @@ Recording rules (sanitized evidence only):
 
 ## Desktop reference device
 
-- Remote edit no-echo: pending
-- Cursor gap to manifest repair: pending
-- Lost-SQLite recovery without duplicate sources: pending
-- Remote tombstone to local trash: pending
+- Remote edit no-echo: pass — guarded Desktop WDIO verdict `obsidian_live_acceptance_passed` (2026-08-27): remote edit applied with exact byte-identical no-echo; final device state Applied/Acknowledged, cursor lag 0
+- Cursor gap to manifest repair: pass — guarded Desktop WDIO verdict `obsidian_live_acceptance_passed` (2026-08-27): cursor gap repaired through a completed manifest run; the transient `Repair: Running (device_manifest_state_invalid)` entry cleared with the blocker gone
+- Lost-SQLite recovery without duplicate sources: pass — guarded Desktop WDIO verdict `obsidian_live_acceptance_passed` (2026-08-27): journal rebuilt through manifest reconciliation with no duplicate canonical source
+- Remote tombstone to local trash: pass — guarded Desktop WDIO verdict `obsidian_live_acceptance_passed` (2026-08-27): remote tombstone moved the proven-unchanged file into Obsidian local trash
 
-Recorded by (operator, date) — pending.
+Recorded by Duc with the guarded Desktop WDIO journey on 2026-08-27.
 
 ## Mobile reference device
 
-- Manifest suspend/resume: pending
-- Remote apply no-echo: pending
-- Lost-SQLite repair: pending
-- Tombstone to local trash: pending
-- Edit-during-reconciliation preservation: pending
+- Manifest suspend/resume: pass — suspension mid-run paused the apply; on resume the run continued and the device reached applied/acknowledged convergence through the interruption; two runs expired at their one-hour database deadline and were replaced by a fresh run that completed in under a minute (final cursor lag 0, no active runs left). Finding recorded: a suspension exactly at the finalize transition blocks resume until the deadline (supersede fix staged).
+- Remote apply no-echo: pass — remote-origin content applied byte-exact through pull and manifest download actions with zero device-origin uploads across the whole session (no echo); one post-rebuild remote update settled as a durable conflict (`device_manifest_local_diverged`) preserving local bytes by design.
+- Lost-SQLite repair: pass — the journal was deleted on device; every re-admitted duplicate create was refused (locator-occupied 409 family); the manifest rebuild re-verified identity with zero duplicate canonical sources (43 active sources, no duplicated active locator) and the cursor reconverged. Finding recorded: the rebuild did not trigger reconcile-first on mobile, so outbound create attempts poisoned local claims (later local edits ride durable conflicts until the Child 8 flow).
+- Tombstone to local trash: pass — a remote tombstone (server delete event 2026-08-27 12:23 UTC) moved the proven-unchanged file into Obsidian local trash on the physical device (operator-confirmed trash presence; no hard delete); a second tombstone on a conflict-claimed file preserved local bytes by design.
+- Edit-during-reconciliation preservation: pass — the edit survived the reconciliation run byte-exact (never discarded or overwritten); its replay attempt settled as the documented durable conflict owned by the later conflict flow.
 
-Recorded by (operator, date) — pending.
+Recorded by Duc with Codex on 2026-08-27.

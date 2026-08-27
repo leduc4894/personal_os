@@ -226,7 +226,7 @@ Deliverables:
 
 1. Collection contract with named dense/sparse vectors and exact indexes.
 2. OpenAI embedding adapter and local BM25 sparse adapter.
-3. Policy-gated batching/cache.
+3. Policy-gated batching/cache với latest-wins intent coalescing theo source và quiet-window dwell cấu hình được (mặc định 10 phút; version bị vượt trong dwell chốt closed `superseded` không tốn embedding/API call — ADR-020).
 4. Semantic filter AST + schema-aware compiler.
 5. Dense/sparse search, RRF fusion, reranker adapters and diversity.
 6. Deployment provision/verify/activate/repair/rebuild services.
@@ -234,6 +234,7 @@ Deliverables:
 Acceptance:
 
 - `domains`, `tags`, time và dynamic typed filters pass against real Qdrant.
+- Projection intents coalesce latest-wins: các version bị vượt trong dwell settle `superseded` với zero embedding/API calls; một source đang edit liên tục chỉ được embed một lần cho version cuối sau khi im đủ dwell (ADR-020).
 - Local-only fixture never reaches cloud mocks/live audit.
 - Golden retrieval meets pinned threshold.
 - Wipe/rebuild returns equivalent manifest and acceptable golden metrics.

@@ -95,10 +95,63 @@ design). No secrets printed; only runbook hostnames appear here.
 
 ### Mobile matrix
 
-Not run — the operator was unavailable; per AGENTS.md Mobile acceptance may
-defer but never be inferred from Desktop. Exactly one BACKLOG row (2026-08-27
-`device-sync-live-gates`) holds it with `Implement by: Before Child 7 start`.
-No Mobile row in `device-sync-device-verification.md` is marked passed.
+**RAN and PASSED 2026-08-27 (evening session)** on the physical iPhone
+against the disposable project `knowledge-ci-child6-mobile-20260827`
+(schema migrated, TOTP activated, policy revision 1 published, and the
+guarded Desktop journey re-passed on this same project as bonus stack
+sanity: `obsidian_live_acceptance_passed`). Operator-confirmed sanitized
+rows live in `docs/operations/device-sync-device-verification.md` and
+`uv run poe device-sync-device-verification` exits 0. The matrix exercised
+all five scenarios with physical evidence and — the reference-device
+method working as designed — surfaced five real defects that no Desktop
+run can reach. Child 6's completion claim is unlocked pending the final
+whole-branch review; three indexed BACKLOG rows now carry the fixes.
+
+## Physical Mobile matrix findings (2026-08-27)
+
+Every failure mode below failed closed: no operator byte was lost,
+overwritten or duplicated at any point (canonical active sources stayed
+at exactly one per locator through the entire session).
+
+1. **Suspend-at-finalize deadlock** — suspending the app exactly between
+   the server's `applying` transition and the device's receipt of the
+   finalize response leaves the resumed run replaying finalize into a
+   409 `device_manifest_state_invalid`; the device blocks until the
+   run's one-hour deadline. Observed end-to-end with server and trail
+   evidence. Fix batch (BACKLOG `device-sync-recovery`): the
+   supersede-generation start change **landed this session** — the pinning
+   integration test was rewritten first (the live-RED step could not run
+   while the live matrix stack held the ports; noted as a TDD deviation),
+   then implementation + module docstring + runbook; ruff/mypy clean and
+   the full manifest-transaction suite passes 26/26 on a fresh
+   `knowledge-ci-supersede-fix` project, device-sync unit tests 107/107.
+   Finalize idempotent replay and idle-based run expiry remain as the
+   deferred legs of the same BACKLOG row.
+2. **Access-token expiry while resident** — refresh runs only at plugin
+   startup, so a foreground-resident app past the token TTL enters a
+   silent 401 pull loop until restarted. Reproduced twice with trail
+   evidence (rotation-replay recovery at startup worked exactly as
+   designed both times). BACKLOG `plugin-auth`.
+3. **Rebuild-without-reconcile-first poisoning** — deleting the journal
+   with vault content present does not trigger reconciliation-first on
+   mobile; the outbound create-storm settles `blocked_conflict` claims,
+   after which every local edit and remote update settles durable
+   conflict until Child 8, and each restart re-admits the claims and
+   burns server sequences (watermark ran 131→171 on retries alone).
+   Desktop never sees this because its rebuild trigger reconciles
+   first. BACKLOG `device-sync-recovery` (Before Child 8 conflict merge).
+4. **Echo race at initial reconcile** — one system-written file was
+   captured by the watcher before its echo marker landed (one
+   `source_locator_conflict` upload refusal, self-settled); folded into
+   the Child 8 claims domain.
+5. **Operational, machine-local** — the fresh-CI-project bring-up needs
+   the bootstrap run twice with an API restart and a worker restart in
+   between (API cannot start before schema+keyset exist; TOTP needs the
+   API; policy publish needs the workers), and `.local/run-serve.py`
+   still pinned `KNOWLEDGE_AUTH_MAX_PLUGIN_VERSION=0.1.0` after
+   serve-local.sh was raised — a real 0.2.0 device is refused onboarding
+   (the WDIO helper sends "0.1.0" so the Desktop gate cannot catch it).
+   Fixed this session by raising the pin to 0.2.0 in run-serve.py.
 
 ## Spec-interpretation decisions (with rationale)
 
@@ -126,7 +179,7 @@ No Mobile row in `device-sync-device-verification.md` is marked passed.
 | 2026-08-23 `_validate_epoch_ms` metrics row | RETAINED unchanged (trigger not reached, per plan) |
 | 2026-08-24 source-lifecycle `record_commit(COMMITTED)` metrics row | RETAINED unchanged (trigger not reached, per plan) |
 | 2026-08-26 device-sync rows (EXCLUDED uploads; review minors batch; index candidates) | RETAINED unchanged |
-| 2026-08-27 device-sync-live-gates: physical Mobile matrix | RETAINED — updated with the green-Desktop fact; blocks Child 7 start |
+| 2026-08-27 device-sync-live-gates: physical Mobile matrix | **RETIRED** — matrix ran and passed 2026-08-27 (both device records present, gate exit 0); replaced by three findings rows (recovery batch, plugin-auth resident refresh, rebuild reconcile-first) |
 
 The two RETAINED 2026-08-26 device-sync rows each index exactly one deferred
 group: the per-task review minors batch from Tasks 1-11 (triaged by the final
@@ -148,13 +201,9 @@ pinned fixture size; `Implement by: Before production activation`).
 
 ## Next actions (in order)
 
-1. An operator records the sanitized Desktop rows in
-   `docs/operations/device-sync-device-verification.md` from the green
-   evidence block, then runs the physical Mobile matrix on the reference
-   device and records its rows; `uv run poe device-sync-device-verification`
-   must exit 0 — only then is Child 6 complete.
-2. Final whole-branch review (triage the parked minors in the SDD ledger),
-   then `finishing-a-development-branch`.
+1. Final whole-branch review (triage the parked minors in the SDD ledger
+   plus the three new findings rows; the supersede fix landed with suite
+   evidence this session), then `finishing-a-development-branch`.
 
 Operational state at handoff: the live CI project and all helper-started
 services are torn down via `bash .local/serve-live-ci.sh down`;

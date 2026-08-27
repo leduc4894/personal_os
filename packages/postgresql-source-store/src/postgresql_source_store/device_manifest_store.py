@@ -6,8 +6,10 @@
 per workspace/device to the acknowledged cursor base, one frozen statement
 checkpoint and the workspace's active policy revision: the conflict-tolerant
 insert resumes the existing unfinished run (a different observation
-generation is the closed state rejection) and a run past its one-hour
-database deadline is expired — retaining its prior evidence — before a fresh
+generation supersedes the abandoned run — expired with its evidence
+retained, the same replacement a policy advance performs) and a run past
+its one-hour database deadline is expired — retaining its prior evidence —
+before a fresh
 run may start. ``append_manifest_page`` accepts only the exact next ordered
 page: an earlier page replays exactly on equal digest and count, reuse with
 different evidence fails the run with the closed replay mismatch, the
@@ -970,7 +972,21 @@ class PostgresqlDeviceManifestStore:
                 await connection.execute(manifest_run_expire_statement(unfinished.manifest_run_id))
                 unfinished = None
             if unfinished is not None:
-                return self._resume_or_reject(unfinished, command)
+                if (
+                    int(unfinished.client_observation_generation)
+                    == command.client_observation_generation
+                ):
+                    return self._run_receipt(unfinished)
+                # A different observation generation means the client minted
+                # a newer barrier and abandoned this run's local progress
+                # (an explicit repair after an interrupted run, or a rebuilt
+                # journal): the stale unfinished run is superseded — expired
+                # with its evidence retained, exactly like a policy advance
+                # replaces a run — instead of dead-locking the device until
+                # the one-hour database deadline.
+                await connection.execute(
+                    manifest_run_expire_statement(unfinished.manifest_run_id)
+                )
             policy_revision_number = await self._read_active_policy_revision_number(
                 connection, context.workspace_id
             )
