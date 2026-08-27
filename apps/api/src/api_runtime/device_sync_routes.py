@@ -387,7 +387,14 @@ def create_device_sync_route_endpoints(
             headers={
                 "content-length": str(descriptor.size_bytes),
                 _CONTENT_SHA256_HEADER: descriptor.content_digest.hexadecimal,
-                **_NO_STORE_HEADERS,
+                # The live Desktop gate proved a compressing intermediary
+                # (the public HTTPS origin's edge) rewrites text/* payload
+                # streams to content-encoding gzip and DROPS the explicit
+                # Content-Length, failing the client's exact byte/size
+                # verification. The verified byte stream is exact by
+                # contract: `no-transform` forbids every intermediary
+                # re-encoding and keeps the declared length authoritative.
+                "cache-control": "no-store, no-transform",
             },
         )
 

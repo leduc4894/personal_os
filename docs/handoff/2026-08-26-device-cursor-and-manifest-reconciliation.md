@@ -1,181 +1,217 @@
-# Handoff — Device Cursor and Manifest Reconciliation (Child 6, Tasks 1-11)
+# Handoff — Device Cursor and Manifest Reconciliation (Child 6, Final)
 
-Mid-plan handoff: Tasks 1-11 of
-`docs/superpowers/plans/2026-08-26-device-cursor-and-manifest-reconciliation.md`
-are implemented, reviewed and committed. Tasks 12-15 remain. The session stopped
-here on user instruction ("dừng sau Task 11"), not on a blocker.
+Final handoff of
+`docs/superpowers/plans/2026-08-26-device-cursor-and-manifest-reconciliation.md`.
+Tasks 1-14 landed the implementation, cross-boundary tests, canonical docs and
+the 0.2.0 release candidate. Task 15 ran the mandatory Desktop WDIO live gate
+for the first time and left it **BLOCKED on one remaining plugin-side defect**
+(two other real transport defects it exposed are fixed and tested in this
+commit). The physical Mobile matrix did not run (operator unavailable). Child 6
+is NOT complete; no completion claim is made.
 
 ## Commit accounting
 
-Branch `device-cursor-manifest-reconciliation` (created from `master` @
-`41ab718`, per user instruction: new branch, no worktree — this overrides the
-plan's Execution Discipline #2 worktree mandate).
+Branch `device-cursor-manifest-reconciliation` (from `master` @ `41ab718`).
 
-Final implementation commit: `05a1c54`. The commit that carries this handoff is
-its immediate successor; this file therefore records `05a1c54` as the last
-implementation SHA by convention (the plan's Task 15 Step 7 uses the same
-convention for its own final handoff).
+Last implementation commit before Task 15: `cd2a301` (Task 14, release
+candidate 0.2.0). The commit that carries this handoff is Task 15's own
+commit and therefore its immediate successor; by the plan's convention (used
+by the mid-plan handoff for `05a1c54`) this file records `cd2a301` as the
+last pre-Task-15 SHA and the Task 15 commit as the final acceptance commit
+whose exact SHA is `git rev-parse HEAD` at commit time — stated here rather
+than inventing a future SHA.
 
-Task commits (18 total, each task's brief at
-`.superpowers/sdd/2026-08-26-device-cursor-and-manifest-reconciliation/task-N-brief.md`,
-full reports as `task-N-report.md` alongside):
+Task 15's commit carries: the Desktop WDIO journey
+(`apps/obsidian-plugin/test/specs/device-sync-reconciliation.e2e.ts`), its
+phase codes (`test/support/live-acceptance-phase-status.ts`), the guarded
+bootstrap's new spec choice (`tools/obsidian_live_acceptance_bootstrap.py`),
+two live-gate transport fixes with tests
+(`apps/obsidian-plugin/src/device-sync/api.ts`,
+`apps/api/src/api_runtime/device_sync_routes.py` +
+`tests/unit/api_runtime/test_device_sync_routes.py`), the reference-device
+records template and its structural contract test
+(`docs/operations/device-sync-device-verification.md`,
+`tests/contract/device_sync/test_reference_device_records.py`), the runbook
+status, the docs/15 §7 accumulator sentence, `wdio.conf.mts`, the BACKLOG row
+and this handoff.
 
-| Task | Commits | Review outcome |
+Earlier task commits are tabulated in git history `4bf367b..cd2a301` (18
+implementation commits + Task 11b/12b dispatches); the per-task review record
+lives in `.superpowers/sdd/2026-08-26-device-cursor-and-manifest-reconciliation/progress.md`
+(git-ignored scratch).
+
+## Offline gates (all green at this commit)
+
+| Gate | Command | Evidence |
 |---|---|---|
-| 1 domain/registry/diagnostics | `4bf367b` | clean (3 minors deferred) |
-| 2 schema/migration | `a16c3d1`, `4f787be` | 1 fix round (state-shape constraint) |
-| 3 event pull + cursors | `be3239d`, `ddf77e0` | 1 fix round (gap witness on total history loss) |
-| 4 manifest planning/completion | `b344c7a`, `02b838a`, `03dd7e4` | 2 fix rounds (bind-param ceiling; active locator; golden digests) |
-| 5 verified content | `a9fb340`, `172a56c` | 1 fix round (ruff format artifacts) |
-| 6 HTTP API + correlation | `abb87d5` | clean |
-| 7 trail v2 + diagnostics surface | `8f46dc1` | clean |
-| 8 journal v7 + repository | `d602cf2` | clean (routing carry-forward) |
-| 9 wire client + binary transport | `16ea66e` | clean |
-| 10 remote apply + echo suppression | `3c0d528`, `29135f0` | 1 fix round (1 Critical + 2 Important) |
-| 11 capture/barrier/reconciliation | `c463867`, `05a1c54` | 1 fix round (3 Important) |
+| Full Python + web | `uv run poe verify` | exit 0 (505 files formatted, ruff/mypy strict/eslint/tsc/vitest/build/web build) |
+| API contract | `uv run poe api-contract-check` | exit 0 (openapi-typescript clean) |
+| Device-sync suite | `CI=true LOCAL_STACK_TEST_PROJECT=knowledge-ci-task15-verify uv run poe device-sync-test` | exit 0: 1590 passed, 2 skipped, 1 deselected (`device_records` by design), 775 s |
+| Plugin unit | `pnpm --dir apps/obsidian-plugin exec vitest run` | 1140 passed (55 files) |
+| Plugin types/lint/build | `tsc --noEmit` / `run lint` / `run build` | all exit 0 |
+| Records gate | `uv run poe device-sync-device-verification` | exit 1 **by design**: both sections exist with every required label `pending`; "only observed outcomes satisfy the gate". This is the correct, documented state until a human records physical evidence. |
+| Whitespace/tree | `git diff --check` / `git status --short` | clean; only intended files |
 
-## Gate status (offline evidence at `05a1c54`)
+The two live-gate fixes are pinned by the suites above: the device-sync
+client tests (`src/device-sync/api.test.ts`, 57 tests) and the route header
+test (`test_download_streams_verified_bytes_with_exact_headers` now asserts
+`cache-control: no-store, no-transform`).
 
-- Python: focused unit/contract suites green per task; `python-lint` and
-  `python-type-check` (mypy strict) green through Task 11 (196 files at Task 6).
-- Live PostgreSQL integration (disposable `knowledge-ci-*` projects, runbook
-  `.local/RESTART.md` followed, `knowledge-local` stood down and restored each
-  time): migration upgrade/downgrade, cursor/event transactions, manifest
-  transactions, query plans, verified content — all PASS (Task 5 content used a
-  verification-faithful double plus the scripted real-adapter contract suite;
-  live-R2 bucket proof is allocated to Task 13 Step 6 `object-storage-test-live`).
-- OpenAPI snapshot + generated workspace client regenerated at Task 6; the 7
-  pre-existing snapshot failures from Task 1's registry growth are cleared;
-  `api-contract-check` green; client `generate` + `type-check` green.
-- Plugin: full vitest suite 1072/1072 (52 files) at `05a1c54`; `tsc --noEmit`,
-  lint (`--max-warnings=0`), build all exit 0.
-- Known red: repo-wide `poe python-format-check` fails on 9 files (Task 1-4
-  drift; see deferred items). `poe python-lint` is green; no task gate between
-  now and Task 13 Step 7 runs format-check, and Task 13 must clean it first.
-- NOT run yet by design: Desktop WDIO journey, physical Mobile matrix,
-  `object-storage-test-live`, `poe verify` full pass — owned by Tasks 13-15.
-  Child 6 is NOT complete; no completion claim is made by this handoff.
+## Live gates (Desktop WDIO BLOCKED)
+
+Procedure: `.local/RESTART.md` order followed throughout; `knowledge-local`
+stood down (volumes kept) before each disposable provision and restored
+`"state":"ready"` at the end; nine disposable `knowledge-ci-*` projects were
+created and fully reset (no containers/volumes remain); Web Admin :38000,
+both policy workers, and the existing tunnel `knowledge-api-verify` ran each
+round; TOTP enrolled/activated through the approved Web HTTP flow by the
+guarded bootstrap on every fresh project; policy published through
+`.local/publish-policy-revision.py`. No secrets were printed; only the
+runbook's own hostnames appear here.
+
+### What the gate proved before blocking
+
+- The guarded bootstrap chain works end to end for the new spec: stack
+  preflight, migrations, identity, web credential, policy key, TOTP
+  enrollment + activation, policy publication, WDIO launch, phase-status
+  plumbing (`device_sync_scenario_started` → `device_sync_onboarding_completed`).
+- Desktop onboarding, the automatic snapshot upload, the fixture create
+  upload, the remote second-device actor (grant → approve → poll → update
+  preflight/upload), the event pull, self-origin echo suppression and the
+  cursor acknowledgement all worked on the real wire (server log: pulls 200,
+  acks 200, canonical events 1-3 committed, cursor acked=2/delivered=3).
+
+### Defect 1 (FIXED): device-sync JSON bodies lacked `content-type`
+
+Every `POST /api/sync/cursor-acknowledgements` (and every other JSON body on
+the device-sync client) was 422-rejected by request validation before any
+handler ran — the client set only `accept`. Fixed in
+`apps/obsidian-plugin/src/device-sync/api.ts` (`jsonRequest` now sends
+`content-type: application/json` for carrying requests, exactly like the
+journal lane). Live-verified: acknowledgements returned 200 afterwards.
+
+### Defect 2 (FIXED): the verified byte stream was transformable
+
+The public HTTPS origin's edge (Cloudflare tunnel) re-encoded `text/plain`
+payload responses to `content-encoding: gzip` and DROPPED the explicit
+`Content-Length`; the client's exact size verification then correctly failed.
+Proven by a sanitized credential-scoped probe (local: length 77, no encoding,
+digest match; tunnel before fix: encoding gzip, length header absent, digest
+match after decompression; tunnel after fix: identical to local). Fixed in
+`apps/api/src/api_runtime/device_sync_routes.py` — the download response now
+carries `Cache-Control: no-store, no-transform`.
+
+### Defect 3 (OPEN — the blocker): plugin-side download integrity + recovery dead end
+
+After both fixes, the remote-edit apply still fails identically on every
+fresh workspace (three clean reproductions: `task15f`, `task15g`, `task15h`):
+
+- Plugin trail (sanitized, from the journey's failure dump):
+  `apply_failure:download` → `apply_failure:device_download_integrity_failed`
+  once, then `apply_failure:recovery` →
+  `apply_failure:device_apply_recovery_ambiguous` repeating on every cycle.
+- Server side: the download itself returns 200 with exact headers (probe
+  above); the desktop cursor ends `acknowledged=2, delivered=3` — events 1-2
+  (both creates, self-origin suppressed) settled, event 3 (the remote update)
+  delivered but never applied.
+- Bootstrap closed verdict: `obsidian_wdio_failed_after_device_sync_onboarding`
+  (phase `device_sync_onboarding_completed`).
+
+So the failure is inside the plugin's `requestUrl`-based
+`DeviceSyncHttpTransport` integrity inputs (`arrayBuffer`/header shape on the
+real Electron wire) or just after them — the offline journeys cannot see it
+because their fixtures stub the transport. Additionally, the failed download
+leaves the apply row `prepared` and every subsequent recovery reports
+`device_apply_recovery_ambiguous` forever: the device never self-heals and no
+amount of cadence retries or explicit repairs clears it (the whole drain
+keeps cycling recovery). Both facets need a fix before the gate can pass.
+
+### Mobile matrix
+
+Not run — the operator (human) was unavailable in this session, and per
+AGENTS.md/18.1 Mobile acceptance may defer but never be inferred from
+Desktop evidence. Exactly one BACKLOG row added (see verdicts below). No
+Mobile row in `device-sync-device-verification.md` is marked passed.
 
 ## Spec-interpretation decisions (with rationale)
 
-1. **Canonical-only download placement — the load-bearing open decision.**
-   Spec §12.3/§12.4 require canonical-only `download` actions to deliver bytes
-   through the remote-apply state machine (new-device onboarding and
-   SQLite-loss-with-missing-files converge only through this channel, since
-   post-completion pulls start after checkpoint C). The Task 6 action wire
-   carries only `source_locator_id` (a locator row UUID, per spec §6.5) — no
-   locator text — and `localEntryId` is null for canonical-only actions, so the
-   plugin cannot know where to place bytes. Task 11 therefore settles
-   canonical-only downloads as durable `device_manifest_identity_ambiguous`
-   conflicts, surfaced through one `reconcileFailure("actions", reason)`
-   observation that survives completion (fail-closed, readable, no wrong write).
-   Ruling: the spec's behavior contract governs over the interface sketch; the
-   wire must be extended. Fix routed as a dedicated dispatch on the Task 6
-   surface BEFORE Task 13: add checkpoint locator text to the canonical-only
-   download action payload (precedent: §7.1 events carry locator text on
-   operational wires; §6.4 forbids it only in diagnostics/telemetry), fix
-   `src/personal_os/device_sync/planning.py:268` so the per-entry catch-up
-   download echoes its `local_entry_id`, regenerate OpenAPI/client, update the
-   plugin mirror + reconciler, and amend spec §6.5/§7.3 in Task 14's docs pass.
-   BACKLOG row added with `Before Child 6 Task 13`.
-2. **Worktree override** — user directed branch-only; noted in SDD ledger line 2.
-3. **OpenAPI snapshot sequencing** — Task 1 grew the central `ErrorCode` enum;
-   snapshot regeneration deferred to Task 6 (repo precedent `2cbcd6b`→`b41f812`),
-   leaving 7 known-red snapshot tests between Tasks 1-6 (cleared at `abb87d5`).
-4. **`ManifestEntryResolution`** deliberately absent from Task 1 (shape depends
-   on Task 4's `ManifestMatchKind`); added in Task 4's commit to `contracts.py`.
-5. **Task 2 forced scope** — 12 files beyond the brief's git-add list were
-   mechanically forced (head pins in six test files, `CANONICAL_POSTGRESQL_SCHEMA_REVISION`
-   bump, recovery manifest v3→v4 with the v3 count set frozen); reviewer
-   verified file-by-file. The `ck_manifest_runs__state_shape` constraint was
-   restructured after review so `failed`/`expired` runs are writable in honest
-   shapes (small-file-sync precedent grouping).
-6. **Task 4 wire grammar** — canonical-JSON final digest
-   `{"pages":[{"digest","entries","page"}…],"version":1}` (RFC 8785) is pinned
-   by golden vectors on both server and plugin; the canonical-only downloads
-   exclusion binds as ONE `unnest(:ids)` array parameter (65,535 bind ceiling);
-   rule-2 (historical locator) actions carry the checkpoint-ACTIVE locator id.
-7. **Task 5 policy denial** — surfaces as `ExclusionPolicyError(EXCLUSION_POLICY_DENIED)`
-   (registered closed code) and passes unmetered through device-sync metrics
-   (the metric label vocabulary is `DeviceSyncErrorCode`-only; metering it needs
-   a Task 1 registry change). Reviewer accepted: the token reaches a readable
-   surface at the route boundary.
-8. **Task 6 correlation** — `diagnostics/events.py` deliberately unchanged:
-   `request_id` reaches failed-request lines via the bound diagnostic context;
-   the registry stays closed. The 2026-08-23 `request_id` BACKLOG row is NOT
-   retired (waits for Task 15 live evidence) even though the remediation is
-   implemented and pinned.
-9. **Task 8→11 `reconcile_required` clearing** — Task 8's `completeRepair`
-   could not clear `journal_meta.is_reconcile_required` (persistence sticky
-   merge would re-clobber). Task 11 added `markReconcileComplete()` +
-   `onDeviceSyncRepairComplete` (`journal/persistence.ts`, approved forced
-   file), proven durable across close/reopen with a regression control.
-10. **Task 9 transport** — dedicated `DeviceSyncHttpTransport` port instead of
-    widening `SyncHttpResponse` (exact-shape assertions in `sync-api.test.ts`
-    are outside the task's file list); `createObsidianDeviceSyncHttpTransport`
-    wiring is owned by Task 12 (`plugin.ts`).
-11. **Task 10 recovery classification** — created/restored with absent target
-    after crash-at-prepared recovers `clean` (absent target is the verified
-    pre-mutation expectation); updated-with-absent-target stays `blocked`
-    (genuine divergence).
-12. **Task 11 barrier semantics** — upload admission refusal →
-    `blocked("actions", "journal_mutation_failed")`; synthetic-sequence lattice
-    guard → `blocked("actions", "device_cursor_gap")`; barrier-paused outbound
-    passes report `completed`; every settle-with-reason emits one closed
-    observation so blockers stay readable after completion discards progress
-    rows; echo markers swept at/below `acknowledgedSequence` at completion (no
-    time-based expiry anywhere).
+1. **`plugin_version: "0.1.0"` in the journey's remote actor** — the local
+   launcher's auth gate pins the accepted plugin window
+   (`KNOWLEDGE_AUTH_MIN/MAX_PLUGIN_VERSION=0.1.0`); the desktop onboarding
+   helper sends the same value. Sending 0.2.0 is a closed 426.
+2. **Local policy rule shape** — `.local/publish-policy-revision.py` (local,
+   never committed) now publishes a `media_type` family deny (`image/*`)
+   instead of `extension .tmp`. Rationale: the verified download authorizes
+   exact bytes with NO locator operand by design
+   (`device_content_catalog.evaluate_device_content_policy`), so any
+   locator-class rule makes every download indeterminate → denied
+   (`exclusion_policy_denied` 403, reproduced live). A media-type rule keeps
+   a real, evaluable deny on the disposable workspace. The next session must
+   know this machine's local helper now publishes that shape.
+3. **No `sync-now` command exists** — the plugin's command palette exposes
+   only copy-diagnostics, self-check, restore and repair-sync. The journey's
+   `triggerSyncNow` rewrites the fixture note with its own unchanged bytes
+   via the public Vault API: the modify event always fires, the capture
+   admits nothing (identical fingerprint) and the `local_commit` trigger runs
+   one bounded cycle with zero canonical side effects.
+4. **One fresh disposable project per WDIO attempt** — every WDIO run copies
+   the fixture vault (which contains `hello.md`); a second run on the same
+   workspace creates `hello.md` at an occupied locator
+   (`source_locator_conflict` 409), flags the journal `reconcile_required`
+   and distorts the journey. Recorded in the runbook.
+5. **Guarded-run contract extensions** — the bootstrap tool gained the
+   `--wdio-spec test/specs/device-sync-reconciliation.e2e.ts` choice and six
+   per-phase failure codes; the journey records seven phase codes through the
+   existing `E2E_LIVE_PHASE_STATUS_FILE` contract. Manual (non-guarded) WDIO
+   runs need ABSOLUTE paths for the password file, TOTP helper and phase
+   file — the bootstrap passes absolute values; relative ones resolve against
+   the plugin directory and fail closed.
+6. **BACKLOG retirement withheld** — plan Step 4 gated the three triggered
+   rows on green Desktop evidence cited in this handoff; the gate is red, so
+   none were retired (Execution Discipline #7: no retirement from unit
+   evidence when the ruling requires live evidence). Note: live failed
+   requests DID carry `request_id` in the API's structured lines throughout
+   today's round (422/429/403 lines in `api-diagnostics.log` all carry it) —
+   that specific remediation is live-proven and ready to retire on a green
+   gate rerun.
 
-## Deferred items (each has exactly one BACKLOG row)
+## Backlog verdicts
 
-1. **Canonical-only locator wire gap** — see decision 1. `Before Child 6 Task 13`.
-2. **Policy-rule EXCLUDED for unowned uploads** — locator-class
-   (`folder_prefix`/`path_glob`/`extension`), `exact_source_id` and
-   `source_type` rules cannot be evaluated at finalize for entries with no
-   bound canonical source (raw locators never persist), so unowned uploads
-   plan `EXCLUDED` (fail-closed; apply-time recheck and publication
-   enforcement backstop). Durable fix needs a `device_sync` schema column for
-   the append-time decision. `Before Child 8 conflict merge`.
-3. **Format drift, 9 files** — Tasks 1-4 left `poe python-format-check` red
-   (`device_event_store.py`, `device_manifest_store.py`, `planning.py`, six
-   device-sync test files); Task 13 Step 7 runs format-check and must clean it.
-   `Before Child 6 Task 13`.
-4. **Per-task review minors (Tasks 1-11)** — parked in the SDD ledger for the
-   final whole-branch review to triage; representative items: duplicate
-   `DeviceEventType` `__all__` entry; dead fakes helpers; unbounded
-   `ManifestAction.local_entry_id`; auth-gate parametrize 5/8 routes;
-   mid-stream-failure-after-200 logs COMPLETED (pre-existing semantics);
-   client-disconnect generator `aclose` relies on asyncgen finalization;
-   double download per download action; Task 8 echo-conflict barrier parity
-   and digest-after-validation ordering. `Before Child 6 whole-branch review`.
-5. **Index candidates** — `(workspace_id, event_sequence)` pull index and
-   `source_tombstones.restore_event_id` index; query-plan gates pass at pinned
-   fixture size; sparsity matters at multi-workspace scale. `Before production
-   activation`.
-
-Rows 53/54/60/67 of the existing BACKLOG (the three triggered Child-6 hygiene
-rows + their residual row) are remediated in code with test evidence (Tasks 6-7)
-but stay until Task 15's live evidence, per the plan. The two metrics rows
-(`_validate_epoch_ms`, `record_commit(COMMITTED)`) remain untouched per the
-plan's global constraints.
+| Row | Verdict |
+|---|---|
+| 2026-08-23 observability: failed-request `request_id` | RETAINED — remediation live-proven today (structured failed-request lines carry `request_id`); retirement still gated on the green Desktop rerun per plan Step 4 |
+| 2026-08-24 sync-error-tracing: P5 read tokens in Stop reasons | RETAINED — no green live run to observe the derived stop-reason surface during healthy sync |
+| 2026-08-24 sync-error-tracing: residual trail hygiene group | RETAINED — same gate |
+| 2026-08-23 `_validate_epoch_ms` metrics row | RETAINED unchanged (trigger not reached, per plan) |
+| 2026-08-24 source-lifecycle `record_commit(COMMITTED)` metrics row | RETAINED unchanged (trigger not reached, per plan) |
+| 2026-08-26 device-sync rows (EXCLUDED uploads; review minors batch; index candidates) | RETAINED unchanged |
+| NEW 2026-08-27 device-sync-live-gates: physical Mobile matrix | ADDED — one row, `Implement by: Before Child 7 start (physical operator matrix; rerun after the Desktop download-integrity fix)`, pointing here |
 
 ## Next actions (in order)
 
-1. Dedicated dispatch on the Task 6 surface for the canonical-only locator
-   wire gap (decision 1) — includes OpenAPI/client regen, plugin mirror,
-   reconciler placement, and removes the interim identity_ambiguous settle.
-2. Task 12 (coordinator, cadence, repair command, status; wires
-   `createObsidianDeviceSyncHttpTransport` and the vault seam in `plugin.ts`;
-   add the settings/status composition surfaces).
-3. Task 13 (cross-boundary journeys, privacy, performance; run
-   `object-storage-test-live`; fix the 9-file format drift before its Step 7).
-4. Task 14 (canonical docs incl. spec §6.5/§7.3 amendment from decision 1,
-   runbook, release candidate 0.2.0, full offline verification).
-5. Task 15 (Desktop WDIO + physical Mobile gates, BACKLOG retirement with
-   evidence, rewrite this handoff as the final one).
-6. Final whole-branch review (most capable model; triages deferred minors in
-   the SDD ledger), then `finishing-a-development-branch`.
+1. Fix defect 3: instrument the plugin's `requestUrl` transport on the real
+   wire (probe `arrayBuffer`/`content-length`/`x-content-sha256` as the
+   transport sees them inside Obsidian; a focused WDIO probe or a temporary
+   trail hook on the integrity inputs localizes it in one run), then make the
+   failed-download recovery path terminate (the permanent
+   `device_apply_recovery_ambiguous` loop must reach a readable, actionable
+   state — repair or blocked verdict — instead of an endless recovery cycle).
+2. Rerun the guarded Desktop gate on a FRESH `knowledge-ci-*` project
+   (runbook command; expect `obsidian_live_acceptance_passed` with all four
+   scenarios in the sanitized evidence block).
+3. Record the Desktop rows in
+   `docs/operations/device-sync-device-verification.md` from the sanitized
+   evidence (an operator observes the run), then run the physical Mobile
+   matrix with the operator and record its rows; `uv run poe
+   device-sync-device-verification` must exit 0.
+4. Retire the three triggered BACKLOG rows above with the green-gate
+   citation; update the runbook status block.
+5. Final whole-branch review (triage the parked minors in the SDD ledger),
+   then `finishing-a-development-branch`.
 
-SDD workspace (ledger, briefs, reports, review packages):
-`.superpowers/sdd/2026-08-26-device-cursor-and-manifest-reconciliation/` —
-git-ignored scratch; `progress.md` is the authoritative per-task record.
+Operational state at handoff: `knowledge-local` restored and `"ready"`
+(all seven services healthy); no `knowledge-ci-*` containers or volumes
+remain; the API serve/tunnel background processes started for the round were
+stopped (the operator restarts them per `.local/RESTART.md` when needed);
+`.local/` is untracked, so the local publish-helper rule change (decision 2)
+persists only on this machine and should be read before the next live round.

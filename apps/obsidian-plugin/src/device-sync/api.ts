@@ -732,7 +732,14 @@ export function createDeviceSyncApi(options: DeviceSyncApiOptions): DeviceSyncAp
     return {
       url,
       method,
-      headers: { accept: "application/json" },
+      headers: {
+        accept: "application/json",
+        // The live Desktop gate proved the real server rejects a JSON body
+        // without an explicit content type (422 before any handler ran):
+        // every carrying request names its media type exactly like the
+        // journal lane's preflight does.
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+      },
       ...(body === undefined ? {} : { body }),
     };
   }

@@ -20,6 +20,13 @@ export const LIVE_ACCEPTANCE_PHASE_RESULT_CODES = [
   "automatic_new_note_committed",
   "automatic_policy_successor_committed",
   "automatic_convergence_journey_completed",
+  "device_sync_scenario_started",
+  "device_sync_onboarding_completed",
+  "device_sync_remote_edit_no_echo_completed",
+  "device_sync_cursor_gap_repair_completed",
+  "device_sync_lost_sqlite_repair_completed",
+  "device_sync_remote_tombstone_completed",
+  "device_sync_journey_completed",
 ] as const;
 
 export type LiveAcceptancePhaseResultCode =

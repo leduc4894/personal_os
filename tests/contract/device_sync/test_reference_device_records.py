@@ -138,6 +138,29 @@ def test_reference_device_verification_records_are_present_and_complete() -> Non
         )
 
 
+def test_reference_device_records_template_exists_with_every_required_label() -> None:
+    """The records file must exist and carry every required scenario label.
+
+    Runs in the default suite (no marker): the living records file keeps
+    both device-class sections and every required ``- <Label>:`` row. This
+    pins the file the physical evidence gate reads — a deleted template or a
+    drifted label fails here, long before the explicit ``-m device_records``
+    run decides whether the outcomes are observed or still placeholders.
+    """
+
+    assert RECORDS_PATH.is_file(), (
+        f"the reference-device records file {RECORDS_PATH} must exist; the "
+        "device-sync runbook and the device-verification gate both read it"
+    )
+    sections = _sections(RECORDS_PATH.read_text(encoding="utf-8"))
+    for device_class, required_labels in REQUIRED_RECORD_LABELS_BY_DEVICE.items():
+        body = sections.get(device_class)
+        assert body, f"the records file lost its '{device_class} reference device' section"
+        records = _records(body)
+        for label in required_labels:
+            assert label in records, f"the {device_class} records are missing the label {label!r}"
+
+
 # --- the child 6 operator runbook documentation contract ----------------------
 
 

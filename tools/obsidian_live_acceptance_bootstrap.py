@@ -71,6 +71,21 @@ _WDIO_PHASE_FAILURE_CODES: Final[Mapping[str, str]] = {
     "automatic_convergence_journey_completed": (
         "obsidian_wdio_failed_after_automatic_convergence_journey"
     ),
+    "device_sync_scenario_started": "obsidian_wdio_failed_during_device_sync_onboarding",
+    "device_sync_onboarding_completed": "obsidian_wdio_failed_after_device_sync_onboarding",
+    "device_sync_remote_edit_no_echo_completed": (
+        "obsidian_wdio_failed_after_device_sync_remote_edit_no_echo"
+    ),
+    "device_sync_cursor_gap_repair_completed": (
+        "obsidian_wdio_failed_after_device_sync_cursor_gap_repair"
+    ),
+    "device_sync_lost_sqlite_repair_completed": (
+        "obsidian_wdio_failed_after_device_sync_lost_sqlite_repair"
+    ),
+    "device_sync_remote_tombstone_completed": (
+        "obsidian_wdio_failed_after_device_sync_remote_tombstone"
+    ),
+    "device_sync_journey_completed": "obsidian_wdio_failed_after_device_sync_journey",
 }
 
 
@@ -643,6 +658,7 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=(
             "test/specs/source-lifecycle.e2e.ts",
             "test/specs/device-login-sync.e2e.ts",
+            "test/specs/device-sync-reconciliation.e2e.ts",
         ),
         default="test/specs/source-lifecycle.e2e.ts",
     )

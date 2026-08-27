@@ -651,7 +651,10 @@ def test_download_streams_verified_bytes_with_exact_headers(
     assert response.headers["x-content-sha256"] == _SHA256
     assert response.headers["x-request-id"]
     assert response.content == _OFFLINE_CONTENT
-    assert response.headers["cache-control"] == "no-store"
+    # The exact byte stream also forbids intermediary re-encoding: the live
+    # Desktop gate proved a compressing edge response drops the explicit
+    # Content-Length and fails the client's size verification.
+    assert response.headers["cache-control"] == "no-store, no-transform"
     assert harness.state.reader_closed is True
 
 

@@ -132,7 +132,10 @@ tại chỗ, không phụ thuộc stack Phần 1:
   chỉ nghĩa là một HTTP attempt thực sự chạm transport và thất bại; thiếu
   credential hay refresh fail trước contact ghi `credential_failure`. Trail
   observe-only: không đổi semantics sync, append fire-and-forget, không bao
-  giờ chặn pass.
+  giờ chặn pass. Hành vi cadence đã ghi nhận (Task 14): sau một thời gian
+  suspend dài, catch-up burst ghi nợ từng stale tick 30 giây vào accumulator
+  reconcile sáu giờ — tệ nhất chỉ tạo một cơ hội periodic-reconcile giả rồi
+  no-op khi không có gì nợ (xem runbook device-sync).
 - **Wire correlation**: mọi wire failure mang `request_id` từ response envelope
   (UUID-gated) để join với access observation của API; nâng cấp tự nhiên là đọc
   header `traceparent` (W3C) API đã trả.

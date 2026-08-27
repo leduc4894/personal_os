@@ -13,10 +13,21 @@ lifecycle writes by
 the closed diagnostics vocabulary by
 [`sync-error-tracing.md`](sync-error-tracing.md).
 
-Status (2026-08-26): implementation complete and offline-verified. The two
-mandatory live gates — the Desktop WDIO journey and the physical Mobile
-matrix (design 18.1) — have NOT run yet, so Child 6 is not closed: make no
-completion claim until they pass and the records exist at
+Status (2026-08-27): implementation complete and offline-verified; the Desktop
+WDIO live gate ran for the first time against the disposable local stack and
+is BLOCKED — the remote-apply verified download fails the plugin's exact
+integrity verification on the real wire (`apply_failure:download` →
+`device_download_integrity_failed`, then a permanent
+`apply_failure:recovery` → `device_apply_recovery_ambiguous` loop; bootstrap
+verdict `obsidian_wdio_failed_after_device_sync_onboarding`). Two real
+transport defects the gate exposed are already fixed and tested: the
+device-sync client now sends `content-type: application/json` on JSON bodies
+(the server 422-rejected every cursor acknowledgement without it), and the
+verified byte stream now carries `Cache-Control: no-store, no-transform`
+(a compressing edge response re-encoded text payloads to gzip and dropped
+the explicit `Content-Length`). The physical Mobile matrix has not run
+(operator unavailable). Child 6 stays open: make no completion claim until
+both gates pass and the records exist at
 [`device-sync-device-verification.md`](device-sync-device-verification.md).
 
 ## The route set (operator reference)
@@ -254,6 +265,15 @@ never a personal Vault):
 - **Desktop WDIO** (`wdio-obsidian-service`): remote edit plus exact
   no-echo; cursor gap to manifest repair; lost-SQLite identity/cursor
   recovery without duplicate sources; remote tombstone to local trash.
+  Run it guarded (the closed verdict token
+  `obsidian_live_acceptance_passed` comes only from the bootstrap):
+  `CI=true uv run python tools/obsidian_live_acceptance_bootstrap.py
+  --project-name knowledge-ci-<slug> --wdio-spec
+  test/specs/device-sync-reconciliation.e2e.ts`. One fresh disposable
+  project per attempt — every WDIO run re-uploads the fixture vault's
+  `hello.md`, and a second run on the same workspace hits its occupied
+  locator (`source_locator_conflict`), which flags the journal
+  `reconcile_required` and distorts the journey.
 - **Physical Mobile matrix**: manifest suspend/resume; remote apply plus
   no-echo; lost-SQLite repair; tombstone to local trash;
   edit-during-reconciliation preservation.

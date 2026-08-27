@@ -27,7 +27,10 @@ export const config: WebdriverIOConfig = {
   services: ["obsidian"],
   reporters: ["obsidian"],
   cacheDir: path.resolve(".obsidian-cache"),
-  mochaOpts: { ui: "bdd", timeout: 120_000 },
+  // The device-sync reconciliation journey (Child 6 live gate) chains four
+  // scenarios with two manifest repairs in one test; its per-test timeouts
+  // stay authoritative, and the suite default covers the shorter journeys.
+  mochaOpts: { ui: "bdd", timeout: 780_000 },
   logLevel: "warn",
   /**
    * The launcher installs only manifest.json, main.js, styles.css and
