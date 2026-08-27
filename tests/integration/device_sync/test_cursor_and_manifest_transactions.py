@@ -856,6 +856,8 @@ class ManifestStoreHarness:
                         manifest_runs.c.entry_count,
                         manifest_runs.c.safe_error_code,
                         manifest_runs.c.final_digest,
+                        manifest_runs.c.expires_at,
+                        manifest_runs.c.created_at,
                     ).where(manifest_runs.c.manifest_run_id == manifest_run_id)
                 )
             ).one()
@@ -909,6 +911,19 @@ class ManifestStoreHarness:
             await connection.execute(
                 sa.update(manifest_runs)
                 .values(expires_at=sa.text("CURRENT_TIMESTAMP"))
+                .where(manifest_runs.c.manifest_run_id == manifest_run_id)
+            )
+
+    async def idle_run(self, manifest_run_id: UUID) -> None:
+        """Backdate client activity past the idle-expiry window (hard cap untouched)."""
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                sa.update(manifest_runs)
+                .values(
+                    last_client_activity_at=sa.text(
+                        "CURRENT_TIMESTAMP - INTERVAL '600 seconds'"
+                    )
+                )
                 .where(manifest_runs.c.manifest_run_id == manifest_run_id)
             )
 
@@ -1349,6 +1364,50 @@ async def test_finalize_verifies_count_and_canonical_final_digest(
         context, run.manifest_run_id, total_entry_count=1, final_digest=final_digest
     )
     assert replayed.state is ManifestRunState.PLANNED
+
+
+@pytest.mark.asyncio
+async def test_finalize_replays_idempotently_after_the_run_reaches_applying(
+    manifest_store: ManifestStoreHarness,
+) -> None:
+    population = await seed_reconciliation_population(manifest_store.engine)
+    context = population.workspace.context()
+    run, final_digest = await manifest_store.drive_planned_run(population)
+    # The first action read moves the run to applying; a device that lost
+    # the finalize response before suspension replays the exact finalize
+    # afterwards and must receive the receipt (the recorded final digest
+    # proves the finalize landed) instead of a state rejection.
+    await manifest_store.read_actions(context, run.manifest_run_id, limit=1)
+    assert (await manifest_store.run_row(run.manifest_run_id)).state == "applying"
+
+    recorded = await manifest_store.run_row(run.manifest_run_id)
+    replayed = await manifest_store.finalize(
+        context,
+        run.manifest_run_id,
+        total_entry_count=recorded.entry_count,
+        final_digest=final_digest,
+    )
+    assert replayed.manifest_run_id == run.manifest_run_id
+    assert (await manifest_store.run_row(run.manifest_run_id)).state == "applying"
+
+
+@pytest.mark.asyncio
+async def test_idle_run_expires_and_frees_a_new_run_before_the_hard_deadline(
+    manifest_store: ManifestStoreHarness,
+) -> None:
+    population = await seed_reconciliation_population(manifest_store.engine)
+    context = population.workspace.context()
+    run, _final_digest = await manifest_store.drive_planned_run(population)
+    await manifest_store.read_actions(context, run.manifest_run_id, limit=1)
+    # The hard one-hour deadline is untouched; only the client went quiet.
+    row = await manifest_store.run_row(run.manifest_run_id)
+    assert row.expires_at > row.created_at
+    await manifest_store.idle_run(run.manifest_run_id)
+
+    fresh = await manifest_store.start(context, generation=run.client_observation_generation + 1)
+    assert fresh.manifest_run_id != run.manifest_run_id
+    assert fresh.state is ManifestRunState.COLLECTING
+    assert (await manifest_store.run_row(run.manifest_run_id)).state == "expired"
 
 
 @pytest.mark.asyncio

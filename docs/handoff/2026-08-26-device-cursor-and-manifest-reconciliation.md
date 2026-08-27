@@ -118,20 +118,27 @@ at exactly one per locator through the entire session).
    finalize response leaves the resumed run replaying finalize into a
    409 `device_manifest_state_invalid`; the device blocks until the
    run's one-hour deadline. Observed end-to-end with server and trail
-   evidence. Fix batch (BACKLOG `device-sync-recovery`): the
-   supersede-generation start change **landed this session** — the pinning
-   integration test was rewritten first (the live-RED step could not run
-   while the live matrix stack held the ports; noted as a TDD deviation),
-   then implementation + module docstring + runbook; ruff/mypy clean and
-   the full manifest-transaction suite passes 26/26 on a fresh
-   `knowledge-ci-supersede-fix` project, device-sync unit tests 107/107.
-   Finalize idempotent replay and idle-based run expiry remain as the
-   deferred legs of the same BACKLOG row.
+   evidence. **All three recovery legs landed** (the recovery-batch
+   BACKLOG row retired): the supersede-generation start (previous
+   commit), the idempotent finalize replay on `planned` and `applying`
+   runs with matching digest evidence, and the idle-based run expiry —
+   a run now expires after one hour OR five minutes without client
+   activity (migration `20260827_01` adds
+   `manifest_runs.last_client_activity_at`, refreshed on every start,
+   page append, finalize and action read), whichever comes first. Suite
+   evidence: 28/28 manifest-transaction integration tests on a fresh
+   CI project (live-RED could not run for the two later legs while the
+   matrix stack held the ports; the incident itself is the RED).
 2. **Access-token expiry while resident** — refresh runs only at plugin
    startup, so a foreground-resident app past the token TTL enters a
    silent 401 pull loop until restarted. Reproduced twice with trail
    evidence (rotation-replay recovery at startup worked exactly as
-   designed both times). BACKLOG `plugin-auth`.
+   designed both times). **Landed**: the device-sync client gained the
+   optional mid-session `refreshAccessToken` hook — one refresh and one
+   retry on the closed `access_expired` verdict, wired to
+   `session.refresh()` in the plugin composition (60/60 api tests
+   including the two new healing tests; BACKLOG `plugin-auth` row
+   retired).
 3. **Rebuild-without-reconcile-first poisoning** — deleting the journal
    with vault content present does not trigger reconciliation-first on
    mobile; the outbound create-storm settles `blocked_conflict` claims,

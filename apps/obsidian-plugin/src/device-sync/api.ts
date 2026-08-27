@@ -631,6 +631,15 @@ export interface DeviceSyncApiOptions {
   readonly resolveOrigin: () => string;
   /** The memory-only device access credential; null means login is required. */
   readonly getAccessToken: () => string | null;
+  /**
+   * The optional mid-session credential rotation: a request that fails with
+   * the closed `access_expired` verdict triggers exactly one refresh and
+   * one retry with the rotated credential. Without the hook the 401 stays
+   * terminal (the resident-app finding of the 2026-08-27 physical matrix:
+   * a foreground app whose access credential expired must heal itself, not
+   * silently stop syncing until a restart).
+   */
+  readonly refreshAccessToken?: () => Promise<void>;
   /** The mandatory diagnostics surface every closed failure reports through. */
   readonly diagnostics: DeviceSyncDiagnostics;
 }
@@ -655,7 +664,7 @@ export interface DeviceSyncApi {
  * before any transport attempt as `credential_failure/access_missing`.
  */
 export function createDeviceSyncApi(options: DeviceSyncApiOptions): DeviceSyncApi {
-  const { transport, resolveOrigin, getAccessToken, diagnostics } = options;
+  const { transport, resolveOrigin, getAccessToken, refreshAccessToken, diagnostics } = options;
 
   function requireAccessToken(): string {
     const accessToken = getAccessToken();
@@ -713,7 +722,21 @@ export function createDeviceSyncApi(options: DeviceSyncApiOptions): DeviceSyncAp
     try {
       return await execute(accessToken);
     } catch (error) {
-      const failure = error instanceof DeviceSyncApiError ? error : malformed();
+      let failure = error instanceof DeviceSyncApiError ? error : malformed();
+      if (failure.reason === "access_expired" && refreshAccessToken !== undefined) {
+        try {
+          await refreshAccessToken();
+          const rotatedToken = requireAccessToken();
+          return await execute(rotatedToken);
+        } catch (retryError) {
+          // A failed refresh or a still-failing retry keeps the freshest
+          // closed verdict: the retry's own failure when it produced one,
+          // otherwise the original access_expired outcome.
+          if (retryError instanceof DeviceSyncApiError) {
+            failure = retryError;
+          }
+        }
+      }
       report(lane, failure.reason, { requestId: failure.requestId, wireErrorCode: failure.wireErrorCode });
       throw failure;
     }

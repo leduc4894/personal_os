@@ -618,6 +618,7 @@ manifest_runs: Final[Table] = Table(
     Column("safe_error_code", sa.String(length=100), nullable=True),
     Column("created_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
     Column("expires_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("last_client_activity_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
     Column("planned_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
     Column("completed_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
     sa.PrimaryKeyConstraint("manifest_run_id", name="pk_manifest_runs"),

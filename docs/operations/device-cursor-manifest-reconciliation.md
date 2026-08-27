@@ -101,10 +101,14 @@ repair never overlap) with this cadence:
 - Offline/timeout/429/temporary outage: cancellable jittered exponential
   backoff from one second to five minutes; the backoff pauses the pull tick
   and the first success re-anchors the cadence.
-- A manifest run expires after one hour of database time even across app
-  suspension; an idle gap of one hour or more with an active run discards
+- A manifest run expires after one hour of database time OR five minutes
+  without client activity (every start, page append, finalize and action
+  read refreshes the activity anchor), whichever comes first — a device
+  whose app was suspended or killed mid-run waits minutes, not the full
+  hour; an idle gap of one hour or more with an active run discards
   its local progress before the resume cycle, and resume then starts a new
-  run — never fake success.
+  run — never fake success. A replayed finalize (planned or applying)
+  whose digest matches the recorded evidence replays idempotently.
 
 Documented behavior note (accepted): after a long suspension the
 catch-up-anchored cadence fires a bounded catch-up burst — each stale tick

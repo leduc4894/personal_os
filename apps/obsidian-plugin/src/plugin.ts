@@ -866,6 +866,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
             allowLoopbackHttp: ALLOW_LOOPBACK_HTTP_ORIGIN,
           }) ?? "",
         getAccessToken: () => session.accessCredential,
+        // Resident-app self-healing: a foreground session whose access
+        // credential expired rotates once and retries instead of silently
+        // stopping until an app restart (2026-08-27 physical-matrix finding).
+        refreshAccessToken: () => session.refresh(),
         diagnostics: deviceSyncDiagnostics,
       });
       const remoteEventApplier = createRemoteEventApplier({

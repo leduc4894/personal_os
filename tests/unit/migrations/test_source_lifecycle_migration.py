@@ -143,7 +143,7 @@ def test_revision_stacks_directly_on_the_small_file_head() -> None:
     scripts = ScriptDirectory.from_config(Config(str(ALEMBIC_INI_PATH)))
     # The device sync revisions stack on the lifecycle revision, so the
     # single graph head moved past it.
-    assert scripts.get_heads() == ["20260826_02"]
+    assert scripts.get_heads() == ["20260827_01"]
     revision = scripts.get_revision(SOURCE_LIFECYCLE_REVISION)
     assert revision is not None
     assert revision.down_revision == SMALL_FILE_REVISION

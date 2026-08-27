@@ -8,8 +8,9 @@ checkpoint and the workspace's active policy revision: the conflict-tolerant
 insert resumes the existing unfinished run (a different observation
 generation supersedes the abandoned run — expired with its evidence
 retained, the same replacement a policy advance performs) and a run past
-its one-hour database deadline is expired — retaining its prior evidence —
-before a fresh
+its effective deadline — the one-hour database cap or five minutes
+without client activity, whichever comes first — is expired, retaining
+its prior evidence, before a fresh
 run may start. ``append_manifest_page`` accepts only the exact next ordered
 page: an earlier page replays exactly on equal digest and count, reuse with
 different evidence fails the run with the closed replay mismatch, the
@@ -56,6 +57,7 @@ the ``safe_error_code`` persisted on failed runs.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from datetime import timedelta
 from hashlib import sha256
 from typing import Any, Final, cast
 from uuid import UUID, uuid7
@@ -159,6 +161,13 @@ __all__ = [
 #: migration).
 MANIFEST_UNFINISHED_STATES: Final[frozenset[str]] = frozenset({"collecting", "planned", "applying"})
 
+#: A run whose client goes quiet for this long expires early — bounded by
+#: (and usually well inside) the one-hour hard deadline, so a device whose
+#: app was suspended or killed mid-run waits minutes, not the full hour.
+#: Every client operation (start, page append, finalize, action read)
+#: refreshes ``last_client_activity_at``.
+MANIFEST_RUN_IDLE_EXPIRY_SECONDS: Final[int] = 300
+
 #: One page record of the canonical final-digest grammar: the zero-based
 #: page number, its accepted entry count and its page digest hex.
 type ManifestPageRecord = tuple[int, int, str]
@@ -246,6 +255,7 @@ def manifest_run_select_statement(
         manifest_runs.c.final_digest,
         manifest_runs.c.safe_error_code,
         manifest_runs.c.expires_at,
+        manifest_runs.c.last_client_activity_at,
     ).where(
         manifest_runs.c.workspace_id == workspace_id,
         manifest_runs.c.device_id == device_id,
@@ -281,6 +291,7 @@ def manifest_unfinished_run_select_statement(
             manifest_runs.c.final_digest,
             manifest_runs.c.safe_error_code,
             manifest_runs.c.expires_at,
+            manifest_runs.c.last_client_activity_at,
         )
         .where(
             manifest_runs.c.workspace_id == workspace_id,
@@ -340,6 +351,7 @@ def manifest_run_planned_statement(manifest_run_id: UUID, final_digest: str) -> 
             state=sa.literal_column("'planned'"),
             final_digest=sa.bindparam("final_digest", final_digest),
             planned_at=sa.func.current_timestamp(),
+            last_client_activity_at=sa.func.current_timestamp(),
         )
         .where(
             manifest_runs.c.manifest_run_id == manifest_run_id,
@@ -353,7 +365,10 @@ def manifest_run_applying_transition_statement(manifest_run_id: UUID) -> sa.Upda
 
     return (
         sa.update(manifest_runs)
-        .values(state=sa.literal_column("'applying'"))
+        .values(
+            state=sa.literal_column("'applying'"),
+            last_client_activity_at=sa.func.current_timestamp(),
+        )
         .where(
             manifest_runs.c.manifest_run_id == manifest_run_id,
             manifest_runs.c.state == sa.literal_column("'planned'"),
@@ -968,7 +983,7 @@ class PostgresqlDeviceManifestStore:
                 )
             ).one_or_none()
             database_now = await self._database_now(connection)
-            if unfinished is not None and unfinished.expires_at <= database_now:
+            if unfinished is not None and self._effective_deadline(unfinished) <= database_now:
                 await connection.execute(manifest_run_expire_statement(unfinished.manifest_run_id))
                 unfinished = None
             if unfinished is not None:
@@ -1007,6 +1022,7 @@ class PostgresqlDeviceManifestStore:
                     policy_revision_number=policy_revision_number,
                     client_observation_generation=command.client_observation_generation,
                     state="collecting",
+                    last_client_activity_at=database_now,
                 )
                 .on_conflict_do_nothing(
                     index_elements=["workspace_id", "device_id"],
@@ -1162,6 +1178,7 @@ class PostgresqlDeviceManifestStore:
             .values(
                 next_page_number=page_number + 1,
                 entry_count=int(run.entry_count) + len(command.entries),
+                last_client_activity_at=sa.func.current_timestamp(),
             )
             .where(manifest_runs.c.manifest_run_id == command.manifest_run_id)
         )
@@ -1428,9 +1445,23 @@ class PostgresqlDeviceManifestStore:
             await apply_transaction_bounds(connection)
             run = await self._lock_run(connection, context, command.manifest_run_id)
             state = str(run.state)
-            if state == "planned":
+            if state in ("planned", "applying"):
+                # The planned replay is idempotent on matching digest and
+                # count; an applying run carries the same recorded final
+                # digest, so a device that lost the finalize response
+                # before its first action read replays exactly like the
+                # planned case instead of a state rejection.
                 await self._reject_expired_run(connection, run)
-                return self._planned_replay_or_reject(run, command)
+                receipt = self._planned_replay_or_reject(run, command)
+                await connection.execute(
+                    sa.update(manifest_runs)
+                    .values(last_client_activity_at=sa.func.current_timestamp())
+                    .where(
+                        manifest_runs.c.manifest_run_id == command.manifest_run_id,
+                        manifest_runs.c.state.in_(("planned", "applying")),
+                    )
+                )
+                return receipt
             if state == "expired":
                 raise DeviceSyncError(DeviceSyncErrorCode.MANIFEST_EXPIRED)
             if state != "collecting":
@@ -1797,6 +1828,18 @@ class PostgresqlDeviceManifestStore:
                     await connection.execute(
                         manifest_run_applying_transition_statement(query.manifest_run_id)
                     )
+                else:
+                    # Every later action page of an applying run is client
+                    # activity: refresh the idle-expiry anchor so a long
+                    # paged apply never looks abandoned.
+                    await connection.execute(
+                        sa.update(manifest_runs)
+                        .values(last_client_activity_at=sa.func.current_timestamp())
+                        .where(
+                            manifest_runs.c.manifest_run_id == query.manifest_run_id,
+                            manifest_runs.c.state == sa.literal_column("'applying'"),
+                        )
+                    )
             elif state == "expired":
                 raise DeviceSyncError(DeviceSyncErrorCode.MANIFEST_EXPIRED)
             elif state == "failed":
@@ -1956,13 +1999,22 @@ class PostgresqlDeviceManifestStore:
         if state not in MANIFEST_UNFINISHED_STATES:
             return
         database_now = await self._database_now(connection)
-        if run.expires_at <= database_now:
+        if self._effective_deadline(run) <= database_now:
             # The expiry mark outlives the rejection: it commits on its own
             # so the rollback of the rejecting request cannot resurrect the
             # run (nothing else is pending in these fail-closed paths).
             await connection.execute(manifest_run_expire_statement(run.manifest_run_id))
             await connection.commit()
             raise DeviceSyncError(DeviceSyncErrorCode.MANIFEST_EXPIRED)
+
+    @staticmethod
+    def _effective_deadline(run: RowMapping) -> Any:
+        """The earlier of the one-hour hard cap and the idle-expiry window."""
+
+        idle_deadline = run.last_client_activity_at + timedelta(
+            seconds=MANIFEST_RUN_IDLE_EXPIRY_SECONDS
+        )
+        return min(run.expires_at, idle_deadline)
 
     async def _reject_policy_stale_run(self, connection: AsyncConnection, run: RowMapping) -> None:
         active = await self._read_active_policy_revision_number(connection, run.workspace_id)

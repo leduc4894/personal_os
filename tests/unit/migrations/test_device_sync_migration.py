@@ -20,6 +20,7 @@ MIGRATION_PATH = (
 
 DEVICE_SYNC_REVISION = "20260826_01"
 DOWNLOAD_ENTRY_ECHO_REVISION = "20260826_02"
+RUN_CLIENT_ACTIVITY_REVISION = "20260827_01"
 SOURCE_LIFECYCLE_REVISION = "20260820_01"
 
 CURSOR_COLUMNS = frozenset(
@@ -132,6 +133,10 @@ class _Op:
         self.tables: dict[str, Any] = {}
         self.indexes: dict[str, tuple[tuple[Any, ...], dict[str, Any]]] = {}
         self.checks: dict[str, str] = {}
+        self.adds: dict[tuple[str, str], Any] = {}
+        self.alterations: list[tuple[str, str, Any]] = []
+        self.drops: list[tuple[str, str]] = []
+        self.executes: list[str] = []
         self.bind = _Bind(protected_rows)
         self.context = SimpleNamespace(
             config=SimpleNamespace(cmd_opts=SimpleNamespace(x=x_arguments or []))
@@ -164,6 +169,21 @@ class _Op:
 
     def execute(self, statement: Any, **kwargs: Any) -> None:
         self.events.append(("execute", str(statement)))
+        self.executes.append(" ".join(str(statement).split()))
+
+    def add_column(self, table_name: str, column: Any, **kwargs: Any) -> None:
+        self.events.append(("add_column", table_name))
+        self.adds[(table_name, column.name)] = column
+
+    def alter_column(
+        self, table_name: str, column_name: str, **kwargs: Any
+    ) -> None:
+        self.events.append(("alter_column", table_name))
+        self.alterations.append((table_name, column_name, kwargs.get("nullable")))
+
+    def drop_column(self, table_name: str, column_name: str, **kwargs: Any) -> None:
+        self.events.append(("drop_column", table_name))
+        self.drops.append((table_name, column_name))
 
     def get_bind(self) -> _Bind:
         return self.bind
@@ -226,10 +246,41 @@ def test_device_sync_revision_extends_source_lifecycle_head() -> None:
 
 def test_device_sync_revision_is_the_single_alembic_head() -> None:
     scripts = ScriptDirectory.from_config(Config(str(ALEMBIC_INI_PATH)))
-    assert scripts.get_heads() == [DOWNLOAD_ENTRY_ECHO_REVISION]
-    revision = scripts.get_revision(DOWNLOAD_ENTRY_ECHO_REVISION)
+    assert scripts.get_heads() == [RUN_CLIENT_ACTIVITY_REVISION]
+    revision = scripts.get_revision(RUN_CLIENT_ACTIVITY_REVISION)
     assert revision is not None
-    assert revision.down_revision == DEVICE_SYNC_REVISION
+    assert revision.down_revision == DOWNLOAD_ENTRY_ECHO_REVISION
+
+
+def test_run_client_activity_revision_pins_its_chain_link() -> None:
+    module = load_revision("20260827_01_add_manifest_run_client_activity.py")
+    assert module.revision == "20260827_01"
+    assert module.down_revision == "20260826_02"
+
+
+def test_run_client_activity_upgrade_adds_the_backfilled_not_null_column() -> None:
+    module = load_revision("20260827_01_add_manifest_run_client_activity.py")
+    recorder = _Op()
+    module.op = recorder
+    module.upgrade()
+    added = recorder.adds[("manifest_runs", "last_client_activity_at")]
+    assert added.nullable is True
+    # The backfill copies each run's only known activity point before the
+    # NOT NULL clamp, so idle-expiry never sees a synthetic zero anchor.
+    assert recorder.executes == [
+        "UPDATE knowledge.manifest_runs "
+        "SET last_client_activity_at = created_at "
+        "WHERE last_client_activity_at IS NULL"
+    ]
+    assert recorder.alterations == [("manifest_runs", "last_client_activity_at", False)]
+
+
+def test_run_client_activity_downgrade_drops_the_column() -> None:
+    module = load_revision("20260827_01_add_manifest_run_client_activity.py")
+    recorder = _Op()
+    module.op = recorder
+    module.downgrade()
+    assert recorder.drops == [("manifest_runs", "last_client_activity_at")]
 
 
 def test_download_entry_echo_revision_pins_its_chain_link() -> None:

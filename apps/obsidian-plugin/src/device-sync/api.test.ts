@@ -90,6 +90,8 @@ class RecordingDiagnostics implements DeviceSyncDiagnostics {
 interface TestOptions {
   readonly transport: DeviceSyncHttpTransport;
   readonly accessToken?: string | null;
+  readonly getAccessToken?: () => string | null;
+  readonly refreshAccessToken?: () => Promise<void>;
   readonly diagnostics?: DeviceSyncDiagnostics;
   readonly origin?: string;
 }
@@ -99,7 +101,12 @@ function createApi(options: TestOptions): { api: DeviceSyncApi; diagnostics: Rec
   const api = createDeviceSyncApi({
     transport: options.transport,
     resolveOrigin: () => options.origin ?? ORIGIN,
-    getAccessToken: () => options.accessToken === undefined ? ACCESS_TOKEN : options.accessToken,
+    getAccessToken:
+      options.getAccessToken ??
+      (() => (options.accessToken === undefined ? ACCESS_TOKEN : options.accessToken)),
+    ...(options.refreshAccessToken === undefined
+      ? {}
+      : { refreshAccessToken: options.refreshAccessToken }),
     diagnostics,
   });
   return { api, diagnostics: diagnostics instanceof RecordingDiagnostics ? diagnostics : new RecordingDiagnostics() };
@@ -844,6 +851,58 @@ describe("device sync client authentication and diagnostics", () => {
       retryable: false,
       wireErrorCode: "device_credential_invalid",
     });
+  });
+
+  it("refreshes once through a mid-session access_expired and retries with the new credential", async () => {
+    // The resident-app finding (2026-08-27 physical matrix): the access
+    // credential expires while the app stays foreground and the pull loop
+    // silently 401s until a restart; with a refresh hook the client heals
+    // itself — one refresh, one retry, no failure observation.
+    let calls = 0;
+    let accessToken = "stale-access-token";
+    let refreshes = 0;
+    const transport = jsonTransport(async () => {
+      calls += 1;
+      return calls === 1
+        ? { status: 401, bodyText: errorBody("device_credential_invalid") }
+        : { status: 200, bodyText: eventPageBody([]) };
+    });
+    const { api, diagnostics } = createApi({
+      transport,
+      getAccessToken: () => accessToken,
+      refreshAccessToken: async () => {
+        refreshes += 1;
+        accessToken = "fresh-access-token";
+      },
+    });
+    const page = await api.pullEvents();
+    expect(page.events).toEqual([]);
+    expect(refreshes).toBe(1);
+    expect(calls).toBe(2);
+    expect(transport.requests.map((request) => request.headers.authorization)).toEqual([
+      "Bearer stale-access-token",
+      "Bearer fresh-access-token",
+    ]);
+    expect(diagnostics.observations).toEqual([]);
+  });
+
+  it("surfaces the original access_expired failure when the mid-session refresh itself fails", async () => {
+    let refreshes = 0;
+    const { api, diagnostics } = createApi({
+      transport: staticJsonTransport(401, errorBody("device_credential_invalid")),
+      refreshAccessToken: async () => {
+        refreshes += 1;
+        throw new Error("network down during refresh");
+      },
+    });
+    await expect(api.pullEvents()).rejects.toMatchObject({
+      reason: "access_expired",
+      retryable: false,
+    });
+    expect(refreshes).toBe(1);
+    expect(diagnostics.observations).toMatchObject([
+      { kind: "cursor_failure", stage: "pull", reason: "access_expired" },
+    ]);
   });
 
   it("maps a genuine 403 envelope onto login_required and an edge 403 onto server_error", async () => {
