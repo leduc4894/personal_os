@@ -58,7 +58,9 @@ def _record(digest_hexadecimal: str, *, size_bytes: int = 8) -> CreatedObjectRec
 
 
 def _manifest_with(*records: CreatedObjectRecord) -> LiveCleanupManifest:
-    manifest = LiveCleanupManifest(bucket_name=_TEST_BUCKET, run_nonce="0" * 32)
+    # The manifest carries no run identity: payloads are per-run random bytes
+    # and cleanup binds only to the recorded exact keys of this run.
+    manifest = LiveCleanupManifest(bucket_name=_TEST_BUCKET)
     for record in records:
         manifest.record_created(record)
     return manifest

@@ -11,7 +11,7 @@ one dedicated private test bucket, plus a per-run
 - Configuration is composed onto the exact ``KNOWLEDGE_*`` names the frozen
   settings loader reads (secret FILES beneath a secret root; no plaintext
   secret environment value ever reaches the loader).
-- Payloads are per-run random non-personal bytes bound to the manifest nonce.
+- Payloads are per-run random non-personal bytes.
 - Teardown runs in a ``finally``: it validates every recorded key against the
   exact-key contract (wrong bucket, noncanonical key, unrecorded key and
   wildcard are rejected BEFORE any delete call), deletes exactly those keys
@@ -31,7 +31,6 @@ import os
 import shutil
 import sys
 import tempfile
-import uuid
 import xml.etree.ElementTree as ElementTree
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -532,9 +531,7 @@ async def live_r2_harness() -> AsyncIterator[LiveR2Harness]:
         )
         low_level_client = await low_level_context.__aenter__()
         try:
-            manifest = LiveCleanupManifest(
-                bucket_name=settings.r2_bucket_name, run_nonce=uuid.uuid4().hex
-            )
+            manifest = LiveCleanupManifest(bucket_name=settings.r2_bucket_name)
             client = await client_manager.get_client()
             store = R2S3ObjectStore(
                 client,

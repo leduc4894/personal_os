@@ -70,9 +70,8 @@ class LiveCleanupManifest:
     cleanup.
     """
 
-    def __init__(self, *, bucket_name: str, run_nonce: str) -> None:
+    def __init__(self, *, bucket_name: str) -> None:
         self._bucket_name = bucket_name
-        self._run_nonce = run_nonce
         self._created: dict[str, CreatedObjectRecord] = {}
 
     @property
@@ -80,12 +79,6 @@ class LiveCleanupManifest:
         """The dedicated test bucket every recorded key was created in."""
 
         return self._bucket_name
-
-    @property
-    def run_nonce(self) -> str:
-        """Per-run random identity binding recorded payloads to this run."""
-
-        return self._run_nonce
 
     def record_created(self, record: CreatedObjectRecord) -> None:
         """Record one exact canonical key created by the current run."""
