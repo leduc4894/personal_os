@@ -646,6 +646,17 @@ describe("DeviceSyncRepository remote apply invariants", () => {
     expect(repository.readUnfinishedApply()?.state).toBe("locally_applied");
   });
 
+  it("refuses to abandon a remote apply that has left the prepared state", async () => {
+    const { repository } = createRepository();
+    await repository.prepareRemoteApply(preparedApplyOf(1, "updated"));
+    await repository.transitionRemoteApply({ eventSequence: 1, state: "temp_verified", tempToken: "t-1" });
+
+    await expect(repository.abandonRemoteApply(1)).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+    // Only a proven-clean prepared intent may be abandoned: the durable row
+    // owns its Vault effect and must survive the refused mutation intact.
+    expect(repository.readUnfinishedApply()?.state).toBe("temp_verified");
+  });
+
   it("rejects backwards and unknown-sequence transitions", async () => {
     const { repository } = createRepository();
     await repository.prepareRemoteApply(preparedApplyOf(1));

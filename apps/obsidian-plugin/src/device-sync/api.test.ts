@@ -600,6 +600,35 @@ describe("device sync wire client strict response parsing", () => {
     expect(request?.headers["accept"]).toBe("application/json");
     expect(request?.body).toBeUndefined();
   });
+
+  it("names application/json on carrying POST and PUT requests and never on GET requests", async () => {
+    // The live Desktop gate proved the real server 422-rejects a carrying
+    // JSON body without an explicit content type (before any handler ran):
+    // pin the header on both carrying verbs and its absence on bodyless GETs.
+    const pull = staticJsonTransport(200, eventPageBody([]));
+    const { api: pulling } = createApi({ transport: pull });
+    await pulling.pullEvents();
+    const list = staticJsonTransport(200, manifestActionPageBody());
+    const { api: listing } = createApi({ transport: list });
+    await listing.listManifestActions(ACTIONS_QUERY);
+    for (const transport of [pull, list]) {
+      expect(transport.requests[0]?.method).toBe("GET");
+      expect(transport.requests[0]?.headers["content-type"]).toBeUndefined();
+    }
+
+    const post = staticJsonTransport(200, cursorReceiptBody());
+    const { api: posting } = createApi({ transport: post });
+    await posting.acknowledgeCursor(ACKNOWLEDGEMENT);
+    await posting.completeManifest(COMPLETE);
+    expect(post.requests.map((request) => request.headers["content-type"]))
+      .toEqual(["application/json", "application/json"]);
+
+    const put = staticJsonTransport(200, manifestPageReceiptBody());
+    const { api: putting } = createApi({ transport: put });
+    await putting.appendManifestPage(APPEND_PAGE);
+    expect(put.requests[0]?.method).toBe("PUT");
+    expect(put.requests[0]?.headers["content-type"]).toBe("application/json");
+  });
 });
 
 // --- verified binary download (step 1) ---------------------------------------------------------------

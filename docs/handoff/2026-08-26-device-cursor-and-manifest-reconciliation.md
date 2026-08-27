@@ -39,7 +39,7 @@ per-task review record lives in
 |---|---|---|
 | Full Python + web | `uv run poe verify` | exit 0 (ruff/mypy strict/eslint/tsc/vitest/build/web build) |
 | API contract | `uv run poe api-contract-check` | exit 0 |
-| Device-sync suite | `CI=true LOCAL_STACK_TEST_PROJECT=knowledge-ci-* uv run poe device-sync-test` | exit 0 (re-run at the final commit candidate; see records below) |
+| Device-sync suite | `CI=true LOCAL_STACK_TEST_PROJECT=knowledge-ci-* uv run poe device-sync-test` | exit 0 — 1589 passed / 2 skipped / 1 deselected on `knowledge-ci-task15-final-verify` in 767 s (re-run at the final commit candidate) |
 | Plugin unit | `pnpm --dir apps/obsidian-plugin exec vitest run` | full suite green (1144 at `c0fbb17`) |
 | Plugin types/lint/build | `tsc --noEmit` / `run lint` / `run build` | all exit 0 |
 | Records gate | `uv run poe device-sync-device-verification` | exit 1 **by design** until the operator records the physical Desktop/Mobile rows; both sections exist with every required label `pending` |
@@ -127,6 +127,13 @@ No Mobile row in `device-sync-device-verification.md` is marked passed.
 | 2026-08-24 source-lifecycle `record_commit(COMMITTED)` metrics row | RETAINED unchanged (trigger not reached, per plan) |
 | 2026-08-26 device-sync rows (EXCLUDED uploads; review minors batch; index candidates) | RETAINED unchanged |
 | 2026-08-27 device-sync-live-gates: physical Mobile matrix | RETAINED — updated with the green-Desktop fact; blocks Child 7 start |
+
+The two RETAINED 2026-08-26 device-sync rows each index exactly one deferred
+group: the per-task review minors batch from Tasks 1-11 (triaged by the final
+whole-branch review; `Implement by: Before Child 6 whole-branch review`) and
+the per-workspace pull index `(workspace_id, event_sequence)` together with
+the `source_tombstones.restore_event_id` index (query-plan gates pass at the
+pinned fixture size; `Implement by: Before production activation`).
 
 ## Operational changes landed with Task 15 (user-directed)
 
