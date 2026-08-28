@@ -1,14 +1,14 @@
 """Schema-qualified SQLAlchemy Core table metadata for DML against the baseline.
 
 The Alembic migrations ``20260813_01``, ``20260816_01``, ``20260817_01``,
-``20260818_01``, ``20260820_01`` and ``20260826_01`` are the DDL authority: they own
-the schema, columns, constraints, indexes and triggers. This module is the typed DML
-representation of exactly the thirty-seven migrated tables: identical table names,
-schema (``knowledge``), column names, column types, nullability and primary keys,
-contract-tested against the migration sources. There is deliberately no
-``create_all()`` path and no constraint duplication: check, unique and foreign
-key constraints stay owned by the migrations, while reads and writes address
-the tables through this metadata.
+``20260818_01``, ``20260820_01``, ``20260826_01`` and ``20260828_01`` are the DDL
+authority: they own the schema, columns, constraints, indexes and triggers. This
+module is the typed DML representation of exactly the thirty-nine migrated tables:
+identical table names, schema (``knowledge``), column names, column types,
+nullability and primary keys, contract-tested against the migration sources. There
+is deliberately no ``create_all()`` path and no constraint duplication: check,
+unique and foreign key constraints stay owned by the migrations, while reads and
+writes address the tables through this metadata.
 """
 
 from __future__ import annotations
@@ -673,10 +673,65 @@ manifest_actions: Final[Table] = Table(
     sa.PrimaryKeyConstraint("manifest_run_id", "action_index", name="pk_manifest_actions"),
 )
 
+#: Durable multipart upload session state (migration ``20260828_01``). The
+#: ``staging_key`` and ``provider_upload_id`` columns are private provider
+#: identity: they never render in a repr, log, metric or API schema, and no
+#: presigned URL is ever durable state.
+multipart_uploads: Final[Table] = Table(
+    "multipart_uploads",
+    _SOURCE_STORE_METADATA,
+    Column("multipart_upload_id", sa.Uuid(), nullable=False),
+    Column("session_id", sa.String(length=128), nullable=False),
+    Column("workspace_id", sa.Uuid(), nullable=False),
+    Column("device_id", sa.Uuid(), nullable=False),
+    Column("operation_id", sa.Uuid(), nullable=False),
+    Column("declared_sha256", sa.String(length=64), nullable=False),
+    Column("declared_size_bytes", sa.BigInteger(), nullable=False),
+    Column("declared_media_type", sa.String(length=255), nullable=False),
+    Column("base_version_id", sa.Uuid(), nullable=True),
+    Column("policy_revision_number", sa.BigInteger(), nullable=False),
+    Column("part_size_bytes", sa.BigInteger(), nullable=False),
+    Column("part_count", sa.Integer(), nullable=False),
+    Column("staging_key", sa.Text(), nullable=False),
+    Column("provider_upload_id", sa.Text(), nullable=False),
+    Column("state", sa.Text(), nullable=False),
+    Column("claim_token", sa.Uuid(), nullable=True),
+    Column("claim_expires_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("result_kind", sa.Text(), nullable=True),
+    Column("result_source_id", sa.Uuid(), nullable=True),
+    Column("result_source_version_id", sa.Uuid(), nullable=True),
+    Column("result_content_version", sa.BigInteger(), nullable=True),
+    Column("result_committed_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("cleanup_state", sa.Text(), nullable=False),
+    Column("cleanup_attempt_count", sa.Integer(), nullable=False),
+    Column("cleanup_next_retry_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    Column("cleanup_reason_code", sa.String(length=100), nullable=True),
+    Column("expires_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("created_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("updated_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    sa.PrimaryKeyConstraint("multipart_upload_id", name="pk_multipart_uploads"),
+)
+
+#: Completed multipart part evidence (migration ``20260828_01``). The
+#: ``provider_etag`` column is private provider identity.
+multipart_parts: Final[Table] = Table(
+    "multipart_parts",
+    _SOURCE_STORE_METADATA,
+    Column("multipart_part_id", sa.Uuid(), nullable=False),
+    Column("multipart_upload_id", sa.Uuid(), nullable=False),
+    Column("part_number", sa.Integer(), nullable=False),
+    Column("offset_bytes", sa.BigInteger(), nullable=False),
+    Column("size_bytes", sa.BigInteger(), nullable=False),
+    Column("provider_etag", sa.Text(), nullable=False),
+    Column("verified_size_bytes", sa.BigInteger(), nullable=False),
+    Column("completed_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    sa.PrimaryKeyConstraint("multipart_part_id", name="pk_multipart_parts"),
+)
+
 #: Single frozen metadata collection owning every DML table.
 SOURCE_STORE_METADATA: Final[MetaData] = _SOURCE_STORE_METADATA
 
-#: Immutable name-indexed view of the thirty-seven migrated tables, keyed by
+#: Immutable name-indexed view of the thirty-nine migrated tables, keyed by
 #: their unqualified table names (``metadata.tables`` itself is
 #: schema-qualified).
 SOURCE_STORE_TABLES: Final[Mapping[str, Table]] = MappingProxyType(
@@ -720,6 +775,8 @@ SOURCE_STORE_TABLES: Final[Mapping[str, Table]] = MappingProxyType(
             manifest_pages,
             manifest_entry_resolutions,
             manifest_actions,
+            multipart_uploads,
+            multipart_parts,
         )
     }
 )

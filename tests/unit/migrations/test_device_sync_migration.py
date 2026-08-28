@@ -21,6 +21,7 @@ MIGRATION_PATH = (
 DEVICE_SYNC_REVISION = "20260826_01"
 DOWNLOAD_ENTRY_ECHO_REVISION = "20260826_02"
 RUN_CLIENT_ACTIVITY_REVISION = "20260827_01"
+MULTIPART_UPLOAD_REVISION = "20260828_01"
 SOURCE_LIFECYCLE_REVISION = "20260820_01"
 
 CURSOR_COLUMNS = frozenset(
@@ -175,9 +176,7 @@ class _Op:
         self.events.append(("add_column", table_name))
         self.adds[(table_name, column.name)] = column
 
-    def alter_column(
-        self, table_name: str, column_name: str, **kwargs: Any
-    ) -> None:
+    def alter_column(self, table_name: str, column_name: str, **kwargs: Any) -> None:
         self.events.append(("alter_column", table_name))
         self.alterations.append((table_name, column_name, kwargs.get("nullable")))
 
@@ -246,7 +245,9 @@ def test_device_sync_revision_extends_source_lifecycle_head() -> None:
 
 def test_device_sync_revision_is_the_single_alembic_head() -> None:
     scripts = ScriptDirectory.from_config(Config(str(ALEMBIC_INI_PATH)))
-    assert scripts.get_heads() == [RUN_CLIENT_ACTIVITY_REVISION]
+    # The multipart upload revision stacks on the run client-activity
+    # revision, so the single graph head moved past it.
+    assert scripts.get_heads() == [MULTIPART_UPLOAD_REVISION]
     revision = scripts.get_revision(RUN_CLIENT_ACTIVITY_REVISION)
     assert revision is not None
     assert revision.down_revision == DOWNLOAD_ENTRY_ECHO_REVISION

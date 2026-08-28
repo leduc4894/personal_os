@@ -664,7 +664,7 @@ async def _assert_reupgraded_state(stack: SourcePublicationStack) -> None:
                     " WHERE table_schema = 'knowledge'"
                 )
             )
-            assert int(table_count.scalar_one()) == 37
+            assert int(table_count.scalar_one()) == 39
             cursor_count = await connection.execute(
                 sa.select(sa.func.count()).select_from(device_cursors)
             )
