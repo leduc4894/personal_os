@@ -36,6 +36,8 @@ from r2_object_storage.settings import LoadedR2Credentials, ObjectStorageSetting
 if TYPE_CHECKING:
     from types_aiobotocore_s3 import S3Client
 
+    from r2_object_storage.multipart import MultipartStagingSdkClient
+
 #: Region Cloudflare R2 accepts for the SigV4-signed S3 API.
 _R2_REGION: Final[str] = "auto"
 #: Bounded connection pool: one slot per process-wide in-flight operation.
@@ -322,6 +324,7 @@ class R2ClientManager:
         )
         self._lock = asyncio.Lock()
         self._client: AiobotocoreS3Client | None = None
+        self._raw_client: S3Client | None = None
 
     async def get_client(self) -> S3ClientProtocol:
         async with self._lock:
@@ -336,15 +339,32 @@ class R2ClientManager:
                 config=_build_config(),
             )
             raw_client = await context.__aenter__()
+            self._raw_client = raw_client
             client = AiobotocoreS3Client(
                 raw_client, bucket=self._settings.r2_bucket_name, context=context
             )
             self._client = client
             return client
 
+    async def get_multipart_staging_client(self) -> MultipartStagingSdkClient:
+        """Return the process-wide SDK client typed for multipart staging.
+
+        The staging provider keeps its own complete SDK keyword mapping (all
+        multipart keywords live in ``multipart.py``), so the manager shares the
+        one bounded client — a single connection pool and lifecycle — typed by
+        the narrow multipart protocol instead of wrapping it a second time.
+        """
+
+        if self._raw_client is None:
+            await self.get_client()
+        raw_client = self._raw_client
+        assert raw_client is not None, "get_client must publish the raw SDK client"
+        return raw_client
+
     async def close(self) -> None:
         async with self._lock:
             client = self._client
             self._client = None
+            self._raw_client = None
         if client is not None:
             await client.close()

@@ -38,6 +38,7 @@ from botocore.exceptions import ConnectionError as BotoCoreConnectionError
 
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import ApplicationError, InternalApplicationError
+from personal_os.multipart_upload.errors import MultipartUploadError
 from personal_os.object_storage.errors import ObjectStorageError
 
 
@@ -83,6 +84,15 @@ OBJECT_MISSING_ERROR_CODES: Final[frozenset[str]] = frozenset(
         "NotFound",  # the code synthesised for a HEAD object absence.
     }
 )
+#: Error codes meaning "the addressed multipart upload does not exist". The
+#: staging provider turns this token into idempotent-success cleanup when the
+#: exact upload was the target (spec 6.4) and into the closed
+#: provider-state-invalid error everywhere else.
+UPLOAD_ABSENT_ERROR_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "NoSuchUpload",
+    }
+)
 _TRANSIENT_HTTP_STATUSES: Final[frozenset[int]] = frozenset({408, 429, 500, 502, 503, 504})
 
 # Transient transport failures raised by botocore before/while reading a
@@ -118,6 +128,18 @@ def _extract_client_error_info(cause: ClientError) -> tuple[str | None, int | No
     )
 
 
+def client_error_code(cause: ClientError) -> str | None:
+    """Return only the safe ``Error.Code`` token of a ``ClientError``.
+
+    The multipart staging boundary uses this single safe token to recognize
+    the idempotent-absence outcomes (an already-aborted upload, an
+    already-removed staging object) before any classification; the provider
+    message, request id and headers stay on the chained cause.
+    """
+
+    return _extract_client_error_info(cause)[0]
+
+
 def classify_r2_failure(cause: BaseException) -> RetryDecision:
     """Classify an R2 failure into the closed :class:`RetryDecision` set.
 
@@ -146,14 +168,15 @@ def classify_r2_failure(cause: BaseException) -> RetryDecision:
     return RetryDecision.TERMINAL
 
 
-def map_r2_failure(cause: BaseException, *, exhausted: bool) -> ApplicationError:
+def map_r2_failure(cause: BaseException, *, exhausted: bool = False) -> ApplicationError:
     """Map a classified R2 failure to a typed registry error.
 
     ``exhausted`` records whether the retry deadline elapsed (as opposed to the
     attempt budget); both give-up modes for a transient cause yield the same
     ``object_storage_unavailable`` code, and it does not alter the code selected
-    for a terminal cause. The parameter is retained for signature fidelity with
-    :meth:`RetryPolicy.run` and for future diagnostic differentiation.
+    for a terminal cause. :meth:`RetryPolicy.run` no longer passes it (the two
+    give-up modes are indistinguishable in the mapped code); direct callers
+    such as the runtime check keep the explicit flag for diagnostic fidelity.
 
     The provider exception remains only as the chained ``__cause__``; its
     message, request id, headers and body never enter the returned error.
@@ -190,6 +213,40 @@ def map_r2_failure(cause: BaseException, *, exhausted: bool) -> ApplicationError
     return InternalApplicationError(ErrorCode.INTERNAL_ERROR)
 
 
+def map_multipart_failure(cause: BaseException, *, exhausted: bool = False) -> ApplicationError:
+    """Map a classified R2 failure to the closed multipart error codes.
+
+    The multipart staging boundary's mapper for :meth:`RetryPolicy.run` and
+    the provider's fail-closed translation. Transient transport and
+    availability conditions, a missing bucket and every other give-up mode of
+    a retryable cause surface as the retryable
+    ``multipart_dependency_unavailable``. Terminal provider-side failures —
+    access denial or bad credentials, a resource absent outside the
+    idempotent cleanup paths (``NoSuchUpload``/``NoSuchKey`` reached where the
+    upload or object was required), malformed or unsupported responses —
+    surface as the non-retryable ``multipart_provider_state_invalid``: the
+    registry deliberately has no provider-authorization multipart code, and a
+    provider credential failure is never rewritten into the domain
+    ``multipart_policy_denied`` (which is the exclusion policy's own verdict)
+    and never made retryable. Unknown exceptions cross as the typed internal
+    error, exactly as the canonical mapping does. Provider exception text,
+    request ids and endpoints stay chained on the cause; only the closed code
+    crosses.
+    """
+
+    decision = classify_r2_failure(cause)
+    if decision is RetryDecision.RETRY:
+        return MultipartUploadError(ErrorCode.MULTIPART_DEPENDENCY_UNAVAILABLE)
+    if isinstance(cause, ClientError):
+        if client_error_code(cause) == "NoSuchBucket":
+            return MultipartUploadError(ErrorCode.MULTIPART_DEPENDENCY_UNAVAILABLE)
+        return MultipartUploadError(ErrorCode.MULTIPART_PROVIDER_STATE_INVALID)
+    if isinstance(cause, ConditionalCreateConflict):
+        # Defensive: no multipart operation sends conditional-create guards.
+        return MultipartUploadError(ErrorCode.MULTIPART_PROVIDER_STATE_INVALID)
+    return InternalApplicationError(ErrorCode.INTERNAL_ERROR)
+
+
 @dataclass(frozen=True, slots=True)
 class RetryPolicy:
     maximum_attempts: int = 3
@@ -202,6 +259,7 @@ class RetryPolicy:
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         jitter: Callable[[float, float], float] = random.uniform,
+        map_failure: Callable[[BaseException], ApplicationError] = map_r2_failure,
     ) -> T:
         started = monotonic()
         for attempt in range(1, self.maximum_attempts + 1):
@@ -220,7 +278,7 @@ class RetryPolicy:
                     or attempt == self.maximum_attempts
                     or remaining <= 0
                 ):
-                    raise map_r2_failure(cause, exhausted=remaining <= 0) from cause
+                    raise map_failure(cause) from cause
                 maximum_delay = min(2.0 ** (attempt - 1), 30.0, remaining)
                 await sleep(jitter(0.0, maximum_delay))
         raise AssertionError("retry loop exhausted without a result")

@@ -14,8 +14,9 @@ nothing here logs, hashes or persists content.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from personal_os.object_storage.keys import CanonicalObjectKey
 from r2_object_storage.client import (
@@ -499,5 +500,113 @@ class ScriptedS3Client:
             raise AssertionError("scripted S3 fake has no outcome queued for the next call")
         outcome = self._outcomes.popleft()
         if isinstance(outcome, _RaiseOutcome):
+            raise outcome.cause
+        return outcome.result
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedSdkCall:
+    """One recorded raw multipart SDK call and its exact keyword arguments.
+
+    The keywords appear exactly as the provider passed them (the staging key,
+    upload ID, part number and expiry the provider bound), so contract tests
+    assert the precise SDK surface. No provider header, endpoint or request id
+    is ever recorded.
+    """
+
+    method: str
+    kwargs: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _MultipartReturnOutcome:
+    result: Any
+
+
+@dataclass(frozen=True, slots=True)
+class _MultipartRaiseOutcome:
+    cause: BaseException
+
+
+_MultipartOutcome = _MultipartReturnOutcome | _MultipartRaiseOutcome
+
+
+class ScriptedMultipartS3Client:
+    """Deterministic fake of the raw multipart staging SDK surface.
+
+    A fake of the provider boundary's SDK protocol, not an S3/R2 behavioral
+    emulator: it records every raw SDK call in arrival order with the exact
+    keyword arguments and returns or raises the next scripted outcome from a
+    FIFO queue shared across all methods, so the staging provider's keyword
+    mapping, retry and error translation are fully deterministic and never
+    touch the network. Calling a method with an empty queue fails closed so a
+    missing script is loud rather than flaky. Nothing here logs, hashes or
+    persists content.
+    """
+
+    def __init__(self) -> None:
+        self._outcomes: deque[_MultipartOutcome] = deque()
+        self.calls: list[RecordedSdkCall] = []
+
+    def enqueue(self, outcome: Any) -> ScriptedMultipartS3Client:
+        """Queue the next raw return value or exception, FIFO across methods."""
+
+        if isinstance(outcome, BaseException):
+            self._outcomes.append(_MultipartRaiseOutcome(outcome))
+        else:
+            self._outcomes.append(_MultipartReturnOutcome(outcome))
+        return self
+
+    @property
+    def method_names(self) -> list[str]:
+        """The recorded raw SDK method names in call order."""
+
+        return [call.method for call in self.calls]
+
+    def single_call(self, method: str) -> RecordedSdkCall:
+        """Return the single recorded call of ``method``; fail closed otherwise."""
+
+        matches = [call for call in self.calls if call.method == method]
+        if len(matches) != 1:
+            raise AssertionError(f"expected exactly one {method} call, found {len(matches)}")
+        return matches[0]
+
+    async def create_multipart_upload(self, **kwargs: Any) -> Any:
+        return self._consume("create_multipart_upload", kwargs)
+
+    async def generate_presigned_url(
+        self,
+        ClientMethod: str,
+        Params: Mapping[str, Any] | None = None,
+        ExpiresIn: int = 3600,
+        HttpMethod: Any = None,
+    ) -> str:
+        recorded: dict[str, Any] = {
+            "ClientMethod": ClientMethod,
+            "Params": dict(Params) if Params is not None else {},
+            "ExpiresIn": ExpiresIn,
+        }
+        if HttpMethod is not None:
+            recorded["HttpMethod"] = HttpMethod
+        return self._consume("generate_presigned_url", recorded)
+
+    async def list_parts(self, **kwargs: Any) -> Any:
+        return self._consume("list_parts", kwargs)
+
+    async def complete_multipart_upload(self, **kwargs: Any) -> Any:
+        return self._consume("complete_multipart_upload", kwargs)
+
+    async def abort_multipart_upload(self, **kwargs: Any) -> Any:
+        return self._consume("abort_multipart_upload", kwargs)
+
+    async def delete_object(self, **kwargs: Any) -> Any:
+        return self._consume("delete_object", kwargs)
+
+    def _consume(self, method: str, kwargs: Mapping[str, Any]) -> Any:
+        self.calls.append(RecordedSdkCall(method=method, kwargs=dict(kwargs)))
+        if not self._outcomes:
+            raise AssertionError("scripted multipart fake has no outcome queued for the next call")
+        outcome = self._outcomes.popleft()
+        if isinstance(outcome, _MultipartRaiseOutcome):
             raise outcome.cause
         return outcome.result
