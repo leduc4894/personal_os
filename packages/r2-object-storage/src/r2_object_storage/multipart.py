@@ -1,31 +1,34 @@
 """Private R2 multipart staging provider: the sole multipart SDK boundary.
 
 This module is the only place the multipart S3/R2 request and response
-keyword surface exists. It exposes exactly six staging capabilities — create
+keyword surface exists. It exposes exactly seven staging capabilities — create
 one upload, presign exactly one part PUT, list one upload's parts, complete,
-abort and remove one staging object — and nothing else: there is deliberately
-no bucket listing, no batch or prefix deletion, no version listing, no
-provider-side copy and no canonical-key delete anywhere in this package.
+abort, remove one staging object and full-read exactly one staging object —
+and nothing else: there is deliberately no bucket listing, no batch or prefix
+deletion, no version listing, no provider-side copy and no canonical-key read
+or delete anywhere in this package.
 
 Every method first requires a validated private
 :class:`MultipartStagingKey` value (and, where applicable, a validated
 :class:`~personal_os.multipart_upload.ports.MultipartProviderUploadId`); the
 staging-key grammar is ``staging/multipart/{opaque base64url token}``, a
 prefix a canonical ``objects/sha256/...`` key can never satisfy, so a
-presigned part URL cannot target a canonical object and cleanup cannot touch
-one. A presigned URL authorizes a single ``upload_part`` request with the
-fixed ``PartNumber``, ``UploadId`` and content length for exactly ten
-minutes.
+presigned part URL cannot target a canonical object, the staging full read
+cannot fetch one and cleanup cannot touch one. A presigned URL authorizes a
+single ``upload_part`` request with the fixed ``PartNumber``, ``UploadId``
+and content length for exactly ten minutes.
 
 Every SDK call runs under the shared bounded retry policy (explicit attempt
 budget and operation deadline; the shared SDK client already pins connect and
 read timeouts) and every failure crosses the boundary as the typed
 :class:`~personal_os.multipart_upload.errors.MultipartUploadError` mapped by
-:func:`r2_object_storage.error_mapping.map_multipart_failure`. Provider
-exception text, request ids, staging keys, upload IDs, ETags, presigned URLs
-and response bodies remain chained causes only; they never enter a typed
-error, a diagnostic event or a metric label. Diagnostic events carry only the
-closed operation token, bounded counters and the fixed provider token.
+:func:`r2_object_storage.error_mapping.map_multipart_failure`. The staging
+full read applies that same typed mapping to a mid-stream body failure, so no
+raw provider exception ever crosses this package. Provider exception text,
+request ids, staging keys, upload IDs, ETags, presigned URLs and response
+bodies remain chained causes only; they never enter a typed error, a
+diagnostic event or a metric label. Diagnostic events carry only the closed
+operation token, bounded counters and the fixed provider token.
 
 The one exact-key staging removal operation is named plainly — as the typed
 protocol declaration and the single direct call in the staging-removal path —
@@ -39,10 +42,12 @@ list, wildcard, prefix or canonical-object operation is introduced anywhere.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import random
 import re
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -78,6 +83,7 @@ if TYPE_CHECKING:
         CompleteMultipartUploadRequestTypeDef,
         CreateMultipartUploadRequestTypeDef,
         DeleteObjectRequestTypeDef,
+        GetObjectRequestTypeDef,
         ListPartsRequestTypeDef,
     )
 
@@ -114,6 +120,7 @@ class MultipartStagingOperation(StrEnum):
     COMPLETE_UPLOAD = "complete_upload"
     ABORT_UPLOAD = "abort_upload"
     DELETE_STAGING_OBJECT = "delete_staging_object"
+    READ_STAGING_OBJECT = "read_staging_object"
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,11 +182,13 @@ class MultipartStagingSdkClient(Protocol):
 
     The real ``types_aiobotocore_s3`` client satisfies this protocol
     structurally, and the scripted contract-test double implements the same
-    six declared operations. The exact-key staging removal operation is named
-    plainly here and invoked through this typed declaration only — never
-    through a quoted name or dynamic dispatch — and the composition contract
-    permits that one capability name in this module alone, only for this
-    protocol declaration and the single staging-removal call. This is the
+    seven declared operations. The exact-key staging removal operation is
+    named plainly here and invoked through this typed declaration only —
+    never through a quoted name or dynamic dispatch — and the composition
+    contract permits that one capability name in this module alone, only for
+    this protocol declaration and the single staging-removal call. The
+    staging full read is the same shape: one ``get_object`` of exactly the
+    validated private staging key, never a canonical-key read. This is the
     capability boundary: no other SDK operation is reachable through the
     provider.
     """
@@ -207,6 +216,8 @@ class MultipartStagingSdkClient(Protocol):
     ) -> Any: ...
 
     async def delete_object(self, **kwargs: Unpack[DeleteObjectRequestTypeDef]) -> Any: ...
+
+    async def get_object(self, **kwargs: Unpack[GetObjectRequestTypeDef]) -> Any: ...
 
 
 class _MalformedProviderState(Exception):
@@ -464,6 +475,56 @@ class R2MultipartStagingProvider:
             self._record_failed(operation, cause, started=started, attempt_count=tracker.count)
             raise
 
+    def open_staging_stream(
+        self, staging_key: MultipartStagingKey
+    ) -> AbstractAsyncContextManager[AsyncIterable[bytes]]:
+        """Full-read exactly one staging object as a bounded byte stream.
+
+        The verification spool of spec 6.3.4 consumes this stream: the fetch
+        of exactly the validated private staging key runs under the shared
+        bounded retry policy, the response body must carry the closed async
+        streaming shape, and every mid-stream body failure crosses the
+        boundary as the same typed multipart error — no raw provider
+        exception ever escapes the context manager. The body is closed
+        exactly once when the context exits. No canonical key can reach the
+        underlying ``get_object`` call.
+        """
+
+        key = self._require_staging_key(staging_key)
+        operation = MultipartStagingOperation.READ_STAGING_OBJECT
+        started = self._monotonic()
+        tracker = _AttemptTracker()
+
+        @asynccontextmanager
+        async def _stream() -> AsyncIterator[AsyncIterable[bytes]]:
+            try:
+                response = await self._run_with_retry(
+                    operation,
+                    tracker,
+                    lambda _attempt: self._client.get_object(
+                        Bucket=self._bucket,
+                        Key=key.value,
+                    ),
+                )
+            except ApplicationError as cause:
+                self._record_failed(
+                    operation, cause, started=started, attempt_count=tracker.count
+                )
+                raise
+            body = self._streaming_body(response)
+            self._record_succeeded(operation, started=started, attempt_count=tracker.count)
+            try:
+                yield _TypedStagingBodyIterator(
+                    body,
+                    on_failure=lambda error: self._record_failed(
+                        operation, error, started=started, attempt_count=tracker.count
+                    ),
+                )
+            finally:
+                await _close_staging_body(body)
+
+        return _stream()
+
     # --- SDK calls (the only multipart keyword surface) ---------------------
 
     async def _abort_exact_upload(self, key: str, upload_id: str) -> None:
@@ -574,6 +635,19 @@ class R2MultipartStagingProvider:
         except ValueError as cause:
             raise MultipartUploadError(ErrorCode.MULTIPART_PROVIDER_STATE_INVALID) from cause
 
+    def _streaming_body(self, response: object) -> Any:
+        """Translate one staging read response into its streaming body.
+
+        The provider answer must be a mapping carrying one async-iterable
+        body with an async ``read``; any other shape is the closed
+        provider-state error before a single staging byte is consumed.
+        """
+
+        body = response.get("Body") if isinstance(response, dict) else None
+        if not _is_async_streaming_body(body):
+            raise MultipartUploadError(ErrorCode.MULTIPART_PROVIDER_STATE_INVALID)
+        return body
+
     def _part_url(
         self, part_range: MultipartPartRange, url: str, expires_at: datetime
     ) -> MultipartPartUrl:
@@ -664,6 +738,73 @@ class R2MultipartStagingProvider:
                 "size_bytes": size_bytes,
             },
         )
+
+
+class _TypedStagingBodyIterator:
+    """One staging body's async iteration with the closed typed mapping.
+
+    The provider's streaming body is consumed exactly once, forward-only;
+    every non-termination failure of ``__anext__`` crosses as the typed
+    multipart error of the shared classifier (chained cause only), and the
+    first such failure records one closed failed-operation event through the
+    injected callback. The body itself is closed by the context manager that
+    yielded this iterator, never here.
+    """
+
+    def __init__(
+        self,
+        body: Any,
+        *,
+        on_failure: Callable[[ApplicationError], None],
+    ) -> None:
+        self._iterator: AsyncIterator[bytes] = body.__aiter__()
+        self._on_failure = on_failure
+        self._failure_recorded = False
+
+    def __aiter__(self) -> _TypedStagingBodyIterator:
+        return self
+
+    async def __anext__(self) -> bytes:
+        try:
+            return await self._iterator.__anext__()
+        except StopAsyncIteration:
+            raise
+        except Exception as cause:
+            error = map_multipart_failure(cause)
+            if not self._failure_recorded:
+                self._failure_recorded = True
+                self._on_failure(error)
+            raise error from cause
+
+
+def _is_async_streaming_body(body: object) -> bool:
+    """Report whether one provider answer carries the async streaming shape.
+
+    Probing uses plain attribute access (never a dynamic capability name):
+    the body must expose a callable async ``read`` and an async iterator.
+    """
+
+    try:
+        read_member = body.read  # type: ignore[attr-defined]
+        aiter_member = body.__aiter__  # type: ignore[attr-defined]
+    except AttributeError:
+        return False
+    return callable(read_member) and callable(aiter_member)
+
+
+async def _close_staging_body(body: Any) -> None:
+    """Best-effort close of one staging read body; never masks a result."""
+
+    try:
+        aclose = body.aclose
+    except AttributeError:
+        return
+    try:
+        outcome = aclose()
+        if inspect.isawaitable(outcome):
+            await outcome
+    except Exception:
+        return
 
 
 def _parse_part_pages(pages: Sequence[Any]) -> tuple[MultipartProviderPart, ...]:

@@ -303,6 +303,7 @@ def test_provider_type_declares_only_the_staging_methods() -> None:
         "complete_upload",
         "abort_upload",
         "delete_staging_object",
+        "open_staging_stream",
     }
 
 

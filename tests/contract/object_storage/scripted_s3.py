@@ -18,6 +18,8 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from botocore.exceptions import ResponseStreamingError
+
 from personal_os.object_storage.keys import CanonicalObjectKey
 from r2_object_storage.client import (
     GetObjectResult,
@@ -52,13 +54,19 @@ class ScriptedStreamingBody:
 
     A streaming body is inherently stateful (a single forward pass), so this
     helper tracks its position; the chunks themselves are fixed at construction.
+    ``fail_after_first`` scripts one mid-stream transport failure after the
+    first chunk, and ``close_count`` observes the adapter's body disposal.
     """
 
-    def __init__(self, chunks: tuple[bytes, ...]) -> None:
+    def __init__(self, chunks: tuple[bytes, ...], *, fail_after_first: bool = False) -> None:
         self._chunks = chunks
         self._position = 0
+        self._fail_after_first = fail_after_first
+        self.close_count = 0
 
     async def read(self, amt: int | None = None) -> bytes:
+        if self._fail_after_first and self._position > 0:
+            raise ResponseStreamingError(error="scripted mid-stream transport failure")
         if self._position >= len(self._chunks):
             return b""
         chunk = self._chunks[self._position]
@@ -69,15 +77,22 @@ class ScriptedStreamingBody:
         return self._iter()
 
     async def _iter(self) -> AsyncIterator[bytes]:
-        for chunk in self._chunks:
+        for index, chunk in enumerate(self._chunks):
+            if self._fail_after_first and index > 0:
+                raise ResponseStreamingError(error="scripted mid-stream transport failure")
             yield chunk
 
     async def __anext__(self) -> bytes:
+        if self._fail_after_first and self._position > 0:
+            raise ResponseStreamingError(error="scripted mid-stream transport failure")
         if self._position >= len(self._chunks):
             raise StopAsyncIteration
         chunk = self._chunks[self._position]
         self._position += 1
         return chunk
+
+    async def aclose(self) -> None:
+        self.close_count += 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,10 +108,12 @@ class _RaiseOutcome:
 _Outcome = _ReturnOutcome | _RaiseOutcome
 
 
-def scripted_body(chunks: list[bytes]) -> ScriptedStreamingBody:
+def scripted_body(
+    chunks: list[bytes], *, fail_after_first: bool = False
+) -> ScriptedStreamingBody:
     """Build a deterministic streaming body from fixed byte chunks."""
 
-    return ScriptedStreamingBody(chunks=tuple(chunks))
+    return ScriptedStreamingBody(chunks=tuple(chunks), fail_after_first=fail_after_first)
 
 
 def _payload_chunks(payload: bytes) -> list[bytes]:
@@ -601,6 +618,9 @@ class ScriptedMultipartS3Client:
 
     async def delete_object(self, **kwargs: Any) -> Any:
         return self._consume("delete_object", kwargs)
+
+    async def get_object(self, **kwargs: Any) -> Any:
+        return self._consume("get_object", kwargs)
 
     def _consume(self, method: str, kwargs: Mapping[str, Any]) -> Any:
         self.calls.append(RecordedSdkCall(method=method, kwargs=dict(kwargs)))

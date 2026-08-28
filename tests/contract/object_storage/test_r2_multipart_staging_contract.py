@@ -23,7 +23,10 @@ from typing import Any
 
 import pytest
 from botocore.exceptions import ClientError
-from tests.contract.object_storage.scripted_s3 import ScriptedMultipartS3Client
+from tests.contract.object_storage.scripted_s3 import (
+    ScriptedMultipartS3Client,
+    scripted_body,
+)
 
 from personal_os.diagnostics import DiagnosticLogger
 from personal_os.error_contracts.codes import ErrorCode
@@ -251,6 +254,9 @@ async def test_every_staging_method_validates_the_staging_key_before_any_sdk_cal
         await provider.abort_upload(canonical_key, _upload_id())
     with pytest.raises(MultipartUploadError):
         await provider.delete_staging_object(canonical_key)
+    with pytest.raises(MultipartUploadError):
+        async with provider.open_staging_stream(canonical_key) as _stream:
+            pass
 
 
 @pytest.mark.asyncio
@@ -491,6 +497,116 @@ async def test_retryable_failure_exhausts_to_dependency_unavailable() -> None:
     assert client.method_names == ["create_multipart_upload"] * 3
 
 
+# --- Staging read (the verification spool's full-object stream) ------------------
+
+
+@pytest.mark.asyncio
+async def test_open_staging_stream_reads_exactly_one_staging_object() -> None:
+    client = ScriptedMultipartS3Client()
+    client.enqueue({"Body": scripted_body([b"staging-bytes-1", b"staging-bytes-2"])})
+    provider = build_provider(client)
+
+    chunks: list[bytes] = []
+    async with provider.open_staging_stream(MultipartStagingKey.parse(_STAGING_KEY)) as stream:
+        async for chunk in stream:
+            chunks.append(chunk)
+
+    assert chunks == [b"staging-bytes-1", b"staging-bytes-2"]
+    call = client.single_call("get_object")
+    assert call.kwargs == {"Bucket": _BUCKET, "Key": _STAGING_KEY}
+    assert client.method_names == ["get_object"]
+
+
+@pytest.mark.asyncio
+async def test_open_staging_stream_rejects_malformed_provider_response() -> None:
+    client = ScriptedMultipartS3Client()
+    client.enqueue({"Unexpected": "shape"})
+    provider = build_provider(client)
+
+    with pytest.raises(MultipartUploadError) as info:
+        async with provider.open_staging_stream(MultipartStagingKey.parse(_STAGING_KEY)) as stream:
+            async for _chunk in stream:
+                pass
+    assert info.value.error_code is ErrorCode.MULTIPART_PROVIDER_STATE_INVALID
+
+
+@pytest.mark.asyncio
+async def test_open_staging_stream_maps_absent_object_to_provider_state_invalid() -> None:
+    client = ScriptedMultipartS3Client()
+    client.enqueue(_client_error("NoSuchKey", 404, "GetObject"))
+    provider = build_provider(client)
+
+    with pytest.raises(MultipartUploadError) as info:
+        async with provider.open_staging_stream(MultipartStagingKey.parse(_STAGING_KEY)) as stream:
+            async for _chunk in stream:
+                pass
+    assert info.value.error_code is ErrorCode.MULTIPART_PROVIDER_STATE_INVALID
+
+
+@pytest.mark.asyncio
+async def test_open_staging_stream_maps_mid_stream_failure_to_typed_error() -> None:
+    client = ScriptedMultipartS3Client()
+    client.enqueue(
+        {"Body": scripted_body([b"first-chunk", b"never-delivered"], fail_after_first=True)}
+    )
+    provider = build_provider(client)
+
+    with pytest.raises(MultipartUploadError) as info:
+        async with provider.open_staging_stream(MultipartStagingKey.parse(_STAGING_KEY)) as stream:
+            async for _chunk in stream:
+                pass
+
+    assert info.value.error_code is ErrorCode.MULTIPART_DEPENDENCY_UNAVAILABLE
+    blob = f"{info.value!r}\n{info.value}\n{info.value.to_safe_dict()!r}"
+    for sentinel in (_PROVIDER_MESSAGE_SENTINEL, _PROVIDER_REQUEST_ID_SENTINEL):
+        assert sentinel not in blob
+
+
+@pytest.mark.asyncio
+async def test_open_staging_stream_closes_the_body_on_exit() -> None:
+    client = ScriptedMultipartS3Client()
+    body = scripted_body([b"chunk"])
+    client.enqueue({"Body": body})
+    provider = build_provider(client)
+
+    async with provider.open_staging_stream(MultipartStagingKey.parse(_STAGING_KEY)) as stream:
+        async for _chunk in stream:
+            pass
+
+    assert body.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_staging_stream_diagnostics_carry_only_closed_fields() -> None:
+    client = ScriptedMultipartS3Client()
+    client.enqueue(
+        {"Body": scripted_body([b"first", b"second"], fail_after_first=True)}
+    )
+    with capture_diagnostic_events() as capture:
+        provider = build_provider(client)
+        with pytest.raises(MultipartUploadError):
+            async with provider.open_staging_stream(
+                MultipartStagingKey.parse(_STAGING_KEY)
+            ) as stream:
+                async for _chunk in stream:
+                    pass
+
+    by_name = {
+        event.get("event"): event
+        for event in capture.events
+        if event.get("event")
+        in {"object_storage_operation_succeeded", "object_storage_operation_failed"}
+    }
+    succeeded = by_name["object_storage_operation_succeeded"]
+    assert succeeded["operation"] == MultipartStagingOperation.READ_STAGING_OBJECT.value
+    failed = by_name["object_storage_operation_failed"]
+    assert failed["operation"] == MultipartStagingOperation.READ_STAGING_OBJECT.value
+    assert failed["error_code"] == ErrorCode.MULTIPART_DEPENDENCY_UNAVAILABLE.value
+    rendered = repr(capture.events)
+    for sensitive in (_STAGING_KEY_TOKEN, _UPLOAD_ID):
+        assert sensitive not in rendered
+
+
 # --- Capability surface and closed diagnostics ----------------------------------
 
 
@@ -504,6 +620,7 @@ def test_provider_exposes_exactly_the_staging_capability() -> None:
         "complete_upload",
         "abort_upload",
         "delete_staging_object",
+        "open_staging_stream",
     }
     for forbidden in ("list_objects", "delete_objects", "copy_object", "list_object_versions"):
         assert not hasattr(provider, forbidden)
