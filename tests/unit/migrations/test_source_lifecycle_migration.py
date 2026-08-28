@@ -141,9 +141,9 @@ def _replay(function_name: str, **kwargs: Any) -> _Op:
 
 def test_revision_stacks_directly_on_the_small_file_head() -> None:
     scripts = ScriptDirectory.from_config(Config(str(ALEMBIC_INI_PATH)))
-    # The device sync and multipart revisions stack on the lifecycle
-    # revision, so the single graph head moved past it.
-    assert scripts.get_heads() == ["20260828_01"]
+    # The device sync, multipart and operation-size-bound revisions stack on
+    # the lifecycle revision, so the single graph head moved past it.
+    assert scripts.get_heads() == ["20260828_02"]
     revision = scripts.get_revision(SOURCE_LIFECYCLE_REVISION)
     assert revision is not None
     assert revision.down_revision == SMALL_FILE_REVISION
