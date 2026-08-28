@@ -376,6 +376,7 @@ describe("journal sync api failure mapping (spec 12)", () => {
       "blocked_size",
       "blocked_conflict",
       "integrity_failed",
+      "policy_denied",
       "operation_retry_required",
     ]);
     const transport = createRecordingTransport(async () => ({
@@ -521,6 +522,304 @@ describe("journal sync api envelope request id correlation (sync error tracing t
       .catch((error: unknown) => error);
     expect(failure).toMatchObject({ kind: "server_error", requestId: null });
     expect(htmlApi.readLastEnvelopeRequestId()).toBeNull();
+  });
+});
+
+// --- the multipart surface (child 7 spec 5) ---------------------------------------------------------
+
+const MULTIPART_SESSION_ID = "bXVsdGlwYXJ0LXNlc3Npb24taWRlbnRpdHktMDEyMzQ1Njc4OTA";
+const MULTIPART_R2_URL =
+  "https://r2.example.net/staging/session/part-2?X-Amz-Signature=secret-2-1&part=2";
+const MULTIPART_EXPIRES_AT = "2026-08-29T00:00:00Z";
+
+/** One canonical multipart session plan data member set. */
+function multipartPlanBody(overrides: Record<string, unknown> = {}): unknown {
+  return {
+    session_id: MULTIPART_SESSION_ID,
+    part_count: 3,
+    part_size_bytes: 8 * 1024 * 1024,
+    expires_at: MULTIPART_EXPIRES_AT,
+    ...overrides,
+  };
+}
+
+/** One canonical multipart session status data member set. */
+function multipartStatusBody(overrides: Record<string, unknown> = {}): unknown {
+  return {
+    session_id: MULTIPART_SESSION_ID,
+    state: "uploading",
+    part_count: 3,
+    part_size_bytes: 8 * 1024 * 1024,
+    expires_at: MULTIPART_EXPIRES_AT,
+    completed_part_numbers: [1],
+    terminal_result: null,
+    ...overrides,
+  };
+}
+
+/** One canonical presigned part authorization data member set. */
+function multipartPartUrlBody(overrides: Record<string, unknown> = {}): unknown {
+  return {
+    url: MULTIPART_R2_URL,
+    part_number: 2,
+    offset_bytes: 8 * 1024 * 1024,
+    size_bytes: 8 * 1024 * 1024,
+    expires_at: MULTIPART_EXPIRES_AT,
+    ...overrides,
+  };
+}
+
+describe("journal sync api multipart surface (child 7 spec 5)", () => {
+  it("sends one authenticated create with the exact preflight-shaped body", async () => {
+    const transport = createRecordingTransport(async () => ({
+      status: 200,
+      bodyText: successBody(multipartPlanBody()),
+    }));
+    await createApi(transport).createMultipartUploadSession(PREFLIGHT_INPUT);
+
+    expect(transport.requests).toHaveLength(1);
+    const request = transport.requests[0];
+    if (request === undefined) {
+      throw new Error("expected one create request");
+    }
+    expect(request.url).toBe(`${ORIGIN}/api/uploads/multipart-sessions`);
+    expect(request.method).toBe("POST");
+    expect(request.headers["authorization"]).toBe(`Bearer ${ACCESS_TOKEN}`);
+    expect(request.headers["content-type"]).toBe("application/json");
+    expect(JSON.parse(request.body as string)).toEqual({
+      event_id: PREFLIGHT_INPUT.eventId,
+      idempotency_key: PREFLIGHT_INPUT.idempotencyKey,
+      operation: "create",
+      local_file_id: PREFLIGHT_INPUT.localFileId,
+      normalized_locator: "notes/one.md",
+      sha256: "a".repeat(64),
+      size_bytes: 12,
+      media_type: "text/plain",
+      policy_revision: 4,
+    });
+  });
+
+  it("parses the session plan of one create", async () => {
+    const transport = createRecordingTransport(async () => ({
+      status: 200,
+      bodyText: successBody(multipartPlanBody()),
+    }));
+    await expect(
+      createApi(transport).createMultipartUploadSession(PREFLIGHT_INPUT),
+    ).resolves.toEqual({
+      sessionId: MULTIPART_SESSION_ID,
+      partCount: 3,
+      partSizeBytes: 8 * 1024 * 1024,
+      expiresAtEpochMs: Date.parse(MULTIPART_EXPIRES_AT),
+    });
+  });
+
+  it("sends one authenticated session status GET and parses the reconciliation", async () => {
+    const transport = createRecordingTransport(async () => ({
+      status: 200,
+      bodyText: successBody(multipartStatusBody()),
+    }));
+    await expect(
+      createApi(transport).getMultipartUploadSession(MULTIPART_SESSION_ID),
+    ).resolves.toEqual({
+      sessionId: MULTIPART_SESSION_ID,
+      state: "uploading",
+      partCount: 3,
+      partSizeBytes: 8 * 1024 * 1024,
+      expiresAtEpochMs: Date.parse(MULTIPART_EXPIRES_AT),
+      completedPartNumbers: [1],
+      terminalResult: null,
+    });
+    const request = transport.requests[0];
+    expect(request?.method).toBe("GET");
+    expect(request?.url).toBe(
+      `${ORIGIN}/api/uploads/multipart-sessions/${MULTIPART_SESSION_ID}`,
+    );
+    expect(request?.headers["authorization"]).toBe(`Bearer ${ACCESS_TOKEN}`);
+    expect(request?.body).toBeUndefined();
+  });
+
+  it("issues exactly one part URL through one authenticated POST", async () => {
+    const transport = createRecordingTransport(async () => ({
+      status: 200,
+      bodyText: successBody(multipartPartUrlBody()),
+    }));
+    await expect(
+      createApi(transport).issueMultipartPartUrl({
+        sessionId: MULTIPART_SESSION_ID,
+        partNumber: 2,
+      }),
+    ).resolves.toEqual({
+      url: MULTIPART_R2_URL,
+      partNumber: 2,
+      offsetBytes: 8 * 1024 * 1024,
+      sizeBytes: 8 * 1024 * 1024,
+      expiresAtEpochMs: Date.parse(MULTIPART_EXPIRES_AT),
+    });
+    const request = transport.requests[0];
+    expect(request?.method).toBe("POST");
+    expect(request?.url).toBe(
+      `${ORIGIN}/api/uploads/multipart-sessions/${MULTIPART_SESSION_ID}/parts/2/url`,
+    );
+    expect(request?.headers["authorization"]).toBe(`Bearer ${ACCESS_TOKEN}`);
+  });
+
+  it("requests completion and parses the frozen terminal result", async () => {
+    const transport = createRecordingTransport(async () => ({
+      status: 200,
+      bodyText: successBody({
+        state: "committed",
+        terminal_result: {
+          result_kind: "committed",
+          source_id: SOURCE_ID,
+          source_version_id: SOURCE_VERSION_ID,
+          content_version: 3,
+          committed_at: "2026-08-18T00:00:00Z",
+        },
+      }),
+    }));
+    await expect(
+      createApi(transport).completeMultipartUploadSession(MULTIPART_SESSION_ID),
+    ).resolves.toEqual({
+      state: "committed",
+      terminalReceipt: {
+        resultKind: "committed",
+        sourceId: SOURCE_ID,
+        sourceVersionId: SOURCE_VERSION_ID,
+        contentVersion: 3,
+      },
+    });
+    const request = transport.requests[0];
+    expect(request?.method).toBe("POST");
+    expect(request?.url).toBe(
+      `${ORIGIN}/api/uploads/multipart-sessions/${MULTIPART_SESSION_ID}/complete`,
+    );
+  });
+
+  it("requests abort through one authenticated POST and parses the cancel state", async () => {
+    const transport = createRecordingTransport(async () => ({
+      status: 200,
+      bodyText: successBody(multipartStatusBody({ state: "cancelling" })),
+    }));
+    await expect(
+      createApi(transport).abortMultipartUploadSession(MULTIPART_SESSION_ID),
+    ).resolves.toMatchObject({ state: "cancelling" });
+    const request = transport.requests[0];
+    expect(request?.method).toBe("POST");
+    expect(request?.url).toBe(
+      `${ORIGIN}/api/uploads/multipart-sessions/${MULTIPART_SESSION_ID}/abort`,
+    );
+  });
+
+  it("PUTs the exact part bytes to the presigned URL with no credential", async () => {
+    const transport = createRecordingTransport(async () => ({ status: 200, bodyText: "" }));
+    await expect(
+      createApi(transport).putMultipartPartBytes({
+        url: MULTIPART_R2_URL,
+        contentBytes: new Uint8Array([4, 5, 6]),
+      }),
+    ).resolves.toBe("uploaded");
+    const request = transport.requests[0];
+    if (request === undefined) {
+      throw new Error("expected one part PUT");
+    }
+    expect(request.url).toBe(MULTIPART_R2_URL);
+    expect(request.method).toBe("PUT");
+    expect(request.headers["authorization"]).toBeUndefined();
+    expect(request.body).toBeInstanceOf(ArrayBuffer);
+    expect(new Uint8Array(request.body as ArrayBuffer)).toEqual(new Uint8Array([4, 5, 6]));
+  });
+
+  it("classifies a rejected presigned URL as url_rejected and other failures closed", async () => {
+    for (const [status, expectation] of [
+      [403, "url_rejected"],
+      [401, "url_rejected"],
+    ] as const) {
+      const rejected = createRecordingTransport(async () => ({ status, bodyText: "denied" }));
+      await expect(
+        createApi(rejected).putMultipartPartBytes({
+          url: MULTIPART_R2_URL,
+          contentBytes: new Uint8Array(2),
+        }),
+      ).resolves.toBe(expectation);
+    }
+    const failed = createRecordingTransport(async () => ({ status: 500, bodyText: "boom" }));
+    await expect(
+      createApi(failed).putMultipartPartBytes({
+        url: MULTIPART_R2_URL,
+        contentBytes: new Uint8Array(2),
+      }),
+    ).rejects.toMatchObject({ kind: "server_error" });
+    const offline: SyncHttpTransport = async () => {
+      throw new Error("socket gone");
+    };
+    await expect(
+      createApi(offline).putMultipartPartBytes({
+        url: MULTIPART_R2_URL,
+        contentBytes: new Uint8Array(2),
+      }),
+    ).rejects.toMatchObject({ kind: "network_offline" });
+  });
+
+  it("parses the multipart_upload preflight outcome without any storage handle", async () => {
+    const transport = createRecordingTransport(async () => ({
+      status: 200,
+      bodyText: successBody({ outcome: "multipart_upload" }),
+    }));
+    await expect(createApi(transport).preflightJournalEvent(PREFLIGHT_INPUT)).resolves.toEqual({
+      outcome: "multipart_upload",
+    });
+  });
+
+  it.each<readonly [number, string, string]>([
+    [404, "multipart_session_not_found", "operation_retry_required"],
+    [410, "multipart_session_expired", "operation_retry_required"],
+    [409, "multipart_session_state_invalid", "operation_retry_required"],
+    [409, "multipart_completion_in_progress", "operation_retry_required"],
+    [503, "multipart_part_url_rejected", "server_error"],
+    [422, "multipart_part_invalid", "server_error"],
+    [503, "multipart_cleanup_failed", "server_error"],
+    [503, "multipart_dependency_unavailable", "server_error"],
+    [422, "multipart_provider_state_invalid", "integrity_failed"],
+    [422, "multipart_integrity_failed", "integrity_failed"],
+    // A policy denial is a genuine API 403 carrying the canonical envelope:
+    // it must never collapse onto the login verdict.
+    [403, "multipart_policy_denied", "policy_denied"],
+  ])("maps status %s code %s onto kind %s", async (status, code, expectedKind) => {
+    const transport = createRecordingTransport(async () => ({
+      status,
+      bodyText: errorBody(code),
+    }));
+    await expect(
+      createApi(transport).getMultipartUploadSession(MULTIPART_SESSION_ID),
+    ).rejects.toMatchObject({ kind: expectedKind, wireErrorCode: code });
+  });
+
+  it("fails closed on malformed multipart wire data", async () => {
+    const malformedBodies = [
+      successBody(multipartPlanBody({ session_id: "not-a-session-id" })),
+      successBody(multipartPlanBody({ part_count: 0 })),
+      successBody(multipartPlanBody({ part_size_bytes: 4 })),
+      successBody(multipartPlanBody({ expires_at: "not-a-date" })),
+      successBody(multipartStatusBody({ state: "mystery_state" })),
+      successBody(multipartStatusBody({ completed_part_numbers: [0] })),
+      successBody(multipartStatusBody({ completed_part_numbers: [2, 2] })),
+      successBody(multipartPartUrlBody({ part_number: 3 })),
+      successBody({ state: "committed" }),
+    ];
+    for (const [index, bodyText] of malformedBodies.entries()) {
+      const transport = createRecordingTransport(async () => ({ status: 200, bodyText }));
+      const api = createApi(transport);
+      const attempt =
+        index < 4
+          ? api.createMultipartUploadSession(PREFLIGHT_INPUT)
+          : index < 7
+            ? api.getMultipartUploadSession(MULTIPART_SESSION_ID)
+            : index === 7
+              ? api.issueMultipartPartUrl({ sessionId: MULTIPART_SESSION_ID, partNumber: 2 })
+              : api.completeMultipartUploadSession(MULTIPART_SESSION_ID);
+      await expect(attempt).rejects.toMatchObject({ kind: "server_error" });
+    }
   });
 });
 

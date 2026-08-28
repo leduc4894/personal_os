@@ -19,6 +19,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import { CoalescingQueuePassDispatcher } from "./automatic-snapshot";
 import type { JournalEvent, JournalMeta, JournalSafeErrorLabel } from "./contracts";
+import { MULTIPART_PART_SIZE_BYTES } from "./contracts";
 import { deriveFrozenFingerprint } from "./fingerprint";
 import {
   JournalQueueDriver,
@@ -129,10 +130,16 @@ interface ScriptedTransport {
   readonly maximumInFlightRequests: number;
 }
 
-/** The scripted raw transport behind the real sync client. */
+/**
+ * The scripted raw transport behind the real sync client. The optional
+ * multipart router runs FIRST: it answers the five authenticated multipart
+ * endpoints plus the presigned part PUTs, and returns null for every request
+ * it does not own (the preflight and single-part content lanes).
+ */
 function createScriptedHandlers(handlers: {
   preflight: PreflightHandler;
   content?: ContentHandler;
+  multipart?: (request: SyncHttpRequest) => Promise<RawResponse | null> | null;
 }): ScriptedTransport & {
   readonly transport: (request: SyncHttpRequest) => Promise<RawResponse>;
 } {
@@ -154,6 +161,12 @@ function createScriptedHandlers(handlers: {
       inFlightRequests += 1;
       maximumInFlightRequests = Math.max(maximumInFlightRequests, inFlightRequests);
       try {
+        if (handlers.multipart !== undefined) {
+          const routed = await handlers.multipart(request);
+          if (routed !== null) {
+            return routed;
+          }
+        }
         if (request.method === "PUT") {
           const bytes = new Uint8Array(request.body as ArrayBuffer);
           contentRequests.push(request);
@@ -254,7 +267,11 @@ interface DriverHarness {
   readonly nowEpochMs: () => number;
   advanceClock: (milliseconds: number) => void;
   installTransport: (
-    handlers: { preflight: PreflightHandler; content?: ContentHandler },
+    handlers: {
+      preflight: PreflightHandler;
+      content?: ContentHandler;
+      multipart?: (request: SyncHttpRequest) => Promise<RawResponse | null> | null;
+    },
   ) => ScriptedTransport;
 }
 
@@ -2425,5 +2442,264 @@ describe("queue driver repair barrier pause (task 11, spec 12.1, 12.4)", () => {
     const second = await runPass(harness.driver);
     expect(second).toEqual({ outcome: "completed", processedEventCount: 0 });
     expect(dispatched).toEqual(["notes/held.md", "notes/planned-upload.md"]);
+  });
+});
+
+// --- multipart dispatch (child 7 spec 4.3) ---------------------------------------------------------
+
+const MULTIPART_SESSION_ID = "bXVsdGlwYXJ0LXNlc3Npb24taWRlbnRpdHktMDEyMzQ1Njc4OTA";
+const MULTIPART_R2_BASE = "https://r2.example.net";
+const MULTIPART_EXPIRES_AT = "2026-08-29T00:00:00Z";
+const MULTIPART_FILE_LAST_PART_BYTES = 1_048_576 + 123;
+
+/** Deterministic multipart-sized bytes: position-derived, no provider content. */
+function multipartFileBytes(partCount: number, salt = 0): Uint8Array {
+  const totalSizeBytes =
+    (partCount - 1) * MULTIPART_PART_SIZE_BYTES + MULTIPART_FILE_LAST_PART_BYTES;
+  const bytes = new Uint8Array(totalSizeBytes);
+  for (let index = 0; index < totalSizeBytes; index += 1) {
+    bytes[index] = (index * 31 + 7 + salt) & 0xff;
+  }
+  return bytes;
+}
+
+/**
+ * The compact multipart route script of the driver tests: it answers the
+ * five authenticated endpoints plus the presigned part PUTs and journals the
+ * closed call kinds, the part PUT numbers and the uploaded byte windows.
+ */
+function createMultipartScript(partCount: number) {
+  const calls: string[] = [];
+  const partPutNumbers: number[] = [];
+  const serverCompletedParts = new Set<number>();
+  const partSizeOf = (partNumber: number) =>
+    partNumber < partCount ? MULTIPART_PART_SIZE_BYTES : MULTIPART_FILE_LAST_PART_BYTES;
+  const script = {
+    calls,
+    partPutNumbers,
+    onPartPut: (partNumber: number) => {
+      void partNumber;
+      return { status: 200, bodyText: "" } as RawResponse;
+    },
+    route: async (request: SyncHttpRequest): Promise<RawResponse | null> => {
+      const url = new URL(request.url);
+      if (url.origin === MULTIPART_R2_BASE && request.method === "PUT") {
+        const partNumber = Number(url.searchParams.get("part"));
+        calls.push(`part_put:${partNumber}`);
+        partPutNumbers.push(partNumber);
+        const directive = script.onPartPut(partNumber);
+        if (directive.status >= 200 && directive.status < 300) {
+          serverCompletedParts.add(partNumber);
+        }
+        return directive;
+      }
+      if (url.origin !== ORIGIN) {
+        return null;
+      }
+      if (url.pathname === "/api/sync/journal-events/preflight") {
+        return null;
+      }
+      const sessionPath = `/api/uploads/multipart-sessions/${MULTIPART_SESSION_ID}`;
+      const partUrlMatch = url.pathname.match(
+        /^\/api\/uploads\/multipart-sessions\/[^/]+\/parts\/(\d+)\/url$/,
+      );
+      if (request.method === "POST" && url.pathname === "/api/uploads/multipart-sessions") {
+        calls.push("create");
+        return {
+          status: 200,
+          bodyText: successBody({
+            session_id: MULTIPART_SESSION_ID,
+            part_count: partCount,
+            part_size_bytes: MULTIPART_PART_SIZE_BYTES,
+            expires_at: MULTIPART_EXPIRES_AT,
+          }),
+        };
+      }
+      if (request.method === "GET" && url.pathname === sessionPath) {
+        calls.push("status");
+        return {
+          status: 200,
+          bodyText: successBody({
+            session_id: MULTIPART_SESSION_ID,
+            state: "uploading",
+            part_count: partCount,
+            part_size_bytes: MULTIPART_PART_SIZE_BYTES,
+            expires_at: MULTIPART_EXPIRES_AT,
+            completed_part_numbers: [...serverCompletedParts],
+            terminal_result: null,
+          }),
+        };
+      }
+      if (request.method === "POST" && partUrlMatch !== null) {
+        const partNumber = Number(partUrlMatch[1]);
+        calls.push(`part_url:${partNumber}`);
+        return {
+          status: 200,
+          bodyText: successBody({
+            url: `${MULTIPART_R2_BASE}/staging/${MULTIPART_SESSION_ID}/part-${partNumber}?X-Amz-Signature=secret-${partNumber}&part=${partNumber}`,
+            part_number: partNumber,
+            offset_bytes: (partNumber - 1) * MULTIPART_PART_SIZE_BYTES,
+            size_bytes: partSizeOf(partNumber),
+            expires_at: MULTIPART_EXPIRES_AT,
+          }),
+        };
+      }
+      if (request.method === "POST" && url.pathname === `${sessionPath}/complete`) {
+        calls.push("complete");
+        return {
+          status: 200,
+          bodyText: successBody({
+            state: "committed",
+            terminal_result: {
+              result_kind: "committed",
+              source_id: SOURCE_ID,
+              source_version_id: SOURCE_VERSION_ID,
+              content_version: 1,
+              committed_at: "2026-08-18T00:00:00Z",
+            },
+          }),
+        };
+      }
+      if (request.method === "POST" && url.pathname === `${sessionPath}/abort`) {
+        calls.push("abort");
+        return {
+          status: 200,
+          bodyText: successBody({
+            session_id: MULTIPART_SESSION_ID,
+            state: "cancelling",
+            part_count: partCount,
+            part_size_bytes: MULTIPART_PART_SIZE_BYTES,
+            expires_at: MULTIPART_EXPIRES_AT,
+            completed_part_numbers: [...serverCompletedParts],
+            terminal_result: null,
+          }),
+        };
+      }
+      return null;
+    },
+  };
+  return script;
+}
+
+describe("queue driver multipart dispatch (child 7 spec 4.3)", () => {
+  it("routes a multipart_upload preflight through the resumable transport and commits", async () => {
+    const harness = createHarness();
+    await captureBytes(harness, "notes/huge.bin", multipartFileBytes(3));
+    const script = createMultipartScript(3);
+    harness.installTransport({
+      preflight: async () => ({
+        status: 200,
+        bodyText: successBody({ outcome: "multipart_upload" }),
+      }),
+      content: async () => {
+        throw new Error("single-part content must not run");
+      },
+      multipart: (request) => script.route(request),
+    });
+
+    const summary = await runPass(harness.driver);
+
+    expect(summary).toEqual({ outcome: "completed", processedEventCount: 1 });
+    const localFile = harness.repository.readLocalFileByPath("notes/huge.bin");
+    expect(localFile?.sourceId).toBe(SOURCE_ID);
+    expect(localFile?.baseVersionId).toBe(SOURCE_VERSION_ID);
+    expect(eventsOfPath(harness, "notes/huge.bin").at(-1)?.state).toBe("committed");
+    // Every geometry-declared part moved once and the completion claimed the
+    // session; the receipt cleared the durable progress.
+    expect(script.partPutNumbers.slice().sort((a, b) => a - b)).toEqual([1, 2, 3]);
+    expect(script.calls).toContain("complete");
+    const committedEvent = eventsOfPath(harness, "notes/huge.bin").at(-1);
+    if (committedEvent === undefined) {
+      throw new Error("expected the committed multipart event");
+    }
+    expect(harness.repository.readMultipartProgress(committedEvent.eventId)).toBeNull();
+  });
+
+  it("terminalizes a changed local file under the closed change token without coalescing", async () => {
+    const harness = createHarness();
+    const event = await captureBytes(harness, "notes/huge-changed.bin", multipartFileBytes(3));
+    let successorEventId: string | null = null;
+    let hasSavedNewerBytes = false;
+    const script = createMultipartScript(3);
+    harness.installTransport({
+      preflight: async () => {
+        if (hasSavedNewerBytes) {
+          // The newer watcher event dispatches on its own; nothing else
+          // mutates the Vault during this pass.
+          return { status: 200, bodyText: successBody({ outcome: "excluded" }) };
+        }
+        // The user saves while the old event's preflight is in flight: the
+        // successor is recorded through the same capture path and the file
+        // bytes change before the old session uploads one byte.
+        hasSavedNewerBytes = true;
+        const newerBytes = multipartFileBytes(3, 9);
+        harness.vaultBytes.set("notes/huge-changed.bin", newerBytes);
+        const successor = await harness.repository.recordCapture({
+          normalizedPath: "notes/huge-changed.bin",
+          fingerprint: await deriveFrozenFingerprint(newerBytes),
+          policyRevisionNumber: 2,
+          admission: "policy_allowed",
+        });
+        if (successor.outcome === "event_recorded") {
+          successorEventId = successor.event.eventId;
+        }
+        return { status: 200, bodyText: successBody({ outcome: "multipart_upload" }) };
+      },
+      content: async () => {
+        throw new Error("single-part content must not run");
+      },
+      multipart: (request) => script.route(request),
+    });
+
+    const summary = await runPass(harness.driver);
+    expect(summary.outcome).toBe("completed");
+
+    const stored = harness.repository.readEvent(event.eventId);
+    expect(stored?.state).toBe("integrity_failed");
+    expect(stored?.safeError).toBe("multipart_local_content_changed");
+    // The old session stopped and aborted exactly; no part byte moved.
+    expect(script.partPutNumbers).toEqual([]);
+    expect(script.calls).toEqual(["create", "abort"]);
+    // The newer watcher event stayed its own row with its own frozen
+    // fingerprint — never coalesced into the old event — and dispatched
+    // separately in the same pass.
+    const successor = successorEventId === null ? null : harness.repository.readEvent(successorEventId);
+    expect(successor?.eventId).not.toBe(stored?.eventId);
+    expect(successor?.fingerprint.sha256).not.toBe(stored?.fingerprint.sha256);
+    expect(successor?.state).toBe("excluded_policy");
+  });
+
+  it("keeps the multipart event retryable with progress retained across offline", async () => {
+    const harness = createHarness();
+    const event = await captureBytes(harness, "notes/huge-offline.bin", multipartFileBytes(3));
+    const script = createMultipartScript(3);
+    script.onPartPut = () => {
+      throw new Error("transport gone");
+    };
+    harness.installTransport({
+      preflight: async () => ({
+        status: 200,
+        bodyText: successBody({ outcome: "multipart_upload" }),
+      }),
+      multipart: (request) => script.route(request),
+    });
+
+    const first = await runPass(harness.driver);
+    expect(first.outcome).toBe("retry_scheduled");
+    const parked = harness.repository.readEvent(event.eventId);
+    expect(parked?.state).toBe("waiting_retry");
+    expect(parked?.safeError).toBe("network_offline");
+    // The durable session record survives the interruption untouched.
+    expect(harness.repository.readMultipartProgress(event.eventId)).not.toBeNull();
+
+    // After the bounded backoff a fresh pass resumes only the parts that
+    // never landed and finishes the frozen event. The first pass attempted
+    // part 1 once (the transport died), so the resumed pass re-uploads it.
+    script.onPartPut = () => ({ status: 200, bodyText: "" });
+    harness.advanceClock(10_000);
+    const second = await runPass(harness.driver);
+    expect(second).toEqual({ outcome: "completed", processedEventCount: 1 });
+    expect(script.partPutNumbers).toEqual([1, 1, 2, 3]);
+    expect(harness.repository.readEvent(event.eventId)?.state).toBe("committed");
   });
 });

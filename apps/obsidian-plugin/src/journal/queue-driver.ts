@@ -41,10 +41,20 @@ import type { JournalEvent, JournalEventState, JournalSafeErrorLabel, LocalFile 
 import { JOURNAL_SAFE_ERROR_LABELS, MAX_FILE_SIZE_BYTES } from "./contracts";
 import { deriveFrozenFingerprint } from "./fingerprint";
 import type { LifecycleDriver, LifecycleRunOutcome } from "./lifecycle-driver";
+import { MultipartUploadRunner } from "./multipart-upload";
+import type {
+  MultipartUploadPlatform,
+  MultipartUploadRunContext,
+  MultipartUploadRunOutcome,
+} from "./multipart-upload";
 import { isUuid } from "./repository";
 import type { JournalRepository } from "./repository";
 import { JournalStoreError, type JournalStoreErrorReason } from "./sqlite-database";
-import type { JournalPreflightOutcome, JournalSyncApi, SmallFileTerminalReceipt } from "./sync-api";
+import type {
+  JournalPreflightOutcome,
+  JournalSyncApi,
+  SmallFileTerminalReceipt,
+} from "./sync-api";
 import { SyncApiError } from "./sync-api";
 import type { SyncApiFailureKind } from "./sync-api";
 import type {
@@ -150,6 +160,13 @@ export interface JournalQueueDriverOptions {
    * (spec 19.2) is enforced deterministically.
    */
   readonly lifecycleDriver?: LifecycleDriver;
+  /**
+   * The platform class of the multipart transport (child 7 spec 4): it
+   * selects only the part-PUT semaphore limit (three Desktop, two Mobile).
+   * Defaults to `"desktop"`; the composition root injects the observed
+   * platform class of the running app.
+   */
+  readonly multipartPlatform?: MultipartUploadPlatform;
   /** Rotates the access credential once; a rejection ends the pass as login required. */
   readonly refreshAccessToken: () => Promise<void>;
   /** Clock for deadlines, retries and attempt timestamps; defaults to `Date.now`. */
@@ -292,6 +309,8 @@ export class JournalQueueDriver {
   readonly #passDeadlineMs: number;
   readonly #requestTimeoutMs: number;
   readonly #diagnosticTrail: SyncDiagnosticsTrail | null;
+  readonly #multipartRunner: MultipartUploadRunner;
+  readonly #multipartPlatform: MultipartUploadPlatform;
   /** The pass's last successful request outcome's envelope request id. */
   #lastPassWireRequestId: string | null = null;
   #isStopped = false;
@@ -311,6 +330,14 @@ export class JournalQueueDriver {
     this.#passDeadlineMs = options.passDeadlineMs ?? QUEUE_PASS_DEADLINE_MS;
     this.#requestTimeoutMs = options.requestTimeoutMs ?? QUEUE_REQUEST_TIMEOUT_MS;
     this.#diagnosticTrail = options.diagnosticTrail ?? null;
+    this.#multipartPlatform = options.multipartPlatform ?? "desktop";
+    this.#multipartRunner = new MultipartUploadRunner({
+      repository: options.repository,
+      syncApi: options.syncApi,
+      fileBytesReader: options.fileBytesReader,
+      nowEpochMs: this.#nowEpochMs,
+      requestTimeoutMs: this.#requestTimeoutMs,
+    });
   }
 
   /** Whether the driver was stopped for unload/suspension and runs nothing new. */
@@ -745,6 +772,16 @@ export class JournalQueueDriver {
           return "continue";
         case "single_part_upload":
           return await this.#streamContent(event, outcome.operationId, passDeadlineEpochMs, refreshBudget, correlationId);
+        case "multipart_upload":
+          // The server-owned resumable transport (child 7 spec 4): the
+          // runner owns session resume, part scheduling and completion; a
+          // thrown closed failure lands in the shared matrix below.
+          return await this.#dispatchMultipartUpload(
+            event,
+            passDeadlineEpochMs,
+            refreshBudget,
+            correlationId,
+          );
       }
     } catch (error) {
       if (this.#isStopped) {
@@ -787,6 +824,103 @@ export class JournalQueueDriver {
     }
     const persisted = this.#repository.readEvent(event.eventId);
     return persisted?.operationId === event.operationId ? event.operationId : null;
+  }
+
+  /**
+   * Dispatch one `multipart_upload` preflight outcome through the
+   * resumable multipart runner (child 7 spec 4.3): the runner resumes the
+   * durable session, drives only unfinished parts and either returns a
+   * frozen receipt/local verdict or throws the SAME closed failure kinds
+   * the single-part path already maps below. The one-per-pass credential
+   * budget covers this lane exactly like the content stream: a first
+   * `access_expired` rotates once and retries the run a single time.
+   */
+  async #dispatchMultipartUpload(
+    event: JournalEvent,
+    passDeadlineEpochMs: number,
+    refreshBudget: RefreshBudget,
+    correlationId: string,
+  ): Promise<PassContinuation> {
+    if (this.#isPastDeadline(passDeadlineEpochMs)) {
+      // A natural deadline boundary: the event keeps its `preflight`
+      // eligibility and its durable multipart progress, so the pass stays
+      // continuable by the dispatcher.
+      return "end_deadline_boundary";
+    }
+    const runContext: MultipartUploadRunContext = {
+      signal: this.#passAbortController.signal,
+      passDeadlineEpochMs,
+    };
+    const issue = (): Promise<MultipartUploadRunOutcome> =>
+      this.#multipartRunner.run(event, this.#multipartPlatform, runContext);
+    let outcome: MultipartUploadRunOutcome;
+    try {
+      outcome = await issue();
+    } catch (error) {
+      const kind = syncFailureKind(error);
+      if (kind !== "access_expired" || refreshBudget.hasRefreshed) {
+        if (this.#isStopped) {
+          return "end_stopped";
+        }
+        return await this.#handleFailure(event.eventId, error, correlationId, refreshBudget);
+      }
+      refreshBudget.hasRefreshed = true;
+      try {
+        await this.#refreshAccessToken();
+      } catch {
+        refreshBudget.requiresLogin = true;
+        this.#recordCredentialRefreshFailureTrailEntry();
+        if (this.#isStopped) {
+          return "end_stopped";
+        }
+        return await this.#handleFailure(event.eventId, error, correlationId, refreshBudget);
+      }
+      if (this.#isStopped) {
+        return "end_stopped";
+      }
+      try {
+        outcome = await issue();
+      } catch (retryError) {
+        if (this.#isStopped) {
+          return "end_stopped";
+        }
+        return await this.#handleFailure(event.eventId, retryError, correlationId, refreshBudget);
+      }
+    }
+    if (this.#isStopped) {
+      return "end_stopped";
+    }
+    this.#sampleSuccessfulWireRequestId();
+    switch (outcome.outcome) {
+      case "committed":
+        await this.#persistCommittedReceipt(event.eventId, outcome.receipt);
+        return "continue";
+      case "no_change":
+        await this.#repository.recordNoChangeReceipt({
+          eventId: event.eventId,
+          sourceId: outcome.receipt.sourceId,
+          baseVersionId: outcome.receipt.sourceVersionId,
+        });
+        return "continue";
+      case "local_content_changed":
+        // The frozen file changed under the open session (child 7 spec
+        // 4.3): the runner already aborted the old session server-side;
+        // the OLD event closes under the closed change token and the newer
+        // watcher event — its own journal row since the fingerprint froze —
+        // uploads separately.
+        await this.#closeTerminal(
+          event.eventId,
+          "integrity_failed",
+          "multipart_local_content_changed",
+          correlationId,
+        );
+        return "continue";
+      case "local_file_missing":
+        await this.#closeTerminal(event.eventId, "deferred_lifecycle", "deferred_lifecycle", correlationId);
+        return "continue";
+      case "pass_deadline_reached":
+        return "end_deadline_boundary";
+    }
   }
 
   async #streamContent(
@@ -1001,6 +1135,13 @@ export class JournalQueueDriver {
         return "continue";
       case "integrity_failed":
         await this.#closeTerminal(eventId, "integrity_failed", "integrity_failed", correlationId);
+        return "continue";
+      case "policy_denied":
+        // The rechecked mid-transfer policy denial of the multipart surface
+        // (child 7 spec 7): preserve the local bytes and close exactly like
+        // a preflight `excluded` verdict — never a login verdict, never a
+        // silent retry loop. The server owns the staging cleanup.
+        await this.#closeTerminal(eventId, "excluded_policy", "excluded_policy", correlationId);
         return "continue";
       case "network_offline":
       case "network_timeout":

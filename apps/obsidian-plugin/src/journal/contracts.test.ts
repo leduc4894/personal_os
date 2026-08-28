@@ -75,6 +75,7 @@ describe("JOURNAL_SAFE_ERROR_LABELS closed set (spec 12)", () => {
       "blocked_conflict",
       "deferred_lifecycle",
       "integrity_failed",
+      "multipart_local_content_changed",
       "reconcile_required",
       "committed",
     ]);

@@ -138,6 +138,12 @@ export type JournalNonRetryEventState = (typeof JOURNAL_NON_RETRY_EVENT_STATES)[
  * `committed`. The `JournalAttempt` audit row uses the success token
  * for a successful commit so the audit trail no longer labels a
  * successful send as `server_error` (task 9 fix round 1 M1).
+ *
+ * `multipart_local_content_changed` (child 7 spec 7) is the one multipart
+ * token of {@link MULTIPART_SAFE_REASON_TOKENS} that terminates a journal
+ * event: the frozen Vault file changed under an open multipart session, so
+ * the old event closes without ever mixing bytes of two file generations
+ * while the newer watcher event uploads separately.
  */
 export const JOURNAL_SAFE_ERROR_LABELS = [
   "network_offline",
@@ -150,6 +156,7 @@ export const JOURNAL_SAFE_ERROR_LABELS = [
   "blocked_conflict",
   "deferred_lifecycle",
   "integrity_failed",
+  "multipart_local_content_changed",
   "reconcile_required",
   "committed",
 ] as const;
