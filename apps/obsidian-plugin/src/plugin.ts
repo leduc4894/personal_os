@@ -50,6 +50,7 @@ import type {
   VaultRenameTarget,
   VaultTargetFile,
 } from "./journal/lifecycle-capture";
+import type { MultipartUploadPlatform } from "./journal/multipart-upload";
 import { JournalQueueDriver } from "./journal/queue-driver";
 import type { QueuePassOutcome, QueuePassSummary } from "./journal/queue-driver";
 import { LifecycleDriverImpl } from "./journal/lifecycle-driver";
@@ -201,6 +202,16 @@ function resolvePlatformName(): string {
   if (Platform.isLinux) {
     return "linux";
   }
+  return Platform.isDesktop ? "desktop" : "mobile";
+}
+
+/**
+ * The platform class of the multipart transport (child 7 spec 4): the same
+ * Desktop/Mobile discrimination the composition already applies — Desktop
+ * earns three part-PUT permits, every non-Desktop runtime (phone or tablet)
+ * stays under the hard two-permit Mobile cap.
+ */
+function resolveMultipartPlatformClass(): MultipartUploadPlatform {
   return Platform.isDesktop ? "desktop" : "mobile";
 }
 
@@ -801,6 +812,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         }),
         fileBytesReader: vaultReader,
         lifecycleDriver,
+        multipartPlatform: resolveMultipartPlatformClass(),
         refreshAccessToken: () => session.refresh(),
         diagnosticTrail,
       });

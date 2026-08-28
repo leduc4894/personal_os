@@ -126,6 +126,27 @@ describe("Obsidian plugin composition root", () => {
     expect(pluginSource).toContain("ALLOW_LOOPBACK_HTTP_ORIGIN = false");
   });
 
+  it("injects the observed platform class into the multipart queue driver", () => {
+    // Child 7 spec 4: Desktop earns three part-PUT permits, every
+    // non-Desktop runtime stays under the hard two-permit Mobile cap. The
+    // composition root must pass the REAL observed class — an unwired
+    // construction silently violates the Mobile cap on real installs.
+    expect(pluginSource).toContain(
+      "function resolveMultipartPlatformClass(): MultipartUploadPlatform",
+    );
+    const resolverIndex = pluginSource.indexOf("function resolveMultipartPlatformClass");
+    const resolverBody = pluginSource.slice(resolverIndex, resolverIndex + 300);
+    expect(resolverIndex).toBeGreaterThanOrEqual(0);
+    expect(resolverBody).toContain('return Platform.isDesktop ? "desktop" : "mobile";');
+    const driverConstructionIndex = pluginSource.indexOf("new JournalQueueDriver({");
+    const constructionBody = pluginSource.slice(
+      driverConstructionIndex,
+      driverConstructionIndex + 900,
+    );
+    expect(driverConstructionIndex).toBeGreaterThanOrEqual(0);
+    expect(constructionBody).toContain("multipartPlatform: resolveMultipartPlatformClass()");
+  });
+
   it("registers vault capture listeners only after journal recovery", () => {
     expect(pluginSource).toContain("await persistence.open()");
     const recoveryIndex = pluginSource.indexOf("await persistence.open()");

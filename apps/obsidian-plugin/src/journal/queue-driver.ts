@@ -163,8 +163,10 @@ export interface JournalQueueDriverOptions {
   /**
    * The platform class of the multipart transport (child 7 spec 4): it
    * selects only the part-PUT semaphore limit (three Desktop, two Mobile).
-   * Defaults to `"desktop"`; the composition root injects the observed
-   * platform class of the running app.
+   * Defaults to the CONSERVATIVE `"mobile"` class — a construction site
+   * that forgets to inject under-uses concurrency instead of silently
+   * breaking the hard two-permit Mobile cap. The composition root injects
+   * the observed platform class (`resolveMultipartPlatformClass`).
    */
   readonly multipartPlatform?: MultipartUploadPlatform;
   /** Rotates the access credential once; a rejection ends the pass as login required. */
@@ -330,7 +332,7 @@ export class JournalQueueDriver {
     this.#passDeadlineMs = options.passDeadlineMs ?? QUEUE_PASS_DEADLINE_MS;
     this.#requestTimeoutMs = options.requestTimeoutMs ?? QUEUE_REQUEST_TIMEOUT_MS;
     this.#diagnosticTrail = options.diagnosticTrail ?? null;
-    this.#multipartPlatform = options.multipartPlatform ?? "desktop";
+    this.#multipartPlatform = options.multipartPlatform ?? "mobile";
     this.#multipartRunner = new MultipartUploadRunner({
       repository: options.repository,
       syncApi: options.syncApi,

@@ -2472,12 +2472,15 @@ function createMultipartScript(partCount: number) {
   const calls: string[] = [];
   const partPutNumbers: number[] = [];
   const serverCompletedParts = new Set<number>();
+  let activePartPuts = 0;
+  let maximumActivePartPuts = 0;
   const partSizeOf = (partNumber: number) =>
     partNumber < partCount ? MULTIPART_PART_SIZE_BYTES : MULTIPART_FILE_LAST_PART_BYTES;
   const script = {
     calls,
     partPutNumbers,
-    onPartPut: (partNumber: number) => {
+    readMaximumActivePartPuts: (): number => maximumActivePartPuts,
+    onPartPut: (partNumber: number): RawResponse | Promise<RawResponse> => {
       void partNumber;
       return { status: 200, bodyText: "" } as RawResponse;
     },
@@ -2487,11 +2490,17 @@ function createMultipartScript(partCount: number) {
         const partNumber = Number(url.searchParams.get("part"));
         calls.push(`part_put:${partNumber}`);
         partPutNumbers.push(partNumber);
-        const directive = script.onPartPut(partNumber);
-        if (directive.status >= 200 && directive.status < 300) {
-          serverCompletedParts.add(partNumber);
+        activePartPuts += 1;
+        maximumActivePartPuts = Math.max(maximumActivePartPuts, activePartPuts);
+        try {
+          const directive = await script.onPartPut(partNumber);
+          if (directive.status >= 200 && directive.status < 300) {
+            serverCompletedParts.add(partNumber);
+          }
+          return directive;
+        } finally {
+          activePartPuts -= 1;
         }
-        return directive;
       }
       if (url.origin !== ORIGIN) {
         return null;
@@ -2579,6 +2588,29 @@ function createMultipartScript(partCount: number) {
     },
   };
   return script;
+}
+
+/** One externally resolved latch for gating a scripted part PUT. */
+function createPartPutGate(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+/** Poll until one observable multipart condition holds; bounded so a stall fails loudly. */
+async function waitUntilPartPutCondition(
+  condition: () => boolean,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const startedAt = Date.now();
+  while (!condition()) {
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new Error("multipart condition not reached before the bounded wait expired");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 describe("queue driver multipart dispatch (child 7 spec 4.3)", () => {
@@ -2701,5 +2733,50 @@ describe("queue driver multipart dispatch (child 7 spec 4.3)", () => {
     expect(second).toEqual({ outcome: "completed", processedEventCount: 1 });
     expect(script.partPutNumbers).toEqual([1, 1, 2, 3]);
     expect(harness.repository.readEvent(event.eventId)?.state).toBe("committed");
+  });
+
+  it("defaults the multipart platform class to the conservative mobile cap", async () => {
+    // Review fix (task 10): a construction site that forgets to inject the
+    // platform class must under-use concurrency, never silently break the
+    // hard two-permit Mobile cap (child 7 spec 4). The harness driver is
+    // built WITHOUT `multipartPlatform`, so three unfinished parts may hold
+    // at most two active PUTs.
+    const harness = createHarness();
+    await captureBytes(harness, "notes/huge-default.bin", multipartFileBytes(3));
+    const script = createMultipartScript(3);
+    const gates = new Map<number, { promise: Promise<void>; resolve: () => void }>();
+    script.onPartPut = (partNumber) => {
+      const gate = createPartPutGate();
+      gates.set(partNumber, gate);
+      return gate.promise.then(() => ({ status: 200, bodyText: "" }) as RawResponse);
+    };
+    harness.installTransport({
+      preflight: async () => ({
+        status: 200,
+        bodyText: successBody({ outcome: "multipart_upload" }),
+      }),
+      multipart: (request) => script.route(request),
+    });
+
+    const runPromise = harness.driver.runPass();
+    await waitUntilPartPutCondition(() => gates.size >= 2);
+    // Hold both permits: the third part must NOT issue a PUT while two are
+    // active — the conservative Mobile cap holds it inside the semaphore.
+    // (Under a Desktop-class default the third PUT would appear here.)
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(gates.size).toBe(2);
+    expect(script.readMaximumActivePartPuts()).toBe(2);
+    for (const gate of gates.values()) {
+      gate.resolve();
+    }
+    // The third part enters only after one permit freed: release it too.
+    await waitUntilPartPutCondition(() => gates.size >= 3);
+    for (const gate of gates.values()) {
+      gate.resolve();
+    }
+    const summary = await runPromise;
+    expect(summary).toEqual({ outcome: "completed", processedEventCount: 1 });
+    expect(script.readMaximumActivePartPuts()).toBeLessThanOrEqual(2);
+    expect(script.partPutNumbers.slice().sort((a, b) => a - b)).toEqual([1, 2, 3]);
   });
 });
