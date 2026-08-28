@@ -415,6 +415,7 @@ async def _seed_population(engine: AsyncEngine) -> DeviceSyncQueryPlanPopulation
                 entry_count=_SEED_ROW_COUNT,
                 final_digest=hashlib.sha256(f"ds-plan-{nonce}".encode("ascii")).hexdigest(),
                 planned_at=now,
+                last_client_activity_at=now,
             )
         )
         action_rows = [
@@ -515,6 +516,7 @@ async def _seed_population(engine: AsyncEngine) -> DeviceSyncQueryPlanPopulation
                 "final_digest": hashlib.sha256(f"ds-plan-run-{index}".encode("ascii")).hexdigest(),
                 "completed_at": now,
                 "planned_at": now,
+                "last_client_activity_at": now,
             }
             for index, workspace_index in enumerate(range(_CURSOR_WORKSPACE_COUNT))
         ]

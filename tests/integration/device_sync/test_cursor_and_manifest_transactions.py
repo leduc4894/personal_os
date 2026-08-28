@@ -1390,6 +1390,19 @@ async def test_finalize_replays_idempotently_after_the_run_reaches_applying(
     assert replayed.manifest_run_id == run.manifest_run_id
     assert (await manifest_store.run_row(run.manifest_run_id)).state == "applying"
 
+    # A finalize replay with the WRONG digest against an applying run names
+    # the real problem — the recorded evidence does not match — instead of
+    # the generic state rejection, and never fails the run.
+    with pytest.raises(DeviceSyncError) as raised:
+        await manifest_store.finalize(
+            context,
+            run.manifest_run_id,
+            total_entry_count=recorded.entry_count,
+            final_digest=_digest("wrong-applying-replay-digest"),
+        )
+    assert raised.value.code is DeviceSyncErrorCode.MANIFEST_DIGEST_MISMATCH
+    assert (await manifest_store.run_row(run.manifest_run_id)).state == "applying"
+
 
 @pytest.mark.asyncio
 async def test_idle_run_expires_and_frees_a_new_run_before_the_hard_deadline(

@@ -27,6 +27,14 @@ Branch `device-cursor-manifest-reconciliation` (from `master` @ `41ab718`).
   `git rev-parse HEAD` at commit time): green-gate evidence, BACKLOG
   retirement, this rewrite, and the operational changes (compose
   `restart: "no"` + its contract-test pin, AGENTS.md live-stack rule).
+- `42df119` (master, 2026-08-27 evening) — physical Mobile matrix closed:
+  both device records, gate exit 0, ADR-020/021, runbook/BACKLOG updates,
+  and the supersede-generation start fix (26/26 suite evidence).
+- `682dd9a` (master, 2026-08-27 night) — the recovery batch landed:
+  finalize idempotent replay on applying runs, idle-based run expiry
+  (migration `20260827_01`), and the resident access-token refresh hook in
+  the device-sync client (28/28 integration, 69/69 migration units,
+  1148/1148 plugin tests).
 
 Earlier task commits are tabulated in git history `4bf367b..cd2a301`; the
 per-task review record lives in
