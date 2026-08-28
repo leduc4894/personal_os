@@ -246,15 +246,34 @@ class MultipartStoreHarness:
             provider_upload_id=MultipartProviderUploadId(f"provider-upload-{nonce}"),
         )
 
+    async def reserve_session_only(
+        self,
+        seeded: SeededMultipartOperation,
+        device_context: SmallFileDeviceContext,
+    ) -> MultipartSessionRecord:
+        """Reserve the seeded operation's session before any provider work."""
+
+        return await self.store.reserve_session(
+            operation=seeded.operation,
+            device_context=device_context,
+            diagnostic_context=diagnostic_context(),
+        )
+
     async def reserve(
         self,
         seeded: SeededMultipartOperation,
         device_context: SmallFileDeviceContext,
     ) -> MultipartSessionRecord:
-        """Reserve the seeded operation's session through the real store."""
+        """Reserve the session and land its post-create provider identity.
 
-        return await self.store.reserve_session(
-            operation=seeded.operation,
+        The spec 6.1 creation order end to end: the durable session row
+        first, then the fenced identity write carrying the private staging
+        identity the (doubled) provider adapter minted.
+        """
+
+        record = await self.reserve_session_only(seeded, device_context)
+        return await self.store.record_provider_identity(
+            session_id=record.session_id,
             staging_key=seeded.staging_key,
             provider_upload_id=seeded.provider_upload_id,
             device_context=device_context,

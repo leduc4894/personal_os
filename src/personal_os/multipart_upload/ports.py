@@ -151,9 +151,12 @@ class MultipartSessionRecord:
     completed part numbers and — only for a committed session — its frozen
     terminal source-event result. ``staging_key`` and
     ``provider_upload_id`` are private provider identity exchanged only
-    between the session store and the staging provider adapters: this view
-    stays off the package's public surface, never renders outside a
-    redacted ``repr`` and never crosses a plan, status, URL or error.
+    between the session store and the staging provider adapters: they are
+    ``None`` on a session reserved before its provider create (spec 6.1
+    persist-before-create) and land exclusively through the fenced
+    post-create identity write; this view stays off the package's public
+    surface, never renders outside a redacted ``repr`` and never crosses a
+    plan, status, URL or error.
     """
 
     session_id: MultipartUploadSessionId
@@ -162,8 +165,8 @@ class MultipartSessionRecord:
     part_count: int
     total_size_bytes: int
     expires_at: datetime
-    staging_key: str
-    provider_upload_id: MultipartProviderUploadId
+    staging_key: str | None
+    provider_upload_id: MultipartProviderUploadId | None
     completed_part_numbers: frozenset[int]
     terminal_result: SmallFileTerminalResult | None
 
@@ -214,13 +217,18 @@ class MultipartSessionStore(Protocol):
     """Durable multipart session store port: replay, fencing and cleanup.
 
     ``reserve_session`` lands the canonical session row for one frozen
-    preflight-bound operation: the store performs no provider I/O, so the
-    caller supplies the private staging identity its provider adapter
-    already minted, and the operation-scoped lifetime uniqueness makes an
-    exact replay resolve the very same session — one session per frozen
-    operation ever, no second provider workload. ``load_owned_session`` is
-    the owner-checked resume read; ``record_provider_part`` persists one
-    part fact exactly as the provider's ``ListParts`` observed it.
+    preflight-bound operation BEFORE any provider call (spec 6.1): the row
+    carries no provider identity yet — that is the durable recovery state
+    that makes an ambiguous create retryable — and the operation-scoped
+    lifetime uniqueness makes an exact replay resolve the very same
+    session, one session per frozen operation ever. After the caller's
+    provider adapter minted the staging upload, ``record_provider_identity``
+    is the fenced post-create write that lands the private identity: the
+    identical identity replays idempotently, an absent one is stored, and a
+    divergent one surfaces as the closed provider-state-invalid rejection
+    so the caller can abort its fresh orphan. ``load_owned_session`` is the
+    owner-checked resume read; ``record_provider_part`` persists one part
+    fact exactly as the provider's ``ListParts`` observed it.
     ``claim_completion`` mints the finite completion lease (or observes the
     frozen committed replay) and ``record_terminal_result`` is the fenced
     terminal write — compare-and-set on the claim token and state — for
@@ -237,6 +245,14 @@ class MultipartSessionStore(Protocol):
         self,
         *,
         operation: SmallFileUploadOperation,
+        device_context: SmallFileDeviceContext,
+        diagnostic_context: DiagnosticContext,
+    ) -> MultipartSessionRecord: ...
+
+    async def record_provider_identity(
+        self,
+        *,
+        session_id: MultipartUploadSessionId,
         staging_key: str,
         provider_upload_id: MultipartProviderUploadId,
         device_context: SmallFileDeviceContext,

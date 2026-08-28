@@ -2,16 +2,24 @@
 
 :class:`PostgresqlMultipartUploadStore` implements the provider-neutral
 :class:`~personal_os.multipart_upload.ports.MultipartSessionStore` port
-against the ``20260828_01`` migration. The store owns no provider I/O of
-any kind: no R2 SDK, object-storage client or network call is ever
-imported or touched while a transaction is open, so the orchestration
-service crosses to the provider strictly between the committed database
-steps. ``reserve_session`` runs one ``READ COMMITTED`` transaction behind
-the shared upload-operation identity advisory lock and a
-``SELECT ... FOR UPDATE`` on the operation's session row: the operation's
-lifetime uniqueness admits exactly one session per frozen operation, a
-concurrent or sequential replay resolves that same session and the store
-mints no provider work twice. ``claim_completion`` serializes the
+against the ``20260828_01`` and ``20260828_03`` migrations. The store owns
+no provider I/O of any kind: no R2 SDK, object-storage client or network
+call is ever imported or touched while a transaction is open, so the
+orchestration service crosses to the provider strictly between the
+committed database steps. ``reserve_session`` runs one ``READ COMMITTED``
+transaction behind the shared upload-operation identity advisory lock and
+a ``SELECT ... FOR UPDATE`` on the operation's session row: the
+reservation happens BEFORE any provider call and carries no provider
+identity (spec 6.1 persist-before-create) — that identity-absent row is
+the durable recovery state that makes an ambiguous provider create
+retryable — and the operation's lifetime uniqueness admits exactly one
+session per frozen operation, so a concurrent or sequential replay
+resolves that same session and the store mints no provider work twice.
+``record_provider_identity`` is the fenced post-create write that lands
+the private staging identity exactly once: the identical identity replays
+idempotently and a divergent one is the closed provider-state-invalid
+rejection, so a caller that minted a second upload can abort its orphan
+instead of silently discarding it. ``claim_completion`` serializes the
 completion family (``completing``/``verifying``/``promoting``) behind an
 explicit finite lease: a fresh claim mints a new opaque token, a caller
 that arrives while a live lease stands observes the closed retryable
@@ -151,6 +159,16 @@ _PART_RECORDING_STATES: Final[frozenset[MultipartSessionState]] = frozenset(
         MultipartSessionState.CREATED,
         MultipartSessionState.UPLOADING,
         MultipartSessionState.COMPLETING,
+    }
+)
+
+#: The states that admit the fenced post-create provider identity write:
+#: only the two pre-completion states of a session whose completion no
+#: claimant holds yet.
+_IDENTITY_RECORDING_STATES: Final[frozenset[MultipartSessionState]] = frozenset(
+    {
+        MultipartSessionState.CREATED,
+        MultipartSessionState.UPLOADING,
     }
 )
 
@@ -316,15 +334,15 @@ def multipart_session_insert_statement(
     policy_revision_number: int,
     part_size_bytes: int,
     part_count: int,
-    staging_key: str,
-    provider_upload_id_value: str,
     expires_at: datetime,
 ) -> sa.Insert:
     """Build the parameter-bound reservation insert of one created session.
 
-    The row opens in the ``created`` state with no claim and no cleanup
-    obligation; the private staging identity crosses only as bound
-    parameters, never as SQL text.
+    The row opens in the ``created`` state with no claim, no cleanup
+    obligation and no provider identity (spec 6.1 persist-before-create):
+    the private staging identity arrives only through the fenced
+    post-create write, so this insert already is the durable recovery
+    state that makes an ambiguous provider create retryable.
     """
     return sa.insert(multipart_uploads).values(
         multipart_upload_id=multipart_upload_id,
@@ -339,8 +357,8 @@ def multipart_session_insert_statement(
         policy_revision_number=policy_revision_number,
         part_size_bytes=part_size_bytes,
         part_count=part_count,
-        staging_key=staging_key,
-        provider_upload_id=provider_upload_id_value,
+        staging_key=None,
+        provider_upload_id=None,
         state=MultipartSessionState.CREATED.value,
         claim_token=None,
         claim_expires_at=None,
@@ -349,6 +367,39 @@ def multipart_session_insert_statement(
         cleanup_next_retry_at=None,
         cleanup_reason_code=None,
         expires_at=expires_at,
+    )
+
+
+def provider_identity_update_statement(
+    *,
+    session_id_value: str,
+    staging_key: str,
+    provider_upload_id_value: str,
+) -> sa.Update:
+    """Build the compare-and-set post-create provider identity write.
+
+    The guard admits exactly one pre-completion state row that carries no
+    identity and no claim lease, so the identity lands once: a concurrent
+    or replayed winner is visible as a zero-row update the caller resolves
+    through its own identity comparison. The private values cross only as
+    bound parameters, never as SQL text.
+    """
+    return (
+        sa.update(multipart_uploads)
+        .values(
+            staging_key=staging_key,
+            provider_upload_id=provider_upload_id_value,
+            updated_at=sa.text("CURRENT_TIMESTAMP"),
+        )
+        .where(
+            multipart_uploads.c.session_id == session_id_value,
+            multipart_uploads.c.state.in_(
+                (MultipartSessionState.CREATED.value, MultipartSessionState.UPLOADING.value)
+            ),
+            multipart_uploads.c.staging_key.is_(None),
+            multipart_uploads.c.provider_upload_id.is_(None),
+            multipart_uploads.c.claim_token.is_(None),
+        )
     )
 
 
@@ -779,8 +830,8 @@ class MultipartSessionRow:
     policy_revision_number: int
     part_size_bytes: int
     part_count: int
-    staging_key: str
-    provider_upload_id_value: str
+    staging_key: str | None
+    provider_upload_id_value: str | None
     state: MultipartSessionState
     claim_token: UUID | None
     claim_expires_at: datetime | None
@@ -874,6 +925,21 @@ class MultipartSessionRow:
         """Report whether the 24-hour deadline already struck a forward state."""
 
         return self.state in _FORWARD_SESSION_STATES and self.expires_at <= now
+
+    def has_provider_identity(self) -> bool:
+        """Report whether the fenced post-create identity write already landed."""
+
+        return self.staging_key is not None and self.provider_upload_id_value is not None
+
+    def carries_provider_identity(
+        self, staging_key: str, provider_upload_id_value: str
+    ) -> bool:
+        """Report whether the row already carries exactly this identity."""
+
+        return (
+            self.staging_key == staging_key
+            and self.provider_upload_id_value == provider_upload_id_value
+        )
 
     def geometry(self) -> MultipartPartGeometry:
         """Rebuild the session's frozen part geometry from its row."""
@@ -971,18 +1037,17 @@ class PostgresqlMultipartUploadStore:
         self,
         *,
         operation: SmallFileUploadOperation,
-        staging_key: str,
-        provider_upload_id: MultipartProviderUploadId,
         device_context: SmallFileDeviceContext,
         diagnostic_context: DiagnosticContext,
     ) -> MultipartSessionRecord:
         """Land or exactly replay the one session a frozen operation owns.
 
-        The caller supplies the private staging identity its provider
-        adapter already minted — the store performs no provider I/O. Behind
-        the operation-identity advisory lock and the row-locked
-        operation-scoped lookup, a fresh reservation inserts the created
-        session with its frozen geometry and 24-hour deadline, while an
+        The reservation happens BEFORE any provider call (spec 6.1) and
+        carries no provider identity: the inserted ``created`` row is the
+        durable recovery state that makes an ambiguous provider create
+        retryable. Behind the operation-identity advisory lock and the
+        row-locked operation-scoped lookup, a fresh reservation inserts
+        the session with its frozen geometry and 24-hour deadline, while an
         existing row is returned unchanged: the operation's lifetime
         uniqueness means the replay resolves the same session without
         minting any second provider workload.
@@ -995,10 +1060,41 @@ class PostgresqlMultipartUploadStore:
         return await self._retry.run(
             lambda _attempt: self._reserve_session_once(
                 operation=operation,
+                device_context=device_context,
+                geometry=geometry,
+            )
+        )
+
+    async def record_provider_identity(
+        self,
+        *,
+        session_id: MultipartUploadSessionId,
+        staging_key: str,
+        provider_upload_id: MultipartProviderUploadId,
+        device_context: SmallFileDeviceContext,
+        diagnostic_context: DiagnosticContext,
+    ) -> MultipartSessionRecord:
+        """Land the fenced post-create provider identity of one session.
+
+        The caller invokes this after its provider adapter minted the
+        staging upload — the store performs no provider I/O. Behind the
+        session row lock: a row carrying no identity stores it once
+        (compare-and-set on the identity-absent, claim-free pre-completion
+        shape); a row already carrying the identical identity is an
+        idempotent replay; a row carrying a divergent identity is the
+        closed provider-state-invalid rejection, so the caller can abort
+        its fresh orphan upload instead of silently discarding it. A
+        session whose completion a claimant already holds, whose identity
+        is absent but whose state left the pre-completion states, or whose
+        deadline passed fails closed as state-invalid or expired.
+        """
+        del diagnostic_context
+        return await self._retry.run(
+            lambda _attempt: self._record_provider_identity_once(
+                session_id=session_id,
                 staging_key=staging_key,
                 provider_upload_id=provider_upload_id,
                 device_context=device_context,
-                geometry=geometry,
             )
         )
 
@@ -1160,8 +1256,6 @@ class PostgresqlMultipartUploadStore:
         self,
         *,
         operation: SmallFileUploadOperation,
-        staging_key: str,
-        provider_upload_id: MultipartProviderUploadId,
         device_context: SmallFileDeviceContext,
         geometry: MultipartPartGeometry,
     ) -> MultipartSessionRecord:
@@ -1209,8 +1303,6 @@ class PostgresqlMultipartUploadStore:
                     policy_revision_number=operation.preflight.policy_revision_number,
                     part_size_bytes=geometry.part_size_bytes,
                     part_count=geometry.part_count,
-                    staging_key=staging_key,
-                    provider_upload_id_value=provider_upload_id.value,
                     expires_at=expires_at,
                 )
             )
@@ -1218,6 +1310,45 @@ class PostgresqlMultipartUploadStore:
             if reserved is None:  # pragma: no cover - the insert just committed locally
                 raise _state_invalid()
             return await self._hydrate_record(connection, reserved)
+
+    async def _record_provider_identity_once(
+        self,
+        *,
+        session_id: MultipartUploadSessionId,
+        staging_key: str,
+        provider_upload_id: MultipartProviderUploadId,
+        device_context: SmallFileDeviceContext,
+    ) -> MultipartSessionRecord:
+        async with (
+            self._engine.connect() as connection,
+            connection.begin(),
+        ):
+            await apply_transaction_bounds(connection)
+            row = await self._fetch_session_row(connection, session_id)
+            if row is None:
+                raise _session_not_found()
+            self._require_owner(row, device_context)
+            if row.carries_provider_identity(staging_key, provider_upload_id.value):
+                return await self._hydrate_record(connection, row)
+            if row.state not in _IDENTITY_RECORDING_STATES:
+                raise _state_invalid()
+            if row.is_forward_expired(self._clock()):
+                raise _session_expired()
+            if row.has_provider_identity():
+                raise _provider_state_invalid()
+            guarded = await connection.execute(
+                provider_identity_update_statement(
+                    session_id_value=row.session_id_value,
+                    staging_key=staging_key,
+                    provider_upload_id_value=provider_upload_id.value,
+                )
+            )
+            if guarded.rowcount != 1:
+                raise _provider_state_invalid()
+            refreshed = await self._fetch_session_row(connection, session_id)
+            if refreshed is None:  # pragma: no cover - the row is locked
+                raise _state_invalid()
+            return await self._hydrate_record(connection, refreshed)
 
     async def _load_owned_session_once(
         self,
@@ -1257,6 +1388,8 @@ class PostgresqlMultipartUploadStore:
             if row is None:
                 raise _session_not_found()
             self._require_owner(row, device_context)
+            if not row.has_provider_identity():
+                raise _state_invalid()
             if row.state not in _PART_RECORDING_STATES:
                 raise _state_invalid()
             if row.is_forward_expired(self._clock()):
@@ -1317,6 +1450,10 @@ class PostgresqlMultipartUploadStore:
             if row is None:
                 raise _session_not_found()
             self._require_owner(row, device_context)
+            if not row.has_provider_identity():
+                # A session whose provider create never completed cannot
+                # claim the serialized completion.
+                raise _state_invalid()
             if row.state is MultipartSessionState.COMMITTED:
                 return MultipartSessionClaim(
                     session=await self._hydrate_record(connection, row),
@@ -1565,7 +1702,11 @@ class PostgresqlMultipartUploadStore:
             total_size_bytes=row.declared_size_bytes,
             expires_at=row.expires_at,
             staging_key=row.staging_key,
-            provider_upload_id=MultipartProviderUploadId(row.provider_upload_id_value),
+            provider_upload_id=(
+                None
+                if row.provider_upload_id_value is None
+                else MultipartProviderUploadId(row.provider_upload_id_value)
+            ),
             completed_part_numbers=completed_part_numbers,
             terminal_result=row.terminal_result(),
         )

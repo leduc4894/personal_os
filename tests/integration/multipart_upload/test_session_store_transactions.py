@@ -3,21 +3,27 @@
 Live coverage of the durable semantics the unit seam cannot prove: one
 frozen operation resolves exactly one session for its whole lifetime — a
 sequential exact replay and a concurrent reservation storm converge on the
-same row with no second provider workload; the finite completion lease
-serializes completion (one claimant wins, the concurrent callers observe
-the closed in-progress token) and fences every terminal write (a lease
-that expired and was reclaimed can never land the old claimant's result,
-while the replacement claimant and the committed replay can); part facts
-land only when they match the exact session geometry, replaying the same
-provider observation is idempotent and a conflicting observation fails
-closed; ownership and the 24-hour deadline fail closed at load; the expiry
-sweep strikes overdue forward sessions into the cleanup obligation, the
-cleanup lease fences stale workers, a failed cleanup persists its closed
-reason with an exact bounded next retry, and a succeeded cleanup freezes
-the terminal cleaned shape; and the four hot statements address the
-shipped indexes (unique session/operation lookups, the partial expiry
-sweep and the partial cleanup claim) without sequentially scanning a
-populated session table.
+same row with no second provider workload; the spec 6.1 creation order is
+durable — the reservation persists the session BEFORE any provider call
+with no provider identity, the fenced post-create identity write lands
+the private staging identity exactly once, the identical identity replays
+idempotently, a divergent identity surfaces the caller's orphan as the
+closed provider-state-invalid rejection, and a live completion claim
+fences straggler identity writes; the finite completion lease serializes
+completion (one claimant wins, the concurrent callers observe the closed
+in-progress token) and fences every terminal write (a lease that expired
+and was reclaimed can never land the old claimant's result, while the
+replacement claimant and the committed replay can); part facts land only
+when they match the exact session geometry, replaying the same provider
+observation is idempotent and a conflicting observation fails closed;
+ownership and the 24-hour deadline fail closed at load; the expiry sweep
+strikes overdue forward sessions into the cleanup obligation, the cleanup
+lease fences stale workers, a failed cleanup persists its closed reason
+with an exact bounded next retry, and a succeeded cleanup freezes the
+terminal cleaned shape; and the four hot statements address the shipped
+indexes (unique session/operation lookups, the partial expiry sweep and
+the partial cleanup claim) without sequentially scanning a populated
+session table.
 """
 
 from __future__ import annotations
@@ -50,6 +56,7 @@ from personal_os.multipart_upload.contracts import (
 from personal_os.multipart_upload.errors import MultipartUploadError
 from personal_os.multipart_upload.ports import (
     MultipartProviderPartETag,
+    MultipartProviderUploadId,
     MultipartSessionClaim,
     MultipartSessionRecord,
 )
@@ -188,12 +195,161 @@ class TestSessionReservationReplay:
         with pytest.raises(MultipartUploadError, match="multipart_session_state_invalid"):
             await harness.store.reserve_session(
                 operation=seeded.operation,
-                staging_key=seeded.staging_key,
-                provider_upload_id=seeded.provider_upload_id,
                 device_context=foreign_device,
                 diagnostic_context=diagnostic_context(),
             )
         assert await harness.session_count(device_context.workspace_id) == 0
+
+
+class TestProviderIdentityWrite:
+    @pytest.mark.asyncio
+    async def test_reserve_persists_session_before_provider_create(
+        self, multipart_store_harness: MultipartStoreHarness
+    ) -> None:
+        harness = multipart_store_harness
+        device_context = await harness.seed_device()
+        seeded = await harness.seed_operation(device_context, now=_now(harness))
+
+        record = await harness.reserve_session_only(seeded, device_context)
+
+        assert record.state is MultipartSessionState.CREATED
+        assert record.staging_key is None
+        assert record.provider_upload_id is None
+        assert await harness.session_count(device_context.workspace_id) == 1
+
+    @pytest.mark.asyncio
+    async def test_post_create_identity_write_and_idempotent_replay(
+        self, multipart_store_harness: MultipartStoreHarness
+    ) -> None:
+        harness = multipart_store_harness
+        device_context = await harness.seed_device()
+        seeded = await harness.seed_operation(device_context, now=_now(harness))
+        record = await harness.reserve_session_only(seeded, device_context)
+
+        identified = await harness.store.record_provider_identity(
+            session_id=record.session_id,
+            staging_key=seeded.staging_key,
+            provider_upload_id=seeded.provider_upload_id,
+            device_context=device_context,
+            diagnostic_context=diagnostic_context(),
+        )
+        assert identified.staging_key == seeded.staging_key
+        assert identified.provider_upload_id == seeded.provider_upload_id
+
+        # A caller that lost the response replays the identical identity:
+        # it converges instead of writing or failing.
+        replay = await harness.store.record_provider_identity(
+            session_id=record.session_id,
+            staging_key=seeded.staging_key,
+            provider_upload_id=seeded.provider_upload_id,
+            device_context=device_context,
+            diagnostic_context=diagnostic_context(),
+        )
+        assert replay == identified
+        loaded = await harness.store.load_owned_session(
+            session_id=record.session_id,
+            device_context=device_context,
+            diagnostic_context=diagnostic_context(),
+        )
+        assert loaded.staging_key == seeded.staging_key
+        assert loaded.provider_upload_id == seeded.provider_upload_id
+        assert await harness.session_count(device_context.workspace_id) == 1
+
+    @pytest.mark.asyncio
+    async def test_divergent_provider_identity_fails_closed(
+        self, multipart_store_harness: MultipartStoreHarness
+    ) -> None:
+        harness = multipart_store_harness
+        device_context = await harness.seed_device()
+        seeded = await harness.seed_operation(device_context, now=_now(harness))
+        record = await harness.reserve_session_only(seeded, device_context)
+        await harness.store.record_provider_identity(
+            session_id=record.session_id,
+            staging_key=seeded.staging_key,
+            provider_upload_id=seeded.provider_upload_id,
+            device_context=device_context,
+            diagnostic_context=diagnostic_context(),
+        )
+
+        # A caller that minted a second upload after a lost response must
+        # see its orphan surfaced, not silently discarded.
+        with pytest.raises(MultipartUploadError, match="multipart_provider_state_invalid"):
+            await harness.store.record_provider_identity(
+                session_id=record.session_id,
+                staging_key=f"{seeded.staging_key}-second-mint",
+                provider_upload_id=MultipartProviderUploadId(
+                    f"{seeded.provider_upload_id.value}-second-mint"
+                ),
+                device_context=device_context,
+                diagnostic_context=diagnostic_context(),
+            )
+        loaded = await harness.store.load_owned_session(
+            session_id=record.session_id,
+            device_context=device_context,
+            diagnostic_context=diagnostic_context(),
+        )
+        assert loaded.staging_key == seeded.staging_key
+
+    @pytest.mark.asyncio
+    async def test_identity_less_session_cannot_take_parts_or_completion(
+        self, multipart_store_harness: MultipartStoreHarness
+    ) -> None:
+        harness = multipart_store_harness
+        device_context = await harness.seed_device()
+        seeded = await harness.seed_operation(device_context, now=_now(harness))
+        record = await harness.reserve_session_only(seeded, device_context)
+
+        with pytest.raises(MultipartUploadError, match="multipart_session_state_invalid"):
+            await harness.store.record_provider_part(
+                session_id=record.session_id,
+                part_number=1,
+                etag=MultipartProviderPartETag("identity-less-part"),
+                verified_size_bytes=MULTIPART_PART_SIZE_BYTES,
+                device_context=device_context,
+                diagnostic_context=diagnostic_context(),
+            )
+        with pytest.raises(MultipartUploadError, match="multipart_session_state_invalid"):
+            await harness.store.claim_completion(
+                session_id=record.session_id,
+                device_context=device_context,
+                diagnostic_context=diagnostic_context(),
+            )
+
+    @pytest.mark.asyncio
+    async def test_identity_write_is_fenced_by_state_and_lease(
+        self, multipart_store_harness: MultipartStoreHarness
+    ) -> None:
+        harness = multipart_store_harness
+        device_context = await harness.seed_device()
+        seeded = await harness.seed_operation(device_context, now=_now(harness))
+        record = await harness.reserve_session_only(seeded, device_context)
+        await harness.store.record_provider_identity(
+            session_id=record.session_id,
+            staging_key=seeded.staging_key,
+            provider_upload_id=seeded.provider_upload_id,
+            device_context=device_context,
+            diagnostic_context=diagnostic_context(),
+        )
+
+        claim = await harness.store.claim_completion(
+            session_id=record.session_id,
+            device_context=device_context,
+            diagnostic_context=diagnostic_context(),
+        )
+        assert claim.claim_token is not None
+
+        # While a live completion claim holds the session, a straggler
+        # offering a different identity is fenced out by the state guard.
+        with pytest.raises(MultipartUploadError, match="multipart_session_state_invalid"):
+            await harness.store.record_provider_identity(
+                session_id=record.session_id,
+                staging_key=f"{seeded.staging_key}-straggler",
+                provider_upload_id=MultipartProviderUploadId(
+                    f"{seeded.provider_upload_id.value}-straggler"
+                ),
+                device_context=device_context,
+                diagnostic_context=diagnostic_context(),
+            )
 
 
 class TestCompletionFencing:

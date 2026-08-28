@@ -673,10 +673,12 @@ manifest_actions: Final[Table] = Table(
     sa.PrimaryKeyConstraint("manifest_run_id", "action_index", name="pk_manifest_actions"),
 )
 
-#: Durable multipart upload session state (migration ``20260828_01``). The
-#: ``staging_key`` and ``provider_upload_id`` columns are private provider
-#: identity: they never render in a repr, log, metric or API schema, and no
-#: presigned URL is ever durable state.
+#: Durable multipart upload session state (migrations ``20260828_01`` and
+#: ``20260828_03``). The ``staging_key`` and ``provider_upload_id`` columns
+#: are private provider identity: they land only through the store's fenced
+#: post-create write (spec 6.1 persist-before-create), stay NULL until then,
+#: and never render in a repr, log, metric or API schema; no presigned URL is
+#: ever durable state.
 multipart_uploads: Final[Table] = Table(
     "multipart_uploads",
     _SOURCE_STORE_METADATA,
@@ -692,8 +694,8 @@ multipart_uploads: Final[Table] = Table(
     Column("policy_revision_number", sa.BigInteger(), nullable=False),
     Column("part_size_bytes", sa.BigInteger(), nullable=False),
     Column("part_count", sa.Integer(), nullable=False),
-    Column("staging_key", sa.Text(), nullable=False),
-    Column("provider_upload_id", sa.Text(), nullable=False),
+    Column("staging_key", sa.Text(), nullable=True),
+    Column("provider_upload_id", sa.Text(), nullable=True),
     Column("state", sa.Text(), nullable=False),
     Column("claim_token", sa.Uuid(), nullable=True),
     Column("claim_expires_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),

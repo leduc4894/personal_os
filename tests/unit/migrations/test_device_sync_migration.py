@@ -245,9 +245,10 @@ def test_device_sync_revision_extends_source_lifecycle_head() -> None:
 
 def test_device_sync_revision_is_the_single_alembic_head() -> None:
     scripts = ScriptDirectory.from_config(Config(str(ALEMBIC_INI_PATH)))
-    # The multipart upload and operation-size-bound revisions stack on the
-    # run client-activity revision, so the single graph head moved past it.
-    assert scripts.get_heads() == ["20260828_02"]
+    # The multipart upload, operation-size-bound and deferred-identity
+    # revisions stack on the run client-activity revision, so the single graph
+    # head moved past it.
+    assert scripts.get_heads() == ["20260828_03"]
     revision = scripts.get_revision(RUN_CLIENT_ACTIVITY_REVISION)
     assert revision is not None
     assert revision.down_revision == DOWNLOAD_ENTRY_ECHO_REVISION

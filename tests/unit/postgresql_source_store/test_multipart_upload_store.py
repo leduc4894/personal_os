@@ -59,6 +59,7 @@ from postgresql_source_store.multipart_upload_store import (
     multipart_operation_select_statement,
     multipart_session_insert_statement,
     multipart_session_select_statement,
+    provider_identity_update_statement,
     require_terminal_failure_state,
     terminal_failure_update_statement,
     terminal_result_update_statement,
@@ -184,7 +185,7 @@ class TestStatementShapes:
         assert "knowledge.multipart_uploads" in compiled
         assert _SESSION_ID.value not in compiled
 
-    def test_reserve_insert_is_parameter_bound_and_opens_created(self) -> None:
+    def test_reserve_insert_is_parameter_bound_and_defers_provider_identity(self) -> None:
         statement = multipart_session_insert_statement(
             multipart_upload_id=uuid4(),
             session_id_value=_SESSION_ID.value,
@@ -198,16 +199,29 @@ class TestStatementShapes:
             policy_revision_number=4,
             part_size_bytes=8 * 1024 * 1024,
             part_count=3,
+            expires_at=_NOW + timedelta(hours=24),
+        )
+        compiled = _compiled(statement)
+        # The reservation happens before the provider create: the row opens
+        # with NULL private identity and no session value is SQL text.
+        assert _SESSION_ID.value not in compiled
+        assert "knowledge.multipart_uploads" in compiled
+
+    def test_provider_identity_write_is_guarded_compare_and_set(self) -> None:
+        statement = provider_identity_update_statement(
+            session_id_value=_SESSION_ID.value,
             staging_key=_STAGING_KEY,
             provider_upload_id_value=_PROVIDER_UPLOAD_ID.value,
-            expires_at=_NOW + timedelta(hours=24),
         )
         compiled = _compiled(statement)
         # Private provider identity is parameter-bound, never SQL text.
         assert _STAGING_KEY not in compiled
         assert _PROVIDER_UPLOAD_ID.value not in compiled
-        assert _SESSION_ID.value not in compiled
-        assert "knowledge.multipart_uploads" in compiled
+        # The guard admits exactly the identity-absent, claim-free
+        # pre-completion shape.
+        assert "staging_key IS NULL" in compiled
+        assert "provider_upload_id IS NULL" in compiled
+        assert "claim_token IS NULL" in compiled
 
     def test_completion_claim_transition_is_guarded_compare_and_set(self) -> None:
         claim_token = uuid4()

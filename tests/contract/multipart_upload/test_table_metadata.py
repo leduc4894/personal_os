@@ -1,9 +1,10 @@
 """Multipart upload DML metadata contract against the migration DDL authority.
 
-The Alembic migration ``20260828_01`` is the DDL authority for the multipart
-upload schema. This test loads the migration module, replays its
-``upgrade()`` against a recording stub of ``alembic.op`` and compares the two
-schema-qualified tables it creates with the typed DML metadata exported by
+The Alembic migrations ``20260828_01`` (table creation) and ``20260828_03``
+(deferred provider identity) are the DDL authority for the multipart upload
+schema. This test loads both migration modules, replays their ``upgrade()``
+against a recording stub of ``alembic.op`` and compares the resulting two
+schema-qualified tables with the typed DML metadata exported by
 ``postgresql_source_store.tables``: identical table names, schema, column
 names, column types and nullability, identical primary keys, constraint
 ownership staying with the migration (the DML tables duplicate no unique or
@@ -28,9 +29,10 @@ from postgresql_source_store.tables import (
     multipart_uploads,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT: Path = Path(__file__).resolve().parents[3]
 MIGRATION_DIRECTORY = REPO_ROOT / "migrations" / "versions"
 MIGRATION_GLOB = "20260828_01*.py"
+DEFERRED_IDENTITY_MIGRATION_GLOB = "20260828_03*.py"
 
 MULTIPART_TABLE_NAMES = frozenset({"multipart_uploads", "multipart_parts"})
 
@@ -76,6 +78,19 @@ class _RecordingAlembicOp:
     def create_index(self, *args: Any, **kwargs: Any) -> None:
         return None
 
+    def alter_column(
+        self, table_name: str, column_name: str, *, nullable: bool | None = None, **kwargs: Any
+    ) -> None:
+        if nullable is None:
+            return None
+        for table in self.created_tables:
+            if table.name == table_name and column_name in table.columns:
+                table.columns[column_name].nullable = nullable
+                return None
+        raise AssertionError(
+            f"alter_column addressed no recorded column: {table_name}.{column_name}"
+        )
+
     def execute(self, *args: Any, **kwargs: Any) -> None:
         return None
 
@@ -86,19 +101,28 @@ class _RecordingAlembicOp:
         return _ScriptedBind()
 
 
-def _collect_migration_tables() -> dict[str, sa.Table]:
-    matches = sorted(MIGRATION_DIRECTORY.glob(MIGRATION_GLOB))
+def _load_migration_module(label: str, pattern: str) -> Any:
+    matches = sorted(MIGRATION_DIRECTORY.glob(pattern))
     assert len(matches) == 1, (
-        f"expected exactly one migration matching {MIGRATION_GLOB}, found {matches}"
+        f"expected exactly one migration matching {pattern}, found {matches}"
     )
-    spec = importlib.util.spec_from_file_location("multipart_migration", matches[0])
+    spec = importlib.util.spec_from_file_location(label, matches[0])
     assert spec is not None and spec.loader is not None
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)
+    return migration
 
+
+def _collect_migration_tables() -> dict[str, sa.Table]:
     recorder = _RecordingAlembicOp()
-    migration.op = recorder  # type: ignore[attr-defined]
-    migration.upgrade()
+    creation = _load_migration_module("multipart_migration", MIGRATION_GLOB)
+    creation.op = recorder  # type: ignore[attr-defined]
+    creation.upgrade()
+    deferred_identity = _load_migration_module(
+        "multipart_deferred_identity_migration", DEFERRED_IDENTITY_MIGRATION_GLOB
+    )
+    deferred_identity.op = recorder  # type: ignore[attr-defined]
+    deferred_identity.upgrade()
     return {table.name: table for table in recorder.created_tables}
 
 
@@ -159,7 +183,11 @@ def test_provider_identity_columns_are_private_text() -> None:
     """The provider identity is private text; no URL shape is persisted.
 
     The exact staging key, provider upload ID and provider ETag are
-    database-sensitive fields the store keeps as private text columns. A
+    database-sensitive fields the store keeps as private text columns. The
+    two session identity columns are nullable (migration ``20260828_03``):
+    spec 6.1 persists the session before the provider create, so the
+    identity lands only through the fenced post-create write; the provider
+    ETag is only ever written for a confirmed part and stays mandatory. A
     presigned URL (or any URL, query or signature fragment) is short-lived
     authorization, never durable state, so no such column may exist in
     either the DDL or the DML representation.
@@ -168,7 +196,10 @@ def test_provider_identity_columns_are_private_text() -> None:
     for table_name, column_name in sorted(PRIVATE_PROVIDER_COLUMNS):
         column = SOURCE_STORE_TABLES[table_name].columns[column_name]
         assert isinstance(column.type, sa.Text), (table_name, column_name)
-        assert not column.nullable, (table_name, column_name)
+        is_session_identity_column = (table_name, column_name) in frozenset(
+            {("multipart_uploads", "staging_key"), ("multipart_uploads", "provider_upload_id")}
+        )
+        assert column.nullable is is_session_identity_column, (table_name, column_name)
 
     for table_name in sorted(MULTIPART_TABLE_NAMES):
         for column in SOURCE_STORE_TABLES[table_name].columns:
