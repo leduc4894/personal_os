@@ -55,6 +55,13 @@ class ApiRouteTemplate(StrEnum):
     SYNC_EXCLUSION_POLICY_SNAPSHOT = "/api/sync/exclusion-policy/snapshot"
     SYNC_JOURNAL_EVENTS_PREFLIGHT = "/api/sync/journal-events/preflight"
     UPLOAD_CONTENT = "/api/uploads/{operation_id}/content"
+    UPLOAD_MULTIPART_SESSIONS = "/api/uploads/multipart-sessions"
+    UPLOAD_MULTIPART_SESSION = "/api/uploads/multipart-sessions/{session_id}"
+    UPLOAD_MULTIPART_SESSION_PART_URL = (
+        "/api/uploads/multipart-sessions/{session_id}/parts/{part_number}/url"
+    )
+    UPLOAD_MULTIPART_SESSION_COMPLETE = "/api/uploads/multipart-sessions/{session_id}/complete"
+    UPLOAD_MULTIPART_SESSION_ABORT = "/api/uploads/multipart-sessions/{session_id}/abort"
     SYNC_SOURCE_LIFECYCLE_EVENTS = "/api/sources/lifecycle-events"
     SYNC_EVENTS = "/api/sync/events"
     SYNC_CURSOR_ACKNOWLEDGEMENTS = "/api/sync/cursor-acknowledgements"
@@ -136,6 +143,23 @@ SMALL_FILE_SYNC_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset(
     }
 )
 
+#: The closed multipart upload route set of the resumable multipart mobile
+#: upload design (Child 7 spec 5): session create-or-resume, safe status, one
+#: short-lived part-URL issuance, completion and user cancellation, all behind
+#: the ``obsidian_sync`` access Bearer credential with workspace and device
+#: derived from the resolved token context — never a request field. The
+#: part-URL response is the sole surface a signed URL may appear on, so the
+#: whole set carries the strictest cache-suppression posture.
+MULTIPART_UPLOAD_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset(
+    {
+        ApiRouteTemplate.UPLOAD_MULTIPART_SESSIONS,
+        ApiRouteTemplate.UPLOAD_MULTIPART_SESSION,
+        ApiRouteTemplate.UPLOAD_MULTIPART_SESSION_PART_URL,
+        ApiRouteTemplate.UPLOAD_MULTIPART_SESSION_COMPLETE,
+        ApiRouteTemplate.UPLOAD_MULTIPART_SESSION_ABORT,
+    }
+)
+
 #: The closed source lifecycle route set of the lifecycle API (spec 19.2):
 #: the lifecycle-events commit behind the ``obsidian_sync`` access Bearer
 #: credential. The route never carries a workspace or device selector; both
@@ -198,14 +222,16 @@ EXCLUSION_POLICY_DIAGNOSTICS_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]]
 #: Every route whose responses — success, service rejection and dependency
 #: failure alike — carry ``Cache-Control: no-store`` (spec 16): the
 #: authentication-bound sets plus the exclusion-policy, small-file sync,
-#: source lifecycle, device sync and the three diagnostics admin route sets,
-#: whose payloads are per-request policy state, signed envelopes,
-#: device-derived sync results, verified private bytes and per-process
-#: rejection evidence that must never come from a shared cache.
+#: multipart upload, source lifecycle, device sync and the three diagnostics
+#: admin route sets, whose payloads are per-request policy state, signed
+#: envelopes, device-derived sync results, verified private bytes, one
+#: short-lived presigned URL and per-process rejection evidence that must
+#: never come from a shared cache.
 NO_STORE_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = (
     AUTHENTICATION_ROUTE_TEMPLATES
     | EXCLUSION_POLICY_ROUTE_TEMPLATES
     | SMALL_FILE_SYNC_ROUTE_TEMPLATES
+    | MULTIPART_UPLOAD_ROUTE_TEMPLATES
     | SOURCE_LIFECYCLE_ROUTE_TEMPLATES
     | DEVICE_SYNC_ROUTE_TEMPLATES
     | SYNC_DIAGNOSTICS_ROUTE_TEMPLATES

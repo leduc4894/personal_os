@@ -63,7 +63,11 @@ def test_the_small_file_surface_is_exactly_the_two_routes(
     sync_paths = {
         route.path
         for route in application.routes
-        if getattr(route, "path", "").startswith(("/api/sync/journal-events", "/api/uploads"))
+        if getattr(route, "path", "")
+        in (
+            "/api/sync/journal-events/preflight",
+            "/api/uploads/{operation_id}/content",
+        )
     }
     assert sync_paths == set(SYNC_ROUTE_METHODS)
     for path, methods in SYNC_ROUTE_METHODS.items():

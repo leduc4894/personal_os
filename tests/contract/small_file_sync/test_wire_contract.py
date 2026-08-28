@@ -50,7 +50,7 @@ from tests.integration.small_file_sync.conftest import (
 from personal_os.api_contracts.errors import HTTP_ERROR_STATUSES
 from personal_os.error_contracts.codes import ERROR_DEFINITIONS, ErrorCode
 from personal_os.object_storage import CanonicalMediaType, ContentDigest, ExpectedObject
-from personal_os.small_file_sync.contracts import MAX_SINGLE_PART_FILE_SIZE_BYTES
+from personal_os.small_file_sync.contracts import MAX_UPLOAD_FILE_SIZE_BYTES
 from personal_os.sources.commands import SourceType
 from personal_os.sources.reading import CanonicalSourceReference
 
@@ -278,8 +278,11 @@ def _offline_drivers(offline_harness: SmallFileWireHarness) -> dict[str, Callabl
         return offline_harness.upload(token, _CONTENT)
 
     def size_limit() -> Any:
+        # One byte above the 100 MiB product maximum keeps the closed
+        # size-limit rejection; a size above the unchanged 16 MiB routing
+        # constant now routes to the multipart session endpoints (Child 7).
         return offline_harness.preflight(
-            _create_body(size_bytes=MAX_SINGLE_PART_FILE_SIZE_BYTES + 1, sha256_text="0" * 64)
+            _create_body(size_bytes=MAX_UPLOAD_FILE_SIZE_BYTES + 1, sha256_text="0" * 64)
         )
 
     def integrity_failed() -> Any:

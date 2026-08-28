@@ -49,7 +49,10 @@ from fastapi.testclient import TestClient
 
 from personal_os.object_storage import CanonicalMediaType, ContentDigest, ExpectedObject
 from personal_os.runtime_configuration.models import RuntimeEnvironment
-from personal_os.small_file_sync.contracts import MAX_SINGLE_PART_FILE_SIZE_BYTES
+from personal_os.small_file_sync.contracts import (
+    MAX_SINGLE_PART_FILE_SIZE_BYTES,
+    MAX_UPLOAD_FILE_SIZE_BYTES,
+)
 from personal_os.sources.commands import SourceType
 from personal_os.sources.reading import CanonicalSourceReference
 
@@ -380,10 +383,28 @@ def test_preflight_maps_domain_grammar_violations_to_closed_reasons(
 def test_preflight_rejects_declared_size_over_the_server_ceiling(
     harness: SmallFileRouteHarness,
 ) -> None:
-    body = create_body(size_bytes=MAX_SINGLE_PART_FILE_SIZE_BYTES + 1)
+    body = create_body(size_bytes=MAX_UPLOAD_FILE_SIZE_BYTES + 1)
     response = preflight(harness, body)
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "small_file_size_limit_exceeded"
+    assert harness.sync_state.reservation_count == 0
+
+
+def test_preflight_routes_single_part_overload_to_the_multipart_outcome(
+    harness: SmallFileRouteHarness,
+) -> None:
+    """One byte above the routing constant is a server-owned multipart plan.
+
+    The preflight outcome stays payload-free: the client derives its opaque
+    session, geometry and part URLs only from the multipart session
+    endpoints after this decision (Child 7 spec 4).
+    """
+
+    body = create_body(size_bytes=MAX_SINGLE_PART_FILE_SIZE_BYTES + 1)
+    response = preflight(harness, body)
+    assert response.status_code == 200
+    data = dict(response.json()["data"])
+    assert data == {"outcome": "multipart_upload"}
     assert harness.sync_state.reservation_count == 0
 
 

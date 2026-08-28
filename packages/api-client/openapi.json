@@ -848,6 +848,186 @@
         "title": "ApiEnvelope[ManifestRunReceiptData]",
         "type": "object"
       },
+      "ApiEnvelope_MultipartCompletionData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MultipartCompletionData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[MultipartCompletionData]",
+        "type": "object"
+      },
+      "ApiEnvelope_MultipartPartUrlData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MultipartPartUrlData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[MultipartPartUrlData]",
+        "type": "object"
+      },
+      "ApiEnvelope_MultipartSessionPlanData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MultipartSessionPlanData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[MultipartSessionPlanData]",
+        "type": "object"
+      },
+      "ApiEnvelope_MultipartSessionStatusData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MultipartSessionStatusData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[MultipartSessionStatusData]",
+        "type": "object"
+      },
       "ApiEnvelope_PolicyDraftData_": {
         "additionalProperties": false,
         "properties": {
@@ -2867,6 +3047,268 @@
           "client_observation_generation"
         ],
         "title": "ManifestStartRequest",
+        "type": "object"
+      },
+      "MultipartCompletionData": {
+        "additionalProperties": false,
+        "description": "The safe result of one completion claim (spec 4.2/5).\n\nEither the session is still completing under its durable claimant and\ncarries only its persisted state, or the claim finished and the frozen\nterminal source-event result returns unchanged on every exact replay.\nNo URL, provider identity or digest is ever a member.",
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/MultipartSessionState"
+          },
+          "terminal_result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SmallFileTerminalResultData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "title": "MultipartCompletionData",
+        "type": "object"
+      },
+      "MultipartPartUrlData": {
+        "additionalProperties": false,
+        "description": "The one short-lived presigned part authorization (spec 4/5).\n\nThe sole response model of the entire multipart surface that carries a\n``url`` member: exactly one bearer URL, its own expiry, the numbered\npart and the exact derived byte window the single PUT must transmit.\nThe response is never persisted by the client, never copied into any\nother model and never written to an application log; the URL value\nitself is the only field no other surface may render.",
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "offset_bytes": {
+            "minimum": 0.0,
+            "title": "Offset Bytes",
+            "type": "integer"
+          },
+          "part_number": {
+            "minimum": 1.0,
+            "title": "Part Number",
+            "type": "integer"
+          },
+          "size_bytes": {
+            "exclusiveMinimum": 0.0,
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "url": {
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "part_number",
+          "offset_bytes",
+          "size_bytes",
+          "url",
+          "expires_at"
+        ],
+        "title": "MultipartPartUrlData",
+        "type": "object"
+      },
+      "MultipartSessionCreateRequest": {
+        "additionalProperties": false,
+        "description": "The strict multipart session create-or-resume body (spec 5).\n\nInherits the journal-event preflight grammar exactly — the stable event\nidentity, the idempotency key, the create/update operation shape, the\nplugin-local file identity and the declared fingerprint — because the\ncreate call binds the very same frozen operation the preflight decided.\nNever a workspace, device, user, receipt, presigned URL, provider or\nobject-store selector: the credential alone derives the scope.",
+        "properties": {
+          "base_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Version Id"
+          },
+          "event_id": {
+            "format": "uuid",
+            "title": "Event Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "local_file_id": {
+            "format": "uuid",
+            "title": "Local File Id",
+            "type": "string"
+          },
+          "media_type": {
+            "title": "Media Type",
+            "type": "string"
+          },
+          "normalized_locator": {
+            "title": "Normalized Locator",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "create",
+              "update"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "policy_revision": {
+            "title": "Policy Revision",
+            "type": "integer"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Id"
+          }
+        },
+        "required": [
+          "event_id",
+          "idempotency_key",
+          "operation",
+          "local_file_id",
+          "normalized_locator",
+          "sha256",
+          "size_bytes",
+          "media_type",
+          "policy_revision"
+        ],
+        "title": "MultipartSessionCreateRequest",
+        "type": "object"
+      },
+      "MultipartSessionPlanData": {
+        "additionalProperties": false,
+        "description": "The server-owned plan of one permitted multipart transfer (spec 4).\n\nExactly the opaque public session ID, the frozen part geometry and the\n24-hour session expiry — and nothing else: no signed URL, staging key,\nprovider identity, ETag, receipt or storage detail ever crosses with\nthe plan. The client derives the status route from the fixed contract\nand the session ID alone.",
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "part_count": {
+            "exclusiveMinimum": 0.0,
+            "title": "Part Count",
+            "type": "integer"
+          },
+          "part_size_bytes": {
+            "exclusiveMinimum": 0.0,
+            "title": "Part Size Bytes",
+            "type": "integer"
+          },
+          "session_id": {
+            "maxLength": 128,
+            "minLength": 32,
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "part_size_bytes",
+          "part_count",
+          "expires_at"
+        ],
+        "title": "MultipartSessionPlanData",
+        "type": "object"
+      },
+      "MultipartSessionState": {
+        "description": "Closed server session states of the multipart lifecycle (spec 4.2).\n\n``committed`` is the frozen successful source-event outcome, not merely a\ncompleted provider multipart object. ``integrity_failed`` and\n``policy_denied`` are terminal for that frozen event and never publish.\n``cleanup_pending`` is a cleanup obligation, not permission to reuse the\nsession. Transitions are validated against the closed\n:data:`MULTIPART_SESSION_TRANSITIONS` table; the two terminal outcomes\n(``committed`` and ``cleaned``) accept no further transition.",
+        "enum": [
+          "created",
+          "uploading",
+          "completing",
+          "verifying",
+          "promoting",
+          "committed",
+          "cancelling",
+          "expired",
+          "integrity_failed",
+          "policy_denied",
+          "cleanup_pending",
+          "cleaned"
+        ],
+        "title": "MultipartSessionState",
+        "type": "string"
+      },
+      "MultipartSessionStatusData": {
+        "additionalProperties": false,
+        "description": "The safe observable state of one multipart session (spec 4/5).\n\nThe opaque session ID, the current state, the frozen geometry, the\nsession expiry, the ordered provider-reconciled completed part numbers\nand — only once the session is committed — its frozen terminal\nsource-event receipt. No digest, staging key, provider identity, URL or\nsigned material is a member, so none can ever render.",
+        "properties": {
+          "completed_part_numbers": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Completed Part Numbers",
+            "type": "array"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "part_count": {
+            "exclusiveMinimum": 0.0,
+            "title": "Part Count",
+            "type": "integer"
+          },
+          "part_size_bytes": {
+            "exclusiveMinimum": 0.0,
+            "title": "Part Size Bytes",
+            "type": "integer"
+          },
+          "session_id": {
+            "maxLength": 128,
+            "minLength": 32,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/MultipartSessionState"
+          },
+          "terminal_result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SmallFileTerminalResultData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "session_id",
+          "state",
+          "part_size_bytes",
+          "part_count",
+          "expires_at",
+          "completed_part_numbers"
+        ],
+        "title": "MultipartSessionStatusData",
         "type": "object"
       },
       "NormalizedLocator": {
@@ -6510,6 +6952,195 @@
           }
         ],
         "summary": "Append Manifest Page"
+      }
+    },
+    "/api/uploads/multipart-sessions": {
+      "post": {
+        "description": "Create or exactly replay the one session of a frozen operation.",
+        "operationId": "createMultipartUploadSession",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MultipartSessionCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_MultipartSessionPlanData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Create Session"
+      }
+    },
+    "/api/uploads/multipart-sessions/{session_id}": {
+      "get": {
+        "description": "Return the safe observable state, reconciling forward sessions.",
+        "operationId": "getMultipartUploadSession",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{32,128}$",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_MultipartSessionStatusData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Get Session"
+      }
+    },
+    "/api/uploads/multipart-sessions/{session_id}/abort": {
+      "post": {
+        "description": "Terminalize user cancellation into the exact cleanup obligation.",
+        "operationId": "abortMultipartUploadSession",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{32,128}$",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_MultipartSessionStatusData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Abort Session"
+      }
+    },
+    "/api/uploads/multipart-sessions/{session_id}/complete": {
+      "post": {
+        "description": "Claim completion; provider-list parts, complete, verify and promote.",
+        "operationId": "completeMultipartUploadSession",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{32,128}$",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_MultipartCompletionData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Complete Session"
+      }
+    },
+    "/api/uploads/multipart-sessions/{session_id}/parts/{part_number}/url": {
+      "post": {
+        "description": "Recheck authority/policy/state and issue one short-lived part URL.\n\nThe sole response of the surface carrying a signed URL: the value\nrenders once on this uncacheable response and is never copied into\nany other model, log or persisted record.",
+        "operationId": "issueMultipartPartUrl",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{32,128}$",
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "part_number",
+            "required": true,
+            "schema": {
+              "maximum": 13,
+              "minimum": 1,
+              "title": "Part Number",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_MultipartPartUrlData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Issue Part Url"
       }
     },
     "/api/uploads/{operation_id}/content": {

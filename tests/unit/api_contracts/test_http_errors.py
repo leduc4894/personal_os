@@ -133,6 +133,25 @@ def test_http_status_map_is_closed_for_the_api_surface() -> None:
         ErrorCode.DEVICE_MANIFEST_POLICY_ADVANCED: 409,
         ErrorCode.DEVICE_DOWNLOAD_INTEGRITY_FAILED: 422,
         ErrorCode.DEVICE_SYNC_DEPENDENCY_UNAVAILABLE: 503,
+        # The multipart upload block of the resumable multipart mobile
+        # upload design (Child 7 spec 7), wired when the session routes
+        # landed: 422 for the part/geometry validation and the decided
+        # integrity verdicts, 404 for an unknown opaque session, 410 for
+        # the expired session, 409 for the state/concurrent-completion
+        # conflicts and the changed local file, 403 for the rechecked
+        # policy denial, and one 503 per retryable dependency failure.
+        ErrorCode.MULTIPART_SESSION_NOT_FOUND: 404,
+        ErrorCode.MULTIPART_SESSION_EXPIRED: 410,
+        ErrorCode.MULTIPART_SESSION_STATE_INVALID: 409,
+        ErrorCode.MULTIPART_PART_INVALID: 422,
+        ErrorCode.MULTIPART_PART_URL_REJECTED: 503,
+        ErrorCode.MULTIPART_PROVIDER_STATE_INVALID: 422,
+        ErrorCode.MULTIPART_COMPLETION_IN_PROGRESS: 409,
+        ErrorCode.MULTIPART_INTEGRITY_FAILED: 422,
+        ErrorCode.MULTIPART_POLICY_DENIED: 403,
+        ErrorCode.MULTIPART_CLEANUP_FAILED: 503,
+        ErrorCode.MULTIPART_LOCAL_CONTENT_CHANGED: 409,
+        ErrorCode.MULTIPART_DEPENDENCY_UNAVAILABLE: 503,
     }
 
 

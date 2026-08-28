@@ -1,13 +1,16 @@
 """The 16 MiB single-part ceiling over the real wire (spec 3.1, 10.1, 10.2).
 
-The ceiling is exact: a declared size equal to the server-owned limit is
-accepted and a real limit-sized body streams through the bounded content
-limiter, the offline object store's full digest verification and the
-publication path to a committed receipt; one declared byte more is the
-closed size-limit rejection before any reservation, and a body one byte over
-the declared limit is cut off by the stream limiter before anything can
-publish. The boundary bytes are synthetic — a repeating pattern with the
-real SHA-256 computed over the exact payload — and never leave the process.
+The ceiling is exact: a declared size equal to the server-owned routing
+constant is accepted and a real limit-sized body streams through the bounded
+content limiter, the offline object store's full digest verification and the
+publication path to a committed receipt; one declared byte more routes to
+the server-owned multipart plan (the payload-free ``multipart_upload``
+outcome of Child 7 spec 4, never a single-part operation), a declared size
+over the 100 MiB product maximum is the closed size-limit rejection before
+any reservation, and a body one byte over the declared limit is cut off by
+the stream limiter before anything can publish. The boundary bytes are
+synthetic — a repeating pattern with the real SHA-256 computed over the
+exact payload — and never leave the process.
 """
 
 from __future__ import annotations
@@ -18,7 +21,10 @@ from uuid import uuid4
 
 from tests.integration.small_file_sync.conftest import SmallFileWireHarness
 
-from personal_os.small_file_sync.contracts import MAX_SINGLE_PART_FILE_SIZE_BYTES
+from personal_os.small_file_sync.contracts import (
+    MAX_SINGLE_PART_FILE_SIZE_BYTES,
+    MAX_UPLOAD_FILE_SIZE_BYTES,
+)
 
 _MEDIA_TYPE: Final[str] = "text/markdown"
 _LOCATOR: Final[str] = "notes/boundary-note.md"
@@ -75,11 +81,30 @@ def test_a_file_exactly_at_the_ceiling_commits_end_to_end(
     assert harness.sync_state.stored_digest_count == 1
 
 
-def test_one_declared_byte_over_the_ceiling_is_rejected_before_reservation(
+def test_one_declared_byte_over_the_ceiling_routes_to_the_multipart_plan(
+    offline_harness: SmallFileWireHarness,
+) -> None:
+    """One declared byte above the routing constant is never a single part.
+
+    The outcome stays payload-free: the client derives its opaque session,
+    geometry and part URLs only from the multipart session endpoints after
+    this decision (Child 7 spec 4), so no operation token is minted here.
+    """
+
+    harness = offline_harness
+    body = _create_body(MAX_SINGLE_PART_FILE_SIZE_BYTES + 1, "0" * 64)
+    response = harness.preflight(body)
+    assert response.status_code == 200
+    assert response.json()["data"] == {"outcome": "multipart_upload"}
+    assert harness.sync_state.reservation_count == 0
+    assert harness.sync_state.publication_commits == 0
+
+
+def test_a_declared_size_over_the_product_maximum_is_rejected_before_reservation(
     offline_harness: SmallFileWireHarness,
 ) -> None:
     harness = offline_harness
-    body = _create_body(MAX_SINGLE_PART_FILE_SIZE_BYTES + 1, "0" * 64)
+    body = _create_body(MAX_UPLOAD_FILE_SIZE_BYTES + 1, "0" * 64)
     response = harness.preflight(body)
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "small_file_size_limit_exceeded"

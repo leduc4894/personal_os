@@ -62,6 +62,15 @@ ROUTE_OPERATION_IDS: dict[str, dict[str, str]] = {
     "/api/sync/exclusion-policy/snapshot": {"get": "getExclusionPolicySnapshot"},
     "/api/sync/journal-events/preflight": {"post": "preflightJournalEventUpload"},
     "/api/uploads/{operation_id}/content": {"put": "uploadSmallFileContent"},
+    "/api/uploads/multipart-sessions": {"post": "createMultipartUploadSession"},
+    "/api/uploads/multipart-sessions/{session_id}": {"get": "getMultipartUploadSession"},
+    "/api/uploads/multipart-sessions/{session_id}/parts/{part_number}/url": {
+        "post": "issueMultipartPartUrl"
+    },
+    "/api/uploads/multipart-sessions/{session_id}/complete": {
+        "post": "completeMultipartUploadSession"
+    },
+    "/api/uploads/multipart-sessions/{session_id}/abort": {"post": "abortMultipartUploadSession"},
     "/api/sources/lifecycle-events": {"post": "commitSourceLifecycleEvent"},
     "/api/sync/events": {"get": "pullDeviceSyncEvents"},
     "/api/sync/cursor-acknowledgements": {"post": "acknowledgeDeviceSyncCursor"},
@@ -173,6 +182,15 @@ STRICT_MODEL_SCHEMA_NAMES: tuple[str, ...] = (
     "ManifestRunReceiptData",
     "ManifestStartRequest",
     "SourceFingerprintData",
+    "MultipartSessionCreateRequest",
+    "MultipartSessionPlanData",
+    "MultipartSessionStatusData",
+    "MultipartPartUrlData",
+    "MultipartCompletionData",
+    "ApiEnvelope_MultipartSessionPlanData_",
+    "ApiEnvelope_MultipartSessionStatusData_",
+    "ApiEnvelope_MultipartPartUrlData_",
+    "ApiEnvelope_MultipartCompletionData_",
 )
 
 _URL_PATTERN = re.compile(r"\w+://")

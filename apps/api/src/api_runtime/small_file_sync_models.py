@@ -7,7 +7,7 @@ name — deliberately mapped onto the domain's ``policy_revision_number`` — an
 never a workspace, device, user, receipt or object-store selector. Conversion
 to the frozen domain values happens only through this boundary: each field
 grammar that the domain owns (idempotency key, locator, digest, media type,
-policy revision, operation shape and the server-owned single-part ceiling)
+policy revision, operation shape and the server-owned upload ceiling)
 surfaces as the typed ``small_file_preflight_invalid`` with its single closed
 ``reason`` token, or as the closed size-limit rejection when the declared
 size is already over the ceiling. The response renderers project domain
@@ -30,7 +30,7 @@ from personal_os.diagnostics.events import SafeToken
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.object_storage import CanonicalMediaType, ContentDigest
 from personal_os.small_file_sync.contracts import (
-    MAX_SINGLE_PART_FILE_SIZE_BYTES,
+    MAX_UPLOAD_FILE_SIZE_BYTES,
     NormalizedLocator,
     SmallFileIdempotencyKey,
     SmallFileOperation,
@@ -138,9 +138,12 @@ def to_domain_preflight(body: SmallFilePreflightRequest) -> SmallFilePreflight:
 
     Every semantic grammar stays owned by the domain; this boundary maps each
     violation onto the closed ``small_file_preflight_invalid`` reason token
-    of its field, and a declared size over the server-owned single-part
-    ceiling onto the closed size-limit rejection. The converted value never
-    carries a workspace, device or user — those derive from the credential.
+    of its field, and a declared size over the server-owned upload ceiling —
+    the 100 MiB product maximum, above the unchanged single-part routing
+    constant whose larger sizes now route to the multipart session endpoints
+    (Child 7 spec 4) — onto the closed size-limit rejection. The converted
+    value never carries a workspace, device or user — those derive from the
+    credential.
     """
 
     if body.event_id == UUID(int=0):
@@ -167,7 +170,7 @@ def to_domain_preflight(body: SmallFilePreflightRequest) -> SmallFilePreflight:
         raise _preflight_invalid(POLICY_REVISION_INVALID)
     if body.size_bytes < 0:
         raise _preflight_invalid(SIZE_BYTES_INVALID)
-    if body.size_bytes > MAX_SINGLE_PART_FILE_SIZE_BYTES:
+    if body.size_bytes > MAX_UPLOAD_FILE_SIZE_BYTES:
         raise SmallFileSyncError(ErrorCode.SMALL_FILE_SIZE_LIMIT_EXCEEDED)
     operation = SmallFileOperation(body.operation)
     if operation is SmallFileOperation.CREATE:

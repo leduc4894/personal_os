@@ -4,11 +4,12 @@ The factory composes exactly two health routes plus the five session/password
 routes, six TOTP/recovery routes, seven browser device-authorization and
 device-token routes, two Admin device routes of the injected
 web-authentication runtime, the optional runtime-gated exclusion-policy,
-small-file sync, source-lifecycle and device-sync route sets — including the
-read-only sync rejection diagnostics Admin route of the small-file-sync
-runtime, the read-only policy diagnostics Admin route of the
+small-file sync, multipart upload, source-lifecycle and device-sync route
+sets — including the read-only sync rejection diagnostics Admin route of the
+small-file-sync runtime, the read-only policy diagnostics Admin route of the
 exclusion-policy runtime, the eight device sync routes of the device
-reconciliation surface and the local/test-only OpenAPI document route —
+reconciliation surface, the five multipart upload session routes of the
+resumable multipart transfer and the local/test-only OpenAPI document route —
 registers the four envelope exception handlers,
 strips FastAPI's default validation-error response from the generated
 document (the shared handler emits the canonical error envelope instead),
@@ -85,6 +86,14 @@ from api_runtime.exclusion_policy_models import (
     SignedPolicySnapshotData,
 )
 from api_runtime.exclusion_policy_routes import create_exclusion_policy_route_endpoints
+from api_runtime.multipart_upload_composition import MultipartUploadRuntime
+from api_runtime.multipart_upload_models import (
+    MultipartCompletionData,
+    MultipartPartUrlData,
+    MultipartSessionPlanData,
+    MultipartSessionStatusData,
+)
+from api_runtime.multipart_upload_routes import create_multipart_upload_route_endpoints
 from api_runtime.request_context import ASGIApp as CorrelationApp
 from api_runtime.request_context import RequestContextMiddleware
 from api_runtime.session_routes import create_session_route_endpoints
@@ -190,6 +199,7 @@ def create_api_application(
     web_authentication: WebAuthenticationRuntime,
     exclusion_policy: ExclusionPolicyRuntime | None = None,
     small_file_sync: SmallFileSyncRuntime | None = None,
+    multipart_upload: MultipartUploadRuntime | None = None,
     source_lifecycle: SourceLifecycleRuntime | None = None,
     device_sync: DeviceSyncRuntime | None = None,
     event_sink: DiagnosticEventSink | None = None,
@@ -197,11 +207,11 @@ def create_api_application(
 ) -> FastAPI:
     """Compose the runnable API application for one runtime environment.
 
-    The exclusion-policy, small-file-sync, source-lifecycle and device-sync
-    runtimes are optional only so the authentication-only contract
-    compositions of the earlier children stay constructible; the serve graph
-    and the full contract document always compose them, and the routes
-    register only when the runtime is present — never through router
+    The exclusion-policy, small-file-sync, multipart-upload, source-lifecycle
+    and device-sync runtimes are optional only so the authentication-only
+    contract compositions of the earlier children stay constructible; the
+    serve graph and the full contract document always compose them, and the
+    routes register only when the runtime is present — never through router
     auto-discovery.
     """
     app = FastAPI(
@@ -243,6 +253,8 @@ def create_api_application(
     if small_file_sync is not None:
         _register_small_file_sync_routes(app, web_authentication, small_file_sync)
         _register_sync_diagnostics_admin_route(app, web_authentication, small_file_sync)
+    if multipart_upload is not None:
+        _register_multipart_upload_routes(app, web_authentication, multipart_upload)
     if source_lifecycle is not None:
         _register_source_lifecycle_routes(app, web_authentication, source_lifecycle)
         _register_source_lifecycle_diagnostics_admin_route(
@@ -674,6 +686,59 @@ def _register_small_file_sync_routes(
                 },
             }
         },
+    )
+
+
+def _register_multipart_upload_routes(
+    app: FastAPI,
+    web_authentication: WebAuthenticationRuntime,
+    multipart_upload: MultipartUploadRuntime,
+) -> None:
+    """Register the closed multipart upload session route set (Child 7 spec 5).
+
+    Each route carries its manually assigned semantic operation id and the
+    envelope response model of its strict payload; the access Bearer
+    dependency, the credential-derived workspace/device scope and the
+    boundary session-grammar validation live in the endpoint factory. The
+    part-URL response is the sole signed-URL surface of the API.
+    """
+    endpoints = create_multipart_upload_route_endpoints(
+        web_authentication=web_authentication, multipart_upload=multipart_upload
+    )
+    app.add_api_route(
+        "/api/uploads/multipart-sessions",
+        endpoints.create_session,
+        methods=["POST"],
+        operation_id="createMultipartUploadSession",
+        response_model=ApiEnvelope[MultipartSessionPlanData],
+    )
+    app.add_api_route(
+        "/api/uploads/multipart-sessions/{session_id}",
+        endpoints.get_session,
+        methods=["GET"],
+        operation_id="getMultipartUploadSession",
+        response_model=ApiEnvelope[MultipartSessionStatusData],
+    )
+    app.add_api_route(
+        "/api/uploads/multipart-sessions/{session_id}/parts/{part_number}/url",
+        endpoints.issue_part_url,
+        methods=["POST"],
+        operation_id="issueMultipartPartUrl",
+        response_model=ApiEnvelope[MultipartPartUrlData],
+    )
+    app.add_api_route(
+        "/api/uploads/multipart-sessions/{session_id}/complete",
+        endpoints.complete_session,
+        methods=["POST"],
+        operation_id="completeMultipartUploadSession",
+        response_model=ApiEnvelope[MultipartCompletionData],
+    )
+    app.add_api_route(
+        "/api/uploads/multipart-sessions/{session_id}/abort",
+        endpoints.abort_session,
+        methods=["POST"],
+        operation_id="abortMultipartUploadSession",
+        response_model=ApiEnvelope[MultipartSessionStatusData],
     )
 
 

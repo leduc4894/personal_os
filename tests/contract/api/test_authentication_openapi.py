@@ -39,6 +39,13 @@ CREDENTIAL_ROUTE_SECURITY: Final[dict[tuple[str, str], str]] = {
     ("/api/sync/exclusion-policy/snapshot", "get"): "AccessCredential",
     ("/api/sync/journal-events/preflight", "post"): "AccessCredential",
     ("/api/uploads/{operation_id}/content", "put"): "AccessCredential",
+    ("/api/uploads/multipart-sessions", "post"): "AccessCredential",
+    ("/api/uploads/multipart-sessions/{session_id}", "get"): "AccessCredential",
+    ("/api/uploads/multipart-sessions/{session_id}/parts/{part_number}/url", "post"): (
+        "AccessCredential"
+    ),
+    ("/api/uploads/multipart-sessions/{session_id}/complete", "post"): "AccessCredential",
+    ("/api/uploads/multipart-sessions/{session_id}/abort", "post"): "AccessCredential",
     ("/api/sources/lifecycle-events", "post"): "AccessCredential",
     ("/api/sync/events", "get"): "AccessCredential",
     ("/api/sync/cursor-acknowledgements", "post"): "AccessCredential",

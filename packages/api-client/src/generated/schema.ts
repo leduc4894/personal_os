@@ -874,6 +874,110 @@ export type paths = {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/uploads/multipart-sessions": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Create Session
+         * @description Create or exactly replay the one session of a frozen operation.
+         */
+        readonly post: operations["createMultipartUploadSession"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/uploads/multipart-sessions/{session_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Get Session
+         * @description Return the safe observable state, reconciling forward sessions.
+         */
+        readonly get: operations["getMultipartUploadSession"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/uploads/multipart-sessions/{session_id}/abort": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Abort Session
+         * @description Terminalize user cancellation into the exact cleanup obligation.
+         */
+        readonly post: operations["abortMultipartUploadSession"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/uploads/multipart-sessions/{session_id}/complete": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Complete Session
+         * @description Claim completion; provider-list parts, complete, verify and promote.
+         */
+        readonly post: operations["completeMultipartUploadSession"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/uploads/multipart-sessions/{session_id}/parts/{part_number}/url": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Issue Part Url
+         * @description Recheck authority/policy/state and issue one short-lived part URL.
+         *
+         *     The sole response of the surface carrying a signed URL: the value
+         *     renders once on this uncacheable response and is never copied into
+         *     any other model, log or persisted record.
+         */
+        readonly post: operations["issueMultipartPartUrl"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/uploads/{operation_id}/content": {
         readonly parameters: {
             readonly query?: never;
@@ -1183,6 +1287,66 @@ export type components = {
         /** ApiEnvelope[ManifestRunReceiptData] */
         readonly ApiEnvelope_ManifestRunReceiptData_: {
             readonly data: components["schemas"]["ManifestRunReceiptData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[MultipartCompletionData] */
+        readonly ApiEnvelope_MultipartCompletionData_: {
+            readonly data: components["schemas"]["MultipartCompletionData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[MultipartPartUrlData] */
+        readonly ApiEnvelope_MultipartPartUrlData_: {
+            readonly data: components["schemas"]["MultipartPartUrlData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[MultipartSessionPlanData] */
+        readonly ApiEnvelope_MultipartSessionPlanData_: {
+            readonly data: components["schemas"]["MultipartSessionPlanData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[MultipartSessionStatusData] */
+        readonly ApiEnvelope_MultipartSessionStatusData_: {
+            readonly data: components["schemas"]["MultipartSessionStatusData"] | null;
             readonly error: components["schemas"]["ApiErrorBody"] | null;
             /**
              * Request Id
@@ -2007,6 +2171,153 @@ export type components = {
         readonly ManifestStartRequest: {
             /** Client Observation Generation */
             readonly client_observation_generation: number;
+        };
+        /**
+         * MultipartCompletionData
+         * @description The safe result of one completion claim (spec 4.2/5).
+         *
+         *     Either the session is still completing under its durable claimant and
+         *     carries only its persisted state, or the claim finished and the frozen
+         *     terminal source-event result returns unchanged on every exact replay.
+         *     No URL, provider identity or digest is ever a member.
+         */
+        readonly MultipartCompletionData: {
+            readonly state: components["schemas"]["MultipartSessionState"];
+            readonly terminal_result?: components["schemas"]["SmallFileTerminalResultData"] | null;
+        };
+        /**
+         * MultipartPartUrlData
+         * @description The one short-lived presigned part authorization (spec 4/5).
+         *
+         *     The sole response model of the entire multipart surface that carries a
+         *     ``url`` member: exactly one bearer URL, its own expiry, the numbered
+         *     part and the exact derived byte window the single PUT must transmit.
+         *     The response is never persisted by the client, never copied into any
+         *     other model and never written to an application log; the URL value
+         *     itself is the only field no other surface may render.
+         */
+        readonly MultipartPartUrlData: {
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            readonly expires_at: string;
+            /** Offset Bytes */
+            readonly offset_bytes: number;
+            /** Part Number */
+            readonly part_number: number;
+            /** Size Bytes */
+            readonly size_bytes: number;
+            /** Url */
+            readonly url: string;
+        };
+        /**
+         * MultipartSessionCreateRequest
+         * @description The strict multipart session create-or-resume body (spec 5).
+         *
+         *     Inherits the journal-event preflight grammar exactly — the stable event
+         *     identity, the idempotency key, the create/update operation shape, the
+         *     plugin-local file identity and the declared fingerprint — because the
+         *     create call binds the very same frozen operation the preflight decided.
+         *     Never a workspace, device, user, receipt, presigned URL, provider or
+         *     object-store selector: the credential alone derives the scope.
+         */
+        readonly MultipartSessionCreateRequest: {
+            /** Base Version Id */
+            readonly base_version_id?: string | null;
+            /**
+             * Event Id
+             * Format: uuid
+             */
+            readonly event_id: string;
+            /** Idempotency Key */
+            readonly idempotency_key: string;
+            /**
+             * Local File Id
+             * Format: uuid
+             */
+            readonly local_file_id: string;
+            /** Media Type */
+            readonly media_type: string;
+            /** Normalized Locator */
+            readonly normalized_locator: string;
+            /**
+             * Operation
+             * @enum {string}
+             */
+            readonly operation: "create" | "update";
+            /** Policy Revision */
+            readonly policy_revision: number;
+            /** Sha256 */
+            readonly sha256: string;
+            /** Size Bytes */
+            readonly size_bytes: number;
+            /** Source Id */
+            readonly source_id?: string | null;
+        };
+        /**
+         * MultipartSessionPlanData
+         * @description The server-owned plan of one permitted multipart transfer (spec 4).
+         *
+         *     Exactly the opaque public session ID, the frozen part geometry and the
+         *     24-hour session expiry — and nothing else: no signed URL, staging key,
+         *     provider identity, ETag, receipt or storage detail ever crosses with
+         *     the plan. The client derives the status route from the fixed contract
+         *     and the session ID alone.
+         */
+        readonly MultipartSessionPlanData: {
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            readonly expires_at: string;
+            /** Part Count */
+            readonly part_count: number;
+            /** Part Size Bytes */
+            readonly part_size_bytes: number;
+            /** Session Id */
+            readonly session_id: string;
+        };
+        /**
+         * MultipartSessionState
+         * @description Closed server session states of the multipart lifecycle (spec 4.2).
+         *
+         *     ``committed`` is the frozen successful source-event outcome, not merely a
+         *     completed provider multipart object. ``integrity_failed`` and
+         *     ``policy_denied`` are terminal for that frozen event and never publish.
+         *     ``cleanup_pending`` is a cleanup obligation, not permission to reuse the
+         *     session. Transitions are validated against the closed
+         *     :data:`MULTIPART_SESSION_TRANSITIONS` table; the two terminal outcomes
+         *     (``committed`` and ``cleaned``) accept no further transition.
+         * @enum {string}
+         */
+        readonly MultipartSessionState: "created" | "uploading" | "completing" | "verifying" | "promoting" | "committed" | "cancelling" | "expired" | "integrity_failed" | "policy_denied" | "cleanup_pending" | "cleaned";
+        /**
+         * MultipartSessionStatusData
+         * @description The safe observable state of one multipart session (spec 4/5).
+         *
+         *     The opaque session ID, the current state, the frozen geometry, the
+         *     session expiry, the ordered provider-reconciled completed part numbers
+         *     and — only once the session is committed — its frozen terminal
+         *     source-event receipt. No digest, staging key, provider identity, URL or
+         *     signed material is a member, so none can ever render.
+         */
+        readonly MultipartSessionStatusData: {
+            /** Completed Part Numbers */
+            readonly completed_part_numbers: readonly number[];
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            readonly expires_at: string;
+            /** Part Count */
+            readonly part_count: number;
+            /** Part Size Bytes */
+            readonly part_size_bytes: number;
+            /** Session Id */
+            readonly session_id: string;
+            readonly state: components["schemas"]["MultipartSessionState"];
+            readonly terminal_result?: components["schemas"]["SmallFileTerminalResultData"] | null;
         };
         /**
          * NormalizedLocator
@@ -4076,6 +4387,119 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["ApiEnvelope_ManifestPageReceiptData_"];
+                };
+            };
+        };
+    };
+    readonly createMultipartUploadSession: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["MultipartSessionCreateRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_MultipartSessionPlanData_"];
+                };
+            };
+        };
+    };
+    readonly getMultipartUploadSession: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly session_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_MultipartSessionStatusData_"];
+                };
+            };
+        };
+    };
+    readonly abortMultipartUploadSession: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly session_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_MultipartSessionStatusData_"];
+                };
+            };
+        };
+    };
+    readonly completeMultipartUploadSession: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly session_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_MultipartCompletionData_"];
+                };
+            };
+        };
+    };
+    readonly issueMultipartPartUrl: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly session_id: string;
+                readonly part_number: number;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_MultipartPartUrlData_"];
                 };
             };
         };
