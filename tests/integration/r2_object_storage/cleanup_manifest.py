@@ -29,11 +29,20 @@ from personal_os.diagnostics.events import SafeToken
 _CANONICAL_KEY_PATTERN: Final = re.compile(
     r"^objects/sha256/([0-9a-f]{2})/([0-9a-f]{2})/([0-9a-f]{64})$"
 )
+#: The only multipart staging-key grammar (spec 3.3): exactly the staging
+#: prefix followed by 32 to 128 URL-safe base64url characters — a shape no
+#: canonical ``objects/sha256/...`` key can satisfy, so a validated staging
+#: key can never address canonical content and a canonical key can never pass
+#: as staging material.
+_STAGING_KEY_PATTERN: Final = re.compile(r"^staging/multipart/[A-Za-z0-9_-]{32,128}$")
+#: Bounded length of one provider upload ID recorded with a staging resource.
+_MAXIMUM_RECORDED_UPLOAD_ID_LENGTH: Final[int] = 1024
 #: Characters a delete request must never carry (wildcard or placeholder forms).
 _WILDCARD_CHARACTERS: Final = ("*", "?", "%")
 
 REJECTION_BUCKET_MISMATCH: Final[SafeToken] = SafeToken.parse("cleanup_bucket_mismatch")
 REJECTION_NONCANONICAL_KEY: Final[SafeToken] = SafeToken.parse("cleanup_key_noncanonical")
+REJECTION_NONSTAGING_KEY: Final[SafeToken] = SafeToken.parse("cleanup_key_not_staging")
 REJECTION_UNRECORDED_KEY: Final[SafeToken] = SafeToken.parse("cleanup_key_unrecorded")
 REJECTION_WILDCARD_KEY: Final[SafeToken] = SafeToken.parse("cleanup_key_wildcard")
 
@@ -60,6 +69,20 @@ class CreatedObjectRecord:
     media_type: str
 
 
+@dataclass(frozen=True, slots=True)
+class CreatedStagingResourceRecord:
+    """One exact staging key the current run created, with its upload IDs.
+
+    The provider upload IDs of exactly this staging key that the current run
+    observed (a create race may briefly mint more than one before the losers
+    abort their own orphans). Every value stays private cleanup material: it
+    is never rendered and only ever addresses this one key's uploads.
+    """
+
+    staging_key: str
+    provider_upload_ids: tuple[str, ...] = ()
+
+
 class LiveCleanupManifest:
     """In-memory allowlist of exactly the keys the current run created.
 
@@ -68,11 +91,20 @@ class LiveCleanupManifest:
     observed a successful create (a store receipt or a harness-written object)
     record here. ``recorded_keys`` returns insertion order for deterministic
     cleanup.
+
+    The same manifest also carries the run's exact multipart staging
+    identities: a staging key is recorded the moment the composed service
+    hands it toward its first provider mutation (before any provider byte
+    moves), and every observed provider upload ID of that key is attached the
+    moment it is known. Staging recording enforces the closed staging grammar,
+    so a canonical-shaped value can never be recorded or cleaned as staging
+    material.
     """
 
     def __init__(self, *, bucket_name: str) -> None:
         self._bucket_name = bucket_name
         self._created: dict[str, CreatedObjectRecord] = {}
+        self._staging: dict[str, tuple[str, ...]] = {}
 
     @property
     def bucket_name(self) -> str:
@@ -86,7 +118,7 @@ class LiveCleanupManifest:
         self._created.setdefault(record.key, record)
 
     def recorded_keys(self) -> tuple[str, ...]:
-        """Every recorded key in insertion (creation) order."""
+        """Every recorded canonical key in insertion (creation) order."""
 
         return tuple(self._created)
 
@@ -94,6 +126,50 @@ class LiveCleanupManifest:
         """The recorded entry for ``key``, or ``None`` when unrecorded."""
 
         return self._created.get(key)
+
+    def record_staging_key(self, staging_key: str) -> None:
+        """Record one exact staging key before its first provider mutation.
+
+        The grammar check fails closed on any non-staging value (including
+        every canonical key shape), so the staging allowlist can only ever
+        hold genuine private staging identities of the current run.
+        """
+
+        if _STAGING_KEY_PATTERN.fullmatch(staging_key) is None:
+            raise CleanupRejection(REJECTION_NONSTAGING_KEY)
+        self._staging.setdefault(staging_key, ())
+
+    def attach_staging_upload_id(self, staging_key: str, provider_upload_id: str) -> None:
+        """Attach one observed provider upload ID to its recorded staging key.
+
+        The staging key must already be recorded; an unknown key is the closed
+        unrecorded rejection, and an oversized or empty upload ID is the closed
+        non-staging rejection — neither value is ever rendered.
+        """
+
+        if staging_key not in self._staging:
+            raise CleanupRejection(REJECTION_UNRECORDED_KEY)
+        if not 1 <= len(provider_upload_id) <= _MAXIMUM_RECORDED_UPLOAD_ID_LENGTH:
+            raise CleanupRejection(REJECTION_NONSTAGING_KEY)
+        attached = self._staging[staging_key]
+        if provider_upload_id not in attached:
+            self._staging[staging_key] = (*attached, provider_upload_id)
+
+    def recorded_staging_resources(self) -> tuple[CreatedStagingResourceRecord, ...]:
+        """Every recorded staging resource in insertion (creation) order."""
+
+        return tuple(
+            CreatedStagingResourceRecord(staging_key=key, provider_upload_ids=ids)
+            for key, ids in self._staging.items()
+        )
+
+    def staging_record_for(self, staging_key: str) -> CreatedStagingResourceRecord | None:
+        """The recorded staging entry for ``staging_key``, or ``None``."""
+
+        ids = self._staging.get(staging_key)
+        if ids is None:
+            return None
+        return CreatedStagingResourceRecord(staging_key=staging_key, provider_upload_ids=ids)
 
     def __len__(self) -> int:
         return len(self._created)
@@ -156,6 +232,67 @@ async def run_exact_key_cleanup(
     validated = validate_cleanup_deletions(manifest, bucket_name=bucket_name, keys=keys)
     for key in validated:
         await delete_one(key)
+    return validated
+
+
+def validate_staging_cleanup(
+    manifest: LiveCleanupManifest,
+    *,
+    bucket_name: str,
+    staging_keys: Sequence[str],
+) -> tuple[str, ...]:
+    """Validate requested staging cleanup against the exact-identity contract.
+
+    The same fail-closed order as :func:`validate_cleanup_deletions`, for the
+    staging side: a wrong bucket, any wildcard character, a value outside the
+    closed staging grammar (which every canonical key shape fails) and an
+    unrecorded staging key each raise :class:`CleanupRejection` before the
+    calling pipeline has issued a single provider request. Returns the
+    validated staging keys in request order.
+    """
+
+    if bucket_name != manifest.bucket_name:
+        raise CleanupRejection(REJECTION_BUCKET_MISMATCH)
+    validated: list[str] = []
+    for staging_key in staging_keys:
+        if any(character in staging_key for character in _WILDCARD_CHARACTERS):
+            raise CleanupRejection(REJECTION_WILDCARD_KEY)
+        if _STAGING_KEY_PATTERN.fullmatch(staging_key) is None:
+            raise CleanupRejection(REJECTION_NONSTAGING_KEY)
+        if manifest.staging_record_for(staging_key) is None:
+            raise CleanupRejection(REJECTION_UNRECORDED_KEY)
+        validated.append(staging_key)
+    return tuple(validated)
+
+
+async def run_exact_staging_cleanup(
+    manifest: LiveCleanupManifest,
+    *,
+    bucket_name: str,
+    resources: Sequence[CreatedStagingResourceRecord],
+    abort_one: Callable[[str, str], Awaitable[None]],
+    delete_one: Callable[[str], Awaitable[None]],
+) -> tuple[str, ...]:
+    """Validate first, then clean exactly the validated staging resources.
+
+    ``abort_one`` and ``delete_one`` are the harness-local exact-identity
+    provider calls; they are invoked only after :func:`validate_staging_cleanup`
+    accepted every requested key, each upload ID of a validated key is aborted
+    for exactly that key, and the staging object itself is removed for exactly
+    that key. Both provider operations treat an already-absent resource as
+    success (spec 6.4), so a replayed or inline-cleaned session stays a clean
+    teardown. A rejection proves no provider request ran at all.
+    """
+
+    validated = validate_staging_cleanup(
+        manifest, bucket_name=bucket_name, staging_keys=[r.staging_key for r in resources]
+    )
+    for staging_key in validated:
+        record = manifest.staging_record_for(staging_key)
+        assert record is not None, "validated staging keys always have a record"
+        for provider_upload_id in record.provider_upload_ids:
+            await abort_one(staging_key, provider_upload_id)
+        await delete_one(staging_key)
     return validated
 
 
