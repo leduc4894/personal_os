@@ -1076,6 +1076,7 @@ class MultipartServiceHarness:
     current_sources: FakeCanonicalSourceReadStore
     policy_guard: AllowAllSmallFilePolicyGuard | DenyingSmallFilePolicyGuard
     metrics: InMemoryMultipartUploadMetrics
+    diagnostics: RecordingDiagnosticSink
     clock: MutableUtcClock
     device: SmallFileDeviceContext
     preflight: SmallFilePreflight
@@ -1144,6 +1145,22 @@ class MultipartServiceHarness:
             )
 
 
+
+class RecordingDiagnosticSink:
+    """Structural event-sink double recording every emitted closed event."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, str]]] = []
+
+    def emit(self, event_name: object, fields: object = None) -> None:
+        name = str(getattr(event_name, "value", event_name))
+        rendered = {
+            str(key): str(getattr(value, "value", value))
+            for key, value in (fields or {}).items()
+        }
+        self.events.append((name, rendered))
+
+
 def build_multipart_service_harness(
     *,
     size_bytes: int = DEFAULT_MULTIPART_SIZE_BYTES,
@@ -1152,6 +1169,7 @@ def build_multipart_service_harness(
     policy_system_failure: bool = False,
     stale_base: bool = False,
     missing_base: bool = False,
+    diagnostics: RecordingDiagnosticSink | None = None,
 ) -> MultipartServiceHarness:
     """Wire the service over the fakes; the caller drives the async flows."""
 
@@ -1182,6 +1200,7 @@ def build_multipart_service_harness(
         else AllowAllSmallFilePolicyGuard()
     )
     metrics = InMemoryMultipartUploadMetrics()
+    diagnostics_sink = diagnostics if diagnostics is not None else RecordingDiagnosticSink()
     service = MultipartUploadService(
         session_store=session_store,
         evidence_store=evidence_store,
@@ -1194,6 +1213,7 @@ def build_multipart_service_harness(
         staging_byte_source=staging_reader,
         metrics=metrics,
         clock=clock,
+        diagnostics=diagnostics_sink,
     )
     return MultipartServiceHarness(
         ledger=ledger,
@@ -1209,6 +1229,7 @@ def build_multipart_service_harness(
         policy_guard=policy_guard,
         metrics=metrics,
         clock=clock,
+        diagnostics=diagnostics_sink,
         device=device,
         preflight=preflight,
         session_id=MultipartUploadSessionId(secrets.token_urlsafe(32)),

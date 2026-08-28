@@ -58,6 +58,7 @@ from datetime import datetime
 from typing import Final, Protocol
 
 from personal_os.diagnostics.context import DiagnosticContext
+from personal_os.diagnostics.events import DiagnosticEventSink, EventName
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import ApplicationError
 from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
@@ -477,6 +478,7 @@ class MultipartUploadService:
     staging_byte_source: MultipartStagingByteSource
     metrics: MultipartUploadMetrics
     clock: AwareUtcClock
+    diagnostics: DiagnosticEventSink | None = None
 
     async def create_or_resume(
         self,
@@ -1175,9 +1177,8 @@ class MultipartUploadService:
         except ApplicationError as error:
             self._record_rejection_code(MultipartMetricFlow.COMPLETION, error.error_code)
         except BaseException:
-            self.metrics.record_rejection(
-                flow=MultipartMetricFlow.COMPLETION,
-                reason_code=MultipartRejectionReason.MULTIPART_CLEANUP_FAILED,
+            self._record_rejection(
+                MultipartMetricFlow.COMPLETION, MultipartRejectionReason.MULTIPART_CLEANUP_FAILED
             )
 
     # --- cancellation (spec 6.4) ---------------------------------------------
@@ -1247,11 +1248,11 @@ class MultipartUploadService:
             return (False, error.error_code)
         except BaseException:
             # An untyped failure keeps the closed cleanup token as its
-            # readable reason on the ring, records the failed obligation and
-            # never aborts the remaining batch.
-            self.metrics.record_rejection(
-                flow=MultipartMetricFlow.CLEANUP,
-                reason_code=MultipartRejectionReason.MULTIPART_CLEANUP_FAILED,
+            # readable reason on the ring and the durable closed log,
+            # records the failed obligation and never aborts the remaining
+            # batch.
+            self._record_rejection(
+                MultipartMetricFlow.CLEANUP, MultipartRejectionReason.MULTIPART_CLEANUP_FAILED
             )
             return (False, ErrorCode.MULTIPART_CLEANUP_FAILED)
         return (True, None)
@@ -1275,9 +1276,8 @@ class MultipartUploadService:
         except ApplicationError as error:
             self._record_rejection_code(flow, error.error_code)
         except BaseException:
-            self.metrics.record_rejection(
-                flow=flow,
-                reason_code=MultipartRejectionReason.MULTIPART_CLEANUP_FAILED,
+            self._record_rejection(
+                flow, MultipartRejectionReason.MULTIPART_CLEANUP_FAILED
             )
 
     # --- shared rechecks -------------------------------------------------------
@@ -1357,7 +1357,26 @@ class MultipartUploadService:
             reason_code = MultipartRejectionReason(error_code.value)
         except ValueError:
             return
+        self._record_rejection(flow, reason_code)
+
+    def _record_rejection(
+        self, flow: MultipartMetricFlow, reason_code: MultipartRejectionReason
+    ) -> None:
+        """Record one closed rejection on the ring and the durable closed log.
+
+        The in-memory ring serves the process-local diagnostics snapshot;
+        the structured closed event through the diagnostics sink is the
+        durable surface — the rotating log an operator reads after a
+        restart — carrying only the closed flow and reason tokens, never a
+        key, URL, provider identity or digest (docs/15 observability).
+        """
+
         self.metrics.record_rejection(flow=flow, reason_code=reason_code)
+        if self.diagnostics is not None:
+            self.diagnostics.emit(
+                EventName.MULTIPART_UPLOAD_REJECTED,
+                {"flow": flow, "reason": reason_code},
+            )
 
     def _elapsed_seconds_since(self, started_at: datetime) -> float:
         # Clamped at zero so a clock seam that repeats or drifts backwards

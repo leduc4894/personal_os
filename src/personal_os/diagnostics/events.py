@@ -127,6 +127,7 @@ class EventName(StrEnum):
     DEVICE_SYNC_OPERATION_COMPLETED = "device_sync_operation_completed"
     DEVICE_SYNC_OPERATION_REJECTED = "device_sync_operation_rejected"
     DEVICE_SYNC_OPERATION_FAILED = "device_sync_operation_failed"
+    MULTIPART_UPLOAD_REJECTED = "multipart_upload_rejected"
 
 
 type SafeDiagnosticScalar = (
@@ -698,6 +699,12 @@ EVENT_DEFINITIONS: Final[Mapping[EventName, EventDefinition]] = MappingProxyType
             result_code=ResultCode.FAILED,
             required_fields=frozenset({"operation", "reason", "duration_ms"}),
             allowed_fields=frozenset({"operation", "reason", "duration_ms"}),
+        ),
+        EventName.MULTIPART_UPLOAD_REJECTED: EventDefinition(
+            level=DiagnosticLevel.WARNING,
+            result_code=ResultCode.REJECTED,
+            required_fields=frozenset({"flow", "reason"}),
+            allowed_fields=frozenset({"flow", "reason"}),
         ),
     }
 )

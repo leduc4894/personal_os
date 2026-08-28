@@ -503,6 +503,55 @@ class TestComplete:
         }
         assert "multipart_dependency_unavailable" in reasons
 
+    async def test_inline_staging_delete_failure_emits_the_durable_closed_event(
+        self, harness
+    ) -> None:
+        """The committed session's inline-delete reason survives on the closed log.
+
+        The in-memory rejection ring dies with the process; the structured
+        closed event through the diagnostics sink is the durable surface an
+        operator reads after a restart (docs/15 observability). It carries
+        only the closed flow and reason tokens — never a staging key, URL,
+        provider identity or digest.
+        """
+
+        harness.staging_provider.delete_error = dependency_outage()
+
+        result = await harness.service.complete(
+            session_id=harness.session_id,
+            device_context=harness.device,
+            diagnostic_context=harness.context,
+        )
+
+        assert result.terminal_result is not None
+        assert result.terminal_result.result_kind is SmallFileTerminalResultKind.COMMITTED
+        rejections = [
+            fields
+            for name, fields in harness.diagnostics.events
+            if name == "multipart_upload_rejected"
+        ]
+        assert {"flow": "completion", "reason": "multipart_dependency_unavailable"} in rejections
+        rendered = repr(harness.diagnostics.events)
+        assert harness.staging_key() not in rendered
+        assert "https://" not in rendered
+
+    async def test_every_flow_rejection_emits_the_durable_closed_event(self, harness) -> None:
+        unknown_session = MultipartUploadSessionId("u" * 43)
+
+        with pytest.raises(MultipartUploadError):
+            await harness.service.status(
+                session_id=unknown_session,
+                device_context=harness.device,
+                diagnostic_context=harness.context,
+            )
+
+        rejections = [
+            fields
+            for name, fields in harness.diagnostics.events
+            if name == "multipart_upload_rejected"
+        ]
+        assert {"flow": "session_status", "reason": "multipart_session_not_found"} in rejections
+
     async def test_typed_errors_never_carry_private_values(self, harness) -> None:
         harness.staging_reader.digest = ContentDigest.parse("b" * 64)
 

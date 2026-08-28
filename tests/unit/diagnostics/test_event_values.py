@@ -81,4 +81,5 @@ def test_event_names_are_closed() -> None:
         "device_sync_operation_completed",
         "device_sync_operation_rejected",
         "device_sync_operation_failed",
+        "multipart_upload_rejected",
     }
