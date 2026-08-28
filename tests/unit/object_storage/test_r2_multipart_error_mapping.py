@@ -237,29 +237,61 @@ def test_classification_is_shared_with_the_canonical_boundary() -> None:
 # --- Exact-key staging removal and capability text ------------------------------
 
 
-def test_staging_removal_operation_name_is_the_exact_sdk_operation() -> None:
-    from r2_object_storage import multipart as multipart_module
+def test_staging_removal_operation_matches_the_real_sdk_surface() -> None:
+    """The typed protocol operation is the real SDK exact-key removal.
 
-    assembled = multipart_module._STAGING_OBJECT_REMOVAL_OPERATION
-    assert isinstance(assembled, str)
-    assert assembled == "delete" + "_object"
+    The capability name the provider declares and calls must exist verbatim on
+    the pinned aiobotocore S3 client surface, and it must appear in the module
+    exactly as the protocol declaration plus the single direct call — never as
+    a quoted name or an assembled/dynamic form a future edit could broaden.
+    """
+
+    from types_aiobotocore_s3 import S3Client
+
+    assert hasattr(S3Client, "delete_object"), (
+        "the pinned aiobotocore S3 client no longer exposes the exact-key "
+        "removal operation the staging provider declares"
+    )
+    source = (_ADAPTER_PACKAGE_ROOT / "multipart.py").read_text(encoding="utf-8")
+    assert source.count("delete_object") == 2
+    assert "async def delete_object(" in source
+    assert source.count("self._client.delete_object(") == 1
+    assert '"delete_object"' not in source
+    assert "getattr" not in source
 
 
 def test_adapter_package_contains_no_broad_cleanup_capability_text() -> None:
-    sources = [
-        path.read_text(encoding="utf-8")
+    """Every adapter source stays free of broad-cleanup capability text.
+
+    The exact-key staging removal name is permitted only in the multipart
+    module, only as the typed protocol declaration plus the single direct call
+    (the same scoped contract the composition boundary enforces); every other
+    file, and every batch/list/version/copy token anywhere, stays forbidden.
+    """
+
+    staging_module = _ADAPTER_PACKAGE_ROOT / "multipart.py"
+    package_files = [
+        path
         for path in sorted(_ADAPTER_PACKAGE_ROOT.rglob("*.py"))
         if "__pycache__" not in path.parts
     ]
-    assert sources, "the adapter package must contain sources"
-    for source in sources:
+    assert package_files, "the adapter package must contain sources"
+    for path in package_files:
+        source = path.read_text(encoding="utf-8")
         for forbidden in (
             "list_objects",
             "delete_objects",
             "list_object_versions",
             "copy_object",
         ):
-            assert forbidden not in source, f"adapter source mentions {forbidden!r}"
+            assert forbidden not in source, f"{path} mentions {forbidden!r}"
+        if path == staging_module:
+            assert source.count("delete_object") == 2, (
+                "multipart.py names the exact-key staging removal operation "
+                "outside the protocol declaration and single direct call"
+            )
+        else:
+            assert "delete_object" not in source, f"{path} mentions 'delete_object'"
 
 
 def test_provider_type_declares_only_the_staging_methods() -> None:

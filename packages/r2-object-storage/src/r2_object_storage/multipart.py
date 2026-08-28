@@ -27,12 +27,13 @@ and response bodies remain chained causes only; they never enter a typed
 error, a diagnostic event or a metric label. Diagnostic events carry only the
 closed operation token, bounded counters and the fixed provider token.
 
-The one exact-key staging removal operation name is assembled by an explicit
-concatenation expression because the phase-one composition contract scans this
-package's source text for the canonical-delete capability name; the Child 7
-spec adds exactly this single exact-key staging removal (spec 6.4) while every
-broad-cleanup capability stays forbidden. No list, wildcard, prefix or
-canonical-object operation is introduced anywhere.
+The one exact-key staging removal operation is named plainly — as the typed
+protocol declaration and the single direct call in the staging-removal path —
+and the composition contract permits that capability name in this module
+alone, only for those two positions, never as a quoted name or through
+dynamic dispatch. The Child 7 spec adds exactly this single exact-key staging
+removal (spec 6.4) while every broad-cleanup capability stays forbidden: no
+list, wildcard, prefix or canonical-object operation is introduced anywhere.
 """
 
 from __future__ import annotations
@@ -76,6 +77,7 @@ if TYPE_CHECKING:
         AbortMultipartUploadRequestTypeDef,
         CompleteMultipartUploadRequestTypeDef,
         CreateMultipartUploadRequestTypeDef,
+        DeleteObjectRequestTypeDef,
         ListPartsRequestTypeDef,
     )
 
@@ -101,13 +103,6 @@ _MAXIMUM_LIST_PARTS_PAGES: Final[int] = 4
 
 #: Fixed low-cardinality provider token bound to every diagnostic event.
 _PROVIDER: Final[SafeToken] = SafeToken.parse("r2")
-
-#: The SDK operation that removes exactly one staging object, assembled by an
-#: explicit concatenation expression the formatter never folds (see the module
-#: docstring: the phase-one composition contract scans this package's source
-#: text for that capability name while the Child 7 spec mandates this one
-#: exact-key staging removal).
-_STAGING_OBJECT_REMOVAL_OPERATION: Final[str] = "delete" + "_object"
 
 
 class MultipartStagingOperation(StrEnum):
@@ -180,10 +175,13 @@ class MultipartStagingSdkClient(Protocol):
 
     The real ``types_aiobotocore_s3`` client satisfies this protocol
     structurally, and the scripted contract-test double implements the same
-    five declared operations plus the one exact-key staging removal operation,
-    which is deliberately not declared here by name (see
-    :data:`_STAGING_OBJECT_REMOVAL_OPERATION`). This is the capability
-    boundary: no other SDK operation is reachable through the provider.
+    six declared operations. The exact-key staging removal operation is named
+    plainly here and invoked through this typed declaration only — never
+    through a quoted name or dynamic dispatch — and the composition contract
+    permits that one capability name in this module alone, only for this
+    protocol declaration and the single staging-removal call. This is the
+    capability boundary: no other SDK operation is reachable through the
+    provider.
     """
 
     async def create_multipart_upload(
@@ -207,6 +205,8 @@ class MultipartStagingSdkClient(Protocol):
     async def abort_multipart_upload(
         self, **kwargs: Unpack[AbortMultipartUploadRequestTypeDef]
     ) -> Any: ...
+
+    async def delete_object(self, **kwargs: Unpack[DeleteObjectRequestTypeDef]) -> Any: ...
 
 
 class _MalformedProviderState(Exception):
@@ -481,9 +481,8 @@ class R2MultipartStagingProvider:
             raise
 
     async def _remove_staging_object(self, key: str) -> None:
-        removal = getattr(self._client, _STAGING_OBJECT_REMOVAL_OPERATION)
         try:
-            await removal(Bucket=self._bucket, Key=key)
+            await self._client.delete_object(Bucket=self._bucket, Key=key)
         except ClientError as cause:
             if client_error_code(cause) in OBJECT_MISSING_ERROR_CODES:
                 # The exact staging object is already absent: success (spec 6.4).

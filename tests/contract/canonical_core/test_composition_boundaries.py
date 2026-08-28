@@ -103,8 +103,35 @@ def test_production_r2_adapter_exposes_no_destructive_capability() -> None:
 
 def test_corruption_capability_lives_only_in_test_harness() -> None:
     package_root = REPO_ROOT / "packages" / "r2-object-storage" / "src" / "r2_object_storage"
+    # The Child 7 spec (6.4) narrows the phase-one ban for exactly one module:
+    # multipart staging may remove one exact staging object in production. The
+    # capability name is permitted ONLY in multipart.py, only as the typed SDK
+    # protocol declaration and the single direct call of the exact-key staging
+    # removal path — never as a quoted name, never through dynamic dispatch,
+    # and never alongside a broad-cleanup capability.
+    staging_module = package_root / "multipart.py"
     for path in _iter_source_files(package_root):
         source = path.read_text(encoding="utf-8")
+        if path == staging_module:
+            assert source.count("delete_object") == 2, (
+                "multipart.py must name the exact-key staging removal operation "
+                "exactly twice: the protocol declaration and the single direct call"
+            )
+            assert "async def delete_object(" in source, (
+                "multipart.py must declare the staging removal operation on its SDK protocol"
+            )
+            assert source.count("self._client.delete_object(") == 1, (
+                "multipart.py must invoke the staging removal operation exactly once"
+            )
+            assert '"delete_object"' not in source, (
+                "multipart.py must not carry the staging removal operation as a quoted name"
+            )
+            assert "getattr" not in source, (
+                "multipart.py must not reach any SDK operation through dynamic dispatch"
+            )
+            for broad in ("delete_objects", "list_objects", "list_object_versions", "copy_object"):
+                assert broad not in source, f"{path} must not contain {broad!r}"
+            continue
         for forbidden in ("delete_object", "write_object_under_digest", "delete_exact_object"):
             assert forbidden not in source, f"{path} must not contain {forbidden!r}"
     harness = (REPO_ROOT / "tests" / "integration" / "r2_object_storage" / "conftest.py").read_text(
@@ -181,10 +208,15 @@ def test_no_new_alembic_revision() -> None:
         "20260820_01",
         "20260826_01",
         "20260826_02",
+        "20260827_01",
+        "20260828_01",
+        "20260828_02",
+        "20260828_03",
     }, (
         f"the Alembic graph must stay exactly at the baseline, authentication, "
-        f"exclusion policy, small-file sync, source-lifecycle and device sync "
-        f"revisions, got {sorted(revisions)}"
+        f"exclusion policy, small-file sync, source-lifecycle, device sync, "
+        f"manifest-run client-activity and multipart upload revisions, "
+        f"got {sorted(revisions)}"
     )
 
 
