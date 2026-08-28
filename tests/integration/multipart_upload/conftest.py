@@ -906,17 +906,47 @@ class LiveR2MultipartHarness:
         return rows[0]
 
     async def cleanup_manifest_contains_only_session_resources(self) -> bool:
-        """The manifest holds exactly this session's staging and canonical keys."""
+        """The manifest holds exactly this session's staging and canonical keys.
+
+        Every refusal fails through ``pytest.fail`` with ``pytrace=False`` so
+        only booleans, counts and closed wording are ever rendered: a failing
+        comparison never renders a staging key, provider upload ID, digest or
+        URL into pytest or JUnit output.
+        """
 
         staging = self.manifest.recorded_staging_resources()
-        assert len(staging) == 1, "exactly one staging key belongs to this run"
-        assert staging[0].staging_key == derive_staging_key(self.session_id)
+        if len(staging) != 1:
+            pytest.fail(
+                f"expected exactly one recorded staging key for this run, got {len(staging)}",
+                pytrace=False,
+            )
+        if staging[0].staging_key != derive_staging_key(self.session_id):
+            pytest.fail(
+                "the recorded staging key does not address this run's session "
+                "(no key value is rendered)",
+                pytrace=False,
+            )
         row = await self.session_row()
-        assert row["staging_key"] == staging[0].staging_key
-        assert row["provider_upload_id"] in staging[0].provider_upload_ids
-        assert self.manifest.recorded_keys() == (
-            self._require_intent().canonical_object_key,
-        )
+        if row["staging_key"] != staging[0].staging_key:
+            pytest.fail(
+                "the durable session row and the manifest disagree on the staging "
+                "key identity (no key value is rendered)",
+                pytrace=False,
+            )
+        if row["provider_upload_id"] not in staging[0].provider_upload_ids:
+            pytest.fail(
+                "the durable session row's provider upload ID is not among the "
+                f"{len(staging[0].provider_upload_ids)} upload ID(s) recorded for "
+                "this run's staging key (no upload ID is rendered)",
+                pytrace=False,
+            )
+        if self.manifest.recorded_keys() != (self._require_intent().canonical_object_key,):
+            pytest.fail(
+                "the manifest's canonical keys are not exactly this run's one "
+                f"declared-digest key ({len(self.manifest.recorded_keys())} recorded; "
+                "no digest is rendered)",
+                pytrace=False,
+            )
         return True
 
     async def staging_object_exists(self) -> bool:
