@@ -31,7 +31,12 @@
  *
  * Privacy (spec 5, 7): no presigned URL, query signature, provider
  * identity, ETag, staging key, digest or path is ever persisted, retained
- * after its single PUT, logged or carried on a thrown error.
+ * after its single PUT, logged or carried on a thrown error. The one
+ * diagnostics surface the runner owns is the closed `multipart_failure`
+ * trail kind: one closed resume/verify/cleanup stage token plus the
+ * failure's closed reason token, recorded for every catch that would
+ * otherwise discard its causal reason (the best-effort abort, the
+ * best-effort durable-progress clear and every thrown failure's stage).
  */
 
 import type {
@@ -41,7 +46,7 @@ import type {
   MultipartSafeReasonToken,
   MultipartSessionState,
 } from "./contracts";
-import { MULTIPART_PART_SIZE_BYTES } from "./contracts";
+import { MULTIPART_PART_SIZE_BYTES, MULTIPART_SAFE_REASON_TOKENS } from "./contracts";
 import { deriveFrozenFingerprint } from "./fingerprint";
 import type { QueueVaultFileReader } from "./queue-driver";
 import type {
@@ -53,6 +58,9 @@ import type {
   SmallFileTerminalReceipt,
 } from "./sync-api";
 import { SyncApiError } from "./sync-api";
+import type { SyncDiagnosticToken, SyncDiagnosticsTrail } from "./sync-diagnostics-trail";
+import type { SyncMultipartFailureStageToken } from "./sync-diagnostics-trail";
+import { JournalStoreError } from "./sqlite-database";
 
 // --- platform concurrency (child 7 spec 4) --------------------------------------------------------
 
@@ -148,6 +156,12 @@ export interface MultipartUploadRunnerOptions {
   readonly nowEpochMs: () => number;
   /** One transport request may hold at most this long; late results are discarded. */
   readonly requestTimeoutMs: number;
+  /**
+   * The durable diagnostics trail the runner's closed `multipart_failure`
+   * entries append to (fire-and-forget, never blocking the transfer);
+   * absent in self-contained unit runs.
+   */
+  readonly diagnosticTrail?: SyncDiagnosticsTrail | undefined;
 }
 
 /** The verdict of one frozen-file check: usable bytes, a changed file or a vanished file. */
@@ -208,6 +222,30 @@ function raceRequestTimeout<T>(request: Promise<T>, timeoutMs: number): Promise<
   });
 }
 
+/**
+ * Map one caught multipart-path failure onto its closed trail tokens: the
+ * declared multipart registry code when the failing envelope carried one,
+ * otherwise the closed wire failure kind; a journal store failure keeps
+ * its closed store reason; anything else keeps the closed
+ * `reason_unknown` fallback. No catch of this module ever discards its
+ * causal reason without one of these closed tokens.
+ */
+function multipartFailureTokensOf(error: unknown): readonly SyncDiagnosticToken[] {
+  if (error instanceof SyncApiError) {
+    if (
+      error.wireErrorCode !== null &&
+      (MULTIPART_SAFE_REASON_TOKENS as readonly string[]).includes(error.wireErrorCode)
+    ) {
+      return [error.wireErrorCode as MultipartSafeReasonToken];
+    }
+    return [error.kind];
+  }
+  if (error instanceof JournalStoreError) {
+    return [error.reason];
+  }
+  return ["reason_unknown"];
+}
+
 // --- the runner ----------------------------------------------------------------------------------------
 
 /**
@@ -223,6 +261,7 @@ export class MultipartUploadRunner {
   readonly #fileBytesReader: QueueVaultFileReader;
   readonly #nowEpochMs: () => number;
   readonly #requestTimeoutMs: number;
+  readonly #diagnosticTrail: SyncDiagnosticsTrail | null;
 
   constructor(options: MultipartUploadRunnerOptions) {
     this.#repository = options.repository;
@@ -230,33 +269,48 @@ export class MultipartUploadRunner {
     this.#fileBytesReader = options.fileBytesReader;
     this.#nowEpochMs = options.nowEpochMs;
     this.#requestTimeoutMs = options.requestTimeoutMs;
+    this.#diagnosticTrail = options.diagnosticTrail ?? null;
   }
 
   /**
    * Resume or open the frozen event's multipart session and drive only its
    * unfinished parts. `platform` selects the part-PUT semaphore limit and
-   * nothing else.
+   * nothing else. Every failure that leaves this boundary appends one
+   * closed `multipart_failure` trail entry — the phase's closed stage
+   * token plus the failure's closed reason token — before rethrowing, so
+   * no catch discards its causal reason.
    */
   async run(
     event: JournalEvent,
     platform: MultipartUploadPlatform,
     context: MultipartUploadRunContext = {},
   ): Promise<MultipartUploadRunOutcome> {
+    const stageRef: { current: SyncMultipartFailureStageToken } = { current: "multipart_resume" };
     try {
-      return await this.#run(event, platform, context);
+      return await this.#run(event, platform, context, stageRef);
     } catch (error) {
       // A session-gone registry verdict (spec 8) means the persisted
       // session is dead: clear its safe progress so the queue's retry
       // re-preflights the same frozen event instead of resuming a session
       // that can never answer again. The cleanup is best effort — a store
-      // failure never masks the original closed verdict.
+      // failure never masks the original closed verdict, and its own
+      // closed reason lands on the trail (stage cleanup) instead of being
+      // swallowed.
       if (
         error instanceof SyncApiError &&
         error.wireErrorCode !== null &&
         SESSION_GONE_WIRE_CODES.has(error.wireErrorCode)
       ) {
-        await this.#repository.clearMultipartProgress(event.eventId).catch(() => undefined);
+        await this.#repository.clearMultipartProgress(event.eventId).catch(
+          (clearError: unknown) => {
+            this.#recordMultipartFailure(
+              "multipart_cleanup",
+              multipartFailureTokensOf(clearError),
+            );
+          },
+        );
       }
+      this.#recordMultipartFailure(stageRef.current, multipartFailureTokensOf(error));
       throw error;
     }
   }
@@ -265,6 +319,7 @@ export class MultipartUploadRunner {
     event: JournalEvent,
     platform: MultipartUploadPlatform,
     context: MultipartUploadRunContext,
+    stageRef: { current: SyncMultipartFailureStageToken },
   ): Promise<MultipartUploadRunOutcome> {
     this.#throwIfSuspended(context.signal);
     const localFile = this.#repository.readLocalFileByLocalFileId(event.localFileId);
@@ -322,7 +377,10 @@ export class MultipartUploadRunner {
     }
 
     // Drive every unfinished range under the platform semaphore; each part
-    // reopens and re-checks the frozen file first (spec 4.3).
+    // reopens and re-checks the frozen file first (spec 4.3). From here the
+    // run is in its verification phase: a failure's trail entry records the
+    // closed verify stage.
+    stageRef.current = "multipart_verify";
     const unfinishedPartNumbers: number[] = [];
     for (let partNumber = 1; partNumber <= plan.partCount; partNumber += 1) {
       if (!completedPartNumbers.has(partNumber)) {
@@ -583,11 +641,18 @@ export class MultipartUploadRunner {
       "uploading",
       "multipart_local_content_changed",
     );
+    // The terminal change verdict lands on the trail first (stage verify)
+    // so the closed reason survives even a process death mid-abort.
+    this.#recordMultipartFailure("multipart_verify", ["multipart_local_content_changed"]);
     try {
       await this.#request(() => this.#syncApi.abortMultipartUploadSession(plan.sessionId));
-    } catch {
+    } catch (error) {
       // Best-effort exact abort: the closed change verdict must survive an
-      // offline abort request (spec 8, changed-file row).
+      // offline abort request (spec 8, changed-file row), and the abort's
+      // own closed reason lands on the trail (stage cleanup) instead of
+      // being swallowed — the server's expiry cleanup owns the orphaned
+      // staging resources.
+      this.#recordMultipartFailure("multipart_cleanup", multipartFailureTokensOf(error));
     }
     return { outcome: "local_content_changed" };
   }
@@ -696,6 +761,19 @@ export class MultipartUploadRunner {
   /** One transport request under the per-request timeout. */
   #request<T>(issue: () => Promise<T>): Promise<T> {
     return raceRequestTimeout(issue(), this.#requestTimeoutMs);
+  }
+
+  /**
+   * Append one closed `multipart_failure` trail entry: the phase's closed
+   * stage token plus the failure's closed reason tokens. Fire-and-forget
+   * like every trail seam — diagnostics never block the transfer — and a
+   * null trail (self-contained unit runs) records nothing.
+   */
+  #recordMultipartFailure(
+    stage: SyncMultipartFailureStageToken,
+    tokens: readonly SyncDiagnosticToken[],
+  ): void {
+    void this.#diagnosticTrail?.append({ kind: "multipart_failure", tokens: [stage, ...tokens] });
   }
 
   #throwIfSuspended(signal: AbortSignal | undefined): void {

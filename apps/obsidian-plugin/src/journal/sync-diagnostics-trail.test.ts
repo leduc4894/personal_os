@@ -16,6 +16,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import type { JournalFileStore } from "./persistence";
+import { MULTIPART_SAFE_REASON_TOKENS } from "./contracts";
 import {
   MAX_SYNC_DIAGNOSTICS_TRAIL_APPEND_FAILURES,
   MAX_SYNC_DIAGNOSTICS_TRAIL_ENTRIES,
@@ -24,6 +25,7 @@ import {
   SYNC_DIAGNOSTIC_KINDS,
   SYNC_DIAGNOSTICS_TRAIL_CONTRACT,
   SYNC_DIAGNOSTICS_TRAIL_FILE_NAME,
+  SYNC_MULTIPART_FAILURE_STAGE_TOKENS,
   SYNC_PARK_SITE_TOKENS,
   SYNC_SELF_CHECK_VERDICT_TOKENS,
   SYNC_STARTUP_STAGE_TOKENS,
@@ -366,6 +368,7 @@ describe("sync diagnostics trail contract v2 (device cursor and manifest reconci
       "apply_failure",
       "reconcile_failure",
       "composition_read_failure",
+      "multipart_failure",
     ]);
   });
 
@@ -821,6 +824,119 @@ describe("sync diagnostics trail startup_failure entries (closed-reason surfacin
       "status_read_failed",
       "note_status_read_failed",
     ]);
+  });
+});
+
+// --- the multipart_failure kind (resumable multipart mobile upload task 11) ---------------------------
+
+describe("sync diagnostics trail multipart_failure entries (multipart task 11)", () => {
+  it("pins the closed three-stage multipart failure vocabulary", () => {
+    expect(SYNC_MULTIPART_FAILURE_STAGE_TOKENS).toEqual([
+      "multipart_resume",
+      "multipart_verify",
+      "multipart_cleanup",
+    ]);
+  });
+
+  it("admits the multipart_failure kind into the closed kind vocabulary", () => {
+    expect(SYNC_DIAGNOSTIC_KINDS).toContain("multipart_failure");
+  });
+
+  it("persists and reloads a multipart_failure entry carrying its stage and closed reason", async () => {
+    const store = new FakeTrailFileStore();
+    const trail = await createLoadedTrail(store);
+    await trail.append({
+      kind: "multipart_failure",
+      tokens: ["multipart_resume", "multipart_session_expired"],
+    });
+    await trail.append({
+      kind: "multipart_failure",
+      tokens: ["multipart_verify", "multipart_part_url_rejected"],
+    });
+    await trail.append({
+      kind: "multipart_failure",
+      tokens: ["multipart_cleanup", "multipart_cleanup_failed"],
+    });
+    const reloaded = await createLoadedTrail(store);
+    expect(reloaded.readEntries().map((entry) => [entry.kind, ...entry.tokens])).toEqual([
+      ["multipart_failure", "multipart_resume", "multipart_session_expired"],
+      ["multipart_failure", "multipart_verify", "multipart_part_url_rejected"],
+      ["multipart_failure", "multipart_cleanup", "multipart_cleanup_failed"],
+    ]);
+  });
+
+  it("admits every closed multipart safe-reason token as a multipart_failure token", async () => {
+    const store = new FakeTrailFileStore();
+    const trail = await createLoadedTrail(store);
+    for (const reasonToken of MULTIPART_SAFE_REASON_TOKENS) {
+      await trail.append({ kind: "multipart_failure", tokens: ["multipart_verify", reasonToken] });
+    }
+    const reloaded = await createLoadedTrail(store);
+    expect(reloaded.readEntries()).toHaveLength(MULTIPART_SAFE_REASON_TOKENS.length);
+    expect(reloaded.readEntries().map((entry) => entry.tokens[1])).toEqual([
+      ...MULTIPART_SAFE_REASON_TOKENS,
+    ]);
+  });
+
+  it("accepts the closed wire failure kinds and reason_unknown alongside a multipart stage", async () => {
+    const store = new FakeTrailFileStore();
+    const trail = await createLoadedTrail(store);
+    await trail.append({ kind: "multipart_failure", tokens: ["multipart_cleanup", "network_offline"] });
+    await trail.append({ kind: "multipart_failure", tokens: ["multipart_verify", "server_error"] });
+    await trail.append({ kind: "multipart_failure", tokens: ["multipart_cleanup", "reason_unknown"] });
+    const reloaded = await createLoadedTrail(store);
+    expect(reloaded.readEntries().map((entry) => [...entry.tokens])).toEqual([
+      ["multipart_cleanup", "network_offline"],
+      ["multipart_verify", "server_error"],
+      ["multipart_cleanup", "reason_unknown"],
+    ]);
+  });
+
+  it("resets a sidecar carrying a foreign multipart stage token", async () => {
+    for (const foreignBody of [
+      JSON.stringify({
+        contract: "obsidian_sync_diagnostics_trail/v2",
+        entries: [
+          { kind: "multipart_failure", at_epoch_ms: 1, tokens: ["resume", "multipart_session_expired"] },
+        ],
+      }),
+      JSON.stringify({
+        contract: "obsidian_sync_diagnostics_trail/v2",
+        entries: [
+          { kind: "multipart_failure", at_epoch_ms: 1, tokens: ["multipart_nonsense"] },
+        ],
+      }),
+    ]) {
+      const store = seededTrailStore(foreignBody);
+      const trail = await createLoadedTrail(store);
+      expect(trail.readEntries().map((entry) => entry.kind)).toEqual(["trail_reset"]);
+    }
+  });
+
+  it("persists multipart_failure records free of multipart identity sentinels", async () => {
+    const store = new FakeTrailFileStore();
+    const trail = await createLoadedTrail(store);
+    await trail.append({
+      kind: "multipart_failure",
+      tokens: ["multipart_verify", "multipart_local_content_changed"],
+    });
+    await trail.append({ kind: "multipart_failure", tokens: ["multipart_cleanup", "network_offline"] });
+    const sidecarText = new TextDecoder().decode(
+      store.files.get(SYNC_DIAGNOSTICS_TRAIL_FILE_NAME) ?? new ArrayBuffer(0),
+    );
+    for (const forbiddenText of [
+      "sentinel-etag",
+      "provider_upload_id",
+      "staging",
+      "X-Amz",
+      "https://",
+      "notes/",
+      "signature",
+      ".md",
+      "uploadId",
+    ]) {
+      expect(sidecarText).not.toContain(forbiddenText);
+    }
   });
 });
 

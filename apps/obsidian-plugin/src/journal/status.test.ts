@@ -944,3 +944,110 @@ describe("source lifecycle surface (Task 10)", () => {
     expect(telemetry.match(/[0-9a-f]{64}/i)).toBeNull();
   });
 });
+
+// --- the closed multipart status surface (resumable multipart mobile upload task 11) --------------
+
+import {
+  MULTIPART_SAFE_REASON_TOKENS,
+  MULTIPART_SESSION_STATES,
+} from "./contracts";
+import type { MultipartSafeReasonToken, MultipartSessionState } from "./contracts";
+
+describe("closed multipart status surface (multipart task 11)", () => {
+  it("pins the closed multipart vocabularies the surface may expose", () => {
+    // The twelve safe-reason tokens and the twelve session states are the
+    // whole string surface of the multipart status projection.
+    expect(MULTIPART_SAFE_REASON_TOKENS).toHaveLength(12);
+    expect(MULTIPART_SESSION_STATES).toHaveLength(12);
+    expect(MULTIPART_SESSION_STATES).toContain("uploading");
+    expect(MULTIPART_SAFE_REASON_TOKENS).toContain("multipart_local_content_changed");
+  });
+
+  /** One full multipart session-state histogram with one uploading session. */
+  function uploadingMultipartCounts(): Record<MultipartSessionState, number> {
+    const counts = {} as Record<MultipartSessionState, number>;
+    for (const state of MULTIPART_SESSION_STATES) {
+      counts[state] = 0;
+    }
+    counts.uploading = 1;
+    return counts;
+  }
+
+  it("projects the closed multipart session-state histogram verbatim", () => {
+    const counts = uploadingMultipartCounts();
+    const snapshot = projectJournalSyncStatus(
+      projectInput({ multipartSessionStateCounts: counts }),
+    );
+    expect(snapshot.multipartSessionStateCounts).toEqual(counts);
+  });
+
+  it("defaults the multipart histogram to zero counts when no input is tracked", () => {
+    const snapshot = projectJournalSyncStatus(projectInput());
+    expect(snapshot.multipartSessionStateCounts).toEqual(
+      MULTIPART_SESSION_STATES.reduce(
+        (acc, state) => {
+          acc[state] = 0;
+          return acc;
+        },
+        {} as Record<MultipartSessionState, number>,
+      ),
+    );
+    expect(snapshot.multipartSafeReasonCodes).toEqual([]);
+  });
+
+  it("falls back to the zero histogram when any count is not a non-negative integer", () => {
+    for (const invalidCounts of [
+      { ...uploadingMultipartCounts(), uploading: -1 },
+      { ...uploadingMultipartCounts(), committed: 1.5 },
+      { ...uploadingMultipartCounts(), created: Number.NaN },
+    ]) {
+      const snapshot = projectJournalSyncStatus(
+        projectInput({ multipartSessionStateCounts: invalidCounts }),
+      );
+      expect(snapshot.multipartSessionStateCounts.uploading).toBe(0);
+      expect(snapshot.multipartSessionStateCounts.committed).toBe(0);
+    }
+  });
+
+  it("projects only closed multipart safe-reason tokens, deduplicated", () => {
+    const reasonCodes = [
+      "multipart_local_content_changed",
+      "multipart_cleanup_failed",
+      "multipart_local_content_changed",
+      // A foreign snake_case token is dropped silently at the closed gate.
+      "multipart_made_up_reason",
+    ] as unknown as readonly MultipartSafeReasonToken[];
+    const snapshot = projectJournalSyncStatus(
+      projectInput({ multipartSafeReasonCodes: reasonCodes }),
+    );
+    expect(snapshot.multipartSafeReasonCodes).toEqual([
+      "multipart_local_content_changed",
+      "multipart_cleanup_failed",
+    ]);
+  });
+
+  it("keeps the multipart surface free of identity sentinels", () => {
+    const snapshot = projectJournalSyncStatus(
+      projectInput({
+        multipartSessionStateCounts: uploadingMultipartCounts(),
+        multipartSafeReasonCodes: [
+          "multipart_part_url_rejected",
+          "multipart_dependency_unavailable",
+        ],
+      }),
+    );
+    const telemetry = `${JSON.stringify(snapshot)} ${renderJournalSyncStatusText(snapshot)}`;
+    for (const forbidden of [
+      "sentinel-etag",
+      "provider_upload_id",
+      "staging_key",
+      "X-Amz",
+      "https://",
+      "signature",
+      "notes/",
+      ".md",
+    ]) {
+      expect(telemetry).not.toContain(forbidden);
+    }
+  });
+});

@@ -26,6 +26,15 @@
  * a legacy v1 sidecar losslessly (its entries parse under the same closed
  * gates) and the next persist rewrites the sidecar under the v2 contract.
  *
+ * The resumable multipart mobile-upload child (task 11) adds the
+ * `multipart_failure` kind: one closed `multipart_resume` /
+ * `multipart_verify` / `multipart_cleanup` stage token of
+ * {@link SYNC_MULTIPART_FAILURE_STAGE_TOKENS} plus the closed multipart
+ * safe-reason token (or the closed wire failure kind /
+ * `reason_unknown` fallback) of the swallowed or terminal multipart
+ * verdict — never a presigned URL, query signature, provider identity,
+ * ETag, staging key, digest or path.
+ *
  * The trail persists as ONE JSON sidecar (`sync-diagnostics-trail.json`)
  * through the journal file store port bound to the Vault's plugin
  * directory. A corrupt or unreadable sidecar resets the trail to empty
@@ -55,8 +64,8 @@ import type {
   DeviceSyncReason,
   ReconcileFailureStage,
 } from "../device-sync/contracts";
-import { JOURNAL_SAFE_ERROR_LABELS } from "./contracts";
-import type { JournalSafeErrorLabel } from "./contracts";
+import { JOURNAL_SAFE_ERROR_LABELS, MULTIPART_SAFE_REASON_TOKENS } from "./contracts";
+import type { JournalSafeErrorLabel, MultipartSafeReasonToken } from "./contracts";
 import type { RestoreReservationRefusal } from "./lifecycle-contracts";
 import type { LifecycleRunOutcome } from "./lifecycle-driver";
 import type { JournalFileStore } from "./persistence";
@@ -113,7 +122,9 @@ export const MAX_SYNC_DIAGNOSTICS_TRAIL_APPEND_FAILURES = 999;
  * The closed diagnostic kinds the trail records. The five device-sync
  * kinds (task 7, spec 14.1) name the credential/cursor/apply/reconcile
  * failure surfaces of the device-sync operations and the composition
- * reads that never stop sync.
+ * reads that never stop sync. The `multipart_failure` kind (multipart
+ * task 11, child 7 spec 7) names the resumable multipart runner's
+ * swallowed best-effort abort/clear reasons and terminal local verdicts.
  */
 export const SYNC_DIAGNOSTIC_KINDS = [
   "wire_failure",
@@ -128,6 +139,7 @@ export const SYNC_DIAGNOSTIC_KINDS = [
   "apply_failure",
   "reconcile_failure",
   "composition_read_failure",
+  "multipart_failure",
 ] as const;
 
 export type SyncDiagnosticKind = (typeof SYNC_DIAGNOSTIC_KINDS)[number];
@@ -157,7 +169,9 @@ export type SyncDiagnosticClosedToken =
   | ApplyFailureStage
   | ReconcileFailureStage
   | CredentialFailureStage
-  | CompositionReadStage;
+  | CompositionReadStage
+  | SyncMultipartFailureStageToken
+  | MultipartSafeReasonToken;
 
 /**
  * The closed row-state tokens a `journal_failure` entry may carry when a
@@ -272,6 +286,26 @@ export const SYNC_COMPOSITION_READ_FAILURE_TOKENS = [
 
 export type SyncCompositionReadFailureToken =
   (typeof SYNC_COMPOSITION_READ_FAILURE_TOKENS)[number];
+
+/**
+ * The closed three-stage failure vocabulary of the `multipart_failure`
+ * kind (resumable multipart mobile upload, task 11, child 7 spec 7):
+ * `multipart_resume` names the session create/status/replay boundary,
+ * `multipart_verify` names the part-PUT and completion-verification
+ * boundary, and `multipart_cleanup` names the best-effort abort and
+ * durable-progress-clear boundary. A `multipart_failure` entry carries
+ * exactly one of these stage tokens plus the closed reason token; no
+ * other stage string is a member and no entry ever carries a presigned
+ * URL, signature, provider identity, ETag, staging key, digest or path.
+ */
+export const SYNC_MULTIPART_FAILURE_STAGE_TOKENS = [
+  "multipart_resume",
+  "multipart_verify",
+  "multipart_cleanup",
+] as const;
+
+export type SyncMultipartFailureStageToken =
+  (typeof SYNC_MULTIPART_FAILURE_STAGE_TOKENS)[number];
 
 /**
  * The brand that keeps the opaque envelope request id out of the closed
@@ -395,6 +429,9 @@ const CLOSED_DIAGNOSTIC_TOKEN_SET: ReadonlySet<string> = new Set<string>([
   ...DEVICE_SYNC_RECONCILE_STAGES,
   ...DEVICE_SYNC_CREDENTIAL_STAGES,
   ...DEVICE_SYNC_COMPOSITION_READ_STAGES,
+  // The multipart failure stages and safe-reason tokens (multipart task 11).
+  ...SYNC_MULTIPART_FAILURE_STAGE_TOKENS,
+  ...MULTIPART_SAFE_REASON_TOKENS,
 ]);
 
 const SYNC_API_ENVELOPE_ERROR_CODE_SET: ReadonlySet<string> = new Set<string>(

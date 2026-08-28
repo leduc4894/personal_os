@@ -1,12 +1,19 @@
 """Low-cardinality multipart upload metrics and in-memory recorder.
 
 Every metric label is a closed :class:`enum.StrEnum` member: session,
-completion and cleanup outcomes, the closed flow that stands in for the
+completion and cleanup outcomes, the closed stage that stands in for the
 route template, and rejection reason codes mirroring the domain error
 registry. Session IDs, staging keys, provider upload IDs, ETags, presigned
 URLs, digests, byte counts and provider messages are never accepted as
 labels and never recorded. :data:`MULTIPART_METRIC_CONTRACTS` pins the
-exact metric names and their label dimensions.
+exact metric names and their label dimensions, and every dimension name is
+itself a member of the closed label universe
+:data:`MULTIPART_METRIC_LABEL_NAMES` — ``outcome``, ``state``,
+``platform_class``, ``stage`` and ``error_code`` only (spec 7) — enforced
+at import time by :func:`validate_multipart_metric_contracts`, so an
+identifier-bearing dimension (a session ID, staging key, provider upload
+ID, ETag, request ID, path, locator, digest, URL or signature) can never
+be registered as a label name.
 
 :class:`MultipartUploadMetrics` is the injectable Protocol the orchestration
 service depends on; :class:`InMemoryMultipartUploadMetrics` is the bounded
@@ -17,12 +24,13 @@ negative or non-finite durations and any non-enum label value.
 
 The recorder additionally keeps a bounded ring of the most recent rejection
 records — closed reason code, epoch-millisecond timestamp and the closed
-flow label standing in for the route template — and exposes both ring and
+stage label standing in for the route template — and exposes both ring and
 counters through the read-side
 :class:`MultipartRejectionDiagnosticsSource` protocol. The ring is the
 durable-trail surface the committed session's inline exact staging-delete
-failure records its closed reason token on: the committed terminal state
-has no cleanup-obligation exit, so the ring plus the counter is the
+failure records its closed reason token on (:meth:`record_cleanup_failed`
+is the first-class entry point for that one path): the committed terminal
+state has no cleanup-obligation exit, so the ring plus the counter is the
 readable reason surface for that one path.
 """
 
@@ -36,6 +44,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Final, Protocol, runtime_checkable
+
+from personal_os.error_contracts.codes import ErrorCode
 
 #: Maximum number of retained per-path records. The recorder is a bounded
 #: ring buffer for tests and standalone runs, never an unbounded audit log.
@@ -79,13 +89,13 @@ class MultipartCleanupOutcome(StrEnum):
 
 
 class MultipartMetricFlow(StrEnum):
-    """The closed request flows whose rejections the ring records.
+    """The closed stage label of one multipart boundary's rejections.
 
-    Each member stands in for the diagnostics route-template token of one
-    multipart boundary; the metrics layer sits below the
-    request-correlation plumbing that owns route templates, so this closed
-    label carries the diagnostic value without new plumbing. Never a UUID,
-    key, locator, digest, token, path or free-form string.
+    Each member is the ``stage`` label value of one multipart boundary; the
+    metrics layer sits below the request-correlation plumbing that owns
+    route templates, so this closed label carries the diagnostic value
+    without new plumbing. Never a UUID, key, locator, digest, token, path
+    or free-form string.
     """
 
     SESSION_CREATE = "session_create"
@@ -97,7 +107,7 @@ class MultipartMetricFlow(StrEnum):
 
 
 class MultipartRejectionReason(StrEnum):
-    """The closed rejection reason codes mirroring the domain error registry."""
+    """The closed ``error_code`` label values mirroring the domain registry."""
 
     MULTIPART_SESSION_NOT_FOUND = "multipart_session_not_found"
     MULTIPART_SESSION_EXPIRED = "multipart_session_expired"
@@ -113,9 +123,20 @@ class MultipartRejectionReason(StrEnum):
     MULTIPART_DEPENDENCY_UNAVAILABLE = "multipart_dependency_unavailable"
 
 
-#: The exact required metric names and their label dimensions. IDs, keys,
-#: locators, digests, URLs, provider identities and tokens are never metric
-#: labels, so no dimension names one.
+#: The closed universe of multipart metric label names (spec 7): outcome,
+#: state, platform class, stage and safe error code — no other dimension
+#: name may ever label a multipart metric, which by construction excludes
+#: every identifier-bearing dimension: no session ID, staging key,
+#: provider upload ID, ETag, request ID, filename/path, locator, digest,
+#: URL, signature or workspace/device identifier is a member.
+MULTIPART_METRIC_LABEL_NAMES: Final[frozenset[str]] = frozenset(
+    {"outcome", "state", "platform_class", "stage", "error_code"}
+)
+
+#: The exact required metric names and their label dimensions. Every
+#: dimension name is a member of :data:`MULTIPART_METRIC_LABEL_NAMES`;
+#: IDs, keys, locators, digests, URLs, provider identities and tokens are
+#: never metric labels, so no dimension names one.
 MULTIPART_METRIC_CONTRACTS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
     {
         "multipart_session_total": frozenset({"outcome"}),
@@ -123,9 +144,39 @@ MULTIPART_METRIC_CONTRACTS: Final[Mapping[str, frozenset[str]]] = MappingProxyTy
         "multipart_completion_total": frozenset({"outcome"}),
         "multipart_completion_duration_seconds": frozenset({"outcome"}),
         "multipart_cleanup_total": frozenset({"outcome"}),
-        "multipart_rejection_total": frozenset({"flow", "reason_code"}),
+        "multipart_rejection_total": frozenset({"stage", "error_code"}),
     }
 )
+
+
+def validate_multipart_metric_contracts(
+    contracts: Mapping[str, frozenset[str]] | None = None,
+) -> None:
+    """Validate that every multipart metric labels only the closed universe.
+
+    The landed contracts are validated at import time; a caller may pass its
+    own mapping (the registration seam a production sink uses) to validate a
+    candidate contract before it is ever exported. Raises ``ValueError``
+    naming the offending metric and label as soon as one label name falls
+    outside :data:`MULTIPART_METRIC_LABEL_NAMES` — which is exactly how an
+    identifier-bearing label name (``session_id``, ``staging_key``,
+    ``provider_upload_id``, ``etag``, ``request_id``, ``path``, ``digest``,
+    ``url``, ``signature``, …) is rejected: none of them is a member of the
+    closed five-name universe, so none can ever be registered.
+    """
+
+    for metric_name, labels in (
+        MULTIPART_METRIC_CONTRACTS if contracts is None else contracts
+    ).items():
+        rejected_label_names = sorted(labels - MULTIPART_METRIC_LABEL_NAMES)
+        if rejected_label_names:
+            raise ValueError(
+                f"{metric_name} label {rejected_label_names[0]!r} is not a"
+                " closed metric label name of MULTIPART_METRIC_LABEL_NAMES"
+            )
+
+
+validate_multipart_metric_contracts()
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,8 +197,8 @@ class MultipartRejectionRecord:
     """One recent rejection of the bounded diagnostics ring.
 
     Carries only the closed reason code, the epoch-millisecond moment of the
-    rejection and the closed flow label. Never a UUID, key, locator, digest,
-    URL, provider identity, path or free-form string.
+    rejection and the closed stage label. Never a UUID, key, locator,
+    digest, URL, provider identity, path or free-form string.
     """
 
     error_code: MultipartRejectionReason
@@ -221,6 +272,17 @@ class MultipartUploadMetrics(Protocol):
         reason_code: MultipartRejectionReason,
     ) -> None:
         """Increment the rejection counter for one closed reason."""
+        ...
+
+    def record_cleanup_failed(self, error_code: ErrorCode) -> None:
+        """Record one cleanup failure's closed registry reason on the ring.
+
+        The committed session's inline exact staging-delete has no
+        cleanup-obligation exit, so its swallowed closed reason surfaces
+        here: the readable reason surface of that one path. Accepts only
+        the closed ``multipart_*`` registry block; a foreign code raises
+        ``ValueError`` and records nothing.
+        """
         ...
 
 
@@ -311,6 +373,19 @@ class InMemoryMultipartUploadMetrics:
             )
         )
 
+    def record_cleanup_failed(self, error_code: ErrorCode) -> None:
+        """Record one cleanup failure's closed registry reason on the ring.
+
+        Only the closed ``multipart_*`` registry block records: a foreign
+        code's constructor lookup raises ``ValueError`` before any counter
+        or ring mutation runs.
+        """
+
+        self.record_rejection(
+            flow=MultipartMetricFlow.CLEANUP,
+            reason_code=MultipartRejectionReason(error_code.value),
+        )
+
     def session_count(self, outcome: MultipartSessionOutcome) -> int:
         return sum(1 for record in self._records if record.outcome is outcome)
 
@@ -338,6 +413,7 @@ class InMemoryMultipartUploadMetrics:
 
 __all__ = [
     "MULTIPART_METRIC_CONTRACTS",
+    "MULTIPART_METRIC_LABEL_NAMES",
     "InMemoryMultipartUploadMetrics",
     "MultipartCleanupOutcome",
     "MultipartCompletionOutcome",
@@ -350,4 +426,5 @@ __all__ = [
     "MultipartUploadMetrics",
     "MultipartUploadMetricsWithRejectionDiagnostics",
     "MultipartUploadRecord",
+    "validate_multipart_metric_contracts",
 ]

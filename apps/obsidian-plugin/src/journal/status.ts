@@ -21,10 +21,21 @@
  * paths, locators, source IDs, tokens, fingerprints, remote URLs or any
  * other Vault detail — the input carries only closed enum tokens and
  * counts, and the snapshot only ever reads those.
+ *
+ * The resumable multipart mobile-upload child (task 11) adds the closed
+ * redacted multipart surface: a session-state histogram over the closed
+ * `MultipartSessionState` vocabulary and the closed set of observed
+ * multipart safe-reason tokens. The projection exposes the closed tokens
+ * and counts only — never a session ID, staging key, provider upload ID,
+ * ETag, presigned URL, digest, byte count or Vault path.
  */
 
-import type { JournalEventState } from "./contracts";
-import { JOURNAL_PENDING_EVENT_STATES } from "./contracts";
+import type {
+  JournalEventState,
+  MultipartSafeReasonToken,
+  MultipartSessionState,
+} from "./contracts";
+import { JOURNAL_PENDING_EVENT_STATES, MULTIPART_SAFE_REASON_TOKENS, MULTIPART_SESSION_STATES } from "./contracts";
 import type { LifecycleLocalFileState } from "./lifecycle-contracts";
 import { LIFECYCLE_LOCAL_FILE_STATES } from "./lifecycle-contracts";
 import type { QueuePassOutcome } from "./queue-driver";
@@ -138,6 +149,17 @@ const WAITING_RETRY_SAFE_ERRORS: ReadonlySet<string> = new Set([
  */
 export type LifecycleStateCounts = Readonly<Record<LifecycleLocalFileState, number>>;
 
+/**
+ * The closed, redacted multipart session-state histogram of one snapshot
+ * (multipart task 11): one closed {@link MultipartSessionState} key per
+ * state, the count of durable multipart progress records that hold that
+ * state. Missing states report zero so callers never have to defend
+ * against `undefined` keys. The map shape is the only thing the surface
+ * ever exposes — no session ID, staging key, provider upload ID, ETag,
+ * presigned URL, digest, byte count or Vault path ever reaches it.
+ */
+export type MultipartSessionStateCounts = Readonly<Record<MultipartSessionState, number>>;
+
 /** The closed, redacted input of the projection: counts, labels, booleans. */
 export interface JournalSyncStatusInput {
   /** The durable reconcile flag of the journal meta (spec 6.4). */
@@ -158,6 +180,10 @@ export interface JournalSyncStatusInput {
   readonly failedAttemptCount?: number;
   /** Closed set of lifecycle blocker codes observed right now. */
   readonly lifecycleBlockedReasonCodes?: readonly LifecycleBlockedReasonCode[];
+  /** Redacted multipart session-state histogram (multipart task 11). */
+  readonly multipartSessionStateCounts?: MultipartSessionStateCounts;
+  /** Closed set of observed multipart safe-reason tokens (multipart task 11). */
+  readonly multipartSafeReasonCodes?: readonly MultipartSafeReasonToken[];
 }
 
 /**
@@ -179,6 +205,10 @@ export interface JournalSyncStatusSnapshot {
   readonly failedAttemptCount: number;
   /** Closed set of lifecycle blocker codes. Empty when none observed. */
   readonly lifecycleBlockedReasonCodes: readonly LifecycleBlockedReasonCode[];
+  /** Redacted multipart session-state histogram (multipart task 11). Defaults to zero counts. */
+  readonly multipartSessionStateCounts: MultipartSessionStateCounts;
+  /** Closed set of multipart safe-reason tokens. Empty when none observed. */
+  readonly multipartSafeReasonCodes: readonly MultipartSafeReasonToken[];
 }
 
 // --- the projection ---------------------------------------------------------------------------------
@@ -192,6 +222,15 @@ const ZERO_LIFECYCLE_STATE_COUNTS: LifecycleStateCounts = LIFECYCLE_LOCAL_FILE_S
   {} as Record<LifecycleLocalFileState, number>,
 ) as LifecycleStateCounts;
 
+/** The zero-initialised multipart session-state histogram (multipart task 11). */
+const ZERO_MULTIPART_STATE_COUNTS: MultipartSessionStateCounts = MULTIPART_SESSION_STATES.reduce(
+  (acc, state) => {
+    acc[state] = 0;
+    return acc;
+  },
+  {} as Record<MultipartSessionState, number>,
+) as MultipartSessionStateCounts;
+
 /**
  * Project one closed status snapshot (spec 11). Priority is fixed:
  * `reconcile_required` (a hard stop that must idle the driver) above
@@ -204,7 +243,8 @@ const ZERO_LIFECYCLE_STATE_COUNTS: LifecycleStateCounts = LIFECYCLE_LOCAL_FILE_S
  * blocker codes to the closed enum, and never lets a non-enum string
  * reach the snapshot. Every numeric count is validated to be a
  * non-negative integer; an invalid value falls through to zero rather
- * than poison the surface.
+ * than poison the surface. The multipart surface (task 11) folds through
+ * the same two closed redacted gates.
  */
 export function projectJournalSyncStatus(input: JournalSyncStatusInput): JournalSyncStatusSnapshot {
   let pendingEventCount = 0;
@@ -262,6 +302,12 @@ export function projectJournalSyncStatus(input: JournalSyncStatusInput): Journal
   const lifecycleBlockedReasonCodes = normaliseLifecycleBlockedReasonCodes(
     input.lifecycleBlockedReasonCodes,
   );
+  const multipartSessionStateCounts = normaliseMultipartSessionStateCounts(
+    input.multipartSessionStateCounts,
+  );
+  const multipartSafeReasonCodes = normaliseMultipartSafeReasonCodes(
+    input.multipartSafeReasonCodes,
+  );
   return {
     kind,
     pendingEventCount,
@@ -270,6 +316,8 @@ export function projectJournalSyncStatus(input: JournalSyncStatusInput): Journal
     pendingLifecycleEventCount,
     failedAttemptCount,
     lifecycleBlockedReasonCodes,
+    multipartSessionStateCounts,
+    multipartSafeReasonCodes,
   };
 }
 
@@ -323,6 +371,59 @@ function normaliseLifecycleBlockedReasonCodes(
     if (
       typeof candidate === "string" &&
       (LIFECYCLE_BLOCKED_REASON_CODES as readonly string[]).includes(candidate) &&
+      !seen.has(candidate)
+    ) {
+      seen.add(candidate);
+      filtered.push(candidate);
+    }
+  }
+  return filtered;
+}
+
+/**
+ * Return the closed multipart session-state histogram (multipart task 11):
+ * the input is preserved verbatim when every value is a non-negative
+ * integer AND every key is a closed enum token; otherwise the zero
+ * histogram is returned so the surface never carries an invalid value.
+ */
+function normaliseMultipartSessionStateCounts(
+  value: MultipartSessionStateCounts | undefined,
+): MultipartSessionStateCounts {
+  if (value === undefined) {
+    return ZERO_MULTIPART_STATE_COUNTS;
+  }
+  const counts: Record<MultipartSessionState, number> = { ...ZERO_MULTIPART_STATE_COUNTS };
+  for (const state of MULTIPART_SESSION_STATES) {
+    const candidate = value[state];
+    if (candidate === undefined) {
+      continue;
+    }
+    if (!Number.isInteger(candidate) || candidate < 0) {
+      return ZERO_MULTIPART_STATE_COUNTS;
+    }
+    counts[state] = candidate;
+  }
+  return counts;
+}
+
+/**
+ * Restrict the multipart safe-reason list to the closed twelve-token
+ * vocabulary, deduplicated in first-observed order (multipart task 11):
+ * a foreign snake_case string is dropped silently at the closed gate —
+ * the closed enum is the only string surface ever exposed.
+ */
+function normaliseMultipartSafeReasonCodes(
+  value: readonly MultipartSafeReasonToken[] | undefined,
+): readonly MultipartSafeReasonToken[] {
+  if (value === undefined) {
+    return [];
+  }
+  const seen = new Set<MultipartSafeReasonToken>();
+  const filtered: MultipartSafeReasonToken[] = [];
+  for (const candidate of value) {
+    if (
+      typeof candidate === "string" &&
+      (MULTIPART_SAFE_REASON_TOKENS as readonly string[]).includes(candidate) &&
       !seen.has(candidate)
     ) {
       seen.add(candidate);

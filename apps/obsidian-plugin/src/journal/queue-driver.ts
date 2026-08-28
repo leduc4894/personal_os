@@ -339,6 +339,9 @@ export class JournalQueueDriver {
       fileBytesReader: options.fileBytesReader,
       nowEpochMs: this.#nowEpochMs,
       requestTimeoutMs: this.#requestTimeoutMs,
+      // The multipart lane's closed `multipart_failure` entries (multipart
+      // task 11) ride the same durable trail as the driver's own entries.
+      diagnosticTrail: this.#diagnosticTrail ?? undefined,
     });
   }
 

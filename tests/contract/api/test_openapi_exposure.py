@@ -6,10 +6,18 @@ environments, that staging and production have no OpenAPI route at all, that
 Swagger and ReDoc are disabled in every environment, that the route set stays
 closed to the two health routes plus the local/test document route, and that
 the document route still receives the correlation headers.
+
+The multipart privacy guard (resumable multipart mobile-upload task 11)
+additionally pins that the locally served document — one of the safe surfaces
+of the multipart child's leak scan (spec 9.3) — never carries a sensitive
+multipart sentinel or the name of an in-process diagnostics surface: the
+rejection ring and the metric sinks are process-local/structured-log surfaces,
+never API routes or schema members.
 """
 
 from __future__ import annotations
 
+import json
 import re
 
 import httpx
@@ -21,6 +29,30 @@ from starlette.routing import Route as StarletteRoute
 
 from personal_os.package_metadata import distribution_version
 from personal_os.runtime_configuration.models import RuntimeEnvironment
+
+#: Sensitive multipart sentinels (spec 9.3) the served document must never
+#: render: provider identity, staging identity, wire credentials, Vault
+#: paths, digests and diagnostics-surface names all stay off the API.
+SENSITIVE_MULTIPART_SENTINELS: frozenset[str] = frozenset(
+    {
+        "sentinel-etag-9f8e7d6c",
+        "sentinel-provider-upload-id-000111222333",
+        "sentinel-session-id-value-445566778899",
+        "sentinel-request-id-value-998877665544",
+        "notes/sentinel-leak-path.md",
+        "sentinel-digest-hex-0123456789abcdef0123456789abcdef",
+        "https://sentinel-storage.example.com/staging?X-Amz-Signature=SENTINELSIGNATURE",
+        "staging/sentinel-key-0f1e2d3c4b5a",
+        "SentinelProviderException: multipart sentinel failure",
+    }
+)
+
+#: The names of the multipart in-process diagnostics surfaces that must
+#: never become API surface members.
+FORBIDDEN_MULTIPART_SURFACE_MARKERS: frozenset[str] = frozenset(
+    {"provider_upload_id", "staging_key", "rejection_diagnostics", "recent_rejections"}
+)
+
 
 _TRACEPARENT_PATTERN = re.compile(r"00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}")
 _API_ROUTE_PATHS = frozenset(
@@ -161,3 +193,23 @@ async def test_route_set_is_closed_to_the_api_and_local_document_routes() -> Non
     assert "PUT" in routes["/api/auth/password"].methods
     assert "DELETE" in routes["/api/auth/totp"].methods
     assert isinstance(routes["/api/openapi.json"], StarletteRoute)
+
+
+@pytest.mark.asyncio
+async def test_served_openapi_document_carries_no_sensitive_multipart_sentinel() -> None:
+    """The served document is a safe surface of the multipart leak scan (spec 9.3).
+
+    The multipart diagnostics this child owns — the closed rejection ring,
+    the metric sinks, the structured rejection events — are process-local
+    and structured-log surfaces: none of their names, none of their label
+    vocabularies and no sensitive sentinel value may render into the API
+    document.
+    """
+
+    response = await request(create_test_app(RuntimeEnvironment.TEST), "GET", "/api/openapi.json")
+    assert response.status_code == 200
+    rendered = json.dumps(response.json())
+    for sentinel in SENSITIVE_MULTIPART_SENTINELS:
+        assert sentinel not in rendered, sentinel
+    for forbidden_marker in FORBIDDEN_MULTIPART_SURFACE_MARKERS:
+        assert forbidden_marker not in rendered, forbidden_marker
