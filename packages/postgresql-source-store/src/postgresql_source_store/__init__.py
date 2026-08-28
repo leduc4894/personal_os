@@ -35,6 +35,11 @@ from postgresql_source_store.error_mapping import (
     map_database_failure,
 )
 from postgresql_source_store.identity_bootstrap import PostgresqlIdentityBootstrapStore
+from postgresql_source_store.multipart_upload_store import (
+    MULTIPART_COMPLETION_LEASE_SECONDS,
+    MultipartDatabaseRetryPolicy,
+    PostgresqlMultipartUploadStore,
+)
 from postgresql_source_store.policy_drafts import PostgresqlPolicyDraftStore
 from postgresql_source_store.policy_keysets import PostgresqlPolicyKeysetStore
 from postgresql_source_store.projection_intents import (
@@ -56,15 +61,18 @@ from postgresql_source_store.tables import SOURCE_STORE_TABLES
 
 __all__ = [
     "ACCEPTED_READ_SOURCE_STATES",
+    "MULTIPART_COMPLETION_LEASE_SECONDS",
     "SOURCE_STORE_TABLES",
     "UPLOAD_OPERATION_EXPIRY_SECONDS",
     "DatabaseRetryPolicy",
+    "MultipartDatabaseRetryPolicy",
     "PostgresqlBackupSnapshotStore",
     "PostgresqlCanonicalSourceReadStore",
     "PostgresqlDeviceContentCatalog",
     "PostgresqlDeviceEventStore",
     "PostgresqlDeviceManifestStore",
     "PostgresqlIdentityBootstrapStore",
+    "PostgresqlMultipartUploadStore",
     "PostgresqlPolicyDraftStore",
     "PostgresqlPolicyKeysetStore",
     "PostgresqlProjectionIntentStore",
