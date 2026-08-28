@@ -34,6 +34,11 @@ RUN_POLICY_PREVIEWS_ARGUMENT = "run-policy-previews"
 #: reconciliation dispatcher.
 RUN_POLICY_RECONCILIATIONS_ARGUMENT = "run-policy-reconciliations"
 
+#: The exact process-shell argument selecting the multipart exact-cleanup
+#: worker loop: the registered Temporal cleanup worker plus the bounded
+#: sweep dispatcher.
+RUN_MULTIPART_CLEANUP_ARGUMENT = "run-multipart-cleanup"
+
 
 def _check_runtime() -> int:
     from workflow_worker.runtime_check import run
@@ -77,6 +82,18 @@ def _run_policy_reconciliations() -> int:
     return 0
 
 
+def _run_multipart_cleanup() -> int:
+    from personal_os.error_contracts.exceptions import ApplicationError
+    from workflow_worker.multipart_cleanup_workflow import run_multipart_cleanup_process
+
+    try:
+        _run_worker_process(run_multipart_cleanup_process())
+    except ApplicationError as error:
+        print(f"multipart_cleanup_worker_failed {error.error_code.value}")
+        return 78
+    return 0
+
+
 def _selected_arguments(argv: Sequence[str] | None) -> list[str]:
     import sys
 
@@ -91,6 +108,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         return _run_policy_previews()
     if selected == [RUN_POLICY_RECONCILIATIONS_ARGUMENT]:
         return _run_policy_reconciliations()
+    if selected == [RUN_MULTIPART_CLEANUP_ARGUMENT]:
+        return _run_multipart_cleanup()
     return run_bootstrap_command(IDENTITY, argv, runtime_check=_check_runtime)
 
 
