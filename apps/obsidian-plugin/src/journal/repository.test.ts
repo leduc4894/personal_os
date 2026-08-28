@@ -1631,3 +1631,88 @@ describe("JournalRepository multipart progress persistence (task 9, spec 4.1)", 
     );
   });
 });
+
+// --- the closed multipart status aggregates (multipart task 11) ------------------------------------
+
+describe("JournalRepository multipart status aggregates (multipart task 11)", () => {
+  /** One opaque public session-ID-shaped value: printable base64url, not a UUID. */
+  const AGGREGATE_SESSION_ID = "bXVsdGlwYXJ0LXNlc3Npb24taWRlbnRpdHktMDEyMzQ1Njc4OTA";
+
+  /** One valid safe progress record for a freshly captured event. */
+  async function captureWithProgress(
+    repository: JournalRepository,
+    normalizedPath: string,
+    overrides: Partial<MultipartProgressRecord> = {},
+  ): Promise<MultipartProgressRecord> {
+    const { event } = await captureAllowed(repository, normalizedPath, fingerprintOf("e1"));
+    const record: MultipartProgressRecord = {
+      eventId: event.eventId,
+      sessionId: AGGREGATE_SESSION_ID,
+      partSizeBytes: MULTIPART_PART_SIZE_BYTES,
+      partCount: 3,
+      expiresAtEpochMs: 1_784_086_400_000,
+      completedPartNumbers: [1],
+      sessionState: "uploading",
+      safeReason: null,
+      ...overrides,
+    };
+    await repository.saveMultipartProgress(record);
+    return record;
+  }
+
+  /** The zero histogram: every closed session state counts zero. */
+  function zeroStateCounts(): Record<string, number> {
+    return {
+      created: 0,
+      uploading: 0,
+      completing: 0,
+      verifying: 0,
+      promoting: 0,
+      committed: 0,
+      cancelling: 0,
+      expired: 0,
+      integrity_failed: 0,
+      policy_denied: 0,
+      cleanup_pending: 0,
+      cleaned: 0,
+    };
+  }
+
+  it("answers the zero histogram and no reason codes on an empty journal", () => {
+    const { repository } = createOpenedJournal();
+    expect(repository.readMultipartSessionStateCounts()).toEqual(zeroStateCounts());
+    expect(repository.readMultipartSafeReasonCodes()).toEqual([]);
+  });
+
+  it("aggregates counts by closed session state and closed safe reason", async () => {
+    const { repository } = createOpenedJournal();
+    await captureWithProgress(repository, "notes/asset-a.bin");
+    await captureWithProgress(repository, "notes/asset-b.bin", {
+      sessionState: "completing",
+      safeReason: "multipart_part_url_rejected",
+    });
+    await captureWithProgress(repository, "notes/asset-c.bin", {
+      sessionState: "uploading",
+      safeReason: "multipart_local_content_changed",
+    });
+
+    expect(repository.readMultipartSessionStateCounts()).toEqual({
+      ...zeroStateCounts(),
+      uploading: 2,
+      completing: 1,
+    });
+    expect([...repository.readMultipartSafeReasonCodes()].sort()).toEqual([
+      "multipart_local_content_changed",
+      "multipart_part_url_rejected",
+    ]);
+  });
+
+  it("drops a cleared session from the aggregate histogram", async () => {
+    const { repository } = createOpenedJournal();
+    const record = await captureWithProgress(repository, "notes/asset-a.bin");
+    expect(repository.readMultipartSessionStateCounts().uploading).toBe(1);
+    await repository.clearMultipartProgress(record.eventId);
+    expect(repository.readMultipartSessionStateCounts()).toEqual(zeroStateCounts());
+    expect(repository.readMultipartSafeReasonCodes()).toEqual([]);
+  });
+});

@@ -531,6 +531,24 @@ describe("Obsidian plugin composition root", () => {
     expect(projectionBody).toContain("lifecycleBlockedReasonCodes:");
   });
 
+  it("wires the multipart status aggregates into the live composition projection", () => {
+    // Multipart task 11 fix: the closed multipart session-state histogram
+    // and safe-reason codes MUST be read from the repository inside the
+    // same fail-closed projection block and passed verbatim to the
+    // projection — never a permanently zero/empty surface.
+    const projectionHeaderIndex = pluginSource.indexOf(
+      "#projectSyncStatus(): JournalSyncStatusSnapshot | null",
+    );
+    const projectionBody = pluginSource.slice(
+      projectionHeaderIndex,
+      projectionHeaderIndex + 2_600,
+    );
+    expect(projectionBody).toContain("repository.readMultipartSessionStateCounts()");
+    expect(projectionBody).toContain("repository.readMultipartSafeReasonCodes()");
+    expect(projectionBody).toContain("multipartSessionStateCounts:");
+    expect(projectionBody).toContain("multipartSafeReasonCodes:");
+  });
+
   it("composes the durable diagnostics trail into the journal seams (sync error tracing task 1)", () => {
     // One trail sidecar (`sync-diagnostics-trail.json`) lives in the Vault
     // plugin directory through the SAME journal file store port, loads (and

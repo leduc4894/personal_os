@@ -37,6 +37,8 @@ import type {
   JournalSafeErrorLabel,
   LocalFile,
   MultipartProgressRecord,
+  MultipartSafeReasonToken,
+  MultipartSessionState,
 } from "./contracts";
 import {
   LIFECYCLE_LOCAL_FILE_STATES,
@@ -1436,6 +1438,62 @@ export class JournalRepository {
         `delete from multipart_upload_progress where event_id = ${sqlText(eventId)};`,
       );
     });
+  }
+
+  /**
+   * The closed multipart session-state histogram of the durable safe
+   * progress table (multipart task 11): one count per closed
+   * `MultipartSessionState`, zero-initialised, aggregated over
+   * `multipart_upload_progress` rows only. The read carries no session ID,
+   * part geometry, expiry or any other row detail — the closed state token
+   * and its count are the whole answer, the input shape the status
+   * projection consumes verbatim. A persisted state outside the closed
+   * vocabulary is image corruption and fails closed.
+   */
+  readMultipartSessionStateCounts(): Readonly<Record<MultipartSessionState, number>> {
+    const counts = {} as Record<MultipartSessionState, number>;
+    for (const state of MULTIPART_SESSION_STATES) {
+      counts[state] = 0;
+    }
+    const result = this.#database.readAll(
+      "select session_state, count(*) from multipart_upload_progress group by session_state;",
+    );
+    for (const row of result[0]?.values ?? []) {
+      const [state, count] = row;
+      if (typeof state !== "string" || !isClosedToken(state, MULTIPART_SESSION_STATES)) {
+        throw journalStoreError("journal_image_invalid");
+      }
+      if (typeof count !== "number" || !Number.isInteger(count) || count < 0) {
+        throw journalStoreError("journal_image_invalid");
+      }
+      counts[state as MultipartSessionState] = count;
+    }
+    return counts;
+  }
+
+  /**
+   * The closed set of safe-reason tokens the durable multipart progress
+   * rows currently carry (multipart task 11): the distinct non-null
+   * `safe_reason` values, each a member of the closed twelve-token
+   * vocabulary, in first-observed read order. No row detail travels with
+   * the tokens; a foreign token is image corruption and fails closed.
+   */
+  readMultipartSafeReasonCodes(): readonly MultipartSafeReasonToken[] {
+    const codes = new Set<MultipartSafeReasonToken>();
+    const result = this.#database.readAll(
+      "select distinct safe_reason from multipart_upload_progress where safe_reason is not null;",
+    );
+    for (const row of result[0]?.values ?? []) {
+      const [safeReason] = row;
+      if (
+        typeof safeReason !== "string" ||
+        !isClosedToken(safeReason, MULTIPART_SAFE_REASON_TOKENS)
+      ) {
+        throw journalStoreError("journal_image_invalid");
+      }
+      codes.add(safeReason as MultipartSafeReasonToken);
+    }
+    return Array.from(codes);
   }
 
   // --- queries (spec 6.3, 9) -----------------------------------------------------------------------

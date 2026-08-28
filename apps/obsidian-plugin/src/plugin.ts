@@ -69,6 +69,8 @@ import {
 } from "./journal/status";
 import type { JournalSyncStatusSnapshot, LifecycleBlockedReasonCode } from "./journal/status";
 import type { LifecycleStateCounts } from "./journal/status";
+import type { MultipartSessionStateCounts } from "./journal/status";
+import type { MultipartSafeReasonToken } from "./journal/contracts";
 import { JournalStoreError, loadVendoredSqliteEngine } from "./journal/sqlite-database";
 import { createJournalFailureReporter } from "./journal/diagnostic-reporter";
 import type { JournalFailureReporter } from "./journal/diagnostic-reporter";
@@ -1619,11 +1621,14 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   /**
    * The closed projection input, or null while no journal runs: the
    * composition reads the redacted repository histogram plus the sticky
-   * journal reconcile flag, the live credential fact, the pass facts and
+   * journal reconcile flag, the live credential fact, the pass facts,
    * (Task 10) the redacted source-lifecycle surface (state histogram,
-   * pending-event count, failed-attempt count, closed blocker codes). All
-   * five reads share one `try { … } catch { return null }` boundary so an
-   * unreadable journal renders no status rather than a partial one.
+   * pending-event count, failed-attempt count, closed blocker codes) and
+   * (multipart task 11) the redacted multipart surface (closed
+   * session-state histogram and closed safe-reason tokens of the durable
+   * multipart progress). All reads share one `try { … } catch { return
+   * null }` boundary so an unreadable journal renders no status rather
+   * than a partial one.
    */
   #projectSyncStatus(): JournalSyncStatusSnapshot | null {
     const repository = this.#queueRepository;
@@ -1635,12 +1640,16 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     let pendingLifecycleEventCount: number;
     let failedAttemptCount: number;
     let lifecycleBlockedReasonCodes: readonly LifecycleBlockedReasonCode[];
+    let multipartSessionStateCounts: MultipartSessionStateCounts;
+    let multipartSafeReasonCodes: readonly MultipartSafeReasonToken[];
     try {
       eventStateErrorCounts = repository.readEventStateErrorCounts();
       lifecycleStateCounts = repository.readLifecycleStateCounts();
       pendingLifecycleEventCount = repository.countPendingLifecycleEvents();
       failedAttemptCount = repository.countFailedAttempts();
       lifecycleBlockedReasonCodes = repository.readLifecycleBlockedReasonCodes() as readonly LifecycleBlockedReasonCode[];
+      multipartSessionStateCounts = repository.readMultipartSessionStateCounts();
+      multipartSafeReasonCodes = repository.readMultipartSafeReasonCodes();
     } catch {
       // The journal store is closed or unreadable: render no status rather
       // than a wrong one (the fail-closed rule of the journal design).
@@ -1655,6 +1664,8 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       pendingLifecycleEventCount,
       failedAttemptCount,
       lifecycleBlockedReasonCodes,
+      multipartSessionStateCounts,
+      multipartSafeReasonCodes,
       hasAccessCredential: this.#session?.accessCredential != null,
       isQueuePassActive: this.#isQueuePassActive,
       lastQueuePassOutcome: this.#lastQueuePassOutcome,

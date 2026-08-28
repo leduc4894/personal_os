@@ -948,6 +948,7 @@ describe("source lifecycle surface (Task 10)", () => {
 // --- the closed multipart status surface (resumable multipart mobile upload task 11) --------------
 
 import {
+  MULTIPART_PART_SIZE_BYTES,
   MULTIPART_SAFE_REASON_TOKENS,
   MULTIPART_SESSION_STATES,
 } from "./contracts";
@@ -1049,5 +1050,40 @@ describe("closed multipart status surface (multipart task 11)", () => {
     ]) {
       expect(telemetry).not.toContain(forbidden);
     }
+  });
+
+  it("projects non-zero multipart counts from real durable multipart activity", async () => {
+    // The production wiring (multipart task 11 fix): the repository
+    // aggregates the durable safe progress table and the composition feeds
+    // both closed aggregates into the projection — after multipart
+    // activity the snapshot must carry non-zero counts, never the
+    // permanent zero histogram of an unfed surface.
+    const repository = createEmptyRepository();
+    const event = await captureBytes(
+      repository,
+      "notes/large-asset.bin",
+      new TextEncoder().encode("durable multipart activity bytes"),
+    );
+    await repository.saveMultipartProgress({
+      eventId: event.eventId,
+      sessionId: "bXVsdGlwYXJ0LXNlc3Npb24taWRlbnRpdHktMDEyMzQ1Njc4OTA",
+      partSizeBytes: MULTIPART_PART_SIZE_BYTES,
+      partCount: 3,
+      expiresAtEpochMs: 1_784_086_400_000,
+      completedPartNumbers: [1],
+      sessionState: "uploading",
+      safeReason: "multipart_part_url_rejected",
+    });
+
+    const snapshot = projectJournalSyncStatus(
+      projectInput({
+        multipartSessionStateCounts: repository.readMultipartSessionStateCounts(),
+        multipartSafeReasonCodes: repository.readMultipartSafeReasonCodes(),
+      }),
+    );
+
+    expect(snapshot.multipartSessionStateCounts.uploading).toBe(1);
+    expect(snapshot.multipartSessionStateCounts.committed).toBe(0);
+    expect(snapshot.multipartSafeReasonCodes).toEqual(["multipart_part_url_rejected"]);
   });
 });
