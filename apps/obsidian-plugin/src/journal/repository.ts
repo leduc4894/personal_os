@@ -36,6 +36,7 @@ import type {
   JournalOperation,
   JournalSafeErrorLabel,
   LocalFile,
+  MultipartProgressRecord,
 } from "./contracts";
 import {
   LIFECYCLE_LOCAL_FILE_STATES,
@@ -65,14 +66,18 @@ import {
   JOURNAL_SAFE_ERROR_LABELS,
   MAX_EVENT_ATTEMPT_HISTORY,
   MAX_JOURNAL_SIZE_BYTES,
+  MAX_MULTIPART_PART_COUNT,
   MAX_PENDING_EVENTS,
+  MULTIPART_PART_SIZE_BYTES,
+  MULTIPART_SAFE_REASON_TOKENS,
+  MULTIPART_SESSION_STATES,
 } from "./contracts";
 import { isFrozenFingerprintShape } from "./fingerprint";
 import {
   projectLocalNoteSyncStatus,
   type LocalNoteSyncStatus,
 } from "./note-status";
-import { journalStoreError } from "./sqlite-database";
+import { JournalStoreError, journalStoreError } from "./sqlite-database";
 import type { SqliteMutationSession, SqliteQueryResult } from "./sqlite-database";
 
 // --- structural database slice ---------------------------------------------------------------
@@ -288,6 +293,114 @@ function validateCaptureInput(input: JournalCaptureInput): void {
   }
 }
 
+// --- closed multipart progress value validation (child 7 spec 4.1, task 9) ----------------------
+
+/**
+ * The opaque public multipart session-ID grammar mirrored from the
+ * server's `MultipartUploadSessionId`: printable URL-safe base64url of 32
+ * to 128 characters. The grammar deliberately refuses the raw canonical
+ * UUID form so a session ID can never be a journal identity or canonical
+ * database UUID in disguise — and because `:`, `/`, `?`, `&` and `=` are
+ * not base64url characters, no signed URL, query signature, provider
+ * handle or other locator text can survive it.
+ */
+const MULTIPART_SESSION_ID_MIN_LENGTH = 32;
+const MULTIPART_SESSION_ID_MAX_LENGTH = 128;
+const MULTIPART_SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{32,128}$/;
+
+/** Whether one value carries the opaque public session handle grammar. */
+function isMultipartSessionIdShape(value: string): boolean {
+  return (
+    typeof value === "string" &&
+    value.length >= MULTIPART_SESSION_ID_MIN_LENGTH &&
+    value.length <= MULTIPART_SESSION_ID_MAX_LENGTH &&
+    MULTIPART_SESSION_ID_PATTERN.test(value) &&
+    !isUuid(value)
+  );
+}
+
+/** The exact own-key set one safe progress record may carry — no more, no less. */
+const MULTIPART_PROGRESS_RECORD_KEYS = [
+  "completedPartNumbers",
+  "eventId",
+  "expiresAtEpochMs",
+  "partCount",
+  "partSizeBytes",
+  "safeReason",
+  "sessionId",
+  "sessionState",
+] as const satisfies readonly (keyof MultipartProgressRecord)[];
+
+/**
+ * Validate one multipart progress record completely (child 7 spec 4.1)
+ * BEFORE any SQL runs: exactly the contract's own keys (unknown and
+ * missing fields both reject), the event UUID, the opaque session-ID
+ * grammar, the frozen geometry (an exactly-8-MiB ordinary part, 1 to 13
+ * parts), a non-negative expiry, strictly ascending whole completed part
+ * numbers each inside the geometry, a closed session state and a closed
+ * (or absent) safe reason. Nothing outside this closed shape can reach
+ * SQLite, so no URL, provider identity, digest or locator can persist.
+ */
+function validateMultipartProgressRecord(record: MultipartProgressRecord): void {
+  if (typeof record !== "object" || record === null) {
+    throw journalStoreError("journal_mutation_failed");
+  }
+  const keys = Object.keys(record).sort();
+  const expectedKeys = [...MULTIPART_PROGRESS_RECORD_KEYS].sort();
+  if (
+    keys.length !== expectedKeys.length ||
+    keys.some((key, index) => key !== expectedKeys[index])
+  ) {
+    throw journalStoreError("journal_mutation_failed");
+  }
+  if (!isUuid(record.eventId)) {
+    throw journalStoreError("journal_mutation_failed");
+  }
+  if (!isMultipartSessionIdShape(record.sessionId)) {
+    throw journalStoreError("journal_mutation_failed");
+  }
+  if (
+    typeof record.partSizeBytes !== "number" ||
+    !Number.isInteger(record.partSizeBytes) ||
+    record.partSizeBytes !== MULTIPART_PART_SIZE_BYTES
+  ) {
+    throw journalStoreError("journal_mutation_failed");
+  }
+  if (
+    typeof record.partCount !== "number" ||
+    !Number.isInteger(record.partCount) ||
+    record.partCount < 1 ||
+    record.partCount > MAX_MULTIPART_PART_COUNT
+  ) {
+    throw journalStoreError("journal_mutation_failed");
+  }
+  if (!isNonNegativeInteger(record.expiresAtEpochMs)) {
+    throw journalStoreError("journal_mutation_failed");
+  }
+  if (!Array.isArray(record.completedPartNumbers)) {
+    throw journalStoreError("journal_mutation_failed");
+  }
+  let previousPartNumber = 0;
+  for (const partNumber of record.completedPartNumbers) {
+    if (
+      typeof partNumber !== "number" ||
+      !Number.isInteger(partNumber) ||
+      partNumber < 1 ||
+      partNumber > record.partCount ||
+      partNumber <= previousPartNumber
+    ) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    previousPartNumber = partNumber;
+  }
+  if (!isClosedToken(record.sessionState, MULTIPART_SESSION_STATES)) {
+    throw journalStoreError("journal_mutation_failed");
+  }
+  if (record.safeReason !== null && !isClosedToken(record.safeReason, MULTIPART_SAFE_REASON_TOKENS)) {
+    throw journalStoreError("journal_mutation_failed");
+  }
+}
+
 // --- row parsing --------------------------------------------------------------------------------
 
 /** One stored journal event row including the internal freeze marker. */
@@ -461,6 +574,57 @@ function parseJournalAttemptRow(row: readonly unknown[]): JournalAttempt {
     outcomeLabel: outcomeLabel as JournalSafeErrorLabel,
     requestCorrelationId,
   };
+}
+
+/**
+ * Parse one persisted multipart progress row back into the frozen record
+ * shape (child 7 spec 4.1). The completed part numbers re-validate against
+ * the stored geometry through the same closed validator mutations use; a
+ * row that violates the contract — a torn JSON array, an out-of-geometry
+ * part number, a foreign token — is image corruption and fails closed as
+ * `journal_image_invalid`.
+ */
+function parseMultipartProgressRow(
+  row: readonly unknown[],
+  eventId: string,
+): MultipartProgressRecord {
+  const [
+    sessionId,
+    partSizeBytes,
+    partCount,
+    expiresAtEpochMs,
+    completedPartNumbersJson,
+    sessionState,
+    safeReason,
+  ] = row;
+  let completedPartNumbers: unknown;
+  if (typeof completedPartNumbersJson !== "string") {
+    throw journalStoreError("journal_image_invalid");
+  }
+  try {
+    completedPartNumbers = JSON.parse(completedPartNumbersJson);
+  } catch {
+    throw journalStoreError("journal_image_invalid");
+  }
+  const candidate = {
+    eventId,
+    sessionId,
+    partSizeBytes,
+    partCount,
+    expiresAtEpochMs,
+    completedPartNumbers,
+    sessionState,
+    safeReason,
+  } as MultipartProgressRecord;
+  try {
+    validateMultipartProgressRecord(candidate);
+  } catch (error) {
+    if (error instanceof JournalStoreError) {
+      throw journalStoreError("journal_image_invalid");
+    }
+    throw error;
+  }
+  return candidate;
 }
 
 /** Parse one latest-event join row before passing only closed fields to the local UI projection. */
@@ -920,7 +1084,10 @@ export class JournalRepository {
   /**
    * Close one event in a terminal non-retry state with a closed safe error
    * label. Terminal rows stay queryable forever; they are never deleted and
-   * never transition again (spec 6.4, 7.2).
+   * never transition again (spec 6.4, 7.2). Any multipart progress of the
+   * event clears in this same mutation: the terminal outcome (with its
+   * closed label) is the durable evidence, and progress of a session that
+   * can never dispatch again must not linger or resurrect.
    */
   async markEventTerminal(
     eventId: string,
@@ -949,6 +1116,9 @@ export class JournalRepository {
           "is_fingerprint_frozen = 1",
           `where event_id = ${sqlText(eventId)};`,
         ].join(" "),
+      );
+      session.exec(
+        `delete from multipart_upload_progress where event_id = ${sqlText(eventId)};`,
       );
     });
   }
@@ -992,6 +1162,17 @@ export class JournalRepository {
           "and operation in ('create', 'update');",
         ].join(" "),
       );
+      // Frozen content events never dispatch again, so their multipart
+      // progress clears in the same mutation (child 7 spec 4.1).
+      session.exec(
+        [
+          "delete from multipart_upload_progress where event_id in (",
+          "select event_id from journal_events",
+          `where local_file_id = ${sqlText(localFileId)}`,
+          "and state = 'deferred_lifecycle'",
+          "and operation in ('create', 'update'));",
+        ].join(" "),
+      );
     });
   }
 
@@ -1017,6 +1198,9 @@ export class JournalRepository {
       }
       session.exec(
         `delete from journal_attempts where event_id in (select event_id from journal_events where local_file_id = ${sqlText(localFileId)});`,
+      );
+      session.exec(
+        `delete from multipart_upload_progress where event_id in (select event_id from journal_events where local_file_id = ${sqlText(localFileId)});`,
       );
       session.exec(
         `delete from lifecycle_event_operands where event_id in (select event_id from journal_events where local_file_id = ${sqlText(localFileId)});`,
@@ -1063,6 +1247,12 @@ export class JournalRepository {
           `where event_id = ${sqlText(input.eventId)};`,
         ].join(" "),
       );
+      // The frozen committed receipt is the durable evidence; the
+      // multipart progress of the finished session clears in this same
+      // mutation (child 7 spec 4.1).
+      session.exec(
+        `delete from multipart_upload_progress where event_id = ${sqlText(input.eventId)};`,
+      );
       session.exec(
         [
           "update local_files set",
@@ -1083,7 +1273,8 @@ export class JournalRepository {
    * current server base — no bytes were uploaded and nothing retries. The
    * `last_committed_*` triple is updated from the event's frozen fingerprint
    * so the lifecycle capture can verify restore eligibility against the
-   * server's acknowledgement.
+   * server's acknowledgement. Any multipart progress clears in the same
+   * mutation: a no-change outcome leaves no session work owed.
    */
   async recordNoChangeReceipt(input: JournalCommittedReceiptInput): Promise<void> {
     if (
@@ -1106,6 +1297,9 @@ export class JournalRepository {
           "is_fingerprint_frozen = 1",
           `where event_id = ${sqlText(input.eventId)};`,
         ].join(" "),
+      );
+      session.exec(
+        `delete from multipart_upload_progress where event_id = ${sqlText(input.eventId)};`,
       );
       session.exec(
         [
@@ -1164,6 +1358,82 @@ export class JournalRepository {
           `where event_id = ${sqlText(input.eventId)}`,
           `order by attempt_ordinal desc limit ${MAX_EVENT_ATTEMPT_HISTORY});`,
         ].join(" "),
+      );
+    });
+  }
+
+  // --- multipart safe progress (child 7 spec 4.1, task 9) ----------------------------------------
+
+  /**
+   * Persist the SAFE progress of one frozen event's multipart transfer
+   * (child 7 spec 4.1): the opaque public session ID, the fixed geometry
+   * and expiry of the server plan, the completed part-number set, the last
+   * observed closed session state and the last closed retry/status token.
+   * The whole record is validated against the closed contract BEFORE any
+   * SQL runs — unknown fields, hostile session IDs, out-of-geometry part
+   * numbers and foreign tokens never reach SQLite, so no URL, provider
+   * identity, staging key or digest can persist. The row lands in the
+   * same serialized mutation the event's dispatch state lives in, bound
+   * to a known nonterminal event; a terminal event never resurrects
+   * progress (its frozen outcome is the durable evidence instead).
+   */
+  async saveMultipartProgress(record: MultipartProgressRecord): Promise<void> {
+    validateMultipartProgressRecord(record);
+    await this.#database.runSerializedMutation((session) => {
+      const event = this.#requireEventRow(
+        (sql) => session.readRows(sql),
+        record.eventId,
+      );
+      this.#requireNonTerminalEvent(event);
+      session.exec(
+        [
+          "insert or replace into multipart_upload_progress (event_id, session_id,",
+          "part_size_bytes, part_count, expires_at_epoch_ms, completed_part_numbers_json,",
+          "session_state, safe_reason) values (",
+          `${sqlText(record.eventId)}, ${sqlText(record.sessionId)},`,
+          `${record.partSizeBytes}, ${record.partCount}, ${record.expiresAtEpochMs},`,
+          `${sqlText(JSON.stringify(record.completedPartNumbers))},`,
+          `${sqlText(record.sessionState)},`,
+          `${record.safeReason === null ? "null" : sqlText(record.safeReason)});`,
+        ].join(" "),
+      );
+    });
+  }
+
+  /**
+   * Read the durable safe progress bound to one journal event, or null
+   * when the event carries no session. A persisted row that violates the
+   * closed contract fails closed as image corruption.
+   */
+  readMultipartProgress(eventId: string): MultipartProgressRecord | null {
+    if (!isUuid(eventId)) {
+      throw journalStoreError("journal_query_failed");
+    }
+    const row = firstRow(
+      this.#database.readAll(
+        [
+          "select session_id, part_size_bytes, part_count, expires_at_epoch_ms,",
+          "completed_part_numbers_json, session_state, safe_reason",
+          `from multipart_upload_progress where event_id = ${sqlText(eventId)};`,
+        ].join(" "),
+      ),
+    );
+    return row === null ? null : parseMultipartProgressRow(row, eventId);
+  }
+
+  /**
+   * Clear the durable safe progress of one event (child 7 spec 4.1): the
+   * idempotent exact-key cleanup the runner issues when a session is
+   * superseded or its evidence is no longer owed. The journal event
+   * itself is never touched — cancellation and interruption retain it.
+   */
+  async clearMultipartProgress(eventId: string): Promise<void> {
+    if (!isUuid(eventId)) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    await this.#database.runSerializedMutation((session) => {
+      session.exec(
+        `delete from multipart_upload_progress where event_id = ${sqlText(eventId)};`,
       );
     });
   }

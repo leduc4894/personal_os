@@ -165,14 +165,14 @@ describe("schema migration from Child 4 to Child 5", () => {
     engineModule = await initSqlJs({ wasmBinary });
   });
 
-  it("bumps JOURNAL_SCHEMA_VERSION to 7 with lifecycle tables present", async () => {
+  it("keeps LIFECYCLE_SCHEMA_VERSION pinned to the current journal schema version", async () => {
     const { LIFECYCLE_SCHEMA_VERSION } = await import("./lifecycle-contracts");
     expect(LIFECYCLE_SCHEMA_VERSION).toBe(JOURNAL_SCHEMA_VERSION);
-    expect(LIFECYCLE_SCHEMA_VERSION).toBe(7);
-    expect(JOURNAL_SCHEMA_VERSION).toBe(7);
+    expect(LIFECYCLE_SCHEMA_VERSION).toBe(8);
+    expect(JOURNAL_SCHEMA_VERSION).toBe(8);
   });
 
-  it("migrates a Child 4 journal through v3 to v7 without losing any prior row", async () => {
+  it("migrates a Child 4 journal through every schema step to the current version without losing any prior row", async () => {
     const {
       migrateChildFourJournalToLifecycleSchema,
       migrateLifecycleJournalToLastCommittedSchema,
@@ -181,7 +181,10 @@ describe("schema migration from Child 4 to Child 5", () => {
     } = await import(
       "./lifecycle-contracts"
     );
-    const { migrateRestoreReservationJournalToDeviceSyncSchema } = await import(
+    const {
+      migrateDeviceSyncJournalToMultipartProgressSchema,
+      migrateRestoreReservationJournalToDeviceSyncSchema,
+    } = await import(
       "./sqlite-database"
     );
     // Seed a Child 4 journal by hand (no lifecycle columns) using raw sql.js.
@@ -267,8 +270,12 @@ describe("schema migration from Child 4 to Child 5", () => {
       engineModule,
       v6Image,
     );
+    const v8Image = migrateDeviceSyncJournalToMultipartProgressSchema(
+      engineModule,
+      v7Image,
+    );
 
-    const reopened = SqliteDatabase.openFromImage(engineModule, v7Image);
+    const reopened = SqliteDatabase.openFromImage(engineModule, v8Image);
     const meta = reopened.readJournalMeta() satisfies JournalMeta;
     expect(meta.schemaVersion).toBe(JOURNAL_SCHEMA_VERSION);
     expect(meta.dirtyGeneration).toBe(4);
@@ -307,11 +314,12 @@ describe("schema migration from Child 4 to Child 5", () => {
       ["f1f1f1f1-0000-4000-8000-000000000001", "active", null, null, null],
       ["f1f1f1f1-0000-4000-8000-000000000002", "active", null, null, null],
     ]);
-    // The schema version has advanced to v7; the server-receipt column from v5,
-    // the restore-reservation column from v6 and the zeroed device-sync
-    // singleton from v7 are all present, and every prior row reads back with
-    // the nullable columns as null.
-    expect(reopened.readSchemaVersion()).toBe(7);
+    // The schema version has advanced to the current version; the
+    // server-receipt column from v5, the restore-reservation column from
+    // v6, the zeroed device-sync singleton from v7 and the empty multipart
+    // progress table from v8 are all present, and every prior row reads
+    // back with the nullable columns as null.
+    expect(reopened.readSchemaVersion()).toBe(JOURNAL_SCHEMA_VERSION);
     const columnCheck = reopened.readAll(
       "select server_receipt_tombstone_id from lifecycle_event_operands;",
     );
@@ -327,6 +335,10 @@ describe("schema migration from Child 4 to Child 5", () => {
       "select applied_sequence, acknowledged_sequence, observation_generation from device_sync_state where singleton_key = 1;",
     );
     expect(deviceSyncState[0]?.values[0]).toEqual([0, 0, 0]);
+    const multipartProgressRows = reopened.readAll(
+      "select count(*) from multipart_upload_progress;",
+    );
+    expect(multipartProgressRows[0]?.values[0]?.[0]).toBe(0);
     reopened.close();
   });
 

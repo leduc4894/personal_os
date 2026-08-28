@@ -8,15 +8,23 @@ import type {
   JournalMeta,
   JournalNonRetryEventState,
   JournalSafeErrorLabel,
+  MultipartProgressRecord,
 } from "./contracts";
 import {
   MAX_EVENT_ATTEMPT_HISTORY,
   MAX_FILE_SIZE_BYTES,
   MAX_JOURNAL_SIZE_BYTES,
+  MAX_MULTIPART_PART_COUNT,
   MAX_PENDING_EVENTS,
+  MULTIPART_PART_SIZE_BYTES,
 } from "./contracts";
 import { JournalRepository } from "./repository";
-import { JOURNAL_SCHEMA_VERSION, SqliteDatabase } from "./sqlite-database";
+import type { JournalRepositoryDatabase } from "./repository";
+import {
+  JOURNAL_SCHEMA_VERSION,
+  SqliteDatabase,
+  migrateDeviceSyncJournalToMultipartProgressSchema,
+} from "./sqlite-database";
 import type { SqliteEngineModule } from "./sqlite-database";
 
 /** The real sql.js WebAssembly engine drives every repository test (spec 6.1). */
@@ -1223,5 +1231,403 @@ describe("JournalRepository manifest repair completion (task 11, spec 12.4)", ()
         reason: "device_manifest_action_stale",
       },
     ]);
+  });
+});
+
+// --- multipart upload progress persistence (task 9, child 7 spec 4.1) ------------------------------
+
+describe("JournalRepository multipart progress persistence (task 9, spec 4.1)", () => {
+  /** Opaque public session-ID-shaped text: printable base64url, not a UUID. */
+  const MULTIPART_SESSION_ID = "bXVsdGlwYXJ0LXNlc3Npb24taWRlbnRpdHktMDEyMzQ1Njc4OTA";
+
+  const V7_LOCAL_FILE_ID = "11111111-1111-4111-8111-111111111111";
+  const V7_EVENT_ID = "55555555-5555-4555-8555-555555555555";
+  const V7_IDEMPOTENCY_KEY = "66666666-6666-4666-8666-666666666666";
+
+  /** One valid safe progress record bound to `eventId`. */
+  function multipartProgressRecord(
+    eventId: string,
+    overrides: Partial<MultipartProgressRecord> = {},
+  ): MultipartProgressRecord {
+    return {
+      eventId,
+      sessionId: MULTIPART_SESSION_ID,
+      partSizeBytes: MULTIPART_PART_SIZE_BYTES,
+      partCount: 3,
+      expiresAtEpochMs: 1_784_086_400_000,
+      completedPartNumbers: [1],
+      sessionState: "uploading",
+      safeReason: null,
+      ...overrides,
+    };
+  }
+
+  /** One captured allowed content event with its progress already saved. */
+  async function captureEventWithProgress(
+    repository: JournalRepository,
+    normalizedPath: string,
+    overrides: Partial<MultipartProgressRecord> = {},
+  ): Promise<MultipartProgressRecord> {
+    const { event } = await captureAllowed(repository, normalizedPath, fingerprintOf("d1"));
+    const record = multipartProgressRecord(event.eventId, overrides);
+    await repository.saveMultipartProgress(record);
+    return record;
+  }
+
+  /**
+   * A full database dump for sentinel scans: the raw exported image bytes
+   * decoded as text plus every table's rows rendered as JSON, so a sentinel
+   * anywhere — live row, freelist page or schema text — is caught.
+   */
+  function databaseDump(database: SqliteDatabase): string {
+    const parts: string[] = [new TextDecoder("latin1").decode(database.exportImage())];
+    const tables = database.readAll(
+      "select name from sqlite_master where type = 'table' order by name;",
+    );
+    for (const row of tables[0]?.values ?? []) {
+      parts.push(JSON.stringify(database.readAll(`select * from ${String(row[0])};`)));
+    }
+    return parts.join("\n");
+  }
+
+  /**
+   * A repository over a counting database wrapper: a test can prove a
+   * rejection happened BEFORE any SQL mutation ran by asserting the
+   * serialized-mutation counter never moved. The underlying database stays
+   * available for dumps and raw session SQL.
+   */
+  function createCountingJournal(): {
+    repository: JournalRepository;
+    database: SqliteDatabase;
+    readMutationCount: () => number;
+  } {
+    const { database } = createOpenedJournal();
+    let mutationCount = 0;
+    const countingDatabase: JournalRepositoryDatabase = {
+      runSerializedMutation: (operation) => {
+        mutationCount += 1;
+        return database.runSerializedMutation(operation);
+      },
+      readAll: (sql) => database.readAll(sql),
+    };
+    const repository = new JournalRepository({
+      database: countingDatabase,
+      nowEpochMs: () => 1_784_000_000_000,
+    });
+    return { repository, database, readMutationCount: () => mutationCount };
+  }
+
+  /**
+   * Build one seeded v7 journal image (a tracked file plus one in-flight
+   * uploading event — the durable state a real v7 device carries across
+   * the upgrade), migrate it in memory to the current schema and open it
+   * as a live repository.
+   */
+  function openV7ThenMigrate(): {
+    repository: JournalRepository;
+    database: SqliteDatabase;
+    eventId: string;
+  } {
+    const fresh = SqliteDatabase.createEmpty(engineModule, {
+      schemaVersion: JOURNAL_SCHEMA_VERSION,
+      dirtyGeneration: 4,
+      lastVerifiedGeneration: 4,
+      isReconcileRequired: false,
+      recoveryState: "verified_generation_loaded",
+    } satisfies JournalMeta);
+    const currentImage = fresh.exportImage();
+    fresh.close();
+    const engine = new engineModule.Database(currentImage);
+    let v7Image: Uint8Array;
+    try {
+      engine.exec("begin immediate;");
+      engine.exec("drop table multipart_upload_progress;");
+      engine.exec("update journal_meta set schema_version = 7 where singleton_key = 1;");
+      engine.exec("pragma user_version = 7;");
+      engine.exec(
+        [
+          "insert into local_files (local_file_id, normalized_path, source_id,",
+          "observed_sha256, observed_size_bytes, observed_media_type, base_version_id,",
+          `policy_revision) values ('${V7_LOCAL_FILE_ID}', 'notes/big-asset.bin', null,`,
+          `'${"a".repeat(64)}', 20 * 1024 * 1024, 'application/octet-stream', null, 4);`,
+        ].join(" "),
+      );
+      engine.exec(
+        [
+          "insert into journal_events (event_id, local_file_id, idempotency_key, operation,",
+          "sha256, size_bytes, media_type, state, is_fingerprint_frozen, attempt_count,",
+          "next_eligible_retry_epoch_ms, safe_error, operation_id, created_at_epoch_ms)",
+          `values ('${V7_EVENT_ID}', '${V7_LOCAL_FILE_ID}', '${V7_IDEMPOTENCY_KEY}', 'create',`,
+          `'${"a".repeat(64)}', 20 * 1024 * 1024, 'application/octet-stream', 'uploading', 1,`,
+          "1, 1784000001000, null, null, 1784000000000);",
+        ].join(" "),
+      );
+      engine.exec("commit;");
+      v7Image = engine.export();
+    } finally {
+      engine.close();
+    }
+    const database = SqliteDatabase.openFromImage(
+      engineModule,
+      migrateDeviceSyncJournalToMultipartProgressSchema(engineModule, v7Image),
+    );
+    const repository = new JournalRepository({
+      database,
+      nowEpochMs: () => 1_784_000_000_000,
+    });
+    return { repository, database, eventId: V7_EVENT_ID };
+  }
+
+  it("migrates v7 journal data and persists only safe multipart progress", async () => {
+    const { repository, database, eventId } = openV7ThenMigrate();
+    try {
+      const record = multipartProgressRecord(eventId, { completedPartNumbers: [1, 2] });
+      await repository.saveMultipartProgress(record);
+      expect(await repository.readMultipartProgress(eventId)).toEqual(record);
+
+      const dump = databaseDump(database);
+      expect(dump).not.toContain("X-Amz-Signature");
+      expect(dump).not.toContain("provider-upload-id");
+
+      // The seeded v7 evidence survives the migration untouched: the
+      // in-flight uploading event reads back with its frozen identity.
+      const event = repository.readEvent(eventId);
+      expect(event?.state).toBe("uploading");
+      expect(event?.idempotencyKey).toBe(V7_IDEMPOTENCY_KEY);
+      expect(repository.readLocalFileByLocalFileId(V7_LOCAL_FILE_ID)?.normalizedPath).toBe(
+        "notes/big-asset.bin",
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  it("saves, updates and clears safe progress on the current journal", async () => {
+    const { repository } = createOpenedJournal();
+    const record = await captureEventWithProgress(repository, "notes/big-asset.bin");
+    expect(await repository.readMultipartProgress(record.eventId)).toEqual(record);
+
+    const updated = multipartProgressRecord(record.eventId, {
+      completedPartNumbers: [1, 2, 3],
+      sessionState: "completing",
+      safeReason: "multipart_part_url_rejected",
+    });
+    await repository.saveMultipartProgress(updated);
+    expect(await repository.readMultipartProgress(record.eventId)).toEqual(updated);
+
+    await repository.clearMultipartProgress(record.eventId);
+    expect(await repository.readMultipartProgress(record.eventId)).toBeNull();
+    // Clearing is idempotent cleanup, never a failure.
+    await repository.clearMultipartProgress(record.eventId);
+    expect(await repository.readMultipartProgress(record.eventId)).toBeNull();
+  });
+
+  it("retains progress across suspend/offline waiting_retry transitions", async () => {
+    const { repository } = createOpenedJournal();
+    const record = await captureEventWithProgress(repository, "notes/big-asset.bin");
+
+    await repository.markEventWaitingRetry(record.eventId, "network_offline", 1_784_000_060_000);
+
+    expect(await repository.readMultipartProgress(record.eventId)).toEqual(record);
+  });
+
+  it("clears progress in the same mutation as committed, no-change and terminal outcomes", async () => {
+    const { repository } = createOpenedJournal();
+    const { event: committedEvent } = await captureAllowed(
+      repository,
+      "notes/committed.bin",
+      fingerprintOf("d2"),
+    );
+    await repository.markEventPreflightStarted(committedEvent.eventId);
+    await repository.saveMultipartProgress(multipartProgressRecord(committedEvent.eventId));
+    await repository.recordCommittedReceipt({
+      eventId: committedEvent.eventId,
+      sourceId: "1fbd21b0-0000-4000-8000-0000000000aa",
+      baseVersionId: "2fce31c1-0000-4000-8000-0000000000bb",
+    });
+    expect(await repository.readMultipartProgress(committedEvent.eventId)).toBeNull();
+
+    const { event: noChangeEvent } = await captureAllowed(
+      repository,
+      "notes/no-change.bin",
+      fingerprintOf("d3"),
+    );
+    await repository.markEventPreflightStarted(noChangeEvent.eventId);
+    await repository.saveMultipartProgress(multipartProgressRecord(noChangeEvent.eventId));
+    await repository.recordNoChangeReceipt({
+      eventId: noChangeEvent.eventId,
+      sourceId: "1fbd21b0-0000-4000-8000-0000000000aa",
+      baseVersionId: "2fce31c1-0000-4000-8000-0000000000bb",
+    });
+    expect(await repository.readMultipartProgress(noChangeEvent.eventId)).toBeNull();
+
+    const { event: terminalEvent } = await captureAllowed(
+      repository,
+      "notes/terminal.bin",
+      fingerprintOf("d4"),
+    );
+    await repository.markEventPreflightStarted(terminalEvent.eventId);
+    await repository.saveMultipartProgress(multipartProgressRecord(terminalEvent.eventId));
+    await repository.markEventTerminal(terminalEvent.eventId, "integrity_failed", "integrity_failed");
+    expect(await repository.readMultipartProgress(terminalEvent.eventId)).toBeNull();
+  });
+
+  it("clears progress when pending content is frozen for lifecycle and when the mapping is removed", async () => {
+    const { repository } = createOpenedJournal();
+    const frozen = await captureEventWithProgress(repository, "notes/frozen.bin");
+    await repository.markEventPreflightStarted(frozen.eventId);
+    await repository.freezePendingForLocalFile(
+      (await repository.readEvent(frozen.eventId))?.localFileId ?? "",
+    );
+    expect(await repository.readMultipartProgress(frozen.eventId)).toBeNull();
+
+    const removed = await captureEventWithProgress(repository, "notes/removed.bin");
+    await repository.removeLocalMapping(
+      (await repository.readEvent(removed.eventId))?.localFileId ?? "",
+    );
+    expect(await repository.readMultipartProgress(removed.eventId)).toBeNull();
+  });
+
+  it("rejects unknown and missing record fields before any SQL mutation", async () => {
+    const { repository, readMutationCount } = createCountingJournal();
+    const { event } = await captureAllowed(repository, "notes/a.bin", fingerprintOf("d5"));
+    const mutationsBefore = readMutationCount();
+
+    const unknownFieldRecord = {
+      ...multipartProgressRecord(event.eventId),
+      signedUrl: "https://r2.example/x?X-Amz-Signature=abc",
+    } as never;
+    await expect(repository.saveMultipartProgress(unknownFieldRecord)).rejects.toMatchObject({
+      reason: "journal_mutation_failed",
+    });
+
+    const missingFieldRecord = {
+      eventId: event.eventId,
+      sessionId: MULTIPART_SESSION_ID,
+      partSizeBytes: MULTIPART_PART_SIZE_BYTES,
+      partCount: 3,
+      expiresAtEpochMs: 1_784_086_400_000,
+      completedPartNumbers: [1],
+      sessionState: "uploading",
+    } as never;
+    await expect(repository.saveMultipartProgress(missingFieldRecord)).rejects.toMatchObject({
+      reason: "journal_mutation_failed",
+    });
+
+    expect(readMutationCount()).toBe(mutationsBefore);
+    expect(await repository.readMultipartProgress(event.eventId)).toBeNull();
+  });
+
+  it("rejects completed part numbers outside the frozen geometry before any SQL mutation", async () => {
+    const { repository, readMutationCount } = createCountingJournal();
+    const { event } = await captureAllowed(repository, "notes/b.bin", fingerprintOf("d6"));
+    const mutationsBefore = readMutationCount();
+    // Geometry is partCount 3: 0 is below one, 4 and 99 exceed it, 1.5 is
+    // not a whole part number, and [1, 1], [2, 1], [1, 2, 2] repeat or
+    // disorder numbers the server status order never carries.
+    const invalidPartNumberSets: readonly (readonly number[])[] = [
+      [0],
+      [4],
+      [99],
+      [1.5],
+      [1, 1],
+      [2, 1],
+      [1, 2, 2],
+    ];
+    for (const completedPartNumbers of invalidPartNumberSets) {
+      await expect(
+        repository.saveMultipartProgress(multipartProgressRecord(event.eventId, { completedPartNumbers })),
+      ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+    }
+
+    expect(readMutationCount()).toBe(mutationsBefore);
+    expect(await repository.readMultipartProgress(event.eventId)).toBeNull();
+  });
+
+  it("rejects hostile session IDs and unknown tokens before any SQL mutation, persisting nothing", async () => {
+    const { repository, database, readMutationCount } = createCountingJournal();
+    const { event } = await captureAllowed(repository, "notes/c.bin", fingerprintOf("d7"));
+    const mutationsBefore = readMutationCount();
+
+    const hostileSessionIds = [
+      "https://r2.example/staging?X-Amz-Signature=secret",
+      "provider-upload-id",
+      "abc",
+      "A".repeat(129),
+      event.eventId,
+    ];
+    for (const sessionId of hostileSessionIds) {
+      await expect(
+        repository.saveMultipartProgress(multipartProgressRecord(event.eventId, { sessionId })),
+      ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+    }
+
+    await expect(
+      repository.saveMultipartProgress(
+        multipartProgressRecord(event.eventId, { sessionState: "finished" as never }),
+      ),
+    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+    await expect(
+      repository.saveMultipartProgress(
+        multipartProgressRecord(event.eventId, { safeReason: "provider_said_no" as never }),
+      ),
+    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+    await expect(
+      repository.saveMultipartProgress(
+        multipartProgressRecord(event.eventId, { partSizeBytes: 4 * 1024 * 1024 }),
+      ),
+    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+    await expect(
+      repository.saveMultipartProgress(
+        multipartProgressRecord(event.eventId, { partCount: MAX_MULTIPART_PART_COUNT + 1 }),
+      ),
+    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+    await expect(
+      repository.saveMultipartProgress(multipartProgressRecord(event.eventId, { partCount: 0 })),
+    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+    await expect(
+      repository.saveMultipartProgress(
+        multipartProgressRecord(event.eventId, { expiresAtEpochMs: -1 }),
+      ),
+    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+
+    expect(readMutationCount()).toBe(mutationsBefore);
+    expect(await repository.readMultipartProgress(event.eventId)).toBeNull();
+    const dump = databaseDump(database);
+    expect(dump).not.toContain("X-Amz-Signature");
+    expect(dump).not.toContain("provider-upload-id");
+  });
+
+  it("rejects progress for an unknown or terminal event", async () => {
+    const { repository } = createOpenedJournal();
+    await expect(
+      repository.saveMultipartProgress(
+        multipartProgressRecord("00000000-0000-4000-8000-0000000000ff"),
+      ),
+    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+
+    const { event } = await captureAllowed(repository, "notes/terminal.bin", fingerprintOf("d8"));
+    await repository.markEventTerminal(event.eventId, "blocked_size", "blocked_size");
+    await expect(
+      repository.saveMultipartProgress(multipartProgressRecord(event.eventId)),
+    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+    expect(await repository.readMultipartProgress(event.eventId)).toBeNull();
+  });
+
+  it("fails closed on a corrupted persisted progress row", async () => {
+    const { repository, database } = createOpenedJournal();
+    const record = await captureEventWithProgress(repository, "notes/corrupt.bin");
+    await database.runSerializedMutation((session) => {
+      session.exec(
+        [
+          "update multipart_upload_progress set completed_part_numbers_json = '[99]'",
+          `where event_id = '${record.eventId}';`,
+        ].join(" "),
+      );
+    });
+
+    expect(() => repository.readMultipartProgress(record.eventId)).toThrowError(
+      expect.objectContaining({ reason: "journal_image_invalid" }),
+    );
   });
 });

@@ -18,7 +18,13 @@
 
 import initSqlJs from "sql.js";
 
-import { JOURNAL_RECOVERY_STATES } from "./contracts";
+import {
+  JOURNAL_RECOVERY_STATES,
+  MAX_MULTIPART_PART_COUNT,
+  MULTIPART_PART_SIZE_BYTES,
+  MULTIPART_SAFE_REASON_TOKENS,
+  MULTIPART_SESSION_STATES,
+} from "./contracts";
 import type { JournalMeta, JournalRecoveryState } from "./contracts";
 
 // --- closed schema bookkeeping (spec 6.3) ----------------------------------------------
@@ -75,8 +81,20 @@ import type { JournalMeta, JournalRecoveryState } from "./contracts";
  * restore reservation and attempt survives, both cursor values start at
  * zero, no barrier/apply/echo row exists and a pre-existing
  * `is_reconcile_required = 1` stays set.
+ *
+ * Version 8 (resumable multipart mobile upload, task 9) adds the
+ * `multipart_upload_progress` table of child 7 spec 4.1: one row per
+ * frozen outbound journal event carrying ONLY the safe transfer progress —
+ * the opaque public session ID, the fixed part geometry and expiry, the
+ * completed part-number JSON, the last observed closed session state and
+ * the last closed safe reason. No URL, provider upload ID, ETag, staging
+ * key, digest or locator ever persists. The v7 → v8 migration
+ * (`migrateDeviceSyncJournalToMultipartProgressSchema`) is lossless: every
+ * v7 row — file mapping, event, attempt, lifecycle operand, reservation,
+ * cursor, barrier, apply and echo marker — survives unchanged and the new
+ * table starts empty.
  */
-export const JOURNAL_SCHEMA_VERSION = 7;
+export const JOURNAL_SCHEMA_VERSION = 8;
 
 // --- closed failure reasons ---------------------------------------------------------------
 
@@ -400,6 +418,40 @@ create table if not exists echo_markers (
 const DEVICE_SYNC_STATE_SEED_SQL =
   "insert into device_sync_state (singleton_key, applied_sequence, acknowledged_sequence, observation_generation) values (1, 0, 0, 0);";
 
+// --- multipart progress schema (child 7 spec 4.1, task 9) ----------------------------------------
+
+/** Render one closed vocabulary as a SQL `in (...)` text list. */
+function sqlTextList(values: readonly string[]): string {
+  return values.map((value) => `'${value}'`).join(", ");
+}
+
+/**
+ * The durable SAFE progress of one frozen outbound journal event's
+ * multipart transfer (child 7 spec 4.1), keyed by the event ID: the opaque
+ * public session ID, the fixed part geometry (an exactly-8-MiB ordinary
+ * part, at most 13 parts), the session expiry, the completed part-number
+ * JSON, the last observed closed session state and the last closed safe
+ * reason. The check constraints mirror the frozen constants and closed
+ * vocabularies of `contracts.ts`; the repository re-validates every value
+ * (including the part-number JSON against the geometry) BEFORE any SQL
+ * mutation runs. No column exists for a URL, provider upload ID, ETag,
+ * staging key, digest, path or locator — none can ever persist.
+ */
+const MULTIPART_UPLOAD_PROGRESS_DDL = `
+create table if not exists multipart_upload_progress (
+  event_id text primary key references journal_events (event_id),
+  session_id text not null,
+  part_size_bytes integer not null check (part_size_bytes = ${MULTIPART_PART_SIZE_BYTES}),
+  part_count integer not null check (part_count >= 1
+    and part_count <= ${MAX_MULTIPART_PART_COUNT}),
+  expires_at_epoch_ms integer not null check (expires_at_epoch_ms >= 0),
+  completed_part_numbers_json text not null,
+  session_state text not null check (session_state in (${sqlTextList(MULTIPART_SESSION_STATES)})),
+  safe_reason text check (safe_reason is null
+    or safe_reason in (${sqlTextList(MULTIPART_SAFE_REASON_TOKENS)}))
+);
+`;
+
 const JOURNAL_SCHEMA_DDL = [
   JOURNAL_META_DDL,
   LOCAL_FILES_DDL,
@@ -411,6 +463,7 @@ const JOURNAL_SCHEMA_DDL = [
   MANIFEST_ACTION_PROGRESS_DDL,
   REMOTE_APPLY_OPERATIONS_DDL,
   ECHO_MARKERS_DDL,
+  MULTIPART_UPLOAD_PROGRESS_DDL,
 ].join("");
 
 /**
@@ -443,6 +496,14 @@ export const SERVER_RECEIPT_SCHEMA_VERSION = 5;
  * constant as the source version it accepts.
  */
 export const RESTORE_RESERVATION_SCHEMA_VERSION = 6;
+
+/**
+ * The device-sync schema version (7). The v7 → v8 migration
+ * (`migrateDeviceSyncJournalToMultipartProgressSchema`, task 9, child 7
+ * spec 4.1) adds the `multipart_upload_progress` table; the function pins
+ * this constant as the source version it accepts.
+ */
+export const DEVICE_SYNC_SCHEMA_VERSION = 7;
 
 // --- closed failure reasons ---------------------------------------------------------------
 
@@ -801,6 +862,118 @@ export function migrateRestoreReservationJournalToDeviceSyncSchema(
     engine.exec("begin immediate;");
     try {
       engine.exec(DEVICE_SYNC_MIGRATION_DDL);
+      engine.exec("commit;");
+    } catch (error) {
+      try {
+        engine.exec("rollback;");
+      } catch {
+        // Best-effort rollback: the closed reason below is the answer.
+      }
+      throw error instanceof JournalStoreError
+        ? error
+        : journalStoreError("journal_mutation_failed");
+    }
+    return engine.export();
+  } catch (error) {
+    // sql.js surfaces lazy open failures ("file is not a database") at the
+    // first statement, not at construction: those bytes are not a journal
+    // image. Closed store reasons pass through untouched.
+    throw error instanceof JournalStoreError ? error : journalStoreError("journal_image_invalid");
+  } finally {
+    engine.close();
+  }
+}
+
+// --- the v7 → v8 multipart progress schema migration (task 9, child 7 spec 4.1) ---------------
+
+/**
+ * The v7 → v8 migration DDL: the `multipart_upload_progress` table of
+ * child 7 spec 4.1 plus the schema bookkeeping bump. The destination
+ * version is pinned to `8` here (NOT interpolated from
+ * {@link JOURNAL_SCHEMA_VERSION}) so a future v8 → v9 migration can layer
+ * on top of this block without rewriting this DDL.
+ */
+const MULTIPART_PROGRESS_MIGRATION_DDL = [
+  MULTIPART_UPLOAD_PROGRESS_DDL,
+  "update journal_meta set schema_version = 8 where singleton_key = 1;",
+  "pragma user_version = 8;",
+].join("");
+
+/**
+ * Whether one candidate v7 image carries the full journal surface the
+ * migration builds on: the meta row, every pre-v7 table and all five
+ * device-sync tables of spec 8. A missing table is image corruption the
+ * migration must fail closed on, never a silent partial upgrade.
+ */
+function deviceSyncJournalImageLooksValid(engine: SqliteDatabaseEngine): boolean {
+  try {
+    const metaRows = engine.exec(
+      "select schema_version from journal_meta where singleton_key = 1;",
+    );
+    if (metaRows[0]?.values[0] === undefined) {
+      return false;
+    }
+    const tables = engine.exec(
+      "select name from sqlite_master where type = 'table' order by name;",
+    );
+    const tableNames = (tables[0]?.values ?? []).map((row) => row[0]);
+    const required = [
+      "device_sync_state",
+      "echo_markers",
+      "journal_attempts",
+      "journal_events",
+      "journal_meta",
+      "lifecycle_event_operands",
+      "local_files",
+      "manifest_action_progress",
+      "manifest_page_progress",
+      "remote_apply_operations",
+    ];
+    for (const name of required) {
+      if (!(tableNames as readonly unknown[]).includes(name)) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Migrate one device-sync (`pragma user_version = 7`) journal image to the
+ * v8 multipart progress schema in memory (task 9, child 7 spec 4.1). The
+ * migration creates the per-event safe progress table and stamps the
+ * schema bookkeeping; every existing v7 row — file mapping, journal event,
+ * attempt, lifecycle operand, restore reservation, cursor singleton,
+ * barrier, manifest progress, remote apply and echo marker — survives
+ * untouched, and the new table starts empty. The input image is never
+ * mutated; the function returns the upgraded image and runs the DDL inside
+ * one `begin immediate ... commit` transaction so a torn migration leaves
+ * the original image intact.
+ */
+export function migrateDeviceSyncJournalToMultipartProgressSchema(
+  engineModule: SqliteEngineModule,
+  image: ArrayLike<number>,
+): Uint8Array {
+  let engine: SqliteDatabaseEngine;
+  try {
+    engine = new engineModule.Database(image);
+  } catch {
+    // Bytes that are not a SQLite image at all never execute a statement.
+    throw journalStoreError("journal_image_invalid");
+  }
+  try {
+    const currentVersion = readUserVersionOf(engine);
+    if (currentVersion !== DEVICE_SYNC_SCHEMA_VERSION) {
+      throw journalStoreError("journal_schema_unsupported");
+    }
+    if (!deviceSyncJournalImageLooksValid(engine)) {
+      throw journalStoreError("journal_image_invalid");
+    }
+    engine.exec("begin immediate;");
+    try {
+      engine.exec(MULTIPART_PROGRESS_MIGRATION_DDL);
       engine.exec("commit;");
     } catch (error) {
       try {

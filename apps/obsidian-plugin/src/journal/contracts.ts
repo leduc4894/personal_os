@@ -29,6 +29,24 @@ export const MAX_JOURNAL_SIZE_BYTES = 64 * 1024 * 1024;
 /** Per-file watcher settle delay before fingerprinting: 250 ms (spec 7.1). */
 export const FILE_SETTLE_DELAY_MS = 250;
 
+// --- frozen multipart geometry (child 7 spec 4) -----------------------------------------------
+
+/**
+ * Ordinary multipart part size: exactly 8 MiB (child 7 spec 4). Mirrors the
+ * server constant `MULTIPART_PART_SIZE_BYTES` — every part except the final
+ * one carries exactly this many bytes; the value is never negotiated. The
+ * plugin never derives routing from it; it only validates the geometry the
+ * server-owned plan already returned.
+ */
+export const MULTIPART_PART_SIZE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Maximum number of parts one multipart session's geometry may declare
+ * (child 7 spec 4): the 100 MiB product maximum over the 8 MiB ordinary
+ * part. Mirrors the server constant `MAX_MULTIPART_PART_COUNT`.
+ */
+export const MAX_MULTIPART_PART_COUNT = 13;
+
 /**
  * The closed, redacted outcome of a bounded Vault snapshot capture. Explicit
  * scans may be cancelled before enumeration; automatic snapshots stop when
@@ -161,6 +179,56 @@ export const QUEUE_OUTCOMES = [
 
 export type QueueOutcome = (typeof QUEUE_OUTCOMES)[number];
 
+// --- closed multipart session vocabulary (child 7 spec 4.2, 7) ----------------------------------
+
+/**
+ * The closed server session states of the multipart lifecycle (child 7
+ * spec 4.2) the safe progress record may persist: the last state the
+ * session's status surface reported. `committed` and `cleaned` are the
+ * terminal outcomes; `cleanup_pending` is a cleanup obligation, never
+ * permission to reuse the session.
+ */
+export const MULTIPART_SESSION_STATES = [
+  "created",
+  "uploading",
+  "completing",
+  "verifying",
+  "promoting",
+  "committed",
+  "cancelling",
+  "expired",
+  "integrity_failed",
+  "policy_denied",
+  "cleanup_pending",
+  "cleaned",
+] as const;
+
+export type MultipartSessionState = (typeof MULTIPART_SESSION_STATES)[number];
+
+/**
+ * The closed multipart retry/status reason tokens (child 7 spec 7) the
+ * durable progress record may carry as its last observed safe reason —
+ * the same vocabulary the server registers once in its central error
+ * registry. No provider text, URL, digest or other detail ever travels
+ * with these tokens.
+ */
+export const MULTIPART_SAFE_REASON_TOKENS = [
+  "multipart_session_not_found",
+  "multipart_session_expired",
+  "multipart_session_state_invalid",
+  "multipart_part_invalid",
+  "multipart_part_url_rejected",
+  "multipart_provider_state_invalid",
+  "multipart_completion_in_progress",
+  "multipart_integrity_failed",
+  "multipart_policy_denied",
+  "multipart_cleanup_failed",
+  "multipart_local_content_changed",
+  "multipart_dependency_unavailable",
+] as const;
+
+export type MultipartSafeReasonToken = (typeof MULTIPART_SAFE_REASON_TOKENS)[number];
+
 // --- recovery states (spec 6.2) --------------------------------------------------------------
 
 /**
@@ -284,4 +352,32 @@ export interface JournalMeta {
   readonly lastVerifiedGeneration: number;
   readonly isReconcileRequired: boolean;
   readonly recoveryState: JournalRecoveryState;
+}
+
+/**
+ * The durable SAFE progress of one frozen outbound journal event's
+ * multipart transfer (child 7 spec 4.1): the opaque public session ID the
+ * server issued, the fixed part geometry and expiry of its plan, the last
+ * observed closed session state, the completed part-number set and the
+ * last closed retry/status token — and nothing else. No presigned URL or
+ * query signature, provider upload ID or ETag, staging key, digest, path
+ * or locator is ever a member, so none can persist.
+ */
+export interface MultipartProgressRecord {
+  /** The existing journal event this session is bound to. */
+  readonly eventId: string;
+  /** Opaque public session ID (printable base64url, never a raw UUID). */
+  readonly sessionId: string;
+  /** Ordinary part size: exactly {@link MULTIPART_PART_SIZE_BYTES}. */
+  readonly partSizeBytes: number;
+  /** Declared part count: 1 to {@link MAX_MULTIPART_PART_COUNT}. */
+  readonly partCount: number;
+  /** The session expiry the server plan returned. */
+  readonly expiresAtEpochMs: number;
+  /** Completed part numbers, strictly ascending, each 1 to `partCount`. */
+  readonly completedPartNumbers: readonly number[];
+  /** The last session state the status surface reported. */
+  readonly sessionState: MultipartSessionState;
+  /** The last closed retry/status token, or null before any closed path. */
+  readonly safeReason: MultipartSafeReasonToken | null;
 }

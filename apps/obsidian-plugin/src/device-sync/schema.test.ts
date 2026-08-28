@@ -15,7 +15,12 @@ import { readFileSync } from "node:fs";
 import initSqlJs from "sql.js";
 import { beforeAll, describe, expect, it } from "vitest";
 
-import { migrateRestoreReservationJournalToDeviceSyncSchema, SqliteDatabase } from "../journal/sqlite-database";
+import {
+  JOURNAL_SCHEMA_VERSION,
+  SqliteDatabase,
+  migrateDeviceSyncJournalToMultipartProgressSchema,
+  migrateRestoreReservationJournalToDeviceSyncSchema,
+} from "../journal/sqlite-database";
 import type { SqliteEngineModule } from "../journal/sqlite-database";
 import { readDeviceSyncState } from "./schema";
 
@@ -40,31 +45,52 @@ const TOMBSTONE_ID = "44444444-4444-4444-8444-444444444444";
 const EVENT_ID = "55555555-5555-4555-8555-555555555555";
 const IDEMPOTENCY_KEY = "66666666-6666-4666-8666-666666666666";
 
+/** The five device-sync tables schema v7 adds on top of the v6 journal. */
+const DEVICE_SYNC_V7_TABLES = [
+  "device_sync_state",
+  "manifest_page_progress",
+  "manifest_action_progress",
+  "remote_apply_operations",
+  "echo_markers",
+] as const;
+
 /**
- * Build one fully seeded v6 restore-reservation journal image: the v7 empty
- * journal is downgraded with a raw engine (device-sync tables dropped,
- * bookkeeping pinned to 6) and then seeded with one tombstoned local file
- * holding an open restore reservation, one committed lifecycle delete event,
- * its keyed operand row and one bounded attempt.
+ * Migrate one seeded v6 image all the way to the current schema: the
+ * device-sync step (task 8) followed by the multipart progress step
+ * (task 9), so the result opens through `openFromImage`.
+ */
+function migrateV6ImageToCurrentSchema(v6Image: Uint8Array): Uint8Array {
+  return migrateDeviceSyncJournalToMultipartProgressSchema(
+    engineModule,
+    migrateRestoreReservationJournalToDeviceSyncSchema(engineModule, v6Image),
+  );
+}
+
+/**
+ * Build one fully seeded v6 restore-reservation journal image: the current
+ * empty journal is downgraded with a raw engine (multipart progress and
+ * device-sync tables dropped, bookkeeping pinned to 6) and then seeded
+ * with one tombstoned local file holding an open restore reservation, one
+ * committed lifecycle delete event, its keyed operand row and one bounded
+ * attempt.
  */
 function createSeededV6Image(options: { isReconcileRequired: boolean }): Uint8Array {
   const database = SqliteDatabase.createEmpty(engineModule, {
-    schemaVersion: 7,
+    schemaVersion: JOURNAL_SCHEMA_VERSION,
     dirtyGeneration: 4,
     lastVerifiedGeneration: 4,
     isReconcileRequired: false,
     recoveryState: "verified_generation_loaded",
   });
-  const v7Image = database.exportImage();
+  const currentImage = database.exportImage();
   database.close();
-  const engine = new engineModule.Database(v7Image);
+  const engine = new engineModule.Database(currentImage);
   try {
     engine.exec("begin immediate;");
-    engine.exec("drop table device_sync_state;");
-    engine.exec("drop table manifest_page_progress;");
-    engine.exec("drop table manifest_action_progress;");
-    engine.exec("drop table remote_apply_operations;");
-    engine.exec("drop table echo_markers;");
+    engine.exec("drop table multipart_upload_progress;");
+    for (const table of DEVICE_SYNC_V7_TABLES) {
+      engine.exec(`drop table ${table};`);
+    }
     engine.exec(
       `update journal_meta set schema_version = 6, is_reconcile_required = ${options.isReconcileRequired ? 1 : 0} where singleton_key = 1;`,
     );
@@ -125,12 +151,12 @@ function readRawScalar(image: Uint8Array, sql: string): unknown {
 // --- the v6 → v7 migration (task 8 step 1, spec 8) ---------------------------------------------------------
 
 describe("device sync schema migration (v6 to v7)", () => {
-  it("migrates v6 to v7 without clearing reconcile_required", () => {
+  it("migrates v6 through v7 to the current schema without clearing reconcile_required", () => {
     const v6Image = createSeededV6Image({ isReconcileRequired: true });
-    const v7Image = migrateRestoreReservationJournalToDeviceSyncSchema(engineModule, v6Image);
-    const database = SqliteDatabase.openFromImage(engineModule, v7Image);
+    const migratedImage = migrateV6ImageToCurrentSchema(v6Image);
+    const database = SqliteDatabase.openFromImage(engineModule, migratedImage);
     try {
-      expect(database.readSchemaVersion()).toBe(7);
+      expect(database.readSchemaVersion()).toBe(JOURNAL_SCHEMA_VERSION);
       expect(readDeviceSyncState(database)).toEqual({
         appliedSequence: 0,
         acknowledgedSequence: 0,
@@ -142,7 +168,7 @@ describe("device sync schema migration (v6 to v7)", () => {
         manifestFinalDigest: null,
       });
       expect(database.readJournalMeta().isReconcileRequired).toBe(true);
-      expect(database.readJournalMeta().schemaVersion).toBe(7);
+      expect(database.readJournalMeta().schemaVersion).toBe(JOURNAL_SCHEMA_VERSION);
     } finally {
       database.close();
     }
@@ -150,8 +176,8 @@ describe("device sync schema migration (v6 to v7)", () => {
 
   it("preserves every v6 local file, journal event, attempt, lifecycle operand and restore reservation", () => {
     const v6Image = createSeededV6Image({ isReconcileRequired: false });
-    const v7Image = migrateRestoreReservationJournalToDeviceSyncSchema(engineModule, v6Image);
-    const database = SqliteDatabase.openFromImage(engineModule, v7Image);
+    const migratedImage = migrateV6ImageToCurrentSchema(v6Image);
+    const database = SqliteDatabase.openFromImage(engineModule, migratedImage);
     try {
       const localFileRow = database.readAll(
         [
@@ -196,14 +222,15 @@ describe("device sync schema migration (v6 to v7)", () => {
 
   it("creates no barrier, manifest, remote apply or echo marker row", () => {
     const v6Image = createSeededV6Image({ isReconcileRequired: true });
-    const v7Image = migrateRestoreReservationJournalToDeviceSyncSchema(engineModule, v6Image);
-    const database = SqliteDatabase.openFromImage(engineModule, v7Image);
+    const migratedImage = migrateV6ImageToCurrentSchema(v6Image);
+    const database = SqliteDatabase.openFromImage(engineModule, migratedImage);
     try {
       for (const table of [
         "manifest_page_progress",
         "manifest_action_progress",
         "remote_apply_operations",
         "echo_markers",
+        "multipart_upload_progress",
       ]) {
         const count = database.readAll(`select count(*) from ${table};`)[0]?.values[0]?.[0];
         expect(count, table).toBe(0);
@@ -231,7 +258,7 @@ describe("device sync schema migration (v6 to v7)", () => {
 
   it("rejects an already-v7 image as a migration source", () => {
     const database = SqliteDatabase.createEmpty(engineModule, {
-      schemaVersion: 7,
+      schemaVersion: JOURNAL_SCHEMA_VERSION,
       dirtyGeneration: 1,
       lastVerifiedGeneration: 1,
       isReconcileRequired: false,
@@ -261,12 +288,12 @@ describe("device sync schema migration (v6 to v7)", () => {
   });
 });
 
-// --- the fresh v7 state singleton ------------------------------------------------------------------------
+// --- the fresh state singleton ------------------------------------------------------------------------
 
-describe("device sync state singleton (fresh v7 journal)", () => {
-  it("seeds a zeroed reconciliation state row on a fresh v7 journal", () => {
+describe("device sync state singleton (fresh journal)", () => {
+  it("seeds a zeroed reconciliation state row on a fresh journal", () => {
     const database = SqliteDatabase.createEmpty(engineModule, {
-      schemaVersion: 7,
+      schemaVersion: JOURNAL_SCHEMA_VERSION,
       dirtyGeneration: 1,
       lastVerifiedGeneration: 1,
       isReconcileRequired: false,
@@ -290,7 +317,7 @@ describe("device sync state singleton (fresh v7 journal)", () => {
 
   it("fails closed when the singleton row is missing", async () => {
     const database = SqliteDatabase.createEmpty(engineModule, {
-      schemaVersion: 7,
+      schemaVersion: JOURNAL_SCHEMA_VERSION,
       dirtyGeneration: 1,
       lastVerifiedGeneration: 1,
       isReconcileRequired: false,
@@ -310,7 +337,7 @@ describe("device sync state singleton (fresh v7 journal)", () => {
 
   it("fails closed when the singleton carries a foreign barrier reason", async () => {
     const database = SqliteDatabase.createEmpty(engineModule, {
-      schemaVersion: 7,
+      schemaVersion: JOURNAL_SCHEMA_VERSION,
       dirtyGeneration: 1,
       lastVerifiedGeneration: 1,
       isReconcileRequired: false,
@@ -336,7 +363,7 @@ describe("device sync state singleton (fresh v7 journal)", () => {
 describe("device sync schema reader slice", () => {
   it("reads through the structural readAll seam without a concrete SqliteDatabase", () => {
     const database = SqliteDatabase.createEmpty(engineModule, {
-      schemaVersion: 7,
+      schemaVersion: JOURNAL_SCHEMA_VERSION,
       dirtyGeneration: 1,
       lastVerifiedGeneration: 1,
       isReconcileRequired: false,

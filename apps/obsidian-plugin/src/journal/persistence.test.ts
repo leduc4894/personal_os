@@ -17,6 +17,7 @@ import type {
   VaultAdapterSurface,
 } from "./persistence";
 import type { SqliteEngineModule } from "./sqlite-database";
+import { JOURNAL_SCHEMA_VERSION } from "./sqlite-database";
 import type {
   SyncDiagnosticsTrail,
   SyncDiagnosticsTrailAppendInput,
@@ -668,7 +669,7 @@ describe("JournalPersistence diagnostics trail wiring (sync error tracing task 1
   });
 });
 
-// --- v6 → v7 migration of the loader (device cursor and manifest reconciliation, task 8) ------------------------
+// --- migration of the loader (device cursor task 8; multipart progress task 9) -----------------------------------
 
 /** The five device-sync tables schema v7 adds on top of the v6 journal. */
 const DEVICE_SYNC_V7_TABLES = [
@@ -688,45 +689,53 @@ const V6_SEEDED_LOCAL_FILE_SQL = [
 ].join(" ");
 
 /**
- * Turn a freshly opened v7 store into a verified v6 store: the generation-1
- * image is downgraded with a raw engine (device-sync tables dropped,
- * bookkeeping pinned to 6) plus one seeded local file row, and the manifest
- * is rewritten so generation 1 verifies byte-exactly as a v6 image.
+ * Downgrade one freshly opened current-schema generation to the pinned
+ * version: the tables the version does not know are dropped, the
+ * bookkeeping is pinned and one seeded local file row lands, and the
+ * manifest is rewritten so generation 1 verifies byte-exactly as an image
+ * of that version.
  */
-async function writeVerifiedV6Store(
+async function writeVerifiedOlderStore(
   store: InMemoryJournalFileStore,
-  options: { isReconcileRequired: boolean; isMigrationBroken?: boolean },
+  options: {
+    readonly schemaVersion: 6 | 7;
+    readonly isReconcileRequired: boolean;
+    readonly isMigrationBroken?: boolean;
+  },
 ): Promise<void> {
   const journal = new JournalPersistence({ fileStore: store, engineModule });
   await journal.open();
   journal.close();
-  const v7Image = new Uint8Array(await store.readBinary(generationFileName(1)));
-  const engine = new engineModule.Database(v7Image);
+  const currentImage = new Uint8Array(await store.readBinary(generationFileName(1)));
+  const engine = new engineModule.Database(currentImage);
   try {
     engine.exec("begin immediate;");
-    for (const table of DEVICE_SYNC_V7_TABLES) {
-      engine.exec(`drop table ${table};`);
+    engine.exec("drop table multipart_upload_progress;");
+    if (options.schemaVersion === 6) {
+      for (const table of DEVICE_SYNC_V7_TABLES) {
+        engine.exec(`drop table ${table};`);
+      }
     }
     engine.exec(
-      `update journal_meta set schema_version = 6, is_reconcile_required = ${options.isReconcileRequired ? 1 : 0} where singleton_key = 1;`,
+      `update journal_meta set schema_version = ${options.schemaVersion}, is_reconcile_required = ${options.isReconcileRequired ? 1 : 0} where singleton_key = 1;`,
     );
-    engine.exec("pragma user_version = 6;");
+    engine.exec(`pragma user_version = ${options.schemaVersion};`);
     engine.exec(V6_SEEDED_LOCAL_FILE_SQL);
     if (options.isMigrationBroken === true) {
-      // A v6 image missing a required journal table is image corruption the
+      // An image missing a required journal table is image corruption the
       // migration must fail closed on — never a silent partial upgrade.
       engine.exec("drop table lifecycle_event_operands;");
     }
     engine.exec("commit;");
-    const v6Image = engine.export();
-    const sha256 = await sha256Hex(v6Image);
+    const olderImage = engine.export();
+    const sha256 = await sha256Hex(olderImage);
     const manifest = {
       contract: "obsidian_journal_manifest/v1",
       current: {
         generationNumber: 1,
-        sizeBytes: v6Image.byteLength,
+        sizeBytes: olderImage.byteLength,
         sha256,
-        schemaVersion: 6,
+        schemaVersion: options.schemaVersion,
       },
       prior: null,
     };
@@ -736,9 +745,9 @@ async function writeVerifiedV6Store(
     );
     await store.writeBinary(
       generationFileName(1),
-      v6Image.buffer.slice(
-        v6Image.byteOffset,
-        v6Image.byteOffset + v6Image.byteLength,
+      olderImage.buffer.slice(
+        olderImage.byteOffset,
+        olderImage.byteOffset + olderImage.byteLength,
       ) as ArrayBuffer,
     );
   } finally {
@@ -746,8 +755,21 @@ async function writeVerifiedV6Store(
   }
 }
 
-describe("JournalPersistence v6 to v7 migration (task 8, spec 8)", () => {
-  it("migrates a verified v6 generation and publishes the v7 generation before exposing the journal", async () => {
+/**
+ * Turn a freshly opened store into a verified v6 store: the generation-1
+ * image is downgraded with a raw engine (device-sync tables dropped,
+ * bookkeeping pinned to 6) plus one seeded local file row, and the manifest
+ * is rewritten so generation 1 verifies byte-exactly as a v6 image.
+ */
+async function writeVerifiedV6Store(
+  store: InMemoryJournalFileStore,
+  options: { isReconcileRequired: boolean; isMigrationBroken?: boolean },
+): Promise<void> {
+  await writeVerifiedOlderStore(store, { ...options, schemaVersion: 6 });
+}
+
+describe("JournalPersistence v6 to current-schema migration (task 8, spec 8)", () => {
+  it("migrates a verified v6 generation and publishes the migrated generation before exposing the journal", async () => {
     const store = new InMemoryJournalFileStore();
     await writeVerifiedV6Store(store, { isReconcileRequired: true });
 
@@ -757,16 +779,16 @@ describe("JournalPersistence v6 to v7 migration (task 8, spec 8)", () => {
 
     const manifest = await readManifest(store);
     expect(manifest.current.generationNumber).toBe(2);
-    expect(manifest.current.schemaVersion).toBe(7);
+    expect(manifest.current.schemaVersion).toBe(JOURNAL_SCHEMA_VERSION);
     expect(manifest.prior).toMatchObject({ generationNumber: 1, schemaVersion: 6 });
     // The v6 generation stays on disk as the prior recovery image.
     expect(await store.exists(generationFileName(1))).toBe(true);
     expect(await store.exists(generationFileName(2))).toBe(true);
 
-    expect(journal.readJournalMeta().schemaVersion).toBe(7);
+    expect(journal.readJournalMeta().schemaVersion).toBe(JOURNAL_SCHEMA_VERSION);
     expect(journal.readJournalMeta().isReconcileRequired).toBe(true);
 
-    // Every v6 row survived: the seeded local file reads back on the v7 image.
+    // Every v6 row survived: the seeded local file reads back on the migrated image.
     const fileCount = journal.readAll("select count(*) from local_files;")[0]?.values[0]?.[0];
     expect(fileCount).toBe(1);
 
@@ -778,7 +800,7 @@ describe("JournalPersistence v6 to v7 migration (task 8, spec 8)", () => {
     journal.close();
   });
 
-  it("reopens the migrated v7 generation without migrating again", async () => {
+  it("reopens the migrated generation without migrating again", async () => {
     const store = new InMemoryJournalFileStore();
     await writeVerifiedV6Store(store, { isReconcileRequired: false });
     const first = await openedPersistence(store);
@@ -788,18 +810,21 @@ describe("JournalPersistence v6 to v7 migration (task 8, spec 8)", () => {
     expect(reopened.recoveryState).toBe("verified_generation_loaded");
     expect(reopened.verifiedGenerationNumber).toBe(2);
     const manifest = await readManifest(store);
-    expect(manifest.current).toMatchObject({ generationNumber: 2, schemaVersion: 7 });
+    expect(manifest.current).toMatchObject({
+      generationNumber: 2,
+      schemaVersion: JOURNAL_SCHEMA_VERSION,
+    });
     expect(manifest.prior).toMatchObject({ generationNumber: 1, schemaVersion: 6 });
     reopened.close();
   });
 
-  it("falls back to the retained v6 prior generation and migrates it when the v7 image is torn", async () => {
+  it("falls back to the retained v6 prior generation and migrates it when the newest image is torn", async () => {
     const store = new InMemoryJournalFileStore();
     await writeVerifiedV6Store(store, { isReconcileRequired: false });
     const migrated = await openedPersistence(store);
     migrated.close();
-    // Tear the newest v7 generation: recovery must fall back to the retained
-    // v6 prior generation and migrate that image again.
+    // Tear the newest migrated generation: recovery must fall back to the
+    // retained v6 prior generation and migrate that image again.
     const tornBytes = (await store.readBinary(generationFileName(2))).slice(0, 64);
     await store.writeBinary(generationFileName(2), tornBytes);
 
@@ -807,7 +832,7 @@ describe("JournalPersistence v6 to v7 migration (task 8, spec 8)", () => {
     expect(reopened.recoveryState).toBe("prior_generation_recovered");
     expect(reopened.verifiedGenerationNumber).toBe(2);
     const manifest = await readManifest(store);
-    expect(manifest.current.schemaVersion).toBe(7);
+    expect(manifest.current.schemaVersion).toBe(JOURNAL_SCHEMA_VERSION);
     expect(manifest.prior).toMatchObject({ generationNumber: 1, schemaVersion: 6 });
     const fileCount = reopened.readAll("select count(*) from local_files;")[0]?.values[0]?.[0];
     expect(fileCount).toBe(1);
@@ -837,7 +862,7 @@ describe("JournalPersistence v6 to v7 migration (task 8, spec 8)", () => {
   });
 
   it("fails closed on a manifest of a foreign or newer schema version", async () => {
-    for (const foreignSchemaVersion of [5, 8]) {
+    for (const foreignSchemaVersion of [5, JOURNAL_SCHEMA_VERSION + 1]) {
       const store = new InMemoryJournalFileStore();
       await writeVerifiedV6Store(store, { isReconcileRequired: false });
       const manifest = await readManifest(store);
@@ -856,5 +881,54 @@ describe("JournalPersistence v6 to v7 migration (task 8, spec 8)", () => {
       expect(journal.isReconcileRequired).toBe(true);
       journal.close();
     }
+  });
+});
+
+describe("JournalPersistence v7 to v8 migration (task 9, child 7 spec 4.1)", () => {
+  it("migrates a verified v7 generation and publishes the v8 generation before exposing the journal", async () => {
+    const store = new InMemoryJournalFileStore();
+    await writeVerifiedOlderStore(store, { isReconcileRequired: true, schemaVersion: 7 });
+
+    const journal = await openedPersistence(store);
+    expect(journal.recoveryState).toBe("verified_generation_loaded");
+    expect(journal.verifiedGenerationNumber).toBe(2);
+
+    const manifest = await readManifest(store);
+    expect(manifest.current).toMatchObject({
+      generationNumber: 2,
+      schemaVersion: JOURNAL_SCHEMA_VERSION,
+    });
+    expect(manifest.prior).toMatchObject({ generationNumber: 1, schemaVersion: 7 });
+    expect(await store.exists(generationFileName(1))).toBe(true);
+    expect(await store.exists(generationFileName(2))).toBe(true);
+
+    expect(journal.readJournalMeta().schemaVersion).toBe(JOURNAL_SCHEMA_VERSION);
+    expect(journal.readJournalMeta().isReconcileRequired).toBe(true);
+
+    // Every v7 row survived, and the new progress table starts empty.
+    const fileCount = journal.readAll("select count(*) from local_files;")[0]?.values[0]?.[0];
+    expect(fileCount).toBe(1);
+    const progressRowCount = journal.readAll(
+      "select count(*) from multipart_upload_progress;",
+    )[0]?.values[0]?.[0];
+    expect(progressRowCount).toBe(0);
+    journal.close();
+  });
+
+  it("reopens the migrated v8 generation without migrating again", async () => {
+    const store = new InMemoryJournalFileStore();
+    await writeVerifiedOlderStore(store, { isReconcileRequired: false, schemaVersion: 7 });
+    const first = await openedPersistence(store);
+    first.close();
+
+    const reopened = await openedPersistence(store);
+    expect(reopened.recoveryState).toBe("verified_generation_loaded");
+    expect(reopened.verifiedGenerationNumber).toBe(2);
+    const manifest = await readManifest(store);
+    expect(manifest.current).toMatchObject({
+      generationNumber: 2,
+      schemaVersion: JOURNAL_SCHEMA_VERSION,
+    });
+    reopened.close();
   });
 });

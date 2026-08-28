@@ -25,12 +25,14 @@
 import { sha256Hex } from "../exclusion-policy/canonical-json";
 import type { JournalMeta, JournalRecoveryState } from "./contracts";
 import {
+  DEVICE_SYNC_SCHEMA_VERSION,
   JOURNAL_SCHEMA_VERSION,
   JournalStoreError,
   RESTORE_RESERVATION_SCHEMA_VERSION,
   type JournalStoreErrorReason,
   journalStoreError,
   SqliteDatabase,
+  migrateDeviceSyncJournalToMultipartProgressSchema,
   migrateRestoreReservationJournalToDeviceSyncSchema,
 } from "./sqlite-database";
 import type {
@@ -167,13 +169,15 @@ function parseVerifiedGeneration(value: unknown): VerifiedJournalGeneration | nu
   if (typeof sha256 !== "string" || !SHA256_HEX_PATTERN.test(sha256)) {
     return null;
   }
-  // The migration source version (v6) is accepted beside the current one
-  // (task 8, spec 8): a verified v6 generation is migrated in memory
-  // before it may serve any read. Any other version — older, foreign or
-  // newer — fails closed here.
+  // The migration source versions (v6 and v7) are accepted beside the
+  // current one (task 8, task 9): a verified v6/v7 generation is migrated
+  // in memory — v6 through v7 up to the current schema — before it may
+  // serve any read. Any other version — older, foreign or newer — fails
+  // closed here.
   if (
     schemaVersion !== JOURNAL_SCHEMA_VERSION &&
-    schemaVersion !== RESTORE_RESERVATION_SCHEMA_VERSION
+    schemaVersion !== RESTORE_RESERVATION_SCHEMA_VERSION &&
+    schemaVersion !== DEVICE_SYNC_SCHEMA_VERSION
   ) {
     return null;
   }
@@ -207,6 +211,14 @@ function parseJournalManifest(bytes: Uint8Array): JournalGenerationManifest | nu
     }
   }
   return { contract: JOURNAL_MANIFEST_CONTRACT, current, prior };
+}
+
+/** Whether one manifest schema version is an accepted in-memory migration source. */
+function isKnownJournalMigrationSource(schemaVersion: number): boolean {
+  return (
+    schemaVersion === RESTORE_RESERVATION_SCHEMA_VERSION ||
+    schemaVersion === DEVICE_SYNC_SCHEMA_VERSION
+  );
 }
 
 function isSameVerifiedGeneration(
@@ -432,11 +444,12 @@ export class JournalPersistence {
           ? manifest.prior
           : null;
       if (wasMigrated) {
-        // A verified v6 generation was migrated in memory (task 8, spec
-        // 8): publish the migrated v7 image as the next verified
-        // generation BEFORE the journal is exposed, so the v6 generation
-        // stays retained as the prior recovery image and a crash never
-        // leaves the store without a verified v7 generation.
+        // A verified migration-source generation was migrated in memory
+        // (task 8, task 9): publish the migrated current-schema image as
+        // the next verified generation BEFORE the journal is exposed, so
+        // the source generation stays retained as the prior recovery
+        // image and a crash never leaves the store without a verified
+        // migrated generation.
         try {
           await this.#executeGenerationCommit(() => undefined);
         } catch (error) {
@@ -502,9 +515,10 @@ export class JournalPersistence {
   /**
    * The required table names that must be present on every verified
    * generation (spec 6.3, child 5; task 8 adds the five device-sync
-   * tables of spec 8): a torn / missing table is image corruption that
-   * recovery must surface as `journal_image_invalid` instead of silently
-   * passing verification.
+   * tables of spec 8; task 9 adds the multipart progress table of child 7
+   * spec 4.1): a torn / missing table is image corruption that recovery
+   * must surface as `journal_image_invalid` instead of silently passing
+   * verification.
    */
   static readonly #REQUIRED_JOURNAL_TABLES = [
     "journal_meta",
@@ -517,6 +531,7 @@ export class JournalPersistence {
     "manifest_action_progress",
     "remote_apply_operations",
     "echo_markers",
+    "multipart_upload_progress",
   ] as const;
 
   /**
@@ -581,11 +596,14 @@ export class JournalPersistence {
 
   /**
    * Read one candidate generation back, verify it byte-exactly and open
-   * it. A generation whose manifest entry names the migration source
-   * version (v6) is migrated in memory first (task 8, spec 8): the
-   * migrated v7 image is what recovery opens, and any migration failure
-   * records the existing `startup_failure`/`journal_recovery` trail
-   * surface before recovery falls back — never a silent partial upgrade.
+   * it. A generation whose manifest entry names a migration source
+   * version (v6 or v7) is migrated in memory first (task 8, task 9): a
+   * v6 image walks the device-sync migration and then the multipart
+   * progress migration up to the current schema, a v7 image takes only
+   * the last step, and the migrated image is what recovery opens. Any
+   * migration failure records the existing `startup_failure`/
+   * `journal_recovery` trail surface before recovery falls back — never a
+   * silent partial upgrade.
    */
   async #openVerifiedGeneration(
     candidate: VerifiedJournalGeneration,
@@ -610,14 +628,21 @@ export class JournalPersistence {
         if (
           !(error instanceof JournalStoreError) ||
           error.reason !== "journal_schema_unsupported" ||
-          candidate.schemaVersion !== RESTORE_RESERVATION_SCHEMA_VERSION
+          !isKnownJournalMigrationSource(candidate.schemaVersion)
         ) {
           throw error;
         }
         migrationWasAttempted = true;
-        const migratedImage = migrateRestoreReservationJournalToDeviceSyncSchema(
+        let migratedImage: Uint8Array = imageBytes;
+        if (candidate.schemaVersion === RESTORE_RESERVATION_SCHEMA_VERSION) {
+          migratedImage = migrateRestoreReservationJournalToDeviceSyncSchema(
+            this.#engineModule,
+            migratedImage,
+          );
+        }
+        migratedImage = migrateDeviceSyncJournalToMultipartProgressSchema(
           this.#engineModule,
-          imageBytes,
+          migratedImage,
         );
         database = SqliteDatabase.openFromImage(this.#engineModule, migratedImage);
       }
