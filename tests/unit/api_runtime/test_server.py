@@ -335,6 +335,129 @@ def test_server_binds_one_shared_policy_metrics_sink_at_both_composition_sites(
     assert observed["small_file_sync_metrics"] is bound_metrics
 
 
+def test_server_serves_the_multipart_upload_routes() -> None:
+    """The production serve graph binds the real multipart upload runtime.
+
+    A serve process that 404s the five spec §5 routes would leave the
+    resumable large-file transfer undelivered, and the offline composition
+    is for the OpenAPI export and route tests only.
+    """
+
+    captured = RecordingServerFactory()
+    assert run_server(environ=LOCAL_ENVIRONMENT, server_factory=captured) == 0
+    application = captured.config.app
+    assert isinstance(application, FastAPI)
+    paths = {route.path for route in application.routes}
+    assert "/api/uploads/multipart-sessions" in paths
+    assert "/api/uploads/multipart-sessions/{session_id}" in paths
+    assert "/api/uploads/multipart-sessions/{session_id}/parts/{part_number}/url" in paths
+    assert "/api/uploads/multipart-sessions/{session_id}/complete" in paths
+    assert "/api/uploads/multipart-sessions/{session_id}/abort" in paths
+
+
+def test_server_closes_the_multipart_runtime_client_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The serve lifespan disposes the multipart runtime's R2 client once.
+
+    The runtime owns one lazy R2 client manager (the staging provider, the
+    staging byte source and the canonical spool share it); the lifespan
+    must await its disposal hook exactly once on shutdown, mirroring the
+    small-file and device-sync runtimes.
+    """
+
+    from dataclasses import replace as dataclass_replace
+
+    from api_runtime import server as server_module
+    from api_runtime.multipart_upload_composition import MultipartUploadRuntime
+
+    class _NoDatabaseLifecycle:
+        """Lifespan double whose startup opens no PostgreSQL connection."""
+
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
+        async def check(self) -> None:
+            return None
+
+        async def verify_exclusion_policy_signer(self, *, signing_key_id: str) -> None:
+            del signing_key_id
+            return None
+
+    async def _accept_keyring_coverage(**_: object) -> None:
+        return None
+
+    monkeypatch.setattr(server_module, "DatabaseRuntimeLifecycle", _NoDatabaseLifecycle)
+    monkeypatch.setattr(
+        server_module, "verify_keyring_covers_required_key_ids", _accept_keyring_coverage
+    )
+
+    real_composition = server_module.compose_multipart_upload
+    close_counts: list[int] = []
+
+    def counting_composition(**kwargs: object) -> MultipartUploadRuntime:
+        runtime = real_composition(**kwargs)  # type: ignore[arg-type]
+        original_aclose = runtime.aclose
+        assert original_aclose is not None
+
+        async def counting_aclose() -> None:
+            close_counts.append(1)
+            await original_aclose()
+
+        return dataclass_replace(runtime, aclose=counting_aclose)
+
+    monkeypatch.setattr(server_module, "compose_multipart_upload", counting_composition)
+    result = run_server(
+        environ=LOCAL_ENVIRONMENT,
+        server_factory=LifespanExecutingServerFactory(),
+    )
+
+    assert result == 0
+    assert close_counts == [1]
+
+
+def test_server_shares_the_policy_metrics_sink_with_the_multipart_composition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The multipart enforcement records into the shared policy sink (C2)."""
+
+    from api_runtime import server as server_module
+
+    from personal_os.exclusion_policy.metrics import InMemoryExclusionPolicyMetrics
+
+    observed: dict[str, object] = {}
+    real_exclusion_policy_composition = server_module.compose_exclusion_policy
+    real_multipart_composition = server_module.compose_multipart_upload
+
+    def recording_exclusion_policy_composition(**kwargs: object) -> object:
+        observed["exclusion_policy_metrics"] = kwargs.get("metrics")
+        return real_exclusion_policy_composition(**kwargs)
+
+    def recording_multipart_composition(**kwargs: object) -> object:
+        observed["multipart_policy_metrics"] = kwargs.get("policy_metrics")
+        return real_multipart_composition(**kwargs)
+
+    monkeypatch.setattr(
+        server_module, "compose_exclusion_policy", recording_exclusion_policy_composition
+    )
+    monkeypatch.setattr(
+        server_module, "compose_multipart_upload", recording_multipart_composition
+    )
+
+    captured = RecordingServerFactory()
+    assert run_server(environ=LOCAL_ENVIRONMENT, server_factory=captured) == 0
+
+    bound_metrics = observed["exclusion_policy_metrics"]
+    assert isinstance(bound_metrics, InMemoryExclusionPolicyMetrics)
+    assert observed["multipart_policy_metrics"] is bound_metrics
+
+
 def test_server_missing_object_storage_configuration_exits_seventy_eight(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

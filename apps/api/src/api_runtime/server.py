@@ -10,7 +10,8 @@ private key through the same secret-file boundary, loads the R2
 object-storage settings and their two credential files through the same
 boundary, configures structured diagnostics, builds the database lifecycle,
 the web-authentication runtime, the exclusion-policy runtime, the
-small-file sync runtime and the device sync runtime over the real PostgreSQL
+small-file sync runtime, the multipart upload runtime and the device sync
+runtime over the real PostgreSQL
 and R2 adapters (each R2 client opens lazily at the first store call inside
 the serving loop), and
 builds the FastAPI application (wiring the lifecycle into the application
@@ -59,6 +60,7 @@ from api_runtime.exclusion_policy_settings import (
     load_exclusion_policy_signer,
     load_exclusion_policy_signing_settings,
 )
+from api_runtime.multipart_upload_composition import compose_multipart_upload
 from api_runtime.server_settings import load_api_server_settings
 from api_runtime.small_file_sync_composition import compose_small_file_sync
 from api_runtime.source_lifecycle_composition import (
@@ -177,6 +179,20 @@ def run_server(
                 logger=logger,
                 policy_metrics=policy_metrics,
             )
+            # The multipart upload runtime owns its own lazy R2 client
+            # manager (the staging provider, the exact staging read and the
+            # canonical verification spool share it) so it stays
+            # independently disposable through the same lifecycle; the
+            # durable session store seals its raw operation tokens with the
+            # authentication keyring the serve graph already loaded.
+            multipart_upload = compose_multipart_upload(
+                engine=engine,
+                object_storage_settings=object_storage_settings,
+                object_storage_credentials=object_storage_credentials,
+                logger=logger,
+                keyring=keyring,
+                policy_metrics=policy_metrics,
+            )
             lifecycle_metrics = InMemorySourceLifecycleMetrics()
             lifecycle_policy_verifier = TrustAnchorEd25519Verifier()
             source_lifecycle = compose_source_lifecycle_runtime(
@@ -228,6 +244,8 @@ def run_server(
                 finally:
                     if small_file_sync.aclose is not None:
                         await small_file_sync.aclose()
+                    if multipart_upload.aclose is not None:
+                        await multipart_upload.aclose()
                     if device_sync.aclose is not None:
                         await device_sync.aclose()
                     await lifecycle.stop()
@@ -238,6 +256,7 @@ def run_server(
                 web_authentication=web_authentication,
                 exclusion_policy=exclusion_policy,
                 small_file_sync=small_file_sync,
+                multipart_upload=multipart_upload,
                 source_lifecycle=source_lifecycle,
                 device_sync=device_sync,
                 event_sink=logger,

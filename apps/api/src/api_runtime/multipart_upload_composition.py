@@ -38,33 +38,53 @@ multipart tasks and stay load-bearing for the serve graph:
 
 The serve graph binding (the durable PostgreSQL session store, the R2
 staging provider behind the shared lazy client manager, the durable
-evidence store and the exact staging-read capability) lands with the server
-composition wiring of the next task: this module owns the runtime contract
-that binding must satisfy — one shared R2 client per process, disposed
-exactly once through the runtime's ``aclose`` hook, mirroring how the
-small-file sync runtime closes its own client — together with the two
-reusable adapters (the locator-aware recheck guard and the
-:class:`ValidatedStagingKeyMultipartProvider` str-key seam) that binding
-composes.
+evidence store and the exact staging-read capability) is
+:func:`compose_multipart_upload` below: one shared R2 client per process,
+disposed exactly once through the runtime's ``aclose`` hook, mirroring how
+the small-file sync runtime closes its own client — together with the
+reusable adapters (the locator-aware recheck guard, the
+:class:`ValidatedStagingKeyMultipartProvider` str-key seam, the
+:class:`R2MultipartStagingByteSource` exact staging read and the
+:class:`KeyringMultipartOperationTokenCodec` AEAD seam over the versioned
+authentication keyring) that binding composes.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import secrets
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Final, Protocol
+from typing import Any, Final, Protocol
 from uuid import UUID, uuid4
 
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from api_runtime.authentication_crypto import (
+    AuthenticationKeyring,
+    CryptographyAuthenticationCrypto,
+)
+from api_runtime.exclusion_policy_crypto import TrustAnchorEd25519Verifier
+from api_runtime.small_file_sync_composition import (
+    BoundPolicySmallFilePublicationGateway,
+    LazyR2ClientSource,
+)
+from personal_os.authentication.crypto import MULTIPART_OPERATION_TOKEN_AEAD_LABEL
 from personal_os.diagnostics.context import DiagnosticContext
+from personal_os.diagnostics.logging import DiagnosticLogger
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.error_contracts.exceptions import InternalApplicationError
 from personal_os.exclusion_policy.contracts import PolicySubject
-from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
+from personal_os.exclusion_policy.enforcement import (
+    AllowedPolicyRevisionBinding,
+    PolicyDecision,
+    default_utc_clock,
+)
 from personal_os.exclusion_policy.errors import ExclusionPolicyError
-from personal_os.exclusion_policy.metrics import PolicyBoundary
+from personal_os.exclusion_policy.metrics import ExclusionPolicyMetrics, PolicyBoundary
 from personal_os.multipart_upload.contracts import (
     MultipartPartRange,
     MultipartPartUrl,
@@ -86,6 +106,7 @@ from personal_os.multipart_upload.ports import (
     MultipartProviderUploadId,
     MultipartSessionClaim,
     MultipartSessionRecord,
+    SealedMultipartOperationToken,
 )
 from personal_os.multipart_upload.service import (
     MultipartObservedPart,
@@ -124,13 +145,35 @@ from personal_os.sources.commands import (
     CreateSourceVersion,
     UpdateSourceVersion,
 )
+from personal_os.sources.metrics import InMemorySourcePublicationMetrics
 from personal_os.sources.reading import (
     CanonicalReadStateError,
     CanonicalSourceReference,
     ReadCurrentSourceCommand,
 )
 from personal_os.sources.results import PublicationOutcome, SourceVersionPublicationResult
-from r2_object_storage.multipart import MultipartProviderPart, MultipartStagingKey
+from postgresql_source_store.canonical_read import PostgresqlCanonicalSourceReadStore
+from postgresql_source_store.multipart_upload_store import (
+    PostgresqlMultipartSessionEvidenceStore,
+    PostgresqlMultipartUploadStore,
+)
+from postgresql_source_store.policy_enforcement import compose_policy_enforcement
+from postgresql_source_store.publication_store import PostgresqlSourcePublicationStore
+from postgresql_source_store.small_file_sync_operations import (
+    PostgresqlSmallFileUploadOperationStore,
+)
+from r2_object_storage.adapter import R2S3ObjectStore
+from r2_object_storage.client import R2ClientManager
+from r2_object_storage.error_mapping import RetryPolicy
+from r2_object_storage.metrics import InMemoryObjectStorageMetrics
+from r2_object_storage.multipart import (
+    MultipartProviderPart,
+    MultipartStagingKey,
+    MultipartStagingSdkClient,
+    R2MultipartStagingProvider,
+)
+from r2_object_storage.settings import LoadedR2Credentials, ObjectStorageSettings
+from r2_object_storage.spool import SpoolManager
 
 #: The ordinary part geometry constant the offline rows derive (8 MiB).
 _OFFLINE_PART_SIZE_BYTES: Final[int] = 8 * 1024 * 1024
@@ -255,7 +298,7 @@ class PolicyPreflightEnforcement(Protocol):
         subject: PolicySubject,
         boundary: PolicyBoundary,
         context: DiagnosticContext,
-    ) -> AllowedPolicyRevisionBinding: ...
+    ) -> PolicyDecision: ...
 
 
 class RecheckLocatorAwarePolicyEnforcementGuard:
@@ -268,7 +311,9 @@ class RecheckLocatorAwarePolicyEnforcementGuard:
     rule then observes indeterminate evidence and the enforcement boundary
     fails closed, so an advance to deny can never pass an early recheck
     through the stand-in locator as if it were real evidence (parked
-    finding D1).
+    finding D1). The allowed decision converts to the server-owned revision
+    binding exactly like the small-file guard, without retaining the full
+    decision evidence.
     """
 
     def __init__(self, *, enforcement: PolicyPreflightEnforcement) -> None:
@@ -292,10 +337,14 @@ class RecheckLocatorAwarePolicyEnforcementGuard:
             media_type=preflight.media_type,
             size_bytes=preflight.size_bytes,
         )
-        return await self._enforcement.authorize_preflight(
+        decision = await self._enforcement.authorize_preflight(
             subject=subject,
             boundary=PolicyBoundary.MULTIPART_UPLOAD,
             context=diagnostic_context,
+        )
+        return AllowedPolicyRevisionBinding(
+            workspace_id=decision.workspace_id,
+            policy_revision_number=decision.revision_number,
         )
 
 
@@ -1304,7 +1353,210 @@ def compose_offline_multipart_upload(
     return MultipartUploadRuntime(service=service, rejection_diagnostics=recorder)
 
 
+# --- the serve graph --------------------------------------------------------------
+
+
+class KeyringMultipartOperationTokenCodec:
+    """Versioned-keyring AEAD adapter for the sealed operation token.
+
+    Sealing always derives the ``multipart/operation-token/v1`` subkey of
+    the current authentication master key; opening resolves the subkey of
+    the key ID the session row references, so a previous-key seal stays
+    openable across rotation. Every decrypt or parameter failure fails
+    closed as the safe ``internal_error`` without crypto text; the raw
+    token never renders.
+    """
+
+    def __init__(
+        self,
+        crypto: CryptographyAuthenticationCrypto,
+        keyring: AuthenticationKeyring,
+    ) -> None:
+        self._crypto = crypto
+        self._keyring = keyring
+
+    def current_key_id(self) -> str:
+        return self._keyring.current_key_id
+
+    def seal_token(self, *, token: UploadOperationToken) -> SealedMultipartOperationToken:
+        key_id = self.current_key_id()
+        subkey = self._crypto.derive_subkey(
+            master_key=self._keyring.keys_by_id[key_id],
+            label=MULTIPART_OPERATION_TOKEN_AEAD_LABEL,
+        )
+        nonce, ciphertext = self._crypto.seal_secret(
+            key=subkey, plaintext=token.value.encode("utf-8")
+        )
+        return SealedMultipartOperationToken(
+            key_id=key_id,
+            nonce=base64.b64encode(nonce).decode("ascii"),
+            ciphertext=base64.b64encode(ciphertext).decode("ascii"),
+        )
+
+    def open_token(self, *, sealed: SealedMultipartOperationToken) -> UploadOperationToken:
+        master_key = self._keyring.keys_by_id.get(sealed.key_id)
+        if master_key is None:
+            raise InternalApplicationError(ErrorCode.INTERNAL_ERROR)
+        subkey = self._crypto.derive_subkey(
+            master_key=master_key, label=MULTIPART_OPERATION_TOKEN_AEAD_LABEL
+        )
+        plaintext = self._crypto.open_secret(
+            key=subkey,
+            nonce=base64.b64decode(sealed.nonce.encode("ascii")),
+            ciphertext=base64.b64decode(sealed.ciphertext.encode("ascii")),
+        )
+        try:
+            return UploadOperationToken(plaintext.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as cause:
+            raise InternalApplicationError(ErrorCode.INTERNAL_ERROR) from cause
+
+
+class LazyMultipartStagingSdkClient:
+    """Raw staging SDK facade over the lazy per-process client manager.
+
+    The serve composition runs before any event loop exists while the R2
+    client is created asynchronously; every member resolves the manager's
+    shared raw SDK client first — one bounded lock check after the first
+    call — so the staging provider never opens a connection at composition
+    time and always talks to the one client the runtime owns and closes.
+    """
+
+    def __init__(self, manager: R2ClientManager) -> None:
+        self._manager = manager
+
+    async def _client(self) -> MultipartStagingSdkClient:
+        return await self._manager.get_multipart_staging_client()
+
+    async def create_multipart_upload(self, **kwargs: Any) -> Any:
+        return await (await self._client()).create_multipart_upload(**kwargs)
+
+    async def generate_presigned_url(
+        self,
+        ClientMethod: str,
+        Params: Mapping[str, Any] | None = None,
+        ExpiresIn: int = 3600,
+        HttpMethod: Any = None,
+    ) -> str:
+        return await (await self._client()).generate_presigned_url(
+            ClientMethod, Params if Params is not None else {}, ExpiresIn, HttpMethod
+        )
+
+    async def list_parts(self, **kwargs: Any) -> Any:
+        return await (await self._client()).list_parts(**kwargs)
+
+    async def complete_multipart_upload(self, **kwargs: Any) -> Any:
+        return await (await self._client()).complete_multipart_upload(**kwargs)
+
+    async def abort_multipart_upload(self, **kwargs: Any) -> Any:
+        return await (await self._client()).abort_multipart_upload(**kwargs)
+
+    async def delete_object(self, **kwargs: Any) -> Any:
+        return await (await self._client()).delete_object(**kwargs)
+
+    async def get_object(self, **kwargs: Any) -> Any:
+        return await (await self._client()).get_object(**kwargs)
+
+
+class R2MultipartStagingByteSource:
+    """The exact staging read of one session's completed staging object.
+
+    Binds the verification spool's byte-source port over the R2 staging
+    provider's own exact-key read: the persisted str staging key is
+    re-validated against the closed grammar before the provider call — a
+    canonical-shaped key can never address canonical content through this
+    seam — and the typed provider boundary owns the stream, its bounded
+    retry and its mid-stream error mapping.
+    """
+
+    def __init__(self, provider: R2MultipartStagingProvider) -> None:
+        self._provider = provider
+
+    def open_staging_stream(
+        self, staging_key: str
+    ) -> AbstractAsyncContextManager[AsyncIterable[bytes]]:
+        return self._provider.open_staging_stream(validated_staging_key(staging_key))
+
+
+def compose_multipart_upload(
+    *,
+    engine: AsyncEngine,
+    object_storage_settings: ObjectStorageSettings,
+    object_storage_credentials: LoadedR2Credentials,
+    logger: DiagnosticLogger,
+    keyring: AuthenticationKeyring,
+    policy_metrics: ExclusionPolicyMetrics | None = None,
+) -> MultipartUploadRuntime:
+    """Build the real multipart serve runtime of one API process.
+
+    Follows the small-file sync serve precedent's shape: the shared engine,
+    the durable stores that connect lazily per transaction, and the provider
+    adapters that open no connection at construction — the one lazy R2
+    client manager opens at the first call inside the serving loop and is
+    disposed exactly once through the runtime's ``aclose`` (the canonical
+    object store's ``close`` closes the shared client and its spool
+    reservations; the staging provider and byte source borrow the same
+    client, so nothing else needs disposal). The durable evidence read
+    opens the session row's sealed operation token through the keyring
+    codec; the enforcement service records into the shared policy metrics
+    sink (spec 2026-08-24 C2) and the rejection ring plus the closed
+    structured log form the readable rejection surface of the committed
+    session's inline staging-delete failure.
+    """
+
+    verifier = TrustAnchorEd25519Verifier()
+    enforcement = compose_policy_enforcement(engine, verifier=verifier, metrics=policy_metrics)
+    client_manager = R2ClientManager(object_storage_settings, object_storage_credentials)
+    object_store = R2S3ObjectStore(
+        LazyR2ClientSource(client_manager),
+        spools=SpoolManager(object_storage_settings.object_storage_spool_root),
+        retry=RetryPolicy(),
+        metrics=InMemoryObjectStorageMetrics(),
+        logger=logger,
+    )
+    staging_provider = R2MultipartStagingProvider(
+        LazyMultipartStagingSdkClient(client_manager),
+        bucket=object_storage_settings.r2_bucket_name,
+        logger=logger,
+    )
+    operation_store = PostgresqlSmallFileUploadOperationStore(engine, clock=default_utc_clock)
+    token_codec = KeyringMultipartOperationTokenCodec(
+        CryptographyAuthenticationCrypto(), keyring
+    )
+    metrics = InMemoryMultipartUploadMetrics()
+    service = MultipartUploadService(
+        session_store=PostgresqlMultipartUploadStore(
+            engine, clock=default_utc_clock, token_codec=token_codec
+        ),
+        evidence_store=PostgresqlMultipartSessionEvidenceStore(
+            engine, token_codec=token_codec
+        ),
+        operation_store=operation_store,
+        policy_guard=RecheckLocatorAwarePolicyEnforcementGuard(enforcement=enforcement),
+        current_sources=PostgresqlCanonicalSourceReadStore(engine, policy_verifier=verifier),
+        publication_gateway=BoundPolicySmallFilePublicationGateway(
+            store=PostgresqlSourcePublicationStore(engine, policy_verifier=verifier),
+            object_store=object_store,
+            metrics=InMemorySourcePublicationMetrics(),
+            clock=default_utc_clock,
+            enforcement=enforcement,
+            operation_store=operation_store,
+            diagnostics=logger,
+        ),
+        object_store=object_store,
+        staging_provider=ValidatedStagingKeyMultipartProvider(staging_provider),
+        staging_byte_source=R2MultipartStagingByteSource(staging_provider),
+        metrics=metrics,
+        clock=default_utc_clock,
+        diagnostics=logger,
+    )
+    return MultipartUploadRuntime(
+        service=service, rejection_diagnostics=metrics, aclose=object_store.close
+    )
+
+
 __all__ = [
+    "KeyringMultipartOperationTokenCodec",
+    "LazyMultipartStagingSdkClient",
     "MultipartUploadRuntime",
     "OfflineMultipartCurrentSourceStore",
     "OfflineMultipartEvidenceStore",
@@ -1316,8 +1568,10 @@ __all__ = [
     "OfflineMultipartStagingByteSource",
     "OfflineMultipartStagingProvider",
     "OfflineMultipartUploadState",
+    "R2MultipartStagingByteSource",
     "RecheckLocatorAwarePolicyEnforcementGuard",
     "ValidatedStagingKeyMultipartProvider",
+    "compose_multipart_upload",
     "compose_offline_multipart_upload",
     "multipart_recheck_locator_stand_in",
     "validated_staging_key",

@@ -45,7 +45,13 @@ from fastapi.testclient import TestClient
 
 from personal_os.diagnostics.context import DiagnosticContext, create_diagnostic_context
 from personal_os.error_contracts.codes import ErrorCode
-from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
+from personal_os.exclusion_policy.contracts import (
+    EnforcedPolicyDecision,
+    RawPolicyDecision,
+)
+from personal_os.exclusion_policy.enforcement import (
+    PolicyDecision,
+)
 from personal_os.multipart_upload.contracts import (
     MultipartPartGeometry,
     MultipartUploadSessionId,
@@ -648,15 +654,25 @@ class _RecordingPolicyEnforcement:
         subject: Any,
         boundary: Any,
         context: DiagnosticContext,
-    ) -> AllowedPolicyRevisionBinding:
+    ) -> PolicyDecision:
         del boundary, context
         from personal_os.exclusion_policy.errors import ExclusionPolicyError
 
         self.subjects.append(subject)
         if subject.normalized_locator is None:
             raise ExclusionPolicyError(ErrorCode.EXCLUSION_POLICY_INDETERMINATE)
-        return AllowedPolicyRevisionBinding(
-            workspace_id=subject.workspace_id, policy_revision_number=7
+        # The real enforcement service answers with its internal decision
+        # evidence; the guard converts it to the server-owned binding.
+        return PolicyDecision(
+            workspace_id=subject.workspace_id,
+            policy_revision_id=uuid4(),
+            revision_number=7,
+            subject_fingerprint=b"0" * 32,
+            raw_decision=RawPolicyDecision.ALLOWED,
+            enforced_decision=EnforcedPolicyDecision.ALLOWED,
+            matched_rule_ids=(),
+            missing_fields=(),
+            evaluated_at=datetime.now(UTC),
         )
 
 
