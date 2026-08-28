@@ -673,12 +673,16 @@ manifest_actions: Final[Table] = Table(
     sa.PrimaryKeyConstraint("manifest_run_id", "action_index", name="pk_manifest_actions"),
 )
 
-#: Durable multipart upload session state (migrations ``20260828_01`` and
-#: ``20260828_03``). The ``staging_key`` and ``provider_upload_id`` columns
-#: are private provider identity: they land only through the store's fenced
-#: post-create write (spec 6.1 persist-before-create), stay NULL until then,
-#: and never render in a repr, log, metric or API schema; no presigned URL is
-#: ever durable state.
+#: Durable multipart upload session state (migrations ``20260828_01``,
+#: ``20260828_03`` and ``20260828_04``). The ``staging_key`` and
+#: ``provider_upload_id`` columns are private provider identity: they land
+#: only through the store's fenced post-create write (spec 6.1
+#: persist-before-create), stay NULL until then, and never render in a repr,
+#: log, metric or API schema; no presigned URL is ever durable state. The
+#: three ``operation_token_*`` columns are the AEAD-sealed raw preimage of
+#: the frozen operation's token hash plus its keyring key ID: sealed
+#: secret-bearing text, nullable (a composition without a codec reserves
+#: with no seal) and never rendered either.
 multipart_uploads: Final[Table] = Table(
     "multipart_uploads",
     _SOURCE_STORE_METADATA,
@@ -696,6 +700,9 @@ multipart_uploads: Final[Table] = Table(
     Column("part_count", sa.Integer(), nullable=False),
     Column("staging_key", sa.Text(), nullable=True),
     Column("provider_upload_id", sa.Text(), nullable=True),
+    Column("operation_token_ciphertext", sa.String(length=255), nullable=True),
+    Column("operation_token_nonce", sa.String(length=64), nullable=True),
+    Column("operation_token_key_id", sa.String(length=100), nullable=True),
     Column("state", sa.Text(), nullable=False),
     Column("claim_token", sa.Uuid(), nullable=True),
     Column("claim_expires_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),

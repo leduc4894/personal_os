@@ -38,6 +38,7 @@ from postgresql_source_store.identity_bootstrap import PostgresqlIdentityBootstr
 from postgresql_source_store.multipart_upload_store import (
     MULTIPART_COMPLETION_LEASE_SECONDS,
     MultipartDatabaseRetryPolicy,
+    PostgresqlMultipartSessionEvidenceStore,
     PostgresqlMultipartUploadStore,
 )
 from postgresql_source_store.policy_drafts import PostgresqlPolicyDraftStore
@@ -72,6 +73,7 @@ __all__ = [
     "PostgresqlDeviceEventStore",
     "PostgresqlDeviceManifestStore",
     "PostgresqlIdentityBootstrapStore",
+    "PostgresqlMultipartSessionEvidenceStore",
     "PostgresqlMultipartUploadStore",
     "PostgresqlPolicyDraftStore",
     "PostgresqlPolicyKeysetStore",

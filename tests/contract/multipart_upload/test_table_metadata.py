@@ -1,16 +1,16 @@
 """Multipart upload DML metadata contract against the migration DDL authority.
 
-The Alembic migrations ``20260828_01`` (table creation) and ``20260828_03``
-(deferred provider identity) are the DDL authority for the multipart upload
-schema. This test loads both migration modules, replays their ``upgrade()``
-against a recording stub of ``alembic.op`` and compares the resulting two
-schema-qualified tables with the typed DML metadata exported by
-``postgresql_source_store.tables``: identical table names, schema, column
-names, column types and nullability, identical primary keys, constraint
-ownership staying with the migration (the DML tables duplicate no unique or
-foreign key constraint), and the provider identity columns remaining private
-text columns — no presigned URL, URL fragment or signature column exists in
-either representation.
+The Alembic migrations ``20260828_01`` (table creation), ``20260828_03``
+(deferred provider identity) and ``20260828_04`` (sealed operation token)
+are the DDL authority for the multipart upload schema. This test loads the
+migration modules, replays their ``upgrade()`` against a recording stub of
+``alembic.op`` and compares the resulting two schema-qualified tables with
+the typed DML metadata exported by ``postgresql_source_store.tables``:
+identical table names, schema, column names, column types and nullability,
+identical primary keys, constraint ownership staying with the migration (the
+DML tables duplicate no unique or foreign key constraint), and the provider
+identity columns remaining private text columns — no presigned URL, URL
+fragment or signature column exists in either representation.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ REPO_ROOT: Path = Path(__file__).resolve().parents[3]
 MIGRATION_DIRECTORY = REPO_ROOT / "migrations" / "versions"
 MIGRATION_GLOB = "20260828_01*.py"
 DEFERRED_IDENTITY_MIGRATION_GLOB = "20260828_03*.py"
+SEALED_TOKEN_MIGRATION_GLOB = "20260828_04*.py"
 
 MULTIPART_TABLE_NAMES = frozenset({"multipart_uploads", "multipart_parts"})
 
@@ -43,6 +44,18 @@ PRIVATE_PROVIDER_COLUMNS = frozenset(
         ("multipart_uploads", "staging_key"),
         ("multipart_uploads", "provider_upload_id"),
         ("multipart_parts", "provider_etag"),
+    }
+)
+
+#: The AEAD-sealed raw-token preimage columns of the session row
+#: (migration ``20260828_04``): sealed secret-bearing text that is nullable —
+#: a reserved session whose composition sealed no token carries no seal and
+#: the durable evidence read fails closed instead of guessing.
+SEALED_OPERATION_TOKEN_COLUMNS = frozenset(
+    {
+        ("multipart_uploads", "operation_token_ciphertext"),
+        ("multipart_uploads", "operation_token_nonce"),
+        ("multipart_uploads", "operation_token_key_id"),
     }
 )
 
@@ -91,6 +104,25 @@ class _RecordingAlembicOp:
             f"alter_column addressed no recorded column: {table_name}.{column_name}"
         )
 
+    def add_column(
+        self, table_name: str, column: Any, *, schema: Any = None, **kwargs: Any
+    ) -> None:
+        del schema, kwargs
+        for table in self.created_tables:
+            if table.name == table_name:
+                table.append_column(column)
+                return None
+        raise AssertionError(f"add_column addressed no recorded table: {table_name}")
+
+    def create_check_constraint(
+        self, constraint_name: str, table_name: str, condition: str, **kwargs: Any
+    ) -> None:
+        del constraint_name, table_name, condition, kwargs
+        return None
+
+    def drop_column(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
     def execute(self, *args: Any, **kwargs: Any) -> None:
         return None
 
@@ -123,6 +155,11 @@ def _collect_migration_tables() -> dict[str, sa.Table]:
     )
     deferred_identity.op = recorder  # type: ignore[attr-defined]
     deferred_identity.upgrade()
+    sealed_token = _load_migration_module(
+        "multipart_operation_token_seal_migration", SEALED_TOKEN_MIGRATION_GLOB
+    )
+    sealed_token.op = recorder  # type: ignore[attr-defined]
+    sealed_token.upgrade()
     return {table.name: table for table in recorder.created_tables}
 
 
@@ -208,6 +245,23 @@ def test_provider_identity_columns_are_private_text() -> None:
                     table_name,
                     column.name,
                 )
+
+
+def test_sealed_operation_token_columns_are_nullable_private_text() -> None:
+    """The sealed raw-token preimage is nullable sealed text (migration 04).
+
+    The three sealed columns carry the AEAD material of the frozen
+    operation's raw token — secret-bearing values that never render in a
+    repr, log, metric or API schema — and stay nullable: a session reserved
+    by a composition without a codec (or before this revision) carries no
+    seal, and the durable evidence read fails closed on its absence instead
+    of admitting a guess.
+    """
+
+    for table_name, column_name in sorted(SEALED_OPERATION_TOKEN_COLUMNS):
+        column = SOURCE_STORE_TABLES[table_name].columns[column_name]
+        assert isinstance(column.type, sa.String), (table_name, column_name)
+        assert column.nullable is True, (table_name, column_name)
 
 
 def test_dml_tables_duplicate_no_migration_owned_constraint() -> None:

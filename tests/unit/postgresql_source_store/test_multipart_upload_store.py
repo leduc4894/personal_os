@@ -35,11 +35,13 @@ from personal_os.multipart_upload.ports import (
     MultipartProviderUploadId,
     MultipartSessionClaim,
     MultipartSessionRecord,
+    SealedMultipartOperationToken,
 )
 from personal_os.object_storage import CanonicalMediaType, ContentDigest
 from personal_os.small_file_sync.contracts import (
     SmallFileTerminalResult,
     SmallFileTerminalResultKind,
+    UploadOperationToken,
 )
 from postgresql_source_store.multipart_upload_store import (
     MULTIPART_CLEANUP_RETRY_BASE_SECONDS,
@@ -57,8 +59,11 @@ from postgresql_source_store.multipart_upload_store import (
     map_multipart_database_failure,
     mint_multipart_session_id,
     multipart_operation_select_statement,
+    multipart_sealed_token_material,
     multipart_session_insert_statement,
     multipart_session_select_statement,
+    operation_row_by_id_select_statement,
+    operation_token_seal_update_statement,
     provider_identity_update_statement,
     require_terminal_failure_state,
     terminal_failure_update_statement,
@@ -82,6 +87,62 @@ _STAGING_KEY = "staging/exact/private-key"
 _PROVIDER_UPLOAD_ID = MultipartProviderUploadId("provider-upload-identity")
 _ETAG = MultipartProviderPartETag("provider-observed-etag")
 _NOW = datetime(2026, 8, 28, 10, 0, 0, tzinfo=UTC)
+_RAW_OPERATION_TOKEN = UploadOperationToken("t" * 43)
+_SEALED_CIPHERTEXT = "c2VhbGVkLWNpcGhlcnRleHQtZW5jcnlwdGVkLXNlbnRpbmVs"
+_SEALED_NONCE = "c2VhbGVkLW5vbmNlLXNlbnRpbmVs"
+
+
+def _sealed_token() -> SealedMultipartOperationToken:
+    return SealedMultipartOperationToken(
+        key_id="auth-key-v1",
+        nonce=_SEALED_NONCE,
+        ciphertext=_SEALED_CIPHERTEXT,
+    )
+
+
+def _multipart_row(
+    state: MultipartSessionState,
+    *,
+    sealed_ciphertext: str | None = _SEALED_CIPHERTEXT,
+    sealed_nonce: str | None = _SEALED_NONCE,
+    sealed_key_id: str | None = "auth-key-v1",
+) -> Any:
+    """Build one hydrated session row view for the pure row-shape tests."""
+
+    from postgresql_source_store.multipart_upload_store import MultipartSessionRow
+
+    return MultipartSessionRow(
+        multipart_upload_id=uuid4(),
+        session_id_value=_SESSION_ID.value,
+        workspace_id=uuid4(),
+        device_id=uuid4(),
+        operation_id=uuid4(),
+        declared_sha256=_DIGEST.hexadecimal,
+        declared_size_bytes=24 * 1024 * 1024,
+        declared_media_type=_MEDIA_TYPE.value,
+        base_version_id=None,
+        policy_revision_number=4,
+        part_size_bytes=8 * 1024 * 1024,
+        part_count=3,
+        staging_key=_STAGING_KEY,
+        provider_upload_id_value=_PROVIDER_UPLOAD_ID.value,
+        sealed_ciphertext=sealed_ciphertext,
+        sealed_nonce=sealed_nonce,
+        sealed_key_id=sealed_key_id,
+        state=state,
+        claim_token=None,
+        claim_expires_at=None,
+        result_kind=None,
+        result_source_id=None,
+        result_source_version_id=None,
+        result_content_version=None,
+        result_committed_at=None,
+        cleanup_state="none",
+        cleanup_attempt_count=0,
+        cleanup_next_retry_at=None,
+        cleanup_reason_code=None,
+        expires_at=_NOW + timedelta(hours=24),
+    )
 
 
 class _DriverFailure(Exception):
@@ -164,6 +225,30 @@ class TestPrivacyRedaction:
         assert _STAGING_KEY not in rendered
         assert _PROVIDER_UPLOAD_ID.value not in rendered
 
+    def test_sealed_token_material_requires_the_full_trio(self) -> None:
+        row = _multipart_row(MultipartSessionState.UPLOADING)
+        sealed = multipart_sealed_token_material(row)
+        assert sealed.key_id == "auth-key-v1"
+        assert sealed.ciphertext == _SEALED_CIPHERTEXT
+        assert sealed.nonce == _SEALED_NONCE
+
+    def test_sealed_token_material_fails_closed_on_a_partial_seal(self) -> None:
+        row = _multipart_row(MultipartSessionState.UPLOADING, sealed_nonce=None)
+        with pytest.raises(MultipartUploadError) as info:
+            multipart_sealed_token_material(row)
+        assert info.value.error_code is ErrorCode.MULTIPART_SESSION_STATE_INVALID
+
+    def test_sealed_token_material_fails_closed_on_an_absent_seal(self) -> None:
+        row = _multipart_row(
+            MultipartSessionState.UPLOADING,
+            sealed_ciphertext=None,
+            sealed_nonce=None,
+            sealed_key_id=None,
+        )
+        with pytest.raises(MultipartUploadError) as info:
+            multipart_sealed_token_material(row)
+        assert info.value.error_code is ErrorCode.MULTIPART_SESSION_STATE_INVALID
+
 
 class TestStatementShapes:
     def test_operation_lookup_takes_row_lock_for_session_mutation(self) -> None:
@@ -200,12 +285,71 @@ class TestStatementShapes:
             part_size_bytes=8 * 1024 * 1024,
             part_count=3,
             expires_at=_NOW + timedelta(hours=24),
+            sealed_token=_sealed_token(),
         )
         compiled = _compiled(statement)
         # The reservation happens before the provider create: the row opens
         # with NULL private identity and no session value is SQL text.
         assert _SESSION_ID.value not in compiled
         assert "knowledge.multipart_uploads" in compiled
+        # The sealed raw-token preimage is parameter-bound sealed text, and
+        # neither the raw token nor its sealed material is SQL text.
+        assert _RAW_OPERATION_TOKEN.value not in compiled
+        assert _SEALED_CIPHERTEXT not in compiled
+        assert _SEALED_NONCE not in compiled
+        assert "operation_token_ciphertext" in compiled
+        assert "operation_token_nonce" in compiled
+        assert "operation_token_key_id" in compiled
+
+    def test_reserve_insert_accepts_an_absent_seal(self) -> None:
+        statement = multipart_session_insert_statement(
+            multipart_upload_id=uuid4(),
+            session_id_value=_SESSION_ID.value,
+            workspace_id=uuid4(),
+            device_id=uuid4(),
+            operation_id=uuid4(),
+            declared_sha256=_DIGEST.hexadecimal,
+            declared_size_bytes=20 * 1024 * 1024,
+            declared_media_type=_MEDIA_TYPE.value,
+            base_version_id=None,
+            policy_revision_number=4,
+            part_size_bytes=8 * 1024 * 1024,
+            part_count=3,
+            expires_at=_NOW + timedelta(hours=24),
+            sealed_token=None,
+        )
+        compiled = _compiled(statement)
+        # A composition without a codec reserves with no seal: the columns
+        # bind NULL and the durable evidence read fails closed later.
+        assert _SESSION_ID.value not in compiled
+        assert "knowledge.multipart_uploads" in compiled
+
+    def test_operation_token_seal_refresh_is_parameter_bound(self) -> None:
+        statement = operation_token_seal_update_statement(
+            session_id_value=_SESSION_ID.value,
+            sealed_token=_sealed_token(),
+        )
+        compiled = _compiled(statement)
+        assert _SESSION_ID.value not in compiled
+        assert _SEALED_CIPHERTEXT not in compiled
+        assert _SEALED_NONCE not in compiled
+        assert "knowledge.multipart_uploads" in compiled
+        # The refresh addresses exactly one session row by its opaque ID.
+        assert "session_id" in compiled
+
+    def test_operation_row_by_id_lookup_is_lock_free_and_parameter_bound(self) -> None:
+        operation_id = uuid4()
+        compiled = _compiled(operation_row_by_id_select_statement(operation_id))
+        assert str(operation_id) not in compiled
+        assert "FOR UPDATE" not in compiled
+        assert "knowledge.small_file_upload_operations" in compiled
+
+    def test_sealed_token_value_renders_redacted(self) -> None:
+        sealed = _sealed_token()
+        rendered = repr(sealed)
+        assert _SEALED_CIPHERTEXT not in rendered
+        assert _SEALED_NONCE not in rendered
+        assert "ciphertext" not in rendered
 
     def test_provider_identity_write_is_guarded_compare_and_set(self) -> None:
         statement = provider_identity_update_statement(

@@ -117,7 +117,7 @@ def test_revision_extends_the_multipart_session_head() -> None:
 
 def test_revision_is_chained_below_the_deferred_identity_head() -> None:
     scripts = _script_directory()
-    assert scripts.get_heads() == ["20260828_03"]
+    assert scripts.get_heads() == ["20260828_04"]
     revision = scripts.get_revision(SIZE_BOUND_REVISION)
     assert revision is not None
     assert revision.down_revision == MULTIPART_SESSION_REVISION

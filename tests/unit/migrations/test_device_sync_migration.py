@@ -248,7 +248,7 @@ def test_device_sync_revision_is_the_single_alembic_head() -> None:
     # The multipart upload, operation-size-bound and deferred-identity
     # revisions stack on the run client-activity revision, so the single graph
     # head moved past it.
-    assert scripts.get_heads() == ["20260828_03"]
+    assert scripts.get_heads() == ["20260828_04"]
     revision = scripts.get_revision(RUN_CLIENT_ACTIVITY_REVISION)
     assert revision is not None
     assert revision.down_revision == DOWNLOAD_ENTRY_ECHO_REVISION

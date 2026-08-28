@@ -18,7 +18,7 @@ every call for correlation.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Final, Protocol
 from uuid import UUID
@@ -37,6 +37,7 @@ from personal_os.small_file_sync.contracts import (
     SmallFilePreflight,
     SmallFileTerminalResult,
     SmallFileUploadOperation,
+    UploadOperationToken,
 )
 
 #: Bounded length of one provider-assigned opaque identity value.
@@ -84,6 +85,40 @@ class MultipartProviderPartETag:
             raise ValueError(
                 f"provider part ETag must be 1 to {_MAX_PROVIDER_IDENTITY_LENGTH} characters long"
             )
+
+
+@dataclass(frozen=True, slots=True)
+class SealedMultipartOperationToken:
+    """One reservation's raw operation token as AEAD-sealed row material.
+
+    The session row carries the sealed preimage of its frozen operation's
+    token hash so a completion claimant — potentially hours later, in another
+    process — can rebuild the bound operation the publication fence needs.
+    ``nonce`` and ``ciphertext`` are opaque sealed text (secret-bearing, never
+    rendered); ``key_id`` names the versioned keyring key that sealed them so
+    a previous-key seal stays openable until its re-seal.
+    """
+
+    key_id: str
+    nonce: str = field(repr=False)
+    ciphertext: str = field(repr=False)
+
+
+class MultipartOperationTokenCodecPort(Protocol):
+    """AEAD seam over the versioned keyring for the sealed operation token.
+
+    ``seal_token`` always uses the current key; ``open_token`` resolves the
+    key ID the row references. A decrypt or parameter failure fails closed as
+    the safe typed error of the implementing boundary without crypto text.
+    The codec is a serve-graph capability: the cleanup worker composes the
+    durable store without it.
+    """
+
+    def current_key_id(self) -> str: ...
+
+    def seal_token(self, *, token: UploadOperationToken) -> SealedMultipartOperationToken: ...
+
+    def open_token(self, *, sealed: SealedMultipartOperationToken) -> UploadOperationToken: ...
 
 
 class MultipartUploadApplicationService(Protocol):

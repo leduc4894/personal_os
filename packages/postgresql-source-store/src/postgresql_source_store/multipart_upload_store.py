@@ -2,7 +2,17 @@
 
 :class:`PostgresqlMultipartUploadStore` implements the provider-neutral
 :class:`~personal_os.multipart_upload.ports.MultipartSessionStore` port
-against the ``20260828_01`` and ``20260828_03`` migrations. The store owns
+against the ``20260828_01``, ``20260828_03`` and ``20260828_04``
+migrations, and
+:class:`PostgresqlMultipartSessionEvidenceStore` implements the frozen
+bound-operation evidence read over the session row's AEAD-sealed raw
+operation-token preimage (migration ``20260828_04``): the reservation
+seals the token inside its own transaction and refreshes the seal on a
+replayed reservation's rotated token, and the evidence read opens the
+seal, proves it against the operation row's stored one-way token hash and
+claims the still-pending operation row into ``receiving`` behind the
+shared operation-identity advisory lock so the small-file publication
+fence accepts the session. The store owns
 no provider I/O of any kind: no R2 SDK, object-storage client or network
 call is ever imported or touched while a transaction is open, so the
 orchestration service crosses to the provider strictly between the
@@ -52,7 +62,7 @@ import asyncio
 import random
 import secrets
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 from uuid import UUID, uuid4, uuid7
@@ -73,12 +83,15 @@ from personal_os.multipart_upload.errors import MultipartUploadError
 from personal_os.multipart_upload.ports import (
     MULTIPART_TERMINAL_FAILURE_STATES,
     MultipartCleanupClaim,
+    MultipartOperationTokenCodecPort,
     MultipartProviderPartETag,
     MultipartProviderUploadId,
     MultipartSessionClaim,
     MultipartSessionRecord,
+    SealedMultipartOperationToken,
 )
 from personal_os.small_file_sync.contracts import (
+    BoundSmallFileOperation,
     SmallFileDeviceContext,
     SmallFileTerminalResult,
     SmallFileTerminalResultKind,
@@ -92,13 +105,26 @@ from postgresql_source_store.error_mapping import (
     DatabaseFailureKind,
     classify_database_failure,
 )
+from postgresql_source_store.locks import advisory_xact_lock_statement
 from postgresql_source_store.small_file_sync_operations import (
+    STATE_FAILED,
+    STATE_PENDING,
+    STATE_RECEIVING,
+    UPLOAD_OPERATION_LOCK_NAMESPACE,
     SmallFileOperationRow,
+    _bound_operation_from_row,
     operation_fingerprint_matches,
     operation_token_lookup_statement,
+    receive_claim_statement,
+    upload_operation_identity_lock_key,
     upload_operation_lock_statement,
+    upload_operation_token_hash,
 )
-from postgresql_source_store.tables import multipart_parts, multipart_uploads
+from postgresql_source_store.tables import (
+    multipart_parts,
+    multipart_uploads,
+    small_file_upload_operations,
+)
 
 #: Finite completion lease: one claimant owns the serialized completion of
 #: a session for at most ten minutes of wall clock. The lease is minted by
@@ -204,6 +230,9 @@ _MULTIPART_ROW_COLUMNS: Final[tuple[str, ...]] = (
     "part_count",
     "staging_key",
     "provider_upload_id",
+    "operation_token_ciphertext",
+    "operation_token_nonce",
+    "operation_token_key_id",
     "state",
     "claim_token",
     "claim_expires_at",
@@ -335,6 +364,7 @@ def multipart_session_insert_statement(
     part_size_bytes: int,
     part_count: int,
     expires_at: datetime,
+    sealed_token: SealedMultipartOperationToken | None = None,
 ) -> sa.Insert:
     """Build the parameter-bound reservation insert of one created session.
 
@@ -342,7 +372,11 @@ def multipart_session_insert_statement(
     obligation and no provider identity (spec 6.1 persist-before-create):
     the private staging identity arrives only through the fenced
     post-create write, so this insert already is the durable recovery
-    state that makes an ambiguous provider create retryable.
+    state that makes an ambiguous provider create retryable. The optional
+    sealed token is the AEAD-sealed raw preimage of the frozen operation's
+    token hash — sealed material only, never plaintext, bound as
+    parameters together with the identity of the keyring key that sealed
+    it.
     """
     return sa.insert(multipart_uploads).values(
         multipart_upload_id=multipart_upload_id,
@@ -359,6 +393,9 @@ def multipart_session_insert_statement(
         part_count=part_count,
         staging_key=None,
         provider_upload_id=None,
+        operation_token_ciphertext=None if sealed_token is None else sealed_token.ciphertext,
+        operation_token_nonce=None if sealed_token is None else sealed_token.nonce,
+        operation_token_key_id=None if sealed_token is None else sealed_token.key_id,
         state=MultipartSessionState.CREATED.value,
         claim_token=None,
         claim_expires_at=None,
@@ -368,6 +405,74 @@ def multipart_session_insert_statement(
         cleanup_reason_code=None,
         expires_at=expires_at,
     )
+
+
+def operation_token_seal_update_statement(
+    *,
+    session_id_value: str,
+    sealed_token: SealedMultipartOperationToken,
+) -> sa.Update:
+    """Build the parameter-bound refresh of one session's sealed token.
+
+    A replayed reservation may arrive with a rotated raw token (the
+    small-file operation store rotates tokens on re-reserve); refreshing
+    the seal in the same reservation transaction keeps the session row's
+    sealed preimage naming the operation row's current token hash.
+    """
+
+    return (
+        sa.update(multipart_uploads)
+        .values(
+            operation_token_ciphertext=sealed_token.ciphertext,
+            operation_token_nonce=sealed_token.nonce,
+            operation_token_key_id=sealed_token.key_id,
+            updated_at=sa.text("CURRENT_TIMESTAMP"),
+        )
+        .where(multipart_uploads.c.session_id == session_id_value)
+    )
+
+
+def operation_row_by_id_select_statement(
+    operation_id: UUID, *, for_update: bool = False
+) -> sa.Select[tuple[Any, ...]]:
+    """Build the operation-row lookup by its frozen primary identity.
+
+    The multipart evidence read resolves its session's frozen operation
+    row by the session row's ``operation_id`` reference — not by any token
+    preimage — so the sealed token is verified against the row's stored
+    hash instead of driving the lookup. The read stays lock-free by
+    default: the evidence path takes the shared operation-identity
+    advisory lock before any claim, mirroring the small-file receive
+    boundary.
+    """
+
+    statement = sa.select(
+        small_file_upload_operations.c.operation_id,
+        small_file_upload_operations.c.operation_token_hash,
+        small_file_upload_operations.c.workspace_id,
+        small_file_upload_operations.c.device_id,
+        small_file_upload_operations.c.event_id,
+        small_file_upload_operations.c.idempotency_key,
+        small_file_upload_operations.c.operation_kind,
+        small_file_upload_operations.c.declared_sha256,
+        small_file_upload_operations.c.declared_size_bytes,
+        small_file_upload_operations.c.declared_media_type,
+        small_file_upload_operations.c.policy_revision_number,
+        small_file_upload_operations.c.reserved_source_id,
+        small_file_upload_operations.c.update_source_id,
+        small_file_upload_operations.c.update_base_version_id,
+        small_file_upload_operations.c.normalized_locator,
+        small_file_upload_operations.c.locator_fingerprint,
+        small_file_upload_operations.c.state,
+        small_file_upload_operations.c.safe_error_code,
+        small_file_upload_operations.c.result_kind,
+        small_file_upload_operations.c.result_source_id,
+        small_file_upload_operations.c.result_source_version_id,
+        small_file_upload_operations.c.result_content_version,
+        small_file_upload_operations.c.result_committed_at,
+        small_file_upload_operations.c.expires_at,
+    ).where(small_file_upload_operations.c.operation_id == operation_id)
+    return statement.with_for_update() if for_update else statement
 
 
 def provider_identity_update_statement(
@@ -832,6 +937,9 @@ class MultipartSessionRow:
     part_count: int
     staging_key: str | None
     provider_upload_id_value: str | None
+    sealed_ciphertext: str | None
+    sealed_nonce: str | None
+    sealed_key_id: str | None
     state: MultipartSessionState
     claim_token: UUID | None
     claim_expires_at: datetime | None
@@ -872,6 +980,9 @@ class MultipartSessionRow:
             part_count=int(row["part_count"]),
             staging_key=row["staging_key"],
             provider_upload_id_value=row["provider_upload_id"],
+            sealed_ciphertext=row["operation_token_ciphertext"],
+            sealed_nonce=row["operation_token_nonce"],
+            sealed_key_id=row["operation_token_key_id"],
             state=state,
             claim_token=row["claim_token"],
             claim_expires_at=row["claim_expires_at"],
@@ -959,6 +1070,26 @@ def _state_invalid() -> MultipartUploadError:
     return MultipartUploadError(ErrorCode.MULTIPART_SESSION_STATE_INVALID)
 
 
+def multipart_sealed_token_material(
+    row: MultipartSessionRow,
+) -> SealedMultipartOperationToken:
+    """Extract one session row's sealed token material, or fail closed.
+
+    The three sealed columns are present or absent together (the migration's
+    biconditional CHECK): an absent or partial seal is unrecoverable
+    evidence surfaced as the closed session-state-invalid error — never a
+    guess and never decrypted material for an owner the caller has not
+    proved.
+    """
+
+    ciphertext = row.sealed_ciphertext
+    nonce = row.sealed_nonce
+    key_id = row.sealed_key_id
+    if ciphertext is None or nonce is None or key_id is None:
+        raise _state_invalid()
+    return SealedMultipartOperationToken(key_id=key_id, nonce=nonce, ciphertext=ciphertext)
+
+
 def _session_expired() -> MultipartUploadError:
     return MultipartUploadError(ErrorCode.MULTIPART_SESSION_EXPIRED)
 
@@ -1025,6 +1156,7 @@ class PostgresqlMultipartUploadStore:
         session_id_generator: Callable[[], MultipartUploadSessionId] = mint_multipart_session_id,
         claim_token_generator: Callable[[], UUID] = uuid4,
         identity_generator: Callable[[], UUID] = uuid7,
+        token_codec: MultipartOperationTokenCodecPort | None = None,
     ) -> None:
         self._engine = engine
         self._clock = clock
@@ -1032,6 +1164,7 @@ class PostgresqlMultipartUploadStore:
         self._session_id_generator = session_id_generator
         self._claim_token_generator = claim_token_generator
         self._identity_generator = identity_generator
+        self._token_codec = token_codec
 
     async def reserve_session(
         self,
@@ -1279,6 +1412,11 @@ class PostgresqlMultipartUploadStore:
             existing = await self._fetch_session_row_by_operation(
                 connection, operation_row.operation_id
             )
+            sealed_token = (
+                None
+                if self._token_codec is None
+                else self._token_codec.seal_token(token=operation.operation_token)
+            )
             if existing is not None:
                 if not _session_row_matches_reservation(
                     existing, operation, device_context, geometry
@@ -1286,6 +1424,17 @@ class PostgresqlMultipartUploadStore:
                     raise _state_invalid()
                 if existing.is_forward_expired(self._clock()):
                     raise _session_expired()
+                if sealed_token is not None:
+                    # A replayed reservation may arrive with a rotated raw
+                    # token; refreshing the seal keeps the session row's
+                    # sealed preimage naming the operation row's current
+                    # token hash.
+                    await connection.execute(
+                        operation_token_seal_update_statement(
+                            session_id_value=existing.session_id_value,
+                            sealed_token=sealed_token,
+                        )
+                    )
                 return await self._hydrate_record(connection, existing)
             session_id = self._session_id_generator()
             expires_at = self._compute_session_expiry()
@@ -1304,6 +1453,7 @@ class PostgresqlMultipartUploadStore:
                     part_size_bytes=geometry.part_size_bytes,
                     part_count=geometry.part_count,
                     expires_at=expires_at,
+                    sealed_token=sealed_token,
                 )
             )
             reserved = await self._fetch_session_row(connection, session_id)
@@ -1734,3 +1884,131 @@ class PostgresqlMultipartUploadStore:
 
     def _compute_cleanup_lease_expiry(self) -> datetime:
         return compute_cleanup_lease_expiry(self._require_aware_now())
+
+
+class PostgresqlMultipartSessionEvidenceStore:
+    """Durable frozen-evidence read of each multipart session.
+
+    Implements the
+    :class:`~personal_os.multipart_upload.service.MultipartSessionEvidenceStore`
+    port over the same canonical baseline: one transaction resolves the
+    owner-checked session row, opens its sealed raw-token preimage through
+    the injected codec, proves that preimage against the frozen operation
+    row's stored one-way token hash, then — under the shared
+    operation-identity advisory lock, exactly like the small-file receive
+    boundary — claims a still-``pending`` operation row into ``receiving``
+    so the publication fence and its in-transaction terminal write accept
+    the session. The 24-hour session deadline (already enforced by every
+    caller of this port) governs the transfer lifetime; the small-file
+    reservation's fifteen-minute deadline deliberately does not, because a
+    multipart session resumes its frozen operation for up to twenty-four
+    hours. A session with no seal (a composition without a codec, or a row
+    predating migration ``20260828_04``) fails closed as the closed
+    state-invalid error; no plaintext token is ever persisted, logged or
+    rendered.
+    """
+
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        *,
+        token_codec: MultipartOperationTokenCodecPort,
+        retry: MultipartDatabaseRetryPolicy | None = None,
+    ) -> None:
+        self._engine = engine
+        self._token_codec = token_codec
+        self._retry = retry if retry is not None else MultipartDatabaseRetryPolicy()
+
+    async def load_bound_operation(
+        self,
+        *,
+        session_id: MultipartUploadSessionId,
+        device_context: SmallFileDeviceContext,
+        diagnostic_context: DiagnosticContext,
+    ) -> BoundSmallFileOperation:
+        """Resolve one owner-checked session's frozen bound operation."""
+
+        del diagnostic_context
+        return await self._retry.run(
+            lambda _attempt: self._load_bound_operation_once(session_id, device_context)
+        )
+
+    async def _load_bound_operation_once(
+        self,
+        session_id: MultipartUploadSessionId,
+        device_context: SmallFileDeviceContext,
+    ) -> BoundSmallFileOperation:
+        async with (
+            self._engine.connect() as connection,
+            connection.begin(),
+        ):
+            await apply_transaction_bounds(connection)
+            session_row = await self._fetch_session_row(connection, session_id)
+            if session_row is None:
+                raise _session_not_found()
+            if (
+                session_row.workspace_id != device_context.workspace_id
+                or session_row.device_id != device_context.device_id
+            ):
+                raise _session_not_found()
+            sealed = multipart_sealed_token_material(session_row)
+            operation_row = await self._fetch_operation_row(
+                connection, session_row.operation_id
+            )
+            if operation_row is None:
+                raise _state_invalid()
+            token = self._token_codec.open_token(sealed=sealed)
+            if upload_operation_token_hash(token) != operation_row.operation_token_hash:
+                # The sealed preimage drifted from the frozen operation row's
+                # current token hash: unrecoverable evidence, never a guess.
+                raise _state_invalid()
+            # The shared operation-identity advisory lock serializes this
+            # claim against every reservation rotation, exactly like the
+            # small-file receive boundary; the lock-free re-read below
+            # observes whatever the lock protects.
+            await connection.execute(
+                advisory_xact_lock_statement(
+                    UPLOAD_OPERATION_LOCK_NAMESPACE,
+                    upload_operation_identity_lock_key(
+                        operation_row.workspace_id,
+                        operation_row.device_id,
+                        operation_row.event_id,
+                        operation_row.idempotency_key,
+                    ),
+                )
+            )
+            operation_row = await self._fetch_operation_row(
+                connection, session_row.operation_id
+            )
+            if operation_row is None:  # pragma: no cover - the row is locked
+                raise _state_invalid()
+            if operation_row.state == STATE_PENDING:
+                claimed = await connection.execute(
+                    receive_claim_statement(operation_id=operation_row.operation_id)
+                )
+                if claimed.rowcount != 1:
+                    raise _state_invalid()
+                operation_row = replace(operation_row, state=STATE_RECEIVING)
+            elif operation_row.state == STATE_FAILED:
+                raise _state_invalid()
+            return _bound_operation_from_row(token, operation_row)
+
+    async def _fetch_session_row(
+        self, connection: AsyncConnection, session_id: MultipartUploadSessionId
+    ) -> MultipartSessionRow | None:
+        # Lock-free indexed lookup: the evidence read mutates only the
+        # operation row, behind the operation-identity advisory lock.
+        result = await connection.execute(
+            multipart_session_select_statement(session_id, for_update=False)
+        )
+        row = result.mappings().one_or_none()
+        return None if row is None else MultipartSessionRow.from_row_mapping(row)
+
+    async def _fetch_operation_row(
+        self, connection: AsyncConnection, operation_id: UUID
+    ) -> SmallFileOperationRow | None:
+        result = await connection.execute(
+            operation_row_by_id_select_statement(operation_id)
+        )
+        row = result.mappings().one_or_none()
+        return None if row is None else SmallFileOperationRow.from_row_mapping(row)

@@ -52,6 +52,10 @@ EXCHANGE_CREDENTIAL_DERIVATION_LABEL: Final[str] = "auth/exchange-credential/v1"
 #: Access-credential derivation and verification domain (spec 12.2, 13.1, 20.1).
 ACCESS_CREDENTIAL_DERIVATION_LABEL: Final[str] = "auth/access-credential/v1"
 
+#: Multipart operation-token authenticated-encryption domain (Child 7 spec
+#: 4.1: the session row's sealed raw-token preimage of its frozen operation).
+MULTIPART_OPERATION_TOKEN_AEAD_LABEL: Final[str] = "multipart/operation-token/v1"
+
 #: The closed domain-separation label vocabulary (exact bytes).
 CRYPTO_DOMAIN_LABELS: Final[frozenset[str]] = frozenset(
     {
@@ -63,6 +67,7 @@ CRYPTO_DOMAIN_LABELS: Final[frozenset[str]] = frozenset(
         REFRESH_REPLAY_DERIVATION_LABEL,
         EXCHANGE_CREDENTIAL_DERIVATION_LABEL,
         ACCESS_CREDENTIAL_DERIVATION_LABEL,
+        MULTIPART_OPERATION_TOKEN_AEAD_LABEL,
     }
 )
 
