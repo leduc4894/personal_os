@@ -1,11 +1,13 @@
 """Closed small-file sync contracts: shapes, grammars and outcome mappings.
 
-Asserts the frozen 16 MiB single-part limit (equality allowed, overage
-rejected), the strict UUID idempotency grammar, the create-versus-update field
+Asserts the frozen 16 MiB single-part routing constant with the 100 MiB
+product maximum above it (equality allowed at both ends, overage rejected),
+the strict UUID idempotency grammar, the create-versus-update field
 requirements of spec 10.1, the canonical locator grammar mirrored from the
 plugin policy evaluator, the opaque URL-safe operation-token grammar, the
-terminal preflight-outcome mapping of spec 10.1/12 and the closed low-cardinality
-metric labels that never accept identifiers.
+terminal preflight-outcome mapping of spec 10.1/12 with the multipart routing
+outcome above the single-part limit, and the closed low-cardinality metric
+labels that never accept identifiers.
 """
 
 from __future__ import annotations
@@ -15,10 +17,18 @@ from datetime import UTC, datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import pytest
+from tests.unit.small_file_sync.fakes import (
+    STORE_RESERVE_OPERATION,
+    build_current_reference,
+    build_device_context,
+    build_diagnostic_context,
+    build_service_harness,
+)
 
 from personal_os.object_storage import CanonicalMediaType, ContentDigest
 from personal_os.small_file_sync.contracts import (
     MAX_SINGLE_PART_FILE_SIZE_BYTES,
+    MAX_UPLOAD_FILE_SIZE_BYTES,
     TERMINAL_PREFLIGHT_OUTCOMES,
     BoundSmallFileOperation,
     NormalizedLocator,
@@ -75,6 +85,7 @@ def _update_preflight(
     *,
     source_id: UUID | None = None,
     base_version_id: UUID | None = None,
+    size_bytes: int = 64,
 ) -> SmallFilePreflight:
     return SmallFilePreflight(
         event_id=_EVENT_ID,
@@ -85,7 +96,7 @@ def _update_preflight(
         base_version_id=base_version_id,
         normalized_locator=NormalizedLocator("notes/planning.md"),
         sha256=_DECLARED_DIGEST,
-        size_bytes=64,
+        size_bytes=size_bytes,
         media_type=_DECLARED_MEDIA_TYPE,
         policy_revision_number=_POLICY_REVISION_NUMBER,
     )
@@ -106,11 +117,15 @@ def _upload_operation(
     )
 
 
-# --- frozen 16 MiB single-part limit ------------------------------------------------------
+# --- routing window between the single-part limit and the product maximum ------------------
 
 
 def test_single_part_limit_is_exactly_sixteen_mib() -> None:
     assert MAX_SINGLE_PART_FILE_SIZE_BYTES == 16 * 1024 * 1024
+
+
+def test_upload_size_maximum_is_exactly_one_hundred_mib() -> None:
+    assert MAX_UPLOAD_FILE_SIZE_BYTES == 100 * 1024 * 1024
 
 
 def test_preflight_accepts_size_equal_to_the_single_part_limit() -> None:
@@ -118,9 +133,19 @@ def test_preflight_accepts_size_equal_to_the_single_part_limit() -> None:
     assert preflight.size_bytes == MAX_SINGLE_PART_FILE_SIZE_BYTES
 
 
-def test_preflight_rejects_size_one_byte_over_the_single_part_limit() -> None:
-    with pytest.raises(ValueError, match="single-part size limit"):
-        _create_preflight(size_bytes=MAX_SINGLE_PART_FILE_SIZE_BYTES + 1)
+def test_preflight_accepts_size_one_byte_over_the_single_part_limit() -> None:
+    preflight = _create_preflight(size_bytes=MAX_SINGLE_PART_FILE_SIZE_BYTES + 1)
+    assert preflight.size_bytes == MAX_SINGLE_PART_FILE_SIZE_BYTES + 1
+
+
+def test_preflight_accepts_size_equal_to_the_product_maximum() -> None:
+    preflight = _create_preflight(size_bytes=MAX_UPLOAD_FILE_SIZE_BYTES)
+    assert preflight.size_bytes == MAX_UPLOAD_FILE_SIZE_BYTES
+
+
+def test_preflight_rejects_size_one_byte_over_the_product_maximum() -> None:
+    with pytest.raises(ValueError, match="upload size limit"):
+        _create_preflight(size_bytes=MAX_UPLOAD_FILE_SIZE_BYTES + 1)
 
 
 def test_preflight_rejects_negative_size() -> None:
@@ -404,6 +429,7 @@ def test_preflight_outcome_values_match_the_spec_text() -> None:
         "excluded",
         "conflict",
         "single_part_upload",
+        "multipart_upload",
     }
     assert {operation.value for operation in SmallFileOperation} == {"create", "update"}
 
@@ -419,6 +445,90 @@ def test_terminal_preflight_outcomes_are_exactly_the_four_finishers() -> None:
     )
     assert expected == TERMINAL_PREFLIGHT_OUTCOMES
     assert SmallFilePreflightOutcome.SINGLE_PART_UPLOAD not in TERMINAL_PREFLIGHT_OUTCOMES
+    assert SmallFilePreflightOutcome.MULTIPART_UPLOAD not in TERMINAL_PREFLIGHT_OUTCOMES
+
+
+# --- multipart preflight routing over the real service fakes ---------------------------------
+
+
+@pytest.mark.asyncio
+async def test_preflight_routes_one_byte_over_single_part_to_multipart() -> None:
+    harness = build_service_harness()
+
+    result = await harness.service.preflight(
+        preflight=_create_preflight(size_bytes=MAX_SINGLE_PART_FILE_SIZE_BYTES + 1),
+        device_context=build_device_context(),
+        diagnostic_context=build_diagnostic_context(),
+    )
+
+    assert result.outcome is SmallFilePreflightOutcome.MULTIPART_UPLOAD
+    assert result.operation_token is None
+    assert result.terminal_result is None
+    # The single-part reservation is never allocated for a routed file.
+    assert harness.ledger.count(STORE_RESERVE_OPERATION) == 0
+
+
+@pytest.mark.asyncio
+async def test_preflight_routes_exactly_the_product_maximum_to_multipart() -> None:
+    harness = build_service_harness()
+
+    result = await harness.service.preflight(
+        preflight=_create_preflight(size_bytes=MAX_UPLOAD_FILE_SIZE_BYTES),
+        device_context=build_device_context(),
+        diagnostic_context=build_diagnostic_context(),
+    )
+
+    assert result.outcome is SmallFilePreflightOutcome.MULTIPART_UPLOAD
+    assert harness.ledger.count(STORE_RESERVE_OPERATION) == 0
+
+
+@pytest.mark.asyncio
+async def test_preflight_keeps_single_part_routing_at_the_exact_limit() -> None:
+    harness = build_service_harness()
+
+    result = await harness.service.preflight(
+        preflight=_create_preflight(size_bytes=MAX_SINGLE_PART_FILE_SIZE_BYTES),
+        device_context=build_device_context(),
+        diagnostic_context=build_diagnostic_context(),
+    )
+
+    assert result.outcome is SmallFilePreflightOutcome.SINGLE_PART_UPLOAD
+    assert result.operation_token is not None
+    assert harness.ledger.count(STORE_RESERVE_OPERATION) == 1
+
+
+@pytest.mark.asyncio
+async def test_multipart_routing_still_requires_an_allowed_policy_decision() -> None:
+    harness = build_service_harness(denying_policy_guard=True)
+
+    result = await harness.service.preflight(
+        preflight=_create_preflight(size_bytes=MAX_SINGLE_PART_FILE_SIZE_BYTES + 1),
+        device_context=build_device_context(),
+        diagnostic_context=build_diagnostic_context(),
+    )
+
+    assert result.outcome is SmallFilePreflightOutcome.EXCLUDED
+
+
+@pytest.mark.asyncio
+async def test_multipart_routing_still_requires_a_current_update_base() -> None:
+    preflight = _update_preflight(
+        source_id=uuid4(),
+        base_version_id=uuid4(),
+        size_bytes=MAX_SINGLE_PART_FILE_SIZE_BYTES + 1,
+    )
+    harness = build_service_harness(
+        current_reference=build_current_reference(preflight, source_version_id=uuid4())
+    )
+
+    result = await harness.service.preflight(
+        preflight=preflight,
+        device_context=build_device_context(),
+        diagnostic_context=build_diagnostic_context(),
+    )
+
+    assert result.outcome is SmallFilePreflightOutcome.CONFLICT
+    assert harness.ledger.count(STORE_RESERVE_OPERATION) == 0
 
 
 # --- committed replay result values --------------------------------------------------------

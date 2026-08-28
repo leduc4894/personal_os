@@ -10,6 +10,7 @@ service in a later task.
 
 from personal_os.small_file_sync.contracts import (
     MAX_SINGLE_PART_FILE_SIZE_BYTES,
+    MAX_UPLOAD_FILE_SIZE_BYTES,
     TERMINAL_PREFLIGHT_OUTCOMES,
     NormalizedLocator,
     SmallFileDeviceContext,
@@ -40,6 +41,7 @@ from personal_os.small_file_sync.ports import (
 
 __all__ = [
     "MAX_SINGLE_PART_FILE_SIZE_BYTES",
+    "MAX_UPLOAD_FILE_SIZE_BYTES",
     "PREFLIGHT_INVALID_REASONS",
     "SMALL_FILE_METRIC_CONTRACTS",
     "TERMINAL_PREFLIGHT_OUTCOMES",

@@ -90,6 +90,7 @@ def test_preflight_data_schema_is_closed_over_its_outcome_members(
     outcome_enum = schema["components"]["schemas"]["SmallFilePreflightOutcome"]["enum"]
     assert set(outcome_enum) == {
         "single_part_upload",
+        "multipart_upload",
         "committed_replay",
         "no_change",
         "excluded",

@@ -135,6 +135,18 @@ class ErrorCode(StrEnum):
     DEVICE_MANIFEST_POLICY_ADVANCED = "device_manifest_policy_advanced"
     DEVICE_DOWNLOAD_INTEGRITY_FAILED = "device_download_integrity_failed"
     DEVICE_SYNC_DEPENDENCY_UNAVAILABLE = "device_sync_dependency_unavailable"
+    MULTIPART_SESSION_NOT_FOUND = "multipart_session_not_found"
+    MULTIPART_SESSION_EXPIRED = "multipart_session_expired"
+    MULTIPART_SESSION_STATE_INVALID = "multipart_session_state_invalid"
+    MULTIPART_PART_INVALID = "multipart_part_invalid"
+    MULTIPART_PART_URL_REJECTED = "multipart_part_url_rejected"
+    MULTIPART_PROVIDER_STATE_INVALID = "multipart_provider_state_invalid"
+    MULTIPART_COMPLETION_IN_PROGRESS = "multipart_completion_in_progress"
+    MULTIPART_INTEGRITY_FAILED = "multipart_integrity_failed"
+    MULTIPART_POLICY_DENIED = "multipart_policy_denied"
+    MULTIPART_CLEANUP_FAILED = "multipart_cleanup_failed"
+    MULTIPART_LOCAL_CONTENT_CHANGED = "multipart_local_content_changed"
+    MULTIPART_DEPENDENCY_UNAVAILABLE = "multipart_dependency_unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -855,6 +867,89 @@ ERROR_DEFINITIONS: Final[Mapping[ErrorCode, ErrorDefinition]] = MappingProxyType
             category=ErrorCategory.DEPENDENCY,
             is_retryable=True,
             safe_message="A device sync dependency is temporarily unavailable",
+            allowed_detail_fields=frozenset(),
+        ),
+        # The multipart upload block of the resumable multipart mobile upload
+        # design (Child 7 spec 7): input, state, integrity and policy codes
+        # are terminal for the triggering request — a fresh event or session
+        # is the only recovery the spec permits — while the part-URL
+        # rejection, the concurrent completion, the unfinished exact cleanup
+        # and the typed dependency outage retry with bounded jitter/backoff.
+        # No code accepts a safe detail: staging keys, provider upload IDs,
+        # ETags, presigned URLs and digests never enter errors, and the
+        # readable closed reason travels through the structured diagnostics
+        # and plugin trail surfaces. HTTP statuses are wired into the closed
+        # api_contracts status map when the routes land.
+        ErrorCode.MULTIPART_SESSION_NOT_FOUND: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The multipart upload session does not exist",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.MULTIPART_SESSION_EXPIRED: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The multipart upload session expired",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.MULTIPART_SESSION_STATE_INVALID: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The multipart upload session state does not accept this action",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.MULTIPART_PART_INVALID: ErrorDefinition(
+            category=ErrorCategory.VALIDATION,
+            is_retryable=False,
+            safe_message="The requested multipart part number or range is invalid",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.MULTIPART_PART_URL_REJECTED: ErrorDefinition(
+            category=ErrorCategory.DEPENDENCY,
+            is_retryable=True,
+            safe_message="The presigned multipart part URL was rejected",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.MULTIPART_PROVIDER_STATE_INVALID: ErrorDefinition(
+            category=ErrorCategory.INTEGRITY,
+            is_retryable=False,
+            safe_message="Provider-observed multipart state is inconsistent with the session",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.MULTIPART_COMPLETION_IN_PROGRESS: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=True,
+            safe_message="A completion for this multipart session is already in progress",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.MULTIPART_INTEGRITY_FAILED: ErrorDefinition(
+            category=ErrorCategory.INTEGRITY,
+            is_retryable=False,
+            safe_message="Multipart staging content failed integrity verification",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.MULTIPART_POLICY_DENIED: ErrorDefinition(
+            category=ErrorCategory.AUTHORIZATION,
+            is_retryable=False,
+            safe_message="The exclusion policy denied this multipart upload",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.MULTIPART_CLEANUP_FAILED: ErrorDefinition(
+            category=ErrorCategory.DEPENDENCY,
+            is_retryable=True,
+            safe_message="Exact staging cleanup could not finish and will be retried",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.MULTIPART_LOCAL_CONTENT_CHANGED: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The local file changed during the multipart upload",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.MULTIPART_DEPENDENCY_UNAVAILABLE: ErrorDefinition(
+            category=ErrorCategory.DEPENDENCY,
+            is_retryable=True,
+            safe_message="A multipart upload dependency is temporarily unavailable",
             allowed_detail_fields=frozenset(),
         ),
     }

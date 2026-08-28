@@ -8,7 +8,9 @@ store, the existing
 the closed low-cardinality metrics sink and the aware UTC clock. Preflight
 re-evaluates policy server-side before any store or object-store access,
 replays a frozen terminal result exactly, resolves the update base (stale,
-missing, no-change or open) and otherwise reserves one short-lived opaque
+missing, no-change or open), routes a declared size strictly above the
+unchanged single-part constant to the payload-free multipart outcome, and
+otherwise reserves one short-lived opaque
 operation whose reserved create UUID never inserts a ``sources`` row.
 Receive binds to that exact operation by token, enforces the server-owned
 single-part ceiling before any spool, streams through the server-side
@@ -221,7 +223,11 @@ class SmallFilePreflightResult:
     ``single_part_upload`` carries only the opaque operation token and its
     expiry — never the reserved create UUID, a receipt or any object-store
     detail. ``committed_replay`` and ``no_change`` carry the frozen terminal
-    receipt; ``excluded`` and ``conflict`` carry no payload at all.
+    receipt; ``multipart_upload`` routes a file strictly above the single-part
+    routing constant into the resumable multipart transport and — like
+    ``excluded`` and ``conflict`` — carries no payload at all: the client
+    obtains its opaque session, geometry and URLs only from the multipart
+    session endpoints, never from this result.
     """
 
     outcome: SmallFilePreflightOutcome
@@ -250,7 +256,7 @@ class SmallFilePreflightResult:
             or self.operation_token is not None
             or self.expires_at is not None
         ):
-            raise ValueError("excluded and conflict outcomes carry no safe payload")
+            raise ValueError("excluded, conflict and multipart outcomes carry no safe payload")
 
 
 @dataclass(slots=True)
@@ -399,6 +405,17 @@ class SmallFileSyncService:
             )
             if base_result is not None:
                 return base_result
+        # Multipart routing (Child 7 spec 4): a declared size strictly above
+        # the unchanged single-part routing constant — and the preflight value
+        # already capped it at the product maximum — never reserves a
+        # single-part operation. The outcome is payload-free: the client
+        # derives its opaque session, geometry and part URLs only from the
+        # multipart session endpoints after this decision.
+        if preflight.size_bytes > MAX_SINGLE_PART_FILE_SIZE_BYTES:
+            self._record_preflight(
+                preflight.operation, SmallFilePreflightOutcome.MULTIPART_UPLOAD, started_at
+            )
+            return SmallFilePreflightResult(outcome=SmallFilePreflightOutcome.MULTIPART_UPLOAD)
         operation = await self.operation_store.reserve_operation(
             preflight=preflight,
             device_context=device_context,

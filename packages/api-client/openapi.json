@@ -2288,7 +2288,19 @@
           "device_manifest_digest_mismatch",
           "device_manifest_policy_advanced",
           "device_download_integrity_failed",
-          "device_sync_dependency_unavailable"
+          "device_sync_dependency_unavailable",
+          "multipart_session_not_found",
+          "multipart_session_expired",
+          "multipart_session_state_invalid",
+          "multipart_part_invalid",
+          "multipart_part_url_rejected",
+          "multipart_provider_state_invalid",
+          "multipart_completion_in_progress",
+          "multipart_integrity_failed",
+          "multipart_policy_denied",
+          "multipart_cleanup_failed",
+          "multipart_local_content_changed",
+          "multipart_dependency_unavailable"
         ],
         "title": "ErrorCode",
         "type": "string"
@@ -4408,13 +4420,14 @@
         "type": "object"
       },
       "SmallFilePreflightOutcome": {
-        "description": "Closed typed outcomes one preflight returns (spec 10.1 table).\n\nThe four members of :data:`TERMINAL_PREFLIGHT_OUTCOMES` finish the event\nwithout any upload; ``SINGLE_PART_UPLOAD`` is the only outcome that opens\nthe content-stream step.",
+        "description": "Closed typed outcomes one preflight returns (spec 10.1 table).\n\nThe four members of :data:`TERMINAL_PREFLIGHT_OUTCOMES` finish the event\nwithout any upload; ``SINGLE_PART_UPLOAD`` is the only outcome that opens\nthe content-stream step, and ``MULTIPART_UPLOAD`` routes a file strictly\nabove the single-part routing constant (and at or below the product\nmaximum) into the resumable multipart transport instead — it opens no\noperation token and carries no signed URL, key or provider detail.",
         "enum": [
           "committed_replay",
           "no_change",
           "excluded",
           "conflict",
-          "single_part_upload"
+          "single_part_upload",
+          "multipart_upload"
         ],
         "title": "SmallFilePreflightOutcome",
         "type": "string"

@@ -28,10 +28,17 @@ from personal_os.sources.actors import reject_nil_uuid
 from personal_os.sources.commands import normalize_utc_timestamp
 
 #: Server-owned single-part upload ceiling: exactly 16 MiB (spec 3.1, 10.1).
-#: ``size_bytes == MAX_SINGLE_PART_FILE_SIZE_BYTES`` is accepted; one byte
-#: more is the closed size-limit rejection. This constant is the single
-#: Python source of the limit and is never duplicated as a literal.
+#: ``size_bytes == MAX_SINGLE_PART_FILE_SIZE_BYTES`` is accepted and routes to
+#: the single-part transport; one byte more routes to the multipart transport
+#: of the Child 7 design. This constant is the single Python source of the
+#: routing boundary and is never duplicated as a literal.
 MAX_SINGLE_PART_FILE_SIZE_BYTES: Final[int] = 16 * 1024 * 1024
+
+#: Server-owned product maximum for any device file upload: exactly 100 MiB
+#: (Child 7 spec 4). ``size_bytes == MAX_UPLOAD_FILE_SIZE_BYTES`` is accepted
+#: through the multipart transport; one byte more is the closed size-limit
+#: rejection. Content above this maximum has no transport in this product.
+MAX_UPLOAD_FILE_SIZE_BYTES: Final[int] = 100 * 1024 * 1024
 
 #: Canonical idempotency-key grammar: exactly the canonical lowercase
 #: hyphenated UUID text form the plugin mints with ``crypto.randomUUID``.
@@ -68,7 +75,10 @@ class SmallFilePreflightOutcome(StrEnum):
 
     The four members of :data:`TERMINAL_PREFLIGHT_OUTCOMES` finish the event
     without any upload; ``SINGLE_PART_UPLOAD`` is the only outcome that opens
-    the content-stream step.
+    the content-stream step, and ``MULTIPART_UPLOAD`` routes a file strictly
+    above the single-part routing constant (and at or below the product
+    maximum) into the resumable multipart transport instead — it opens no
+    operation token and carries no signed URL, key or provider detail.
     """
 
     COMMITTED_REPLAY = "committed_replay"
@@ -76,6 +86,7 @@ class SmallFilePreflightOutcome(StrEnum):
     EXCLUDED = "excluded"
     CONFLICT = "conflict"
     SINGLE_PART_UPLOAD = "single_part_upload"
+    MULTIPART_UPLOAD = "multipart_upload"
 
 
 #: The preflight outcomes that end the event with no upload and no automatic
@@ -157,9 +168,12 @@ class SmallFilePreflight:
     Field requirements are exact: a create carries neither ``source_id`` nor
     ``base_version_id`` (the client never mints a canonical source); an
     update requires both as non-nil UUIDs. ``size_bytes`` is a non-negative
-    exact byte size at or below the frozen single-part limit — equality is
-    allowed, one byte over is rejected. Device, user and workspace identity
-    are never part of this value; they derive from the bearer credential.
+    exact byte size at or below the frozen product maximum — equality is
+    allowed, one byte over is rejected. Sizes above the single-part routing
+    constant route to the multipart transport; which transport serves a size
+    is the service's decision over this shared declared shape. Device, user
+    and workspace identity are never part of this value; they derive from the
+    bearer credential.
     """
 
     event_id: UUID
@@ -181,10 +195,9 @@ class SmallFilePreflight:
             raise ValueError("policy_revision_number must be a positive integer")
         if self.size_bytes < 0:
             raise ValueError("size_bytes must be a non-negative byte size")
-        if self.size_bytes > MAX_SINGLE_PART_FILE_SIZE_BYTES:
+        if self.size_bytes > MAX_UPLOAD_FILE_SIZE_BYTES:
             raise ValueError(
-                "size_bytes exceeds the server single-part size limit of "
-                f"{MAX_SINGLE_PART_FILE_SIZE_BYTES} bytes"
+                f"size_bytes exceeds the upload size limit of {MAX_UPLOAD_FILE_SIZE_BYTES} bytes"
             )
         if self.operation is SmallFileOperation.CREATE:
             if self.source_id is not None:
