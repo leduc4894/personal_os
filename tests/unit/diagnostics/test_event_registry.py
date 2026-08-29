@@ -33,12 +33,19 @@ def test_api_request_events_have_closed_low_cardinality_fields() -> None:
     for name, result in (
         (EventName.API_REQUEST_COMPLETED, ResultCode.SUCCEEDED),
         (EventName.API_REQUEST_REJECTED, ResultCode.REJECTED),
-        (EventName.API_REQUEST_FAILED, ResultCode.FAILED),
     ):
         definition = EVENT_DEFINITIONS[name]
         assert definition.result_code is result
         assert definition.required_fields == EXPECTED_FIELDS
         assert definition.allowed_fields == EXPECTED_FIELDS
+
+    # The failed access observation additionally carries the closed reason
+    # token of an incomplete response body (e.g. a download that started 200
+    # and died mid-stream); it is optional and never required.
+    failed = EVENT_DEFINITIONS[EventName.API_REQUEST_FAILED]
+    assert failed.result_code is ResultCode.FAILED
+    assert failed.required_fields == EXPECTED_FIELDS
+    assert failed.allowed_fields == EXPECTED_FIELDS | {"reason"}
 
 
 def test_source_publication_events_are_registered_with_exact_contracts() -> None:

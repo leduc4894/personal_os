@@ -5,7 +5,10 @@ fresh server request id (UUIDv7), resolves the client correlation headers into
 a :class:`DiagnosticContext`, echoes exactly one ``X-Request-ID`` and one
 formatted ``traceparent`` response header, and emits one registered access
 observation whose fields are closed enum values, the status code and a
-non-negative duration. Raw paths, query strings and header values never enter
+non-negative duration. A response that started below 400 but never delivered
+its final body chunk — a download that died mid-stream — is classified
+``failed`` with the closed ``response_body_incomplete`` reason token instead of
+``completed``. Raw paths, query strings and header values never enter
 diagnostics. Non-HTTP ASGI scopes (lifespan, websocket handshake extension
 points) pass through untouched without binding a context.
 
@@ -55,6 +58,7 @@ _TRACEPARENT_HEADER: Final = b"traceparent"
 _RESPONSE_REQUEST_ID_HEADER: Final = b"x-request-id"
 _OWNED_RESPONSE_HEADERS: Final = frozenset({_RESPONSE_REQUEST_ID_HEADER, _TRACEPARENT_HEADER})
 _INVALID_FORMAT_REASON: Final = SafeToken.parse("invalid_format")
+_RESPONSE_BODY_INCOMPLETE_REASON: Final[str] = "response_body_incomplete"
 _INTERNAL_ERROR_STATUS: Final[int] = HTTP_ERROR_STATUSES[ErrorCode.INTERNAL_ERROR]
 _INTERNAL_ERROR: Final[InternalApplicationError] = InternalApplicationError(
     ErrorCode.INTERNAL_ERROR
@@ -149,13 +153,16 @@ class RequestContextMiddleware:
             traceparent=_header(scope, _TRACEPARENT_HEADER),
         )
         status_code: int | None = None
+        response_body_completed = False
 
         async def send_with_correlation_headers(message: Mapping[str, Any]) -> None:
-            nonlocal status_code
+            nonlocal status_code, response_body_completed
             if message["type"] == "http.response.start":
                 status_code = message["status"]
                 await send(_amend_response_start(message, resolution.context))
                 return
+            if message["type"] == "http.response.body" and not message.get("more_body", False):
+                response_body_completed = True
             await send(message)
 
         with bind_diagnostic_context(resolution.context):
@@ -175,7 +182,9 @@ class RequestContextMiddleware:
                 raise
             finally:
                 if status_code is not None:
-                    self._emit_access_observation(scope, status_code, started_ns)
+                    self._emit_access_observation(
+                        scope, status_code, started_ns, response_body_completed
+                    )
 
     async def _send_exception_response(self, context: DiagnosticContext, send: Send) -> None:
         """Start and complete the internal error response for a crashed app.
@@ -206,7 +215,13 @@ class RequestContextMiddleware:
         if resolution.was_traceparent_replaced:
             self._emit(EventName.TRACE_CONTEXT_REPLACED)
 
-    def _emit_access_observation(self, scope: Scope, status_code: int, started_ns: int) -> None:
+    def _emit_access_observation(
+        self,
+        scope: Scope,
+        status_code: int,
+        started_ns: int,
+        response_body_completed: bool,
+    ) -> None:
         """Emit the one registered access observation for a completed exchange."""
         if self._event_sink is None:
             return
@@ -218,15 +233,20 @@ class RequestContextMiddleware:
             else EventName.API_REQUEST_FAILED
         )
         duration_ms = max(0, (self._monotonic_ns() - started_ns) // _NANOSECONDS_PER_MILLISECOND)
-        self._event_sink.emit(
-            event_name,
-            {
-                "http_method": _resolve_http_method(scope),
-                "route": _resolve_route_template(scope),
-                "status_code": status_code,
-                "duration_ms": duration_ms,
-            },
-        )
+        fields: dict[str, Any] = {
+            "http_method": _resolve_http_method(scope),
+            "route": _resolve_route_template(scope),
+            "status_code": status_code,
+            "duration_ms": duration_ms,
+        }
+        if status_code < 400 and not response_body_completed:
+            # A sub-400 response start whose final body chunk never shipped —
+            # e.g. a download that began 200 and died mid-stream — is a
+            # failed request, recorded with the already-sent status paired
+            # with the failed classification and the closed reason token.
+            event_name = EventName.API_REQUEST_FAILED
+            fields["reason"] = _RESPONSE_BODY_INCOMPLETE_REASON
+        self._event_sink.emit(event_name, fields)
 
     def _emit(self, event_name: EventName) -> None:
         if self._event_sink is not None:

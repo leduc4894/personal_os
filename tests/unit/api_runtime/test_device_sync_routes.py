@@ -17,11 +17,11 @@ without ever attempting a second JSON body.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import AsyncGenerator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-from typing import Any, Final
+from typing import Any, Final, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -40,9 +40,11 @@ from api_runtime.device_sync_composition import (
     OfflineDeviceSyncState,
     compose_offline_device_sync,
 )
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
+from personal_os.authentication.contracts import AuthenticatedDeviceContext, DeviceScope
 from personal_os.device_sync.contracts import (
     MAX_MANIFEST_PAGE_ENTRIES,
     DeviceCursorReceipt,
@@ -56,6 +58,7 @@ from personal_os.device_sync.contracts import (
     SourceFingerprint,
 )
 from personal_os.device_sync.errors import DeviceSyncError, DeviceSyncErrorCode
+from personal_os.diagnostics.context import bind_diagnostic_context, create_diagnostic_context
 from personal_os.runtime_configuration.models import RuntimeEnvironment
 from personal_os.source_locators.values import NormalizedLocator
 
@@ -778,6 +781,56 @@ async def test_download_mid_stream_failure_terminates_transport_without_json(
     assert chunks == [_OFFLINE_CONTENT]
     assert b'"error"' not in b"".join(chunks)
     assert headers[b"x-content-sha256"].decode() == _SHA256
+    assert harness.state.reader_closed is True
+
+
+@pytest.mark.asyncio
+async def test_download_client_disconnect_closes_the_opened_reader_context(
+    harness: DeviceSyncRouteHarness,
+) -> None:
+    """Abandoning the streamed response mid-body closes the verified reader.
+
+    A client that stops reading mid-download closes the response's streaming
+    generator while the inner verified-chunks generator is still suspended
+    mid-iteration; the opened reader context must close in that same step —
+    deterministically — instead of waiting for a later GC pass over the
+    abandoned inner generator.
+    """
+
+    content = b"verified offline content " * 5_000  # spans multiple reader chunks
+    harness.state.content_bytes = content
+    download = next(
+        route
+        for route in harness.client.app.router.routes
+        if isinstance(route, APIRoute)
+        and route.path == "/api/sources/{source_id}/versions/{source_version_id}/content"
+    )
+    device = AuthenticatedDeviceContext(
+        user_id=uuid4(),
+        workspace_id=uuid4(),
+        device_id=harness.device_id,
+        scope=DeviceScope.OBSIDIAN_SYNC,
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "headers": [],
+            "path": "/api/sources/content",
+            "query_string": b"",
+            "root_path": "",
+        }
+    )
+    with bind_diagnostic_context(create_diagnostic_context().context):
+        response = await download.endpoint(
+            request, source_id=uuid4(), source_version_id=uuid4(), device=device
+        )
+    assert response.status_code == 200
+    body = cast("AsyncGenerator[bytes]", response.body_iterator)
+    shipped = [await body.__anext__()]  # the primed first chunk ships; bytes remain
+    await body.aclose()  # the client disconnect abandons the iteration mid-body
+    assert shipped == [content[:65536]]
+    assert len(content) > len(shipped[0])
     assert harness.state.reader_closed is True
 
 

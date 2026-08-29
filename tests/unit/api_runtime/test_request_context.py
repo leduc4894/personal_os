@@ -274,6 +274,66 @@ async def test_completed_access_event_carries_only_closed_fields() -> None:
     ]
 
 
+def _mid_stream_crash_app() -> ASGIApp:
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"partial", "more_body": True})
+        raise RuntimeError(_SENTINEL_EXCEPTION_TEXT)
+
+    return app
+
+
+@pytest.mark.asyncio
+async def test_mid_stream_failure_after_200_emits_failed_with_closed_reason() -> None:
+    sink = RecordingSink()
+    response, _body_chunks, caught = await _invoke_asgi_observing_failure(
+        RequestContextMiddleware(_mid_stream_crash_app(), event_sink=sink, monotonic_ns=lambda: 0)
+    )
+    assert isinstance(caught, RuntimeError)
+    assert response.status == 200
+    # A response that started 200 and never delivered its final body chunk is
+    # a failed request: the already-sent status stays paired with the failed
+    # classification and the closed reason token replaces the exception text.
+    assert sink.events == [
+        (
+            EventName.API_REQUEST_FAILED,
+            {
+                "http_method": ApiHttpMethod.GET,
+                "route": ApiRouteTemplate.UNMATCHED,
+                "status_code": 200,
+                "duration_ms": 0,
+                "reason": "response_body_incomplete",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_completed_streaming_body_emits_completed_without_reason() -> None:
+    sink = RecordingSink()
+
+    async def streaming_app(scope: Scope, receive: Receive, send: Send) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"partial", "more_body": True})
+        await send({"type": "http.response.body", "body": b"tail", "more_body": False})
+
+    response = await _invoke_asgi(
+        RequestContextMiddleware(streaming_app, event_sink=sink, monotonic_ns=lambda: 0)
+    )
+    assert response.status == 200
+    assert sink.events == [
+        (
+            EventName.API_REQUEST_COMPLETED,
+            {
+                "http_method": ApiHttpMethod.GET,
+                "route": ApiRouteTemplate.UNMATCHED,
+                "status_code": 200,
+                "duration_ms": 0,
+            },
+        )
+    ]
+
+
 @pytest.mark.asyncio
 async def test_rejected_status_between_400_and_499_buckets_non_get_methods() -> None:
     sink = RecordingSink()
@@ -306,6 +366,7 @@ async def test_route_template_uses_closed_values_and_never_raw_paths() -> None:
     async def app_with_matched_route(scope: Scope, receive: Receive, send: Send) -> None:
         scope["route"] = SimpleNamespace(path="/api/health/ready")
         await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}"})
 
     await _invoke_asgi(RequestContextMiddleware(app_with_matched_route, event_sink=sink))
     fields = _access_fields(sink, EventName.API_REQUEST_COMPLETED)

@@ -606,7 +606,12 @@ EVENT_DEFINITIONS: Final[Mapping[EventName, EventDefinition]] = MappingProxyType
             level=DiagnosticLevel.ERROR,
             result_code=ResultCode.FAILED,
             required_fields=frozenset({"http_method", "route", "status_code", "duration_ms"}),
-            allowed_fields=frozenset({"http_method", "route", "status_code", "duration_ms"}),
+            # The optional closed reason token of a sub-400 response whose
+            # final body chunk never shipped (e.g. a download that started 200
+            # and died mid-stream); never a raw failure detail.
+            allowed_fields=frozenset(
+                {"http_method", "route", "status_code", "duration_ms", "reason"}
+            ),
         ),
         # Spec 21 evaluation events: per-source evaluations use metrics rather
         # than one audit row each, so these carry only the closed boundary and

@@ -40,10 +40,13 @@ HTTP access observation dùng closed event set
 `api_request_completed` / `api_request_rejected` / `api_request_failed`
 (INFO/WARNING/ERROR theo status <400/<500/else) với đúng các field
 `http_method`, `route` (route template hoặc hằng `unmatched`), `status_code`,
-`duration_ms` cùng correlation fields. Raw path, query, headers, cookies,
-body, response data và exception text không bao giờ vào access observation;
-correlation value không hợp lệ chỉ được ghi bằng rejection event với reason
-token, không echo giá trị bị từ chối.
+`duration_ms` cùng correlation fields. Response bắt đầu dưới 400 nhưng không
+bao giờ gửi body chunk cuối (ví dụ download chết giữa stream hoặc client ngắt
+giữa body) được phân loại `api_request_failed` kèm reason token đóng (tùy
+chọn) `response_body_incomplete` — giữ nguyên status đã gửi. Raw path, query,
+headers, cookies, body, response data và exception text không bao giờ vào
+access observation; correlation value không hợp lệ chỉ được ghi bằng
+rejection event với reason token, không echo giá trị bị từ chối.
 
 Multipart upload (child 7) thêm structured event đóng
 `multipart_upload_rejected` (stage + `error_code` thuộc khối `multipart_*`,

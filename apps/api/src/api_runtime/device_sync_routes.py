@@ -20,7 +20,7 @@ before any response start exists.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Annotated, Final
@@ -97,7 +97,7 @@ async def verified_chunks(
     opened: AbstractAsyncContextManager[VerifiedDeviceContent],
     *,
     entered: list[VerifiedDeviceContent] | None = None,
-) -> AsyncIterator[bytes]:
+) -> AsyncGenerator[bytes]:
     """Stream one verified content context, closing it exactly once.
 
     The verified-reader context stays open for the whole iteration and is
@@ -336,13 +336,19 @@ def create_device_sync_route_endpoints(
         receipt = await service.complete_manifest(command)
         return _success_json(device_cursor_receipt_data(receipt))
 
-    async def _continued(primed: bytes, stream: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    async def _continued(primed: bytes, stream: AsyncGenerator[bytes]) -> AsyncIterator[bytes]:
         """Yield the primed first chunk, then the remainder of the stream."""
 
-        if primed:
-            yield primed
-        async for chunk in stream:
-            yield chunk
+        try:
+            if primed:
+                yield primed
+            async for chunk in stream:
+                yield chunk
+        finally:
+            # Client disconnect closes only this outer generator; the inner
+            # verified-chunks generator owns the opened reader context and
+            # must close deterministically instead of by GC.
+            await stream.aclose()
 
     async def download_source_version(
         request: Request,
