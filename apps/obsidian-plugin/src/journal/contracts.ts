@@ -255,11 +255,15 @@ export type MultipartSafeReasonToken = (typeof MULTIPART_SAFE_REASON_TOKENS)[num
 
 /**
  * The closed journal recovery states of spec 6.2. `empty_journal_rebuilt`
- * always accompanies `isReconcileRequired: true` because no valid
- * generation survived.
+ * keeps its meaning — nothing verified while journal artifacts exist — and
+ * always accompanies `isReconcileRequired: true`; `fresh_journal_reconcile_required`
+ * also accompanies `isReconcileRequired: true`, because the journal knows
+ * nothing about a non-empty Vault (the full-deletion rebuild shape):
+ * a fresh journal rebuilt there must reconcile before any outbound upload.
  */
 export const JOURNAL_RECOVERY_STATES = [
   "fresh_journal_created",
+  "fresh_journal_reconcile_required",
   "verified_generation_loaded",
   "prior_generation_recovered",
   "empty_journal_rebuilt",

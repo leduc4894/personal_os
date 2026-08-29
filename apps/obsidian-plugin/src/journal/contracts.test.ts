@@ -121,6 +121,7 @@ describe("JOURNAL_RECOVERY_STATES closed set (spec 6.2)", () => {
   it("is exactly the closed recovery state set", () => {
     expect([...JOURNAL_RECOVERY_STATES]).toEqual([
       "fresh_journal_created",
+      "fresh_journal_reconcile_required",
       "verified_generation_loaded",
       "prior_generation_recovered",
       "empty_journal_rebuilt",

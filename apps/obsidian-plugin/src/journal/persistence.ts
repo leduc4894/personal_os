@@ -8,7 +8,10 @@
  * Startup accepts only a manifest whose named generation verifies; a torn,
  * missing or invalid newest write falls back to the newest prior verified
  * generation, and when nothing verifies the journal rebuilds empty with
- * `reconcile_required` while every Vault file stays untouched (spec 6.2).
+ * `reconcile_required` while every Vault file stays untouched (spec 6.2) —
+ * and a fresh journal the optional Vault-content probe reports non-empty
+ * rebuilds reconcile-first too (the mobile full-journal-deletion shape),
+ * before any outbound upload may mint creates.
  * Retention keeps the current and one prior verified generation and only ever
  * removes an older generation after the new manifest verified.
  *
@@ -90,13 +93,16 @@ export interface JournalGenerationManifest {
 /**
  * The binary journal directory: file names are journal-local (generation
  * images and the manifest); the plugin binds this to its Vault plugin
- * directory through the Obsidian DataAdapter binary methods.
+ * directory through the Obsidian DataAdapter binary methods. `list` answers
+ * the journal-local file names of that directory — the shape the rebuild
+ * artifact probe uses to see ANY retained generation file.
  */
 export interface JournalFileStore {
   exists(fileName: string): Promise<boolean>;
   readBinary(fileName: string): Promise<ArrayBuffer>;
   writeBinary(fileName: string, data: ArrayBuffer): Promise<void>;
   remove(fileName: string): Promise<void>;
+  list(): Promise<readonly string[]>;
 }
 
 /**
@@ -113,6 +119,7 @@ export interface VaultAdapterSurface {
       readBinary(path: string): Promise<ArrayBuffer>;
       writeBinary(path: string, data: ArrayBuffer): Promise<void>;
       remove(path: string): Promise<void>;
+      list(path: string): Promise<{ readonly files: readonly string[] }>;
     };
   };
 }
@@ -139,12 +146,21 @@ export function createVaultPluginJournalStore(
   }
   const { configDir, adapter } = app.vault;
   const pluginDirectory = joinVaultPath(configDir, "plugins", pluginId);
+  const pluginDirectoryPrefix = `${pluginDirectory}/`;
   return {
     exists: (fileName: string) => adapter.exists(joinVaultPath(pluginDirectory, fileName)),
     readBinary: (fileName: string) => adapter.readBinary(joinVaultPath(pluginDirectory, fileName)),
     writeBinary: (fileName: string, data: ArrayBuffer) =>
       adapter.writeBinary(joinVaultPath(pluginDirectory, fileName), data),
     remove: (fileName: string) => adapter.remove(joinVaultPath(pluginDirectory, fileName)),
+    list: async (): Promise<readonly string[]> => {
+      // Narrow the DataAdapter's directory listing to the journal
+      // directory's own file names (journal-local, never Vault paths).
+      const directory = await adapter.list(pluginDirectory);
+      return directory.files
+        .filter((path) => path.startsWith(pluginDirectoryPrefix))
+        .map((path) => path.slice(pluginDirectoryPrefix.length));
+    },
   };
 }
 
@@ -257,6 +273,21 @@ function generationFileName(generationNumber: number): string {
   return `${JOURNAL_GENERATION_FILE_PREFIX}${generationNumber}`;
 }
 
+/**
+ * Whether one journal-directory file name is a generation image
+ * (`journal.sqlite.g<n>`, n >= 1): the rebuild artifact probe matches ANY
+ * retained generation file this way, so retention retiring generation 1
+ * once the third generation publishes cannot leave a survived journal
+ * masquerading as a fresh store.
+ */
+export function isGenerationFileName(fileName: string): boolean {
+  if (!fileName.startsWith(JOURNAL_GENERATION_FILE_PREFIX)) {
+    return false;
+  }
+  const generationDigits = fileName.slice(JOURNAL_GENERATION_FILE_PREFIX.length);
+  return /^[1-9][0-9]*$/.test(generationDigits);
+}
+
 // --- the journal persistence layer ---------------------------------------------------------------
 
 /** The closed outcome of the unload-time final flush attempt (spec 11). */
@@ -271,6 +302,14 @@ export interface JournalPersistenceOptions {
    * trail never blocks or alters the publish protocol.
    */
   readonly diagnosticTrail?: SyncDiagnosticsTrail | undefined;
+  /**
+   * The optional Vault-content probe of the reconcile-first rebuild (the
+   * mobile full-journal-deletion shape): `null` — the default — means no
+   * probe is available, which leaves a fresh journal at exactly today's
+   * `fresh_journal_created` behavior. An errored probe fails closed: an
+   * unreadable Vault must never masquerade as an empty one.
+   */
+  readonly hasVaultContent?: (() => Promise<boolean>) | null;
 }
 
 /**
@@ -289,6 +328,7 @@ export class JournalPersistence {
   readonly #fileStore: JournalFileStore;
   readonly #engineModule: SqliteEngineModule;
   readonly #diagnosticTrail: SyncDiagnosticsTrail | null;
+  readonly #hasVaultContent: (() => Promise<boolean>) | null;
   #database: SqliteDatabase | null = null;
   #recoveryState: JournalRecoveryState | null = null;
   #verifiedGeneration: VerifiedJournalGeneration | null = null;
@@ -323,6 +363,7 @@ export class JournalPersistence {
     this.#fileStore = options.fileStore;
     this.#engineModule = options.engineModule;
     this.#diagnosticTrail = options.diagnosticTrail ?? null;
+    this.#hasVaultContent = options.hasVaultContent ?? null;
   }
 
   /**
@@ -727,15 +768,21 @@ export class JournalPersistence {
   }
 
   async #rebuildEmptyJournal(isManifestPresent: boolean): Promise<void> {
-    const hasJournalArtifacts = isManifestPresent || (await this.#hasFirstGenerationFile());
-    if (hasJournalArtifacts) {
-      // Nothing verified but artifacts exist: preserve every Vault file and
-      // mark the rebuilt journal for reconciliation (spec 6.2).
+    const hasJournalArtifacts = isManifestPresent || (await this.#hasAnyGenerationFile());
+    const vaultContentProbe = this.#hasVaultContent;
+    const hasVaultContent =
+      vaultContentProbe === null ? false : await this.#probeVaultContent(vaultContentProbe);
+    const reconcileRequired = hasJournalArtifacts || hasVaultContent;
+    if (reconcileRequired) {
+      // Nothing verified (or nothing known about a non-empty Vault):
+      // preserve every Vault file and reconcile before any outbound upload.
       this.#isReconcileRequired = true;
     }
     const recoveryState: JournalRecoveryState = hasJournalArtifacts
       ? "empty_journal_rebuilt"
-      : "fresh_journal_created";
+      : hasVaultContent
+        ? "fresh_journal_reconcile_required"
+        : "fresh_journal_created";
     const database = SqliteDatabase.createEmpty(this.#engineModule, {
       schemaVersion: JOURNAL_SCHEMA_VERSION,
       dirtyGeneration: 0,
@@ -748,12 +795,21 @@ export class JournalPersistence {
     await this.#executeGenerationCommit(() => undefined);
   }
 
-  async #hasFirstGenerationFile(): Promise<boolean> {
+  async #hasAnyGenerationFile(): Promise<boolean> {
     try {
-      return await this.#fileStore.exists(generationFileName(1));
+      const names = await this.#fileStore.list();
+      return names.some(isGenerationFileName);
     } catch {
-      // A probe error is not an absent generation file: fail closed so a
-      // transient adapter failure can never masquerade as a fresh store.
+      // Fail closed exactly like the previous single-generation probe.
+      throw journalStoreError("journal_store_unavailable");
+    }
+  }
+
+  async #probeVaultContent(probe: () => Promise<boolean>): Promise<boolean> {
+    try {
+      return await probe();
+    } catch {
+      // An unreadable Vault must never masquerade as an empty one.
       throw journalStoreError("journal_store_unavailable");
     }
   }

@@ -70,6 +70,11 @@ class InMemoryJournalFileStore implements JournalFileStore {
     this.accessedFileNames.push(`remove:${fileName}`);
     this.files.delete(fileName);
   }
+
+  async list(): Promise<readonly string[]> {
+    this.accessedFileNames.push("list");
+    return [...this.files.keys()];
+  }
 }
 
 /**
@@ -111,6 +116,17 @@ function createRecordingVaultFake(): {
           adapterCalls.push(`remove:${path}`);
           vaultFiles.delete(path);
         },
+        async list(path: string): Promise<{ readonly files: readonly string[] }> {
+          adapterCalls.push(`list:${path}`);
+          const directoryPrefix = `${path}/`;
+          return {
+            files: [...vaultFiles.keys()].filter(
+              (entry) =>
+                entry.startsWith(directoryPrefix) &&
+                !entry.slice(directoryPrefix.length).includes("/"),
+            ),
+          };
+        },
       },
     },
   };
@@ -139,6 +155,32 @@ async function openWithTwoGenerations(): Promise<{
   const journal = await openedPersistence(store);
   await journal.commitGeneration(() => undefined);
   return { store, journal };
+}
+
+/**
+ * Build a not-yet-opened persistence over an empty in-memory store,
+ * optionally seeding orphaned generation files and wiring the Vault-content
+ * probe of the reconcile-first rebuild (the mobile full-journal-deletion
+ * shape).
+ */
+function buildPersistence(
+  options: {
+    readonly hasVaultContent?: (() => Promise<boolean>) | null;
+    readonly generationFiles?: readonly number[];
+  } = {},
+): JournalPersistence {
+  const store = new InMemoryJournalFileStore();
+  for (const generationNumber of options.generationFiles ?? []) {
+    store.files.set(
+      generationFileName(generationNumber),
+      new TextEncoder().encode("orphaned generation image").buffer as ArrayBuffer,
+    );
+  }
+  return new JournalPersistence({
+    fileStore: store,
+    engineModule,
+    hasVaultContent: options.hasVaultContent ?? null,
+  });
 }
 
 describe("JournalPersistence first open and valid manifest load (spec 6.2)", () => {
@@ -313,15 +355,11 @@ describe("JournalPersistence probe failure handling (spec 6.2 fail-closed)", () 
     reopened.close();
   });
 
-  it("rejects open when the artifact existence probe errors", async () => {
+  it("rejects open when the artifact listing probe errors", async () => {
     const store = await openWithRetiredFirstGeneration();
     await store.remove(JOURNAL_MANIFEST_FILE_NAME);
-    const originalExists = store.exists.bind(store);
-    store.exists = async (fileName: string): Promise<boolean> => {
-      if (fileName === generationFileName(1)) {
-        throw new Error("transient adapter failure");
-      }
-      return originalExists(fileName);
+    store.list = async (): Promise<readonly string[]> => {
+      throw new Error("transient adapter failure");
     };
 
     await expect(openedPersistence(store)).rejects.toMatchObject({
@@ -329,10 +367,55 @@ describe("JournalPersistence probe failure handling (spec 6.2 fail-closed)", () 
     });
 
     // No fresh journal was published over the orphaned generations.
-    store.exists = originalExists;
     expect(await store.exists(JOURNAL_MANIFEST_FILE_NAME)).toBe(false);
     expect(await store.exists(generationFileName(2))).toBe(true);
     expect(await store.exists(generationFileName(3))).toBe(true);
+  });
+});
+
+describe("JournalPersistence rebuild reconcile-first over vault content (mobile full-deletion shape)", () => {
+  it("rebuilds fresh-journal-reconcile-required when the vault has content", async () => {
+    const persistence = buildPersistence({ hasVaultContent: async () => true });
+    await persistence.open();
+    expect(persistence.recoveryState).toBe("fresh_journal_reconcile_required");
+    expect(persistence.isReconcileRequired).toBe(true);
+    // The reconcile-first verdict is durable in the rebuilt meta row.
+    expect(persistence.readJournalMeta().isReconcileRequired).toBe(true);
+    expect(persistence.readJournalMeta().recoveryState).toBe("fresh_journal_reconcile_required");
+    persistence.close();
+  });
+
+  it("keeps fresh_journal_created for an empty vault", async () => {
+    const persistence = buildPersistence({ hasVaultContent: async () => false });
+    await persistence.open();
+    expect(persistence.recoveryState).toBe("fresh_journal_created");
+    expect(persistence.isReconcileRequired).toBe(false);
+    persistence.close();
+  });
+
+  it("treats any generation file as a rebuild artifact", async () => {
+    // The store holds journal.sqlite.g2 (and no manifest, no g1) — before
+    // the any-generation probe this misclassified as fresh_journal_created
+    // once retention retired generation 1.
+    const persistence = buildPersistence({
+      generationFiles: [2],
+      hasVaultContent: async () => false,
+    });
+    await persistence.open();
+    expect(persistence.recoveryState).toBe("empty_journal_rebuilt");
+    expect(persistence.isReconcileRequired).toBe(true);
+    persistence.close();
+  });
+
+  it("fails closed when the vault probe errors", async () => {
+    const persistence = buildPersistence({
+      hasVaultContent: async () => {
+        throw new Error("vault unavailable");
+      },
+    });
+    await expect(persistence.open()).rejects.toMatchObject({
+      reason: "journal_store_unavailable",
+    });
   });
 });
 

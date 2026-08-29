@@ -751,6 +751,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         fileStore: this.createJournalFileStore(),
         engineModule,
         diagnosticTrail,
+        // A journal rebuilt over a non-empty Vault must reconcile first
+        // (the mobile full-deletion shape); the probe mirrors exactly the
+        // files the automatic snapshot would admit.
+        hasVaultContent: async () => this.app.vault.getFiles().length > 0,
       });
       startupStage = "journal_recovery";
       await persistence.open();
