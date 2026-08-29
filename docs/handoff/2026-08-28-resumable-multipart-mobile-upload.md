@@ -1,57 +1,76 @@
-# Handoff — Resumable Multipart Mobile Upload (Child 7, mid-plan stop after Task 5)
+# Handoff — Resumable Multipart Mobile Upload (Child 7, complete)
 
-- **Date:** 2026-08-28
+- **Date:** 2026-08-29
 - **Branch:** `resumable-multipart-mobile-upload` (from `master` `7fd6137`)
-- **Final commit of this session:** `aba6c56` (feat: orchestrate multipart verification and promotion)
-- **Plan:** `docs/superpowers/plans/2026-08-28-resumable-multipart-mobile-upload.md` (14 tasks)
+- **Implementation head:** `75d0921` (fix: refire lost policy-fixture capture in multipart journey); this handoff commit follows.
+- **Plan:** `docs/superpowers/plans/2026-08-28-resumable-multipart-mobile-upload.md` — all 14 tasks executed.
 - **Spec:** `docs/superpowers/specs/2026-08-28-resumable-multipart-mobile-upload-design.md`
-- **Stop instruction:** user directed the session to stop once Task 5 completed. Tasks 6–14 are **NOT started**; nothing below about them is evidence — they are next actions only.
-- **SDD workspace (ledger, briefs, reports, review diffs):** `.superpowers/sdd/2026-08-28-resumable-multipart-mobile-upload/` — git-ignored scratch; the ledger `progress.md` is the authoritative per-task record. Resume the SDD loop there (do not re-dispatch Tasks 1–5).
+- **Living operations doc:** `docs/operations/resumable-multipart-upload.md` (recovery runbook, live procedure) — linked, not duplicated here.
+- **Process note:** Tasks 1–12 ran the full SDD loop (implementer subagent + task review + fix rounds). Per explicit user instruction, the Task 13 remainder and all of Task 14 (verification, catch-site sweep, handoff, BACKLOG) were executed directly by the controller session without the final subagent review wave; per-task review evidence lives in `.superpowers/sdd/2026-08-28-resumable-multipart-mobile-upload/`.
 
-## Gate status (all offline gates; evidence below)
+## Gate status (final evidence)
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Multipart + small-file unit/contract | `uv run pytest tests/unit/multipart_upload tests/unit/postgresql_source_store/test_multipart_upload_store.py tests/contract/multipart_upload tests/unit/small_file_sync -q` | 270 passed (run 2026-08-28 on `aba6c56`) |
-| Object-storage + composition boundaries | `uv run pytest tests/contract/object_storage tests/contract/canonical_core/test_composition_boundaries.py -q` | 117 passed |
-| Strict typing | `uv run mypy src/personal_os/multipart_upload packages/postgresql-source-store/src packages/r2-object-storage/src` | Success, 44 files |
-| Tree hygiene | `git status --porcelain`; `git diff --check` | clean / clean |
+| Repo verify (deterministic parts) | `uv run poe verify` | ruff clean; mypy strict 209 files clean; Python suites 4207 passed / 21 skipped; api-client 1/1; web 138/138. **Caveat below.** |
+| Plugin suite (direct) | `pnpm --dir apps/obsidian-plugin exec vitest run` | 56 files / 1226 tests passed |
+| API contract | `uv run poe api-contract-check` | exit 0 |
+| Plugin lint / types / build | `pnpm ... run lint` / `type-check` / `build` | exit 0 / 0 / 0 |
+| Live integration (final) | `CI=true LOCAL_STACK_TEST_PROJECT=knowledge-ci-multipart-final uv run pytest tests/integration/multipart_upload -q -m "not device_records"` | **39 passed** in 500s (28 local_stack + 11 r2_live) |
+| Desktop WDIO live (Task 13) | guarded bootstrap on `knowledge-ci-multipart-live` | `obsidian_live_acceptance_passed`, phase `multipart_journey_completed` |
+| Physical Mobile matrix | runbook procedure | **PENDING** — physical device prerequisite, not run |
+| Tree hygiene | `git diff --check`; stack teardown | clean; `stack_down_complete`, 0 containers, `knowledge-local` left down |
 
-Per-task evidence (TDD RED→GREEN, live-stack runs, full regressions) lives in the SDD workspace reports `task-{1..5}-report.md`. Live-stack integration for Task 3 ran green under `CI=true LOCAL_STACK_TEST_PROJECT=knowledge-ci-multipart-store` (53 passed) and the stack was torn down. The plan's live gates (Desktop WDIO, physical Mobile, `knowledge-ci-multipart-int`/`-final` integration rounds) are owned by Tasks 12–14 and have **not** run.
+**`poe verify` caveat (honest):** exit 1 on 4 of 5 runs — each time a different rotating subset of 2–3 *pre-existing* timing-sensitive plugin tests (`repository-subprocess`, `lifecycle-repository` leakage, `echo-suppression` import scan; 5–11 s each) starved under the parallel coverage run on this machine. Evidence it is environment load, not a branch defect: the branch touched none of those three files (`git log master..HEAD -- <files>` empty); the three files pass standalone with coverage 49/49; the direct full suite is green 1226/1226; one full `poe verify` run was entirely green. BACKLOG row added.
 
-## Landed work (Tasks 1–5, each task-review clean)
+**R2 test env note:** the final round composed `R2_TEST_ENDPOINT`/`R2_TEST_BUCKET_NAME` from `.local/serve-local.sh` values and a mode-0600 secret root holding `r2_test_access_key_id`/`r2_test_secret_access_key` copied from `.local/stack-secrets/` (values never rendered), per the `compose_live_environment` contract.
 
-1. `63d0e8a` — domain contract: geometry (8 MiB part, ≤13 parts, 16–100 MiB routing, 24 h expiry, 10 min URL), 12-state machine, **twelve** `MULTIPART_*` codes (brief's "eleven" was a miscount; spec §7 governs), `MULTIPART_UPLOAD` preflight outcome, OpenAPI/generated-client regenerated (outcome is wire-visible).
-2. `32e9dc3` — schema: `multipart_uploads` + `multipart_parts` (migration `20260828_01`); **lifetime UNIQUE on `operation_id`** (spec §4.2/§5: one session per operation ever, replay returns the frozen result).
-3. `0a263fb`/`59ba317`/`4c3b11e` — PostgreSQL store + fencing: `PostgreSqlMultipartUploadStore` (7 methods + `record_provider_identity`), FOR-UPDATE mutation, completion lease CAS, typed closed errors. Migration `20260828_02` widens the legacy 16 MiB operations CHECK to 100 MiB (live CheckViolation proved the old CHECK unsatisfiable with multipart FK rows). Migration `20260828_03` defers provider identity (nullable) to enable persist-before-create.
-4. `7c4b0ad`/`42b2973` — R2 staging provider: exactly six methods, staging-key validation before every SDK call, kwargs-level scripted-S3 contract tests, closed error mapping. Fix round amended `test_corruption_capability_lives_only_in_test_harness` with a narrowly-scoped `multipart.py`-only exception and inlined `"delete_object"` (string assembly evasion was rejected in review); alembic pin set extended to `20260828_01..03` (+ pre-existing `20260827_01` gap).
-5. `aba6c56` — orchestration service: `create_or_resume` (reserve → `create_upload` → `record_provider_identity`), `status` (ListParts reconciliation), `issue_part_url` (ownership/state/expiry/policy recheck), `complete` (claim → ListParts → Complete → bounded verification spool → `SmallFilePublicationGateway` → frozen terminal → inline exact staging delete), `abort`, `run_exact_cleanup`; closed low-cardinality metrics module.
+## Task ledger (all reviewed; fix rounds where noted)
+
+| Task | Commits | Note |
+| --- | --- | --- |
+| 1 contract | `63d0e8a` | twelve `MULTIPART_*` codes (spec §7; brief's "eleven" was a miscount) |
+| 2 schema | `32e9dc3` | `20260828_01`; lifetime UNIQUE on `operation_id` (spec §4.2/§5) |
+| 3 store+fencing | `0a263fb` `59ba317` `4c3b11e` | fix round: persist-before-create (`20260828_02` widens size CHECK; `20260828_03` defers identity) |
+| 4 R2 staging | `7c4b0ad` `42b2973` | fix round: composition-boundary scan amended, literal inlined (string-assembly evasion rejected) |
+| 5 service | `aba6c56` | §6.3 chain, exact cleanup, closed metrics |
+| 6 Temporal cleanup | `ea971ba` | batch-granularity activity adjudicated sound |
+| 7 API routes | `a104f4b` | wire bound → 100 MiB; D1 resolved fail-closed; early OpenAPI/TS regen adjudicated necessary |
+| 8 client+composition | `a646519` `d4d1aaa` `7f25383` `46f50ae` | Blocker B staging read; Blocker A sealed token (`20260828_04`); D2 closed log event |
+| 9 plugin SQLite v8 | `3d4ede3` | safe progress only; sentinel-scanned |
+| 10 runner/scheduler | `167ac56` `6d82b04` | fix round: platform class wired + conservative default |
+| 11 diagnostics/privacy | `0710dbf` `0493fc5` | fix round: status counts fed in production |
+| 12 integration proof | `1d9ca89` `5a2fe12` | live 11 passed; fix round: redacted assertions |
+| 13 docs+live | `3d50040` `75d0921` | WDIO PASS; journey re-fire hardening (controller-applied) |
+| 14 final+handoff | this commit | evidence above |
 
 ## Spec-interpretation decisions (with rationale)
 
-- **Twelve error codes, not eleven** — spec §7 lists twelve; brief miscounted. Spec governs (more-specific document).
-- **Lifetime UNIQUE on `operation_id`** — spec §4.2 ("cleanup_pending is not permission to reuse") + §5 (exact replay must return the same single session) require exactly one session per operation ever; an active-only partial index would make replay ambiguous.
-- **Persist-before-create** — spec §6.1 requires the session row durable before the R2 create call; Task 3's original port made this unimplementable (identity required at reserve) and was amended in fix round 1 (`4c3b11e`), including nullable identity via `20260828_03`. Divergent identity on replay → typed closed error; the *service* aborts its own fresh orphan (caller-side, not a session obligation). NULL-identity expiry = trivially successful cleanup.
-- **Staging read via `CanonicalObjectStore`** — the provider deliberately has no staging-object read method; the verification spool streams through the existing bounded reader (plan binds it). Promotion never uses R2 copy/rename.
-- **Harness-bug fixes in Task 5's staged tests** — the plan's Step-1 snippets contained 4 impossible-to-pass bugs (stale `session_id` comparison, guard swapped off the wired service, stale-base setup contradicting the create-time conflict test); fixed intent-preservingly, reviewer-verified.
+1. **Twelve error codes** (not eleven) — spec §7 governs over the brief's miscount.
+2. **Lifetime UNIQUE on `operation_id`** — replay must return the same single session ever (§4.2 "cleanup_pending is not permission to reuse"; §5 create-or-replay).
+3. **Persist-before-create** — §6.1 requires durable session row before the R2 create; identity deferred (nullable) with a fenced post-create write; divergent identity → typed closed error + caller aborts its own fresh orphan; NULL-identity expiry = trivially successful cleanup.
+4. **One activity per bounded batch (≤100)** in the cleanup workflow — spec §6.4 prescribes no per-row activity granularity; per-row timeout/retry/closed-failure live inside `run_exact_cleanup`; the store port shape and history-privacy force batch granularity.
+5. **24 h session deadline governs evidence reuse** (not the 15-min small-file reservation); the publication fence deliberately skips the small-file expiry check on the bound path.
+6. **D1 resolved fail-closed** — recheck guards evaluate a locator-free subject; a locator-keyed deny advance blocks part-URL issuance and completion (route-proven), publication additionally fails closed via `authorize_bound_publication`.
+7. **Wire size bound** moved to the 100 MiB product maximum at the API boundary; offline fake keeps `https://multipart-staging.invalid/`.
+8. **`multipart_local_content_changed`** is client-originated and intentionally absent from the wire-code map (fail-safe retryable fall-through).
 
-## Deferred items (verdicts)
+## Deferred items (verdicts → BACKLOG rows)
 
-| # | Item | Verdict |
-| --- | --- | --- |
-| D1 | **Locator stand-in weakens §7 early blocking for UPDATE sessions**: policy rechecks at `issue_part_url`/completion-start use `_RECHECK_UPDATE_LOCATOR` placeholder because `BoundSmallFileOperation` drops update locators; a locator-keyed deny advance does NOT block new part URLs/completion start (it fabricates allow-evidence where absent-locator would be indeterminate→fail-closed). Publication still fails closed via `authorize_bound_publication`. | Real, structural; **must be resolved by Task 7** (bind the recheck guard with a locator-free subject that fails closed, or amend the spec documenting the approximation). BACKLOG row written. |
-| D2 | Committed-session inline staging-delete failure surfaces only on the in-memory rejection ring; COMMITTED rows have no cleanup-state exits, so no durable retry exists (storage-only leak; staging keys cannot address canonical content). | Real; durable surface owned by Task 7 composition. BACKLOG row written. |
-| D3 | Cosmetic minors parked across Tasks 1–5 (transition-table pin limits; `committed_replay` precedence untested; Plan/Status `part_count` looseness; https-prefix URL check; hasattr protocol pin; unrelated reformat in `test_device_sync_migration.py`; `any()` ordering pins; protocol-conformance pin absent; lease token taxonomy split; `literal_binds=False` tautology; client-manager lock race note; presign expiry skew (safe direction); `MultipartStagingKey` placement seam; composition-test multipart exemption breadth; status provider-state-invalid waits for 24 h sweep; lost-complete-response forces re-upload (safe); `staging/multipart/` prefix duplication; report count nits). | Triaged by per-task reviews as non-blocking. One aggregated BACKLOG row; final adjudication at the plan's Task 14 / whole-branch review. |
+| Item | Verdict |
+| --- | --- |
+| Physical Mobile matrix | PENDING — runbook procedure documented; no physical evidence yet, so Child 7's Mobile acceptance is NOT claimed. Row: *Before Child 9 operations acceptance*. |
+| `poe verify` plugin-coverage flake (3 pre-existing timing tests, rotating subset) | Environment load, not branch defect (evidence above). Row: *Before the next full `poe verify` dependency bump or CI move*. |
+| Bare plugin reload → false `login_required` (credential-refresh race) | Real, prior fixes don't cover the reload corner; harness works around via fresh grant. Row: *Before Child 9 operations acceptance*. |
+| `serve-live-ci up` fresh-project quirk: `postgres-provision` intermittently exits 0 without migrations → API readiness 503 (fixtures self-provision; live bootstrap owns `alembic upgrade head`) | Ops fix in the CI bootstrap. Row: *Before the next live acceptance round*. |
+| Journey re-fire recovery path (`75d0921`) not yet exercised live (offline-proven; added after the passing round) | Row: *At the next multipart WDIO journey run*. |
+| Create-while-`receiving` surfaces `small_file_upload_state_invalid` at the route layer (spec-faithful; resume is status+part-URLs) | Route-layer translation question. Row: *Before production activation*. |
+| Cosmetic minors batch from per-task reviews (Tasks 1–12 minors recorded in the SDD ledger; e.g. dual trail entries halving ring history, tautology-shaped sentinel legs, duplicated staging prefix constants, token-taxonomy split, unwired-progress minors) | Non-blocking, triaged per task. Row: *Before Child 8 conflict merge*. |
+
+Resolved during the plan (BACKLOG rows removed): D1 locator stand-in (Task 7), D2 durable rejection surface (Task 8).
 
 ## Next actions
 
-1. Resume SDD execution at **Task 6** (Temporal cleanup workflow) using the ledger at `.superpowers/sdd/2026-08-28-resumable-multipart-mobile-upload/progress.md`; briefs regenerate via the skill's `task-brief` script. Tasks 6–14 proceed unchanged from the plan.
-2. Task 6 consumes `run_exact_cleanup` (`src/personal_os/multipart_upload/service.py`) and the Task 3 cleanup claims; NULL-identity claims are trivially successful.
-3. Task 7 must: (a) move the wire size bound from 16 MiB to 100 MiB in `apps/api` (`small_file_sync_models.py` still caps at the old constant; safe_message golden-pinned); (b) resolve D1 (locator-free recheck subject or spec amendment); (c) provide the durable surface for D2; (d) implement `MultipartSessionEvidenceStore` / `MultipartStagingByteSource` / str-key adapter seam ports introduced by Task 5; (e) compose store+provider+service with the server lifecycle (R2 client closes exactly once).
-4. Tasks 12–14 own live gates (`knowledge-ci-multipart-int`/`-final`, Desktop WDIO, physical Mobile) — per AGENTS.md the Mobile matrix may only be deferred with a verified BACKLOG row, never silently.
-5. Operational watch item from Task 3: one `serve-live-ci up` run saw `postgres-provision` exit 0 without applying migrations (conftest applied Alembic itself). Not blocking; investigate before relying on the initializer for migration application.
-
-## Living documents
-
-- Operations runbook for this feature lands with plan Task 13 at `docs/operations/resumable-multipart-upload.md` (does not exist yet).
-- Local live-stack runbook: `.local/RESTART.md`; CI bootstrap contract: `.local/serve-live-ci.sh`.
+1. Record physical Mobile evidence per the runbook (`docs/operations/resumable-multipart-upload.md`) — the only open Child 7 acceptance item.
+2. Child 8 conflict-merge sweep should re-check the deferred-minors row and the route-layer `small_file_upload_state_invalid` translation.
+3. Merge decision for the branch itself is the user's; SDD workspace kept (per-task review evidence) at `.superpowers/sdd/2026-08-28-resumable-multipart-mobile-upload/`.
