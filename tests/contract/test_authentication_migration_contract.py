@@ -730,13 +730,13 @@ def test_alembic_graph_has_exactly_one_head_beyond_the_authentication_revision()
     # revisions stack on this revision, so the single graph head moved past
     # authentication.
     script_directory = _script_directory()
-    assert script_directory.get_heads() == ["20260828_04"]
+    assert script_directory.get_heads() == ["20260829_01"]
 
 
 def test_authentication_revision_stacks_on_the_canonical_baseline_root() -> None:
     script_directory = _script_directory()
     revisions = list(script_directory.walk_revisions())
-    assert len(revisions) == 12
+    assert len(revisions) == 13
     baseline = script_directory.get_revision(BASELINE_REVISION)
     assert baseline is not None
     assert baseline.down_revision is None
@@ -749,9 +749,9 @@ def test_authentication_revision_stacks_on_the_canonical_baseline_root() -> None
 
 def test_canonical_revision_constant_is_the_current_graph_head() -> None:
     # The canonical revision authority always pins the current graph head; the
-    # multipart operation-token seal migration ``20260828_04`` is that head
-    # now.
-    assert CANONICAL_POSTGRESQL_SCHEMA_REVISION == "20260828_04"
+    # append-time submitted policy verdict migration ``20260829_01`` is that
+    # head now.
+    assert CANONICAL_POSTGRESQL_SCHEMA_REVISION == "20260829_01"
 
 
 # ---------------------------------------------------------------------------

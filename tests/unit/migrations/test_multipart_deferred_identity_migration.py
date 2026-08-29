@@ -116,8 +116,9 @@ def test_revision_extends_the_operation_size_bound_head() -> None:
 
 def test_revision_is_the_single_alembic_head() -> None:
     scripts = _script_directory()
-    # The sealed-token revision ``20260828_04`` stacks on this head.
-    assert scripts.get_heads() == ["20260828_04"]
+    # The sealed-token revision ``20260828_04`` and the submitted policy
+    # verdict revision ``20260829_01`` stack above this head.
+    assert scripts.get_heads() == ["20260829_01"]
 
 
 def test_upgrade_relaxes_exactly_the_two_identity_columns() -> None:

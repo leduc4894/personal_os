@@ -40,6 +40,7 @@ MULTIPART_SESSION_REVISION: str = "20260828_01"
 MULTIPART_SIZE_BOUND_REVISION: str = "20260828_02"
 MULTIPART_DEFERRED_IDENTITY_REVISION: str = "20260828_03"
 MULTIPART_OPERATION_TOKEN_SEAL_REVISION: str = "20260828_04"
+SUBMITTED_POLICY_VERDICT_REVISION: str = "20260829_01"
 SCHEMA_NAME: str = "knowledge"
 
 EXPECTED_TABLES_IN_CREATION_ORDER: tuple[str, ...] = (
@@ -587,13 +588,13 @@ def _script_directory() -> ScriptDirectory:
 
 def test_alembic_graph_has_exactly_one_head_revision() -> None:
     script_directory = _script_directory()
-    assert script_directory.get_heads() == [MULTIPART_OPERATION_TOKEN_SEAL_REVISION]
+    assert script_directory.get_heads() == [SUBMITTED_POLICY_VERDICT_REVISION]
 
 
 def test_baseline_revision_is_the_single_graph_root() -> None:
     script_directory = _script_directory()
     revisions = list(script_directory.walk_revisions())
-    assert len(revisions) == 12
+    assert len(revisions) == 13
     revision = script_directory.get_revision(BASELINE_REVISION)
     assert revision is not None
     assert revision.down_revision is None
@@ -612,6 +613,7 @@ def test_baseline_revision_is_the_single_graph_root() -> None:
         (MULTIPART_SIZE_BOUND_REVISION, MULTIPART_SESSION_REVISION),
         (MULTIPART_DEFERRED_IDENTITY_REVISION, MULTIPART_SIZE_BOUND_REVISION),
         (MULTIPART_OPERATION_TOKEN_SEAL_REVISION, MULTIPART_DEFERRED_IDENTITY_REVISION),
+        (SUBMITTED_POLICY_VERDICT_REVISION, MULTIPART_OPERATION_TOKEN_SEAL_REVISION),
     ):
         stacked = script_directory.get_revision(revision_id)
         assert stacked is not None, revision_id
@@ -628,7 +630,7 @@ def test_alembic_graph_loads_without_database_settings_or_secrets() -> None:
             removed[key] = os.environ.pop(key)
     try:
         script_directory = _script_directory()
-        assert script_directory.get_heads() == [MULTIPART_OPERATION_TOKEN_SEAL_REVISION]
+        assert script_directory.get_heads() == [SUBMITTED_POLICY_VERDICT_REVISION]
     finally:
         os.environ.update(removed)
 

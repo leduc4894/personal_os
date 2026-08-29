@@ -653,6 +653,7 @@ manifest_entry_resolutions: Final[Table] = Table(
     Column("resolved_source_locator_id", sa.Uuid(), nullable=True),
     Column("resolved_source_tombstone_id", sa.Uuid(), nullable=True),
     Column("match_kind", sa.Text(), nullable=False),
+    Column("submitted_policy_allowed", sa.Boolean(), nullable=True),
     sa.PrimaryKeyConstraint(
         "manifest_run_id", "page_number", "entry_index", name="pk_manifest_entry_resolutions"
     ),

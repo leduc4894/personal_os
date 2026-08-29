@@ -11,12 +11,13 @@ from __future__ import annotations
 from typing import Final
 
 #: Canonical PostgreSQL schema revision pinned by the acceptance/recovery contract;
-#: readiness accepts exactly this head and nothing else. The multipart
-#: revision ``20260828_04`` (the sealed raw multipart operation token) stacks
-#: on ``20260828_01..03`` (multipart sessions/parts, widened operation size
-#: bound, deferred provider identity), which stack on the device sync
-#: revision ``20260826_02`` (the catch-up download entry echo amendment),
-#: which stacks on ``20260826_01``, the ``20260820_01`` source-lifecycle
-#: revision, and the small-file, exclusion-policy, authentication and
-#: baseline revisions beneath them.
-CANONICAL_POSTGRESQL_SCHEMA_REVISION: Final[str] = "20260828_04"
+#: readiness accepts exactly this head and nothing else. The device sync
+#: revision ``20260829_01`` (the append-time submitted policy verdict column)
+#: stacks on the multipart revision ``20260828_04`` (the sealed raw multipart
+#: operation token), which stacks on ``20260828_01..03`` (multipart
+#: sessions/parts, widened operation size bound, deferred provider identity),
+#: which stack on the device sync revision ``20260826_02`` (the catch-up
+#: download entry echo amendment), which stacks on ``20260826_01``, the
+#: ``20260820_01`` source-lifecycle revision, and the small-file,
+#: exclusion-policy, authentication and baseline revisions beneath them.
+CANONICAL_POSTGRESQL_SCHEMA_REVISION: Final[str] = "20260829_01"

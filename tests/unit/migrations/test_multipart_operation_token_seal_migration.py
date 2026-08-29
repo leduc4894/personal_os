@@ -148,7 +148,9 @@ def test_revision_extends_the_deferred_identity_head() -> None:
 
 def test_revision_is_the_single_alembic_head() -> None:
     scripts = _script_directory()
-    assert scripts.get_heads() == [SEALED_TOKEN_REVISION]
+    # The submitted policy verdict revision ``20260829_01`` stacks on this
+    # head.
+    assert scripts.get_heads() == ["20260829_01"]
 
 
 def test_upgrade_adds_exactly_the_three_sealed_columns() -> None:

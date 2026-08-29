@@ -33,6 +33,7 @@ pytestmark = pytest.mark.local_stack
 REPO_ROOT = Path(__file__).resolve().parents[3]
 _REVISION = "20260826_02"
 _PREDECESSOR_REVISION = "20260820_01"
+_SEALED_OPERATION_TOKEN_REVISION = "20260828_04"
 _MIGRATION_COMMAND_TIMEOUT_SECONDS = 60
 _PAGE_DIGEST = hashlib.sha256(b"device-sync-page-zero").hexdigest()
 _ENTRY_SHA256 = hashlib.sha256(b"device-sync-entry").hexdigest()
@@ -673,6 +674,64 @@ async def _assert_reupgraded_state(stack: SourcePublicationStack) -> None:
         await dispose_source_store_engine(engine)
 
 
+async def _assert_submitted_policy_allowed_column_present(
+    stack: SourcePublicationStack,
+) -> None:
+    """Head-state assertions: the append-time verdict column exists, nullable."""
+
+    engine = create_source_store_engine(stack.settings, stack.password)
+    try:
+        async with engine.begin() as connection:
+            column_facts = await connection.execute(
+                sa.text(
+                    "SELECT data_type, is_nullable FROM information_schema.columns"
+                    " WHERE table_schema = 'knowledge'"
+                    " AND table_name = 'manifest_entry_resolutions'"
+                    " AND column_name = 'submitted_policy_allowed'"
+                )
+            )
+            assert [(row[0], row[1]) for row in column_facts.fetchall()] == [("boolean", "YES")]
+            table_count = await connection.execute(
+                sa.text(
+                    "SELECT count(*) FROM information_schema.tables"
+                    " WHERE table_schema = 'knowledge'"
+                )
+            )
+            assert int(table_count.scalar_one()) == 39
+    finally:
+        await dispose_source_store_engine(engine)
+
+
+async def _assert_submitted_policy_allowed_column_absent(
+    stack: SourcePublicationStack,
+) -> None:
+    """Downgrade-state assertions: the column is gone, catalog counts unchanged."""
+
+    engine = create_source_store_engine(stack.settings, stack.password)
+    try:
+        async with engine.begin() as connection:
+            column_facts = await connection.execute(
+                sa.text(
+                    "SELECT count(*) FROM information_schema.columns"
+                    " WHERE table_schema = 'knowledge'"
+                    " AND table_name = 'manifest_entry_resolutions'"
+                    " AND column_name = 'submitted_policy_allowed'"
+                )
+            )
+            assert int(column_facts.scalar_one()) == 0
+            table_count = await connection.execute(
+                sa.text(
+                    "SELECT count(*) FROM information_schema.tables"
+                    " WHERE table_schema = 'knowledge'"
+                )
+            )
+            # A column add changes no catalog counts, so the schema keeps its
+            # full application-table set after the downgrade.
+            assert int(table_count.scalar_one()) == 39
+    finally:
+        await dispose_source_store_engine(engine)
+
+
 def test_device_sync_revision_round_trips_cursor_and_manifest_constraints(
     source_publication_stack: SourcePublicationStack,
 ) -> None:
@@ -698,3 +757,34 @@ def test_device_sync_revision_round_trips_cursor_and_manifest_constraints(
         _assert_reupgraded_state(source_publication_stack),
         loop_factory=asyncio.SelectorEventLoop,
     )
+
+
+def test_submitted_policy_allowed_column_survives_upgrade_and_downgrade(
+    source_publication_stack: SourcePublicationStack,
+) -> None:
+    """The append-time policy verdict column lands nullable and drops cleanly.
+
+    Upgrade to head: ``manifest_entry_resolutions.submitted_policy_allowed``
+    exists as a nullable boolean (NULL marks legacy rows appended before the
+    revision).  Downgrade to the sealed-operation-token revision: the column
+    is absent.  A column add changes no catalog counts, so the schema keeps
+    its 39 application tables on both sides of the round trip.
+    """
+
+    upgrade = _alembic("upgrade", "head")
+    assert upgrade.returncode == 0
+    asyncio.run(
+        _assert_submitted_policy_allowed_column_present(source_publication_stack),
+        loop_factory=asyncio.SelectorEventLoop,
+    )
+    downgrade = _alembic(
+        "-x", "allow_destructive=true", "downgrade", _SEALED_OPERATION_TOKEN_REVISION
+    )
+    assert downgrade.returncode == 0
+    asyncio.run(
+        _assert_submitted_policy_allowed_column_absent(source_publication_stack),
+        loop_factory=asyncio.SelectorEventLoop,
+    )
+    # Leave the stack at head for any test that follows.
+    second_upgrade = _alembic("upgrade", "head")
+    assert second_upgrade.returncode == 0
