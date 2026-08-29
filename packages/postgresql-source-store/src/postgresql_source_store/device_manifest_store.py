@@ -17,11 +17,16 @@ different evidence fails the run with the closed replay mismatch, the
 cumulative 100,000-entry cap holds, and every entry's identity is resolved
 against the canonical locator/tombstone history at the run checkpoint inside
 the credential workspace — persisting only canonical IDs plus the internal
-locator-evidence digest, never raw locator bytes.
+locator-evidence digest and the entry's append-time policy verdict (a
+boolean evaluated while the submitted locator is still in memory; the
+locator text itself never persists on a manifest table).
 ``finalize_manifest`` verifies the canonical-JSON final digest over the
 run's ordered pages, then materializes the deterministic action plan through
 the pure planner: per-entry resolutions against the canonical source state
-at the checkpoint under the run's bound policy revision, plus canonical-only
+at the checkpoint under the run's bound policy revision — each unowned
+upload keeping its persisted append-time verdict, with the legacy
+finalize-time subject (no locator, no source identity) recomputed only for
+resolution rows predating the verdict column — plus canonical-only
 downloads for allowed active sources absent from the manifest (a deleted
 canonical source absent locally needs no file action). Because a run may
 resolve the schema's full 100,000 entries, every finalize-time ``IN`` lookup
@@ -554,6 +559,7 @@ def manifest_resolution_rows_statement(
             manifest_entry_resolutions.c.resolved_source_locator_id,
             manifest_entry_resolutions.c.resolved_source_tombstone_id,
             manifest_entry_resolutions.c.match_kind,
+            manifest_entry_resolutions.c.submitted_policy_allowed,
         )
         .where(manifest_entry_resolutions.c.manifest_run_id == manifest_run_id)
         .order_by(
@@ -1158,8 +1164,16 @@ class PostgresqlDeviceManifestStore:
             raise DeviceSyncError(DeviceSyncErrorCode.MANIFEST_PAGE_REPLAY_MISMATCH)
         if int(run.entry_count) + len(command.entries) > MAX_MANIFEST_RUN_ENTRIES:
             raise DeviceSyncError(DeviceSyncErrorCode.MANIFEST_PAGE_INVALID)
+        # The bound revision loads once per accepted page — inside the same
+        # transaction as the resolution writes — because the append-time
+        # policy decision needs the run's immutable rules while the submitted
+        # locator is still in memory. A page replay returns above without
+        # this read.
+        revision = await self._load_bound_policy_revision(
+            connection, command.context.workspace_id, int(run.policy_revision_number)
+        )
         resolution_rows = await self._resolve_page_entries(
-            connection, command.context.workspace_id, run, command
+            connection, command.context.workspace_id, run, command, revision
         )
         await connection.execute(
             sa.insert(manifest_pages).values(
@@ -1195,6 +1209,7 @@ class PostgresqlDeviceManifestStore:
         workspace_id: UUID,
         run: RowMapping,
         command: AppendManifestPageCommand,
+        revision: ExclusionPolicyRevision,
     ) -> list[dict[str, Any]]:
         checkpoint = int(run.checkpoint_sequence)
         entries = command.entries
@@ -1273,6 +1288,9 @@ class PostgresqlDeviceManifestStore:
                     "resolved_source_locator_id": resolved_locator_id,
                     "resolved_source_tombstone_id": resolved_tombstone_id,
                     "match_kind": identity.match_kind.value,
+                    "submitted_policy_allowed": self._submitted_entry_is_allowed(
+                        revision, workspace_id, entry
+                    ),
                 }
             )
         return resolution_rows
@@ -1607,8 +1625,10 @@ class PostgresqlDeviceManifestStore:
                 known_version_id=row.known_version_id,
                 submitted_fingerprint=submitted,
                 known_base_fingerprint=trusted_base,
-                is_policy_allowed=self._submitted_subject_is_allowed(
-                    revision, workspace_id, submitted
+                is_policy_allowed=(
+                    row.submitted_policy_allowed
+                    if row.submitted_policy_allowed is not None
+                    else self._submitted_subject_is_allowed(revision, workspace_id, submitted)
                 ),
                 match_kind=ManifestMatchKind(str(row.match_kind)),
                 resolved_source_id=row.resolved_source_id,
@@ -1748,6 +1768,33 @@ class PostgresqlDeviceManifestStore:
             source_type=None,
             media_type=self._media_type(submitted.media_type),
             size_bytes=submitted.size_bytes,
+        )
+        outcome = evaluate_policy(revision=revision, subject=subject)
+        return outcome.enforced is EnforcedPolicyDecision.ALLOWED
+
+    def _submitted_entry_is_allowed(
+        self,
+        revision: ExclusionPolicyRevision,
+        workspace_id: UUID,
+        entry: ManifestEntry,
+    ) -> bool:
+        """The append-time decision: the entry's raw locator is still in
+        memory here, so locator-class rules evaluate against the submitted
+        path. Only the boolean verdict persists — never the locator text.
+
+        The run's bound revision is immutable for the run's lifetime, so the
+        recorded verdict stays valid at finalize; the legacy
+        :meth:`_submitted_subject_is_allowed` remains the fallback for
+        resolution rows persisted before this decision existed.
+        """
+
+        subject = PolicySubject(
+            workspace_id=workspace_id,
+            source_id=entry.known_source_id,
+            normalized_locator=entry.normalized_locator.value,
+            source_type=None,
+            media_type=self._media_type(entry.fingerprint.media_type),
+            size_bytes=entry.fingerprint.size_bytes,
         )
         outcome = evaluate_policy(revision=revision, subject=subject)
         return outcome.enforced is EnforcedPolicyDecision.ALLOWED

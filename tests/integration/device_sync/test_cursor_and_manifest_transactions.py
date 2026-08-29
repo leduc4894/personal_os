@@ -889,6 +889,7 @@ class ManifestStoreHarness:
                         manifest_entry_resolutions.c.locator_evidence_digest,
                         manifest_entry_resolutions.c.resolved_source_id,
                         manifest_entry_resolutions.c.resolved_source_locator_id,
+                        manifest_entry_resolutions.c.submitted_policy_allowed,
                     )
                     .where(manifest_entry_resolutions.c.manifest_run_id == manifest_run_id)
                     .order_by(
@@ -1492,6 +1493,54 @@ async def test_finalize_materializes_the_deterministic_action_plan(
     assert absent_download.checkpoint_locator == NormalizedLocator(ABSENT_LOCATOR)
     # The policy-forbidden canonical source absent locally plans no action.
     assert all(action.source_id != population.forbidden_source.source_id for action in page.actions)
+
+
+@pytest.mark.asyncio
+async def test_locator_class_rule_uses_append_time_decision_for_unowned_uploads(
+    manifest_store: ManifestStoreHarness,
+) -> None:
+    """An unowned upload keeps its append-time policy verdict at finalize.
+
+    A locator-class rule can only evaluate while the submitted locator is
+    still in memory (append): a run lacking that append-time decision falls
+    back to the legacy finalize-time subject, where any locator-class rule
+    goes indeterminate and enforced-excluded. Only the boolean verdict
+    persists — never the locator text."""
+
+    workspace = await seed_device_sync_workspace(manifest_store.engine)
+    await publish_workspace_policy(
+        manifest_store.engine,
+        workspace,
+        rules=(SeededPolicyRule(rule_kind="folder_prefix", text_operand="private"),),
+    )
+    context = workspace.context()
+    run = await manifest_store.start(context)
+    entries = (
+        manifest_entry(
+            "entry-allowed", locator="journal/note.md", observed=fingerprint("append-time-allowed")
+        ),
+        manifest_entry(
+            "entry-denied", locator="private/secret.md", observed=fingerprint("append-time-denied")
+        ),
+    )
+    page_digest = _digest("append-time-policy-page-0")
+    await manifest_store.append_page(
+        context, run.manifest_run_id, page_number=0, entries=entries, page_digest=page_digest
+    )
+    final_digest = ContentDigest.parse(
+        compute_manifest_final_digest(((0, len(entries), page_digest.hexadecimal),))
+    )
+    await manifest_store.finalize(
+        context, run.manifest_run_id, total_entry_count=len(entries), final_digest=final_digest
+    )
+    resolutions = await manifest_store.resolution_rows(run.manifest_run_id)
+    decisions = {row.local_entry_id: row.submitted_policy_allowed for row in resolutions}
+    assert decisions["entry-allowed"] is True
+    assert decisions["entry-denied"] is False
+    page = await manifest_store.read_actions(context, run.manifest_run_id, limit=200)
+    kinds = {action.local_entry_id: action.action_kind for action in page.actions}
+    assert kinds["entry-allowed"] is ManifestActionKind.UPLOAD
+    assert kinds["entry-denied"] is ManifestActionKind.EXCLUDED
 
 
 @pytest.mark.asyncio
