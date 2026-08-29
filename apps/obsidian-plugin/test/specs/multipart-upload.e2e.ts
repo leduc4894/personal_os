@@ -1276,14 +1276,54 @@ describe("multipart upload acceptance: interruption/resume, corruption refusal, 
       POLICY_FIXTURE_TOTAL_BYTES,
     );
     recordLiveDiagnostics({ policyRowStage: 3 });
-    await waitForJournalEvidence(
-      policyFixtureNotePath,
-      (evidence) =>
-        evidence.progress !== null && evidence.progress.completedPartCount >= 0,
-      "policy-fixture transfer never opened its multipart session",
-      180,
-      500,
-    );
+    // The fresh renderer can drop the vault-watcher event for a large
+    // Node-side write while its initial device-sync apply burst is still
+    // draining (observed live: no journal event and no session ever
+    // appear). Re-fire the identical write, but only while the journal
+    // still shows NO event for the fixture path — a captured event is
+    // never duplicated, because this row's journal count assertions are
+    // exact — and only inside a closed attempt bound.
+    const POLICY_CAPTURE_MAX_ATTEMPTS = 3;
+    let policyCaptureRefireCount = 0;
+    for (
+      let policyCaptureAttempt = 1;
+      ;
+      policyCaptureAttempt += 1
+    ) {
+      if (policyCaptureAttempt > POLICY_CAPTURE_MAX_ATTEMPTS) {
+        throw new Error("policy-fixture transfer never opened its multipart session");
+      }
+      try {
+        await waitForJournalEvidence(
+          policyFixtureNotePath,
+          (evidence) =>
+            evidence.progress !== null && evidence.progress.completedPartCount >= 0,
+          "policy-fixture watcher capture was lost",
+          60,
+          1_000,
+        );
+        break;
+      } catch (captureError) {
+        const interim = await readJournalEvidence(policyFixtureNotePath).catch(() => null);
+        const captureExists =
+          interim !== null &&
+          (interim.progress !== null ||
+            interim.counts.pendingCount > 0 ||
+            interim.counts.committedCount > 0 ||
+            interim.counts.excludedPolicyCount > 0);
+        if (captureExists || policyCaptureAttempt === POLICY_CAPTURE_MAX_ATTEMPTS) {
+          throw captureError;
+        }
+        writeFixtureNote(
+          fixtureVaultRoot,
+          policyFixtureNotePath,
+          policyFixtureNotePath,
+          POLICY_FIXTURE_TOTAL_BYTES,
+        );
+        policyCaptureRefireCount += 1;
+        recordLiveDiagnostics({ policyCaptureRefireCount });
+      }
+    }
     recordLiveDiagnostics({ policyRowStage: 4 });
     const deniedRevision = await publishPreparedPolicy(
       adminSessionCookies,

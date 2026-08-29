@@ -136,6 +136,31 @@ def test_wdio_journey_never_logs_wire_transfer_material() -> None:
         assert re.search(pattern, document) is None, pattern
 
 
+def test_wdio_journey_refires_a_lost_policy_capture_within_a_bound() -> None:
+    """The policy row must survive a dropped vault-watcher event.
+
+    Two live verification rounds lost the policy fixture's watcher event
+    while the fresh renderer drained its initial device-sync apply burst:
+    no journal event ever appeared and the row timed out. The journey must
+    detect the lost capture (journal shows no event for the fixture path)
+    and re-fire the identical write inside a closed attempt bound, while
+    never re-firing once any event for the path exists (the row's journal
+    count assertions are exact).
+    """
+    document = read_text(WDIO_SPEC_PATH)
+    assert "POLICY_CAPTURE_MAX_ATTEMPTS" in document
+    assert "policyCaptureRefireCount" in document
+    # The re-fire gate must consult every closed count surface the journal
+    # exposes for the fixture path, so a captured event is never duplicated.
+    for guard_marker in (
+        "interim.progress !== null",
+        "interim.counts.pendingCount > 0",
+        "interim.counts.committedCount > 0",
+        "interim.counts.excludedPolicyCount > 0",
+    ):
+        assert guard_marker in document, guard_marker
+
+
 def test_phase_status_support_and_bootstrap_accept_the_journey_codes() -> None:
     support_document = read_text(PHASE_STATUS_SUPPORT_PATH)
     bootstrap_document = read_text(BOOTSTRAP_TOOL_PATH)
