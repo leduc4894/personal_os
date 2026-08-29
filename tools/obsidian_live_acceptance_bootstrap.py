@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import FrozenInstanceError, dataclass
 from pathlib import Path
 from typing import Final, Protocol, TextIO, cast
 from uuid import UUID
@@ -173,11 +173,34 @@ class LiveAcceptanceConfig:
     keep_wdio_phase_status: bool = False
 
 
-@dataclass(frozen=True, slots=True)
+_EXCEPTION_BOOKKEEPING_FIELDS: Final[frozenset[str]] = frozenset(
+    {"__traceback__", "__cause__", "__context__", "__suppress_context__", "__notes__"}
+)
+
+
 class LiveAcceptanceFailure(Exception):
-    """Closed failure whose result code contains no provider-owned text."""
+    """Closed failure whose result code contains no provider-owned text.
+
+    Hand-rolled immutability instead of a frozen dataclass: Python 3.14's
+    context machinery assigns exception bookkeeping fields while a failure
+    propagates through ``with`` blocks, and a frozen dataclass turns that
+    into ``FrozenInstanceError`` instead of raising the failure itself.
+    ``__setattr__`` allows exactly those bookkeeping fields.
+    """
 
     result_code: str
+
+    def __init__(self, result_code: str) -> None:
+        object.__setattr__(self, "result_code", result_code)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in _EXCEPTION_BOOKKEEPING_FIELDS:
+            object.__setattr__(self, name, value)
+            return
+        raise FrozenInstanceError(f"cannot assign to field {name!r}")
+
+    def __repr__(self) -> str:
+        return f"LiveAcceptanceFailure(result_code={self.result_code!r})"
 
 
 HttpClientFactory = Callable[[], httpx.Client]

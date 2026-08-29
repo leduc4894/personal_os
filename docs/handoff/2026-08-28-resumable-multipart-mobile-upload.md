@@ -144,3 +144,23 @@ server-side reuse detection tombstoning a healthy credential.
 in-flight rotation; exactly one transport refresh, TDD-proven: RED double-call
 → GREEN joined). Auth/queue suites 240/240; full suite green modulo the
 documented standalone-passing timing flake. BACKLOG row removed.
+
+**`poe verify` flake also fixed (same day):** root causes were threefold, all
+real. (1) The plugin files that spawn real subprocesses / wait on real timers
+/ scan whole modules exceeded vitest's default 5 s per-test timeout under
+parallel coverage on a loaded machine — five files now carry an explicit
+`testTimeout: 30_000` (wall-clock headroom only; no assertion weakened).
+(2) A genuine Python 3.14 bug in the repo: frozen-dataclass exceptions
+(`StackFailure`, `LiveAcceptanceFailure`) crash with `FrozenInstanceError`
+instead of propagating whenever they cross a generator context manager, because
+contextlib assigns `__traceback__` on 3.14 — reproduced in isolation; both
+classes are now hand-rolled immutable exceptions whose `__setattr__` allows
+exactly the exception-bookkeeping fields (regression-tested). (3) A transient
+Windows `Popen` refusal under load aborted `run_command`; it now retries the
+spawn once (bounded; persistent outage still surfaces
+`subprocess_unavailable` after exactly two attempts — tested). Evidence:
+`uv run poe verify` exit 0 end-to-end (plugin 56 files / 1228 tests green
+under coverage, python suites green, contract/type/lint/build gates green).
+A latent TS error in the token-session test (missed earlier because the gate
+piped through `tail`, swallowing the exit code) was also fixed. BACKLOG row
+removed.

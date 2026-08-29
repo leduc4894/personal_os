@@ -33,12 +33,13 @@ import secrets
 import shutil
 import tempfile
 from collections.abc import AsyncIterable, Callable, Iterator
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from types import MappingProxyType
-from typing import AbstractAsyncContextManager, Any, Final
+from typing import Any, Final
 from uuid import UUID, uuid4
 
 import httpx

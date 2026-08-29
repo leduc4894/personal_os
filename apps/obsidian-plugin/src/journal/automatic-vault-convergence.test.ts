@@ -50,6 +50,13 @@ import type { LifecycleBlockedReasonCode } from "./status";
 import { createJournalSyncApi } from "./sync-api";
 import type { SyncHttpRequest } from "./sync-api";
 
+// Parallel-coverage headroom: this file's tests
+// wait on real watcher timers, which inflates well past the 5 s default when the full
+// suite runs `vitest run --coverage` on a loaded machine (observed:
+// "Test timed out in 5000ms" with every test passing standalone). The
+// raised bound is wall-clock headroom only — no assertion is weakened.
+vi.setConfig({ testTimeout: 30_000 });
+
 // --- the engine and the durable journal directory ---------------------------------------------
 
 let engineModule: import("./sqlite-database").SqliteEngineModule;

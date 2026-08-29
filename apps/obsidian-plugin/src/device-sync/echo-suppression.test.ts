@@ -14,7 +14,7 @@
 
 import { readFileSync } from "node:fs";
 import initSqlJs from "sql.js";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi} from "vitest";
 
 import type { FrozenFingerprint } from "../journal/contracts";
 import { JOURNAL_SCHEMA_VERSION, SqliteDatabase } from "../journal/sqlite-database";
@@ -23,6 +23,13 @@ import type { EchoMarker, VaultObservation } from "./contracts";
 import { createEchoSuppressor } from "./echo-suppression";
 import type { EchoSuppressor } from "./echo-suppression";
 import { DeviceSyncRepository } from "./repository";
+
+// Parallel-coverage headroom: this file's tests
+// load and scan whole modules, which inflates well past the 5 s default when the full
+// suite runs `vitest run --coverage` on a loaded machine (observed:
+// "Test timed out in 5000ms" with every test passing standalone). The
+// raised bound is wall-clock headroom only — no assertion is weakened.
+vi.setConfig({ testTimeout: 30_000 });
 
 /** The real sql.js WebAssembly engine drives every suppression test (spec 6.1). */
 let engineModule: SqliteEngineModule;

@@ -2,8 +2,15 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi} from "vitest";
 import { runFromE2eRepositoryRoot } from "../test/support/repository-subprocess";
+
+// Parallel-coverage headroom: this file's tests
+// spawn real subprocesses, which inflates well past the 5 s default when the full
+// suite runs `vitest run --coverage` on a loaded machine (observed:
+// "Test timed out in 5000ms" with every test passing standalone). The
+// raised bound is wall-clock headroom only — no assertion is weakened.
+vi.setConfig({ testTimeout: 30_000 });
 
 const temporaryDirectories: string[] = [];
 

@@ -18,7 +18,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import asdict, dataclass
+from dataclasses import FrozenInstanceError, asdict, dataclass
 from dataclasses import field as dataclass_field
 from datetime import date
 from enum import IntEnum, StrEnum
@@ -129,12 +129,37 @@ class StackExitCode(IntEnum):
     READINESS = 75
 
 
-@dataclass(frozen=True, slots=True)
+_EXCEPTION_BOOKKEEPING_FIELDS: Final[frozenset[str]] = frozenset(
+    {"__traceback__", "__cause__", "__context__", "__suppress_context__", "__notes__"}
+)
+
+
 class StackFailure(Exception):
-    """A safe lifecycle failure that carries no raw dependency detail."""
+    """A safe lifecycle failure that carries no raw dependency detail.
+
+    Hand-rolled immutability instead of a frozen dataclass: Python 3.14's
+    context machinery assigns exception bookkeeping fields (``__traceback__``
+    and friends) while a failure propagates through ``with`` blocks, and a
+    frozen dataclass turns that bookkeeping into ``FrozenInstanceError``,
+    replacing the failure itself with a crash. ``__setattr__`` allows exactly
+    those bookkeeping fields and rejects every field mutation.
+    """
 
     exit_code: StackExitCode
     result_code: str
+
+    def __init__(self, exit_code: StackExitCode, result_code: str) -> None:
+        object.__setattr__(self, "exit_code", exit_code)
+        object.__setattr__(self, "result_code", result_code)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in _EXCEPTION_BOOKKEEPING_FIELDS:
+            object.__setattr__(self, name, value)
+            return
+        raise FrozenInstanceError(f"cannot assign to field {name!r}")
+
+    def __repr__(self) -> str:
+        return f"StackFailure(exit_code={self.exit_code!r}, result_code={self.result_code!r})"
 
     def __str__(self) -> str:
         return self.result_code
@@ -956,14 +981,23 @@ def run_command(
     clean_environment.update({variable: str(port) for variable, port in effective_ports.items()})
 
     process: subprocess.Popen[bytes] | None = None
-    with suppress(OSError, ValueError):
-        process = subprocess.Popen(
-            list(arguments),
-            shell=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=clean_environment,
-        )
+    for _spawn_attempt in range(2):
+        with suppress(OSError, ValueError):
+            process = subprocess.Popen(
+                list(arguments),
+                shell=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=clean_environment,
+            )
+        if process is not None:
+            break
+        # One bounded retry: Windows can transiently refuse a spawn under
+        # heavy parallel load (pipe-buffer pressure); the second failure
+        # still surfaces as subprocess_unavailable, so a real outage is
+        # never masked.
+        if _spawn_attempt == 0:
+            time.sleep(0.25)
     if process is None:
         raise StackFailure(StackExitCode.PREREQUISITE, "subprocess_unavailable")
 

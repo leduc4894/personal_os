@@ -6,6 +6,8 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any, cast
@@ -915,6 +917,75 @@ def test_run_command_truncates_captured_output() -> None:
     assert result.return_code == 0
     assert len(result.stdout.encode("utf-8")) == 8192
     assert len(result.stderr.encode("utf-8")) == 8192
+
+
+def test_stack_failure_propagates_cleanly_through_context_managers() -> None:
+    """Python 3.14 regression: frozen exceptions must survive `with` blocks.
+
+    The context machinery assigns ``__traceback__`` (and friends) while an
+    exception propagates through a generator context manager; a plain frozen
+    dataclass turns that bookkeeping into ``FrozenInstanceError`` and the
+    closed failure itself is lost. Raised inside ``with`` blocks on a loaded
+    machine, ``StackFailure`` must still arrive as ``StackFailure``.
+    """
+
+    @contextmanager
+    def probe() -> Iterator[None]:
+        yield
+
+    with pytest.raises(StackFailure, match="invalid_command"), probe():
+        raise StackFailure(StackExitCode.CLI, "invalid_command")
+
+
+def test_stack_failure_still_rejects_field_mutation() -> None:
+    failure = StackFailure(StackExitCode.CLI, "invalid_command")
+
+    with pytest.raises(FrozenInstanceError):
+        failure.result_code = "mutated"
+
+
+def test_run_command_retries_one_transient_spawn_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single transient Windows spawn refusal must not fail the command.
+
+    Under heavy parallel load the OS can refuse one ``Popen`` (pipe-buffer
+    pressure); the bounded single retry keeps the capture contract while a
+    persistent outage still surfaces as ``subprocess_unavailable`` after
+    exactly two attempts.
+    """
+
+    real_popen = subprocess.Popen
+    spawn_attempts: list[int] = []
+
+    def flaky_popen(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+        spawn_attempts.append(1)
+        if len(spawn_attempts) == 1:
+            raise OSError("transient pipe-buffer pressure")
+        # String cast: the subscript must not evaluate at runtime, where
+        # subprocess.Popen is monkeypatched to this plain function.
+        return cast("subprocess.Popen[bytes]", real_popen(*args, **kwargs))
+
+    monkeypatch.setattr(subprocess, "Popen", flaky_popen)
+    result = run_command(
+        [sys.executable, "-c", "print('recovered')"],
+        timeout_seconds=5.0,
+    )
+
+    assert result.return_code == 0
+    assert "recovered" in result.stdout
+    assert len(spawn_attempts) == 2
+
+
+def test_run_command_surfaces_subprocess_unavailable_after_two_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def refusing_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        raise OSError("persistent")
+
+    monkeypatch.setattr(subprocess, "Popen", refusing_popen)
+    with pytest.raises(StackFailure, match="subprocess_unavailable"):
+        run_command([sys.executable, "-c", "print('never')"], timeout_seconds=5.0)
 
 
 _RUNTIME_SERVICES = (

@@ -331,11 +331,13 @@ describe("DeviceTokenSession concurrent refresh single-flight (bare-reload race)
     // can trip server-side reuse detection and tombstone a healthy
     // credential; the session must join the in-flight promise instead.
     const harness = createSessionHarness();
-    let releaseFirstRefresh: ((value: typeof SUCCESSOR) => void) | null = null;
+    const firstRefreshGate: {
+      resolve: ((value: typeof SUCCESSOR) => void) | null;
+    } = { resolve: null };
     harness.transport.refresh.mockImplementationOnce(
       () =>
         new Promise<typeof SUCCESSOR>((resolve) => {
-          releaseFirstRefresh = resolve;
+          firstRefreshGate.resolve = resolve;
         }),
     );
     harness.transport.refresh.mockImplementationOnce(async () => ({
@@ -346,7 +348,7 @@ describe("DeviceTokenSession concurrent refresh single-flight (bare-reload race)
     const startupRefresh = harness.session.refresh();
     const queueRefresh = harness.session.refresh();
     expect(harness.transport.refresh).toHaveBeenCalledTimes(1);
-    releaseFirstRefresh?.(SUCCESSOR);
+    firstRefreshGate.resolve?.(SUCCESSOR);
     await Promise.all([startupRefresh, queueRefresh]);
 
     expect(harness.transport.refresh).toHaveBeenCalledTimes(1);
