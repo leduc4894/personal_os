@@ -115,6 +115,32 @@ describe("PolicyStatus", () => {
     expect(screen.queryByText(/signed by key/i)).not.toBeInTheDocument();
   });
 
+  it("renders one health row per stale running preview with its age in minutes", () => {
+    render(
+      <PolicyStatus
+        status={statusData({
+          stale_running_previews: [
+            {
+              age_seconds: 1140,
+              policy_preview_id: "b7c1d2e3-4f5a-4b6c-8d7e-9f0a1b2c3d4e",
+              reason: "worker_stale_running",
+            },
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(screen.getByText(/b7c1d2e3-4f5a-4b6c-8d7e-9f0a1b2c3d4e/)).toBeInTheDocument();
+    expect(screen.getByText(/worker stale running/i)).toBeInTheDocument();
+    expect(screen.getByText(/19 min/i)).toBeInTheDocument();
+    expect(screen.getByText(/No live policy worker has swept these previews/)).toBeInTheDocument();
+  });
+
+  it("renders no worker-health block while nothing is stale", () => {
+    render(<PolicyStatus status={statusData()} />);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("renders only closed metadata and never rule or secret material", () => {
     const { container } = render(
       <PolicyStatus

@@ -88,16 +88,25 @@ export type PolicyEditorClient = PolicyStatusReading &
 
 /**
  * Mirrors the authentication client's transport failure body so every client
- * surface closes identically when the API cannot be reached.
+ * surface closes identically when the API cannot be reached. Shared with the
+ * sibling Admin clients; never duplicated per client.
  */
-const REQUEST_UNAVAILABLE_ERROR: ApiErrorBody = {
+export const REQUEST_UNAVAILABLE_ERROR: ApiErrorBody = {
   code: "internal_error",
   details: {},
   message: "The request could not be completed. Check your connection and try again.",
   retryable: true,
 };
 
-function unwrapEnvelope<T>(payload: { data?: unknown; error?: unknown }): AuthenticationCallResult<T> {
+/**
+ * Unwraps a route envelope onto the closed call-result shape: the route's
+ * data payload on success, its registered error body otherwise. Shared with
+ * the sibling Admin clients; never duplicated per client.
+ */
+export function unwrapEnvelope<T>(payload: {
+  data?: unknown;
+  error?: unknown;
+}): AuthenticationCallResult<T> {
   const envelope = (payload.data ?? payload.error ?? null) as
     | { data?: T | null; error?: ApiErrorBody | null }
     | null;

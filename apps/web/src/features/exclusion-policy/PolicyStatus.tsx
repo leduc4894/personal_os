@@ -54,6 +54,20 @@ export function PolicyStatus({ status, lastPublication = null }: PolicyStatusPro
           policy is published. Publishing the empty policy allows all current sources.
         </p>
       )}
+      {status.stale_running_previews !== null && (
+        <div role="alert" className="warning-message">
+          <h3>Preview worker health</h3>
+          <ul>
+            {status.stale_running_previews.map((preview) => (
+              <li key={preview.policy_preview_id}>
+                Preview <code>{preview.policy_preview_id}</code> — worker stale running for{" "}
+                {Math.round(preview.age_seconds / 60)} min
+              </li>
+            ))}
+          </ul>
+          <p>No live policy worker has swept these previews. Restart the policy workers.</p>
+        </div>
+      )}
       {lastPublication !== null && (
         <>
           <p>
