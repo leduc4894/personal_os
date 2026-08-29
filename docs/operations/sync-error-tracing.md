@@ -31,6 +31,11 @@ The operator surface is small and deliberately redacted:
   read `GET /api/admin/exclusion-policy` whose summary carries the
   reconciliation reason and the stale-running staleness block — all behind
   the strict Web Admin session gate.
+- Two **Web Admin UI surfaces** rendering those reads (2026-08-29): the
+  policy page's `PolicyStatus` preview-worker health block (one row per
+  stale preview with its age and restart guidance) and the
+  `/admin/lifecycle` page's lifecycle-operations card (commit counters
+  plus the recent rejection ring).
 - The worker **dispatch events** (`preview_dispatch_unavailable`,
   `reconciliation_dispatch_unavailable`) riding the structured logging
   boundary.
@@ -455,7 +460,13 @@ commit ever succeeded (deferred:
 [`BACKLOG.md`](../handoff/BACKLOG.md), source-lifecycle row). This route
 answers the server half of a typed 4xx that the plugin parks as
 `blocked_conflict`/`deferred_lifecycle`: the plugin trail names the
-outcome, this ring names the closed rejection reason.
+outcome, this ring names the closed rejection reason. The Web Admin UI
+renders it (2026-08-29): the `/admin/lifecycle` page shows the
+lifecycle-operations card — the commit counters and the recent
+rejection ring with formatted times, explicit empty states, and only the
+closed `error.code` on a failed read — through the authenticated Web
+Admin session, so the L1 readback no longer requires a raw endpoint
+call.
 
 ## Web Admin policy evaluation diagnostics
 
@@ -567,7 +578,13 @@ running forever" class included:
   worker is sweeping it. The read pages at the 16 oldest rows — more
   than 16 stuck rows render as the 16 oldest, with no truncation
   marker. Nothing is restarted or scheduled by this
-  surface; the operator decides.
+  surface; the operator decides. The Web Admin UI renders it (2026-08-29):
+  the policy page's `PolicyStatus` component carries a **Preview worker
+  health** alert block — one row per stale preview with its age in
+  minutes and the fixed restart guidance — whenever
+  `stale_running_previews` is non-null, so the operator reads the
+  staleness verdict directly from the Admin UI instead of a raw endpoint
+  call.
 
 Sanitized example (shape only):
 
@@ -578,10 +595,14 @@ Sanitized example (shape only):
 ```
 
 Worker file-sink note: the rotating sink is activated per process by the
-`KNOWLEDGE_DIAGNOSTICS_LOG_DIR` runtime setting — the worker launchers do
-not set it by default, so an operator who wants durable worker dispatch
-events gives each worker process its own diagnostics directory (never a
-shared directory; the sink rotates files under an exclusive lock).
+`KNOWLEDGE_DIAGNOSTICS_LOG_DIR` runtime setting — and the repository
+worker launcher (`.local/run-worker.sh`) now sets it automatically
+(2026-08-29): each worker role gets its own diagnostics directory
+(`.local/runtime-logs/worker-previews/`,
+`.local/runtime-logs/worker-reconciliations/`), so the W1 dispatch
+events land in durable rotating files by default on the local stack. One
+directory per process remains mandatory (never a shared directory; the
+sink rotates files under an exclusive lock).
 
 ## Object-storage busy reasons and CLI failure tokens
 
@@ -697,12 +718,15 @@ The remediation surfaces add one failure class each to the loop:
    preview dispatched, stop the preview worker and wait past the 15
    minute bound, then read the Admin policy status: the
    `stale_running_previews` block must carry `worker_stale_running` with
-   the row's age. Restart the worker afterwards; the rows converge or
-   fail closed on their own.
-3. **Lifecycle rejections (admin route).** After any typed lifecycle 4xx
-   (a locator conflict is the cheap trigger), read
-   `GET /api/admin/source-lifecycle/rejections` and match the ring's
-   `error_code` against the plugin trail's parked outcome.
+   the row's age — visible directly in the Web Admin policy page's
+   Preview worker health block. Restart the worker afterwards; the rows
+   converge or fail closed on their own.
+3. **Lifecycle rejections (admin surface).** After any typed lifecycle 4xx
+   (a locator conflict is the cheap trigger), read the lifecycle
+   rejections surface — the Web Admin `/admin/lifecycle` page, or
+   `GET /api/admin/source-lifecycle/rejections` behind the same session —
+   and match the ring's `error_code` against the plugin trail's parked
+   outcome.
 4. **Policy system failure (diagnostics route + rejection ring).**
    Temporarily point the signer at a broken key (or stop the policy
    worker), drive one content operation, then read

@@ -955,7 +955,66 @@ in `docs/handoff/BACKLOG.md` with a verifiable `Implement by` milestone.
 | Production operations | Prometheus exporter/sink and fleet dashboards |
 | Later retention work | Sync-event compaction execution and canonical GC |
 
-## 21. References
+## 21. Amendment (2026-08-29): child-8 unblock contract changes
+
+**Amendment (2026-08-29, child-8 unblock plan):** four contract changes
+landed with `docs/superpowers/plans/2026-08-29-device-sync-child8-unblock-and-smoke-round-prep-plan.md`
+(implementation commits `79884c7`..`99663ae`); everything else in this
+design is unchanged.
+
+1. `manifest_entry_resolutions.submitted_policy_allowed` — append-time
+   submitted-policy decision. When a manifest page is accepted, the
+   adapter evaluates the submitted subject against the run's bound
+   policy revision while the entry's raw normalized locator is still in
+   memory, and persists only the boolean verdict in the new nullable
+   column (migration `20260829_01`). Locator-class, `exact_source_id` and
+   `source_type` rules therefore work for entries that do not yet own a
+   source; previously the finalize-time evaluation had no locator
+   available and every such rule forced an indeterminate — enforced
+   `EXCLUDED` — verdict for every unowned upload. The run's bound
+   revision is immutable for the run's lifetime (append re-checks
+   staleness), so the recorded decision stays valid at finalize.
+   `NULL` means a legacy row appended before the migration and keeps the
+   finalize-time recomputation exactly as before. The section 6.4
+   discipline holds: the raw locator still never persists — only the
+   boolean does.
+2. New closed plugin recovery state `fresh_journal_reconcile_required`.
+   Rebuilding an empty journal now decides reconcile-first from journal
+   artifacts OR non-empty Vault content: a fresh journal over a
+   non-empty Vault records `fresh_journal_reconcile_required` with
+   `isReconcileRequired: true` and reconciles before any outbound
+   upload. This is the mobile full-deletion shape — deleting the entire
+   journal leaves neither a manifest nor a generation-1 file, which
+   previously misclassified as `fresh_journal_created` and let the
+   startup snapshot's create-storm settle `blocked_conflict` claims.
+   The rebuild-artifact probe also now recognizes ANY generation file
+   (`journal.sqlite.gN`), not only generation 1, because retention
+   deletes generation 1 once the third generation publishes. A
+   Vault-content probe that errors fails closed
+   (`journal_store_unavailable`): an unreadable Vault must never
+   masquerade as an empty one.
+3. `apply(event, { verifiedDownload })` — one verified download per
+   action. The plugin `RemoteEventApplier.apply` accepts an optional
+   options object; when the reconciler has already downloaded and
+   verified the action's bytes, it passes that same verified download
+   and the applier skips its own download, provided the declared
+   digest matches the event's current fingerprint (mismatch falls back
+   to the applier's own download). The digest proof and the applied
+   bytes are therefore the same object instead of two downloads whose
+   bytes could theoretically diverge. This one fix closes both review
+   findings named "double download per action" and
+   "digest-after-validation ordering".
+4. Outbound `blocked_conflict` repair barrier. When the queue driver
+   parks an upload terminally as `blocked_conflict` (for example the
+   create-time `source_locator_conflict` verdict), it now raises a
+   repair barrier with the existing closed reason
+   `device_manifest_target_occupied` — parity with every inbound
+   conflict lane, which already freeze observation and require
+   reconciliation, so the outbound lane must not keep uploading into a
+   claim it cannot see. An already-owed barrier or an active manifest
+   run is tolerated: a repair is already owed and nothing is raised.
+
+## 22. References
 
 - `docs/00-PRODUCT_VISION_AND_PRD.md`
 - `docs/01-CANONICAL_ARCHITECTURE.md`

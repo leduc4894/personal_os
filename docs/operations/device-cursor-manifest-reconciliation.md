@@ -32,6 +32,17 @@ of them — every failure mode failed closed. The standing no completion claim
 rule held until both records existed; with both gates now passed, the
 Child 6 completion claim is unlocked pending the final whole-branch review.
 
+Update (2026-08-29, child-8 unblock plan): four contract changes landed
+and are folded into the sections below — unowned manifest uploads are
+policy-evaluated at append (locator-class rules now work for them), a
+rebuilt journal over a non-empty Vault requires reconcile-first
+(including the mobile full-deletion shape), each download action uses
+exactly one verified download, and an outbound `blocked_conflict` park
+raises the `device_manifest_target_occupied` repair barrier. The design
+amendment (spec section 21) holds the exact contracts;
+`docs/handoff/2026-08-29-device-sync-child8-unblock-smoke-prep.md`
+records the evidence.
+
 ## The route set (operator reference)
 
 Eight authenticated routes serve the device (every one requires the active
@@ -84,6 +95,19 @@ vocabulary (`device_manifest_identity_ambiguous`,
 `device_manifest_action_stale`, `device_manifest_policy_excluded`) settles
 individual actions as conflict/excluded evidence and never fails the whole
 manifest request.
+
+Unowned uploads are policy-evaluated at append (2026-08-29 change). When
+a manifest page is accepted, the server evaluates the submitted subject
+against the run's bound policy revision while the entry's raw locator is
+still in memory, and persists only the boolean verdict
+(`manifest_entry_resolutions.submitted_policy_allowed`; migration
+`20260829_01`). Locator-class, `exact_source_id` and `source_type` rules
+therefore decide correctly for entries that do not yet own a source —
+before this change every such rule forced an indeterminate (enforced
+`EXCLUDED`) verdict at finalize because the locator was no longer
+available there. Rows appended before the migration keep `NULL` and
+recompute at finalize exactly as before. Only the boolean persists; the
+locator text never enters any `manifest_*` table.
 
 ## Cadence, cursors and the terminal-safe rule
 
@@ -193,6 +217,25 @@ For a manifest entry without a source ID the backend evaluates, in order:
 An entry that supplies a source ID must prove it belongs to the
 credential workspace; invalid or cross-workspace evidence fails closed and
 does not fall back to locator matching.
+
+Rebuild requires reconcile-first whenever the Vault has content
+(2026-08-29 change). The rebuilt journal records the closed recovery
+state `fresh_journal_reconcile_required` (with `isReconcileRequired:
+true`) when a fresh journal opens over a non-empty Vault, so
+reconciliation runs before any outbound upload can mint creates. This is
+the mobile full-deletion shape: deleting the entire journal leaves
+neither a manifest nor a generation-1 file, which previously
+misclassified as `fresh_journal_created` and let the outbound
+create-storm settle `blocked_conflict` claims — after which every local
+edit and remote update settled durable conflict and each restart
+re-admitted the claims and burned server sequences. The rebuild-artifact
+probe now recognizes ANY generation file (`journal.sqlite.gN`), not only
+generation 1, because retention deletes generation 1 once the third
+generation publishes. A Vault-content probe that errors fails closed
+(`journal_store_unavailable`) — an unreadable Vault must never masquerade
+as an empty one. Offline suite evidence verifies the fix; physical mobile
+re-verification rides the next mobile matrix (the standing Child 9
+mobile gates).
 
 ## Remote apply, crash recovery and local trash
 
