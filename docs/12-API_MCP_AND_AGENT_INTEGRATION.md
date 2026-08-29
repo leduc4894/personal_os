@@ -78,6 +78,35 @@ Mọi code đều terminal cho request kích hoạt ngoại lệ duy nhất:
 bounded rồi retry với cùng identity. Operator runbook của toàn bộ mặt
 đồng bộ thiết bị: `docs/operations/device-cursor-manifest-reconciliation.md`.
 
+### Multipart upload session routes (Child 7, spec 5)
+
+Năm route đã đăng ký, yêu cầu active `obsidian_sync` device Bearer
+credential (workspace/device derive từ credential), trả canonical envelope
+`no-store`; preflight của journal event trả `multipart_upload` cho file
+trên 16 MiB (đến 100 MiB) và route create bind đúng frozen event đó:
+
+| Route | Operation id |
+|---|---|
+| `POST /api/uploads/multipart-sessions` | `createMultipartUploadSession` |
+| `GET /api/uploads/multipart-sessions/{session_id}` | `getMultipartUploadSession` |
+| `POST /api/uploads/multipart-sessions/{session_id}/parts/{part_number}/url` | `issueMultipartPartUrl` |
+| `POST /api/uploads/multipart-sessions/{session_id}/complete` | `completeMultipartUploadSession` |
+| `POST /api/uploads/multipart-sessions/{session_id}/abort` | `abortMultipartUploadSession` |
+
+Part PUT đi thẳng tới presigned R2 URL (10 phút, đúng một part, đúng byte
+range, không credential header). Plan/status/completion chỉ mang opaque
+session ID, geometry, expiry, completed part numbers và (khi committed)
+frozen terminal result — không URL, key, provider identity, ETag hay
+digest. Closed error registry: khối `multipart_*` mười hai code
+(`multipart_session_not_found` 404, `multipart_session_expired` 410,
+`multipart_session_state_invalid` 409, `multipart_part_invalid` 422,
+`multipart_part_url_rejected` 503, `multipart_provider_state_invalid` 422,
+`multipart_completion_in_progress` 409, `multipart_integrity_failed` 422,
+`multipart_policy_denied` 403, `multipart_cleanup_failed` 503,
+`multipart_local_content_changed` 409,
+`multipart_dependency_unavailable` 503). Operator
+runbook: `docs/operations/resumable-multipart-upload.md`.
+
 ## 3. Response envelope
 
 ```json

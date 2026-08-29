@@ -163,17 +163,17 @@ def _script_directory() -> ScriptDirectory:
 
 
 def test_alembic_graph_has_exactly_one_head_at_the_policy_revision() -> None:
-    # The device sync revisions ``20260826_01`` and ``20260826_02`` stack on
-    # the source-locator and tombstone revision ``20260820_01``, which stacks
-    # on the small-file sync revision ``20260818_01``, so the single graph
-    # head moved past the policy revision.
-    assert _script_directory().get_heads() == ["20260826_02"]
+    # The device sync, device manifest and multipart revisions stack on the
+    # source-locator and tombstone revision ``20260820_01``, which stacks on
+    # the small-file sync revision ``20260818_01``, so the single graph head
+    # moved past the policy revision.
+    assert _script_directory().get_heads() == ["20260828_04"]
 
 
 def test_policy_revision_stacks_on_the_child_2_head() -> None:
     script_directory = _script_directory()
     revisions = list(script_directory.walk_revisions())
-    assert len(revisions) == 7
+    assert len(revisions) == 12
     policy = script_directory.get_revision(POLICY_REVISION)
     assert policy is not None
     assert policy.down_revision == CHILD_2_HEAD_REVISION

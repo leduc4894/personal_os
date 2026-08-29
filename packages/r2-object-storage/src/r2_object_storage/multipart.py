@@ -507,9 +507,7 @@ class R2MultipartStagingProvider:
                     ),
                 )
             except ApplicationError as cause:
-                self._record_failed(
-                    operation, cause, started=started, attempt_count=tracker.count
-                )
+                self._record_failed(operation, cause, started=started, attempt_count=tracker.count)
                 raise
             body = self._streaming_body(response)
             self._record_succeeded(operation, started=started, attempt_count=tracker.count)

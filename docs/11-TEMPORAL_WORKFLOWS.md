@@ -40,6 +40,17 @@ Tạo proposal, chờ signal approve/reject/expire, revalidate policy/base versi
 
 Đánh dấu candidates, chờ grace period, recheck references/holds rồi xóa exact objects/deployments.
 
+### MultipartCleanupWorkflow
+
+Drain các exact-cleanup obligation đến hạn của multipart upload sessions
+(child 7, worker command `run-multipart-cleanup`): strike các session quá
+24-giờ deadline, lease batch ≤100 qua `FOR UPDATE SKIP LOCKED`, mỗi batch
+là một activity idempotent abort provider upload + delete exact staging key
+của đúng session đó (không list, không wildcard), continue-as-new theo batch
+count, heartbeat counters đóng; thất bại ghi closed reason
+(`multipart_cleanup_failed`/`multipart_dependency_unavailable`) với bounded
+retry deadline trên row, stale lease fail-closed.
+
 ### BackupVerificationWorkflow
 
 Tạo manifest, verify checksums và định kỳ restore vào disposable environment.

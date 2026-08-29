@@ -151,9 +151,7 @@ class TestSessionReservationReplay:
         device_context = await harness.seed_device()
         seeded = await harness.seed_operation(device_context, now=_now(harness))
 
-        records = await asyncio.gather(
-            *(harness.reserve(seeded, device_context) for _ in range(6))
-        )
+        records = await asyncio.gather(*(harness.reserve(seeded, device_context) for _ in range(6)))
 
         assert len({record.session_id.value for record in records}) == 1
         assert await harness.session_count(device_context.workspace_id) == 1
@@ -729,9 +727,7 @@ class TestExpirySweepAndCleanup:
         interim_claims = await harness.store.claim_cleanup_batch(
             batch_limit=25, diagnostic_context=diagnostic_context()
         )
-        assert record.session_id not in {
-            claim.session.session_id for claim in interim_claims
-        }
+        assert record.session_id not in {claim.session.session_id for claim in interim_claims}
         clock.advance(timedelta(seconds=MULTIPART_CLEANUP_RETRY_BASE_SECONDS + 1))
         second_claims = [
             claim
@@ -811,15 +807,11 @@ class TestQueryPlans:
             plans = {
                 "session_lookup": await _explain(
                     connection,
-                    multipart_session_select_statement(
-                        probe_session_id, for_update=False
-                    ),
+                    multipart_session_select_statement(probe_session_id, for_update=False),
                 ),
                 "operation_lookup": await _explain(
                     connection,
-                    multipart_operation_select_statement(
-                        probe_operation_id, for_update=False
-                    ),
+                    multipart_operation_select_statement(probe_operation_id, for_update=False),
                 ),
                 "expiry_sweep": await _explain(
                     connection, expiry_sweep_select_statement(now=sweep_now, batch_limit=25)
@@ -836,8 +828,7 @@ class TestQueryPlans:
             )
             assert index_names, f"{query_name} touched no shipped index"
             assert index_names <= _APPROVED_INDEX_NAMES, (
-                f"{query_name} touched unapproved indexes: "
-                f"{index_names - _APPROVED_INDEX_NAMES}"
+                f"{query_name} touched unapproved indexes: {index_names - _APPROVED_INDEX_NAMES}"
             )
         assert "ix_multipart_uploads__expiry_sweep" in _plan_summary(plans["expiry_sweep"])[1]
         assert "ix_multipart_uploads__cleanup_claim" in _plan_summary(plans["cleanup_claim"])[1]
@@ -886,9 +877,7 @@ async def _populate_sessions_for_plans(
             }
         )
         is_overdue_forward = index < _EXPIRED_FORWARD_ROWS
-        is_cleanup_due = (
-            _EXPIRED_FORWARD_ROWS <= index < _EXPIRED_FORWARD_ROWS + _CLEANUP_DUE_ROWS
-        )
+        is_cleanup_due = _EXPIRED_FORWARD_ROWS <= index < _EXPIRED_FORWARD_ROWS + _CLEANUP_DUE_ROWS
         is_committed = not is_overdue_forward and not is_cleanup_due
         session_rows.append(
             {
@@ -924,9 +913,7 @@ async def _populate_sessions_for_plans(
                 # The cleanup-shape CHECK pins an open obligation to at
                 # least one scheduled attempt.
                 "cleanup_attempt_count": 1 if is_cleanup_due else 0,
-                "cleanup_next_retry_at": (
-                    now - timedelta(minutes=1) if is_cleanup_due else None
-                ),
+                "cleanup_next_retry_at": (now - timedelta(minutes=1) if is_cleanup_due else None),
                 "cleanup_reason_code": None,
                 "expires_at": (
                     now - timedelta(hours=1) if is_overdue_forward else now + timedelta(hours=1)

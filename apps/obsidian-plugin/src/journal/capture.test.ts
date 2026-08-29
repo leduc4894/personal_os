@@ -5,7 +5,11 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { CapturePolicySubject } from "../exclusion-policy/policy-session";
 import { createEchoSuppressor } from "../device-sync/echo-suppression";
 import type { JournalMeta } from "./contracts";
-import { FILE_SETTLE_DELAY_MS, MAX_FILE_SIZE_BYTES } from "./contracts";
+import {
+  FILE_SETTLE_DELAY_MS,
+  MAX_FILE_SIZE_BYTES,
+  MAX_MULTIPART_FILE_SIZE_BYTES,
+} from "./contracts";
 import { deriveFrozenFingerprint } from "./fingerprint";
 import {
   EXISTING_FILES_SCAN_BATCH_FILES,
@@ -444,7 +448,7 @@ describe("JournalCapture settle admission (spec 7.1, 9)", () => {
     expect(harness.repository.readLocalFileByPath("notes")).toBeNull();
   });
 
-  it("admits a regular file of exactly 16 MiB and blocks one byte over", async () => {
+  it("admits files through the multipart ceiling and blocks only above it", async () => {
     useSettleFakeTimers();
     const harness = createHarness();
     harness.vault.setFileBytes("notes/at-limit.bin", new Uint8Array(MAX_FILE_SIZE_BYTES));
@@ -452,18 +456,33 @@ describe("JournalCapture settle admission (spec 7.1, 9)", () => {
       "notes/one-over.bin",
       new Uint8Array(MAX_FILE_SIZE_BYTES + 1),
     );
+    harness.vault.setFileBytes(
+      "notes/multipart-range.bin",
+      new Uint8Array(MAX_MULTIPART_FILE_SIZE_BYTES),
+    );
+    harness.vault.setFileBytes(
+      "notes/over-ceiling.bin",
+      new Uint8Array(MAX_MULTIPART_FILE_SIZE_BYTES + 1),
+    );
     harness.capture.notifyPathChanged("notes/at-limit.bin");
     harness.capture.notifyPathChanged("notes/one-over.bin");
+    harness.capture.notifyPathChanged("notes/multipart-range.bin");
+    harness.capture.notifyPathChanged("notes/over-ceiling.bin");
 
     await settlePastDelay(harness);
 
+    // Above 16 MiB the preflight server routes the frozen event into the
+    // multipart transport (child 7 spec 4), so every observation through the
+    // 100 MiB product ceiling is ordinary pending intent.
     expect(soleEventOf(harness, "notes/at-limit.bin").state).toBe("queued");
-    const blockedEvent = soleEventOf(harness, "notes/one-over.bin");
+    expect(soleEventOf(harness, "notes/one-over.bin").state).toBe("queued");
+    expect(soleEventOf(harness, "notes/multipart-range.bin").state).toBe("queued");
+    const blockedEvent = soleEventOf(harness, "notes/over-ceiling.bin");
     expect(blockedEvent.state).toBe("blocked_size");
     expect(blockedEvent.safeError).toBe("blocked_size");
     expect(blockedEvent.nextEligibleRetryEpochMs).toBeNull();
-    // Only the allowed observation still owes work.
-    expect(harness.repository.countPendingEvents()).toBe(1);
+    // Only the admitted observations still owe work.
+    expect(harness.repository.countPendingEvents()).toBe(3);
   });
 
   it("records excluded and indeterminate policy outcomes as excluded_policy", async () => {
@@ -695,7 +714,7 @@ describe("JournalCapture existing-files scan (spec 7.1)", () => {
     harness.vault.setFileBytes("notes/b.md", bytesOf("denied"));
     harness.vault.setFileBytes(
       "notes/over.bin",
-      new Uint8Array(MAX_FILE_SIZE_BYTES + 1),
+      new Uint8Array(MAX_MULTIPART_FILE_SIZE_BYTES + 1),
     );
 
     const summary = await scanOf(harness, true);

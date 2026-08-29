@@ -17,8 +17,23 @@
 
 // --- frozen limits (spec 3.1, 6.4, 7.1) -----------------------------------------------
 
-/** Hard ceiling on one regular uploaded file: 16 MiB (spec 3.1). */
+/**
+ * Hard ceiling on one single-part uploaded file: 16 MiB (spec 3.1). A
+ * larger admitted observation routes to the server-owned multipart
+ * transport at preflight (child 7 spec 4), so this constant bounds only
+ * the single-part lane; the admission gate below is the product maximum.
+ */
 export const MAX_FILE_SIZE_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Product admission ceiling on one regular uploaded file: 100 MiB (child 7
+ * spec 4). An observation above 16 MiB and at or below this ceiling is
+ * admitted as ordinary journal intent — its preflight routes into the
+ * multipart session endpoints — while one byte above stays born-terminal
+ * `blocked_size` exactly as before. Mirrors the server constant
+ * `MAX_UPLOAD_FILE_SIZE_BYTES` (src/personal_os/small_file_sync/contracts.py).
+ */
+export const MAX_MULTIPART_FILE_SIZE_BYTES = 100 * 1024 * 1024;
 
 /** Soft ceiling on pending journal events: 10,000 rows (spec 6.4). */
 export const MAX_PENDING_EVENTS = 10_000;

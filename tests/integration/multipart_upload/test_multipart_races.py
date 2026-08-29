@@ -96,16 +96,15 @@ async def test_concurrent_completion_commits_exactly_one_version(
     committed = [
         result
         for result in results
-        if not isinstance(result, BaseException)
-        and result.state is MultipartSessionState.COMMITTED
+        if not isinstance(result, BaseException) and result.state is MultipartSessionState.COMMITTED
     ]
     assert committed, "at least one concurrent completion must commit"
     for result in results:
         if isinstance(result, BaseException):
             assert isinstance(result, MultipartUploadError)
-            assert (
-                result.error_code is ErrorCode.MULTIPART_COMPLETION_IN_PROGRESS
-            ), f"unexpected concurrent completion failure: {result.error_code.value}"
+            assert result.error_code is ErrorCode.MULTIPART_COMPLETION_IN_PROGRESS, (
+                f"unexpected concurrent completion failure: {result.error_code.value}"
+            )
 
     assert await live_harness.source_version_count() == 1
     assert await live_harness.sync_event_count() == 1

@@ -726,16 +726,17 @@ def _in_list_values(expression: str) -> frozenset[str]:
 
 
 def test_alembic_graph_has_exactly_one_head_beyond_the_authentication_revision() -> None:
-    # Subsequent policy, small-file, lifecycle and device sync revisions stack
-    # on this revision, so the single graph head moved past authentication.
+    # Subsequent policy, small-file, lifecycle, device sync and multipart
+    # revisions stack on this revision, so the single graph head moved past
+    # authentication.
     script_directory = _script_directory()
-    assert script_directory.get_heads() == [DOWNLOAD_ENTRY_ECHO_REVISION]
+    assert script_directory.get_heads() == ["20260828_04"]
 
 
 def test_authentication_revision_stacks_on_the_canonical_baseline_root() -> None:
     script_directory = _script_directory()
     revisions = list(script_directory.walk_revisions())
-    assert len(revisions) == 7
+    assert len(revisions) == 12
     baseline = script_directory.get_revision(BASELINE_REVISION)
     assert baseline is not None
     assert baseline.down_revision is None
@@ -748,9 +749,9 @@ def test_authentication_revision_stacks_on_the_canonical_baseline_root() -> None
 
 def test_canonical_revision_constant_is_the_current_graph_head() -> None:
     # The canonical revision authority always pins the current graph head; the
-    # device sync download-entry-echo migration ``20260826_02`` is that head
+    # multipart operation-token seal migration ``20260828_04`` is that head
     # now.
-    assert CANONICAL_POSTGRESQL_SCHEMA_REVISION == DOWNLOAD_ENTRY_ECHO_REVISION
+    assert CANONICAL_POSTGRESQL_SCHEMA_REVISION == "20260828_04"
 
 
 # ---------------------------------------------------------------------------

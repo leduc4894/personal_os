@@ -579,9 +579,7 @@ async def test_open_staging_stream_closes_the_body_on_exit() -> None:
 @pytest.mark.asyncio
 async def test_staging_stream_diagnostics_carry_only_closed_fields() -> None:
     client = ScriptedMultipartS3Client()
-    client.enqueue(
-        {"Body": scripted_body([b"first", b"second"], fail_after_first=True)}
-    )
+    client.enqueue({"Body": scripted_body([b"first", b"second"], fail_after_first=True)})
     with capture_diagnostic_events() as capture:
         provider = build_provider(client)
         with pytest.raises(MultipartUploadError):

@@ -47,6 +47,19 @@ Baseline pin theo provider/model/contracts. Update baseline là explicit reviewe
 - Remote Web App edit applied atomically by plugin.
 - Exclusion policy changes.
 
+Multipart (child 7): geometry boundaries (16 MiB exact single-part, +1
+multipart, 100 MiB cap, 13-part max), resume status-first không retransmit
+recorded parts, corruption refusal không publish, policy advance sau part
+URL, lost completion acknowledgement replay đúng một version, exact
+staging-key cleanup (không list/wildcard), concurrency cap 3 Desktop/2
+Mobile, và privacy sentinel scan mọi surface. Offline: unit/contract +
+plugin vitest + live R2/PostgreSQL integration (`r2_live`/`local_stack`).
+Live acceptance: Desktop WDIO journey
+(`apps/obsidian-plugin/test/specs/multipart-upload.e2e.ts`) qua guarded
+bootstrap, và ma trận Mobile vật lý theo procedure tại
+`docs/operations/resumable-multipart-upload.md` — Desktop/mock evidence
+không thay được Mobile vật lý.
+
 ## 6. Workflow tests
 
 Mỗi workflow có success, retryable failure, terminal failure, crash-after-commit, cancellation, timeout, continue-as-new, idempotent replay và fencing cases. Live registry liệt kê exact test nào cần dependency thật.

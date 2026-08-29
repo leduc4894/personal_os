@@ -37,7 +37,7 @@ COLUMN_NAME: Final[str] = "last_client_activity_at"
 def upgrade() -> None:
     op.add_column(
         TABLE_NAME,
-        sa.Column(COLUMN_NAME, sa.DateTime(timezone=True), nullable=True),
+        sa.Column(COLUMN_NAME, sa.TIMESTAMP(timezone=True), nullable=True),
         schema=SCHEMA_NAME,
     )
     op.execute(

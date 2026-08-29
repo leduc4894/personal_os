@@ -35,6 +35,11 @@ SMALL_FILE_REVISION: str = "20260818_01"
 SOURCE_LIFECYCLE_REVISION: str = "20260820_01"
 DEVICE_SYNC_REVISION: str = "20260826_01"
 DOWNLOAD_ENTRY_ECHO_REVISION: str = "20260826_02"
+DEVICE_MANIFEST_REVISION: str = "20260827_01"
+MULTIPART_SESSION_REVISION: str = "20260828_01"
+MULTIPART_SIZE_BOUND_REVISION: str = "20260828_02"
+MULTIPART_DEFERRED_IDENTITY_REVISION: str = "20260828_03"
+MULTIPART_OPERATION_TOKEN_SEAL_REVISION: str = "20260828_04"
 SCHEMA_NAME: str = "knowledge"
 
 EXPECTED_TABLES_IN_CREATION_ORDER: tuple[str, ...] = (
@@ -582,49 +587,37 @@ def _script_directory() -> ScriptDirectory:
 
 def test_alembic_graph_has_exactly_one_head_revision() -> None:
     script_directory = _script_directory()
-    assert script_directory.get_heads() == [DOWNLOAD_ENTRY_ECHO_REVISION]
+    assert script_directory.get_heads() == [MULTIPART_OPERATION_TOKEN_SEAL_REVISION]
 
 
 def test_baseline_revision_is_the_single_graph_root() -> None:
     script_directory = _script_directory()
     revisions = list(script_directory.walk_revisions())
-    assert len(revisions) == 7
+    assert len(revisions) == 12
     revision = script_directory.get_revision(BASELINE_REVISION)
     assert revision is not None
     assert revision.down_revision is None
     # Alembic represents absent branch labels as an empty label set.
     assert not revision.branch_labels
     assert revision.dependencies is None
-    authentication = script_directory.get_revision(AUTHENTICATION_REVISION)
-    assert authentication is not None
-    assert authentication.down_revision == BASELINE_REVISION
-    assert not authentication.branch_labels
-    assert authentication.dependencies is None
-    policy = script_directory.get_revision(POLICY_REVISION)
-    assert policy is not None
-    assert policy.down_revision == AUTHENTICATION_REVISION
-    assert not policy.branch_labels
-    assert policy.dependencies is None
-    small_file = script_directory.get_revision(SMALL_FILE_REVISION)
-    assert small_file is not None
-    assert small_file.down_revision == POLICY_REVISION
-    assert not small_file.branch_labels
-    assert small_file.dependencies is None
-    lifecycle = script_directory.get_revision(SOURCE_LIFECYCLE_REVISION)
-    assert lifecycle is not None
-    assert lifecycle.down_revision == SMALL_FILE_REVISION
-    assert not lifecycle.branch_labels
-    assert lifecycle.dependencies is None
-    device_sync = script_directory.get_revision(DEVICE_SYNC_REVISION)
-    assert device_sync is not None
-    assert device_sync.down_revision == SOURCE_LIFECYCLE_REVISION
-    assert not device_sync.branch_labels
-    assert device_sync.dependencies is None
-    download_entry_echo = script_directory.get_revision(DOWNLOAD_ENTRY_ECHO_REVISION)
-    assert download_entry_echo is not None
-    assert download_entry_echo.down_revision == DEVICE_SYNC_REVISION
-    assert not download_entry_echo.branch_labels
-    assert download_entry_echo.dependencies is None
+    for revision_id, down_revision_id in (
+        (AUTHENTICATION_REVISION, BASELINE_REVISION),
+        (POLICY_REVISION, AUTHENTICATION_REVISION),
+        (SMALL_FILE_REVISION, POLICY_REVISION),
+        (SOURCE_LIFECYCLE_REVISION, SMALL_FILE_REVISION),
+        (DEVICE_SYNC_REVISION, SOURCE_LIFECYCLE_REVISION),
+        (DOWNLOAD_ENTRY_ECHO_REVISION, DEVICE_SYNC_REVISION),
+        (DEVICE_MANIFEST_REVISION, DOWNLOAD_ENTRY_ECHO_REVISION),
+        (MULTIPART_SESSION_REVISION, DEVICE_MANIFEST_REVISION),
+        (MULTIPART_SIZE_BOUND_REVISION, MULTIPART_SESSION_REVISION),
+        (MULTIPART_DEFERRED_IDENTITY_REVISION, MULTIPART_SIZE_BOUND_REVISION),
+        (MULTIPART_OPERATION_TOKEN_SEAL_REVISION, MULTIPART_DEFERRED_IDENTITY_REVISION),
+    ):
+        stacked = script_directory.get_revision(revision_id)
+        assert stacked is not None, revision_id
+        assert stacked.down_revision == down_revision_id, revision_id
+        assert not stacked.branch_labels
+        assert stacked.dependencies is None
 
 
 def test_alembic_graph_loads_without_database_settings_or_secrets() -> None:
@@ -635,7 +628,7 @@ def test_alembic_graph_loads_without_database_settings_or_secrets() -> None:
             removed[key] = os.environ.pop(key)
     try:
         script_directory = _script_directory()
-        assert script_directory.get_heads() == [DOWNLOAD_ENTRY_ECHO_REVISION]
+        assert script_directory.get_heads() == [MULTIPART_OPERATION_TOKEN_SEAL_REVISION]
     finally:
         os.environ.update(removed)
 

@@ -156,9 +156,7 @@ async def test_failed_cleanup_records_closed_reason_then_next_retry_cleans(
     assert row["cleanup_next_retry_at"] is not None
 
     # The bounded backoff hides the failed row until its exact retry deadline.
-    live_harness.advance_clock(
-        timedelta(seconds=MULTIPART_CLEANUP_RETRY_BASE_SECONDS + 1)
-    )
+    live_harness.advance_clock(timedelta(seconds=MULTIPART_CLEANUP_RETRY_BASE_SECONDS + 1))
     second = await live_harness.run_cleanup()
     assert second.cleaned_count == 1
     assert second.failed_count == 0

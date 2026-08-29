@@ -107,9 +107,10 @@ def test_canonical_backup_snapshot_repr_redacts_snapshot_token() -> None:
 
 def test_postgresql_schema_revision_alias_keeps_database_schema_authority() -> None:
     # Authority moved to ``personal_os.database_schema``; the recovery-side
-    # name must keep resolving to the identical constant object.
-    assert CANONICAL_POSTGRESQL_SCHEMA_REVISION == "20260826_02"
-    assert POSTGRESQL_SCHEMA_REVISION == "20260826_02"
+    # name must keep resolving to the identical constant object. The head is
+    # the multipart operation-token seal revision ``20260828_04``.
+    assert CANONICAL_POSTGRESQL_SCHEMA_REVISION == "20260828_04"
+    assert POSTGRESQL_SCHEMA_REVISION == "20260828_04"
     assert POSTGRESQL_SCHEMA_REVISION is CANONICAL_POSTGRESQL_SCHEMA_REVISION
 
 

@@ -86,6 +86,12 @@ _WDIO_PHASE_FAILURE_CODES: Final[Mapping[str, str]] = {
         "obsidian_wdio_failed_after_device_sync_remote_tombstone"
     ),
     "device_sync_journey_completed": "obsidian_wdio_failed_after_device_sync_journey",
+    "multipart_journey_started": "obsidian_wdio_failed_after_multipart_journey_start",
+    "multipart_resume_committed": "obsidian_wdio_failed_after_multipart_resume",
+    "multipart_corruption_refused": "obsidian_wdio_failed_after_multipart_corruption_refusal",
+    "multipart_lost_ack_replayed": "obsidian_wdio_failed_after_multipart_lost_ack_replay",
+    "multipart_policy_denial_observed": "obsidian_wdio_failed_after_multipart_policy_denial",
+    "multipart_journey_completed": "obsidian_wdio_failed_after_multipart_journey",
 }
 
 
@@ -659,6 +665,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "test/specs/source-lifecycle.e2e.ts",
             "test/specs/device-login-sync.e2e.ts",
             "test/specs/device-sync-reconciliation.e2e.ts",
+            "test/specs/multipart-upload.e2e.ts",
         ),
         default="test/specs/source-lifecycle.e2e.ts",
     )

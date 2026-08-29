@@ -920,9 +920,7 @@ class ManifestStoreHarness:
             await connection.execute(
                 sa.update(manifest_runs)
                 .values(
-                    last_client_activity_at=sa.text(
-                        "CURRENT_TIMESTAMP - INTERVAL '600 seconds'"
-                    )
+                    last_client_activity_at=sa.text("CURRENT_TIMESTAMP - INTERVAL '600 seconds'")
                 )
                 .where(manifest_runs.c.manifest_run_id == manifest_run_id)
             )

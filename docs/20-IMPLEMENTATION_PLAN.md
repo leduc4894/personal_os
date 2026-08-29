@@ -185,6 +185,27 @@ section 17). Trạng thái từng child:
   runbook:
   `docs/operations/device-cursor-manifest-reconciliation.md`; handoff:
   `docs/handoff/2026-08-26-device-cursor-and-manifest-reconciliation.md`.
+- Child 7 `resumable-multipart-mobile-upload-design.md` — **triển khai hoàn
+  tất (2026-08-29); guarded Desktop WDIO live gate PASSED (verdict
+  `obsidian_live_acceptance_passed` trên `knowledge-ci-multipart-live`,
+  đủ 4 row: interruption/resume qua tunnel outage, corruption refusal,
+  lost completion acknowledgement, policy advance); còn ma trận Mobile
+  vật lý PENDING theo procedure tại runbook**: domain `multipart_upload`
+  (schema `20260828_01..04`, 5 route `/api/uploads/multipart-sessions`,
+  closed `multipart_*` registry 12 code, R2 staging provider 6-capability,
+  service create/status/part-url/complete/abort + exact cleanup, Temporal
+  `MultipartCleanupWorkflow`), API composition + sealed operation token,
+  plugin journal v8 (multipart progress), multipart runner (status-first
+  resume, frozen-file recheck, cap 3/2, closed `multipart_failure` trail)
+  và capture admission 16–100 MiB. Canonical runtime schema-head authority
+  `CANONICAL_POSTGRESQL_SCHEMA_REVISION` nâng lên `20260828_04` (API trước
+  đó không thể serve schema của child). Spec:
+  `docs/superpowers/specs/2026-08-28-resumable-multipart-mobile-upload-design.md`;
+  plan:
+  `docs/superpowers/plans/2026-08-28-resumable-multipart-mobile-upload.md`;
+  runbook:
+  `docs/operations/resumable-multipart-upload.md`; handoff:
+  `docs/handoff/2026-08-28-resumable-multipart-mobile-upload.md`.
 
 Deliverables:
 

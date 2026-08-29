@@ -108,9 +108,7 @@ class _RaiseOutcome:
 _Outcome = _ReturnOutcome | _RaiseOutcome
 
 
-def scripted_body(
-    chunks: list[bytes], *, fail_after_first: bool = False
-) -> ScriptedStreamingBody:
+def scripted_body(chunks: list[bytes], *, fail_after_first: bool = False) -> ScriptedStreamingBody:
     """Build a deterministic streaming body from fixed byte chunks."""
 
     return ScriptedStreamingBody(chunks=tuple(chunks), fail_after_first=fail_after_first)

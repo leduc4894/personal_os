@@ -5,13 +5,15 @@
  * journal intent — and nothing else. Each path settles for the frozen
  * per-file delay, is then re-read through the narrow Vault reader and
  * fingerprinted over exactly those bytes, and only afterwards is gated:
- * a regular file at most `MAX_FILE_SIZE_BYTES` under a current accepted
- * `allowed` policy decision is recorded as `policy_allowed`; a file one
- * byte over the ceiling is born-terminal `blocked_size`; a raw `excluded`
- * or `indeterminate` decision fails closed to born-terminal
- * `excluded_policy`. The accepted policy revision the decision was taken
- * under is persisted on the journal row (the server re-evaluates policy
- * itself and never trusts that value).
+ * a regular file at most `MAX_MULTIPART_FILE_SIZE_BYTES` under a current
+ * accepted `allowed` policy decision is recorded as `policy_allowed` — an
+ * observation above the 16 MiB single-part constant stays admitted and
+ * simply routes into the multipart transport at preflight (child 7 spec
+ * 4); a file one byte over the product ceiling is born-terminal
+ * `blocked_size`; a raw `excluded` or `indeterminate` decision fails
+ * closed to born-terminal `excluded_policy`. The accepted policy revision
+ * the decision was taken under is persisted on the journal row (the
+ * server re-evaluates policy itself and never trusts that value).
  *
  * Explicit `Sync existing files` scanning remains confirmation-gated, while
  * automatic reconciliation runs the same bounded snapshot through the same
@@ -38,7 +40,7 @@ import type {
 import {
   FILE_SETTLE_DELAY_MS,
   JOURNAL_PENDING_EVENT_STATES,
-  MAX_FILE_SIZE_BYTES,
+  MAX_MULTIPART_FILE_SIZE_BYTES,
   MAX_PENDING_EVENTS,
 } from "./contracts";
 import { deriveFrozenFingerprint } from "./fingerprint";
@@ -679,7 +681,7 @@ export class JournalCapture {
       sizeBytes: fingerprint.sizeBytes,
     });
     const admission: JournalCaptureAdmission =
-      fingerprint.sizeBytes > MAX_FILE_SIZE_BYTES
+      fingerprint.sizeBytes > MAX_MULTIPART_FILE_SIZE_BYTES
         ? "blocked_size"
         : evaluation.decision.enforced === "allowed"
           ? "policy_allowed"
@@ -801,5 +803,5 @@ export class JournalCapture {
 // Reference unused imports so the lint surface stays stable.
 void JOURNAL_PENDING_EVENT_STATES;
 void FILE_SETTLE_DELAY_MS;
-void MAX_FILE_SIZE_BYTES;
+void MAX_MULTIPART_FILE_SIZE_BYTES;
 void deriveFrozenFingerprint;

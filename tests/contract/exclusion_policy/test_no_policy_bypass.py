@@ -50,12 +50,20 @@ FORBIDDEN_RUNTIME_IMPORT_ROOTS: Final[frozenset[str]] = frozenset(
 #: verified-reader service of ``device_sync_content.py`` (the approved
 #: member-caller above); it constructs the adapter but never calls an
 #: object-store port member, which the member-call gate below still enforces
-#: mechanically exactly as for every other module.
+#: mechanically exactly as for every other module. The multipart serve
+#: composition (child 7 spec 5/6) is the same serving-path class — it binds
+#: the lazy R2 client, the canonical object store and the multipart staging
+#: provider behind the guarded multipart service — and the Temporal cleanup
+#: worker composition (child 7 spec 6.4) binds the same provider behind the
+#: exact-cleanup service; both construct adapters without ever calling an
+#: object-store port member, which the member-call gate still enforces.
 APPROVED_PROVIDER_COMPOSITIONS: Final[frozenset[Path]] = frozenset(
     {
         REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "small_file_sync_composition.py",
         REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "device_sync_composition.py",
+        REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "multipart_upload_composition.py",
         REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "server.py",
+        REPO_ROOT / "apps" / "worker" / "src" / "workflow_worker" / "multipart_cleanup_workflow.py",
     }
 )
 
@@ -88,6 +96,14 @@ APPROVED_OBJECT_STORE_MODULES: Final[frozenset[Path]] = frozenset(
         # only through this module after that authorization, and its reader
         # failures map onto the closed device download codes.
         REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "device_sync_content.py",
+        # The multipart upload service (child 7 spec 6.3): its completion
+        # spool streams the session's staging bytes through the bounded
+        # canonical ``store_stream`` verification — the one member call of
+        # the transport — only after the completion claim re-authorized the
+        # frozen subject under the currently active policy, and its
+        # publication re-resolves and fully re-verifies the receipt through
+        # the guarded Phase 1 writer before any commit.
+        REPO_ROOT / "src" / "personal_os" / "multipart_upload" / "service.py",
         REPO_ROOT / "packages" / "r2-object-storage" / "src" / "r2_object_storage" / "adapter.py",
         REPO_ROOT / "src" / "personal_os" / "object_storage" / "contracts.py",
     }
@@ -111,6 +127,11 @@ APPROVED_CANONICAL_READ_IMPORTERS: Final[frozenset[Path]] = frozenset(
         # preflight resolves update bases through the guarded read store,
         # which re-evaluates the active policy inside its own transaction.
         REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "small_file_sync_composition.py",
+        # The multipart serve composition (child 7 spec 6): session
+        # create/resume resolves update bases through the same guarded read
+        # store, which re-evaluates the active policy inside its own
+        # transaction before any staging resource exists.
+        REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "multipart_upload_composition.py",
     }
 )
 

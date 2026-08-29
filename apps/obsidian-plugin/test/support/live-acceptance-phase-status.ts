@@ -27,6 +27,12 @@ export const LIVE_ACCEPTANCE_PHASE_RESULT_CODES = [
   "device_sync_lost_sqlite_repair_completed",
   "device_sync_remote_tombstone_completed",
   "device_sync_journey_completed",
+  "multipart_journey_started",
+  "multipart_resume_committed",
+  "multipart_corruption_refused",
+  "multipart_lost_ack_replayed",
+  "multipart_policy_denial_observed",
+  "multipart_journey_completed",
 ] as const;
 
 export type LiveAcceptancePhaseResultCode =

@@ -123,15 +123,22 @@ dependency, `sql.js` (journal design section 6):
 
 `src/journal/` implements the portable sync journal of the journal design:
 `contracts.ts` freezes the closed vocabulary (event states, safe error
-labels, queue outcomes, recovery states, logical records and the 16 MiB /
-10,000-row / 64 MiB / 250 ms limits), `sqlite-database.ts` runs SQLite as
+labels, queue outcomes, recovery states, logical records, the 16 MiB
+single-part boundary with the 100 MiB multipart admission ceiling, the
+8 MiB/13-part frozen multipart geometry, and the 10,000-row / 64 MiB /
+250 ms limits), `sqlite-database.ts` runs SQLite as
 WebAssembly with journal-scoped sessions, `persistence.ts` publishes every
 commit as a digest-verified immutable generation with crash-safe recovery
 and the synchronous unload flush probe, `repository.ts` owns the durable
-records and the redacted status histogram, `capture.ts` turns settled Vault
+records, the per-event multipart progress store (schema v8) and the
+redacted status histogram, `capture.ts` turns settled Vault
 observations into journal intent through the automatic snapshot
-coordinator, `sync-api.ts` is the hand-mirrored small-file API client and
-`queue-driver.ts` runs the bounded foreground pass. `status.ts` projects the
+coordinator, `sync-api.ts` is the hand-mirrored small-file and multipart
+API client, `multipart-upload.ts` runs the resumable multipart transport
+(status-first resume, frozen-file recheck before every range, platform
+part-PUT cap of three Desktop / two Mobile, closed `multipart_failure`
+trail entries) and `queue-driver.ts` runs the bounded foreground pass.
+`status.ts` projects the
 closed sync status of the minimal plugin UX (spec 11).
 
 ## Minimal plugin UX and operations (spec 11)
@@ -226,7 +233,9 @@ No source maps, test fixtures or secrets are emitted.
 The following are deliberately absent and belong to later children of the
 journal design:
 
-- multipart/resumable uploads and files above 16 MiB (child 7);
+- files above the 100 MiB product ceiling (born-terminal `blocked_size`;
+  resumable multipart uploads of 16–100 MiB files are delivered by
+  child 7 — `docs/operations/resumable-multipart-upload.md`);
 - candidate preservation, Conflict Inbox, merge and visible conflict
   resolution (child 8);
 - any view, markdown post-processor, workspace hook or ribbon icon;

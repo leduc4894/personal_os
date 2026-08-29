@@ -150,6 +150,14 @@ def _is_sanctioned_policy_surface(path: Path) -> bool:
         return True
     if path.name.startswith(("device_sync", "device-sync")):
         return True
+    if path.name.startswith(("multipart_upload", "multipart-upload")):
+        # The sanctioned multipart upload surface of the resumable
+        # multipart child (spec 5/6): its terminal receipts and publication
+        # gateway binding legitimately name canonical source and version
+        # identity, while the object-store guard still proves the bytes
+        # flow only through the guarded writer. It declares no
+        # source-publication endpoint of its own.
+        return True
     if SANCTIONED_PLUGIN_JOURNAL_ROOT in path.parents:
         return True
     if SANCTIONED_DEVICE_SYNC_PLUGIN_ROOT in path.parents:
@@ -221,7 +229,7 @@ def _iter_surface_documents() -> list[Path]:
 
 def test_alembic_heads_and_migration_files_are_pinned() -> None:
     script_directory = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert script_directory.get_heads() == ["20260826_02"]
+    assert script_directory.get_heads() == ["20260828_04"]
     migration_files = [
         path for path in MIGRATIONS_VERSIONS.glob("*.py") if not path.name.startswith("__")
     ]
@@ -233,6 +241,11 @@ def test_alembic_heads_and_migration_files_are_pinned() -> None:
         "20260820_01_add_source_locator_lifecycle.py",
         "20260826_01_add_device_sync_reconciliation.py",
         "20260826_02_allow_manifest_download_entry_echo.py",
+        "20260827_01_add_manifest_run_client_activity.py",
+        "20260828_01_add_multipart_upload_sessions.py",
+        "20260828_02_widen_small_file_operation_declared_size_bound.py",
+        "20260828_03_defer_multipart_provider_identity.py",
+        "20260828_04_seal_multipart_operation_token.py",
     ], "the migrations directory must stay exactly at the pinned revisions"
 
 

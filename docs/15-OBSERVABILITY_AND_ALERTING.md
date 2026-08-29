@@ -45,6 +45,11 @@ body, response data và exception text không bao giờ vào access observation;
 correlation value không hợp lệ chỉ được ghi bằng rejection event với reason
 token, không echo giá trị bị từ chối.
 
+Multipart upload (child 7) thêm structured event đóng
+`multipart_upload_rejected` (stage + `error_code` thuộc khối `multipart_*`,
+survive restart qua rotating log) cho mọi rejection path kể cả cleanup failure
+của session đã committed — lý do đóng luôn đọc được, không nuốt im lặng.
+
 ## 3. Metrics
 
 ### Sync
@@ -62,6 +67,10 @@ Request rate, p50/p95 latency theo stage, candidate counts, degraded modes, zero
 ### Storage
 
 PostgreSQL size/connections, Qdrant points/index bytes/RAM, Neo4j store/heap, Redis memory, disk usage và object-store request/bytes/cost theo low-cardinality backend kind.
+
+### Multipart upload
+
+`multipart_session_total`/`_duration_seconds` (outcome), `multipart_completion_total`/`_duration_seconds` (outcome), `multipart_cleanup_total` (outcome) và `multipart_rejection_total` (stage, error_code) — label universe đóng đúng năm label `outcome`/`state`/`platform_class`/`stage`/`error_code`, validate lúc import; không session ID, staging key, ETag, request ID hay path nào làm label.
 
 Không dùng source ID, path, query hoặc tag làm Prometheus label có cardinality cao.
 
@@ -130,7 +139,12 @@ tại chỗ, không phụ thuộc stack Phần 1:
   retry_schedule_read / sync_status_read — bị loại khỏi derived stop reasons
   vì các read một-lần-mỗi-session này không dừng sync). `wire_failure` giờ
   chỉ nghĩa là một HTTP attempt thực sự chạm transport và thất bại; thiếu
-  credential hay refresh fail trước contact ghi `credential_failure`. Trail
+  credential hay refresh fail trước contact ghi `credential_failure`. Child 7
+  thêm kind đóng `multipart_failure`: đúng một stage token
+  (`multipart_resume`/`multipart_verify`/`multipart_cleanup`) cộng reason
+  token `multipart_*` của thất bại, cho mọi catch của multipart runner
+  (best-effort abort, best-effort progress clear và mọi thrown failure).
+  Trail
   observe-only: không đổi semantics sync, append fire-and-forget, không bao
   giờ chặn pass. Hành vi cadence đã ghi nhận (Task 14): sau một thời gian
   suspend dài, catch-up burst ghi nợ từng stale tick 30 giây vào accumulator

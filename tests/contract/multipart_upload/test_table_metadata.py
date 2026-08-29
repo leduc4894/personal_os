@@ -135,9 +135,7 @@ class _RecordingAlembicOp:
 
 def _load_migration_module(label: str, pattern: str) -> Any:
     matches = sorted(MIGRATION_DIRECTORY.glob(pattern))
-    assert len(matches) == 1, (
-        f"expected exactly one migration matching {pattern}, found {matches}"
-    )
+    assert len(matches) == 1, f"expected exactly one migration matching {pattern}, found {matches}"
     spec = importlib.util.spec_from_file_location(label, matches[0])
     assert spec is not None and spec.loader is not None
     migration = importlib.util.module_from_spec(spec)

@@ -18,6 +18,15 @@ PostgreSQL là canonical application state và correctness authority cho source 
 
 `sources.current_version_id` là authoritative pointer. `content_objects.content_hash` unique và reference-counted. Flexible values dùng typed columns với constraint chỉ một representation được set.
 
+Nhóm Sync nắm hai bảng multipart của child 7 (migration `20260828_01..04`):
+`multipart_uploads` là session state machine (frozen fingerprint, geometry
+8 MiB × tối đa 13 part, 24-giờ expiry, completion claim lease, terminal
+result, cleanup obligation; lifetime UNIQUE trên `operation_id` để exact
+replay luôn gặp đúng một session) và `multipart_parts` là part progress
+do provider chứng minh (UNIQUE theo session+part, ETag server-side).
+`staging_key`/`provider_upload_id`/`provider_etag` là private text, không
+bao giờ render; raw operation token chỉ lưu dạng AEAD-sealed.
+
 ## 3. Key constraints
 
 - Mọi business table có `workspace_id` và foreign key.

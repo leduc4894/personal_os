@@ -999,9 +999,7 @@ class PostgresqlDeviceManifestStore:
                 # with its evidence retained, exactly like a policy advance
                 # replaces a run — instead of dead-locking the device until
                 # the one-hour database deadline.
-                await connection.execute(
-                    manifest_run_expire_statement(unfinished.manifest_run_id)
-                )
+                await connection.execute(manifest_run_expire_statement(unfinished.manifest_run_id))
             policy_revision_number = await self._read_active_policy_revision_number(
                 connection, context.workspace_id
             )

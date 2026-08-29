@@ -23,10 +23,7 @@ from alembic.script import ScriptDirectory
 REPO_ROOT: Path = Path(__file__).resolve().parents[3]
 ALEMBIC_INI_PATH: Path = REPO_ROOT / "alembic.ini"
 MIGRATION_PATH = (
-    REPO_ROOT
-    / "migrations"
-    / "versions"
-    / "20260828_03_defer_multipart_provider_identity.py"
+    REPO_ROOT / "migrations" / "versions" / "20260828_03_defer_multipart_provider_identity.py"
 )
 
 DEFERRED_IDENTITY_REVISION: str = "20260828_03"
@@ -34,9 +31,7 @@ SIZE_BOUND_REVISION: str = "20260828_02"
 
 SESSION_TABLE_NAME: str = "multipart_uploads"
 
-_DOWNGRADE_REFUSAL_MESSAGE: str = (
-    "multipart_provider_identity_downgrade_has_pending_rows"
-)
+_DOWNGRADE_REFUSAL_MESSAGE: str = "multipart_provider_identity_downgrade_has_pending_rows"
 
 
 class _ScriptedBindResult:

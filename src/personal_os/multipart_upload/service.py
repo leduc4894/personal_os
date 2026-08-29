@@ -1276,9 +1276,7 @@ class MultipartUploadService:
         except ApplicationError as error:
             self._record_rejection_code(flow, error.error_code)
         except BaseException:
-            self._record_rejection(
-                flow, MultipartRejectionReason.MULTIPART_CLEANUP_FAILED
-            )
+            self._record_rejection(flow, MultipartRejectionReason.MULTIPART_CLEANUP_FAILED)
 
     # --- shared rechecks -------------------------------------------------------
 

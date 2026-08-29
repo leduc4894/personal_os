@@ -446,9 +446,7 @@ def test_server_shares_the_policy_metrics_sink_with_the_multipart_composition(
     monkeypatch.setattr(
         server_module, "compose_exclusion_policy", recording_exclusion_policy_composition
     )
-    monkeypatch.setattr(
-        server_module, "compose_multipart_upload", recording_multipart_composition
-    )
+    monkeypatch.setattr(server_module, "compose_multipart_upload", recording_multipart_composition)
 
     captured = RecordingServerFactory()
     assert run_server(environ=LOCAL_ENVIRONMENT, server_factory=captured) == 0

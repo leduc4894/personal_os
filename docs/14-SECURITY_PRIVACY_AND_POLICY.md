@@ -45,6 +45,16 @@ indeterminate không được làm sai lệch rename/move/delete/restore đã x�
 canonical transition vẫn commit, còn projection intents là `delete` để dữ liệu
 không tiếp tục được index.
 
+Multipart upload (child 7) recheck policy tại bốn điểm: tạo session, issue
+part URL, completion start và publication. URL đã cấp trước khi policy đổi
+chỉ cho phép ghi staging tạm của đúng session — không bao giờ publish
+denied content. Presigned URL của part là 10 phút, đúng một part với đúng
+byte range và content length, chỉ trúng staging phi-canonical; session ID
+là opaque; staging key và provider upload ID do server tạo và không bao giờ
+rời server. Device-side (kể cả Mobile SQLite journal) không persist presigned
+URL, query signature, provider identity, ETag, staging key hay digest; các
+reason surface đều là closed token `multipart_*`.
+
 ## 6. Prompt injection defense
 
 - Source text luôn được đóng khung là untrusted data.

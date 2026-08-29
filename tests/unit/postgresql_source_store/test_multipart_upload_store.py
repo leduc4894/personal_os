@@ -198,9 +198,7 @@ def _compiled(statement: sa.ClauseElement) -> str:
 class TestSessionIdMinting:
     def test_minted_session_id_matches_public_grammar(self) -> None:
         minted = mint_multipart_session_id()
-        allowed_characters = set(
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-        )
+        allowed_characters = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
         assert 32 <= len(minted.value) <= 128
         assert all(char in allowed_characters for char in minted.value)
 
@@ -259,9 +257,7 @@ class TestStatementShapes:
         assert str(operation_id) not in compiled
 
     def test_operation_lookup_can_run_lock_free(self) -> None:
-        compiled = _compiled(
-            multipart_operation_select_statement(uuid4(), for_update=False)
-        )
+        compiled = _compiled(multipart_operation_select_statement(uuid4(), for_update=False))
         assert "FOR UPDATE" not in compiled
 
     def test_session_lookup_takes_row_lock(self) -> None:
@@ -561,9 +557,7 @@ class TestTerminalOutcomeValidation:
 
     @pytest.mark.asyncio
     async def test_record_terminal_result_requires_exactly_one_outcome(self) -> None:
-        store = PostgresqlMultipartUploadStore(
-            cast(Any, None), clock=lambda: _NOW
-        )
+        store = PostgresqlMultipartUploadStore(cast(Any, None), clock=lambda: _NOW)
         claim = MultipartSessionClaim(
             session=_session_record(MultipartSessionState.COMPLETING),
             claim_token=uuid4(),

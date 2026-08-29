@@ -140,9 +140,10 @@ def test_every_multipart_operation_exposes_only_safe_field_names(
                 if isinstance(schema, dict):
                     field_names |= _property_names(schema)
         for forbidden in FORBIDDEN_FIELD_MARKERS:
-            assert not any(
-                forbidden in field_name for field_name in field_names
-            ), (operation_id, forbidden)
+            assert not any(forbidden in field_name for field_name in field_names), (
+                operation_id,
+                forbidden,
+            )
 
 
 def test_the_part_url_model_is_the_sole_url_bearing_schema(document: dict[str, Any]) -> None:

@@ -40,6 +40,11 @@ MIGRATION_GLOBS: tuple[str, ...] = (
     "20260820_01*.py",
     "20260826_01*.py",
     "20260826_02*.py",
+    "20260827_01*.py",
+    "20260828_01*.py",
+    "20260828_02*.py",
+    "20260828_03*.py",
+    "20260828_04*.py",
 )
 MIGRATION_DIRECTORY = REPO_ROOT / "migrations" / "versions"
 PACKAGE_SOURCE_ROOT = (
@@ -104,6 +109,8 @@ DEVICE_SYNC_TABLE_NAMES = frozenset(
     }
 )
 
+MULTIPART_TABLE_NAMES = frozenset({"multipart_uploads", "multipart_parts"})
+
 EXPECTED_TABLE_NAMES = (
     BASELINE_TABLE_NAMES
     | AUTHENTICATION_TABLE_NAMES
@@ -111,6 +118,7 @@ EXPECTED_TABLE_NAMES = (
     | SMALL_FILE_TABLE_NAMES
     | LIFECYCLE_TABLE_NAMES
     | DEVICE_SYNC_TABLE_NAMES
+    | MULTIPART_TABLE_NAMES
 )
 
 

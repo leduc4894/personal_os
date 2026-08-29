@@ -8,6 +8,7 @@ import {
   JOURNAL_SAFE_ERROR_LABELS,
   MAX_FILE_SIZE_BYTES,
   MAX_JOURNAL_SIZE_BYTES,
+  MAX_MULTIPART_FILE_SIZE_BYTES,
   MAX_PENDING_EVENTS,
   QUEUE_OUTCOMES,
 } from "./contracts";
@@ -170,6 +171,16 @@ describe("frozen journal limits (spec 3.1, 6.4, 7.1)", () => {
     // TypeScript cannot import them, so the value assertion below is the
     // plugin-side half of the cross-language ceiling pin.
     expect(MAX_FILE_SIZE_BYTES).toBe(16_777_216);
+  });
+
+  it("freezes the 100 MiB multipart admission ceiling", () => {
+    // The plugin-side half of the cross-language product-maximum pin: a
+    // file above 16 MiB and at or below this ceiling is admitted as journal
+    // intent and routes to the server-owned multipart transport at
+    // preflight; one byte above stays born-terminal `blocked_size`.
+    // Mirrors MAX_UPLOAD_FILE_SIZE_BYTES
+    // (src/personal_os/small_file_sync/contracts.py).
+    expect(MAX_MULTIPART_FILE_SIZE_BYTES).toBe(104_857_600);
   });
 
   it("freezes the 10,000 pending-event soft limit", () => {

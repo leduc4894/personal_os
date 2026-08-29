@@ -1145,7 +1145,6 @@ class MultipartServiceHarness:
             )
 
 
-
 class RecordingDiagnosticSink:
     """Structural event-sink double recording every emitted closed event."""
 
@@ -1155,8 +1154,7 @@ class RecordingDiagnosticSink:
     def emit(self, event_name: object, fields: object = None) -> None:
         name = str(getattr(event_name, "value", event_name))
         rendered = {
-            str(key): str(getattr(value, "value", value))
-            for key, value in (fields or {}).items()
+            str(key): str(getattr(value, "value", value)) for key, value in (fields or {}).items()
         }
         self.events.append((name, rendered))
 

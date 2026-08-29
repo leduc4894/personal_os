@@ -80,7 +80,7 @@ from personal_os.error_contracts.exceptions import InternalApplicationError
 from personal_os.exclusion_policy.contracts import PolicySubject
 from personal_os.exclusion_policy.enforcement import (
     AllowedPolicyRevisionBinding,
-    PolicyDecision,
+    PolicyEnforcementService,
     default_utc_clock,
 )
 from personal_os.exclusion_policy.errors import ExclusionPolicyError
@@ -289,16 +289,10 @@ def _is_locator_free_recheck(preflight: SmallFilePreflight, stand_in: Normalized
     )
 
 
-class PolicyPreflightEnforcement(Protocol):
-    """The enforcement seam the locator-aware recheck guard evaluates."""
-
-    async def authorize_preflight(
-        self,
-        *,
-        subject: PolicySubject,
-        boundary: PolicyBoundary,
-        context: DiagnosticContext,
-    ) -> PolicyDecision: ...
+# The enforcement seam is the domain ``PolicyEnforcementService`` itself,
+# exactly like the small-file guard: the internal policy-decision evidence
+# never crosses into this runtime module by name — an allowed decision is
+# converted straight into the server-owned revision binding.
 
 
 class RecheckLocatorAwarePolicyEnforcementGuard:
@@ -316,7 +310,7 @@ class RecheckLocatorAwarePolicyEnforcementGuard:
     decision evidence.
     """
 
-    def __init__(self, *, enforcement: PolicyPreflightEnforcement) -> None:
+    def __init__(self, *, enforcement: PolicyEnforcementService) -> None:
         self._enforcement = enforcement
         self._stand_in = multipart_recheck_locator_stand_in()
 
@@ -1519,17 +1513,13 @@ def compose_multipart_upload(
         logger=logger,
     )
     operation_store = PostgresqlSmallFileUploadOperationStore(engine, clock=default_utc_clock)
-    token_codec = KeyringMultipartOperationTokenCodec(
-        CryptographyAuthenticationCrypto(), keyring
-    )
+    token_codec = KeyringMultipartOperationTokenCodec(CryptographyAuthenticationCrypto(), keyring)
     metrics = InMemoryMultipartUploadMetrics()
     service = MultipartUploadService(
         session_store=PostgresqlMultipartUploadStore(
             engine, clock=default_utc_clock, token_codec=token_codec
         ),
-        evidence_store=PostgresqlMultipartSessionEvidenceStore(
-            engine, token_codec=token_codec
-        ),
+        evidence_store=PostgresqlMultipartSessionEvidenceStore(engine, token_codec=token_codec),
         operation_store=operation_store,
         policy_guard=RecheckLocatorAwarePolicyEnforcementGuard(enforcement=enforcement),
         current_sources=PostgresqlCanonicalSourceReadStore(engine, policy_verifier=verifier),

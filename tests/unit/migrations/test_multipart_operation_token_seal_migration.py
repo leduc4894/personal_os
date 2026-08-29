@@ -25,10 +25,7 @@ from alembic.script import ScriptDirectory
 REPO_ROOT: Path = Path(__file__).resolve().parents[3]
 ALEMBIC_INI_PATH: Path = REPO_ROOT / "alembic.ini"
 MIGRATION_PATH = (
-    REPO_ROOT
-    / "migrations"
-    / "versions"
-    / "20260828_04_seal_multipart_operation_token.py"
+    REPO_ROOT / "migrations" / "versions" / "20260828_04_seal_multipart_operation_token.py"
 )
 
 SEALED_TOKEN_REVISION: str = "20260828_04"
@@ -42,9 +39,7 @@ SEALED_COLUMNS: tuple[str, ...] = (
     "operation_token_key_id",
 )
 
-_DOWNGRADE_REFUSAL_MESSAGE: str = (
-    "multipart_operation_token_downgrade_has_forward_sealed_rows"
-)
+_DOWNGRADE_REFUSAL_MESSAGE: str = "multipart_operation_token_downgrade_has_forward_sealed_rows"
 
 
 class _ScriptedBindResult:
@@ -164,8 +159,7 @@ def test_upgrade_adds_exactly_the_three_sealed_columns() -> None:
     ] + [
         (
             "create_check_constraint",
-            "knowledge.multipart_uploads"
-            ".ck_multipart_uploads__operation_token_seal_biconditional",
+            "knowledge.multipart_uploads.ck_multipart_uploads__operation_token_seal_biconditional",
             True,
         ),
         (

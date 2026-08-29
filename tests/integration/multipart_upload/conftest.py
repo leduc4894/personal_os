@@ -329,9 +329,7 @@ class MultipartStoreHarness:
                     policy_revision_number=preflight.policy_revision_number,
                     reserved_source_id=uuid4(),
                     normalized_locator=preflight.normalized_locator.value,
-                    locator_fingerprint=compute_locator_fingerprint(
-                        preflight.normalized_locator
-                    ),
+                    locator_fingerprint=compute_locator_fingerprint(preflight.normalized_locator),
                     state="pending",
                     expires_at=operation_expires_at,
                 )
@@ -387,9 +385,7 @@ class MultipartStoreHarness:
         assert len(rows) == 1, "the session lookup must address exactly one row"
         return rows[0]
 
-    async def session_rows(
-        self, session_id: MultipartUploadSessionId
-    ) -> list[dict[str, Any]]:
+    async def session_rows(self, session_id: MultipartUploadSessionId) -> list[dict[str, Any]]:
         async with self.engine.connect() as connection:
             result = await connection.execute(
                 sa.select(
@@ -445,8 +441,6 @@ def pytest_asyncio_loop_factories(
     """
     del config, item
     return {"selector": asyncio.SelectorEventLoop}
-
-
 
 
 # --- the live R2 multipart journey harness (Task 12, design 9.2) -------------
@@ -548,9 +542,7 @@ class ManifestRecordingStagingProvider:
         self._require_recorded(staging_key)
         await self._provider.complete_upload(staging_key, upload_id, parts)
 
-    async def abort_upload(
-        self, staging_key: str, upload_id: MultipartProviderUploadId
-    ) -> None:
+    async def abort_upload(self, staging_key: str, upload_id: MultipartProviderUploadId) -> None:
         self._require_recorded(staging_key)
         await self._provider.abort_upload(staging_key, upload_id)
 
@@ -661,9 +653,7 @@ class LiveR2MultipartHarness:
                     device_kind="obsidian",
                 )
             )
-        return SmallFileDeviceContext(
-            device_id=device_id, workspace_id=self.device.workspace_id
-        )
+        return SmallFileDeviceContext(device_id=device_id, workspace_id=self.device.workspace_id)
 
     # --- the client observer journey ---------------------------------------------
 
@@ -953,9 +943,7 @@ class LiveR2MultipartHarness:
         """Exact-key probe: does this session's staging object exist in R2?"""
 
         return await _staging_object_at_key_exists(
-            self._low_level_client, self.manifest.bucket_name, derive_staging_key(
-                self.session_id
-            )
+            self._low_level_client, self.manifest.bucket_name, derive_staging_key(self.session_id)
         )
 
     async def upload_in_flight(self) -> bool:
@@ -995,9 +983,7 @@ class LiveR2MultipartHarness:
 def _is_probe_absence(failure: BaseException) -> bool:
     """Classify one exact-probe provider refusal as ordinary absence."""
 
-    return isinstance(failure, ClientError) and (
-        client_error_code(failure) in _PROBE_ABSENCE_CODES
-    )
+    return isinstance(failure, ClientError) and (client_error_code(failure) in _PROBE_ABSENCE_CODES)
 
 
 async def _staging_object_at_key_exists(
@@ -1070,9 +1056,7 @@ async def seed_live_workspace(engine: AsyncEngine) -> SmallFileDeviceContext:
                 active_revision_number=0,
             )
         )
-    await seed_signed_policy(
-        engine, workspace_id=workspace_id, published_by_user_id=owner_user_id
-    )
+    await seed_signed_policy(engine, workspace_id=workspace_id, published_by_user_id=owner_user_id)
     return SmallFileDeviceContext(device_id=device_id, workspace_id=workspace_id)
 
 
@@ -1125,8 +1109,7 @@ async def _run_live_teardown(harness: LiveR2MultipartHarness) -> None:
         )
     except CleanupRejection as rejection:
         pytest.fail(
-            "live staging cleanup violated the exact-identity contract: "
-            f"{rejection.reason.value}",
+            f"live staging cleanup violated the exact-identity contract: {rejection.reason.value}",
             pytrace=False,
         )
     for staging_key in cleaned_staging:
@@ -1147,8 +1130,7 @@ async def _run_live_teardown(harness: LiveR2MultipartHarness) -> None:
         )
     except CleanupRejection as rejection:
         pytest.fail(
-            "live canonical cleanup violated the exact-key contract: "
-            f"{rejection.reason.value}",
+            f"live canonical cleanup violated the exact-key contract: {rejection.reason.value}",
             pytrace=False,
         )
     for key in deleted:
@@ -1196,9 +1178,7 @@ def _low_level_delete_canonical_one(harness: LiveR2MultipartHarness) -> Callable
     """The harness-local low-level exact canonical-key delete call."""
 
     async def delete_one(key: str) -> None:
-        await harness._low_level_client.delete_object(
-            Bucket=harness.manifest.bucket_name, Key=key
-        )
+        await harness._low_level_client.delete_object(Bucket=harness.manifest.bucket_name, Key=key)
 
     return delete_one
 
@@ -1224,9 +1204,7 @@ async def live_harness(
         source_publication_stack.settings, source_publication_stack.password
     )
     low_level_context = None
-    http_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(_PART_PUT_TIMEOUT_SECONDS, connect=15.0)
-    )
+    http_client = httpx.AsyncClient(timeout=httpx.Timeout(_PART_PUT_TIMEOUT_SECONDS, connect=15.0))
     object_store: R2S3ObjectStore | None = None
     client_manager: R2ClientManager | None = None
     try:
@@ -1270,14 +1248,10 @@ async def live_harness(
             session_store=PostgresqlMultipartUploadStore(
                 engine, clock=clock, token_codec=token_codec
             ),
-            evidence_store=PostgresqlMultipartSessionEvidenceStore(
-                engine, token_codec=token_codec
-            ),
+            evidence_store=PostgresqlMultipartSessionEvidenceStore(engine, token_codec=token_codec),
             operation_store=operation_store,
             policy_guard=RecheckLocatorAwarePolicyEnforcementGuard(enforcement=enforcement),
-            current_sources=PostgresqlCanonicalSourceReadStore(
-                engine, policy_verifier=verifier
-            ),
+            current_sources=PostgresqlCanonicalSourceReadStore(engine, policy_verifier=verifier),
             publication_gateway=BoundPolicySmallFilePublicationGateway(
                 store=PostgresqlSourcePublicationStore(engine, policy_verifier=verifier),
                 object_store=object_store,

@@ -71,9 +71,7 @@ class _EventRecordingAlembicOp:
         self.events: list[tuple[str, str, str]] = []
         self.bind = _ScriptedBind(oversized_row_count)
 
-    def drop_constraint(
-        self, constraint_name: str, table_name: str, **kwargs: Any
-    ) -> None:
+    def drop_constraint(self, constraint_name: str, table_name: str, **kwargs: Any) -> None:
         self.events.append(("drop_constraint", constraint_name, table_name))
 
     def create_check_constraint(

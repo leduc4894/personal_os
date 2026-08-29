@@ -96,10 +96,20 @@ Khi Web App commit version, plugin nhận change qua cursor polling/push hint. P
 
 ## 8. Upload strategy
 
-- File nhỏ: backend-mediated hoặc presigned single-part upload.
-- File lớn: PostgreSQL multipart session, presigned parts, complete rồi full-object SHA-256 verification.
-- Capability scope theo workspace, source, version, part, size và expiry.
-- Partial upload có timeout và cleanup workflow.
+- File nhỏ (≤16 MiB): backend-mediated hoặc presigned single-part upload.
+- File lớn (>16 MiB đến 100 MiB): preflight trả `multipart_upload`; plugin
+  mở một server-owned multipart session (part 8 MiB, tối đa 13 part, part
+  URL 10 phút, session 24 giờ), resume qua status-first, và completion luôn
+  full-object SHA-256/size/media-type verification trước khi publication.
+- Quá 100 MiB: capture chặn born-terminal `blocked_size` ở plugin.
+- Capability scope theo workspace, device, event, part, size và expiry; URL
+  chỉ trúng staging phi-canonical của session, không trúng canonical object.
+- Partial upload có expiry cleanup workflow; mọi cleanup dùng exact staging
+  key của session, không có list/wildcard/prefix-based deletion.
+- Policy được recheck ở tạo session, issue part URL, completion và
+  publication; part URL đã cấp trước khi policy đổi chỉ ghi staging tạm,
+  không thể publish denied content.
+- Operator runbook: `docs/operations/resumable-multipart-upload.md`.
 
 ## 9. Mobile constraints
 

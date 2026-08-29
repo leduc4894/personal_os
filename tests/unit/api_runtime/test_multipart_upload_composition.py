@@ -263,9 +263,7 @@ def test_keyring_codec_seals_and_opens_the_operation_token() -> None:
 
 
 def test_keyring_codec_fails_closed_on_an_unknown_key() -> None:
-    codec = KeyringMultipartOperationTokenCodec(
-        CryptographyAuthenticationCrypto(), _keyring()
-    )
+    codec = KeyringMultipartOperationTokenCodec(CryptographyAuthenticationCrypto(), _keyring())
     sealed = SealedMultipartOperationToken(
         key_id="auth-key-unknown",
         nonce="bm9uY2Utc2VudGluZWw",

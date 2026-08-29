@@ -312,10 +312,7 @@ def require_terminal_failure_state(failure_state: MultipartSessionState) -> None
 def _multipart_row_select() -> sa.Select[tuple[Any, ...]]:
     """Build the schema-qualified full-column select of the session table."""
 
-    columns = [
-        getattr(multipart_uploads.c, column_name)
-        for column_name in _MULTIPART_ROW_COLUMNS
-    ]
+    columns = [getattr(multipart_uploads.c, column_name) for column_name in _MULTIPART_ROW_COLUMNS]
     return sa.select(*columns)
 
 
@@ -328,9 +325,7 @@ def multipart_session_select_statement(
     runs behind; the lock-free shape serves the owner-checked reads and the
     query-plan probes.
     """
-    statement = _multipart_row_select().where(
-        multipart_uploads.c.session_id == session_id.value
-    )
+    statement = _multipart_row_select().where(multipart_uploads.c.session_id == session_id.value)
     return statement.with_for_update() if for_update else statement
 
 
@@ -343,9 +338,7 @@ def multipart_operation_select_statement(
     replay point: the row it finds is the one session the operation may
     ever own.
     """
-    statement = _multipart_row_select().where(
-        multipart_uploads.c.operation_id == operation_id
-    )
+    statement = _multipart_row_select().where(multipart_uploads.c.operation_id == operation_id)
     return statement.with_for_update() if for_update else statement
 
 
@@ -679,9 +672,7 @@ def uploading_transition_statement(*, session_id_value: str) -> sa.Update:
     )
 
 
-def expiry_sweep_select_statement(
-    *, now: datetime, batch_limit: int
-) -> sa.Select[tuple[Any, ...]]:
+def expiry_sweep_select_statement(*, now: datetime, batch_limit: int) -> sa.Select[tuple[Any, ...]]:
     """Build the bounded skip-locked sweep over the strikable forward states.
 
     The predicate matches the shipped partial expiry index exactly: only
@@ -691,9 +682,7 @@ def expiry_sweep_select_statement(
     return (
         _multipart_row_select()
         .where(
-            multipart_uploads.c.state.in_(
-                tuple(state.value for state in _FORWARD_SESSION_STATES)
-            ),
+            multipart_uploads.c.state.in_(tuple(state.value for state in _FORWARD_SESSION_STATES)),
             multipart_uploads.c.expires_at <= now,
         )
         .order_by(multipart_uploads.c.expires_at)
@@ -723,9 +712,7 @@ def expiry_strike_update_statement(*, session_id_value: str, now: datetime) -> s
         )
         .where(
             multipart_uploads.c.session_id == session_id_value,
-            multipart_uploads.c.state.in_(
-                tuple(state.value for state in _FORWARD_SESSION_STATES)
-            ),
+            multipart_uploads.c.state.in_(tuple(state.value for state in _FORWARD_SESSION_STATES)),
         )
     )
 
@@ -1042,9 +1029,7 @@ class MultipartSessionRow:
 
         return self.staging_key is not None and self.provider_upload_id_value is not None
 
-    def carries_provider_identity(
-        self, staging_key: str, provider_upload_id_value: str
-    ) -> bool:
+    def carries_provider_identity(self, staging_key: str, provider_upload_id_value: str) -> bool:
         """Report whether the row already carries exactly this identity."""
 
         return (
@@ -1350,9 +1335,7 @@ class PostgresqlMultipartUploadStore:
         """
         del diagnostic_context
         if not 1 <= batch_limit <= MULTIPART_CLEANUP_BATCH_MAXIMUM:
-            raise ValueError(
-                f"batch_limit must be 1 to {MULTIPART_CLEANUP_BATCH_MAXIMUM} sessions"
-            )
+            raise ValueError(f"batch_limit must be 1 to {MULTIPART_CLEANUP_BATCH_MAXIMUM} sessions")
         return await self._retry.run(
             lambda _attempt: self._claim_cleanup_batch_once(batch_limit=batch_limit)
         )
@@ -1400,9 +1383,7 @@ class PostgresqlMultipartUploadStore:
             await connection.execute(
                 upload_operation_lock_statement(device_context, operation.preflight)
             )
-            operation_row = await self._fetch_operation_row(
-                connection, operation.operation_token
-            )
+            operation_row = await self._fetch_operation_row(connection, operation.operation_token)
             if operation_row is None:
                 raise _session_not_found()
             if not operation_fingerprint_matches(
@@ -1626,10 +1607,7 @@ class PostgresqlMultipartUploadStore:
                     if guarded.rowcount != 1:
                         raise _completion_in_progress()
                 else:
-                    if (
-                        row.claim_expires_at is not None
-                        and row.claim_expires_at > self._clock()
-                    ):
+                    if row.claim_expires_at is not None and row.claim_expires_at > self._clock():
                         raise _completion_in_progress()
                     guarded = await connection.execute(
                         completion_lease_replacement_statement(
@@ -1703,9 +1681,7 @@ class PostgresqlMultipartUploadStore:
             if guarded.rowcount != 1:
                 raise _completion_in_progress()
 
-    async def _claim_cleanup_batch_once(
-        self, *, batch_limit: int
-    ) -> list[MultipartCleanupClaim]:
+    async def _claim_cleanup_batch_once(self, *, batch_limit: int) -> list[MultipartCleanupClaim]:
         async with (
             self._engine.connect() as connection,
             connection.begin(),
@@ -1718,9 +1694,7 @@ class PostgresqlMultipartUploadStore:
             struck_rows = list(overdue.mappings())
             for struck in struck_rows:
                 await connection.execute(
-                    expiry_strike_update_statement(
-                        session_id_value=struck["session_id"], now=now
-                    )
+                    expiry_strike_update_statement(session_id_value=struck["session_id"], now=now)
                 )
             claimable = await connection.execute(
                 cleanup_claim_select_statement(now=now, batch_limit=batch_limit)
@@ -1820,18 +1794,14 @@ class PostgresqlMultipartUploadStore:
     async def _fetch_session_row_by_operation(
         self, connection: AsyncConnection, operation_id: UUID
     ) -> MultipartSessionRow | None:
-        result = await connection.execute(
-            multipart_operation_select_statement(operation_id)
-        )
+        result = await connection.execute(multipart_operation_select_statement(operation_id))
         row = result.mappings().one_or_none()
         return None if row is None else MultipartSessionRow.from_row_mapping(row)
 
     async def _fetch_operation_row(
         self, connection: AsyncConnection, operation_token: UploadOperationToken
     ) -> SmallFileOperationRow | None:
-        result = await connection.execute(
-            operation_token_lookup_statement(operation_token)
-        )
+        result = await connection.execute(operation_token_lookup_statement(operation_token))
         row = result.mappings().one_or_none()
         return None if row is None else SmallFileOperationRow.from_row_mapping(row)
 
@@ -1952,9 +1922,7 @@ class PostgresqlMultipartSessionEvidenceStore:
             ):
                 raise _session_not_found()
             sealed = multipart_sealed_token_material(session_row)
-            operation_row = await self._fetch_operation_row(
-                connection, session_row.operation_id
-            )
+            operation_row = await self._fetch_operation_row(connection, session_row.operation_id)
             if operation_row is None:
                 raise _state_invalid()
             token = self._token_codec.open_token(sealed=sealed)
@@ -1977,9 +1945,7 @@ class PostgresqlMultipartSessionEvidenceStore:
                     ),
                 )
             )
-            operation_row = await self._fetch_operation_row(
-                connection, session_row.operation_id
-            )
+            operation_row = await self._fetch_operation_row(connection, session_row.operation_id)
             if operation_row is None:  # pragma: no cover - the row is locked
                 raise _state_invalid()
             if operation_row.state == STATE_PENDING:
@@ -2007,8 +1973,6 @@ class PostgresqlMultipartSessionEvidenceStore:
     async def _fetch_operation_row(
         self, connection: AsyncConnection, operation_id: UUID
     ) -> SmallFileOperationRow | None:
-        result = await connection.execute(
-            operation_row_by_id_select_statement(operation_id)
-        )
+        result = await connection.execute(operation_row_by_id_select_statement(operation_id))
         row = result.mappings().one_or_none()
         return None if row is None else SmallFileOperationRow.from_row_mapping(row)
