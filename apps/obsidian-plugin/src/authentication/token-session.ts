@@ -57,6 +57,7 @@ export function resolveStartupAction(record: DeviceSecretRecord | null): DeviceS
 export class DeviceTokenSession {
   readonly #deps: DeviceTokenSessionDeps;
   #accessCredential: string | null = null;
+  #refreshInFlight: Promise<void> | null = null;
 
   constructor(deps: DeviceTokenSessionDeps) {
     this.#deps = deps;
@@ -85,6 +86,25 @@ export class DeviceTokenSession {
    * successor instead of detecting reuse.
    */
   async refresh(): Promise<void> {
+    // Single-flight (bare-reload race): plugin onload fires the startup
+    // refresh fire-and-forget while a queue pass's login-verdict refresh
+    // can arrive concurrently. Two independent rotations on one refresh
+    // credential can trip server-side reuse detection and tombstone a
+    // healthy credential, so a concurrent caller joins the in-flight
+    // rotation instead of starting its own.
+    if (this.#refreshInFlight !== null) {
+      return this.#refreshInFlight;
+    }
+    const attempt = this.#rotateOnce();
+    this.#refreshInFlight = attempt;
+    try {
+      await attempt;
+    } finally {
+      this.#refreshInFlight = null;
+    }
+  }
+
+  async #rotateOnce(): Promise<void> {
     const record = readDeviceSecretRecord(this.#deps.secretStore, this.#deps.recordName);
     if (record?.state !== "active") {
       throw new DeviceAuthError("device_credential_invalid", {

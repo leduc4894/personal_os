@@ -323,6 +323,57 @@ describe("DeviceTokenSession self-disconnect (spec 14.2)", () => {
   });
 });
 
+describe("DeviceTokenSession concurrent refresh single-flight (bare-reload race)", () => {
+  it("joins an in-flight refresh instead of rotating twice", async () => {
+    // A bare plugin reload fires the startup refresh fire-and-forget while
+    // the queue pass's own login-verdict refresh (fix round 4) may arrive
+    // concurrently. Two independent rotations on one refresh credential
+    // can trip server-side reuse detection and tombstone a healthy
+    // credential; the session must join the in-flight promise instead.
+    const harness = createSessionHarness();
+    let releaseFirstRefresh: ((value: typeof SUCCESSOR) => void) | null = null;
+    harness.transport.refresh.mockImplementationOnce(
+      () =>
+        new Promise<typeof SUCCESSOR>((resolve) => {
+          releaseFirstRefresh = resolve;
+        }),
+    );
+    harness.transport.refresh.mockImplementationOnce(async () => ({
+      ...SUCCESSOR,
+      refresh_credential: NEXT_REFRESH_CREDENTIAL,
+    }));
+
+    const startupRefresh = harness.session.refresh();
+    const queueRefresh = harness.session.refresh();
+    expect(harness.transport.refresh).toHaveBeenCalledTimes(1);
+    releaseFirstRefresh?.(SUCCESSOR);
+    await Promise.all([startupRefresh, queueRefresh]);
+
+    expect(harness.transport.refresh).toHaveBeenCalledTimes(1);
+    expect(harness.transport.refresh).toHaveBeenCalledWith(
+      REFRESH_CREDENTIAL,
+      "22222222-2222-4222-8222-222222222222",
+    );
+    expect(harness.session.accessCredential).toBe(ACCESS_CREDENTIAL);
+    const record = lastStoredJson(harness);
+    expect(record.state).toBe("active");
+    expect(record.pending_rotation_id).toBeNull();
+    // No reuse tombstone, no cleared record, exactly one connected state.
+    expect(harness.settings.secret_record_name).not.toBeNull();
+    expect(harness.states.filter((state) => state === "connected")).toHaveLength(1);
+  });
+
+  it("starts a fresh rotation after the in-flight refresh settles", async () => {
+    const harness = createSessionHarness();
+    harness.transport.refresh.mockImplementation(async () => SUCCESSOR);
+
+    await harness.session.refresh();
+    await harness.session.refresh();
+
+    expect(harness.transport.refresh).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("resolveStartupAction", () => {
   it("resumes a pending grant, refreshes an active record and skips the rest", () => {
     expect(

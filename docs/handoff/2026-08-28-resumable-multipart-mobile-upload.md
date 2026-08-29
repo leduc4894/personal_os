@@ -134,3 +134,13 @@ renders moot.
 **BACKLOG state after adjudication:** one mobile-live row (Mobile matrix +
 re-fire live exercise, same round) and two out-of-scope rows (plugin timing
 flake, web-auth reload race), each naming its owning domain.
+
+**Post-merge follow-up (same day, on master):** the web-auth reload race was
+root-caused and fixed — a bare reload runs the startup refresh fire-and-forget
+while a queue pass's login-verdict refresh (fix round 4) could rotate the same
+credential concurrently; two rotations on one refresh credential risk
+server-side reuse detection tombstoning a healthy credential.
+`DeviceTokenSession.refresh` now single-flights (concurrent callers join the
+in-flight rotation; exactly one transport refresh, TDD-proven: RED double-call
+→ GREEN joined). Auth/queue suites 240/240; full suite green modulo the
+documented standalone-passing timing flake. BACKLOG row removed.
