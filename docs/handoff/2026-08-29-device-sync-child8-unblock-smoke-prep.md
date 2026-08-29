@@ -11,12 +11,16 @@ battery. The Child 8 conflict merge is unblocked.
 ## Commit accounting
 
 Branch `device-sync-child8-unblock-smoke-prep` (from `master`; plan
-commit `7f99b57`, merge base `4f77e61`). The final CODE commit is
-**`99663ae`** (`feat: render worker staleness and lifecycle rejections in
-Web Admin`) — every gate below ran at that tree plus this task's
-docs-only changes. The docs commit (spec amendment, runbooks, BACKLOG
-retirement, this handoff) follows `99663ae` immediately; this handoff
-cannot contain its own commit's SHA.
+commit `7f99b57`, merge base `4f77e61`). The last task-wave CODE commit
+is **`99663ae`** (`feat: render worker staleness and lifecycle
+rejections in Web Admin`); the docs commit (spec amendment, runbooks,
+BACKLOG retirement, this handoff) follows `99663ae` immediately. The
+final whole-branch review then landed ONE fix commit — `fix: emit the
+mid-stream closed reason as a safe diagnostics token`, the "fix commit"
+row below, which also carries this handoff's amendment — and `uv run poe
+verify` plus `uv run poe api-contract-check` re-ran at that tree (both
+exit 0; gate rows refreshed). As before, this handoff cannot contain its
+own carrier commit's SHA; the branch tip at land time is the fix commit.
 
 | Commit | Task | Change |
 |---|---|---|
@@ -31,13 +35,19 @@ cannot contain its own commit's SHA.
 | `99663ae` | 7 | Web Admin renders `worker_stale_running` (PolicyStatus health block) and the lifecycle rejection ring (`/admin/lifecycle` page) |
 | (none) | 8 | machine-local: per-worker `KNOWLEDGE_DIAGNOSTICS_LOG_DIR` in `.local/run-worker.sh` + `RESTART.md` step 4b — untracked by design (see Machine-local execution) |
 | docs commit | 9 | spec amendment section 21, runbook updates, BACKLOG retirement, this handoff |
+| fix commit (branch tip; this row's own carrier) | final review | whole-branch review fix wave: Task 2 mid-stream reason emitted as `SafeToken` (plan-defect fix, decision 4) plus the `build_registered_event`-pinned test; `match="local_entry_id"` on the bounded raises (T1 minor); mobile-round reconcile-first clause on the 2026-08-28 multipart BACKLOG row; machine-local launcher hedge in `sync-error-tracing.md`; this handoff amendment |
 
 ## Gate evidence (final battery, 2026-08-29)
 
+First battery ran at `99663ae` + the docs commit; the final-review fix
+commit re-ran `uv run poe verify` and `uv run poe api-contract-check`
+(both exit 0 — the two rows below refreshed with that run's evidence;
+the fix wave changed no web/plugin code, so those counts are unchanged).
+
 | Command | Exit | Evidence |
 |---|---|---|
-| `uv run poe verify` | 0 | ruff format/check clean; eslint clean; mypy strict — 209 files, no issues; tsc ×3 clean; lint-imports clean; boundary 10 passed; pytest --cov **4219 passed, 21 skipped**; web vitest 147 passed; plugin vitest 1237 passed; plugin + web builds done |
-| `uv run poe api-contract-check` | 0 | `api_contract_current`; `openapi-typescript --check` clean (byte-identical snapshot — no wire change, as planned) |
+| `uv run poe verify` | 0 | ruff format/check clean; eslint clean; mypy strict — 209 files, no issues; tsc ×3 clean; lint-imports clean; boundary 10 passed; pytest --cov **4220 passed, 21 skipped** (first battery 4219; the fix wave's +1 is the `build_registered_event`-pinned mid-stream test); web vitest 147 passed; plugin vitest 1237 passed; plugin + web builds done — re-ran at the fix commit |
+| `uv run poe api-contract-check` | 0 | `api_contract_current`; `openapi-typescript --check` clean (byte-identical snapshot — no wire change, as planned) — re-ran at the fix commit |
 | `pnpm --dir apps/obsidian-plugin exec vitest run` | 0 | 56 files / **1237 passed** |
 | `pnpm --dir apps/obsidian-plugin run type-check` | 0 | tsc clean |
 | `pnpm --dir apps/obsidian-plugin run lint` | 0 | eslint clean |
@@ -83,6 +93,25 @@ cannot contain its own commit's SHA.
    suite (unit seams: `hasVaultContent`, any-generation probe, fail-closed
    probe) and the full battery, not by a physical mobile run. This is a
    plan-acknowledged scope choice, not an oversight — see Deferred items.
+4. **The plan's Task 2 `Final[str]` snippet was a plan defect (final
+   review, Critical).** The plan mandated
+   `_RESPONSE_BODY_INCOMPLETE_REASON: Final[str] = "response_body_incomplete"`
+   verbatim, but a raw `str` is outside the diagnostics safe-scalar union:
+   the production sink (`DiagnosticLogger.emit` → `build_registered_event`)
+   would always reject the payload and drop the event, substituting
+   `logging_payload_rejected` — the closed reason token never reached the
+   diagnostics stream, violating the plan's own Produces contract (token
+   surfaced in the diagnostics stream per the AGENTS closed-path rule).
+   Fixed by emitting `SafeToken.parse("response_body_incomplete")`,
+   matching the neighboring `_INVALID_FORMAT_REASON` constant's exact
+   style; the `events.py` registry allowance (optional `reason` on
+   `api_request_failed`) was already correct and is unchanged. Per-task
+   review missed it because the unit `RecordingSink` captures payloads
+   verbatim without validation; the whole-branch review caught it at the
+   middleware↔validation boundary. A new test routes the mid-stream
+   failure payload through `build_registered_event` and asserts the
+   accepted event keeps the reason intact, so this defect class (unit
+   double bypassing validation) cannot recur silently.
 
 ## Machine-local execution (Task 8, not in git history)
 
@@ -120,7 +149,9 @@ Child 8 conflict merge is unblocked.
    trigger is already indexed — the standing Child 9 mobile gates
    (`docs/20-IMPLEMENTATION_PLAN.md` Child 9 acceptance) plus the next
    physical live round already tracked by the 2026-08-28 multipart-upload
-   mobile BACKLOG row. A new row would duplicate an indexed trigger.
+   mobile BACKLOG row. A new row would duplicate an indexed trigger; the
+   final-review wave instead appended one clause naming this
+   re-verification to that existing row (self-contained index).
    Offline evidence stands in the interim: the mobile full-deletion shape
    is pinned by unit seams (fresh journal + vault content ⇒
    `fresh_journal_reconcile_required`; any-generation artifact probe;
@@ -132,7 +163,7 @@ Child 8 conflict merge is unblocked.
    | Minor (task) | Ruling |
    |---|---|
    | StarletteDeprecationWarning from fastapi testclient import (T1) | Code stands — third-party deprecation, pre-existing, no repository change can remove it; surfaces as 1 warning in every gate run |
-   | Bare `pytest.raises` without `match=` in the new bound test (T1) | Code stands — brief-mandated snippet; the two rejected shapes and the 256-bound acceptance pin the behavior |
+   | Bare `pytest.raises` without `match=` in the new bound test (T1) | Fixed in the final-review fix commit — both raises blocks now carry `match="local_entry_id"` (the superseding "code stands" ruling is retired) |
    | Starlette abandons the body iterator on suspension-at-yield disconnect; inner reader only GC-closed there (T2) | Code stands — framework behavior no wrapper can intercept; the deterministically reachable close/throw/complete paths are covered by tests; the reader's own context still closes it |
    | aclose test drives the endpoint directly, not through the ASGI stack (T2) | Code stands — Starlette abandons the iterator on disconnect, so the ASGI stack cannot reach the aclose path at all; the `_continued` wiring itself stays covered by the existing route tests |
    | Head-revision literals scattered across 13 unit test files (T3) | Code stands — pre-existing style in files this plan does not own; the canonical pin (named constant in the migration contract test) was updated |

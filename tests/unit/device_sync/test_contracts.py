@@ -426,7 +426,7 @@ def test_manifest_action_bounds_its_indices_and_uuids() -> None:
 
 
 def test_manifest_action_local_entry_id_is_bounded() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="local_entry_id"):
         ManifestAction(
             action_index=0,
             action_kind=ManifestActionKind.UPLOAD,
@@ -437,7 +437,7 @@ def test_manifest_action_local_entry_id_is_bounded() -> None:
             source_tombstone_id=None,
             reason=None,
         )
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="local_entry_id"):
         ManifestAction(
             action_index=0,
             action_kind=ManifestActionKind.UPLOAD,

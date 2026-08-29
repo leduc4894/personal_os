@@ -597,7 +597,9 @@ Sanitized example (shape only):
 Worker file-sink note: the rotating sink is activated per process by the
 `KNOWLEDGE_DIAGNOSTICS_LOG_DIR` runtime setting — and the repository
 worker launcher (`.local/run-worker.sh`) now sets it automatically
-(2026-08-29): each worker role gets its own diagnostics directory
+(2026-08-29; machine-local launcher: `.local/` is untracked, so on a fresh
+clone the operator sets the variable themselves): each worker role gets
+its own diagnostics directory
 (`.local/runtime-logs/worker-previews/`,
 `.local/runtime-logs/worker-reconciliations/`), so the W1 dispatch
 events land in durable rotating files by default on the local stack. One

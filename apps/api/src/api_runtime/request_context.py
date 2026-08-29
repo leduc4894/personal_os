@@ -58,7 +58,7 @@ _TRACEPARENT_HEADER: Final = b"traceparent"
 _RESPONSE_REQUEST_ID_HEADER: Final = b"x-request-id"
 _OWNED_RESPONSE_HEADERS: Final = frozenset({_RESPONSE_REQUEST_ID_HEADER, _TRACEPARENT_HEADER})
 _INVALID_FORMAT_REASON: Final = SafeToken.parse("invalid_format")
-_RESPONSE_BODY_INCOMPLETE_REASON: Final[str] = "response_body_incomplete"
+_RESPONSE_BODY_INCOMPLETE_REASON: Final = SafeToken.parse("response_body_incomplete")
 _INTERNAL_ERROR_STATUS: Final[int] = HTTP_ERROR_STATUSES[ErrorCode.INTERNAL_ERROR]
 _INTERNAL_ERROR: Final[InternalApplicationError] = InternalApplicationError(
     ErrorCode.INTERNAL_ERROR

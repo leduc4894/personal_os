@@ -30,9 +30,11 @@ from personal_os.api_contracts import ApiHttpMethod, ApiRouteTemplate
 from personal_os.diagnostics.context import current_diagnostic_context
 from personal_os.diagnostics.events import (
     EVENT_DEFINITIONS,
+    DiagnosticEvent,
     EventName,
     ResultCode,
     SafeToken,
+    build_registered_event,
 )
 
 _SENTINEL_CLIENT_REQUEST_ID = "do-not-emit-client-request-id"
@@ -302,10 +304,31 @@ async def test_mid_stream_failure_after_200_emits_failed_with_closed_reason() ->
                 "route": ApiRouteTemplate.UNMATCHED,
                 "status_code": 200,
                 "duration_ms": 0,
-                "reason": "response_body_incomplete",
+                "reason": SafeToken.parse("response_body_incomplete"),
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_mid_stream_failure_payload_passes_production_event_validation() -> None:
+    """The mid-stream failure payload survives the real validating path.
+
+    The unit ``RecordingSink`` captures payloads verbatim without validation,
+    which once hid a plain-``str`` reason that the production
+    ``DiagnosticLogger`` would always reject and drop. Routing the delivered
+    payload through ``build_registered_event`` pins the accepting path: the
+    closed reason token must be a safe scalar and stay intact.
+    """
+    sink = RecordingSink()
+    await _invoke_asgi_observing_failure(
+        RequestContextMiddleware(_mid_stream_crash_app(), event_sink=sink, monotonic_ns=lambda: 0)
+    )
+    assert len(sink.events) == 1
+    event_name, fields = sink.events[0]
+    result = build_registered_event(event_name, fields)
+    assert isinstance(result, DiagnosticEvent)
+    assert result.fields["reason"] == SafeToken.parse("response_body_incomplete")
 
 
 @pytest.mark.asyncio
