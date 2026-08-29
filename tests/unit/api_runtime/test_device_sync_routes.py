@@ -193,6 +193,9 @@ def entry_body(**overrides: Any) -> dict[str, Any]:
         ("post", "/api/sync/manifests"),
         ("get", f"/api/sync/manifests/{uuid4()}/actions"),
         ("get", f"/api/sources/{uuid4()}/versions/{uuid4()}/content"),
+        ("put", f"/api/sync/manifests/{uuid4()}/pages/0"),
+        ("post", f"/api/sync/manifests/{uuid4()}/finalize"),
+        ("post", f"/api/sync/manifests/{uuid4()}/complete"),
     ],
 )
 def test_every_route_demands_the_device_access_credential(

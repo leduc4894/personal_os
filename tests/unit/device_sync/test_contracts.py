@@ -425,6 +425,43 @@ def test_manifest_action_bounds_its_indices_and_uuids() -> None:
         replace(action, source_id=UUID(int=0))
 
 
+def test_manifest_action_local_entry_id_is_bounded() -> None:
+    with pytest.raises(ValueError):
+        ManifestAction(
+            action_index=0,
+            action_kind=ManifestActionKind.UPLOAD,
+            local_entry_id="",
+            source_id=None,
+            source_version_id=None,
+            source_locator_id=None,
+            source_tombstone_id=None,
+            reason=None,
+        )
+    with pytest.raises(ValueError):
+        ManifestAction(
+            action_index=0,
+            action_kind=ManifestActionKind.UPLOAD,
+            local_entry_id="a" * 257,
+            source_id=None,
+            source_version_id=None,
+            source_locator_id=None,
+            source_tombstone_id=None,
+            reason=None,
+        )
+    # 256 characters remain valid, mirroring ManifestEntry's bound.
+    action = ManifestAction(
+        action_index=0,
+        action_kind=ManifestActionKind.UPLOAD,
+        local_entry_id="a" * 256,
+        source_id=None,
+        source_version_id=None,
+        source_locator_id=None,
+        source_tombstone_id=None,
+        reason=None,
+    )
+    assert action.local_entry_id == "a" * 256
+
+
 def test_download_action_requires_its_checkpoint_locator() -> None:
     """The download placement operand is the checkpoint-active locator text
     the device must place bytes at (spec 12.3, task 11b): a download action
@@ -480,6 +517,12 @@ def test_manifest_action_repr_never_renders_the_locator() -> None:
     rendered = repr(action)
     assert LOCATOR.value not in rendered
     assert "<redacted>" in rendered
+
+
+def test_package_all_entries_are_unique() -> None:
+    from personal_os import device_sync
+
+    assert len(device_sync.__all__) == len(set(device_sync.__all__))
 
 
 def test_start_command_rejects_negative_observation_generation() -> None:

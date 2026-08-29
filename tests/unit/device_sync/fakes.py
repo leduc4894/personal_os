@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Final
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from personal_os.device_sync.contracts import (
     AppendManifestPageCommand,
@@ -42,7 +42,7 @@ from personal_os.device_sync.contracts import (
     compute_manifest_run_expiry,
 )
 from personal_os.device_sync.errors import DeviceSyncError, DeviceSyncErrorCode
-from personal_os.device_sync.metrics import DeviceSyncMetrics, InMemoryDeviceSyncMetrics
+from personal_os.device_sync.metrics import InMemoryDeviceSyncMetrics
 from personal_os.device_sync.service import DeviceSyncService
 from personal_os.diagnostics.context import DiagnosticContext, create_diagnostic_context
 from personal_os.diagnostics.events import EventName
@@ -477,15 +477,3 @@ def build_service_harness() -> ServiceHarness:
         sink=sink,
         monotonic=monotonic,
     )
-
-
-def build_metrics_protocol_fake() -> DeviceSyncMetrics:
-    """The in-memory metrics recorder as the injectable protocol double."""
-
-    return InMemoryDeviceSyncMetrics()
-
-
-def manifest_run_id_of(receipt: ManifestRunReceipt) -> UUID:
-    """Test introspection: the run identity behind one receipt."""
-
-    return receipt.manifest_run_id

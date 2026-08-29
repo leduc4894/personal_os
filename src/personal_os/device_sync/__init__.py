@@ -66,7 +66,6 @@ __all__ = [
     "DeviceEventPage",
     "DeviceEventStore",
     "DeviceEventType",
-    "DeviceEventType",
     "DeviceManifestStore",
     "DeviceSyncContext",
     "DeviceSyncError",

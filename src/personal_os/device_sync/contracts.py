@@ -456,6 +456,13 @@ class ManifestAction:
     def __post_init__(self) -> None:
         if self.action_index < 0:
             raise ValueError("action_index must be a non-negative index")
+        if self.local_entry_id is not None and not (
+            1 <= len(self.local_entry_id) <= _LOCAL_ENTRY_ID_MAXIMUM_LENGTH
+        ):
+            raise ValueError(
+                f"local_entry_id must be 1 to {_LOCAL_ENTRY_ID_MAXIMUM_LENGTH} characters long"
+                " when present"
+            )
         if self.source_id is not None:
             reject_nil_uuid("source_id", self.source_id)
         if self.source_version_id is not None:
