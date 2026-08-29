@@ -1391,6 +1391,10 @@ class MemoryJournalFileStore implements JournalFileStore {
   async remove(fileName: string): Promise<void> {
     this.files.delete(fileName);
   }
+
+  async list(): Promise<readonly string[]> {
+    return [...this.files.keys()];
+  }
 }
 
 describe("ManifestReconciler JournalPersistence composition", () => {

@@ -61,6 +61,11 @@ class FakeSelfCheckFileStore implements JournalFileStore {
     this.accessedFileNames.push(`remove:${fileName}`);
     this.files.delete(fileName);
   }
+
+  async list(): Promise<readonly string[]> {
+    this.accessedFileNames.push("list");
+    return [...this.files.keys()];
+  }
 }
 
 /** Create one loaded trail over a fresh fake store. */

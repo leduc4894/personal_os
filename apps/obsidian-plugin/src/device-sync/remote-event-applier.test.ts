@@ -1279,6 +1279,10 @@ describe("DeviceSyncRepository JournalPersistence composition", () => {
     async remove(fileName: string): Promise<void> {
       this.files.delete(fileName);
     }
+
+    async list(): Promise<readonly string[]> {
+      return [...this.files.keys()];
+    }
   }
 
   /** The same journal slice adapter the plugin composition root builds (task 8 carry-forward). */

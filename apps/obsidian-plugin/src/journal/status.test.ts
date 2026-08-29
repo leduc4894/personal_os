@@ -136,6 +136,10 @@ class InMemoryJournalFileStore implements JournalFileStore {
   async remove(fileName: string): Promise<void> {
     this.files.delete(fileName);
   }
+
+  async list(): Promise<readonly string[]> {
+    return [...this.files.keys()];
+  }
 }
 
 function createEmptyRepository(isReconcileRequired = false): JournalRepository {

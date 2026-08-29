@@ -85,6 +85,10 @@ class PersistedTrailFileStore implements JournalFileStore {
   async remove(): Promise<void> {
     return undefined;
   }
+
+  async list(): Promise<readonly string[]> {
+    return [SYNC_DIAGNOSTICS_TRAIL_FILE_NAME];
+  }
 }
 
 async function reloadPersistedTrailToken(

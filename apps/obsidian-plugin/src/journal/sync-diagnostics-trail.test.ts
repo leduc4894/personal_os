@@ -84,6 +84,11 @@ class FakeTrailFileStore implements JournalFileStore {
     this.accessedFileNames.push(`remove:${fileName}`);
     this.files.delete(fileName);
   }
+
+  async list(): Promise<readonly string[]> {
+    this.accessedFileNames.push("list");
+    return [...this.files.keys()];
+  }
 }
 
 const REQUEST_ID = "66666666-6666-4666-8666-666666666666";

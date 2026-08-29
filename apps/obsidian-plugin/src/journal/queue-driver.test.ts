@@ -244,6 +244,10 @@ class FailingTrailFileStore implements JournalFileStore {
   async remove(): Promise<void> {
     return undefined;
   }
+
+  async list(): Promise<readonly string[]> {
+    return [];
+  }
 }
 
 /** Let one macrotask pass so a fire-and-forget trail append finishes its persist. */
