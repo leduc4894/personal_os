@@ -74,6 +74,12 @@ retransmitted. Do not delete the journal or the plugin data; a resume that
 seems stuck is a credential or policy question (see Re-auth below), not a
 progress question.
 
+A client that re-issues the create call for an operation whose session
+already issued part URLs receives `small_file_upload_state_invalid` (the
+operation row is `receiving`); this is the designed answer, not an error
+state — the correct resume path is status plus part URLs, and the route
+does not translate it into a session-recovery answer.
+
 ### Expiry
 
 Symptoms: `multipart_session_expired` (or status answering expired/cleaned

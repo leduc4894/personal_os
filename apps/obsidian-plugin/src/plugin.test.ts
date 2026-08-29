@@ -135,8 +135,8 @@ describe("Obsidian plugin composition root", () => {
       "function resolveMultipartPlatformClass(): MultipartUploadPlatform",
     );
     const resolverIndex = pluginSource.indexOf("function resolveMultipartPlatformClass");
-    const resolverBody = pluginSource.slice(resolverIndex, resolverIndex + 300);
     expect(resolverIndex).toBeGreaterThanOrEqual(0);
+    const resolverBody = pluginSource.slice(resolverIndex, resolverIndex + 300);
     expect(resolverBody).toContain('return Platform.isDesktop ? "desktop" : "mobile";');
     const driverConstructionIndex = pluginSource.indexOf("new JournalQueueDriver({");
     const constructionBody = pluginSource.slice(
@@ -545,8 +545,14 @@ describe("Obsidian plugin composition root", () => {
     );
     expect(projectionBody).toContain("repository.readMultipartSessionStateCounts()");
     expect(projectionBody).toContain("repository.readMultipartSafeReasonCodes()");
-    expect(projectionBody).toContain("multipartSessionStateCounts:");
-    expect(projectionBody).toContain("multipartSafeReasonCodes:");
+    // Assert the SHORTHAND pass-through inside the projectJournalSyncStatus
+    // call (trailing comma), not the `let` declarations (colon + type): the
+    // reads alone would still pass if the snapshot omitted the fields.
+    const projectionCallIndex = projectionBody.indexOf("projectJournalSyncStatus({");
+    expect(projectionCallIndex).toBeGreaterThanOrEqual(0);
+    const projectionCallBody = projectionBody.slice(projectionCallIndex, projectionCallIndex + 900);
+    expect(projectionCallBody).toContain("multipartSessionStateCounts,");
+    expect(projectionCallBody).toContain("multipartSafeReasonCodes,");
   });
 
   it("composes the durable diagnostics trail into the journal seams (sync error tracing task 1)", () => {

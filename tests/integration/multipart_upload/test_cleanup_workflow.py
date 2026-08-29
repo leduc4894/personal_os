@@ -334,6 +334,11 @@ async def test_workflow_history_holds_only_opaque_values(
         assert reference["batch_token"] == str(batch_token)
     assert expired.staging_key.encode() not in serialized_history
     assert expired.provider_upload_id.value.encode() not in serialized_history
+    # URL and ETag sentinels: the sweep history must never carry a presigned
+    # URL (or any locator URL) or a provider part fact.
+    assert b"X-Amz-Signature" not in serialized_history
+    assert b"https://" not in serialized_history
+    assert b"ETag" not in serialized_history
 
 
 @pytest.mark.asyncio

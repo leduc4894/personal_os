@@ -141,7 +141,10 @@ MULTIPART_CLEANUP_REFERENCE_CONTRACT: Final[str] = MULTIPART_CLEANUP_CONTRACT
 MULTIPART_CLEANUP_ACTIVITY_MAXIMUM_ATTEMPTS: Final[int] = 5
 
 #: One batch is at most 100 exact rows behind the store's own bounded
-#: provider-call timeouts, so the start-to-close bound leaves a wide margin.
+#: provider-call timeouts. The bound is not derived from a pinned per-row
+#: budget: a slow batch that hits the cap fails the attempt and retries with
+#: a fresh claim (idempotent), so the cap trades a throughput retry for
+#: safety rather than risking a half-recorded batch.
 MULTIPART_CLEANUP_ACTIVITY_START_TO_CLOSE_TIMEOUT: Final[timedelta] = timedelta(minutes=10)
 
 #: The caller-side bound for every Temporal RPC the starter issues.

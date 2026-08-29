@@ -326,7 +326,6 @@ class R2MultipartStagingProvider:
         operation = MultipartStagingOperation.PRESIGN_PART
         started = self._monotonic()
         tracker = _AttemptTracker()
-        expires_at = self._now_utc() + MULTIPART_PART_URL_LIFETIME
         try:
             url = await self._run_with_retry(
                 operation,
@@ -343,6 +342,10 @@ class R2MultipartStagingProvider:
                     ExpiresIn=_PART_URL_EXPIRES_IN_SECONDS,
                 ),
             )
+            # Recorded expiry derives from the moment the signature was
+            # issued (after retries settle), not the call's start, so a
+            # retried URL never reports more validity than it has.
+            expires_at = self._now_utc() + MULTIPART_PART_URL_LIFETIME
             part_url = self._part_url(part_range, url, expires_at)
             self._record_succeeded(
                 operation,

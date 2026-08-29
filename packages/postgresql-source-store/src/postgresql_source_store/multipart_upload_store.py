@@ -88,6 +88,7 @@ from personal_os.multipart_upload.ports import (
     MultipartProviderUploadId,
     MultipartSessionClaim,
     MultipartSessionRecord,
+    MultipartSessionStore,
     SealedMultipartOperationToken,
 )
 from personal_os.small_file_sync.contracts import (
@@ -107,6 +108,7 @@ from postgresql_source_store.error_mapping import (
 )
 from postgresql_source_store.locks import advisory_xact_lock_statement
 from postgresql_source_store.small_file_sync_operations import (
+    _OPERATION_ROW_COLUMNS,
     STATE_FAILED,
     STATE_PENDING,
     STATE_RECEIVING,
@@ -439,32 +441,15 @@ def operation_row_by_id_select_statement(
     boundary.
     """
 
-    statement = sa.select(
-        small_file_upload_operations.c.operation_id,
-        small_file_upload_operations.c.operation_token_hash,
-        small_file_upload_operations.c.workspace_id,
-        small_file_upload_operations.c.device_id,
-        small_file_upload_operations.c.event_id,
-        small_file_upload_operations.c.idempotency_key,
-        small_file_upload_operations.c.operation_kind,
-        small_file_upload_operations.c.declared_sha256,
-        small_file_upload_operations.c.declared_size_bytes,
-        small_file_upload_operations.c.declared_media_type,
-        small_file_upload_operations.c.policy_revision_number,
-        small_file_upload_operations.c.reserved_source_id,
-        small_file_upload_operations.c.update_source_id,
-        small_file_upload_operations.c.update_base_version_id,
-        small_file_upload_operations.c.normalized_locator,
-        small_file_upload_operations.c.locator_fingerprint,
-        small_file_upload_operations.c.state,
-        small_file_upload_operations.c.safe_error_code,
-        small_file_upload_operations.c.result_kind,
-        small_file_upload_operations.c.result_source_id,
-        small_file_upload_operations.c.result_source_version_id,
-        small_file_upload_operations.c.result_content_version,
-        small_file_upload_operations.c.result_committed_at,
-        small_file_upload_operations.c.expires_at,
-    ).where(small_file_upload_operations.c.operation_id == operation_id)
+    # Derive the column list from the small-file module's shared tuple so an
+    # upstream column addition cannot silently drift the evidence read into
+    # a KeyError on SmallFileOperationRow.from_row_mapping.
+    columns = [
+        small_file_upload_operations.c[column_name] for column_name in _OPERATION_ROW_COLUMNS
+    ]
+    statement = sa.select(*columns).where(
+        small_file_upload_operations.c.operation_id == operation_id
+    )
     return statement.with_for_update() if for_update else statement
 
 
@@ -1976,3 +1961,8 @@ class PostgresqlMultipartSessionEvidenceStore:
         result = await connection.execute(operation_row_by_id_select_statement(operation_id))
         row = result.mappings().one_or_none()
         return None if row is None else SmallFileOperationRow.from_row_mapping(row)
+
+
+# Static conformance pin: the durable store must satisfy the domain port even
+# where no caller passes it as the port yet; mypy enforces the signatures here.
+_CONFORMANCE_PIN: type[MultipartSessionStore] = PostgresqlMultipartUploadStore

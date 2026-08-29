@@ -133,6 +133,11 @@ from personal_os.sources.results import SourceVersionPublicationResult
 #: grammar (32 to 128 printable base64url characters) keeps the derived key
 #: inside the provider's validated grammar, and the prefix keeps it a shape
 #: no canonical ``objects/sha256/...`` key can satisfy.
+#:
+#: The R2 package holds a grammar twin (``_STAGING_KEY_PREFIX`` in
+#: ``r2_object_storage.multipart``); the dependency direction forbids sharing
+#: one constant, and drift between them fails closed at
+#: ``MultipartStagingKey.parse`` on the provider boundary.
 _STAGING_KEY_PREFIX: Final[str] = "staging/multipart/"
 
 #: Object-storage failure codes that are the closed content-integrity

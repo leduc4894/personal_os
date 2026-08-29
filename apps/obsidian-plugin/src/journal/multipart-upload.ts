@@ -366,7 +366,10 @@ export class MultipartUploadRunner {
       }
       await this.#applySessionVerdict(event.eventId, status.state);
       plan = status;
-      safeReason = persisted.safeReason;
+      // A reason token from the interrupted pass describes that pass, not
+      // this one: the resumed row is actively progressing again, and any new
+      // closed path persists its own token before the next read.
+      safeReason = null;
       for (const partNumber of persisted.completedPartNumbers) {
         completedPartNumbers.add(partNumber);
       }
@@ -418,8 +421,14 @@ export class MultipartUploadRunner {
 
     // Before requesting completion the frozen file is compared one final
     // time (spec 4.3); a changed file ends the session exactly like a
-    // mid-part change.
+    // mid-part change. The deadline is re-checked here too: a fully resumed
+    // session skips the part loop above and must not issue a completion
+    // call past the pass deadline.
     this.#throwIfSuspended(context.signal);
+    if (this.#isPastDeadline(context.passDeadlineEpochMs)) {
+      stopState.deadlineReached = true;
+      return { outcome: "pass_deadline_reached" };
+    }
     const completionCheck = await this.#checkFrozenFile(event, localFile);
     if (completionCheck.kind === "changed") {
       return await this.#stopForLocalContentChange(event, plan, completedPartNumbers);

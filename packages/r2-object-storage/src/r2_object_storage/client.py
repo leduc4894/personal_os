@@ -357,7 +357,8 @@ class R2ClientManager:
 
         if self._raw_client is None:
             await self.get_client()
-        raw_client = self._raw_client
+        async with self._lock:
+            raw_client = self._raw_client
         assert raw_client is not None, "get_client must publish the raw SDK client"
         return raw_client
 

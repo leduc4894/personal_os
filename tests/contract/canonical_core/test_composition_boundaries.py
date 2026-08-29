@@ -131,6 +131,10 @@ def test_corruption_capability_lives_only_in_test_harness() -> None:
             )
             for broad in ("delete_objects", "list_objects", "list_object_versions", "copy_object"):
                 assert broad not in source, f"{path} must not contain {broad!r}"
+            # The multipart exception is scoped to the staging-removal name
+            # only: the sibling corruption-capability bans still apply here.
+            for harness_only in ("write_object_under_digest", "delete_exact_object"):
+                assert harness_only not in source, f"{path} must not contain {harness_only!r}"
             continue
         for forbidden in ("delete_object", "write_object_under_digest", "delete_exact_object"):
             assert forbidden not in source, f"{path} must not contain {forbidden!r}"

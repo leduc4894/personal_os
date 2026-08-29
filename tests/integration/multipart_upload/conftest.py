@@ -32,13 +32,13 @@ import os
 import secrets
 import shutil
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterable, Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Final
+from typing import AbstractAsyncContextManager, Any, Final
 from uuid import UUID, uuid4
 
 import httpx
@@ -478,6 +478,33 @@ class _LiveTransferIntent:
     payload: bytes
     digest_hexadecimal: str
     canonical_object_key: str
+
+
+class ManifestRecordingStagingByteSource:
+    """Manifest-gated read seam over the real staging byte source.
+
+    The verification spool's staging read must pass the same exact-identity
+    tripwire as every mutating capability: a staging key the run never
+    recorded is rejected before the read crosses to the provider, so the
+    completion path can never verify bytes at an identity outside the
+    cleanup manifest.
+    """
+
+    def __init__(
+        self,
+        source: R2MultipartStagingByteSource,
+        *,
+        manifest: LiveCleanupManifest,
+    ) -> None:
+        self._source = source
+        self._manifest = manifest
+
+    def open_staging_stream(
+        self, staging_key: str
+    ) -> AbstractAsyncContextManager[AsyncIterable[bytes]]:
+        if self._manifest.staging_record_for(staging_key) is None:
+            raise CleanupRejection(REJECTION_UNRECORDED_KEY)
+        return self._source.open_staging_stream(staging_key)
 
 
 class ManifestRecordingStagingProvider:
@@ -1263,7 +1290,10 @@ async def live_harness(
             ),
             object_store=object_store,
             staging_provider=recording_provider,
-            staging_byte_source=R2MultipartStagingByteSource(staging_provider),
+            staging_byte_source=ManifestRecordingStagingByteSource(
+                R2MultipartStagingByteSource(staging_provider),
+                manifest=manifest,
+            ),
             metrics=InMemoryMultipartUploadMetrics(),
             clock=clock,
             diagnostics=logger,
