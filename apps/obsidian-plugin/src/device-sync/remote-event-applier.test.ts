@@ -696,6 +696,77 @@ describe("RemoteEventApplier stage surfacing", () => {
   });
 });
 
+// --- the verified-download reuse -------------------------------------------------------------------------
+
+describe("RemoteEventApplier verified-download reuse", () => {
+  it("skips the download when a matching verified download is provided", async () => {
+    let downloaderCalls = 0;
+    const harness = createApplierHarness({
+      seedFiles: seedFilesOf(UPDATED_EVENT()),
+      downloader: async (): Promise<VerifiedDownload> => {
+        downloaderCalls += 1;
+        return nextBytesDownload();
+      },
+    });
+    // A distinct bytes object with the exact verified content: the apply
+    // must place THIS object, never a second download of the same version.
+    const verifiedBytes = bytesOf("remote next content");
+    const verified: VerifiedDownload = {
+      bytes: verifiedBytes,
+      declaredSha256: NEXT_FINGERPRINT.sha256,
+      sizeBytes: verifiedBytes.byteLength,
+      mediaType: "text/markdown",
+    };
+
+    const outcome = await harness.applier.apply(UPDATED_EVENT(), {
+      verifiedDownload: verified,
+    });
+
+    expect(outcome).toEqual({ eventSequence: 1, outcome: "applied", reason: null });
+    // The downloader seam never ran: the already-proven bytes were reused.
+    expect(downloaderCalls).toBe(0);
+    expect(harness.repository.readState().appliedSequence).toBe(1);
+    expect(harness.diagnostics.applyFailures).toEqual([]);
+    // Object identity: the applied bytes ARE the verified download's exact
+    // bytes object — no copy, no second fetch whose bytes could diverge.
+    expect(harness.vault.files.get("notes/a.md")).toBe(verifiedBytes);
+  });
+
+  it("falls back to the downloader when the verified download does not match", async () => {
+    let downloaderCalls = 0;
+    const downloadedBytes = bytesOf("remote next content");
+    const harness = createApplierHarness({
+      seedFiles: seedFilesOf(UPDATED_EVENT()),
+      downloader: async (): Promise<VerifiedDownload> => {
+        downloaderCalls += 1;
+        return {
+          bytes: downloadedBytes,
+          declaredSha256: NEXT_FINGERPRINT.sha256,
+          sizeBytes: downloadedBytes.byteLength,
+          mediaType: "text/markdown",
+        };
+      },
+    });
+    // A digest that proves a DIFFERENT version than the event's current
+    // fingerprint: the stale proof must never substitute for the bytes.
+    const staleVerified: VerifiedDownload = {
+      bytes: bytesOf("stale proven bytes"),
+      declaredSha256: "0".repeat(64),
+      sizeBytes: 0,
+      mediaType: "text/markdown",
+    };
+
+    const outcome = await harness.applier.apply(UPDATED_EVENT(), {
+      verifiedDownload: staleVerified,
+    });
+
+    expect(outcome).toEqual({ eventSequence: 1, outcome: "applied", reason: null });
+    expect(downloaderCalls).toBe(1);
+    expect(harness.vault.files.get("notes/a.md")).toBe(downloadedBytes);
+    expect(harness.diagnostics.applyFailures).toEqual([]);
+  });
+});
+
 // --- the crash-injection matrix -----------------------------------------------------------------------------
 
 describe("RemoteEventApplier crash-injection matrix", () => {

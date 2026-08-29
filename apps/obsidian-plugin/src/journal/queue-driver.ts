@@ -1131,13 +1131,28 @@ export class JournalQueueDriver {
       case "blocked_size":
         await this.#closeTerminal(eventId, "blocked_size", "blocked_size", correlationId);
         return "continue";
-      case "blocked_conflict":
+      case "blocked_conflict": {
         // The server's typed, non-retryable business-conflict verdict (for
         // example the create-time `source_locator_conflict`): park the event
         // terminally so the queue moves on instead of retrying a verdict
         // that can never succeed.
         await this.#closeTerminal(eventId, "blocked_conflict", "blocked_conflict", correlationId);
+        // Barrier parity with the inbound apply lanes: the same conflict on
+        // the inbound path freezes observation and requires reconciliation,
+        // so the outbound lane must not keep uploading into a claim it
+        // cannot see.
+        try {
+          const generation = await this.#repository.deviceSync.nextObservationGeneration();
+          await this.#repository.deviceSync.startRepairBarrier({
+            generation,
+            reason: "device_manifest_target_occupied",
+          });
+        } catch {
+          // A barrier or active manifest run already exists: a repair is
+          // already owed — nothing to raise.
+        }
         return "continue";
+      }
       case "integrity_failed":
         await this.#closeTerminal(eventId, "integrity_failed", "integrity_failed", correlationId);
         return "continue";

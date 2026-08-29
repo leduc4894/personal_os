@@ -75,6 +75,7 @@ import type {
   ManifestReconcilerWireApi,
 } from "./manifest-reconciler";
 import { createRemoteEventApplier } from "./remote-event-applier";
+import type { VerifiedDownloader } from "./remote-event-applier";
 
 /** The real sql.js WebAssembly engine drives every reconciler test (spec 6.1). */
 let engineModule: SqliteEngineModule;
@@ -389,6 +390,8 @@ interface HarnessOptions {
   readonly database?: SqliteDatabase;
   /** Test-only page bound: keeps multi-page scenarios small (default 2). */
   readonly entriesPerPage?: number;
+  /** Test-only verified-download seam override: counts or scripts downloads. */
+  readonly downloader?: VerifiedDownloader;
 }
 
 function createReconcilerHarness(options: HarnessOptions = {}): ReconcilerHarness {
@@ -431,11 +434,12 @@ function createReconcilerHarness(options: HarnessOptions = {}): ReconcilerHarnes
     sizeBytes: FRESH_BYTES.byteLength,
     mediaType: "text/plain",
   });
+  const downloader = options.downloader ?? verifiedFreshDownload;
   const writer = new AtomicVaultWriterImpl({ repository: deviceSync, seam: vault });
   const applier = createRemoteEventApplier({
     repository: deviceSync,
     writer,
-    downloader: verifiedFreshDownload,
+    downloader,
     diagnostics,
   });
   const journal = createManifestReconcilerJournal({
@@ -450,7 +454,7 @@ function createReconcilerHarness(options: HarnessOptions = {}): ReconcilerHarnes
     journal,
     applier,
     diagnostics,
-    downloader: verifiedFreshDownload,
+    downloader,
   });
   return { reconciler, journalRepository, deviceSync, database, vault, api, diagnostics, journal };
 }
@@ -853,6 +857,40 @@ describe("ManifestReconciler action rechecks (spec 12.4)", () => {
     expect(
       new TextDecoder().decode(harness.vault.fileBytes("notes/clean.md") ?? new Uint8Array()),
     ).toBe("fresh remote bytes");
+  });
+
+  it("downloads each download action exactly once and reuses the verified bytes", async () => {
+    const downloads: VerifiedDownload[] = [];
+    const harness = createReconcilerHarness({
+      files: [{ locator: "notes/single-download.md", bytes: STALE_BYTES }],
+      downloader: async (): Promise<VerifiedDownload> => {
+        // A fresh bytes object per call: which exact object the apply staged
+        // proves whether the verified bytes were reused or re-downloaded.
+        const bytes = bytesOf("fresh remote bytes");
+        const download: VerifiedDownload = {
+          bytes,
+          declaredSha256: await sha256Hex(bytes),
+          sizeBytes: bytes.byteLength,
+          mediaType: "text/plain",
+        };
+        downloads.push(download);
+        return download;
+      },
+    });
+    const localEntryId = await entryIdOfLocator("notes/single-download.md");
+    harness.api.plan = [downloadAction(localEntryId)];
+
+    const outcome = await harness.reconciler.reconcile("explicit_repair");
+
+    expect(outcome).toEqual({ kind: "completed", checkpointSequence: CHECKPOINT_SEQUENCE });
+    // One verified download served both the fingerprint proof and the
+    // synthetic apply — never one download per concern.
+    expect(downloads).toHaveLength(1);
+    // Object identity: the applied bytes ARE the verified download's exact
+    // bytes object, so the digest proof and the applied bytes are one
+    // object instead of two downloads that could diverge.
+    expect(harness.vault.fileBytes("notes/single-download.md")).toBe(downloads[0]?.bytes);
+    expect(harness.diagnostics.reconcileFailures).toEqual([]);
   });
 });
 

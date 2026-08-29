@@ -646,15 +646,76 @@ describe("queue driver outcome mapping (spec 10.1 table, 12)", () => {
       "source_locator_conflict",
       { requestId: "66666666-6666-4666-8666-666666666666" },
     ]);
-    // The queue moved on: the follower event was reached in the same pass
-    // instead of the whole pass ending behind a retryable verdict.
+    // The terminal park still moves the queue past the verdict (never a
+    // retryable `waiting_retry` loop), but the raised repair barrier now
+    // holds the follower: no later outbound upload may race a target claim
+    // this device cannot see until reconciliation releases the barrier.
     expect(scripted.preflightBodies.map((body) => body["normalized_locator"])).toEqual([
       "notes/owned-path.md",
-      "notes/follower.md",
     ]);
-    expect(harness.repository.readEvent(follower.eventId)?.state).toBe("excluded_policy");
+    expect(harness.repository.readEvent(follower.eventId)?.state).toBe("queued");
+    expect(harness.repository.deviceSync.readState().barrierReason).toBe(
+      "device_manifest_target_occupied",
+    );
     expect(summary.outcome).toBe("completed");
-    expect(summary.processedEventCount).toBe(2);
+    expect(summary.processedEventCount).toBe(1);
+  });
+
+  it("raises a repair barrier when parking a blocked_conflict upload", async () => {
+    const harness = createHarness();
+    const conflicted = await captureBytes(
+      harness,
+      "notes/barrier-raise.md",
+      new TextEncoder().encode("owned"),
+    );
+    harness.installTransport({
+      preflight: async () => ({ status: 200, bodyText: SINGLE_PART_BODY }),
+      content: async () => ({ status: 409, bodyText: errorBody("source_locator_conflict") }),
+    });
+
+    const summary = await runPass(harness.driver);
+
+    expect(harness.repository.readEvent(conflicted.eventId)?.state).toBe("blocked_conflict");
+    // Barrier parity with the inbound conflict lanes (the applier and the
+    // reconciler): the same occupied-target verdict that freezes observation
+    // inbound now holds the outbound queue behind a repair barrier.
+    const state = harness.repository.deviceSync.readState();
+    expect(state.barrierGeneration).not.toBeNull();
+    expect(state.barrierReason).toBe("device_manifest_target_occupied");
+    expect(summary.outcome).toBe("completed");
+  });
+
+  it("tolerates an already-owed repair barrier when parking blocked_conflict", async () => {
+    const harness = createHarness();
+    const conflicted = await captureBytes(
+      harness,
+      "notes/barrier-owed.md",
+      new TextEncoder().encode("owned"),
+    );
+    harness.installTransport({
+      preflight: async () => ({ status: 200, bodyText: SINGLE_PART_BODY }),
+      content: async () => {
+        // A reconciliation started while the upload was in flight: its
+        // barrier is already owed by the time the conflict verdict parks
+        // the event — the park must tolerate it, never throw.
+        await harness.repository.deviceSync.nextObservationGeneration();
+        await harness.repository.deviceSync.startRepairBarrier({
+          generation: 1,
+          reason: "device_cursor_gap",
+        });
+        return { status: 409, bodyText: errorBody("source_locator_conflict") };
+      },
+    });
+
+    const summary = await runPass(harness.driver);
+
+    // The park completed terminally and the pre-existing barrier stands
+    // untouched with its own reason.
+    expect(harness.repository.readEvent(conflicted.eventId)?.state).toBe("blocked_conflict");
+    const state = harness.repository.deviceSync.readState();
+    expect(state.barrierGeneration).not.toBeNull();
+    expect(state.barrierReason).toBe("device_cursor_gap");
+    expect(summary.outcome).toBe("completed");
   });
 });
 

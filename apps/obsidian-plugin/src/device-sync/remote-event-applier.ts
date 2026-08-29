@@ -46,7 +46,18 @@ import type { AtomicVaultWriter, RemoteApplyRecovery } from "./atomic-vault-writ
 
 export interface RemoteEventApplier {
   recoverUnfinishedApply(): Promise<void>;
-  apply(event: DeviceSyncEvent): Promise<TerminalDeviceEvent>;
+  apply(event: DeviceSyncEvent, options?: RemoteEventApplyOptions): Promise<TerminalDeviceEvent>;
+}
+
+/**
+ * The optional inputs of one apply. `verifiedDownload` carries a download
+ * of the event's current version whose digest a caller already verified
+ * (the manifest reconciler's fingerprint proof): when its declared
+ * SHA-256 matches the event's current fingerprint, the apply reuses these
+ * exact bytes instead of downloading the same version again.
+ */
+export interface RemoteEventApplyOptions {
+  readonly verifiedDownload?: VerifiedDownload | null;
 }
 
 /** The verified-download seam: the Task 9 wire client's `downloadSourceVersion`. */
@@ -152,7 +163,10 @@ export function createRemoteEventApplier(options: RemoteEventApplierOptions): Re
     return { eventSequence, outcome, reason };
   }
 
-  async function apply(event: DeviceSyncEvent): Promise<TerminalDeviceEvent> {
+  async function apply(
+    event: DeviceSyncEvent,
+    options?: RemoteEventApplyOptions,
+  ): Promise<TerminalDeviceEvent> {
     const state = repository.readState();
     if (event.eventSequence <= state.appliedSequence) {
       // Idempotent replay of an already-settled event: nothing is re-run,
@@ -238,25 +252,38 @@ export function createRemoteEventApplier(options: RemoteEventApplierOptions): Re
     // Stage: download — the verified bytes of the event's current version.
     let bytes: Uint8Array | null = null;
     if (needsDownload && event.currentVersionId !== null) {
-      try {
-        const download = await downloader({
-          sourceId: event.sourceId,
-          sourceVersionId: event.currentVersionId,
-        });
-        bytes = download.bytes;
-      } catch (error) {
-        if (error instanceof DeviceSyncApiError) {
-          // The wire lane already reported exactly one observation.
-          throw error;
+      const predownloaded =
+        options?.verifiedDownload != null &&
+        options.verifiedDownload.declaredSha256 === event.currentFingerprint?.sha256
+          ? options.verifiedDownload
+          : null;
+      if (predownloaded !== null) {
+        // The caller proved this exact download already (the reconciler's
+        // fingerprint proof): reusing the same bytes keeps the digest
+        // proof and the applied bytes one object instead of two downloads
+        // whose bytes could theoretically diverge.
+        bytes = predownloaded.bytes;
+      } else {
+        try {
+          const download = await downloader({
+            sourceId: event.sourceId,
+            sourceVersionId: event.currentVersionId,
+          });
+          bytes = download.bytes;
+        } catch (error) {
+          if (error instanceof DeviceSyncApiError) {
+            // The wire lane already reported exactly one observation.
+            throw error;
+          }
+          const failure = classifyDeviceSyncFailure(error);
+          diagnostics.applyFailure("download", failure.reason, failure.correlation);
+          throw new DeviceSyncApiError(
+            failure.reason,
+            failure.retryable,
+            failure.correlation?.requestId ?? null,
+            failure.correlation?.wireErrorCode ?? null,
+          );
         }
-        const failure = classifyDeviceSyncFailure(error);
-        diagnostics.applyFailure("download", failure.reason, failure.correlation);
-        throw new DeviceSyncApiError(
-          failure.reason,
-          failure.retryable,
-          failure.correlation?.requestId ?? null,
-          failure.correlation?.wireErrorCode ?? null,
-        );
       }
     }
 

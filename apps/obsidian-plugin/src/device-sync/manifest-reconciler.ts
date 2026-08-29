@@ -583,6 +583,17 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
           committedAt: SYNTHETIC_EVENT_COMMITTED_AT,
         };
       }
+
+      // One verified download serves both the fingerprint proof above and
+      // the applied bytes below: the applier reuses these exact proven
+      // bytes instead of downloading the same version a second time whose
+      // bytes could diverge from the proof.
+      try {
+        await applier.apply(event, { verifiedDownload: verified });
+      } catch (error) {
+        return runFailure("actions", error);
+      }
+      return terminal(null);
     }
 
     try {
