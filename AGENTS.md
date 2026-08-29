@@ -49,6 +49,13 @@ hoặc khi cần artifact lâu dài. Không tạo tài liệu quy trình cho ch�
   hoặc điều kiện domain có thể kiểm chứng. Cấm dùng `later`, `TBD`, tên wave
   không có child/trigger, hoặc mốc mơ hồ. Nếu chưa suy ra được mốc, đọc handoff
   và contract nguồn để phân loại trước khi ghi row; không tạo deferred vô hạn.
+- Chỉ được defer hai loại item: (a) out of scope — lỗi/việc thuộc domain, infra
+  hoặc test mà plan này không sở hữu (phải nêu rõ plan/domain nào sở hữu); hoặc
+  (b) mobile live test cần thiết bị vật lý. Mọi finding trong scope của plan
+  phải được fix, hoặc đóng bằng phán quyết tường minh trong handoff ("code
+  stands" kèm lý do và bằng chứng) — không được ghi BACKLOG để trì hoãn việc
+  trong scope. Item đơn giản, sửa được trong session của plan, phải hoàn thành
+  trước khi viết handoff cuối.
 
 ## Quy tắc đặt tên
 
@@ -121,7 +128,7 @@ Quy ước theo ngôn ngữ và artifact:
 
 - Nguồn cấu hình local-stack chuẩn là `.local/stack-secrets/`. Trước khi kết luận local-stack thiếu secret hoặc không thể bootstrap, phải dùng loader/validation contract của repository với thư mục này.
 - Không đọc, in, log, copy, hoặc commit giá trị secret. Chỉ báo cáo tên contract, trạng thái hiện diện, và error code đã được redaction.
-- Khi cần chạy integration hoặc live test trên local stack, LUÔN dùng project disposable `knowledge-ci-*` và dựng bằng MỘT lệnh `bash .local/serve-live-ci.sh up <knowledge-ci-*>` — script tự hạ `knowledge-local` (containers không còn auto-wake với Docker nhưng vẫn có thể đang chạy), dựng project CI (initializer `postgres-provision` tự chạy migration lên head) VÀ khởi động đủ các service local (API serve-local, Web Admin 38000, hai policy worker, tunnel `knowledge-api-verify`) rồi chờ ready; chạy bootstrap thiếu service sẽ fail `totp_http_unavailable`. Dọn sau vòng live: `bash .local/serve-live-ci.sh down` (giữ `knowledge-local` ở trạng thái down). Các lệnh stack/bootstrap chạm project CI yêu cầu `CI=true`. Không dùng project CI để thay đổi hay xóa dữ liệu của `knowledge-local`.
+- Khi cần chạy integration hoặc live test trên local stack, LUÔN dùng project disposable `knowledge-ci-*` và dựng bằng MỘT lệnh `bash .local/serve-live-ci.sh up <knowledge-ci-*>` — script tự hạ `knowledge-local` (containers không còn auto-wake với Docker nhưng vẫn có thể đang chạy), dựng project CI (initializer `postgres-provision` chỉ tạo role/database/grant; script up tự chạy `alembic upgrade head` lên head) VÀ khởi động đủ các service local (API serve-local, Web Admin 38000, hai policy worker, tunnel `knowledge-api-verify`) rồi chờ ready; chạy bootstrap thiếu service sẽ fail `totp_http_unavailable`. Dọn sau vòng live: `bash .local/serve-live-ci.sh down` (giữ `knowledge-local` ở trạng thái down). Các lệnh stack/bootstrap chạm project CI yêu cầu `CI=true`. Không dùng project CI để thay đổi hay xóa dữ liệu của `knowledge-local`.
 - `.local/RESTART.md` is the authoritative local-restart runbook. Before starting local services or diagnosing live-test prerequisites, read and follow its order: `uv run poe stack-status`, `.local/serve-local.sh` (with its Windows event-loop helper `.local/run-serve.py`), Web Admin on port 38000, the two policy workers via `.local/run-worker.sh`, then the existing Cloudflare Tunnel `knowledge-api-verify`.
 - Local bootstrap scripts are mandatory contracts, not optional examples: use `.local/serve-local.sh` for API, `.local/run-worker.sh` for workers, `.local/e2e-totp-code.py` for live Obsidian TOTP, and `.local/publish-policy-revision.py` for live policy setup. Do not run `personal-api serve` directly or invent E2E credential variables before reading the runbook and these scripts.
 - `.local/e2e-totp-code.py` is a code producer only after a TOTP credential is active. Before any WDIO live journey, run `tools/obsidian_live_acceptance_bootstrap.py` against the exact disposable `knowledge-ci-*` project. If the helper reports no active credential, the bootstrap must enroll and activate TOTP through the approved Web HTTP flow, rerun the helper preflight, publish policy, and only then launch WDIO. A missing active credential by itself is a bootstrap branch, not a BLOCKED or deferred verdict.

@@ -2,7 +2,7 @@
 
 - **Date:** 2026-08-29
 - **Branch:** `resumable-multipart-mobile-upload` (from `master` `7fd6137`)
-- **Implementation head:** `75d0921` (fix: refire lost policy-fixture capture in multipart journey); this handoff commit follows.
+- **Implementation head:** `ef6981d` (fix: close multipart review minors); this handoff commit follows. Closing wave below.
 - **Plan:** `docs/superpowers/plans/2026-08-28-resumable-multipart-mobile-upload.md` — all 14 tasks executed.
 - **Spec:** `docs/superpowers/specs/2026-08-28-resumable-multipart-mobile-upload-design.md`
 - **Living operations doc:** `docs/operations/resumable-multipart-upload.md` (recovery runbook, live procedure) — linked, not duplicated here.
@@ -74,3 +74,63 @@ Resolved during the plan (BACKLOG rows removed): D1 locator stand-in (Task 7), D
 1. Record physical Mobile evidence per the runbook (`docs/operations/resumable-multipart-upload.md`) — the only open Child 7 acceptance item.
 2. Child 8 conflict-merge sweep should re-check the deferred-minors row and the route-layer `small_file_upload_state_invalid` translation.
 3. Merge decision for the branch itself is the user's; SDD workspace kept (per-task review evidence) at `.superpowers/sdd/2026-08-28-resumable-multipart-mobile-upload/`.
+
+## Closing wave (2026-08-29, post-plan, controller-executed per user instruction)
+
+Per the tightened AGENTS.md deferral rule (only out-of-scope items or mobile
+live tests may be deferred), the deferred list was closed:
+
+**Fixed and verified (commit `ef6981d` + local script):**
+- Live-CI bootstrap quirk FIXED at the source: `.local/serve-live-ci.sh` now
+  runs `alembic upgrade head` after stack-up (postgres-provision never
+  applied migrations — it only creates roles/databases; the "intermittent"
+  appearance was fresh-name vs volume-reuse). Verified on the fresh project
+  `knowledge-ci-provision-fix`: full "LIVE STACK UP" incl. `api ready`, then
+  clean teardown. Script is git-ignored (local contract); AGENTS.md now
+  documents the real behavior.
+- Simple review minors: protocol-conformance pin (store↔port, mypy-enforced);
+  R2 client-manager raw-client read moved under the lock; presign expiry now
+  derived after the SDK call (retried URLs never overstate validity);
+  composition-boundary multipart exception re-ban
+  `write_object_under_digest`/`delete_exact_object` inside the branch;
+  staging-prefix grammar-twin cross-reference; evidence select now DERIVED
+  from `_OPERATION_ROW_COLUMNS` (duplication removed, drift impossible);
+  cleanup-workflow history scan extended with URL/ETag sentinels; runner
+  deadline re-check before completion on fully-resumed sessions; resume no
+  longer replays a stale `safeReason`; dead plugin-test assertion reordered;
+  plugin composition assertion now pins the shorthand pass-through; journey
+  harness byte source passes a manifest-gated recording wrapper (verification
+  reads join the exact-identity tripwire); 10-min activity-cap comment states
+  the real trade-off. Gates: python 3374 unit + contract suites green, mypy
+  strict clean, plugin vitest/lint/type-check green (the two rename/convergence
+  tests that flaked under the full parallel run pass 17/17 standalone — the
+  documented out-of-scope flake row).
+- Route-translation question CLOSED by ruling: keep the spec-faithful
+  behavior (create-while-`receiving` answers `small_file_upload_state_invalid`;
+  resume is status + part URLs) — documented in the runbook's Safe-resume
+  section; BACKLOG row removed.
+
+**Closed by explicit ruling (code stands; no BACKLOG row):** dual
+`multipart_failure`+`wire_failure` trail entries (disjoint information, bounded
+ring by design); recorder-level sentinel-rejection tests carry the privacy
+guarantee where document scans are structural; `part_count` bounds follow the
+brief's field list with exact derivation in geometry; URL check is
+prefix+length for a server-produced value; lease token taxonomy split is
+closed and typed on both families; `literal_binds` parameter-bound tests are
+structural; heartbeat cadence and post-start workflow-failure events are not
+spec-mandated (lease fencing preserves correctness, per-row failure state is
+durable); status `multipart_provider_state_invalid` rides the 24 h expiry
+sweep by spec §6.4 design; lost-complete-response re-upload is the safe
+direction; `MultipartStagingKey` placement respects the dependency direction
+(fail-closed at parse); lazy facade kwargs trade compile-time checks for a
+closed seven-method surface; keyring seal-key startup verification is bounded
+by the 24 h session lifetime (TOTP precedent); the 12th wire code is
+client-originated by design; pre-completion `local_file_missing` is defensive
+(driver maps to `deferred_lifecycle`); cancellation/abort share observables
+per §6.4; injected cleanup failure exercises the durable retry path with the
+retry running the real delete; typed loser paths make race `isinstance`
+renders moot.
+
+**BACKLOG state after adjudication:** one mobile-live row (Mobile matrix +
+re-fire live exercise, same round) and two out-of-scope rows (plugin timing
+flake, web-auth reload race), each naming its owning domain.
