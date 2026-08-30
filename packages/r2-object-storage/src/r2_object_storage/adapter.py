@@ -45,7 +45,7 @@ from typing import IO, Final
 from personal_os.diagnostics import DiagnosticLogger
 from personal_os.diagnostics.events import EventName, SafeToken
 from personal_os.error_contracts.codes import ErrorCode
-from personal_os.error_contracts.exceptions import ApplicationError
+from personal_os.error_contracts.exceptions import ApplicationError, InternalApplicationError
 from personal_os.object_storage import (
     CanonicalMediaType,
     ContentDigest,
@@ -106,21 +106,41 @@ class _SingleFlightEntry:
     waiter_count: int
 
 
-async def _run_shielded(cleanup: Coroutine[object, object, None]) -> None:
+async def _run_shielded(
+    cleanup: Coroutine[object, object, None],
+    *,
+    on_cleanup_failure: Callable[[BaseException], None] | None = None,
+) -> None:
     """Drive ``cleanup`` to completion even when the caller is cancelled.
 
     The cleanup runs as a short shielded local task; a ``CancelledError``
     delivered to the caller waits for the cleanup to finish and is then
     re-raised, so lock-protected table removal and waiter detachment can
     never be abandoned half-done.
+
+    A cleanup that itself fails while the caller is cancelled must never mask
+    that cancellation: the ``CancelledError`` is still re-raised and the
+    cleanup failure is routed to ``on_cleanup_failure`` when the call site
+    provides one. ``on_cleanup_failure is None`` means cleanup failures on
+    that path are unobservable by design — the site has no failure-recording
+    surface — while a provided sink must land the failure on a readable
+    surface (the site's existing failure-recording path). The raw cleanup
+    exception is handed to the sink only; it is never re-raised, logged or
+    serialized here.
     """
 
     task = asyncio.ensure_future(cleanup)
     try:
         await asyncio.shield(task)
     except asyncio.CancelledError:
-        with suppress(asyncio.CancelledError):
+        try:
             await task
+        except asyncio.CancelledError:
+            pass
+        except BaseException as cleanup_error:
+            # A failing cleanup must never mask the caller's cancellation.
+            if on_cleanup_failure is not None:
+                on_cleanup_failure(cleanup_error)
         raise
 
 
@@ -501,7 +521,7 @@ class R2S3ObjectStore:
                     media_type=canonical_media,
                 )
                 receipt, method = await self._store_single_flight(
-                    expected, hashed, operation, tracker
+                    expected, hashed, operation, tracker, started=started
                 )
             self._record_store_outcome(
                 operation,
@@ -790,6 +810,8 @@ class R2S3ObjectStore:
         hashed: HashedSpool,
         operation: ObjectStorageOperation,
         tracker: _AttemptTracker,
+        *,
+        started: float,
     ) -> _SharedStoreOutcome:
         """Own or join the per-digest single flight for the shared R2 work.
 
@@ -801,9 +823,31 @@ class R2S3ObjectStore:
         owner or the other waiters. The owner removes the entry in a
         lock-protected ``finally`` on every exit path, including cancellation,
         so the table is never a cache and never leaks an entry.
+
+        Every shielded cleanup passes the store's failure-recording hook, so a
+        cleanup that fails during a caller's cancellation is recorded as a
+        failed operation carrying the safe ``internal_error`` token instead of
+        masking the cancellation.
         """
 
         digest = expected.content_digest
+
+        def record_cleanup_failure(cleanup_error: BaseException) -> None:
+            """Route one failed shielded cleanup to the store's failure record.
+
+            The raw cleanup exception is intentionally not serialized or
+            chained: only the registered safe ``internal_error`` code reaches
+            the metrics sink and the diagnostic event.
+            """
+
+            self._record_failed(
+                operation,
+                InternalApplicationError(ErrorCode.INTERNAL_ERROR),
+                started=started,
+                size_bytes=expected.size_bytes,
+                attempt_count=tracker.count,
+            )
+
         async with self._single_flight_lock:
             entry = self._single_flight.get(digest)
             if entry is None:
@@ -825,7 +869,10 @@ class R2S3ObjectStore:
                 except ApplicationError as cause:
                     waiter_failure = _clone_application_error(cause)
             finally:
-                await _run_shielded(self._detach_single_flight_waiter(digest, entry))
+                await _run_shielded(
+                    self._detach_single_flight_waiter(digest, entry),
+                    on_cleanup_failure=record_cleanup_failure,
+                )
             if waiter_failure is not None:
                 raise waiter_failure
             assert outcome is not None, "a successful owner must publish its outcome"
@@ -845,9 +892,15 @@ class R2S3ObjectStore:
             finally:
                 await verification.close()
         except BaseException as cause:
-            await _run_shielded(self._finish_single_flight(digest, cause=cause))
+            await _run_shielded(
+                self._finish_single_flight(digest, cause=cause),
+                on_cleanup_failure=record_cleanup_failure,
+            )
             raise
-        await _run_shielded(self._finish_single_flight(digest, outcome=(receipt, method)))
+        await _run_shielded(
+            self._finish_single_flight(digest, outcome=(receipt, method)),
+            on_cleanup_failure=record_cleanup_failure,
+        )
         return receipt, method
 
     async def _detach_single_flight_waiter(

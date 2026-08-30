@@ -8,8 +8,11 @@ verification spool runs alongside the retained input spools, same-digest
 stores share exactly one R2 resolve/create/verify sequence through the bounded
 single-flight table, one waiter's cancellation never cancels the shared owner
 or the other waiters, an owner cancellation cleans up its entry without
-hanging its waiters, client shutdown runs exactly once, and 10,000 completed
-small items leave zero table entries, reservations, permits or spool files.
+hanging its waiters, a cleanup that itself raises during a caller's
+cancellation never masks that cancellation (the failure is routed to the
+call site's failure-recording sink instead), client shutdown runs exactly
+once, and 10,000 completed small items leave zero table entries,
+reservations, permits or spool files.
 
 ``build_repeating_store`` is a deterministic scripted client/store/metrics
 fixture over an in-memory content-addressed map: it never reads the
@@ -39,7 +42,7 @@ from personal_os.object_storage import VerificationMethod, VerifiedObjectReceipt
 from personal_os.object_storage.errors import STREAM_INVALID, ObjectStorageError
 from personal_os.object_storage.keys import CanonicalObjectKey
 from r2_object_storage import spool as spool_module
-from r2_object_storage.adapter import R2S3ObjectStore
+from r2_object_storage.adapter import R2S3ObjectStore, _run_shielded
 from r2_object_storage.client import GetObjectResult, HeadObjectResult, PutObjectRequest
 from r2_object_storage.error_mapping import RetryPolicy
 from r2_object_storage.metrics import (
@@ -853,6 +856,91 @@ async def test_owner_cancellation_cleans_entry_and_fails_waiter_closed(
     ]
     assert len(failed_records) == 1
     assert failed_records[0].error_code is ErrorCode.OBJECT_STORAGE_UNAVAILABLE
+    _assert_no_residual_state(store, tmp_path)
+
+
+# --- Shielded cleanup cancellation -----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_raising_cleanup_does_not_swallow_caller_cancellation() -> None:
+    """A cleanup that raises during caller cancellation never masks the cancellation.
+
+    The caller's ``CancelledError`` must still propagate, and the cleanup
+    failure must reach the call site's sink: that sink is the readable
+    surface for the newly closed cleanup-failure path.
+    """
+
+    allow_cleanup_failure = asyncio.Event()
+
+    async def failing_cleanup() -> None:
+        await allow_cleanup_failure.wait()
+        raise RuntimeError("cleanup failed")
+
+    cleanup_failures: list[BaseException] = []
+
+    def record_cleanup_failure(cleanup_error: BaseException) -> None:
+        cleanup_failures.append(cleanup_error)
+
+    shield_task = asyncio.ensure_future(
+        _run_shielded(failing_cleanup(), on_cleanup_failure=record_cleanup_failure)
+    )
+    await asyncio.sleep(0)  # the shielded cleanup is now in flight
+    shield_task.cancel()
+    allow_cleanup_failure.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await shield_task
+
+    assert len(cleanup_failures) == 1
+    assert isinstance(cleanup_failures[0], RuntimeError)
+
+
+@pytest.mark.asyncio
+async def test_single_flight_cleanup_failure_during_cancellation_records_internal_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's final cleanup failure is recorded, never masking cancellation.
+
+    The single-flight table work completes, then the cleanup raises while the
+    owner is cancelled: the store records a failed operation carrying the
+    safe ``internal_error`` token (its existing failure-recording path) and
+    the cancellation still propagates.
+    """
+
+    store, _client, metrics = build_repeating_store(tmp_path)
+    payload = b"cleanup failure during cancellation"
+    original_finish = store._finish_single_flight
+    call_original_finish = cast("Callable[..., Awaitable[None]]", original_finish)
+    cleanup_started = asyncio.Event()
+    allow_cleanup_failure = asyncio.Event()
+
+    async def finish_then_fail(*arguments: object, **keywords: object) -> None:
+        cleanup_started.set()
+        await allow_cleanup_failure.wait()
+        await call_original_finish(*arguments, **keywords)
+        raise RuntimeError("single-flight cleanup failed")
+
+    monkeypatch.setattr(store, "_finish_single_flight", finish_then_fail)
+
+    owner = asyncio.create_task(
+        store.store_stream(chunks(payload), len(payload), "application/octet-stream")
+    )
+    await asyncio.wait_for(cleanup_started.wait(), timeout=2)
+    owner.cancel()
+    allow_cleanup_failure.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+
+    failed_records = [
+        record
+        for record in metrics.operations
+        if record.operation is ObjectStorageOperation.STORE
+        and record.result is ObjectStorageResult.FAILED
+    ]
+    assert len(failed_records) == 1
+    assert failed_records[0].error_code is ErrorCode.INTERNAL_ERROR
     _assert_no_residual_state(store, tmp_path)
 
 
