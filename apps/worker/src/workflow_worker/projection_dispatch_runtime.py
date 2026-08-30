@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import os
 import re
 import signal
@@ -505,6 +506,24 @@ def _install_shutdown_signals(shutdown: asyncio.Event) -> None:
             signal.signal(signal_number, _request_shutdown)
 
 
+async def close_temporal_client(client: TemporalClient) -> None:
+    """Close one dispatcher-owned Temporal client.
+
+    temporalio 1.30.0 exposes no ``Client.close()`` or ``ServiceClient.close()``
+    surface — gRPC connections live on the shared Core runtime and are torn
+    down with the process — so there is nothing to await today. This seam
+    keeps every dispatcher exit path calling the per-client close the moment
+    a pinned temporalio bump reintroduces one, and the lifecycle unit tests
+    prove the dispatcher reaches the close on every exit path with a
+    close-bearing double.
+    """
+    close = getattr(client, "close", None)
+    if callable(close):
+        pending_close = close()
+        if inspect.isawaitable(pending_close):
+            await pending_close
+
+
 async def run_projection_dispatcher_process() -> None:
     """Compose and run one dispatcher process until a shutdown signal.
 
@@ -512,12 +531,14 @@ async def run_projection_dispatcher_process() -> None:
     refuses activation outside the loopback local/test exception, then runs
     the bounded dispatch loop over the composition-owned engine, intent
     store, Temporal client and starter. Clients and pools are created here
-    only — never at import time — and the engine is disposed on exit while
-    attempts with unknown outcomes stay leased for expiry. The Temporal
-    connect carries the pinned caller-side bound (``Client.connect`` exposes
-    no timeout keyword, so the bound is applied with ``asyncio.wait_for``);
-    a connect that exceeds it surfaces as the retryable dispatch-unavailable
-    failure rather than hanging startup.
+    only — never at import time — and the Temporal client is closed and the
+    engine disposed on every exit path, while attempts with unknown outcomes
+    stay leased for expiry. The Temporal connect carries the pinned
+    caller-side bound (``Client.connect`` exposes no timeout keyword, so the
+    bound is applied with ``asyncio.wait_for``); a connect failure — the
+    timeout or any other refused/TLS/DNS outcome — surfaces as the retryable
+    dispatch-unavailable failure rather than hanging startup or escaping as
+    a raw traceback.
     """
     runtime_settings = load_runtime_settings(ServiceName.WORKER)
     database_settings = load_database_runtime_settings()
@@ -525,19 +546,27 @@ async def run_projection_dispatcher_process() -> None:
     require_dispatcher_activation_allowed(runtime_settings.environment, temporal_settings)
     password = read_database_runtime_password(database_settings)
     engine = create_source_store_engine(database_settings, password)
+    temporal_client: TemporalClient | None = None
     try:
-        temporal_client = await asyncio.wait_for(
-            TemporalClient.connect(temporal_settings.target, namespace=temporal_settings.namespace),
-            timeout=PROJECTION_WORKFLOW_START_TIMEOUT.total_seconds(),
-        )
-    except TimeoutError as cause:
-        raise ProjectionDispatchError(ErrorCode.PROJECTION_DISPATCH_UNAVAILABLE) from cause
-    store = PostgresqlProjectionIntentStore(engine)
-    starter = TemporalProjectionWorkflowStarter(temporal_client)
-    shutdown = asyncio.Event()
-    _install_shutdown_signals(shutdown)
-    try:
+        try:
+            temporal_client = await asyncio.wait_for(
+                TemporalClient.connect(
+                    temporal_settings.target, namespace=temporal_settings.namespace
+                ),
+                timeout=PROJECTION_WORKFLOW_START_TIMEOUT.total_seconds(),
+            )
+        except Exception as cause:
+            # A timeout and any other connect failure (refused endpoint,
+            # TLS, DNS) are the same closed-dependency outcome — never a
+            # raw traceback out of the process shell.
+            raise ProjectionDispatchError(ErrorCode.PROJECTION_DISPATCH_UNAVAILABLE) from cause
+        store = PostgresqlProjectionIntentStore(engine)
+        starter = TemporalProjectionWorkflowStarter(temporal_client)
+        shutdown = asyncio.Event()
+        _install_shutdown_signals(shutdown)
         runtime = ProjectionDispatchRuntime(store=store, starter=starter, clock=_utc_now)
         await runtime.run_until_shutdown(shutdown)
     finally:
+        if temporal_client is not None:
+            await close_temporal_client(temporal_client)
         await dispose_source_store_engine(engine)

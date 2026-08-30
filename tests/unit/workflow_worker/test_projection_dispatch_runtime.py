@@ -20,11 +20,14 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from workflow_worker import projection_dispatch_runtime
 from workflow_worker.projection_dispatch_runtime import (
     PROJECTION_DISPATCH_CONCURRENCY_LIMIT,
     ProjectionDispatchRuntime,
+    TemporalDispatchSettings,
     load_temporal_dispatch_settings,
     require_dispatcher_activation_allowed,
+    run_projection_dispatcher_process,
 )
 from workflow_worker.projection_workflow_starter import (
     ProjectionWorkflowStartResult,
@@ -116,6 +119,8 @@ class FakeIntentStore:
     on_claim: Any = None
     reclaim_calls: list[datetime] = field(default_factory=list)
     claim_calls: list[tuple[datetime, int]] = field(default_factory=list)
+    claimed: list[UUID] = field(default_factory=list)
+    completed: list[UUID] = field(default_factory=list)
     acknowledgements: list[RecordedAcknowledge] = field(default_factory=list)
     releases: list[RecordedRelease] = field(default_factory=list)
     terminals: list[RecordedTerminal] = field(default_factory=list)
@@ -126,6 +131,7 @@ class FakeIntentStore:
 
     async def claim_batch(self, now: datetime, limit: int) -> tuple[LeasedProjectionIntent, ...]:
         self.claim_calls.append((now, limit))
+        self.claimed.extend(intent.projection_intent_id for intent in self.intents)
         if self.on_claim is not None:
             self.on_claim()
         return self.intents
@@ -136,6 +142,8 @@ class FakeIntentStore:
         if self.acknowledge_error is not None:
             raise self.acknowledge_error
         self.acknowledgements.append(RecordedAcknowledge(intent_id, lease_token, now))
+        if self.acknowledge_result:
+            self.completed.append(intent_id)
         return self.acknowledge_result
 
     async def release_retry(
@@ -147,12 +155,16 @@ class FakeIntentStore:
         now: datetime,
     ) -> bool:
         self.releases.append(RecordedRelease(intent_id, lease_token, error_code, available_at, now))
+        if self.release_result:
+            self.completed.append(intent_id)
         return self.release_result
 
     async def mark_terminal(
         self, intent_id: UUID, lease_token: UUID, error_code: SafeToken, now: datetime
     ) -> bool:
         self.terminals.append(RecordedTerminal(intent_id, lease_token, error_code, now))
+        if self.terminal_result:
+            self.completed.append(intent_id)
         return self.terminal_result
 
 
@@ -439,6 +451,8 @@ async def test_shutdown_stops_new_claims_after_the_current_batch() -> None:
     await runtime.run_until_shutdown(shutdown, poll_interval_seconds=0.01)
 
     assert len(store.claim_calls) == 1
+    # Shutdown fired mid-claim; every already-claimed intent still completed:
+    assert store.completed == store.claimed  # drain, not abort
 
 
 @pytest.mark.asyncio
@@ -747,3 +761,204 @@ async def test_bounded_parallel_dispatch_loops_complete_within_the_deadline() ->
             f"parallel dispatch loops did not complete within "
             f"{deadline_seconds}s — possible deadlock"
         ) from cause
+
+
+# --- Dispatcher process lifecycle (row 2026-08-14 §9) -------------------------
+
+
+@dataclass
+class FakeEngineLifecycle:
+    """Engine create/dispose double recording both sides of the pair."""
+
+    created_engines: list[object] = field(default_factory=list)
+    disposed_engines: list[object] = field(default_factory=list)
+
+    def create(self, settings: object, password: object) -> object:
+        del settings, password
+        engine = object()
+        self.created_engines.append(engine)
+        return engine
+
+    async def dispose(self, engine: object) -> None:
+        self.disposed_engines.append(engine)
+
+
+@dataclass
+class FakeTemporalClient:
+    """One dispatcher-owned Temporal client double recording its closes."""
+
+    close_count: int = 0
+
+    async def close(self) -> None:
+        self.close_count += 1
+
+
+@dataclass
+class FakeTemporalClientConnector:
+    """``TemporalClient`` stand-in failing or handing back one client.
+
+    ``connect`` mirrors the real classmethod surface: it raises the pinned
+    connect failure or returns one close-recording client double.
+    """
+
+    connect_error: Exception | None = None
+    connect_targets: list[str] = field(default_factory=list)
+    connected_clients: list[FakeTemporalClient] = field(default_factory=list)
+
+    async def connect(self, target: str, *, namespace: str) -> FakeTemporalClient:
+        self.connect_targets.append(target)
+        if self.connect_error is not None:
+            raise self.connect_error
+        client = FakeTemporalClient()
+        self.connected_clients.append(client)
+        return client
+
+
+@dataclass
+class FakeRuntimeComposition:
+    """``ProjectionDispatchRuntime`` stand-in running one idle cycle.
+
+    The built double signals shutdown on its first ``run_until_shutdown``
+    call, so the process coroutine reaches its cleanup paths without a live
+    PostgreSQL or Temporal dependency.
+    """
+
+    built_runtimes: list[object] = field(default_factory=list)
+    received_stores: list[object] = field(default_factory=list)
+    received_starters: list[object] = field(default_factory=list)
+
+    def __call__(self, *, store: object, starter: object, clock: object) -> object:
+        del clock
+
+        class _IdleShutdownRuntime:
+            async def run_until_shutdown(
+                self, shutdown: asyncio.Event, *, poll_interval_seconds: float = 1.0
+            ) -> None:
+                del poll_interval_seconds
+                shutdown.set()
+
+        self.received_stores.append(store)
+        self.received_starters.append(starter)
+        runtime: object = _IdleShutdownRuntime()
+        self.built_runtimes.append(runtime)
+        return runtime
+
+
+@dataclass
+class FakeRuntimeSettings:
+    """Runtime settings double selecting the activation-allowed test env."""
+
+    environment: RuntimeEnvironment = RuntimeEnvironment.TEST
+
+
+def _install_dispatcher_process_doubles(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    engine: FakeEngineLifecycle,
+    temporal: FakeTemporalClientConnector,
+    runtime_composition: FakeRuntimeComposition,
+) -> None:
+    """Swap every composition dependency of the dispatcher process for doubles.
+
+    The settings loaders return deterministic snapshots (no environment or
+    secret files are read), the engine pair records create/dispose,
+    ``TemporalClient`` becomes the recording connector, and the dispatch
+    runtime becomes one idle-then-shutdown loop.
+    """
+    monkeypatch.setattr(
+        projection_dispatch_runtime,
+        "load_runtime_settings",
+        lambda service_name: FakeRuntimeSettings(),
+    )
+    monkeypatch.setattr(
+        projection_dispatch_runtime, "load_database_runtime_settings", lambda: object()
+    )
+    monkeypatch.setattr(
+        projection_dispatch_runtime, "read_database_runtime_password", lambda settings: ""
+    )
+    monkeypatch.setattr(
+        projection_dispatch_runtime,
+        "load_temporal_dispatch_settings",
+        lambda: TemporalDispatchSettings(),
+    )
+    monkeypatch.setattr(
+        projection_dispatch_runtime, "_install_shutdown_signals", lambda shutdown: None
+    )
+    monkeypatch.setattr(projection_dispatch_runtime, "create_source_store_engine", engine.create)
+    monkeypatch.setattr(projection_dispatch_runtime, "dispose_source_store_engine", engine.dispose)
+    monkeypatch.setattr(projection_dispatch_runtime, "TemporalClient", temporal)
+    monkeypatch.setattr(
+        projection_dispatch_runtime, "ProjectionDispatchRuntime", runtime_composition
+    )
+
+
+@pytest.mark.asyncio
+async def test_connect_timeout_disposes_the_engine_not_leaking_the_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connect timeout still disposes exactly the engine it created."""
+    temporal = FakeTemporalClientConnector(connect_error=TimeoutError())
+    engine = FakeEngineLifecycle()
+
+    _install_dispatcher_process_doubles(
+        monkeypatch,
+        engine=engine,
+        temporal=temporal,
+        runtime_composition=FakeRuntimeComposition(),
+    )
+
+    with pytest.raises(ProjectionDispatchError) as raised:
+        await run_projection_dispatcher_process()
+
+    assert raised.value.error_code is ErrorCode.PROJECTION_DISPATCH_UNAVAILABLE
+    assert engine.disposed_engines == engine.created_engines
+    assert len(engine.disposed_engines) == 1
+    # The connect never produced a client, so no client exists to close.
+    assert temporal.connected_clients == []
+
+
+@pytest.mark.asyncio
+async def test_non_timeout_connect_failure_is_typed_not_a_raw_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused endpoint surfaces as the typed unavailable error, chained from the cause."""
+    temporal = FakeTemporalClientConnector(connect_error=RuntimeError("connection refused"))
+    engine = FakeEngineLifecycle()
+
+    _install_dispatcher_process_doubles(
+        monkeypatch,
+        engine=engine,
+        temporal=temporal,
+        runtime_composition=FakeRuntimeComposition(),
+    )
+
+    with pytest.raises(ProjectionDispatchError) as raised:
+        await run_projection_dispatcher_process()
+
+    assert raised.value.error_code is ErrorCode.PROJECTION_DISPATCH_UNAVAILABLE
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert engine.disposed_engines == engine.created_engines
+
+
+@pytest.mark.asyncio
+async def test_clean_shutdown_closes_the_temporal_client_and_disposes_the_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean shutdown closes the dispatcher-owned Temporal client and engine."""
+    temporal = FakeTemporalClientConnector()
+    engine = FakeEngineLifecycle()
+    runtime_composition = FakeRuntimeComposition()
+
+    _install_dispatcher_process_doubles(
+        monkeypatch,
+        engine=engine,
+        temporal=temporal,
+        runtime_composition=runtime_composition,
+    )
+
+    await run_projection_dispatcher_process()
+
+    assert len(temporal.connected_clients) == 1
+    assert temporal.connected_clients[0].close_count == 1
+    assert engine.disposed_engines == engine.created_engines
+    assert len(runtime_composition.built_runtimes) == 1

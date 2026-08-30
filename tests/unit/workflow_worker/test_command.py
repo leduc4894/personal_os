@@ -67,3 +67,36 @@ def test_worker_process_runs_on_a_selector_event_loop(
 
     assert exit_code == 0
     assert isinstance(observed["loop"], asyncio.SelectorEventLoop)
+
+
+def test_projection_dispatcher_failure_exits_with_the_closed_reason_token(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A typed dispatcher connect failure exits 78 with its closed reason token.
+
+    The dispatcher process types every connect failure (timeout, refused
+    endpoint, TLS, DNS) as ``projection_dispatch_unavailable``; the process
+    shell must map that to its closed failure surface instead of letting a
+    raw traceback escape the command.
+    """
+    from workflow_worker import projection_dispatch_runtime
+
+    from personal_os.error_contracts.codes import ErrorCode
+    from personal_os.sources.errors import ProjectionDispatchError
+
+    async def _fail_projection_dispatch() -> None:
+        raise ProjectionDispatchError(ErrorCode.PROJECTION_DISPATCH_UNAVAILABLE)
+
+    monkeypatch.setattr(
+        projection_dispatch_runtime,
+        "run_projection_dispatcher_process",
+        _fail_projection_dispatch,
+        raising=True,
+    )
+
+    exit_code = command.run([command.DISPATCH_PROJECTIONS_ARGUMENT])
+
+    assert exit_code == 78
+    captured = capsys.readouterr()
+    assert "projection_dispatcher_failed projection_dispatch_unavailable" in captured.out
