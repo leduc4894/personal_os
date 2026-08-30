@@ -47,7 +47,9 @@ uv run python tools/canonical_core_operations.py <subcommand>
 | `69` | Dependency unavailable — reserved for a **non-retryable** dependency failure; the closed error registry currently contains no such code, so no live path exits `69` today. |
 | `70` | Unexpected internal error. |
 | `75` | Busy / retryable dependency failure — pending writers hold the snapshot (`snapshot_busy`), or a dependency (PostgreSQL, R2, Temporal) is unreachable after its bounded retry (all dependency codes in the registry are retryable, including `projection_dispatch_unavailable` for an unreachable Temporal target), or the whole-command timeout fired. |
-| `78` | Configuration or authorization refusal — environment gate (`KNOWLEDGE_ENVIRONMENT` not exactly `local`/`test` for the gated subcommands), missing `--confirm-write-admission-disabled`, `--confirm-target-database` not equal to `--target-database`, bad settings/secret files, unusable backup root. |
+| `78` | Configuration or authorization refusal — bad settings/secret files, unusable backup root. |
+| `78` | Environment refusal — `canonical_recovery_environment_refused`: the environment gate failed (`KNOWLEDGE_ENVIRONMENT` not exactly `local`/`test` for the gated subcommands). |
+| `78` | Admission refusal — `canonical_recovery_admission_refused`: the write-admission gate refused the operation (missing `--confirm-write-admission-disabled` for `backup-create`, or `--confirm-target-database` not equal to `--target-database` for `restore-empty`). |
 
 The 69-vs-75 split is deliberate and closed: a retryable dependency failure is
 the busy class (`75`); `69` stays reserved for a future non-retryable

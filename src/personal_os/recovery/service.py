@@ -545,7 +545,7 @@ class RecoveryService:
             )
         if command.target_confirmation != command.target.database:
             raise RecoveryError(
-                ErrorCode.CANONICAL_RECOVERY_ENVIRONMENT_REFUSED,
+                ErrorCode.CANONICAL_RECOVERY_ADMISSION_REFUSED,
                 safe_details={"operation": RecoveryOperation.RESTORE},
             )
         started = time.monotonic()

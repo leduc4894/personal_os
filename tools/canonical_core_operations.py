@@ -100,7 +100,11 @@ if TYPE_CHECKING:
         VerifiedObjectReader,
         VerifiedObjectReceipt,
     )
-    from personal_os.recovery.contracts import CanonicalAcceptanceMetrics, RecoveryEnvironment
+    from personal_os.recovery.contracts import (
+        CanonicalAcceptanceMetrics,
+        RecoveryEnvironment,
+        RecoveryError,
+    )
     from personal_os.recovery.ports import (
         CanonicalBackupSnapshot,
         DumpReceipt,
@@ -370,7 +374,16 @@ def _require_write_admission(is_admitted: bool) -> None:
     """Require the exact write-admission confirmation flag (spec 9.1)."""
 
     if not is_admitted:
-        raise _environment_refused("backup_create")
+        raise _admission_refused("backup_create")
+
+
+def _admission_refused(operation: str) -> RecoveryError:
+    from personal_os.recovery.contracts import RecoveryError
+
+    return RecoveryError(
+        ErrorCode.CANONICAL_RECOVERY_ADMISSION_REFUSED,
+        safe_details={"operation": SafeToken.parse(operation)},
+    )
 
 
 def _environment_refused(operation: str) -> ApplicationError:
@@ -1578,7 +1591,7 @@ async def _dispatch(
         _require_local_or_test_environment(environ, "restore_empty")
         target_database = cast(str, arguments.target_database)
         if cast(str, arguments.confirm_target_database) != target_database:
-            raise _environment_refused("restore_empty")
+            raise _admission_refused("restore_empty")
         composition = compose_restore_empty(
             RestoreEmptyInvocation(
                 bundle_id=cast(UUID, arguments.bundle_id),

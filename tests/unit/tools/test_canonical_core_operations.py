@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parents[3]))
 
 from tools.canonical_core_operations import (
     CanonicalCoreExitCode,
+    _admission_refused,
     main,
 )
 
@@ -270,7 +271,7 @@ def test_phase_one_acceptance_refuses_staging_before_any_client_or_path() -> Non
 # --- Exact confirmation arguments -------------------------------------------
 
 
-def test_backup_create_requires_exact_write_admission_confirmation() -> None:
+def test_missing_write_admission_flag_refuses_with_the_admission_code() -> None:
     composers = _fake_composers(_FakeComposition())
 
     exit_code, stdout_documents, stderr_documents = _run_main(
@@ -279,15 +280,19 @@ def test_backup_create_requires_exact_write_admission_confirmation() -> None:
 
     assert exit_code == int(CanonicalCoreExitCode.CONFIG)
     assert composers["backup_create"].call_count == 0
-    assert stdout_documents[0]["result_code"] == "canonical_recovery_environment_refused"
+    assert stdout_documents[0]["result_code"] == "canonical_recovery_admission_refused"
     assert len(stderr_documents) == 1
-    assert stderr_documents[0]["error_code"] == "canonical_recovery_environment_refused"
+    assert stderr_documents[0]["error_code"] == "canonical_recovery_admission_refused"
+
+    error = _admission_refused("backup_create")
+    assert error.error_code is ErrorCode.CANONICAL_RECOVERY_ADMISSION_REFUSED
+    assert error.safe_details["operation"].value == "backup_create"
 
 
-def test_restore_empty_requires_exact_target_confirmation() -> None:
+def test_target_database_mismatch_refuses_with_the_admission_code() -> None:
     composers = _fake_composers(_FakeComposition())
 
-    exit_code, _, _ = _run_main(
+    exit_code, stdout_documents, stderr_documents = _run_main(
         [
             "restore-empty",
             "--bundle-id",
@@ -303,6 +308,13 @@ def test_restore_empty_requires_exact_target_confirmation() -> None:
 
     assert exit_code == int(CanonicalCoreExitCode.CONFIG)
     assert composers["restore_empty"].call_count == 0
+    assert stdout_documents[0]["result_code"] == "canonical_recovery_admission_refused"
+    assert len(stderr_documents) == 1
+    assert stderr_documents[0]["error_code"] == "canonical_recovery_admission_refused"
+
+    error = _admission_refused("restore_empty")
+    assert error.error_code is ErrorCode.CANONICAL_RECOVERY_ADMISSION_REFUSED
+    assert error.safe_details["operation"].value == "restore_empty"
 
     confirmed_composers = _fake_composers(_FakeComposition())
     exit_code, _, _ = _run_main(
@@ -443,6 +455,7 @@ def test_error_codes_map_to_exit_classes() -> None:
         (ErrorCode.DATABASE_CONNECTION_UNAVAILABLE, CanonicalCoreExitCode.BUSY),
         (ErrorCode.CONFIGURATION_INVALID, CanonicalCoreExitCode.CONFIG),
         (ErrorCode.CANONICAL_RECOVERY_ENVIRONMENT_REFUSED, CanonicalCoreExitCode.CONFIG),
+        (ErrorCode.CANONICAL_RECOVERY_ADMISSION_REFUSED, CanonicalCoreExitCode.CONFIG),
         (ErrorCode.INTERNAL_ERROR, CanonicalCoreExitCode.INTERNAL),
     ]
     for error_code, expected_exit in cases:

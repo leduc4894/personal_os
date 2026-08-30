@@ -236,11 +236,12 @@ RECOVERY_DEPENDENCY_TOKENS: Final[tuple[SafeToken, ...]] = tuple(
 
 
 class RecoveryError(ApplicationError):
-    """Typed recovery error bound to the closed nine-code recovery set."""
+    """Typed recovery error bound to the closed ten-code recovery set."""
 
     allowed_codes: frozenset[ErrorCode] = frozenset(
         {
             ErrorCode.CANONICAL_RECOVERY_ENVIRONMENT_REFUSED,
+            ErrorCode.CANONICAL_RECOVERY_ADMISSION_REFUSED,
             ErrorCode.CANONICAL_RECOVERY_CONFIGURATION_INVALID,
             ErrorCode.CANONICAL_RECOVERY_SNAPSHOT_BUSY,
             ErrorCode.CANONICAL_RECOVERY_BUNDLE_EXISTS,

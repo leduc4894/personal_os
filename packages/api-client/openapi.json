@@ -2399,6 +2399,7 @@
           "identity_bootstrap_state_conflict",
           "canonical_read_state_invalid",
           "canonical_recovery_environment_refused",
+          "canonical_recovery_admission_refused",
           "canonical_recovery_configuration_invalid",
           "canonical_recovery_snapshot_busy",
           "canonical_recovery_bundle_exists",

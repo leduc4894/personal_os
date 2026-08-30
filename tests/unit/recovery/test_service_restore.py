@@ -906,7 +906,7 @@ async def test_environment_refused_for_restore(
 
 
 @pytest.mark.asyncio
-async def test_target_confirmation_mismatch_refused(
+async def test_target_confirmation_mismatch_refused_with_the_admission_code(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = build_restore_harness(tmp_path, object_count=1)
@@ -920,7 +920,7 @@ async def test_target_confirmation_mismatch_refused(
         )
 
     error = excinfo.value
-    assert error.error_code == ErrorCode.CANONICAL_RECOVERY_ENVIRONMENT_REFUSED
+    assert error.error_code == ErrorCode.CANONICAL_RECOVERY_ADMISSION_REFUSED
     assert dict(error.safe_details) == {"operation": RecoveryOperation.RESTORE}
     assert harness.ledger == []
     assert harness.metrics.backup_records() == []

@@ -65,6 +65,7 @@ class ErrorCode(StrEnum):
     IDENTITY_BOOTSTRAP_STATE_CONFLICT = "identity_bootstrap_state_conflict"
     CANONICAL_READ_STATE_INVALID = "canonical_read_state_invalid"
     CANONICAL_RECOVERY_ENVIRONMENT_REFUSED = "canonical_recovery_environment_refused"
+    CANONICAL_RECOVERY_ADMISSION_REFUSED = "canonical_recovery_admission_refused"
     CANONICAL_RECOVERY_CONFIGURATION_INVALID = "canonical_recovery_configuration_invalid"
     CANONICAL_RECOVERY_SNAPSHOT_BUSY = "canonical_recovery_snapshot_busy"
     CANONICAL_RECOVERY_BUNDLE_EXISTS = "canonical_recovery_bundle_exists"
@@ -431,6 +432,12 @@ ERROR_DEFINITIONS: Final[Mapping[ErrorCode, ErrorDefinition]] = MappingProxyType
             category=ErrorCategory.AUTHORIZATION,
             is_retryable=False,
             safe_message="The recovery environment is not authorized for this operation",
+            allowed_detail_fields=frozenset({"operation"}),
+        ),
+        ErrorCode.CANONICAL_RECOVERY_ADMISSION_REFUSED: ErrorDefinition(
+            category=ErrorCategory.AUTHORIZATION,
+            is_retryable=False,
+            safe_message="the write-admission gate refused the operation",
             allowed_detail_fields=frozenset({"operation"}),
         ),
         ErrorCode.CANONICAL_RECOVERY_CONFIGURATION_INVALID: ErrorDefinition(

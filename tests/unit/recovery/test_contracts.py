@@ -1,6 +1,6 @@
 """Closed recovery error contract, token sets and metric contracts.
 
-Asserts the exact nine-code recovery table (category, retryability, safe-detail
+Asserts the exact ten-code recovery table (category, retryability, safe-detail
 allowlist), the closed reason/component/dependency token sets, the backup
 metric contract pin and the bounded in-memory backup metric sink behaviour.
 """
@@ -32,6 +32,11 @@ from personal_os.recovery.ports import CanonicalBackupSnapshot
 #: The exact spec-15 recovery table: code -> (category, retryable, allowed details).
 RECOVERY_ERROR_TABLE = {
     "canonical_recovery_environment_refused": (
+        ErrorCategory.AUTHORIZATION,
+        False,
+        frozenset({"operation"}),
+    ),
+    "canonical_recovery_admission_refused": (
         ErrorCategory.AUTHORIZATION,
         False,
         frozenset({"operation"}),
