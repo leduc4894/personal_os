@@ -127,14 +127,16 @@ def create_totp_route_endpoints(
             headers=headers,
         )
 
-    async def _rate_limited_json(
-        locked_until: datetime | None, *, headers: dict[str, str] = _NO_STORE_HEADERS
+    def _rate_limited_json(
+        locked_until: datetime | None,
+        limited_at: datetime | None,
+        *,
+        headers: dict[str, str] = _NO_STORE_HEADERS,
     ) -> JSONResponse:
         """Render the throttled exit with its registered safe retry detail."""
         retry_after_seconds = 1
-        if locked_until is not None:
-            database_now = await runtime.totp_service.database_now()
-            remaining_seconds = (locked_until - database_now).total_seconds()
+        if locked_until is not None and limited_at is not None:
+            remaining_seconds = (locked_until - limited_at).total_seconds()
             retry_after_seconds = max(1, math.ceil(remaining_seconds))
         return _error_json(
             AuthenticationError(
@@ -193,7 +195,7 @@ def create_totp_route_endpoints(
         )
         if outcome.public_error is not None:
             if outcome.public_error is ErrorCode.AUTHENTICATION_RATE_LIMITED:
-                return await _rate_limited_json(outcome.locked_until)
+                return _rate_limited_json(outcome.locked_until, outcome.limited_at)
             return _error_json(AuthenticationError(outcome.public_error))
         verified = outcome.verified
         if verified is None:
@@ -266,7 +268,7 @@ def create_totp_route_endpoints(
         )
         if outcome.public_error is not None:
             if outcome.public_error is ErrorCode.AUTHENTICATION_RATE_LIMITED:
-                return await _rate_limited_json(outcome.locked_until)
+                return _rate_limited_json(outcome.locked_until, outcome.limited_at)
             return _error_json(AuthenticationError(outcome.public_error))
         verified = outcome.verified
         if verified is None:
@@ -304,7 +306,7 @@ def create_totp_route_endpoints(
         )
         if outcome.public_error is not None:
             if outcome.public_error is ErrorCode.AUTHENTICATION_RATE_LIMITED:
-                return await _rate_limited_json(outcome.locked_until)
+                return _rate_limited_json(outcome.locked_until, outcome.limited_at)
             return _error_json(AuthenticationError(outcome.public_error))
         entered = outcome.entered
         if entered is None:
@@ -343,7 +345,7 @@ def create_totp_route_endpoints(
         )
         if outcome.public_error is not None:
             if outcome.public_error is ErrorCode.AUTHENTICATION_RATE_LIMITED:
-                return await _rate_limited_json(outcome.locked_until)
+                return _rate_limited_json(outcome.locked_until, outcome.limited_at)
             return _error_json(AuthenticationError(outcome.public_error))
         issued = outcome.issued_codes
         if issued is None:
@@ -370,7 +372,7 @@ def create_totp_route_endpoints(
         )
         if outcome.public_error is not None:
             if outcome.public_error is ErrorCode.AUTHENTICATION_RATE_LIMITED:
-                return await _rate_limited_json(outcome.locked_until)
+                return _rate_limited_json(outcome.locked_until, outcome.limited_at)
             return _error_json(AuthenticationError(outcome.public_error))
         disabled = outcome.disabled
         if disabled is None:

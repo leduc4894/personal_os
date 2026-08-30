@@ -20,7 +20,7 @@ import asyncio
 import base64
 from collections.abc import Iterator
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Final
 from uuid import UUID
 
@@ -199,6 +199,46 @@ def test_totp_verify_rejects_a_wrong_code_then_locks_the_verification_bucket() -
         assert error["code"] == "authentication_rate_limited"
         assert error["details"]["retry_after_seconds"] > 0
         assert locked.headers["cache-control"] == "no-store"
+
+
+class CountingOfflineClock(OfflineAuthenticationClock):
+    """Offline clock double counting every decision-clock read."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.database_now_call_count = 0
+
+    async def database_now(self) -> datetime:
+        self.database_now_call_count += 1
+        return await super().database_now()
+
+
+def test_rate_limited_totp_verify_retry_after_reads_no_second_decision_clock() -> None:
+    # One throttled verification request reads the clock exactly twice — the
+    # challenge-eligible session resolution and the verification decision —
+    # and never a third read for the retry detail: the outcome carries the
+    # decision clock.
+    clock = CountingOfflineClock()
+    with TestClient(
+        create_totp_test_app(totp_active=True, clock=clock), base_url=_SECURE_BASE_URL
+    ) as rate_limited_client:
+        cookies = login(rate_limited_client)
+        for _ in range(5):
+            rejected = rate_limited_client.post(
+                "/api/auth/totp/verify",
+                headers=authenticated_headers(cookies),
+                json={"code": "000000"},
+            )
+            assert rejected.status_code == 401
+        calls_before_locked_request = clock.database_now_call_count
+        locked = rate_limited_client.post(
+            "/api/auth/totp/verify",
+            headers=authenticated_headers(cookies),
+            json={"code": code_at(clock, OFFLINE_TOTP_SECRET)},
+        )
+        assert locked.status_code == 429
+        assert locked.json()["error"]["details"]["retry_after_seconds"] > 0
+        assert clock.database_now_call_count - calls_before_locked_request == 2
 
 
 def test_totp_verify_replays_the_same_code_only_once() -> None:

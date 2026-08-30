@@ -44,7 +44,6 @@ from personal_os.authentication.sessions import (
     ThrottleBucketState,
     ThrottleFailureTransition,
     ThrottleWindowPolicy,
-    next_login_failure_transition,
 )
 from personal_os.authentication.totp import (
     RECOVERY_AUTHENTICATION_METHOD,
@@ -75,6 +74,7 @@ from postgresql_source_store.authentication_credentials import (
     AUDIT_ACTOR_KIND_USER,
     AUDIT_RESULT_SUCCEEDED,
     AUDIT_TARGET_KIND_USER_CREDENTIAL,
+    apply_throttle_bucket_failure,
     run_authentication_transaction,
 )
 from postgresql_source_store.tables import (
@@ -758,59 +758,18 @@ class TotpStore:
         bucket_hash: str,
         database_now: datetime,
     ) -> ThrottleFailureTransition:
-        """Lock one bucket row and apply the pure failure transition."""
-        locked = await connection.execute(
-            sa.select(
-                authentication_throttle_buckets.c.throttle_bucket_id,
-                authentication_throttle_buckets.c.window_started_at,
-                authentication_throttle_buckets.c.failed_attempt_count,
-                authentication_throttle_buckets.c.locked_until,
-            )
-            .where(
-                authentication_throttle_buckets.c.bucket_kind == bucket_kind.value,
-                authentication_throttle_buckets.c.bucket_hash == bucket_hash,
-            )
-            .with_for_update()
+        """Lock one bucket row and apply the pure failure transition.
+
+        Delegates to :func:`apply_throttle_bucket_failure`, whose guarded cold
+        insert closes the concurrent first-failure race on one bucket.
+        """
+        return await apply_throttle_bucket_failure(
+            connection,
+            bucket_kind=bucket_kind,
+            bucket_hash=bucket_hash,
+            database_now=database_now,
+            policy=self._throttle_policy,
         )
-        row = locked.one_or_none()
-        previous = (
-            None
-            if row is None
-            else ThrottleBucketState(
-                window_started_at=row.window_started_at,
-                failed_attempt_count=int(row.failed_attempt_count),
-                locked_until=row.locked_until,
-            )
-        )
-        transition = next_login_failure_transition(
-            previous, database_now=database_now, policy=self._throttle_policy
-        )
-        if row is None:
-            await connection.execute(
-                sa.insert(authentication_throttle_buckets).values(
-                    throttle_bucket_id=uuid7(),
-                    bucket_kind=bucket_kind.value,
-                    bucket_hash=bucket_hash,
-                    window_started_at=transition.window_started_at,
-                    failed_attempt_count=transition.failed_attempt_count,
-                    locked_until=transition.locked_until,
-                    updated_at=database_now,
-                )
-            )
-        else:
-            await connection.execute(
-                sa.update(authentication_throttle_buckets)
-                .values(
-                    window_started_at=transition.window_started_at,
-                    failed_attempt_count=transition.failed_attempt_count,
-                    locked_until=transition.locked_until,
-                    updated_at=database_now,
-                )
-                .where(
-                    authentication_throttle_buckets.c.throttle_bucket_id == row.throttle_bucket_id
-                )
-            )
-        return transition
 
 
 async def _append_audit_event(

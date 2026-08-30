@@ -25,6 +25,7 @@ from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.sql.elements import TextClause
 
 from personal_os.authentication.errors import AuthenticationError
@@ -655,7 +656,12 @@ async def test_disable_totp_without_an_active_credential_fails_closed() -> None:
 
 @pytest.mark.asyncio
 async def test_record_verification_failure_inserts_the_first_bucket_row() -> None:
-    engine = ScriptedEngine([ScriptedResult(rows=())])
+    engine = ScriptedEngine(
+        [
+            ScriptedResult(rows=()),
+            ScriptedResult(rows=(SimpleNamespace(throttle_bucket_id=uuid4()),)),
+        ]
+    )
     store = TotpStore(engine, secret_codec=ScriptedTotpCodec())
     transition = await store.record_verification_failure(
         bucket_kind=ThrottleBucketKind.TOTP_VERIFICATION,
@@ -671,3 +677,47 @@ async def test_record_verification_failure_inserts_the_first_bucket_row() -> Non
     )
     assert len(inserts) == 1
     assert _statement_parameters(inserts[0])["bucket_kind"] == "totp_verification"
+    assert "ON CONFLICT ON CONSTRAINT uq_authentication_throttle_buckets__kind_hash" in str(
+        inserts[0].compile(dialect=postgresql.dialect())
+    )
+
+
+@pytest.mark.asyncio
+async def test_record_verification_failure_losing_the_cold_insert_relocks_and_updates() -> None:
+    # A concurrent first failure won the guarded insert: the loser re-selects
+    # the winner's row under the lock and continues through the update path
+    # instead of surfacing the unique violation as internal_error.
+    engine = ScriptedEngine(
+        [
+            ScriptedResult(rows=()),
+            ScriptedResult(rowcount=0),
+            ScriptedResult(
+                rows=(
+                    SimpleNamespace(
+                        throttle_bucket_id=uuid4(),
+                        window_started_at=_DATABASE_NOW,
+                        failed_attempt_count=1,
+                        locked_until=None,
+                    ),
+                )
+            ),
+            ScriptedResult(rowcount=1),
+        ]
+    )
+    store = TotpStore(engine, secret_codec=ScriptedTotpCodec())
+    transition = await store.record_verification_failure(
+        bucket_kind=ThrottleBucketKind.TOTP_VERIFICATION,
+        bucket_hash="0" * 64,
+        database_now=_DATABASE_NOW,
+    )
+    assert transition.failed_attempt_count == 2
+    assert transition.became_locked is False
+    connection = engine.connections[0]
+    inserts = _statements_of(connection, sa.sql.dml.Insert, "authentication_throttle_buckets")
+    assert len(inserts) == 1
+    assert "ON CONFLICT ON CONSTRAINT uq_authentication_throttle_buckets__kind_hash DO NOTHING" in (
+        str(inserts[0].compile(dialect=postgresql.dialect()))
+    )
+    updates = _statements_of(connection, sa.sql.dml.Update, "authentication_throttle_buckets")
+    assert len(updates) == 1
+    assert _statement_parameters(updates[0])["failed_attempt_count"] == 2

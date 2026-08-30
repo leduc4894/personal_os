@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Final
 
 import httpx
@@ -261,6 +261,40 @@ def test_login_locks_after_five_failures_with_safe_retry_detail(client: TestClie
     assert error["retryable"] is True
     assert error["details"]["retry_after_seconds"] > 0
     assert locked.headers["cache-control"] == "no-store"
+
+
+class CountingOfflineClock(OfflineAuthenticationClock):
+    """Offline clock double counting every decision-clock read."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.database_now_call_count = 0
+
+    async def database_now(self) -> datetime:
+        self.database_now_call_count += 1
+        return await super().database_now()
+
+
+def test_rate_limited_login_retry_after_reads_no_second_decision_clock() -> None:
+    # The throttled exit computes its retry detail from the outcome's carried
+    # decision clock: one rate-limited request reads the clock exactly once —
+    # the login decision's own read — never a second read for the detail.
+    clock = CountingOfflineClock()
+    with TestClient(
+        create_session_test_app(clock=clock), base_url=_SECURE_BASE_URL
+    ) as rate_limited_client:
+        for _ in range(5):
+            rejected = rate_limited_client.post(
+                "/api/auth/login", headers={"Origin": ORIGIN}, json=_WRONG_LOGIN
+            )
+            assert rejected.status_code == 401
+        calls_before_locked_request = clock.database_now_call_count
+        locked = rate_limited_client.post(
+            "/api/auth/login", headers={"Origin": ORIGIN}, json=_VALID_LOGIN
+        )
+        assert locked.status_code == 429
+        assert locked.json()["error"]["details"]["retry_after_seconds"] > 0
+        assert clock.database_now_call_count - calls_before_locked_request == 1
 
 
 def test_malformed_login_body_is_rejected_without_cookie_changes(client: TestClient) -> None:

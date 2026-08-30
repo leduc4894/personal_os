@@ -21,6 +21,7 @@ from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.sql.elements import TextClause
 
 from personal_os.authentication.device_authorization import (
@@ -214,6 +215,9 @@ async def test_insert_pending_grant_records_the_creation_attempt_in_commit() -> 
     engine = ScriptedEngine(
         [
             ScriptedResult(),  # FOR UPDATE bucket select: no existing row
+            ScriptedResult(  # guarded bucket insert wins: RETURNING row present
+                rows=(SimpleNamespace(throttle_bucket_id=uuid4()),)
+            ),
         ]
     )
     store = DeviceAuthorizationStore(engine)
@@ -460,3 +464,67 @@ async def test_throttle_bucket_helpers_follow_the_shared_conventions() -> None:
     )
     assert len(bucket_updates) == 1
     assert _statement_parameters(bucket_updates[0])["failed_attempt_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_throttle_cold_insert_carries_the_unique_constraint_guard() -> None:
+    engine = ScriptedEngine(
+        [
+            ScriptedResult(rows=()),
+            ScriptedResult(rows=(SimpleNamespace(throttle_bucket_id=uuid4()),)),
+        ]
+    )
+    store = DeviceAuthorizationStore(engine)
+    transition = await store.record_throttle_attempt(
+        bucket_kind=ThrottleBucketKind.GRANT_CREATION,
+        bucket_hash=_BUCKET_HASH,
+        database_now=_DATABASE_NOW,
+    )
+    assert transition.failed_attempt_count == 1
+    bucket_inserts = _statements_of(
+        engine.connections[0], sa.Insert, "authentication_throttle_buckets"
+    )
+    assert len(bucket_inserts) == 1
+    assert "ON CONFLICT ON CONSTRAINT uq_authentication_throttle_buckets__kind_hash DO NOTHING" in (
+        str(bucket_inserts[0].compile(dialect=postgresql.dialect()))
+    )
+    # Winning the guarded insert settles without any update statement.
+    assert _statements_of(engine.connections[0], sa.Update, "authentication_throttle_buckets") == []
+
+
+@pytest.mark.asyncio
+async def test_throttle_cold_insert_loser_relocks_the_winner_row_and_updates() -> None:
+    engine = ScriptedEngine(
+        [
+            ScriptedResult(rows=()),
+            ScriptedResult(rowcount=0),
+            ScriptedResult(
+                rows=(
+                    SimpleNamespace(
+                        throttle_bucket_id=uuid4(),
+                        window_started_at=_DATABASE_NOW,
+                        failed_attempt_count=1,
+                        locked_until=None,
+                    ),
+                )
+            ),
+            ScriptedResult(rowcount=1),
+        ]
+    )
+    store = DeviceAuthorizationStore(engine)
+    transition = await store.record_throttle_attempt(
+        bucket_kind=ThrottleBucketKind.GRANT_CREATION,
+        bucket_hash=_BUCKET_HASH,
+        database_now=_DATABASE_NOW,
+    )
+    assert transition.failed_attempt_count == 2
+    assert transition.became_locked is False
+    connection = engine.connections[0]
+    bucket_inserts = _statements_of(connection, sa.Insert, "authentication_throttle_buckets")
+    assert len(bucket_inserts) == 1
+    assert "ON CONFLICT ON CONSTRAINT uq_authentication_throttle_buckets__kind_hash DO NOTHING" in (
+        str(bucket_inserts[0].compile(dialect=postgresql.dialect()))
+    )
+    bucket_updates = _statements_of(connection, sa.Update, "authentication_throttle_buckets")
+    assert len(bucket_updates) == 1
+    assert _statement_parameters(bucket_updates[0])["failed_attempt_count"] == 2

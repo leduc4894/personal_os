@@ -20,6 +20,7 @@ from typing import Any, Final, cast
 import api_runtime.authentication_composition as authentication_composition
 import pytest
 from api_runtime.authentication_composition import (
+    KeyringTotpSecretCodec,
     OfflineAuthenticationState,
     WebAuthenticationRuntime,
     compose_offline_web_authentication,
@@ -124,6 +125,29 @@ def test_resolver_binds_the_configuration_at_composition_time() -> None:
     mutable_cidrs.append("0.0.0.0/0")
     spoofed = build_request(client=_UNTRUSTED_PEER, forwarded_for=_FORWARDED_CLIENT)
     assert resolver(spoofed) == _UNTRUSTED_PEER[0]
+
+
+def test_serve_composition_builds_one_shared_totp_secret_codec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The store and the service must seal and open through one codec instance."""
+    constructions: list[KeyringTotpSecretCodec] = []
+
+    class CountingKeyringTotpSecretCodec(KeyringTotpSecretCodec):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+            constructions.append(self)
+
+    monkeypatch.setattr(
+        authentication_composition,
+        "KeyringTotpSecretCodec",
+        CountingKeyringTotpSecretCodec,
+    )
+
+    runtime = compose_serve_runtime(())
+
+    assert len(constructions) == 1
+    assert runtime.totp_service.secret_codec is constructions[0]
 
 
 def test_keyring_coverage_uses_the_database_clock(

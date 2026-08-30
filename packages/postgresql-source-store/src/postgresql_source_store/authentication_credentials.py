@@ -50,6 +50,7 @@ from typing import Any, Final
 from uuid import UUID, uuid7
 
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from personal_os.authentication.contracts import WebSessionState
@@ -66,6 +67,7 @@ from personal_os.authentication.sessions import (
     ResolvedLoginMaterial,
     ThrottleBucketKind,
     ThrottleBucketState,
+    ThrottleFailureTransition,
     ThrottleWindowPolicy,
     next_login_failure_transition,
 )
@@ -171,6 +173,116 @@ async def run_authentication_transaction[TransactionResultT](
                 continue
             raise InternalApplicationError(ErrorCode.INTERNAL_ERROR) from cause
     raise AssertionError("authentication transaction attempts exhausted without a result")
+
+
+# --- throttle-bucket write shared by every authentication store -----------------------
+
+
+#: Unique constraint carrying exactly one row per bucket kind and hash: the
+#: cold-insert guard of ``apply_throttle_bucket_failure`` targets it, so a
+#: concurrent first failure can never surface as a unique-violation escape.
+THROTTLE_BUCKET_KIND_HASH_CONSTRAINT: Final[str] = "uq_authentication_throttle_buckets__kind_hash"
+
+
+@dataclass(frozen=True, slots=True)
+class LockedThrottleBucket:
+    """One existing throttle bucket row read under its row lock."""
+
+    throttle_bucket_id: UUID
+    state: ThrottleBucketState
+
+
+async def lock_throttle_bucket(
+    connection: AsyncConnection,
+    bucket_kind: ThrottleBucketKind,
+    bucket_hash: str,
+) -> LockedThrottleBucket | None:
+    """Select one bucket row ``FOR UPDATE``; ``None`` on a cold bucket."""
+    result = await connection.execute(
+        sa.select(
+            authentication_throttle_buckets.c.throttle_bucket_id,
+            authentication_throttle_buckets.c.window_started_at,
+            authentication_throttle_buckets.c.failed_attempt_count,
+            authentication_throttle_buckets.c.locked_until,
+        )
+        .where(
+            authentication_throttle_buckets.c.bucket_kind == bucket_kind.value,
+            authentication_throttle_buckets.c.bucket_hash == bucket_hash,
+        )
+        .with_for_update()
+    )
+    row = result.one_or_none()
+    if row is None:
+        return None
+    return LockedThrottleBucket(
+        throttle_bucket_id=row.throttle_bucket_id,
+        state=ThrottleBucketState(
+            window_started_at=row.window_started_at,
+            failed_attempt_count=int(row.failed_attempt_count),
+            locked_until=row.locked_until,
+        ),
+    )
+
+
+async def apply_throttle_bucket_failure(
+    connection: AsyncConnection,
+    *,
+    bucket_kind: ThrottleBucketKind,
+    bucket_hash: str,
+    database_now: datetime,
+    policy: ThrottleWindowPolicy,
+) -> ThrottleFailureTransition:
+    """Lock one bucket row and apply the pure failure transition.
+
+    The row lock serialises concurrent failures on the same bucket, so the
+    read-modify-write cannot lose a count; a bucket locked by a concurrent
+    failure keeps its state (the lock cap holds). A cold bucket cannot rely
+    on the lock alone — two concurrent first failures both miss the row — so
+    the first insert carries the bucket's unique constraint as an ``ON
+    CONFLICT DO NOTHING`` guard: the loser of the guarded insert re-selects
+    the winner's committed row under the lock and continues through the same
+    existing-row update path. Win or loss is read from the ``RETURNING`` row
+    — this driver stack reports ``rowcount`` of -1 for guarded inserts, so a
+    suppressed insert is indistinguishable from a committed one by rowcount
+    alone.
+    """
+    bucket = await lock_throttle_bucket(connection, bucket_kind, bucket_hash)
+    if bucket is None:
+        first_strike = next_login_failure_transition(None, database_now=database_now, policy=policy)
+        inserted = await connection.execute(
+            postgresql_insert(authentication_throttle_buckets)
+            .values(
+                throttle_bucket_id=uuid7(),
+                bucket_kind=bucket_kind.value,
+                bucket_hash=bucket_hash,
+                window_started_at=first_strike.window_started_at,
+                failed_attempt_count=first_strike.failed_attempt_count,
+                locked_until=first_strike.locked_until,
+                updated_at=database_now,
+            )
+            .on_conflict_do_nothing(constraint=THROTTLE_BUCKET_KIND_HASH_CONSTRAINT)
+            .returning(authentication_throttle_buckets.c.throttle_bucket_id)
+        )
+        if inserted.one_or_none() is not None:
+            return first_strike
+        bucket = await lock_throttle_bucket(connection, bucket_kind, bucket_hash)
+    assert bucket is not None, (
+        "losing the guarded cold insert implies the winning bucket row committed"
+    )
+    transition = next_login_failure_transition(
+        bucket.state, database_now=database_now, policy=policy
+    )
+    await connection.execute(
+        sa.update(authentication_throttle_buckets)
+        .values(
+            window_started_at=transition.window_started_at,
+            failed_attempt_count=transition.failed_attempt_count,
+            locked_until=transition.locked_until,
+            updated_at=database_now,
+        )
+        .where(authentication_throttle_buckets.c.throttle_bucket_id == bucket.throttle_bucket_id)
+    )
+    return transition
 
 
 # --- protected operator commands (spec 7.1, 7.2) ------------------------------------
@@ -872,67 +984,21 @@ class CredentialStore:
     ) -> ThrottleBucketState:
         """Lock one bucket row and apply the pure failure transition.
 
-        The row lock serialises concurrent failures on the same bucket, so the
-        read-modify-write cannot lose a count; a bucket locked by a concurrent
-        failure keeps its state (the lock cap holds).
+        Delegates to :func:`apply_throttle_bucket_failure`, whose guarded cold
+        insert closes the concurrent first-failure race on one bucket.
         """
-        locked = await connection.execute(
-            sa.select(
-                authentication_throttle_buckets.c.throttle_bucket_id,
-                authentication_throttle_buckets.c.window_started_at,
-                authentication_throttle_buckets.c.failed_attempt_count,
-                authentication_throttle_buckets.c.locked_until,
-            )
-            .where(
-                authentication_throttle_buckets.c.bucket_kind == bucket_kind.value,
-                authentication_throttle_buckets.c.bucket_hash == bucket_hash,
-            )
-            .with_for_update()
+        transition = await apply_throttle_bucket_failure(
+            connection,
+            bucket_kind=bucket_kind,
+            bucket_hash=bucket_hash,
+            database_now=database_now,
+            policy=self._throttle_policy,
         )
-        row = locked.one_or_none()
-        previous = (
-            None
-            if row is None
-            else ThrottleBucketState(
-                window_started_at=row.window_started_at,
-                failed_attempt_count=int(row.failed_attempt_count),
-                locked_until=row.locked_until,
-            )
-        )
-        transition = next_login_failure_transition(
-            previous, database_now=database_now, policy=self._throttle_policy
-        )
-        next_state = ThrottleBucketState(
+        return ThrottleBucketState(
             window_started_at=transition.window_started_at,
             failed_attempt_count=transition.failed_attempt_count,
             locked_until=transition.locked_until,
         )
-        if row is None:
-            await connection.execute(
-                sa.insert(authentication_throttle_buckets).values(
-                    throttle_bucket_id=uuid7(),
-                    bucket_kind=bucket_kind.value,
-                    bucket_hash=bucket_hash,
-                    window_started_at=transition.window_started_at,
-                    failed_attempt_count=transition.failed_attempt_count,
-                    locked_until=transition.locked_until,
-                    updated_at=database_now,
-                )
-            )
-        else:
-            await connection.execute(
-                sa.update(authentication_throttle_buckets)
-                .values(
-                    window_started_at=transition.window_started_at,
-                    failed_attempt_count=transition.failed_attempt_count,
-                    locked_until=transition.locked_until,
-                    updated_at=database_now,
-                )
-                .where(
-                    authentication_throttle_buckets.c.throttle_bucket_id == row.throttle_bucket_id
-                )
-            )
-        return next_state
 
     async def _select_locked_credential(
         self, connection: AsyncConnection, user_id: UUID, workspace_id: UUID

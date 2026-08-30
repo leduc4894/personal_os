@@ -544,6 +544,7 @@ class TotpSessionVerificationOutcome:
     public_error: ErrorCode | None
     locked_until: datetime | None
     verified: VerifiedSessionTOTP | None
+    limited_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -562,6 +563,7 @@ class TotpEnrollmentVerificationOutcome:
     public_error: ErrorCode | None
     locked_until: datetime | None
     verified: VerifiedTotpEnrollment | None
+    limited_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -571,6 +573,7 @@ class TotpRecoveryOutcome:
     public_error: ErrorCode | None
     locked_until: datetime | None
     entered: EnteredRecoveryLimitedSession | None
+    limited_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -580,6 +583,7 @@ class TotpRegenerationOutcome:
     public_error: ErrorCode | None
     locked_until: datetime | None
     issued_codes: IssuedRecoveryCodes | None
+    limited_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -588,6 +592,7 @@ class TotpProofFailure:
 
     error_code: ErrorCode
     locked_until: datetime | None
+    limited_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -597,6 +602,7 @@ class TotpDisableOutcome:
     public_error: ErrorCode | None
     locked_until: datetime | None
     disabled: DisabledTotpCredential | None
+    limited_at: datetime | None = None
 
 
 # --- the service -------------------------------------------------------------------------------
@@ -669,6 +675,7 @@ class TotpService:
                 public_error=ErrorCode.AUTHENTICATION_RATE_LIMITED,
                 locked_until=locked_until,
                 verified=None,
+                limited_at=database_now,
             )
         unix_time_seconds = int(database_now.timestamp())
         try:
@@ -802,6 +809,7 @@ class TotpService:
                 public_error=ErrorCode.AUTHENTICATION_RATE_LIMITED,
                 locked_until=locked_until,
                 verified=None,
+                limited_at=database_now,
             )
         codes = generate_recovery_codes()
         recovery_hashes = tuple(
@@ -899,6 +907,7 @@ class TotpService:
                 public_error=ErrorCode.AUTHENTICATION_RATE_LIMITED,
                 locked_until=locked_until,
                 entered=None,
+                limited_at=database_now,
             )
         is_password_valid = resolved.password_hash is not None and self._hasher.verify_password(
             resolved.password_hash, password
@@ -982,6 +991,7 @@ class TotpService:
                 public_error=proof_error.error_code,
                 locked_until=proof_error.locked_until,
                 issued_codes=None,
+                limited_at=proof_error.limited_at,
             )
         codes = generate_recovery_codes()
         regenerated = await self._transactions.regenerate_recovery_codes(
@@ -1031,6 +1041,7 @@ class TotpService:
                 public_error=proof_error.error_code,
                 locked_until=proof_error.locked_until,
                 disabled=None,
+                limited_at=proof_error.limited_at,
             )
         rotated = self._prepare_rotation(session.web_session_id, database_now)
         disabled = await self._transactions.disable_totp(
@@ -1157,7 +1168,9 @@ class TotpService:
             database_now=database_now,
         )
         if locked_until is not None:
-            return TotpProofFailure(ErrorCode.AUTHENTICATION_RATE_LIMITED, locked_until)
+            return TotpProofFailure(
+                ErrorCode.AUTHENTICATION_RATE_LIMITED, locked_until, limited_at=database_now
+            )
         try:
             await self._transactions.verify_totp(
                 VerifyTotpCommand(

@@ -23,6 +23,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.sql.elements import TextClause
 
 from personal_os.authentication.errors import AuthenticationError
@@ -371,6 +372,51 @@ async def test_untrusted_account_failure_skips_the_audit_row() -> None:
         for statement in connection.executed_statements
         if isinstance(statement, sa.sql.dml.Insert) and statement.table.name == "audit_events"
     ]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cold_bucket_first_failures_settle_through_the_guarded_insert() -> None:
+    # The first failure of one unknown account inserts both cold buckets under
+    # the unique-constraint guard; a concurrent first failure that loses one
+    # guarded insert re-locks the winner's row and continues through the update
+    # path, so no loser ever surfaces the unique violation as internal_error.
+    engine = ScriptedEngine(
+        [
+            ScriptedResult(),
+            ScriptedResult(rows=(_bucket_row(),), rowcount=1),
+            ScriptedResult(),
+            ScriptedResult(rowcount=0),
+            ScriptedResult(rows=(_bucket_row(failed_attempt_count=1),)),
+            ScriptedResult(rowcount=1),
+        ]
+    )
+    store = CredentialStore(engine, throttle_policy=ThrottleWindowPolicy())
+    recorded = await store.record_login_failure(
+        _record_login_failure_command(user_id=None, workspace_id=None)
+    )
+    assert recorded.username_bucket.failed_attempt_count == 1
+    assert recorded.source_bucket.failed_attempt_count == 2
+    connection = engine.connections[0]
+    bucket_inserts = [
+        statement
+        for statement in connection.executed_statements
+        if isinstance(statement, sa.sql.dml.Insert)
+        and statement.table.name == "authentication_throttle_buckets"
+    ]
+    assert len(bucket_inserts) == 2
+    for statement in bucket_inserts:
+        assert (
+            "ON CONFLICT ON CONSTRAINT uq_authentication_throttle_buckets__kind_hash"
+            " DO NOTHING" in str(statement.compile(dialect=postgresql.dialect()))
+        )
+    bucket_updates = [
+        statement
+        for statement in connection.executed_statements
+        if isinstance(statement, sa.sql.dml.Update)
+        and statement.table.name == "authentication_throttle_buckets"
+    ]
+    assert len(bucket_updates) == 1
+    assert _statement_parameters(bucket_updates[0])["failed_attempt_count"] == 2
 
 
 @pytest.mark.asyncio

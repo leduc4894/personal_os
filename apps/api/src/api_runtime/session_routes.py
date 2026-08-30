@@ -150,13 +150,13 @@ def create_session_route_endpoints(
         )
         return response
 
-    async def _rate_limited_login(outcome: LoginOutcome) -> JSONResponse:
+    def _rate_limited_login(outcome: LoginOutcome) -> JSONResponse:
         """Render the throttled login with its registered safe retry detail."""
         locked_until = outcome.locked_until
+        limited_at = outcome.limited_at
         retry_after_seconds = 1
-        if locked_until is not None:
-            database_now = await runtime.session_service.database_now()
-            remaining = (locked_until - database_now).total_seconds()
+        if locked_until is not None and limited_at is not None:
+            remaining = (locked_until - limited_at).total_seconds()
             retry_after_seconds = max(1, math.ceil(remaining))
         return _error_json(
             AuthenticationError(
@@ -181,7 +181,7 @@ def create_session_route_endpoints(
         )
         if outcome.public_error is not None:
             if outcome.public_error is ErrorCode.AUTHENTICATION_RATE_LIMITED:
-                return await _rate_limited_login(outcome)
+                return _rate_limited_login(outcome)
             return _error_json(AuthenticationError(outcome.public_error))
         started = outcome.started_session
         if started is None:

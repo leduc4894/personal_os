@@ -332,9 +332,8 @@ def compose_web_authentication(
     clock = DatabaseAuthenticationClock(engine)
     credentials: CredentialTransactionPort = CredentialStore(engine)
     sessions: WebSessionTransactionPort = WebSessionStore(engine)
-    totp_transactions: TotpTransactionPort = TotpStore(
-        engine, secret_codec=KeyringTotpSecretCodec(crypto, keyring)
-    )
+    secret_codec = KeyringTotpSecretCodec(crypto, keyring)
+    totp_transactions: TotpTransactionPort = TotpStore(engine, secret_codec=secret_codec)
     master_key = keyring.current_key()
     totp_service = TotpService(
         transactions=totp_transactions,
@@ -343,7 +342,7 @@ def compose_web_authentication(
         crypto=crypto,
         master_key=master_key,
         clock=clock,
-        secret_codec=KeyringTotpSecretCodec(crypto, keyring),
+        secret_codec=secret_codec,
     )
     session_service = SessionService(
         sessions=sessions,

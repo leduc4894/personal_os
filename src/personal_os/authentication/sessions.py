@@ -596,11 +596,17 @@ class StartedWebSession:
 
 @dataclass(frozen=True, slots=True)
 class LoginOutcome:
-    """One login attempt's public result; secrets only on success."""
+    """One login attempt's public result; secrets only on success.
+
+    ``limited_at`` carries the decision clock of the rate-limited exit — the
+    single ``database_now`` the attempt already read — so the caller computes
+    the retry detail without a second clock read.
+    """
 
     public_error: ErrorCode | None
     locked_until: datetime | None
     started_session: StartedWebSession | None
+    limited_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -775,6 +781,7 @@ class LoginService:
                 public_error=ErrorCode.AUTHENTICATION_RATE_LIMITED,
                 locked_until=locked_until,
                 started_session=None,
+                limited_at=database_now,
             )
         selected_hash = (
             material.password_hash if material.password_hash is not None else DUMMY_LOGIN_PHC_HASH

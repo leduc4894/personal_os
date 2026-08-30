@@ -22,6 +22,7 @@ exactly the referenced key set.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import subprocess
@@ -43,6 +44,7 @@ from personal_os.authentication.sessions import (
     DUMMY_LOGIN_PHC_HASH,
     LoginService,
     PasswordChangeService,
+    RecordLoginFailureCommand,
     SessionService,
     ThrottleBucketKind,
     derive_throttle_hmac_key,
@@ -386,6 +388,36 @@ async def test_locked_rejections_use_the_dedicated_audit_action(harness: Any) ->
         assert row.failed_attempt_count == 5
         assert row.window_started_at == harness.database_now
         assert row.locked_until == harness.database_now + timedelta(minutes=15)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cold_bucket_first_failures_settle_one_row(harness: Any) -> None:
+    # Two unknown-account first failures race on the same cold bucket: each
+    # ``record_login_failure`` transaction runs on its own connection, both see
+    # no row under the lock, and both try the first insert. Both attempts must
+    # settle — the insert loser re-locks the winner's row and continues through
+    # the update path — leaving exactly one row per bucket with both strikes.
+    username_bucket_hash, source_bucket_hash = harness.bucket_hashes
+    command = RecordLoginFailureCommand(
+        username_bucket_hash=username_bucket_hash,
+        source_bucket_hash=source_bucket_hash,
+        user_id=None,
+        workspace_id=None,
+        database_now=harness.database_now,
+        diagnostic_context=harness.diagnostic_context(),
+    )
+    recorded = await asyncio.gather(
+        harness.credentials.record_login_failure(command),
+        harness.credentials.record_login_failure(command),
+    )
+    # The loser must not escape as internal_error: both transactions return.
+    assert sorted(outcome.username_bucket.failed_attempt_count for outcome in recorded) == [1, 2]
+    assert sorted(outcome.source_bucket.failed_attempt_count for outcome in recorded) == [1, 2]
+    rows = await harness.throttle_rows()
+    assert len(rows) == 2
+    for row in rows:
+        assert row.failed_attempt_count == 2
+        assert row.locked_until is None
 
 
 @pytest.mark.asyncio
