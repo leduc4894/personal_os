@@ -60,7 +60,6 @@ from personal_os.authentication.sessions import (
     AuthenticatedSession,
     AuthenticationClockPort,
     SessionService,
-    SessionWindowPolicy,
     ThrottleBucketKind,
     ThrottleBucketState,
     ThrottleFailureTransition,
@@ -99,6 +98,12 @@ VERIFICATION_PAGE_PATH: Final[str] = "/device/approve"
 #: Unambiguous uppercase user-code alphabet: no I, O, letter L, 0 or 1, so
 #: every character survives any font, handwriting or dictation (31 values).
 USER_CODE_ALPHABET: Final[str] = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+
+#: Rejection-sampling bound of the user code: the 31 alphabet values cover
+#: exactly 248 byte values (31 * 8), so a byte at or above this bound is
+#: discarded instead of folded by the modulo, whose remainder skew would
+#: favour the first eight alphabet characters.
+USER_CODE_REJECTED_BYTE_MINIMUM: Final[int] = len(USER_CODE_ALPHABET) * 8
 
 #: The user-code grammar as one pattern string: two four-character blocks of
 #: the unambiguous alphabet separated by exactly one hyphen.
@@ -189,10 +194,21 @@ def _user_code_checksum(payload: str) -> str:
 
 
 def generate_user_code(*, random_bytes: Callable[[int], bytes] = secrets.token_bytes) -> str:
-    """Generate one checksum-validated ``CCCC-CCCC`` user code (spec 11.1)."""
-    payload = "".join(
-        USER_CODE_ALPHABET[byte % len(USER_CODE_ALPHABET)] for byte in random_bytes(7)
-    )
+    """Generate one checksum-validated ``CCCC-CCCC`` user code (spec 11.1).
+
+    The seven payload characters are rejection-sampled from the random bytes:
+    every byte at or above ``USER_CODE_REJECTED_BYTE_MINIMUM`` is discarded,
+    so each accepted byte selects one of the 31 alphabet characters with an
+    equal 8-in-248 share and no character is favoured by a modulo remainder.
+    """
+    accepted_bytes = bytearray()
+    while len(accepted_bytes) < 7:
+        accepted_bytes.extend(
+            byte
+            for byte in random_bytes(7 - len(accepted_bytes))
+            if byte < USER_CODE_REJECTED_BYTE_MINIMUM
+        )
+    payload = "".join(USER_CODE_ALPHABET[byte % len(USER_CODE_ALPHABET)] for byte in accepted_bytes)
     characters = payload + _user_code_checksum(payload)
     return f"{characters[:4]}-{characters[4:]}"
 
@@ -313,8 +329,10 @@ def resolve_terminal_rejection_code(
     """Decide whether one approve/deny transition may start (spec 11.3).
 
     The transition requires a pending, unexpired grant. An unknown grant id
-    fails closed as an invalid device credential; expiry wins over the state
-    conflict so the plugin stops polling at the closed 410.
+    fails closed as an invalid device credential; the state check wins over
+    expiry, so a grant already decided terminal resolves the closed state
+    conflict even past its ``expires_at``, and only a pending grant past
+    ``expires_at`` resolves the closed expiry.
     """
     if grant is None:
         return ErrorCode.DEVICE_CREDENTIAL_INVALID
@@ -484,7 +502,14 @@ def _retry_after_seconds(locked_until: datetime, *, database_now: datetime) -> i
     return max(1, math.ceil((locked_until - database_now).total_seconds()))
 
 
-def _rate_limited(locked_until: datetime, *, database_now: datetime) -> AuthenticationError:
+def build_rate_limited_error(
+    locked_until: datetime, *, database_now: datetime
+) -> AuthenticationError:
+    """The closed rate-limited rejection with its registered retry hint.
+
+    Shared by the service choreographies and the transaction stores that
+    enforce a lock inside their own committing transaction.
+    """
     retry_after_seconds = _retry_after_seconds(locked_until, database_now=database_now)
     return AuthenticationError(
         ErrorCode.AUTHENTICATION_RATE_LIMITED,
@@ -492,7 +517,8 @@ def _rate_limited(locked_until: datetime, *, database_now: datetime) -> Authenti
     )
 
 
-def _active_lock_of(locked_until: datetime | None, *, database_now: datetime) -> datetime | None:
+def active_lock_of(locked_until: datetime | None, *, database_now: datetime) -> datetime | None:
+    """The still-active lock of one bucket, or ``None`` once it has lapsed."""
     if locked_until is None:
         return None
     return locked_until if database_now < locked_until else None
@@ -508,10 +534,12 @@ class DeviceAuthorizationService:
     generates and hashes secret material outside every transaction, and
     commits through the transaction port's single-purpose transactions.
     Creation enforces the approved plugin version window before any secret
-    exists, throttles per source through the ``grant_creation`` bucket and
-    caps live grants per client instance; lookup throttles per authenticated
-    user through the ``user_code_lookup`` bucket and resolves only fresh
-    pending grants; approval resolves the presented session, enforces the
+    exists, throttles per source through the ``grant_creation`` bucket —
+    counting every attempt, with the lock enforced inside the inserting
+    transaction rather than a lock-free pre-read — and caps live grants per
+    client instance; lookup throttles per authenticated user through the
+    ``user_code_lookup`` bucket and resolves only fresh pending grants;
+    approval resolves the presented session, enforces the
     ``device_authorization_approve`` scope and the recent re-authentication
     window before the locked transition, while denial requires the active
     session without the recent window (spec 9.4, 11.3).
@@ -527,16 +555,12 @@ class DeviceAuthorizationService:
         clock: AuthenticationClockPort,
         plugin_version_bounds: PluginVersionBounds,
         verification_base_url: str,
-        session_policy: SessionWindowPolicy | None = None,
     ) -> None:
         self._grants = grants
         self._session_service = session_service
         self._clock = clock
         self.plugin_version_bounds = plugin_version_bounds
         self.verification_base_url = verification_base_url
-        self.session_policy = (
-            session_policy if session_policy is not None else SessionWindowPolicy()
-        )
         self._grant_hmac_key = derive_grant_replay_hmac_key(crypto, master_key)
         self._throttle_hmac_key = derive_throttle_hmac_key(crypto, master_key)
 
@@ -564,22 +588,15 @@ class DeviceAuthorizationService:
         The request is fully validated — plugin version against the approved
         window, platform class and scope against their closed vocabularies and
         the device name against its display bounds — before any secret is
-        generated. The creation attempt counts into the source's
-        ``grant_creation`` throttle bucket inside the inserting transaction.
+        generated. Every creation attempt counts into the source's
+        ``grant_creation`` throttle bucket — the accepted one inside the
+        inserting transaction, a validation-rejected or capped one through its
+        own recorded attempt — and the source's lock is enforced inside that
+        same inserting transaction, never through a lock-free pre-read.
         """
         del diagnostic_context  # creation writes no audit row (spec 21)
         database_now = await self._clock.database_now()
         creation_bucket_hash = self._bucket_hash(ThrottleBucketKind.GRANT_CREATION, source_bucket)
-        bucket = await self._grants.resolve_throttle_bucket(
-            bucket_kind=ThrottleBucketKind.GRANT_CREATION,
-            bucket_hash=creation_bucket_hash,
-        )
-        locked_until = _active_lock_of(
-            bucket.locked_until if bucket is not None else None,
-            database_now=database_now,
-        )
-        if locked_until is not None:
-            raise _rate_limited(locked_until, database_now=database_now)
         try:
             validate_plugin_version_bounds(plugin_version, self.plugin_version_bounds)
             self._validate_request_values(
@@ -600,10 +617,16 @@ class DeviceAuthorizationService:
             client_instance_id=client_instance_id, database_now=database_now
         )
         if window.live_grant_count >= MAXIMUM_LIVE_GRANTS_PER_CLIENT_INSTANCE:
+            # A capped attempt still counts toward the source bound.
+            await self._grants.record_throttle_attempt(
+                bucket_kind=ThrottleBucketKind.GRANT_CREATION,
+                bucket_hash=creation_bucket_hash,
+                database_now=database_now,
+            )
             retry_until = window.earliest_expires_at
             if retry_until is None or retry_until <= database_now:
                 retry_until = database_now + DEVICE_GRANT_LIFETIME
-            raise _rate_limited(retry_until, database_now=database_now)
+            raise build_rate_limited_error(retry_until, database_now=database_now)
         grant_id = uuid7()
         expires_at = database_now + DEVICE_GRANT_LIFETIME
         user_code = generate_user_code()
@@ -668,12 +691,12 @@ class DeviceAuthorizationService:
             bucket_kind=ThrottleBucketKind.USER_CODE_LOOKUP,
             bucket_hash=lookup_bucket_hash,
         )
-        locked_until = _active_lock_of(
+        locked_until = active_lock_of(
             bucket.locked_until if bucket is not None else None,
             database_now=database_now,
         )
         if locked_until is not None:
-            raise _rate_limited(locked_until, database_now=database_now)
+            raise build_rate_limited_error(locked_until, database_now=database_now)
         if not is_valid_user_code(user_code):
             await self._grants.record_throttle_attempt(
                 bucket_kind=ThrottleBucketKind.USER_CODE_LOOKUP,

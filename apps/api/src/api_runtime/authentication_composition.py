@@ -73,6 +73,8 @@ from personal_os.authentication.device_authorization import (
     LiveGrantWindow,
     PluginVersionBounds,
     StoredDeviceAuthorizationGrant,
+    active_lock_of,
+    build_rate_limited_error,
     resolve_terminal_rejection_code,
 )
 from personal_os.authentication.device_tokens import (
@@ -1428,6 +1430,13 @@ class OfflineDeviceAuthorizationStore:
                     database_now=command.database_now,
                     policy=_OFFLINE_THROTTLE_POLICY,
                 )
+                locked_until = (
+                    None
+                    if transition.became_locked
+                    else active_lock_of(transition.locked_until, database_now=command.database_now)
+                )
+                if locked_until is not None:
+                    raise build_rate_limited_error(locked_until, database_now=command.database_now)
                 self._state.buckets[key] = ThrottleBucketState(
                     window_started_at=transition.window_started_at,
                     failed_attempt_count=transition.failed_attempt_count,
@@ -2156,7 +2165,6 @@ def compose_offline_web_authentication(
             clock=offline_clock,
             plugin_version_bounds=OFFLINE_PLUGIN_VERSION_BOUNDS,
             verification_base_url=OFFLINE_WEB_ALLOWED_ORIGIN,
-            session_policy=_OFFLINE_SESSION_POLICY,
         ),
         device_token_service=DeviceTokenService(
             exchange=OfflineDeviceAuthorizationStore(offline_state),

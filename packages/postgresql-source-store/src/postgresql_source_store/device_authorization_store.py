@@ -4,7 +4,9 @@
 ``DeviceAuthorizationTransactionPort`` over the migrated authentication
 schema: ``insert_pending_grant`` writes one pending grant row with only the
 caller's HMAC digests and — behind the same commit — counts the creation
-attempt into the source's ``grant_creation`` throttle bucket; creation writes
+attempt into the source's ``grant_creation`` throttle bucket, whose cold row
+is resolved-or-inserted by the shared guarded helper and whose active lock
+rejects the creation inside the same transaction; creation writes
 no audit row because the unauthenticated plugin request has no trusted
 workspace (spec 21); ``lookup_grant_by_user_code`` resolves one row by its
 user-code digest lock-free and resets the ``user_code_lookup`` bucket only
@@ -51,6 +53,8 @@ from personal_os.authentication.device_authorization import (
     InsertPendingGrantCommand,
     LiveGrantWindow,
     StoredDeviceAuthorizationGrant,
+    active_lock_of,
+    build_rate_limited_error,
     resolve_lookup_rejection_code,
     resolve_terminal_rejection_code,
 )
@@ -238,16 +242,31 @@ class DeviceAuthorizationStore:
     async def insert_pending_grant(
         self, command: InsertPendingGrantCommand
     ) -> InsertedPendingGrant:
-        """Insert one pending grant and count the creation attempt in commit."""
+        """Insert one pending grant and count the creation attempt in commit.
+
+        The cold ``grant_creation`` bucket is resolved-or-inserted by the
+        shared guarded helper inside this one transaction, and a bucket a
+        prior attempt already locked rejects the creation here — before any
+        grant row exists — with the closed rate-limited rejection and its
+        retry hint. The attempt that itself reaches the threshold is still
+        served; the lock it sets closes the next one.
+        """
 
         async def operation(connection: AsyncConnection) -> InsertedPendingGrant:
             if command.creation_bucket_hash is not None:
-                await self._record_bucket_attempt(
+                transition = await self._record_bucket_attempt(
                     connection,
                     ThrottleBucketKind.GRANT_CREATION,
                     command.creation_bucket_hash,
                     command.database_now,
                 )
+                locked_until = (
+                    None
+                    if transition.became_locked
+                    else active_lock_of(transition.locked_until, database_now=command.database_now)
+                )
+                if locked_until is not None:
+                    raise build_rate_limited_error(locked_until, database_now=command.database_now)
             await connection.execute(
                 sa.insert(device_authorization_grants).values(
                     grant_id=command.grant_id,

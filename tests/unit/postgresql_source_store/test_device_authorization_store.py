@@ -233,6 +233,99 @@ async def test_insert_pending_grant_records_the_creation_attempt_in_commit() -> 
     assert parameters["failed_attempt_count"] == 1
 
 
+@pytest.mark.asyncio
+async def test_cold_bucket_and_grant_insert_share_one_transaction() -> None:
+    engine = ScriptedEngine(
+        [
+            ScriptedResult(),  # FOR UPDATE bucket select: cold bucket
+            ScriptedResult(  # guarded bucket insert wins: RETURNING row present
+                rows=(SimpleNamespace(throttle_bucket_id=uuid4()),)
+            ),
+        ]
+    )
+    store = DeviceAuthorizationStore(engine)
+
+    inserted = await store.insert_pending_grant(_insert_command(creation_bucket_hash=_BUCKET_HASH))
+
+    assert inserted.grant_id == _GRANT_ID
+    # The bucket resolve-or-insert and the grant insert share exactly one
+    # connection and therefore one transaction; a second engine connection
+    # would mean the cold-bucket decision split out of the insert.
+    assert len(engine.connections) == 1
+    connection = engine.connections[0]
+    bucket_inserts = _statements_of(connection, sa.Insert, "authentication_throttle_buckets")
+    assert len(bucket_inserts) == 1
+    assert "ON CONFLICT ON CONSTRAINT uq_authentication_throttle_buckets__kind_hash DO NOTHING" in (
+        str(bucket_inserts[0].compile(dialect=postgresql.dialect()))
+    )
+    grant_inserts = _statements_of(connection, sa.Insert, "device_authorization_grants")
+    assert len(grant_inserts) == 1
+    assert _statement_parameters(grant_inserts[0])["grant_id"] == _GRANT_ID
+
+
+@pytest.mark.asyncio
+async def test_insert_pending_grant_rejects_a_locked_creation_bucket_in_transaction() -> None:
+    locked_until = _DATABASE_NOW + timedelta(minutes=15)
+    engine = ScriptedEngine(
+        [
+            ScriptedResult(  # FOR UPDATE bucket select: a prior attempt locked it
+                rows=(
+                    SimpleNamespace(
+                        throttle_bucket_id=uuid4(),
+                        window_started_at=_DATABASE_NOW - timedelta(minutes=1),
+                        failed_attempt_count=5,
+                        locked_until=locked_until,
+                    ),
+                )
+            ),
+            ScriptedResult(rowcount=1),  # state-preserving bucket update
+        ]
+    )
+    store = DeviceAuthorizationStore(engine)
+
+    with pytest.raises(AuthenticationError) as raised:
+        await store.insert_pending_grant(_insert_command(creation_bucket_hash=_BUCKET_HASH))
+
+    assert raised.value.error_code is ErrorCode.AUTHENTICATION_RATE_LIMITED
+    assert raised.value.safe_details["retry_after_seconds"] == 15 * 60
+    # The lock decision rode the inserting transaction: one connection, and
+    # the rejection rolled back before any grant row existed.
+    assert len(engine.connections) == 1
+    assert _statements_of(engine.connections[0], sa.Insert, "device_authorization_grants") == []
+
+
+@pytest.mark.asyncio
+async def test_insert_pending_grant_serves_the_attempt_that_locks_the_source() -> None:
+    engine = ScriptedEngine(
+        [
+            ScriptedResult(  # FOR UPDATE bucket select: one strike below the lock
+                rows=(
+                    SimpleNamespace(
+                        throttle_bucket_id=uuid4(),
+                        window_started_at=_DATABASE_NOW - timedelta(minutes=1),
+                        failed_attempt_count=4,
+                        locked_until=None,
+                    ),
+                )
+            ),
+            ScriptedResult(rowcount=1),  # bucket update applying the new lock
+        ]
+    )
+    store = DeviceAuthorizationStore(engine)
+
+    inserted = await store.insert_pending_grant(_insert_command(creation_bucket_hash=_BUCKET_HASH))
+
+    # The creation that itself reaches the threshold is still served; the
+    # lock it sets closes the next one.
+    assert inserted.grant_id == _GRANT_ID
+    connection = engine.connections[0]
+    bucket_updates = _statements_of(connection, sa.Update, "authentication_throttle_buckets")
+    assert _statement_parameters(bucket_updates[0])["locked_until"] == (
+        _DATABASE_NOW + timedelta(minutes=15)
+    )
+    assert len(_statements_of(connection, sa.Insert, "device_authorization_grants")) == 1
+
+
 # --- approval and denial --------------------------------------------------------------
 
 

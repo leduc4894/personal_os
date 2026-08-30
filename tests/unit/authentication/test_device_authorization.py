@@ -13,25 +13,36 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import inspect
 import re
 from datetime import UTC, datetime, timedelta
-from typing import Final
+from typing import Final, cast
 from urllib.parse import urlsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
-from personal_os.authentication.contracts import DeviceAuthorizationGrantState
+from personal_os.authentication.contracts import (
+    FIXED_DEVICE_SCOPE,
+    DeviceAuthorizationGrantState,
+)
 from personal_os.authentication.crypto import GRANT_REPLAY_DERIVATION_LABEL
 from personal_os.authentication.device_authorization import (
     DEVICE_GRANT_EXPIRES_IN_SECONDS,
     DEVICE_GRANT_LIFETIME,
     DEVICE_NAME_MAXIMUM_LENGTH_CHARACTERS,
     DEVICE_NAME_MINIMUM_LENGTH_CHARACTERS,
+    MAXIMUM_LIVE_GRANTS_PER_CLIENT_INSTANCE,
     POLL_INTERVAL_SECONDS,
     POLLING_CREDENTIAL_PREFIX,
+    USER_CODE_ALPHABET,
     USER_CODE_PATTERN,
+    CreatedDeviceGrant,
     DeviceAuthorizationService,
+    DevicePlatformClass,
+    InsertedPendingGrant,
+    InsertPendingGrantCommand,
+    LiveGrantWindow,
     PluginVersionBounds,
     StoredDeviceAuthorizationGrant,
     build_verification_uris,
@@ -46,6 +57,11 @@ from personal_os.authentication.device_authorization import (
     validate_plugin_version_bounds,
 )
 from personal_os.authentication.errors import AuthenticationError
+from personal_os.authentication.sessions import (
+    SessionService,
+    ThrottleBucketKind,
+    ThrottleFailureTransition,
+)
 from personal_os.error_contracts.codes import ErrorCode
 
 _DATABASE_NOW: Final[datetime] = datetime(2026, 8, 16, 12, 0, 0, tzinfo=UTC)
@@ -117,6 +133,61 @@ def test_user_code_generation_is_deterministic_under_fixed_randomness() -> None:
     second = generate_user_code(random_bytes=lambda count: fixed_bytes[:count])
     assert first == second == "ABCD-EFGW"
     assert is_valid_user_code(first)
+
+
+def test_user_code_generation_rejects_biased_bytes() -> None:
+    # 31 alphabet symbols cover exactly 248 byte values (31 * 8); bytes at or
+    # above 248 must be discarded rather than folded by the modulo, whose
+    # remainder skew would favour the first eight alphabet characters.
+    scripted_pool = bytes(
+        [
+            248,
+            255,
+            5,
+            249,
+            30,
+            252,
+            7,
+            251,
+            1,
+            250,
+            12,
+            253,
+            3,
+            247,
+            0,
+            254,
+            9,
+            248,
+            2,
+            252,
+            6,
+            249,
+            4,
+            255,
+            8,
+            250,
+            11,
+            251,
+            10,
+            253,
+        ]
+    )
+    drawn: list[int] = []
+
+    def scripted_random(count: int) -> bytes:
+        chunk = scripted_pool[len(drawn) : len(drawn) + count]
+        drawn.extend(chunk)
+        return chunk
+
+    user_code = generate_user_code(random_bytes=scripted_random)
+
+    accepted_bytes = [byte for byte in scripted_pool if byte < 248][:7]
+    expected_payload = "".join(
+        USER_CODE_ALPHABET[byte % len(USER_CODE_ALPHABET)] for byte in accepted_bytes
+    )
+    assert user_code.replace("-", "")[:7] == expected_payload
+    assert is_valid_user_code(user_code)
 
 
 def test_user_code_checksum_detects_single_character_typos() -> None:
@@ -340,7 +411,100 @@ def test_terminal_decision_maps_expired_pending_and_terminal_states() -> None:
     )
 
 
+def test_terminal_decision_checks_state_before_expiry() -> None:
+    # The state check wins: a grant already decided terminal resolves the
+    # closed state conflict even past its ``expires_at``; only a pending
+    # grant past ``expires_at`` resolves the closed expiry.
+    for terminal_state in (
+        DeviceAuthorizationGrantState.DENIED,
+        DeviceAuthorizationGrantState.APPROVED,
+        DeviceAuthorizationGrantState.EXCHANGED,
+    ):
+        grant = _stored_grant(state=terminal_state, expires_at=_DATABASE_NOW - timedelta(seconds=1))
+        assert (
+            resolve_terminal_rejection_code(grant, database_now=_DATABASE_NOW)
+            is ErrorCode.DEVICE_AUTHORIZATION_STATE_INVALID
+        )
+
+
 # --- service surface ------------------------------------------------------------------
+
+
+class FixedClock:
+    """Clock double returning one fixed transaction timestamp."""
+
+    async def database_now(self) -> datetime:
+        return _DATABASE_NOW
+
+
+class ScriptedGrantTransactions:
+    """Creation-path port double recording every transaction call."""
+
+    def __init__(self, *, live_grant_count: int) -> None:
+        self.live_grant_count = live_grant_count
+        self.resolved_buckets: list[ThrottleBucketKind] = []
+        self.recorded_attempts: list[ThrottleBucketKind] = []
+        self.inserted_commands: list[InsertPendingGrantCommand] = []
+
+    async def resolve_throttle_bucket(
+        self, *, bucket_kind: ThrottleBucketKind, bucket_hash: str
+    ) -> None:
+        self.resolved_buckets.append(bucket_kind)
+        return None
+
+    async def record_throttle_attempt(
+        self, *, bucket_kind: ThrottleBucketKind, bucket_hash: str, database_now: datetime
+    ) -> ThrottleFailureTransition:
+        self.recorded_attempts.append(bucket_kind)
+        return ThrottleFailureTransition(
+            window_started_at=database_now,
+            failed_attempt_count=1,
+            locked_until=None,
+            became_locked=False,
+        )
+
+    async def live_grant_window(
+        self, *, client_instance_id: UUID, database_now: datetime
+    ) -> LiveGrantWindow:
+        return LiveGrantWindow(
+            live_grant_count=self.live_grant_count,
+            earliest_expires_at=database_now + timedelta(seconds=42),
+        )
+
+    async def insert_pending_grant(
+        self, command: InsertPendingGrantCommand
+    ) -> InsertedPendingGrant:
+        self.inserted_commands.append(command)
+        return InsertedPendingGrant(
+            grant_id=command.grant_id,
+            expires_at=command.expires_at,
+            database_now=command.database_now,
+        )
+
+
+def _service_over(transactions: ScriptedGrantTransactions) -> DeviceAuthorizationService:
+    """One service over the scripted port; creation never touches sessions."""
+    return DeviceAuthorizationService(
+        grants=transactions,
+        session_service=cast(SessionService, object()),
+        crypto=StdlibHmacCrypto(),
+        master_key=bytes(range(32)),
+        clock=FixedClock(),
+        plugin_version_bounds=_PLUGIN_BOUNDS,
+        verification_base_url=_VERIFICATION_BASE_URL,
+    )
+
+
+async def _request_grant(service: DeviceAuthorizationService) -> CreatedDeviceGrant:
+    return await service.create_grant(
+        client_instance_id=uuid4(),
+        device_name="Personal desktop",
+        platform_class=DevicePlatformClass.OBSIDIAN_DESKTOP,
+        platform_name="windows",
+        plugin_version="1.4.0",
+        requested_scope=FIXED_DEVICE_SCOPE,
+        source_bucket="scripted-source",
+    )
 
 
 def test_device_authorization_service_exposes_the_transaction_surface() -> None:
@@ -350,6 +514,45 @@ def test_device_authorization_service_exposes_the_transaction_surface() -> None:
     assert hasattr(DeviceAuthorizationService, "lookup_grant")
     assert hasattr(DeviceAuthorizationService, "approve_grant")
     assert hasattr(DeviceAuthorizationService, "deny_grant")
+
+
+def test_device_authorization_service_drops_the_dead_session_policy_surface() -> None:
+    # The recent-authentication window rides the session service the approval
+    # gate resolves through; a stored ``session_policy`` attribute and its
+    # composition threading were dead and must not come back.
+    construction = inspect.signature(DeviceAuthorizationService.__init__)
+    assert "session_policy" not in construction.parameters
+
+
+@pytest.mark.asyncio
+async def test_create_grant_does_not_pre_resolve_the_creation_bucket_lock_free() -> None:
+    transactions = ScriptedGrantTransactions(live_grant_count=0)
+    service = _service_over(transactions)
+
+    created = await _request_grant(service)
+
+    assert created is not None
+    assert transactions.resolved_buckets == []
+    assert len(transactions.inserted_commands) == 1
+    assert transactions.inserted_commands[0].creation_bucket_hash is not None
+
+
+@pytest.mark.asyncio
+async def test_live_grant_cap_rejection_records_a_throttle_attempt() -> None:
+    transactions = ScriptedGrantTransactions(
+        live_grant_count=MAXIMUM_LIVE_GRANTS_PER_CLIENT_INSTANCE
+    )
+    service = _service_over(transactions)
+
+    with pytest.raises(AuthenticationError) as raised:
+        await _request_grant(service)
+
+    assert raised.value.error_code is ErrorCode.AUTHENTICATION_RATE_LIMITED
+    assert raised.value.safe_details["retry_after_seconds"] > 0
+    # A capped attempt still counts toward the source bound, exactly like a
+    # validation-rejected one.
+    assert transactions.recorded_attempts == [ThrottleBucketKind.GRANT_CREATION]
+    assert transactions.inserted_commands == []
 
 
 def test_plugin_version_bounds_construct_from_configured_strings() -> None:
