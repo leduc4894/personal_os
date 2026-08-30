@@ -12,7 +12,11 @@ transaction — password and revision replaced, TOTP and recovery state
 disabled, every session revoked with cleared authenticated timestamps, every
 device, token family and token revoked, pending grants denied, one reset
 audit row with closed counts, including exact zero counts while the device and
-grant surfaces are still empty.
+grant surfaces are still empty. The closed rejections are pinned too: a reset
+on a workspace with no enrollment and a reset of an archived workspace both
+answer the generic ``authentication_failed`` rejection (the CLI maps it to
+exit 78), and a closed confirmation prompt aborts the CLI reset as operator
+input (exit 2), never an internal error.
 """
 
 from __future__ import annotations
@@ -25,7 +29,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 from uuid import UUID, uuid4
 
 import pytest
@@ -80,6 +84,17 @@ _MASTER_KEY = bytes(range(32))
 _ENROLLMENT_PASSWORD = "enrollment-passphrase-value"
 _RESET_PASSWORD = "new secure password"
 _CLI_PASSWORD_FILE_NAME = "web-credential-cli-password"
+
+#: The reset confirmation is read through ``getpass``, which reads the
+#: Windows console (msvcrt) whenever the child interpreter's ``sys.stdin`` is
+#: the original handle — piped automation input then never reaches the prompt
+#: on a Windows host. Replacing ``sys.stdin`` inside the child selects
+#: getpass's documented fallback reader — the same one a Linux CI host
+#: without a controlling tty already gets — which reads the pipe and raises
+#: ``EOFError`` once it closes.
+_RESET_CONFIRMATION_STDIN_SHIM: Final[str] = (
+    "import sys; sys.stdin = open(0, closefd=False); from api_runtime.command import main; main()"
+)
 
 ENROLLMENT_AUDIT_ACTION = "authentication.web_credential_enrolled"
 RESET_AUDIT_ACTION = "authentication.web_authentication_reset"
@@ -179,6 +194,15 @@ class AuthFixture:
                 )
             )
         return SeededAccount(user_id=user_id, workspace_id=workspace_id, username=username)
+
+    async def archive_workspace(self, workspace_id: UUID) -> None:
+        """Archive one seeded workspace through the same direct-write seam."""
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                sa.update(workspaces)
+                .values(status="archived")
+                .where(workspaces.c.workspace_id == workspace_id)
+            )
 
     async def enroll_web_credential(
         self, *, username: str, password: str = _ENROLLMENT_PASSWORD
@@ -456,6 +480,19 @@ async def test_reset_before_any_surfaces_exist_closes_every_count_at_zero(
     assert len(reset_audits) == 1
     assert reset_audits[0].result == "succeeded"
 
+    # A workspace with no enrollment at all refuses the reset closed — the
+    # operation is never create-or-return, so enrollment stays its only door.
+    await database.seed_canonical_account("unenrolled-reset-owner")
+    with pytest.raises(AuthenticationError) as unenrolled:
+        await database.reset_web_authentication(
+            username="unenrolled-reset-owner",
+            new_password=_RESET_PASSWORD,
+            confirmation="unenrolled-reset-owner",
+        )
+    assert unenrolled.value.error_code is ErrorCode.AUTHENTICATION_FAILED
+    unenrolled_status = await database.web_credential_status(username="unenrolled-reset-owner")
+    assert unenrolled_status.credential_revision is None
+
 
 @pytest.mark.asyncio
 async def test_reset_confirmation_must_equal_canonical_username(database: Any) -> None:
@@ -468,6 +505,62 @@ async def test_reset_confirmation_must_equal_canonical_username(database: Any) -
     assert rejected.value.error_code is ErrorCode.AUTHENTICATION_FAILED
     # The refused reset left the enrolled credential untouched.
     status = await database.web_credential_status(username="confirm-owner")
+    assert status.credential_revision == 1
+
+
+@pytest.mark.asyncio
+async def test_reset_on_archived_workspace_is_authentication_failed(
+    database: Any, upgraded_authentication_stack: Any
+) -> None:
+    """Every protected surface of an archived workspace fails closed.
+
+    The archived workspace drops out of the canonical identity resolution, so
+    both the store transaction and the real CLI reset answer the generic
+    ``authentication_failed`` rejection — the CLI as exit code 78 — while the
+    enrolled credential row stays exactly as it was.
+    """
+    username = f"archived-owner-{uuid4().hex[:10]}"
+    account = await database.seed_canonical_account(username)
+    await database.enroll_web_credential(username=username)
+    await database.archive_workspace(account.workspace_id)
+
+    with pytest.raises(AuthenticationError) as rejected:
+        await database.reset_web_authentication(
+            username=username, new_password=_RESET_PASSWORD, confirmation=username
+        )
+    assert rejected.value.error_code is ErrorCode.AUTHENTICATION_FAILED
+
+    environment = dict(upgraded_authentication_stack.alembic_env)
+    password_file = _SECRET_ROOT / _CLI_PASSWORD_FILE_NAME
+    password_file.write_text("cli-emergency-passphrase\n", encoding="utf-8")
+    try:
+        reset = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                _RESET_CONFIRMATION_STDIN_SHIM,
+                "reset-web-authentication",
+                "--username",
+                username,
+                "--password-file-name",
+                _CLI_PASSWORD_FILE_NAME,
+            ],
+            cwd=str(_WORKTREE_ROOT),
+            env=environment,
+            capture_output=True,
+            text=True,
+            input=f"{username}\n",
+            check=False,
+        )
+        assert reset.returncode == 78
+        assert "authentication_failed" in reset.stderr
+        assert "reset=true" not in reset.stdout
+        assert "cli-emergency-passphrase" not in reset.stdout + reset.stderr
+    finally:
+        with suppress(OSError):
+            password_file.unlink()
+
+    status = await database.web_credential_status(username=username)
     assert status.credential_revision == 1
 
 
@@ -624,11 +717,35 @@ async def test_cli_enroll_status_and_reset_end_to_end(
         assert status.returncode == 0, status.stderr
         assert "enrolled=true credential_revision=1" in status.stdout
 
+        # A closed confirmation prompt is a typed abort (exit 2), never an
+        # internal error, and leaves the enrolled credential untouched.
+        aborted_reset = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                _RESET_CONFIRMATION_STDIN_SHIM,
+                "reset-web-authentication",
+                "--username",
+                username,
+                "--password-file-name",
+                _CLI_PASSWORD_FILE_NAME,
+            ],
+            cwd=str(_WORKTREE_ROOT),
+            env=environment,
+            capture_output=True,
+            text=True,
+            input="",
+            check=False,
+        )
+        assert aborted_reset.returncode == 2
+        assert "reset confirmation input closed" in aborted_reset.stderr
+        assert "internal_error" not in aborted_reset.stderr
+
         reset = subprocess.run(
             [
                 sys.executable,
-                "-m",
-                "api_runtime.command",
+                "-c",
+                _RESET_CONFIRMATION_STDIN_SHIM,
                 "reset-web-authentication",
                 "--username",
                 username,

@@ -132,10 +132,15 @@ def read_emergency_reset_confirmation(username: str) -> str:
     """Read the typed confirmation and require the canonical username.
 
     The confirmation repeats the canonical username — not secret material,
-    unlike the password — so it is read as one echoed line: the typed guard
-    works at a real terminal and through piped automation input alike.
+    unlike the password — but it is still read through the non-echoing
+    :func:`getpass.getpass` prompt, so a shared terminal's scrollback never
+    keeps the typed guard; a closed stdin (EOF) is a typed abort, never an
+    internal failure.
     """
-    confirmation = input("type the username to confirm the emergency reset: ")
+    try:
+        confirmation = getpass.getpass("type the username to confirm the emergency reset: ")
+    except EOFError:
+        raise CredentialCommandInputError("reset confirmation input closed") from None
     if confirmation != username:
         raise CredentialCommandInputError("reset confirmation did not match the canonical username")
     return confirmation

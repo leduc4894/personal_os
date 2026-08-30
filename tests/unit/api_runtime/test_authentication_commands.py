@@ -168,14 +168,57 @@ def test_reset_confirmation_must_equal_the_canonical_username(
     from api_runtime import authentication_commands as credential_commands
 
     typed_lines = iter(["owner-typo"])
-    monkeypatch.setattr("builtins.input", lambda _prompt: next(typed_lines))
+    monkeypatch.setattr(getpass, "getpass", lambda _prompt: next(typed_lines))
     with pytest.raises(credential_commands.CredentialCommandInputError) as rejected:
         credential_commands.read_emergency_reset_confirmation(username="owner")
     assert "owner-typo" not in str(rejected.value)
 
     typed_lines = iter(["owner"])
-    monkeypatch.setattr("builtins.input", lambda _prompt: next(typed_lines))
+    monkeypatch.setattr(getpass, "getpass", lambda _prompt: next(typed_lines))
     assert credential_commands.read_emergency_reset_confirmation(username="owner") == "owner"
+
+
+def test_confirmation_prompt_does_not_echo(monkeypatch: pytest.MonkeyPatch) -> None:
+    from api_runtime import authentication_commands as credential_commands
+
+    def _fail_if_echoing_input(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("the emergency-reset confirmation was read through echoing input()")
+
+    prompts: list[str] = []
+
+    def non_echoing_getpass(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return "owner"
+
+    monkeypatch.setattr("builtins.input", _fail_if_echoing_input)
+    monkeypatch.setattr(getpass, "getpass", non_echoing_getpass)
+    assert credential_commands.read_emergency_reset_confirmation(username="owner") == "owner"
+    assert prompts == ["type the username to confirm the emergency reset: "]
+
+
+def test_stdin_eof_maps_to_a_typed_abort(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from api_runtime import authentication_commands as credential_commands
+
+    def closed_stdin_getpass(prompt: str = "") -> str:
+        del prompt
+        raise EOFError
+
+    monkeypatch.setattr(getpass, "getpass", closed_stdin_getpass)
+    with pytest.raises(credential_commands.CredentialCommandInputError) as rejected:
+        credential_commands.read_emergency_reset_confirmation(username="owner")
+    assert rejected.value.reason == "reset confirmation input closed"
+
+    def prompt_then_abort() -> int:
+        credential_commands.read_emergency_reset_confirmation(username="owner")
+        raise AssertionError("a closed confirmation prompt must abort the command")
+
+    assert credential_commands._run_protected_command(prompt_then_abort) == 2
+    captured = capsys.readouterr()
+    assert "reset confirmation input closed" in captured.err
+    assert "internal_error" not in captured.err
+    assert "70" not in captured.err
 
 
 def test_password_file_names_outside_the_closed_grammar_are_rejected() -> None:
