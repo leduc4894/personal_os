@@ -764,3 +764,65 @@ def test_failure_emits_failed_event_and_maps_exit_code() -> None:
     assert stdout_documents == [
         {"result_code": "projection_dispatch_unavailable", "state": "error"}
     ]
+
+
+# --- The injectable monotonic clock behind duration_ms --------------------------
+
+
+class _SteppedMonotonicClock:
+    """Deterministic monotonic clock advancing a fixed step on every call."""
+
+    def __init__(self, *, start_seconds: float = 100.0, step_seconds: float = 0.25) -> None:
+        self._now_seconds = start_seconds
+        self._step_seconds = step_seconds
+
+    def __call__(self) -> float:
+        current_seconds = self._now_seconds
+        self._now_seconds += self._step_seconds
+        return current_seconds
+
+
+@pytest.mark.asyncio
+async def test_completed_duration_ms_equals_injected_monotonic_clock_delta() -> None:
+    (
+        collaborators,
+        _identity,
+        _object_store,
+        _publication_store,
+        _starter,
+        sink,
+        _metrics,
+        _table_counts,
+        _ledger,
+    ) = _build_collaborators()
+
+    await run_phase_one_acceptance(collaborators, monotonic_clock=_SteppedMonotonicClock())
+
+    completed = sink.of(EventName.CANONICAL_ACCEPTANCE_COMPLETED)
+    assert len(completed) == 1
+    # Start read 100.0, elapsed read 100.25: the reported duration is exactly
+    # the fake 250 ms delta, never a real time.monotonic measurement.
+    assert completed[0]["duration_ms"] == 250
+
+
+@pytest.mark.asyncio
+async def test_failed_duration_ms_equals_injected_monotonic_clock_delta() -> None:
+    temporal_failure = ProjectionDispatchError(ErrorCode.PROJECTION_DISPATCH_UNAVAILABLE)
+    (
+        collaborators,
+        _identity,
+        _object_store,
+        _publication_store,
+        _starter,
+        sink,
+        _metrics,
+        _table_counts,
+        _ledger,
+    ) = _build_collaborators(starter_failure=temporal_failure)
+
+    with pytest.raises(ProjectionDispatchError):
+        await run_phase_one_acceptance(collaborators, monotonic_clock=_SteppedMonotonicClock())
+
+    failed = sink.of(EventName.CANONICAL_ACCEPTANCE_FAILED)
+    assert len(failed) == 1
+    assert failed[0]["duration_ms"] == 250

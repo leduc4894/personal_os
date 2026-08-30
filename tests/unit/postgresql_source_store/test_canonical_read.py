@@ -204,7 +204,7 @@ def test_lookup_statement_selects_the_pointer_consistency_columns() -> None:
     }
 
 
-def test_lookup_statement_filters_by_both_workspace_and_source() -> None:
+def test_lookup_statement_joins_three_relations() -> None:
     compiled = str(current_reference_lookup_statement(UUID(int=0), UUID(int=1)).compile())
     assert compiled.count("LEFT OUTER JOIN") == 3
 

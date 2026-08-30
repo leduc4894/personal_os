@@ -170,7 +170,7 @@ def test_cli_parses_before_settings_io() -> None:
     assert exit_code == int(CanonicalCoreExitCode.CLI)
 
 
-def test_no_database_url_or_pgpassword_anywhere_in_tools() -> None:
+def test_no_database_url_or_pgpassword_in_canonical_core_tools() -> None:
     # Scoped to the canonical-core operations CLI: the acceptance composition
     # must never name a raw database URL or password environment variable
     # (credentials travel only through the frozen settings loaders' secret

@@ -1071,8 +1071,10 @@ async def _single_chunk_stream(payload: bytes) -> AsyncIterator[bytes]:
     yield payload
 
 
-def _elapsed_ms_since(started_monotonic: float) -> int:
-    return max(0, int((time.monotonic() - started_monotonic) * 1000))
+def _elapsed_ms_since(started_monotonic: float, monotonic_clock: Callable[[], float]) -> int:
+    """Elapsed whole milliseconds measured on the injected monotonic clock."""
+
+    return max(0, int((monotonic_clock() - started_monotonic) * 1000))
 
 
 def _acceptance_failure_fields(
@@ -1277,6 +1279,7 @@ async def run_phase_one_acceptance(
     collaborators: PhaseOneAcceptanceCollaborators,
     *,
     identity_command: BootstrapIdentityCommand | None = None,
+    monotonic_clock: Callable[[], float] = time.monotonic,
 ) -> Mapping[str, object]:
     """Run the full design-spec-7 acceptance flow and return the safe summary.
 
@@ -1288,7 +1291,9 @@ async def run_phase_one_acceptance(
     second ``EXISTING``), and unchanged final row counts. Exactly one
     registered completion or failure event is emitted through the diagnostics
     sink, one closed metric outcome is recorded, and the summary carries IDs
-    and safe counts only.
+    and safe counts only. Every ``duration_ms`` field is measured on the
+    injected ``monotonic_clock`` (the wall ``time.monotonic`` by default), so
+    no acceptance timing ever bypasses the seam.
     """
 
     from personal_os.recovery.contracts import AcceptanceMetricOutcome
@@ -1297,7 +1302,7 @@ async def run_phase_one_acceptance(
         identity_command if identity_command is not None else build_synthetic_bootstrap_command()
     )
     resolution = create_diagnostic_context()
-    started_monotonic = time.monotonic()
+    started_monotonic = monotonic_clock()
     try:
         summary, completed_fields = await _run_acceptance_flow(
             collaborators, command, resolution.context
@@ -1310,7 +1315,7 @@ async def run_phase_one_acceptance(
                 error.error_code.value,
                 error.category.value,
                 error.is_retryable,
-                _elapsed_ms_since(started_monotonic),
+                _elapsed_ms_since(started_monotonic, monotonic_clock),
             ),
         )
         raise
@@ -1322,13 +1327,13 @@ async def run_phase_one_acceptance(
                 ErrorCode.INTERNAL_ERROR.value,
                 ErrorCategory.INTERNAL.value,
                 False,
-                _elapsed_ms_since(started_monotonic),
+                _elapsed_ms_since(started_monotonic, monotonic_clock),
             ),
         )
         raise
     collaborators.metrics.record_acceptance(outcome=AcceptanceMetricOutcome.SUCCEEDED)
     completed_fields["outcome"] = AcceptanceMetricOutcome.SUCCEEDED
-    completed_fields["duration_ms"] = _elapsed_ms_since(started_monotonic)
+    completed_fields["duration_ms"] = _elapsed_ms_since(started_monotonic, monotonic_clock)
     collaborators.diagnostics.emit(EventName.CANONICAL_ACCEPTANCE_COMPLETED, completed_fields)
     return summary
 
