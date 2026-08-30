@@ -311,52 +311,57 @@ export function SecurityPanel({
         </section>
       )}
 
-      <section aria-labelledby="password-heading">
-        <h2 id="password-heading">Password</h2>
-        <form onSubmit={submitHandler(changePassword)} noValidate>
-          <label htmlFor="change-current-password">Current password</label>
-          <input
-            id="change-current-password"
-            type="password"
-            autoComplete="current-password"
-            value={changeFields.currentPassword}
-            onChange={(event) =>
-              setChangeFields((fields) => ({ ...fields, currentPassword: event.target.value }))
-            }
-          />
-          <label htmlFor="change-current-totp">Current TOTP code</label>
-          <input
-            id="change-current-totp"
-            inputMode="numeric"
-            autoComplete="one-time-code"
-            value={changeFields.currentTotpCode}
-            onChange={(event) =>
-              setChangeFields((fields) => ({ ...fields, currentTotpCode: event.target.value }))
-            }
-          />
-          <label htmlFor="change-new-password">New password</label>
-          <input
-            id="change-new-password"
-            type="password"
-            autoComplete="new-password"
-            value={changeFields.newPassword}
-            onChange={(event) =>
-              setChangeFields((fields) => ({ ...fields, newPassword: event.target.value }))
-            }
-          />
-          <label htmlFor="change-confirm-password">Confirm new password</label>
-          <input
-            id="change-confirm-password"
-            type="password"
-            autoComplete="new-password"
-            value={changeFields.confirmedPassword}
-            onChange={(event) =>
-              setChangeFields((fields) => ({ ...fields, confirmedPassword: event.target.value }))
-            }
-          />
-          <button type="submit">Change password</button>
-        </form>
-      </section>
+      {/* While re-authentication is pending, its current-password field is the
+          only one offered; the change form shares that label and state, so it
+          stays hidden until the TOTP section unlocks. */}
+      {totpMode !== "reauth-required" && (
+        <section aria-labelledby="password-heading">
+          <h2 id="password-heading">Password</h2>
+          <form onSubmit={submitHandler(changePassword)} noValidate>
+            <label htmlFor="change-current-password">Current password</label>
+            <input
+              id="change-current-password"
+              type="password"
+              autoComplete="current-password"
+              value={changeFields.currentPassword}
+              onChange={(event) =>
+                setChangeFields((fields) => ({ ...fields, currentPassword: event.target.value }))
+              }
+            />
+            <label htmlFor="change-current-totp">Current TOTP code</label>
+            <input
+              id="change-current-totp"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              value={changeFields.currentTotpCode}
+              onChange={(event) =>
+                setChangeFields((fields) => ({ ...fields, currentTotpCode: event.target.value }))
+              }
+            />
+            <label htmlFor="change-new-password">New password</label>
+            <input
+              id="change-new-password"
+              type="password"
+              autoComplete="new-password"
+              value={changeFields.newPassword}
+              onChange={(event) =>
+                setChangeFields((fields) => ({ ...fields, newPassword: event.target.value }))
+              }
+            />
+            <label htmlFor="change-confirm-password">Confirm new password</label>
+            <input
+              id="change-confirm-password"
+              type="password"
+              autoComplete="new-password"
+              value={changeFields.confirmedPassword}
+              onChange={(event) =>
+                setChangeFields((fields) => ({ ...fields, confirmedPassword: event.target.value }))
+              }
+            />
+            <button type="submit">Change password</button>
+          </form>
+        </section>
+      )}
 
       <section aria-labelledby="session-heading">
         <h2 id="session-heading">Session</h2>

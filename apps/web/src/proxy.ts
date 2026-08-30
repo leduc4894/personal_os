@@ -3,16 +3,10 @@ import { NextResponse, type NextRequest, type NextProxy } from "next/server";
 import { buildContentSecurityPolicy, createCspNonce } from "./security-headers";
 
 /**
- * The request header the App Router rendering layer reads the nonce from
- * (``headers().get("x-csp-nonce")``) when attaching nonce'd scripts.
- */
-export const CSP_NONCE_REQUEST_HEADER = "x-csp-nonce";
-
-/**
  * Next.js 16 proxy (the rename of middleware): mints one fresh CSP nonce per
- * request. The nonce and the CSP travel on the request headers so App Router
- * rendering stamps them onto its own inline scripts, and the same CSP (plus
- * the hardening headers) is set on the outgoing response.
+ * request. The CSP travels on the request headers so App Router rendering
+ * stamps the same policy onto the page, and it (plus the hardening headers)
+ * is set on the outgoing response.
  */
 const applySecurityProxy: NextProxy = (request: NextRequest) => {
   const nonce = createCspNonce();
@@ -20,7 +14,6 @@ const applySecurityProxy: NextProxy = (request: NextRequest) => {
   const contentSecurityPolicy = buildContentSecurityPolicy(nonce, { development });
 
   const requestHeaders = new Headers(request.headers);
-  requestHeaders.set(CSP_NONCE_REQUEST_HEADER, nonce);
   requestHeaders.set("Content-Security-Policy", contentSecurityPolicy);
 
   const response = NextResponse.next({ request: { headers: requestHeaders } });

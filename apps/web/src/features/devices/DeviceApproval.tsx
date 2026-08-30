@@ -174,6 +174,9 @@ export function DeviceApproval({
 
   function closeAsTerminal(message: string): void {
     setGrantContext(null);
+    // The inline-challenge password is never needed past this point; drop it
+    // with the rest of the one-time flow state.
+    setChallengePassword("");
     setTerminalMessage(message);
     setStep("terminal-error");
   }

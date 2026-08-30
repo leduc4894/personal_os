@@ -264,6 +264,26 @@ describe("TotpEnrollmentOffer", () => {
     expect(seenBodies).toEqual(['{"action":"dismiss_initial_offer"}']);
   });
 
+  it("keeps the offer open with a closed error when the dismissal fails", async () => {
+    const user = userEvent.setup();
+    server.use(mockApi("post", "/api/auth/totp/enrollments", () => authenticationFailedResponse()));
+    const onSkipped = vi.fn();
+    render(
+      <TotpEnrollmentOffer
+        client={createTestClient()}
+        enrollment={testEnrollment()}
+        onCompleted={vi.fn()}
+        onSkipped={onSkipped}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Skip for now" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Skipping failed. Try again.");
+    expect(alert.textContent).not.toContain("Simulated");
+    expect(onSkipped).not.toHaveBeenCalled();
+    expect(screen.getByText("JBSWY3DPEHPK3PXP")).toBeInTheDocument();
+  });
+
   it("hides the skip control when replacement is required", () => {
     render(
       <TotpEnrollmentOffer

@@ -93,6 +93,9 @@ export function LoginForm({
   }
 
   async function beginReplacementEnrollment(): Promise<void> {
+    // Both recovery-limited transitions land here; the held password has done
+    // its job the moment recovery mode starts, so drop it before anything else.
+    setPassword("");
     const result = await client.startTotpEnrollment();
     if (result.ok && result.data.enrollment !== null && result.data.enrollment !== undefined) {
       setEnrollment(result.data.enrollment);

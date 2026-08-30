@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { setupServer } from "msw/node";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 import { createApiClient } from "@workspace/api-client";
 
@@ -19,19 +19,28 @@ import { createNativeFetchTransport } from "../../api/native-fetch-transport";
 import {
   createAuthenticationClient,
   readCsrfTokenFromCookieSource,
+  type ApiErrorBody,
+  type AuthenticationCallResult,
   type AuthenticationClient,
+  type RecoveryLimitedContext,
+  type SessionData,
+  type TotpEnrollmentData,
 } from "../../api/authentication-client";
 import {
   MOCK_API_BASE_URL,
   authenticationFailedResponse,
   dismissedEnrollmentResponse,
   enrollmentStateInvalidResponse,
+  errorBody,
   installMockCsrfCookie,
   mockApi,
   rateLimitedResponse,
+  recoveryCodesData,
   recoveryCodesResponse,
   recoveryLimitedResponse,
+  sessionData,
   sessionResponse,
+  totpEnrollmentData,
   totpEnrollmentResponse,
   unauthenticatedResponse,
 } from "../../testing/api-mock-builders";
@@ -49,6 +58,52 @@ function createTestClient(): AuthenticationClient {
     readCsrfToken: () => readCsrfTokenFromCookieSource(document.cookie),
   });
 }
+
+/**
+ * A synchronous client double for asserting which one-time values the flow
+ * still holds: every method records its arguments without touching the network.
+ */
+interface SpyAuthenticationClient extends AuthenticationClient {
+  login: Mock;
+  startTotpEnrollment: Mock;
+  startTotpRecovery: Mock;
+}
+
+function callFailure(code: string): { ok: false; error: ApiErrorBody } {
+  return { ok: false, error: errorBody(code).error as unknown as ApiErrorBody };
+}
+
+function createSpyClient(behavior: {
+  login?: AuthenticationCallResult<SessionData>;
+  startTotpRecovery?: AuthenticationCallResult<RecoveryLimitedContext>;
+  startTotpEnrollment?: AuthenticationCallResult<TotpEnrollmentData>;
+} = {}): SpyAuthenticationClient {
+  return {
+    login: vi.fn().mockResolvedValue(behavior.login ?? callFailure("authentication_failed")),
+    getSession: vi.fn().mockResolvedValue(callFailure("authentication_required")),
+    logout: vi.fn().mockResolvedValue({ ok: true, data: sessionData("revoked") }),
+    reauthenticate: vi.fn().mockResolvedValue(callFailure("authentication_failed")),
+    changePassword: vi.fn().mockResolvedValue(callFailure("authentication_failed")),
+    verifyTotpChallenge: vi.fn().mockResolvedValue(callFailure("authentication_failed")),
+    startTotpEnrollment: vi.fn().mockResolvedValue(
+      behavior.startTotpEnrollment ?? callFailure("totp_enrollment_state_invalid"),
+    ),
+    dismissInitialTotpOffer: vi.fn().mockResolvedValue({ ok: true, data: totpEnrollmentData() }),
+    verifyTotpEnrollment: vi.fn().mockResolvedValue({ ok: true, data: recoveryCodesData() }),
+    startTotpRecovery: vi.fn().mockResolvedValue(
+      behavior.startTotpRecovery ?? callFailure("authentication_failed"),
+    ),
+    regenerateTotpRecoveryCodes: vi.fn().mockResolvedValue({ ok: true, data: recoveryCodesData() }),
+    disableTotp: vi.fn().mockResolvedValue(callFailure("authentication_failed")),
+  };
+}
+
+const recoveryLimitedContext: RecoveryLimitedContext = {
+  absolute_expires_at: "2026-08-16T12:00:00Z",
+  idle_expires_at: "2026-08-16T09:00:00Z",
+  permitted_actions: ["totp_replacement", "logout"],
+  state: "recovery_limited",
+};
 
 /** Session probe every mounted LoginForm performs before its first paint settles. */
 function stubSessionProbe(): void {
@@ -210,5 +265,36 @@ describe("LoginForm", () => {
     expect(screen.queryByText("JBSWY3DPEHPK3PXP")).not.toBeInTheDocument();
     expect(localStorage).toHaveLength(0);
     expect(sessionStorage).toHaveLength(0);
+  });
+
+  it("clears the held password after a recovery-limited login", async () => {
+    const user = userEvent.setup();
+    const client = createSpyClient({ login: { ok: true, data: sessionData("recovery_limited") } });
+    render(<LoginForm client={client} sessionStore={createAuthenticationSessionStore()} />);
+    await submitPassword(user);
+    await waitFor(() => expect(client.startTotpEnrollment).toHaveBeenCalledTimes(1));
+    expect((screen.getByLabelText("Password") as HTMLInputElement).value).toBe("");
+  });
+
+  it("hands the challenge an empty password after the recovery-limited transition", async () => {
+    const user = userEvent.setup();
+    const client = createSpyClient({
+      login: { ok: true, data: sessionData("pending_totp") },
+      startTotpRecovery: { ok: true, data: recoveryLimitedContext },
+    });
+    render(<LoginForm client={client} sessionStore={createAuthenticationSessionStore()} />);
+    await submitPassword(user);
+    await user.click(await screen.findByRole("button", { name: "Use a recovery code instead" }));
+    await user.type(await screen.findByLabelText("Recovery code"), "ABCD-EFGH-IJKL");
+    await user.click(screen.getByRole("button", { name: "Continue with recovery code" }));
+    await waitFor(() => expect(client.startTotpEnrollment).toHaveBeenCalledTimes(1));
+    // A later recovery attempt must not carry the earlier password.
+    await user.type(screen.getByLabelText("Recovery code"), "MNOP-QRST-UVWX");
+    await user.click(screen.getByRole("button", { name: "Continue with recovery code" }));
+    await waitFor(() => expect(client.startTotpRecovery).toHaveBeenCalledTimes(2));
+    expect(client.startTotpRecovery).toHaveBeenLastCalledWith({
+      password: "",
+      recoveryCode: "MNOP-QRST-UVWX",
+    });
   });
 });

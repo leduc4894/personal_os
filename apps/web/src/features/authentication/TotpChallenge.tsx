@@ -179,7 +179,7 @@ export interface TotpEnrollmentOfferProps {
 /**
  * The one-time TOTP enrollment screen: a locally rendered QR, the Base32
  * secret for manual entry, and the activation code step. The provisioning
- * material lives in component memory only and is cleared on unmount.
+ * material lives in component memory only and disappears with it.
  */
 export function TotpEnrollmentOffer({
   client,
@@ -206,15 +206,6 @@ export function TotpEnrollmentOffer({
       codeInputRef.current?.focus();
     }
   }, [errorMessage]);
-
-  useEffect(
-    () => () => {
-      setCode("");
-      setErrorMessage(null);
-      setCopyStatus(null);
-    },
-    [],
-  );
 
   async function copyValue(value: string): Promise<void> {
     try {
@@ -244,8 +235,12 @@ export function TotpEnrollmentOffer({
 
   async function skip(): Promise<void> {
     setIsSubmitting(true);
-    await client.dismissInitialTotpOffer();
+    const result = await client.dismissInitialTotpOffer();
     setIsSubmitting(false);
+    if (!result.ok) {
+      setErrorMessage(rateLimitedRetryMessage(result.error) ?? "Skipping failed. Try again.");
+      return;
+    }
     onSkipped?.();
   }
 

@@ -22,6 +22,7 @@ import {
   mockApi,
   rateLimitedResponse,
   recentAuthenticationRequiredResponse,
+  recoveryLimitedResponse,
   sessionResponse,
   unauthenticatedResponse,
 } from "../../testing/api-mock-builders";
@@ -208,6 +209,37 @@ describe("DeviceApproval", () => {
     await user.type(await screen.findByLabelText("Authentication code"), "123456");
     await user.click(screen.getByRole("button", { name: "Verify" }));
     expect(await screen.findByText("Personal desktop")).toBeInTheDocument();
+  });
+
+  it("closes recovery mode as terminal and releases the inline challenge", async () => {
+    const user = userEvent.setup();
+    const recoveryBodies: string[] = [];
+    server.use(mockApi("get", "/api/auth/session", () => unauthenticatedResponse()));
+    server.use(mockApi("post", "/api/auth/login", () => sessionResponse("pending_totp")));
+    server.use(
+      mockApi("post", "/api/auth/totp/recovery", async ({ request }) => {
+        recoveryBodies.push(await request.text());
+        return recoveryLimitedResponse();
+      }),
+    );
+    window.history.replaceState({}, "", `/device/approve#${DEVICE_USER_CODE}`);
+    render(<DeviceApproval client={createTestClient()} sessionStore={createAuthenticationSessionStore()} />);
+    await user.type(await screen.findByLabelText("Username"), "owner");
+    await user.type(screen.getByLabelText("Password"), "correct horse battery staple!");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    // The challenge carried the inline-login password into the recovery call.
+    await user.click(await screen.findByRole("button", { name: "Use a recovery code instead" }));
+    await user.type(await screen.findByLabelText("Recovery code"), "ABCD-EFGH-IJKL");
+    await user.click(screen.getByRole("button", { name: "Continue with recovery code" }));
+    expect(
+      await screen.findByText(/Recovery-mode sign-in must be completed on the sign-in page/),
+    ).toBeInTheDocument();
+    expect(recoveryBodies).toEqual([
+      '{"password":"correct horse battery staple!","recovery_code":"ABCD-EFGH-IJKL"}',
+    ]);
+    // The terminal close drops the challenge together with its one-time state.
+    expect(screen.queryByLabelText("Recovery code")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Authentication code")).not.toBeInTheDocument();
   });
 
   it("closes an unrecognized code with plugin guidance", async () => {

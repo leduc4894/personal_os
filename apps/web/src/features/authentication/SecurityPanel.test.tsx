@@ -184,6 +184,29 @@ describe("SecurityPanel", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders exactly one current-password field while re-authentication is required", async () => {
+    const user = userEvent.setup();
+    server.use(
+      mockApi("post", "/api/auth/totp/enrollments", () => recentAuthenticationRequiredResponse()),
+    );
+    render(<SecurityPanel client={createTestClient()} sessionStore={createAuthenticationSessionStore()} />);
+    expect(
+      await screen.findByText("Confirm your password again to manage two-factor authentication."),
+    ).toBeInTheDocument();
+    // The change form shares the current-password label; it must stay hidden
+    // until the re-authentication succeeds so exactly one field is offered.
+    expect(screen.getAllByLabelText("Current password")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Change password" })).not.toBeInTheDocument();
+
+    server.use(mockApi("post", "/api/auth/reauthenticate", () => sessionResponse("active")));
+    server.use(mockApi("post", "/api/auth/totp/enrollments", () => enrollmentStateInvalidResponse()));
+    await user.type(screen.getByLabelText("Current password"), "correct horse battery staple!");
+    await user.click(screen.getByRole("button", { name: "Confirm password" }));
+    expect(await screen.findByText("Two-factor authentication is active.")).toBeInTheDocument();
+    expect(screen.getAllByLabelText("Current password")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Change password" })).toBeInTheDocument();
+  });
+
   it("shows a generic failure and focuses it when disable fails", async () => {
     const user = userEvent.setup();
     server.use(mockApi("post", "/api/auth/totp/enrollments", () => enrollmentStateInvalidResponse()));
