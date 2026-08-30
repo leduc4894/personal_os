@@ -11,6 +11,7 @@ runtime behavior is integration territory (Task 13).
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from typing import Any
 
 import pytest
@@ -25,6 +26,8 @@ from personal_os.recovery.contracts import (
     RecoveryError,
 )
 from postgresql_source_store.backup_snapshot import (
+    _ALEMBIC_VERSION_TABLE_REFERENCE,
+    _SCHEMA_HEAD_STATEMENT,
     SNAPSHOT_LOCK_ORDER,
     SNAPSHOT_LOCK_TIMEOUT_SECONDS,
     build_share_lock_statements,
@@ -140,6 +143,42 @@ def test_pending_writer_count_statement_counts_ungranted_relation_locks() -> Non
     assert "pg_locks.locktype = 'relation'" in compiled
     assert "NOT pg_locks.granted" in compiled
     assert "pg_class.relname = ANY(:tables)" in compiled
+
+
+def _compile_statement(
+    statement: sa.TextClause, parameters: Mapping[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    """Compile one text statement with its execution binding for PostgreSQL."""
+    compiled = statement.compile(dialect=postgresql.dialect())
+    return str(compiled), dict(compiled.construct_params(dict(parameters)))
+
+
+def test_pending_writer_statement_qualifies_the_store_schema() -> None:
+    statement = pending_writer_count_statement()
+    sql, params = _compile_statement(
+        statement, {"tables": list(SNAPSHOT_LOCK_ORDER), "schema": SOURCE_STORE_SCHEMA}
+    )
+    assert "pg_namespace" in sql and "nspname" in sql
+    # The raw text keeps the placeholder spelling the execution binding uses,
+    # so the compiled round-trip and the binding cannot drift apart.
+    assert "pg_namespace.nspname = :schema" in str(statement)
+    assert params["schema"] == SOURCE_STORE_SCHEMA
+
+
+# --- Alembic version-table location (row 2026-08-15 §8 ruling) -----------------
+
+
+def test_alembic_head_statement_names_its_location() -> None:
+    """The head read names its version-table location: the default schema.
+
+    ``migrations/env.py`` configures the online migration environment with no
+    ``version_table_schema``, so Alembic's default placement — the
+    connection's default schema, ``public`` — is the live contract the
+    acceptance gates prove. The reference and the statement text are pinned
+    so neither drifts to the store schema unnoticed.
+    """
+    assert _ALEMBIC_VERSION_TABLE_REFERENCE == "public.alembic_version"
+    assert str(_SCHEMA_HEAD_STATEMENT) == "SELECT version_num FROM public.alembic_version"
 
 
 def test_current_pointer_resolution_statement_joins_and_fails_closed() -> None:

@@ -112,6 +112,10 @@ writers; a second concurrent snapshot refuses `snapshot_busy`, exit `75`) →
 schema head must equal the pinned revision inside the snapshot → bundle id
 must not already exist.
 
+The snapshot transaction's `lock_timeout` bound guards only blocking-lock
+paths; the `NOWAIT` share locks fail immediately regardless — both bounds
+stay by design.
+
 **Bundle layout.** One directory per UUIDv7 bundle id beneath the backup root:
 
 ```text

@@ -123,15 +123,24 @@ SNAPSHOT_ISOLATION_LEVEL: Final[str] = "REPEATABLE READ"
 #: Applied immediately after the snapshot begin: the widened snapshot lock
 #: timeout plus the established statement and idle-in-transaction bounds.
 #: ``SET LOCAL`` scopes every bound to the snapshot transaction only.
+#: ``lock_timeout`` guards only blocking-lock paths — the ``NOWAIT`` share
+#: locks fail immediately regardless; both bounds stay by design.
 SNAPSHOT_TRANSACTION_BOUND_STATEMENTS: Final[tuple[str, ...]] = (
     f"SET LOCAL lock_timeout = '{SNAPSHOT_LOCK_TIMEOUT_SECONDS * 1000}ms'",
     "SET LOCAL statement_timeout = '15000ms'",
     "SET LOCAL idle_in_transaction_session_timeout = '30000ms'",
 )
 
-#: Alembic's version table lives in the default schema.
-_ALEMBIC_SCHEMA: Final[str] = "public"
-_ALEMBIC_TABLE: Final[str] = "alembic_version"
+#: The qualified location of Alembic's version table — one source of truth
+#: for the head read and the presence probes, which bind its schema and table
+#: parts. Provenance: ``migrations/env.py`` configures the online migration
+#: environment with no ``version_table_schema``, so Alembic applies its
+#: default placement and the version table lives in the connection's default
+#: schema (``public``), not in the store schema. Switching any read here to
+#: the store schema would miss the table the migrations actually maintain.
+_ALEMBIC_VERSION_TABLE_REFERENCE: Final[str] = "public.alembic_version"
+_ALEMBIC_VERSION_SCHEMA: Final[str] = _ALEMBIC_VERSION_TABLE_REFERENCE.partition(".")[0]
+_ALEMBIC_VERSION_TABLE: Final[str] = _ALEMBIC_VERSION_TABLE_REFERENCE.partition(".")[2]
 
 _EXPORT_SNAPSHOT_STATEMENT: Final[sa.TextClause] = sa.text("SELECT pg_export_snapshot()")
 _SERVER_VERSION_STATEMENT: Final[sa.TextClause] = sa.text(
@@ -140,7 +149,7 @@ _SERVER_VERSION_STATEMENT: Final[sa.TextClause] = sa.text(
     "SELECT split_part(current_setting('server_version'), ' ', 1)"
 )
 _SCHEMA_HEAD_STATEMENT: Final[sa.TextClause] = sa.text(
-    f"SELECT version_num FROM {_ALEMBIC_SCHEMA}.{_ALEMBIC_TABLE}"
+    f"SELECT version_num FROM {_ALEMBIC_VERSION_TABLE_REFERENCE}"
 )
 _SCHEMA_RELATION_COUNT_STATEMENT: Final[sa.TextClause] = sa.text(
     "SELECT count(*) FROM information_schema.tables WHERE table_schema = :schema"
@@ -184,14 +193,20 @@ def pending_writer_count_statement() -> sa.TextClause:
     """Build the parameter-bound count of ungranted relation locks.
 
     Counts lock requests on the 35 canonical tables that PostgreSQL has not
-    granted (blocked writers waiting on the quiescing share locks); the table
-    names travel only as the bound ``:tables`` array parameter.
+    granted (blocked writers waiting on the quiescing share locks). The
+    ``pg_namespace`` join qualifies the count to the store schema, so a
+    same-named relation in another schema can never inflate it — the join is
+    spurious-abort-safe only and changes nothing else about the snapshot
+    semantics. The table names travel only as the bound ``:tables`` array
+    parameter and the schema only as the bound ``:schema`` value.
     """
     return sa.text(
         "SELECT count(*) FROM pg_locks"
         " JOIN pg_class ON pg_locks.relation = pg_class.oid"
+        " JOIN pg_namespace ON pg_class.relnamespace = pg_namespace.oid"
         " WHERE pg_locks.locktype = 'relation'"
         " AND NOT pg_locks.granted"
+        " AND pg_namespace.nspname = :schema"
         " AND pg_class.relname = ANY(:tables)"
     )
 
@@ -392,7 +407,10 @@ class PostgresqlBackupSnapshotStore:
                 count = (
                     await connection.execute(
                         pending_writer_count_statement(),
-                        {"tables": list(SNAPSHOT_LOCK_ORDER)},
+                        {
+                            "tables": list(SNAPSHOT_LOCK_ORDER),
+                            "schema": SOURCE_STORE_SCHEMA,
+                        },
                     )
                 ).scalar_one()
         except ApplicationError:
@@ -446,7 +464,10 @@ class PostgresqlRestoreTarget:
                 alembic_count = (
                     await connection.execute(
                         _ALEMBIC_PRESENCE_COUNT_STATEMENT,
-                        {"schema": _ALEMBIC_SCHEMA, "table_name": _ALEMBIC_TABLE},
+                        {
+                            "schema": _ALEMBIC_VERSION_SCHEMA,
+                            "table_name": _ALEMBIC_VERSION_TABLE,
+                        },
                     )
                 ).scalar_one()
         except ApplicationError:
@@ -480,7 +501,10 @@ class PostgresqlRestoreTarget:
                 alembic_count = (
                     await connection.execute(
                         _ALEMBIC_PRESENCE_COUNT_STATEMENT,
-                        {"schema": _ALEMBIC_SCHEMA, "table_name": _ALEMBIC_TABLE},
+                        {
+                            "schema": _ALEMBIC_VERSION_SCHEMA,
+                            "table_name": _ALEMBIC_VERSION_TABLE,
+                        },
                     )
                 ).scalar_one()
                 if int(alembic_count) == 0:
