@@ -3,8 +3,10 @@
 Branch `child-nine-hygiene-retirement` (from `master` @ `85fb784`). Design spec:
 `docs/superpowers/specs/backlog/2026-08-30-child-nine-and-phase-two-closure-hygiene-retirement-design.md`;
 implementation plan `docs/superpowers/plans/2026-08-30-child-nine-hygiene-retirement.md`.
-Đủ 20/20 task hoàn thành và review clean. File này thay thế snapshot gián đoạn
-trước đó (sau Task 12) làm handoff cuối duy nhất của wave.
+Đủ 20/20 task hoàn thành; 20/20 per-task review clean, final whole-branch
+review đã hoàn tất với 4 minor findings (0 merge blocker) được đóng trong đúng
+một fix wave — commit mang bản cập nhật này. File này thay thế snapshot gián
+đoạn trước đó (sau Task 12) làm handoff cuối duy nhất của wave.
 
 ## Trạng thái
 
@@ -52,7 +54,7 @@ Chạy tại code head `1b13c8b`. Kết quả verbatim:
   2 failed, 98 passed, 6 deselected — hai failure chính xác là hai test đã tài liệu
   hóa ở trên (source_publication một mình: 79 passed / 2 failed như kỳ vọng;
   canonical_core thêm 19 passed); không có regression nào khác.
-- `bash .local/serve-live-ci.sh down`: stack_reset_complete (project CI removed,
+- `bash .local/serve-live-ci.sh down`: stack_down_complete (project CI removed,
   `knowledge-local` giữ trạng thái down).
 - `git diff --check && git status --short`: clean ngoài các file docs của task này.
 
@@ -176,8 +178,12 @@ mỗi commit) nằm trong SDD ledger và task reports.
 
 ## Deferred items
 
-Năm row mới index tại `docs/handoff/BACKLOG.md` (2026-08-30), trỏ về file này.
-Không có item nào khác mới được defer trong wave này.
+Sáu row mới index tại `docs/handoff/BACKLOG.md` (2026-08-30), trỏ về file này.
+Năm row đầu được index khi đóng wave; row thứ sáu (6) được thêm khi đóng final
+whole-branch review — finding out-of-scope của Task 12 được triage tại đó
+(brief của Task 12 chỉ named hai file, nên bản sao còn lại thuộc domain
+web admin api clients, ngoài scope của mọi task trong wave). Ngoài row đó,
+không có item nào khác mới được defer trong wave này.
 
 1. **web-auth acceptance** — 2 journey `web-security.spec.ts` stale so với
    first-login TOTP offer đã bị remove (commit 99fe1c3 ngày 2026-08-22, là
@@ -207,11 +213,20 @@ Không có item nào khác mới được defer trong wave này.
    `20260818_01` từ chối row-gate, để lại schema nửa đường; test
    `test_gated_downgrade_drops_the_operation_table_and_reapplies_head` đỏ.
    *Implement by: Before production activation.*
+6. **web admin api clients** — bản sao `REQUEST_UNAVAILABLE_ERROR`/
+   `unwrapEnvelope` trùng lặp tại `apps/web/src/api/exclusion-policy-client.ts`
+   (và `source-lifecycle-client.ts` import lại từ nó) thay vì dùng shared
+   exports của `authentication-client.ts`; Task-12 out-of-scope finding
+   (brief chỉ named hai file) được triage thành defer tại final whole-branch
+   review — nội dung thuộc domain web admin api clients, không thuộc scope của
+   task nào trong wave. *Implement by: Before Phase 2 closure (after Child 9).*
 
 ## Next actions
 
-1. SDD final whole-branch review trên `85fb784..HEAD` (reviewer mạnh nhất),
-   trỏ vào parked-minor list trong ledger, tối đa một fix wave.
+1. SDD final whole-branch review trên `85fb784..HEAD` — đã hoàn tất: 4 minor
+   findings (0 merge blocker) được đóng trong đúng một fix wave (commit mang
+   bản cập nhật này); chi tiết theo từng finding tại
+   `.superpowers/sdd/2026-08-30-child-nine-hygiene-retirement/final-fix-report.md`.
 2. `superpowers:finishing-a-development-branch` — quyết định merge. Living
    docs (runbooks, metrics, operations) đã cập nhật tại chỗ trong các task;
    tra hiện trạng qua `docs/operations/`, không qua file này.

@@ -266,9 +266,9 @@ async def apply_throttle_bucket_failure(
         if inserted.one_or_none() is not None:
             return first_strike
         bucket = await lock_throttle_bucket(connection, bucket_kind, bucket_hash)
-    assert bucket is not None, (
-        "losing the guarded cold insert implies the winning bucket row committed"
-    )
+    if bucket is None:
+        # Invariant: losing the guarded cold insert implies the winning row committed.
+        raise InternalApplicationError(ErrorCode.INTERNAL_ERROR) from None
     transition = next_login_failure_transition(
         bucket.state, database_now=database_now, policy=policy
     )

@@ -493,11 +493,7 @@ class LocalFilesystemObjectStore:
             digest=digest,
             size_bytes=total_bytes,
             media_type=stored_media_type,
-            method=(
-                VerificationMethod.EXISTING_FULL_READ
-                if already_present
-                else VerificationMethod.UPLOADED_FULL_READ
-            ),
+            method=VerificationMethod.UPLOADED_FULL_READ,
         )
 
     async def verify_existing_object(self, expected: ExpectedObject) -> VerifiedObjectReceipt:
