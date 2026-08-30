@@ -1,6 +1,8 @@
 import { expect, type Page, type Route } from "@playwright/test";
 import { test } from "@playwright/test";
 
+import { E2E_ACCEPTED_LOGIN_PASSWORD, E2E_LOGIN_USERNAME } from "./e2e-credentials";
+
 /**
  * The complete device-onboarding journey across the Web boundary: a plugin
  * (simulated by this spec) creates a device grant, the unauthenticated
@@ -236,17 +238,17 @@ test("the full onboarding journey approves one device and lists it, at contract 
   const journey = new OnboardingJourney(page);
   await journey.install();
 
-  // The plugin received the provisioning payload and the browser opens the
-  // exact verification URL complete with the fragment user code.
+  // The plugin received the provisioning payload and the browser opens its
+  // exact verification_uri_complete; the request-fidelity assertions below
+  // pin that the journey consumed the user code of that grant payload.
   const provisioning = createdGrant();
-  expect(provisioning.verification_uri_complete).toContain(`#${USER_CODE}`);
-  await page.goto(`/device/approve#${USER_CODE}`);
+  await page.goto(provisioning.verification_uri_complete);
 
   await expect(page.getByRole("heading", { name: "Sign in to approve the device" })).toBeVisible();
   expect(await page.evaluate(() => window.location.hash)).toBe("");
 
-  await page.getByLabel("Username").fill("owner");
-  await page.getByLabel("Password").fill("correct horse battery staple!");
+  await page.getByLabel("Username").fill(E2E_LOGIN_USERNAME);
+  await page.getByLabel("Password").fill(E2E_ACCEPTED_LOGIN_PASSWORD);
   await page.getByRole("button", { name: "Sign in" }).click();
 
   // The grant context renders every display field of the contract payload.
@@ -259,14 +261,15 @@ test("the full onboarding journey approves one device and lists it, at contract 
   // The recent-re-authentication gate precedes the committed approval.
   await page.getByRole("button", { name: "Approve" }).click();
   await expect(page.getByText("Confirm your password again to approve this device.")).toBeVisible();
-  await page.getByLabel("Current password").fill("correct horse battery staple!");
+  await page.getByLabel("Current password").fill(E2E_ACCEPTED_LOGIN_PASSWORD);
   await page.getByRole("button", { name: "Confirm password" }).click();
   await expect(page.getByRole("heading", { name: "Device approved" })).toBeVisible();
 
   // The plugin-side poll consumes the one-time credential into exactly one
-  // exchanged device; the web journey then sees it in the Admin list.
+  // exchanged device; the web journey then sees it in the Admin list. The
+  // fidelity assertions below pin the exchange to the grant the browser
+  // actually approved through the captured request log.
   const exchanged = exchangedCredentials();
-  expect(exchanged.grant_id).toBe(GRANT_ID);
   await page.goto("/admin/devices");
   const onboardedRow = page.getByRole("row", { name: /Personal desktop/ });
   await expect(onboardedRow).toBeVisible();
@@ -275,19 +278,35 @@ test("the full onboarding journey approves one device and lists it, at contract 
   // Request fidelity: every state-changing browser call matched the
   // generated client contract and carried the CSRF token from the cookie.
   expect(journey.callsTo("/api/auth/login")).toEqual([
-    { method: "POST", path: "/api/auth/login", body: '{"username":"owner","password":"correct horse battery staple!"}', csrfToken: undefined },
+    {
+      method: "POST",
+      path: "/api/auth/login",
+      body: JSON.stringify({ username: E2E_LOGIN_USERNAME, password: E2E_ACCEPTED_LOGIN_PASSWORD }),
+      csrfToken: undefined,
+    },
   ]);
+  // The browser navigated the grant's verification_uri_complete and its
+  // lookup consumed exactly the user code that grant payload carries.
   expect(journey.callsTo("/api/auth/device-authorizations/lookup")).toEqual([
-    { method: "POST", path: "/api/auth/device-authorizations/lookup", body: `{"user_code":"${USER_CODE}"}`, csrfToken: "e2e-csrf-value" },
+    {
+      method: "POST",
+      path: "/api/auth/device-authorizations/lookup",
+      body: JSON.stringify({ user_code: provisioning.user_code }),
+      csrfToken: "e2e-csrf-value",
+    },
   ]);
-  const approvals = journey.callsTo(`/api/auth/device-authorizations/${GRANT_ID}/approve`);
+  // The exchange consumed the grant the browser approved: both captured
+  // approval calls targeted the exchanged grant id in their path.
+  const approvals = journey.callsTo(
+    `/api/auth/device-authorizations/${exchanged.grant_id}/approve`,
+  );
   expect(approvals).toHaveLength(2);
   expect(approvals.every((call) => call.csrfToken === "e2e-csrf-value")).toBe(true);
   expect(journey.callsTo("/api/auth/reauthenticate")).toEqual([
     {
       method: "POST",
       path: "/api/auth/reauthenticate",
-      body: '{"password":"correct horse battery staple!","totp_code":null}',
+      body: JSON.stringify({ password: E2E_ACCEPTED_LOGIN_PASSWORD, totp_code: null }),
       csrfToken: "e2e-csrf-value",
     },
   ]);
@@ -340,8 +359,8 @@ test("a denied onboarding terminalizes the approval page without device rows", a
   await page.route("**/api/admin/devices", fulfill(envelopeBody({ devices: adminDevices(false) })));
 
   await page.goto(`/device/approve#${USER_CODE}`);
-  await page.getByLabel("Username").fill("owner");
-  await page.getByLabel("Password").fill("correct horse battery staple!");
+  await page.getByLabel("Username").fill(E2E_LOGIN_USERNAME);
+  await page.getByLabel("Password").fill(E2E_ACCEPTED_LOGIN_PASSWORD);
   await page.getByRole("button", { name: "Sign in" }).click();
   await page.getByRole("button", { name: "Deny" }).click();
 

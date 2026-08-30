@@ -1,6 +1,11 @@
 import { expect, type Page, type Route } from "@playwright/test";
 import { test } from "@playwright/test";
 
+import {
+  E2E_ACCEPTED_LOGIN_PASSWORD,
+  E2E_LOGIN_USERNAME,
+} from "../authentication/e2e-credentials";
+
 /**
  * The complete exclusion-policy publication journey across the Web Admin
  * boundary (spec 17/23.5): the operator signs in, sees the fail-closed
@@ -338,8 +343,8 @@ test("the policy publication journey publishes the empty policy then a deny rule
   // The unauthenticated operator is routed to the login page first.
   await page.goto("/admin/policy");
   await expect(page.getByRole("heading", { name: "Sign in", exact: true })).toBeVisible();
-  await page.getByLabel("Username").fill("owner");
-  await page.getByLabel("Password").fill("correct horse battery staple!");
+  await page.getByLabel("Username").fill(E2E_LOGIN_USERNAME);
+  await page.getByLabel("Password").fill(E2E_ACCEPTED_LOGIN_PASSWORD);
   await page.getByRole("button", { name: "Sign in" }).click();
 
   // The login completes to the device list; the operator opens the policy

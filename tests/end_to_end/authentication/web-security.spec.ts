@@ -1,6 +1,8 @@
 import { expect, type Page, type Route } from "@playwright/test";
 import { test } from "@playwright/test";
 
+import { E2E_ACCEPTED_LOGIN_PASSWORD, E2E_LOGIN_USERNAME } from "./e2e-credentials";
+
 /**
  * The web security journey (Task 12 scope): login, the skippable first-login
  * TOTP offer with a locally rendered QR, one-time recovery codes, the Security
@@ -147,8 +149,8 @@ test("login offers skippable TOTP enrollment with a local QR, then reveals one-t
   expect(response?.headers()["referrer-policy"]).toBe("no-referrer");
   expect(response?.headers()["x-content-type-options"]).toBe("nosniff");
 
-  await page.getByLabel("Username").fill("owner");
-  await page.getByLabel("Password").fill("correct horse battery staple!");
+  await page.getByLabel("Username").fill(E2E_LOGIN_USERNAME);
+  await page.getByLabel("Password").fill(E2E_ACCEPTED_LOGIN_PASSWORD);
   await page.getByRole("button", { name: "Sign in" }).click();
 
   await expect(page.getByText("E2EESUPERSECRET2345")).toBeVisible();
@@ -200,8 +202,8 @@ test("the first-login offer can be skipped and dismissed", async ({ page }) => {
   });
 
   await page.goto("/login");
-  await page.getByLabel("Username").fill("owner");
-  await page.getByLabel("Password").fill("correct horse battery staple!");
+  await page.getByLabel("Username").fill(E2E_LOGIN_USERNAME);
+  await page.getByLabel("Password").fill(E2E_ACCEPTED_LOGIN_PASSWORD);
   await page.getByRole("button", { name: "Sign in" }).click();
 
   await expect(page.getByRole("button", { name: "Skip for now" })).toBeVisible();
@@ -241,8 +243,8 @@ test("a pending_totp login completes through the TOTP challenge", async ({ page 
   });
 
   await page.goto("/login");
-  await page.getByLabel("Username").fill("owner");
-  await page.getByLabel("Password").fill("correct horse battery staple!");
+  await page.getByLabel("Username").fill(E2E_LOGIN_USERNAME);
+  await page.getByLabel("Password").fill(E2E_ACCEPTED_LOGIN_PASSWORD);
   await page.getByRole("button", { name: "Sign in" }).click();
 
   await expect(page.getByLabel("Authentication code")).toBeVisible();
@@ -284,7 +286,7 @@ test("the security page regenerates one-time codes, signs out and keeps storage 
   await page.goto("/admin/security");
   await expect(page.getByText("Two-factor authentication is active.")).toBeVisible();
 
-  await page.getByLabel("Regenerate password").fill("correct horse battery staple!");
+  await page.getByLabel("Regenerate password").fill(E2E_ACCEPTED_LOGIN_PASSWORD);
   await page.getByLabel("Regenerate TOTP code").fill("123456");
   await page.getByRole("button", { name: "Regenerate recovery codes" }).click();
 

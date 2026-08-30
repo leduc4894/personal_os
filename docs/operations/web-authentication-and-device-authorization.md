@@ -193,8 +193,10 @@ for index in range(20):
     hasher.hash(f"benchmark-password-{index:02d}")
     runs.append((time.perf_counter() - started) * 1000)
 ordered = sorted(runs)
-print("median", round(statistics.median(runs), 1),
-      "p95", round(ordered[18] + 0.05 * (ordered[19] - ordered[18]), 1))
+print(f"min {ordered[0]:.1f} ms   median {statistics.median(runs):.1f} ms   "
+      f"mean {statistics.fmean(runs):.1f} ms   "
+      f"p95 {ordered[18] + 0.05 * (ordered[19] - ordered[18]):.1f} ms   "
+      f"max {ordered[19]:.1f} ms")
 PY
 ```
 
@@ -236,7 +238,7 @@ existing canonical backup/restore procedure (see
   and `duration_ms`; identity, address, device and credential values never
   become labels or fields (spec 21, 20.4; no telemetry of any kind).
 - The append-only `audit_events` table records the closed action set:
-  `authentication.login_succeeded` / `login_rejected`,
+  `authentication.login_succeeded` / `login_rejected` / `login_locked_out`,
   `authentication.web_credential_enrolled`, `authentication.password_changed`,
   `authentication.web_authentication_reset`,
   `authentication.totp_enrollment_started` / `totp_activated` /

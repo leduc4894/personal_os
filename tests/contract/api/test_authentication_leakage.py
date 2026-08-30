@@ -289,6 +289,11 @@ class LeakJourney:
             json_body={"password": _PASSWORD_SENTINEL.value},
         )
         assert reauth_rejected.status_code == 401, reauth_rejected.text
+        # The fail-closed rejection mints no binding material at all: the
+        # response must leave without any Set-Cookie, and the capture below
+        # (a no-op by construction) keeps that contract observable.
+        assert not reauth_rejected.headers.get_list("set-cookie")
+        self.capture_cookie_sentinels(reauth_rejected, "reauthenticate-rejected")
 
     def _totp_surfaces(self) -> None:
         enroll = self.request(
@@ -485,11 +490,24 @@ class LeakJourney:
             json_body={"new_password": _NEW_PASSWORD_SENTINEL.value},
         )
         assert changed.status_code == 200, changed.text
+        # The change rotates the current session binding: both fresh cookie
+        # secrets become Set-Cookie-only sentinels of the scan.
+        self.capture_cookie_sentinels(changed, "password-change")
 
     # -- offline state render --------------------------------------------------------
 
     def rendered_offline_state(self) -> str:
-        """Render every offline row, skipping the sanctioned name columns."""
+        """Render every offline table through its per-table column policy.
+
+        Each table renders an explicit allowlist, nothing else: grants their
+        two secret hashes plus the closed platform-name/plugin-version/state
+        columns; tokens the secret hash and token kind; sessions the session
+        and CSRF secret hashes; TOTP the sealed key-id/nonce/ciphertext
+        triple; recovery the code hash. Every other column — identifiers,
+        timestamps, derivation key ids and the sanctioned plaintext device
+        name — stays out of the render, so a sentinel found here means a
+        plaintext secret, never a rendered column.
+        """
 
         def render(value: Any) -> str:
             import json

@@ -97,7 +97,6 @@ _CODE_AT_NOW = totp_code(secret=_TOTP_SECRET, unix_time_seconds=_DATABASE_NOW_UN
 _ROTATED_KEY_ID = "authkey-rotated-2081"
 _RETIRED_KEY_ID = "authkey-retired-2077"
 _ROTATED_MASTER_KEY = bytes(range(32))
-_RETIRED_MASTER_KEY = bytes(range(1, 33))
 _RETIRED_MASTER_KEY = bytes(range(64, 96))
 
 
@@ -384,8 +383,10 @@ class KeyRotationHarness:
             return {str(row.derivation_key_id) for row in (await connection.execute(statement))}
 
     async def grant_derivation_key_ids(self, account: SeededAccount) -> set[str]:
+        """The derivation keys of this account's grants (order-independent)."""
         statement = sa.select(device_authorization_grants.c.derivation_key_id).where(
-            device_authorization_grants.c.derivation_key_id.is_not(None)
+            device_authorization_grants.c.approved_by_user_id == account.user_id,
+            device_authorization_grants.c.derivation_key_id.is_not(None),
         )
         async with self.engine.connect() as connection:
             return {
@@ -494,8 +495,6 @@ async def test_required_key_ids_cover_totp_refresh_tokens_and_grants(
     _created, refresh_credential = await harness.exchange_device_under_retired_key(account)
     assert refresh_credential.startswith("rt1.")
 
-    # Earlier tests in this module may already reference the rotated key, so
-    # the coverage read is asserted on what this account contributes.
     required = await harness.required_key_ids()
     assert _RETIRED_KEY_ID in required
 

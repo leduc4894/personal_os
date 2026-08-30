@@ -418,7 +418,7 @@ def _canonical_postgresql_project_identity_is_ci_scoped(text: str) -> bool:
 
 
 _AUTHENTICATION_ACCEPTANCE_GUARD_PATTERN = re.compile(
-    r'\$LOCAL_STACK_TEST_PROJECT" =~ (\^[^^][^ ]*\$)\s*\]\]; then', re.MULTILINE
+    r'\$LOCAL_STACK_TEST_PROJECT" =~ (\^[^^][^ ]*\$)\s*\]\]; then'
 )
 
 

@@ -1,6 +1,8 @@
 import { expect, type Page, type Route } from "@playwright/test";
 import { test } from "@playwright/test";
 
+import { E2E_ACCEPTED_LOGIN_PASSWORD, E2E_LOGIN_USERNAME } from "./e2e-credentials";
+
 /**
  * The device administration journeys (Task 13 scope): the approval page that
  * consumes the user-code fragment exactly once and signs in inline, the
@@ -153,8 +155,8 @@ test("the approval page consumes the fragment once, signs in inline, re-authenti
   // The fragment was consumed exactly once and stripped from the address bar.
   expect(await page.evaluate(() => window.location.hash)).toBe("");
 
-  await page.getByLabel("Username").fill("owner");
-  await page.getByLabel("Password").fill("correct horse battery staple!");
+  await page.getByLabel("Username").fill(E2E_LOGIN_USERNAME);
+  await page.getByLabel("Password").fill(E2E_ACCEPTED_LOGIN_PASSWORD);
   await page.getByRole("button", { name: "Sign in" }).click();
 
   // The grant resolved with the in-memory code; every metadata value renders as text.
@@ -168,7 +170,7 @@ test("the approval page consumes the fragment once, signs in inline, re-authenti
 
   await page.getByRole("button", { name: "Approve" }).click();
   await expect(page.getByText("Confirm your password again to approve this device.")).toBeVisible();
-  await page.getByLabel("Current password").fill("correct horse battery staple!");
+  await page.getByLabel("Current password").fill(E2E_ACCEPTED_LOGIN_PASSWORD);
   await page.getByRole("button", { name: "Confirm password" }).click();
 
   await expect(page.getByRole("heading", { name: "Device approved" })).toBeVisible();
@@ -270,7 +272,7 @@ test("the devices page lists spec fields, keeps revoked rows read-only and revok
 
   await page.getByRole("button", { name: "Revoke device" }).click();
   await expect(page.getByText("Confirm your password again to revoke this device.")).toBeVisible();
-  await page.getByLabel("Current password").fill("correct horse battery staple!");
+  await page.getByLabel("Current password").fill(E2E_ACCEPTED_LOGIN_PASSWORD);
   await page.getByRole("button", { name: "Confirm password" }).click();
 
   await expect(page.getByRole("dialog")).toHaveCount(0);
