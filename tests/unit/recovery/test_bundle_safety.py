@@ -132,6 +132,25 @@ def test_extra_unregistered_file_rejected(bundle_root: Path) -> None:
     _assert_verify_rejected(bundle_root, reason="file_tree_mismatch")
 
 
+def test_verify_offline_rejects_an_unreferenced_extra_object(bundle_root: Path) -> None:
+    """An object file under ``objects/`` absent from the manifest fails.
+
+    The exact-tree stage rejects the unregistered path; the totals stage then
+    keeps recomputing the object count and byte total from the discovered
+    tree, so the manifest listing can never vouch for bytes the walk did not
+    find (and vice versa).
+    """
+
+    final = asyncio.run(_write_valid_bundle(bundle_root))
+    extra_payload = b"extra-unreferenced-canonical-object"
+    digest = hashlib.sha256(extra_payload).hexdigest()
+    extra_path = final / "objects" / "sha256" / digest[0:2] / digest[2:4] / digest
+    extra_path.parent.mkdir(parents=True, exist_ok=True)
+    extra_path.write_bytes(extra_payload)
+
+    _assert_verify_rejected(bundle_root, reason="file_tree_mismatch")
+
+
 def test_extra_unregistered_directory_rejected(bundle_root: Path) -> None:
     final = asyncio.run(_write_valid_bundle(bundle_root))
     (final / "extra-empty-dir").mkdir()

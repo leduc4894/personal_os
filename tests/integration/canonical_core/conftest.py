@@ -34,12 +34,11 @@ import subprocess
 import sys
 import tempfile
 from asyncio import AbstractEventLoop
-from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterator, Mapping
+from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -71,6 +70,7 @@ from personal_os.error_contracts.codes import ErrorCode
 from personal_os.exclusion_policy.metrics import InMemoryExclusionPolicyMetrics
 from personal_os.object_storage import (
     CanonicalMediaType,
+    CanonicalObjectStore,
     ContentDigest,
     ExpectedObject,
     VerificationMethod,
@@ -421,7 +421,9 @@ class LocalFilesystemObjectStore:
     Implements the full :class:`CanonicalObjectStore` port with the same
     fail-closed verification contract: a receipt is issued only after the full
     size and digest of the stored bytes match the claim, existing objects are
-    re-verified on every read, and media-type metadata conflicts are rejected.
+    re-verified on every read and every re-store (so a same-digest
+    different-media-type restore is a metadata conflict, never a silent pass),
+    and existing keys are never overwritten.
 
     All state lives on disk beneath one root, so successive instances over the
     same root behave like one durable content-addressed store — mirroring how
@@ -474,6 +476,18 @@ class LocalFilesystemObjectStore:
             object_path.write_bytes(payload)
             self._media_path(digest_hexadecimal).write_text(
                 stored_media_type.value, encoding="ascii"
+            )
+        else:
+            # An existing digest re-verifies exactly like the production
+            # conditional-create path: same digest under a different media
+            # type is a metadata conflict and corrupted bytes fail integrity —
+            # the existing key is never overwritten.
+            return await self.verify_existing_object(
+                ExpectedObject(
+                    content_digest=digest,
+                    size_bytes=total_bytes,
+                    media_type=stored_media_type,
+                )
             )
         return self._receipt(
             digest=digest,
@@ -542,10 +556,7 @@ def _make_short_lived_temp_root(prefix: str) -> Path:
 
 @pytest.fixture
 def bundle_root() -> Iterator[Path]:
-    if os.name != "nt":
-        yield _make_short_lived_temp_root("rk13")
-        return
-    root = _make_short_lived_temp_root("rk13")
+    root = _make_short_lived_temp_root("recovery-bundle-")
     try:
         yield root
     finally:
@@ -555,7 +566,7 @@ def bundle_root() -> Iterator[Path]:
 @pytest.fixture(scope="module")
 def object_store_root() -> Iterator[Path]:
     """One module-scoped object-store root: referenced objects accumulate like R2."""
-    root = _make_short_lived_temp_root("ob13")
+    root = _make_short_lived_temp_root("object-store-")
     try:
         yield root
     finally:
@@ -566,7 +577,7 @@ def object_store_root() -> Iterator[Path]:
 
 
 async def run_bounded_child_on_worker_loop(
-    argv: Any, *, env: Mapping[str, str], timeout_seconds: float
+    argv: Sequence[str], *, env: Mapping[str, str], timeout_seconds: float
 ) -> ProcessRunResult:
     """Run the production bounded child runner on a worker thread's loop.
 
@@ -658,12 +669,12 @@ async def disposable_identity_database(
 class RecordingIdentityDiagnostics:
     """Recording structural diagnostic sink retaining only accepted payloads."""
 
-    events: list[tuple[EventName, dict[str, Any]]]
+    events: list[tuple[EventName, dict[str, object]]]
 
     def emit(self, event_name: EventName, fields: Mapping[str, object] | None = None) -> None:
         self.events.append((event_name, dict(fields or {})))
 
-    def of(self, event_name: EventName) -> list[dict[str, Any]]:
+    def of(self, event_name: EventName) -> list[dict[str, object]]:
         return [fields for recorded_name, fields in self.events if recorded_name is event_name]
 
 
@@ -695,9 +706,15 @@ def single_chunk_stream(payload: bytes) -> AsyncIterator[bytes]:
 
 
 class CanonicalCoreHarness:
-    """Engine-bound stores, services and seeding helpers for one test."""
+    """Engine-bound stores, services and seeding helpers for one test.
 
-    def __init__(self, engine: AsyncEngine, object_store: LocalFilesystemObjectStore) -> None:
+    The object store binds through the :class:`CanonicalObjectStore` port —
+    the local-filesystem fake by default, the live R2 adapter for the live
+    acceptance drills via :meth:`with_object_store` (which shares this
+    harness's single engine instead of stacking a second one).
+    """
+
+    def __init__(self, engine: AsyncEngine, object_store: CanonicalObjectStore) -> None:
         self._engine = engine
         self.object_store = object_store
         policy_verifier = TrustAnchorEd25519Verifier()
@@ -736,6 +753,10 @@ class CanonicalCoreHarness:
     @property
     def engine(self) -> AsyncEngine:
         return self._engine
+
+    def with_object_store(self, object_store: CanonicalObjectStore) -> CanonicalCoreHarness:
+        """A harness over the same engine with every service bound to ``object_store``."""
+        return CanonicalCoreHarness(self._engine, object_store)
 
     async def seed_workspace(self) -> SeededWorkspace:
         owner_user_id = uuid4()

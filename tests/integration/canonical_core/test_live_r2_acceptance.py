@@ -27,7 +27,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final, cast
+from typing import Final
 from uuid import uuid4
 
 import pytest
@@ -39,7 +39,6 @@ from tests.integration.canonical_core.conftest import (
     CanonicalCoreStack,
     DisposableIdentityDatabase,
     DisposableRestoreDatabase,
-    LocalFilesystemObjectStore,
     PostgresqlDumpProcessAdapter,
     PublishedSource,
     SeededWorkspace,
@@ -264,28 +263,19 @@ async def live_acceptance_context(
 
     The per-test identity database keeps every drill's referenced-object set
     exactly what that drill published, so bundle equality is provable and
-    earlier drills' teardown deletions cannot break a later backup. The Task 13
-    harness type names the fake local store but consumes only the
-    ``CanonicalObjectStore`` port, which the live adapter implements in full.
+    earlier drills' teardown deletions cannot break a later backup. The
+    fixture's own harness keeps its single engine; only the object store is
+    rebound to the live R2 adapter through the ``CanonicalObjectStore`` port.
     """
 
-    settings = canonical_core_stack.settings.model_copy(
-        update={"database_name": disposable_identity_database.database_name}
+    yield LiveAcceptanceContext(
+        database_name=disposable_identity_database.database_name,
+        backup_target=replace(
+            canonical_core_stack.main_target,
+            database=disposable_identity_database.database_name,
+        ),
+        harness=disposable_identity_database.harness.with_object_store(live_r2_harness.store),
     )
-    engine = create_source_store_engine(settings, canonical_core_stack.password)
-    try:
-        yield LiveAcceptanceContext(
-            database_name=disposable_identity_database.database_name,
-            backup_target=replace(
-                canonical_core_stack.main_target,
-                database=disposable_identity_database.database_name,
-            ),
-            harness=CanonicalCoreHarness(
-                engine, cast(LocalFilesystemObjectStore, live_r2_harness.store)
-            ),
-        )
-    finally:
-        await dispose_source_store_engine(engine)
 
 
 @pytest.fixture

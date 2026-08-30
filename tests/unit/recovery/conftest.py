@@ -23,7 +23,7 @@ def bundle_root(tmp_path: Path) -> Iterator[Path]:
     if os.name != "nt":
         yield tmp_path
         return
-    root = Path(tempfile.mkdtemp(prefix="rk7"))
+    root = Path(tempfile.mkdtemp(prefix="recovery-bundle-"))
     try:
         yield root
     finally:

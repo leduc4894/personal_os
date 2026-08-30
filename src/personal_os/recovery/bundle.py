@@ -3,7 +3,9 @@
 :class:`FilesystemRecoveryBundleStore` stages each bundle in an unguessable
 sibling directory beneath the configured backup root, creates every file
 exclusively with per-file flush and fsync, writes the manifest and its digest
-sidecar last, and publishes the bundle with one atomic same-filesystem rename.
+sidecar last, and publishes the bundle by claiming the final directory with
+one exclusive ``mkdir`` and then moving every staged entry into it — rolling
+the claim back entirely if any move fails.
 Offline verification follows the spec 10 order exactly: boundary, final
 directory type, exact registered tree, sidecar grammar and digest, strict
 manifest parse, dump and object streaming digests in bounded 1 MiB chunks, and
@@ -63,6 +65,7 @@ _MANIFEST_RELATIVE_PATH: Final[str] = "manifest.json"
 _SIDECAR_RELATIVE_PATH: Final[str] = "manifest.sha256"
 _DUMP_RELATIVE_PATH: Final[str] = "postgres.dump"
 _OBJECT_TREE_RELATIVE_PATH: Final[str] = "objects/sha256"
+_OBJECT_TREE_PREFIX: Final[str] = f"{_OBJECT_TREE_RELATIVE_PATH}/"
 _SIDECAR_DIGEST_HEX_LENGTH: Final[int] = 64
 _HEX_LOWER_BYTES: Final[frozenset[int]] = frozenset(b"0123456789abcdef")
 _IS_POSIX: Final[bool] = os.name == "posix"
@@ -261,6 +264,15 @@ def _require_regular_tree_entry(path: Path, *, require_directory: bool) -> None:
         _reject_bundle_invalid(RecoveryBundleInvalidReason.FILE_TREE_MISMATCH)
 
 
+def _discovered_file_size(path: Path) -> int:
+    """Size of one walk-discovered file, or the closed tree token if it vanished."""
+
+    try:
+        return os.lstat(path).st_size
+    except OSError:
+        _reject_bundle_invalid(RecoveryBundleInvalidReason.FILE_TREE_MISMATCH)
+
+
 def _collect_bundle_file_tree(
     bundle_directory: Path,
 ) -> tuple[set[str], set[str]]:
@@ -403,19 +415,38 @@ class _StagingBundleWriter:
             sidecar_bytes = f"{manifest_digest(manifest_bytes)}\n".encode("ascii")
             _write_file_exclusively(self._staging_path / _SIDECAR_RELATIVE_PATH, sidecar_bytes)
             _fsync_directory(self._staging_path)
-            if os.path.lexists(final_path):
+            try:
+                # The exclusive mkdir is the atomic publish claim: it fails
+                # with FileExistsError for ANY pre-existing final path (file,
+                # empty directory or complete bundle) on both POSIX and
+                # Windows — a rename-based publish could silently replace an
+                # empty directory that appears after the admission probe
+                # (spec 8.1).
+                final_path.mkdir(mode=DIRECTORY_PERMISSIONS_POSIX)
+                _apply_directory_permissions(final_path)
+            except FileExistsError as cause:
                 raise RecoveryError(
                     ErrorCode.CANONICAL_RECOVERY_BUNDLE_EXISTS,
                     safe_details={"bundle_id": self._bundle_id},
-                )
-            # Every file handle was flushed and fsynced when it was written,
-            # so the same-volume rename below is safe on Windows as well
-            # (spec 8.1); crash consistency beyond that is deployment-owned.
-            os.rename(self._staging_path, final_path)
+                ) from cause
+            try:
+                # Every file handle was flushed and fsynced when it was
+                # written, so the same-volume moves below are safe on Windows
+                # as well (spec 8.1); crash consistency beyond that is
+                # deployment-owned.
+                for entry in sorted(self._staging_path.iterdir()):
+                    os.rename(self._staging_path / entry.name, final_path / entry.name)
+                self._staging_path.rmdir()
+                _fsync_directory(self._root)
+            except BaseException:
+                # The claim created this directory, so a failed move phase
+                # removes exactly the partial publication and never touches a
+                # pre-existing final path (none can exist past the claim).
+                shutil.rmtree(final_path, ignore_errors=True)
+                raise
         except BaseException:
             self._remove_staging()
             raise
-        _fsync_directory(self._root)
         self._is_finalized = True
 
     async def abandon(self) -> None:
@@ -476,6 +507,10 @@ class FilesystemRecoveryBundleStore:
 
         bundle_text = _canonical_bundle_id_text(bundle_id)
         _require_free_space(self._root)
+        # The early friendly check refuses a visibly occupied final path at
+        # admission; the authoritative race protection is the exclusive
+        # ``mkdir`` claim in ``finalize``, which fails closed no matter when
+        # the final path appeared.
         if os.path.lexists(self._root / bundle_text):
             raise RecoveryError(
                 ErrorCode.CANONICAL_RECOVERY_BUNDLE_EXISTS,
@@ -555,6 +590,18 @@ class FilesystemRecoveryBundleStore:
         _register_inode_identity(seen_identities, manifest_identity)
         _register_inode_identity(seen_identities, sidecar_identity)
 
+        # The object totals are recomputed from the tree the walk discovered,
+        # never from iterating the manifest listing itself: the final totals
+        # comparison below stays independent of what ``manifest.objects``
+        # claims about the bundle it describes.
+        discovered_object_sizes: dict[str, int] = {
+            relative_path: _discovered_file_size(
+                bundle_directory.joinpath(*PurePosixPath(relative_path).parts)
+            )
+            for relative_path in file_tree
+            if relative_path.startswith(_OBJECT_TREE_PREFIX)
+        }
+
         dump_result = _stream_file_digest(bundle_directory / _DUMP_RELATIVE_PATH)
         if (
             dump_result.size_bytes != manifest.postgres_dump.size_bytes
@@ -563,8 +610,6 @@ class FilesystemRecoveryBundleStore:
             _reject_bundle_invalid(RecoveryBundleInvalidReason.CHECKSUM_MISMATCH)
         _register_inode_identity(seen_identities, dump_result.inode_identity)
 
-        object_count = 0
-        object_bytes_total = 0
         for entry in manifest.objects:
             object_path = bundle_directory.joinpath(*PurePosixPath(entry.relative_path).parts)
             object_result = _stream_file_digest(object_path)
@@ -574,11 +619,9 @@ class FilesystemRecoveryBundleStore:
             ):
                 _reject_bundle_invalid(RecoveryBundleInvalidReason.CHECKSUM_MISMATCH)
             _register_inode_identity(seen_identities, object_result.inode_identity)
-            object_count += 1
-            object_bytes_total += object_result.size_bytes
 
-        if object_count != len(manifest.objects) or object_bytes_total != sum(
-            entry.size_bytes for entry in manifest.objects
-        ):
+        if len(discovered_object_sizes) != len(manifest.objects) or sum(
+            discovered_object_sizes.values()
+        ) != sum(entry.size_bytes for entry in manifest.objects):
             _reject_bundle_invalid(RecoveryBundleInvalidReason.CHECKSUM_MISMATCH)
         return manifest
