@@ -6,7 +6,9 @@
 state lock-free; ``record_login_failure`` locks the credential row of a known
 user, applies the pure domain throttle transition under both bucket row locks
 and appends the rejected-attempt audit only behind the trusted account
-boundary; ``commit_login_success`` rechecks the active user/workspace and the
+boundary; ``record_locked_login_rejection`` appends only the dedicated
+locked-out audit row behind the same boundary without touching any bucket;
+``commit_login_success`` rechecks the active user/workspace and the
 credential revision under the credential row lock, decides ``active`` versus
 ``pending_totp`` from the live TOTP state, resets the credential streak,
 optionally upgrades an obsolete Argon2id hash, inserts the session row and
@@ -59,6 +61,7 @@ from personal_os.authentication.sessions import (
     CommitLoginSuccessCommand,
     CommittedLoginSuccess,
     RecordedLoginFailure,
+    RecordLockedLoginRejectionCommand,
     RecordLoginFailureCommand,
     ResolvedLoginMaterial,
     ThrottleBucketKind,
@@ -91,9 +94,12 @@ from postgresql_source_store.tables import (
     workspaces,
 )
 
-#: Audit action tokens of the three credential-anchored transitions.
+#: Audit action tokens of the credential-anchored transitions. The locked-out
+#: rejection is its own token so lockouts stay provably distinct from
+#: wrong-password rejections in the audit trail (2026-08-16 §4).
 LOGIN_SUCCEEDED_AUDIT_ACTION: Final[str] = "authentication.login_succeeded"
 LOGIN_REJECTED_AUDIT_ACTION: Final[str] = "authentication.login_rejected"
+LOGIN_LOCKED_OUT_AUDIT_ACTION: Final[str] = "authentication.login_locked_out"
 PASSWORD_CHANGED_AUDIT_ACTION: Final[str] = "authentication.password_changed"
 WEB_CREDENTIAL_ENROLLED_AUDIT_ACTION: Final[str] = "authentication.web_credential_enrolled"
 WEB_AUTHENTICATION_RESET_AUDIT_ACTION: Final[str] = "authentication.web_authentication_reset"
@@ -363,6 +369,39 @@ class CredentialStore:
                 username_bucket=username_bucket,
                 source_bucket=source_bucket,
                 was_audited=was_audited,
+            )
+
+        return await run_authentication_transaction(self._engine, operation)
+
+    async def record_locked_login_rejection(
+        self, command: RecordLockedLoginRejectionCommand
+    ) -> None:
+        """Commit one locked-out rejection's audit row and nothing else.
+
+        The bucket state that produced the lock stays exactly as resolved: no
+        throttle row is inserted or updated, so the lockout transition never
+        extends its own window. The audit row lands only behind the trusted
+        account boundary, rechecked under the credential row lock.
+        """
+
+        async def operation(connection: AsyncConnection) -> None:
+            if command.user_id is None or command.workspace_id is None:
+                return
+            audited_user_id = command.user_id
+            audited_workspace_id = command.workspace_id
+            if not await self._is_account_trusted_locked(
+                connection, audited_user_id, audited_workspace_id
+            ):
+                return
+            await _append_audit_event(
+                connection,
+                diagnostic_context=command.diagnostic_context,
+                workspace_id=audited_workspace_id,
+                user_id=audited_user_id,
+                action=LOGIN_LOCKED_OUT_AUDIT_ACTION,
+                result=AUDIT_RESULT_REJECTED,
+                reason_code=None,
+                occurred_at=command.database_now,
             )
 
         return await run_authentication_transaction(self._engine, operation)

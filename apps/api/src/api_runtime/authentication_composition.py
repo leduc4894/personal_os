@@ -117,6 +117,7 @@ from personal_os.authentication.sessions import (
     LoginService,
     PasswordChangeService,
     RecordedLoginFailure,
+    RecordLockedLoginRejectionCommand,
     RecordLoginFailureCommand,
     ResolvedLoginMaterial,
     ResolvedWebSession,
@@ -168,6 +169,7 @@ from personal_os.error_contracts.exceptions import (
 )
 from personal_os.runtime_configuration.models import RuntimeEnvironment
 from postgresql_source_store.authentication_credentials import (
+    LOGIN_LOCKED_OUT_AUDIT_ACTION,
     CredentialStore,
     run_authentication_transaction,
 )
@@ -685,6 +687,7 @@ class OfflineAuthenticationState:
         self.password_hash = OfflinePasswordHasher().hash_password(OFFLINE_PASSWORD)
         self.sessions_by_secret_hash: dict[str, StoredWebSession] = {}
         self.buckets: dict[str, ThrottleBucketState] = {}
+        self.login_locked_out_audit_actions: list[str] = []
         self.login_buckets: dict[str, ThrottleBucketState] = {}
         self.source_buckets: dict[str, ThrottleBucketState] = {}
         self.totp_prompt_dismissed_at: datetime | None = None
@@ -783,6 +786,13 @@ class OfflineCredentialStore:
             source_bucket=source_bucket,
             was_audited=command.user_id is not None,
         )
+
+    async def record_locked_login_rejection(
+        self, command: RecordLockedLoginRejectionCommand
+    ) -> None:
+        if command.user_id is None or command.workspace_id is None:
+            return
+        self._state.login_locked_out_audit_actions.append(LOGIN_LOCKED_OUT_AUDIT_ACTION)
 
     async def commit_login_success(
         self, command: CommitLoginSuccessCommand

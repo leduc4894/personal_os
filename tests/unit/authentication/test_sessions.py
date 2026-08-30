@@ -41,6 +41,7 @@ from personal_os.authentication.sessions import (
     LoginService,
     PasswordChangeService,
     RecordedLoginFailure,
+    RecordLockedLoginRejectionCommand,
     RecordLoginFailureCommand,
     ResolvedLoginMaterial,
     ResolvedWebSession,
@@ -65,6 +66,7 @@ from personal_os.authentication.sessions import (
 )
 from personal_os.diagnostics.context import create_diagnostic_context
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.error_contracts.exceptions import ApplicationError
 
 _DATABASE_NOW = datetime(2026, 8, 16, 12, 0, 0, tzinfo=UTC)
 _USERNAME = "owner"
@@ -168,6 +170,8 @@ class FakeCredentialTransactions:
         self.failure_commands: list[RecordLoginFailureCommand] = []
         self.success_commands: list[CommitLoginSuccessCommand] = []
         self.change_commands: list[ChangePasswordCommand] = []
+        self.locked_rejection_commands: list[RecordLockedLoginRejectionCommand] = []
+        self.locked_rejection_error: ApplicationError | None = None
 
     def bind_session_store(self, session_store: FakeWebSessionTransactions) -> None:
         """Mirror the real schema: the success transaction writes the row."""
@@ -245,6 +249,13 @@ class FakeCredentialTransactions:
             ],
             was_audited=command.user_id is not None,
         )
+
+    async def record_locked_login_rejection(
+        self, command: RecordLockedLoginRejectionCommand
+    ) -> None:
+        if self.locked_rejection_error is not None:
+            raise self.locked_rejection_error
+        self.locked_rejection_commands.append(command)
 
     async def commit_login_success(
         self, command: CommitLoginSuccessCommand
@@ -585,6 +596,34 @@ async def test_locked_bucket_rejects_before_verifier_work() -> None:
     assert locked.locked_until == harness.database_now + timedelta(minutes=15)
     assert locked.started_session is None
     assert harness.hasher.verify_calls == LOGIN_FAILURE_THRESHOLD
+
+
+@pytest.mark.asyncio
+async def test_locked_login_records_one_dedicated_rejection_audit() -> None:
+    harness = LoginHarness()
+    for _ in range(LOGIN_FAILURE_THRESHOLD):
+        await harness.reject_login()
+    locked = await harness.login()
+    assert locked.public_error is ErrorCode.AUTHENTICATION_RATE_LIMITED
+    assert len(harness.credentials.locked_rejection_commands) == 1
+    command = harness.credentials.locked_rejection_commands[0]
+    assert command.user_id is not None
+    assert command.workspace_id is not None
+    assert command.database_now == harness.database_now
+
+
+@pytest.mark.asyncio
+async def test_locked_rejection_audit_failure_does_not_mask_rate_limit() -> None:
+    harness = LoginHarness()
+    for _ in range(LOGIN_FAILURE_THRESHOLD):
+        await harness.reject_login()
+    harness.credentials.locked_rejection_error = AuthenticationError(
+        ErrorCode.AUTHENTICATION_FAILED
+    )
+    locked = await harness.login()
+    assert locked.public_error is ErrorCode.AUTHENTICATION_RATE_LIMITED
+    assert locked.locked_until == harness.database_now + timedelta(minutes=15)
+    assert locked.started_session is None
 
 
 @pytest.mark.asyncio

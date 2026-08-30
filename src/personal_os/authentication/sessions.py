@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -49,6 +50,7 @@ from personal_os.authentication.ports import (
 )
 from personal_os.diagnostics.context import DiagnosticContext, create_diagnostic_context
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.error_contracts.exceptions import ApplicationError
 from personal_os.identity.contracts import IDENTITY_KEY_PATTERN
 
 #: Login failures allowed per username/source bucket before the lock (spec 8.3).
@@ -96,6 +98,10 @@ CHALLENGE_ELIGIBLE_SESSION_STATES: Final[frozenset[WebSessionState]] = frozenset
         WebSessionState.RECOVERY_LIMITED,
     }
 )
+
+#: Closed-log surface of the best-effort locked-out audit write; the message
+#: carries only the typed error's registered reason token.
+_LOGGER = logging.getLogger(__name__)
 
 
 class ThrottleBucketKind(StrEnum):
@@ -394,6 +400,21 @@ class RecordedLoginFailure:
 
 
 @dataclass(frozen=True, slots=True)
+class RecordLockedLoginRejectionCommand:
+    """One locked-out rejection's audit-only write (spec 8.2 lockout branch).
+
+    The bucket state that produced the lock was already resolved lock-free by
+    the caller, so this command carries only the trusted-identity candidates
+    and the correlation identity of the rejected attempt.
+    """
+
+    user_id: UUID | None
+    workspace_id: UUID | None
+    database_now: datetime
+    diagnostic_context: DiagnosticContext
+
+
+@dataclass(frozen=True, slots=True)
 class CommitLoginSuccessCommand:
     """One accepted password attempt's transactional write.
 
@@ -471,6 +492,10 @@ class CredentialTransactionPort(Protocol):
     async def record_login_failure(
         self, command: RecordLoginFailureCommand
     ) -> RecordedLoginFailure: ...
+
+    async def record_locked_login_rejection(
+        self, command: RecordLockedLoginRejectionCommand
+    ) -> None: ...
 
     async def commit_login_success(
         self, command: CommitLoginSuccessCommand
@@ -741,6 +766,11 @@ class LoginService:
         )
         locked_until = _earliest_active_lock(material, database_now=database_now)
         if locked_until is not None:
+            await self._record_locked_rejection_best_effort(
+                material=material,
+                database_now=database_now,
+                diagnostic_context=diagnostic_context,
+            )
             return LoginOutcome(
                 public_error=ErrorCode.AUTHENTICATION_RATE_LIMITED,
                 locked_until=locked_until,
@@ -819,6 +849,32 @@ class LoginService:
                 database_now=database_now,
             ),
         )
+
+    async def _record_locked_rejection_best_effort(
+        self,
+        *,
+        material: ResolvedLoginMaterial,
+        database_now: datetime,
+        diagnostic_context: DiagnosticContext,
+    ) -> None:
+        """Append the dedicated locked-out audit row without masking the 429.
+
+        The rate-limited outcome is already decided by the resolved lock, so an
+        audit-store failure can never replace it: the typed error's closed
+        reason token is surfaced on the closed log and the outcome stands.
+        """
+
+        try:
+            await self._credentials.record_locked_login_rejection(
+                RecordLockedLoginRejectionCommand(
+                    user_id=material.user_id,
+                    workspace_id=material.workspace_id,
+                    database_now=database_now,
+                    diagnostic_context=diagnostic_context,
+                )
+            )
+        except ApplicationError as error:
+            _LOGGER.warning("locked login audit write failed: %s", error.error_code.value)
 
 
 def _earliest_active_lock(

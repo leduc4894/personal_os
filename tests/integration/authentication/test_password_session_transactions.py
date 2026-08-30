@@ -8,7 +8,10 @@ derives stable HMAC subkeys, and the clock pins one transaction timestamp so
 expiry and lock assertions are exact. The tests prove the binding contracts:
 unknown user and wrong password are indistinguishable and cost exactly one
 hasher call each; the fifth failure locks both buckets for exactly fifteen
-minutes and a locked bucket rejects before verifier work; success resets the
+minutes and a locked bucket rejects before verifier work, recording the
+dedicated ``authentication.login_locked_out`` audit action for both a correct
+and a wrong password while the unlocked wrong-password attempts keep the
+generic ``authentication.login_rejected`` rows; success resets the
 streak and inserts an ``active`` or ``pending_totp`` row with the exact idle
 and absolute expiry; session resolution slides the idle window without ever
 passing the absolute boundary; logout clears the authenticated timestamps the
@@ -355,6 +358,34 @@ async def test_fifth_failure_locks_bucket_for_fifteen_minutes(harness: Any) -> N
     assert locked.public_error is ErrorCode.AUTHENTICATION_RATE_LIMITED
     assert locked.locked_until == harness.database_now + timedelta(minutes=15)
     assert harness.hasher.verify_calls == 5
+
+
+@pytest.mark.asyncio
+async def test_locked_rejections_use_the_dedicated_audit_action(harness: Any) -> None:
+    await harness.seed_account()
+    for _ in range(5):
+        await harness.reject_login()
+    # Locked with the correct password and locked with a wrong password both
+    # reject rate-limited and both record the dedicated lockout action.
+    locked_correct = await harness.login()
+    locked_wrong = await harness.login(password=_WRONG_PASSWORD)
+    assert locked_correct.public_error is ErrorCode.AUTHENTICATION_RATE_LIMITED
+    assert locked_wrong.public_error is ErrorCode.AUTHENTICATION_RATE_LIMITED
+    locked_out_audits = await harness.audit_rows("authentication.login_locked_out")
+    assert len(locked_out_audits) == 2
+    for row in locked_out_audits:
+        assert row.result == "rejected"
+        assert row.reason_code is None
+        assert row.actor_id is not None
+    # The pre-lock wrong-password attempts on the unlocked account stay the
+    # only generic rejection rows: unlocked+wrong → login_rejected.
+    rejected_audits = await harness.audit_rows("authentication.login_rejected")
+    assert len(rejected_audits) == 5
+    # The locked branch never touches the throttle rows it read.
+    for row in await harness.throttle_rows():
+        assert row.failed_attempt_count == 5
+        assert row.window_started_at == harness.database_now
+        assert row.locked_until == harness.database_now + timedelta(minutes=15)
 
 
 @pytest.mark.asyncio

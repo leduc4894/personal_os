@@ -29,6 +29,7 @@ from personal_os.authentication.errors import AuthenticationError
 from personal_os.authentication.sessions import (
     ChangePasswordCommand,
     CommitLoginSuccessCommand,
+    RecordLockedLoginRejectionCommand,
     RecordLoginFailureCommand,
     ThrottleBucketState,
     ThrottleWindowPolicy,
@@ -36,6 +37,8 @@ from personal_os.authentication.sessions import (
 from personal_os.diagnostics.context import create_diagnostic_context
 from personal_os.error_contracts.codes import ErrorCode
 from postgresql_source_store.authentication_credentials import (
+    AUDIT_RESULT_REJECTED,
+    LOGIN_LOCKED_OUT_AUDIT_ACTION,
     LOGIN_REJECTED_AUDIT_ACTION,
     LOGIN_SUCCEEDED_AUDIT_ACTION,
     PASSWORD_CHANGED_AUDIT_ACTION,
@@ -134,6 +137,17 @@ def _record_login_failure_command(
     return RecordLoginFailureCommand(
         username_bucket_hash=_USERNAME_BUCKET_HASH,
         source_bucket_hash=_SOURCE_BUCKET_HASH,
+        user_id=user_id,
+        workspace_id=workspace_id,
+        database_now=_DATABASE_NOW,
+        diagnostic_context=create_diagnostic_context().context,
+    )
+
+
+def _record_locked_login_rejection_command(
+    *, user_id: UUID | None = _USER_ID, workspace_id: UUID | None = _WORKSPACE_ID
+) -> RecordLockedLoginRejectionCommand:
+    return RecordLockedLoginRejectionCommand(
         user_id=user_id,
         workspace_id=workspace_id,
         database_now=_DATABASE_NOW,
@@ -356,6 +370,40 @@ async def test_untrusted_account_failure_skips_the_audit_row() -> None:
         statement
         for statement in connection.executed_statements
         if isinstance(statement, sa.sql.dml.Insert) and statement.table.name == "audit_events"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_locked_login_rejection_audits_the_dedicated_action() -> None:
+    engine = ScriptedEngine([ScriptedResult(rows=(_credential_row(),))])
+    store = CredentialStore(engine)
+    await store.record_locked_login_rejection(_record_locked_login_rejection_command())
+    connection = engine.connections[0]
+    audit_inserts = [
+        statement
+        for statement in connection.executed_statements
+        if isinstance(statement, sa.sql.dml.Insert) and statement.table.name == "audit_events"
+    ]
+    assert len(audit_inserts) == 1
+    audit_parameters = _statement_parameters(audit_inserts[0])
+    assert audit_parameters["action"] == LOGIN_LOCKED_OUT_AUDIT_ACTION
+    assert audit_parameters["result"] == AUDIT_RESULT_REJECTED
+    assert audit_parameters["reason_code"] is None
+    assert audit_parameters["actor_id"] == _USER_ID
+    assert audit_parameters["occurred_at"] == _DATABASE_NOW
+
+
+@pytest.mark.asyncio
+async def test_locked_rejection_writes_no_throttle_row() -> None:
+    engine = ScriptedEngine([ScriptedResult(rows=(_credential_row(),))])
+    store = CredentialStore(engine)
+    await store.record_locked_login_rejection(_record_locked_login_rejection_command())
+    connection = engine.connections[0]
+    assert not [
+        statement
+        for statement in connection.executed_statements
+        if isinstance(statement, (sa.sql.dml.Insert, sa.sql.dml.Update))
+        and statement.table.name == "authentication_throttle_buckets"
     ]
 
 
