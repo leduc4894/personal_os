@@ -10,6 +10,8 @@
  */
 
 import {
+  DeviceAuthError,
+  isDeviceAuthError,
   parseServerOrigin,
   resolveDeviceAuthClosedCode,
   validateDeviceName,
@@ -17,7 +19,6 @@ import {
 import type {
   ConnectionState,
   DeviceApiTransport,
-  DeviceAuthError,
   DeviceAuthenticationSettings,
   DeviceGrantExchangeWireData,
   DeviceGrantWireRequest,
@@ -82,6 +83,22 @@ export class DeviceAuthorizationController {
    */
   async login(): Promise<void> {
     this.#stopRequested = false;
+    // Overwrite guard (plugin hygiene, 2026-08-16 §12): the durable record
+    // is read BEFORE any grant is created — an active credential must never
+    // be overwritten by a new onboarding. `canLogin` stays the UI gate; this
+    // is the hard refusal for a stale surface racing the record.
+    const existingRecord = readDeviceSecretRecord(this.#deps.secretStore, this.#deps.recordName);
+    if (existingRecord?.state === "active") {
+      // Closed-reason surfacing: the closed refusal code rides the state
+      // seam (the settings render) before the typed rejection propagates,
+      // so the refusal is never swallowed by the action wrapper.
+      this.#deps.onStateChange("refresh_required", "device_credential_invalid");
+      throw new DeviceAuthError("device_credential_invalid", {
+        status: 0,
+        message: "an active device credential record exists; disconnect before starting a new login",
+        isLocal: true,
+      });
+    }
     const origin = parseServerOrigin(this.#deps.settings.server_origin, {
       allowLoopbackHttp: this.#deps.allowLoopbackHttp,
     });
@@ -238,18 +255,34 @@ export class DeviceAuthorizationController {
   }
 
   #surfaceCreationFailure(error: unknown): void {
-    const authError = error as DeviceAuthError;
-    if (
-      authError?.code === "plugin_version_unsupported" ||
-      authError?.code === "api_request_validation_failed" ||
-      authError?.code === "api_request_malformed"
-    ) {
-      const detail =
-        authError.approvedVersionBounds === null
-          ? null
-          : `approved plugin versions ${authError.approvedVersionBounds.minimum} – ${authError.approvedVersionBounds.maximum}`;
-      this.#deps.onStateChange("configuration_invalid", detail);
-      return;
+    if (isDeviceAuthError(error)) {
+      if (error.code === "authentication_rate_limited") {
+        // Rate-limited creation is NOT an offline state (plugin hygiene,
+        // 2026-08-16 §12): the server answered and asked to wait, so the
+        // state change carries the closed rate-limited code plus the
+        // server's retry window instead of the offline label.
+        const retryGuidance =
+          error.retryAfterSeconds !== null && error.retryAfterSeconds > 0
+            ? ` — retry login after ${error.retryAfterSeconds} seconds`
+            : "";
+        this.#deps.onStateChange(
+          "not_connected",
+          `authentication_rate_limited${retryGuidance}`,
+        );
+        return;
+      }
+      if (
+        error.code === "plugin_version_unsupported" ||
+        error.code === "api_request_validation_failed" ||
+        error.code === "api_request_malformed"
+      ) {
+        const detail =
+          error.approvedVersionBounds === null
+            ? null
+            : `approved plugin versions ${error.approvedVersionBounds.minimum} – ${error.approvedVersionBounds.maximum}`;
+        this.#deps.onStateChange("configuration_invalid", detail);
+        return;
+      }
     }
     // Closed-reason surfacing C2 A4: the closed code the transport already
     // produced (transport code or server registry code) reaches the seam
@@ -351,29 +384,30 @@ export class DeviceAuthorizationController {
     | { kind: "continue"; intervalSeconds?: number }
     | { kind: "terminal"; clearedReason: ClearedReason }
     | { kind: "offline"; code: string | null } {
-    const authError = error as DeviceAuthError;
-    if (
-      authError?.code === "device_authorization_pending" ||
-      authError?.code === "device_authorization_slow_down"
-    ) {
-      // Obey the server hint exactly and never poll faster than it allows.
-      const retryHint = authError.retryAfterSeconds;
-      if (retryHint === null || retryHint < 1) {
-        return { kind: "continue" };
+    if (isDeviceAuthError(error)) {
+      if (
+        error.code === "device_authorization_pending" ||
+        error.code === "device_authorization_slow_down"
+      ) {
+        // Obey the server hint exactly and never poll faster than it allows.
+        const retryHint = error.retryAfterSeconds;
+        if (retryHint === null || retryHint < 1) {
+          return { kind: "continue" };
+        }
+        return { kind: "continue", intervalSeconds: retryHint };
       }
-      return { kind: "continue", intervalSeconds: retryHint };
-    }
-    if (authError?.code === "device_authorization_denied") {
-      return { kind: "terminal", clearedReason: "grant_denied" };
-    }
-    if (authError?.code === "device_authorization_expired") {
-      return { kind: "terminal", clearedReason: "grant_expired" };
-    }
-    if (
-      authError?.code === "device_credential_invalid" ||
-      authError?.code === "device_authorization_state_invalid"
-    ) {
-      return { kind: "terminal", clearedReason: "grant_invalid" };
+      if (error.code === "device_authorization_denied") {
+        return { kind: "terminal", clearedReason: "grant_denied" };
+      }
+      if (error.code === "device_authorization_expired") {
+        return { kind: "terminal", clearedReason: "grant_expired" };
+      }
+      if (
+        error.code === "device_credential_invalid" ||
+        error.code === "device_authorization_state_invalid"
+      ) {
+        return { kind: "terminal", clearedReason: "grant_invalid" };
+      }
     }
     return { kind: "offline", code: resolveDeviceAuthClosedCode(error) };
   }

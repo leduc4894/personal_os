@@ -70,6 +70,8 @@ describe("DeviceAuthenticationSettingTab source contract", () => {
       "Device name",
       "Connection status",
       "Login",
+      // Plugin hygiene (2026-08-16 §12): the offline dead-end escape.
+      "Retry connection",
       "Open browser again",
       "Cancel pending login",
       "Disconnect",

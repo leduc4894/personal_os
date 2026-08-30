@@ -117,6 +117,12 @@ export interface DeviceAuthenticationTabView {
   setServerOrigin(origin: string): void;
   setDeviceName(name: string): void;
   login(): Promise<void>;
+  /**
+   * Retry the bounded session refresh (plugin hygiene, 2026-08-16 §12):
+   * the offline dead-end escape, enabled only while offline with an active
+   * credential (`canRetryConnection`).
+   */
+  retryConnection(): Promise<void>;
   openBrowserAgain(): void;
   cancelPendingLogin(): Promise<void>;
   disconnect(): Promise<void>;
@@ -241,6 +247,17 @@ export class DeviceAuthenticationSettingTab extends PluginSettingTab {
         .setDisabled(!controls.canLogin)
         .onClick(() => {
           void this.#runAction(this.#view.login());
+        }),
+    );
+    // Plugin hygiene (2026-08-16 §12): the offline dead-end escape. Enabled
+    // only while offline with an active credential — the state whose Login
+    // and Disconnect pair previously left no recovery but a reload.
+    actionSetting.addButton((button) =>
+      button
+        .setButtonText("Retry connection")
+        .setDisabled(!controls.canRetryConnection)
+        .onClick(() => {
+          void this.#runAction(this.#view.retryConnection());
         }),
     );
     actionSetting.addButton((button) =>

@@ -264,6 +264,83 @@ describe("DeviceAuthorizationController login", () => {
     expect(harness.secretStorage.setSecret).not.toHaveBeenCalled();
     expect(harness.settings.pending_grant).toBeNull();
   });
+
+  it("surfaces rate-limited creation with retry guidance", async () => {
+    // Plugin hygiene (2026-08-16 §12): a 429 grant-creation refusal is NOT
+    // an offline state — the server answered and asked to wait, so the
+    // state change carries the closed rate-limited code plus the server's
+    // retry window instead of the offline label.
+    const harness = createHarness();
+    harness.transport.createGrant.mockRejectedValue(
+      new DeviceAuthError("authentication_rate_limited", {
+        status: 429,
+        message: "rate limited",
+        retryAfterSeconds: 30,
+      }),
+    );
+
+    await harness.controller.login();
+
+    const lastState = harness.states[harness.states.length - 1];
+    expect(lastState).not.toBe("offline");
+    expect(lastState).toBe("not_connected");
+    const lastDetail = harness.stateDetails[harness.stateDetails.length - 1];
+    expect(lastDetail).toContain("authentication_rate_limited");
+    expect(lastDetail).toContain("30");
+    // No record is written and no pending reference survives the refusal.
+    expect(harness.secretStorage.setSecret).not.toHaveBeenCalled();
+    expect(harness.settings.pending_grant).toBeNull();
+  });
+
+  it("surfaces a rate-limited refusal without a retry hint as the closed code only", async () => {
+    const harness = createHarness();
+    harness.transport.createGrant.mockRejectedValue(
+      new DeviceAuthError("authentication_rate_limited", {
+        status: 429,
+        message: "rate limited",
+        retryAfterSeconds: null,
+      }),
+    );
+
+    await harness.controller.login();
+
+    expect(harness.states[harness.states.length - 1]).toBe("not_connected");
+    expect(harness.stateDetails[harness.stateDetails.length - 1]).toBe(
+      "authentication_rate_limited",
+    );
+  });
+
+  it("login refuses to overwrite an active record", async () => {
+    // Plugin hygiene (2026-08-16 §12): `canLogin` is only the UI gate. The
+    // controller reads the durable record FIRST and refuses with a typed
+    // error when an active credential exists, so a stale render racing the
+    // record can never overwrite the live credential with a new grant.
+    const harness = createHarness();
+    harness.stored.set(
+      DEVICE_CREDENTIAL_RECORD_NAME,
+      JSON.stringify({
+        record_version: 1,
+        state: "active",
+        refresh_credential: NEXT_REFRESH_CREDENTIAL,
+        refresh_generation: 1,
+        pending_rotation_id: null,
+      }),
+    );
+
+    await expect(harness.controller.login()).rejects.toMatchObject({
+      code: "device_credential_invalid",
+      isLocal: true,
+    });
+
+    expect(harness.transport.createGrant).not.toHaveBeenCalled();
+    expect(harness.secretStorage.setSecret).not.toHaveBeenCalled();
+    expect(harness.openUrl).not.toHaveBeenCalled();
+    expect(harness.settings.pending_grant).toBeNull();
+    // The closed refusal code rides the state seam, so the settings render
+    // shows why Login refused instead of swallowing the rejection.
+    expect(harness.states).toEqual(["refresh_required"]);
+    expect(harness.stateDetails).toEqual(["device_credential_invalid"]);
+  });
 });
 
 describe("DeviceAuthorizationController polling", () => {
@@ -711,9 +788,9 @@ describe("closed failure-reason detail surfacing (closed-reason surfacing C2)", 
   it("surfaces the closed server code of an unmapped grant-creation failure (A4)", async () => {
     const harness = createHarness();
     harness.transport.createGrant.mockRejectedValue(
-      new DeviceAuthError("authentication_rate_limited", {
-        status: 429,
-        message: "rate limited",
+      new DeviceAuthError("database_connection_unavailable", {
+        status: 503,
+        message: "unavailable",
       }),
     );
 
@@ -721,7 +798,7 @@ describe("closed failure-reason detail surfacing (closed-reason surfacing C2)", 
 
     expect(harness.states[harness.states.length - 1]).toBe("offline");
     expect(harness.stateDetails[harness.stateDetails.length - 1]).toBe(
-      "authentication_rate_limited",
+      "database_connection_unavailable",
     );
   });
 

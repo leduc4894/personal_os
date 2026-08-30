@@ -10,7 +10,7 @@
  * with a credential-free tombstone; offline preserves everything.
  */
 
-import { DeviceAuthError, resolveDeviceAuthClosedCode } from "./contracts";
+import { DeviceAuthError, isDeviceAuthError, resolveDeviceAuthClosedCode } from "./contracts";
 import type {
   ConnectionState,
   DeviceApiTransport,
@@ -136,7 +136,11 @@ export class DeviceTokenSession {
   }
 
   async #surfaceRefreshFailure(error: unknown): Promise<void> {
-    const code = (error as { code?: string } | null)?.code;
+    // Only a mapped `DeviceAuthError` classifies (the type guard replaced
+    // the `as` cast, plugin hygiene 2026-08-16 §12): a foreign throw whose
+    // `code` property collides with a terminal registry code never
+    // tombstones a healthy credential.
+    const code = isDeviceAuthError(error) ? error.code : null;
     if (code === "device_token_reuse_detected") {
       await this.#clearTerminalRecord("token_reuse", "revoked");
       return;
@@ -187,7 +191,7 @@ export class DeviceTokenSession {
     try {
       await this.#deps.transport.revokeCurrent(record.refresh_credential);
     } catch (error) {
-      const code = (error as { code?: string } | null)?.code;
+      const code = isDeviceAuthError(error) ? error.code : null;
       if (
         code === "device_credential_invalid" ||
         code === "device_revoked" ||

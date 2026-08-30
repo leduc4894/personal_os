@@ -71,42 +71,111 @@ describe("ConnectionState closed set (spec 19)", () => {
         hasPendingGrant: false,
         hasActiveCredential: false,
       }),
-    ).toEqual({ canLogin: true, canOpenBrowser: false, canCancel: false, canDisconnect: false });
+    ).toEqual({
+      canLogin: true,
+      canRetryConnection: false,
+      canOpenBrowser: false,
+      canCancel: false,
+      canDisconnect: false,
+    });
 
     expect(
       resolveAuthenticationControls("waiting_for_approval", {
         hasPendingGrant: true,
         hasActiveCredential: false,
       }),
-    ).toEqual({ canLogin: false, canOpenBrowser: true, canCancel: true, canDisconnect: false });
+    ).toEqual({
+      canLogin: false,
+      canRetryConnection: false,
+      canOpenBrowser: true,
+      canCancel: true,
+      canDisconnect: false,
+    });
 
     expect(
       resolveAuthenticationControls("connected", {
         hasPendingGrant: false,
         hasActiveCredential: true,
       }),
-    ).toEqual({ canLogin: false, canOpenBrowser: false, canCancel: false, canDisconnect: true });
+    ).toEqual({
+      canLogin: false,
+      canRetryConnection: false,
+      canOpenBrowser: false,
+      canCancel: false,
+      canDisconnect: true,
+    });
 
     expect(
       resolveAuthenticationControls("offline", {
         hasPendingGrant: true,
         hasActiveCredential: true,
       }),
-    ).toEqual({ canLogin: false, canOpenBrowser: true, canCancel: true, canDisconnect: true });
+    ).toEqual({
+      canLogin: false,
+      canRetryConnection: true,
+      canOpenBrowser: true,
+      canCancel: true,
+      canDisconnect: true,
+    });
 
     expect(
       resolveAuthenticationControls("revoked", {
         hasPendingGrant: false,
         hasActiveCredential: false,
       }),
-    ).toEqual({ canLogin: true, canOpenBrowser: false, canCancel: false, canDisconnect: false });
+    ).toEqual({
+      canLogin: true,
+      canRetryConnection: false,
+      canOpenBrowser: false,
+      canCancel: false,
+      canDisconnect: false,
+    });
 
     expect(
       resolveAuthenticationControls("refresh_required", {
         hasPendingGrant: false,
         hasActiveCredential: false,
       }),
-    ).toEqual({ canLogin: true, canOpenBrowser: false, canCancel: false, canDisconnect: false });
+    ).toEqual({
+      canLogin: true,
+      canRetryConnection: false,
+      canOpenBrowser: false,
+      canCancel: false,
+      canDisconnect: false,
+    });
+  });
+
+  it("enables the retry affordance only while offline with an active credential", () => {
+    // Plugin hygiene (2026-08-16 §12): the offline dead-end (offline state
+    // with a live credential) is the one state that gains the retry
+    // affordance; `canLogin` keeps its own unchanged gating.
+    expect(
+      resolveAuthenticationControls("offline", {
+        hasPendingGrant: false,
+        hasActiveCredential: true,
+      }).canRetryConnection,
+    ).toBe(true);
+
+    expect(
+      resolveAuthenticationControls("offline", {
+        hasPendingGrant: false,
+        hasActiveCredential: false,
+      }).canRetryConnection,
+    ).toBe(false);
+
+    expect(
+      resolveAuthenticationControls("refresh_required", {
+        hasPendingGrant: false,
+        hasActiveCredential: true,
+      }).canRetryConnection,
+    ).toBe(false);
+
+    expect(
+      resolveAuthenticationControls("connected", {
+        hasPendingGrant: false,
+        hasActiveCredential: true,
+      }).canRetryConnection,
+    ).toBe(false);
   });
 });
 

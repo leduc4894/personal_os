@@ -247,6 +247,29 @@ describe("DeviceTokenSession crash-safe refresh (spec 13.3)", () => {
     });
     expect(harness.states).toEqual(["refresh_required"]);
   });
+
+  it("ignores a foreign error carrying a coincidental code property", async () => {
+    // Plugin hygiene (2026-08-16 §12): the failure classification reads
+    // only mapped `DeviceAuthError` values (the `isDeviceAuthError` type
+    // guard), never an `as` cast — a foreign throw whose `code` property
+    // happens to collide with a terminal registry code must not tombstone
+    // a healthy credential.
+    const harness = createSessionHarness();
+    const foreignError = Object.assign(new Error("unrelated transport failure"), {
+      code: "device_revoked",
+    });
+    harness.transport.refresh.mockRejectedValue(foreignError);
+
+    await expect(harness.session.refresh()).rejects.toBe(foreignError);
+
+    expect(JSON.parse(harness.stored.get(DEVICE_CREDENTIAL_RECORD_NAME) ?? "{}")).toMatchObject({
+      state: "active",
+      refresh_credential: REFRESH_CREDENTIAL,
+    });
+    expect(harness.settings.secret_record_name).toBe(DEVICE_CREDENTIAL_RECORD_NAME);
+    expect(harness.states[harness.states.length - 1]).toBe("refresh_required");
+    expect(harness.stateDetails[harness.stateDetails.length - 1]).toBeNull();
+  });
 });
 
 describe("DeviceTokenSession self-disconnect (spec 14.2)", () => {

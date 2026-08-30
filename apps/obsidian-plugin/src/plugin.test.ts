@@ -190,7 +190,9 @@ describe("Obsidian plugin composition root", () => {
     expect(pluginSource).toContain('id: "run-sync-self-check"');
     expect(pluginSource).toContain('id: "repair-sync"');
     expect(pluginSource).toContain('"Repair sync"');
-    expect(pluginSource.match(/addCommand\(/g)?.length ?? 0).toBe(4);
+    // Plugin hygiene (2026-08-16 §12) adds the ONE retry affordance.
+    expect(pluginSource).toContain('id: "retry-connection"');
+    expect(pluginSource.match(/addCommand\(/g)?.length ?? 0).toBe(5);
     expect(pluginSource).not.toContain("#runExistingFilesScan");
     expect(pluginSource).not.toContain("#drainExistingFilesScanQueue");
     expect(pluginSource).not.toContain("#confirmExistingFilesScan");
@@ -1051,6 +1053,75 @@ describe("Obsidian plugin composition root", () => {
     expect(coordinatorBody).not.toContain(
       "resolveOwnDeviceId: () => this.#settings.client_instance_id",
     );
+  });
+
+  it("normalizeSettings preserves a valid stored record name", () => {
+    // Plugin hygiene (2026-08-16 §12): a valid stored record name
+    // round-trips unchanged. The previous rewrite to the build-time
+    // constant renamed every stored SecretStorage record on each load.
+    const normalizeIndex = pluginSource.indexOf("function normalizeSettings(");
+    expect(normalizeIndex).toBeGreaterThanOrEqual(0);
+    const normalizeBody = pluginSource.slice(normalizeIndex, normalizeIndex + 1_700);
+    expect(normalizeBody).toContain("isSecretRecordNameValid");
+    expect(normalizeBody).toContain("secret_record_name: loadedRecordName,");
+    expect(normalizeBody).not.toContain(
+      "secret_record_name: loadedRecordName === null ? null : DEVICE_CREDENTIAL_RECORD_NAME,",
+    );
+  });
+
+  it("reconcileCrashWindow saveData rejection is caught", () => {
+    // Plugin hygiene (2026-08-16 §12): a settings-persist rejection during
+    // the crash-window reconciliation must never abort onload — the closed
+    // reason routes into the startup-failure trail path (the same journal
+    // diagnostics surface the failure reporter feeds) and the bounded
+    // startup chain continues.
+    const reconcileIndex = pluginSource.indexOf("controller.reconcileCrashWindow()");
+    expect(reconcileIndex).toBeGreaterThanOrEqual(0);
+    const tryIndex = pluginSource.lastIndexOf("try {", reconcileIndex);
+    expect(tryIndex).toBeGreaterThanOrEqual(0);
+    expect(tryIndex).toBeLessThan(reconcileIndex);
+    // The try block wraps exactly the reconciliation call.
+    expect(reconcileIndex - tryIndex).toBeLessThan(120);
+    const catchIndex = pluginSource.indexOf("} catch", reconcileIndex);
+    expect(catchIndex).toBeGreaterThan(reconcileIndex);
+    const catchBody = pluginSource.slice(catchIndex, catchIndex + 700);
+    expect(catchBody).toContain("#recordStartupChainFailure(error)");
+    // onload continues past the caught rejection.
+    const refreshBranchIndex = pluginSource.indexOf(
+      'if (startupAction === "refresh_credential")',
+    );
+    expect(refreshBranchIndex).toBeGreaterThan(catchIndex);
+  });
+
+  it("offers a retry affordance while offline with an active credential", () => {
+    // Plugin hygiene (2026-08-16 §12): the offline dead-end (offline state
+    // with a live credential, previously escapeable only by reloading the
+    // plugin) gains ONE Retry connection command, enabled exactly in that
+    // state; `canLogin` keeps its unchanged gating.
+    const commandIndex = pluginSource.indexOf('id: "retry-connection"');
+    expect(commandIndex).toBeGreaterThanOrEqual(0);
+    const commandBody = pluginSource.slice(commandIndex, commandIndex + 500);
+    expect(commandBody).toContain('"Retry connection"');
+    expect(commandBody).toContain("checkCallback");
+    expect(commandBody).toContain("#isRetryConnectionAvailable(secretStore)");
+    expect(commandBody).toContain("#retryConnection(policySession, session)");
+    // The gate is offline WITH an active credential.
+    const gateDefinitionIndex = pluginSource.lastIndexOf(
+      "#isRetryConnectionAvailable(",
+    );
+    expect(gateDefinitionIndex).toBeGreaterThan(commandIndex);
+    const gateBody = pluginSource.slice(gateDefinitionIndex, gateDefinitionIndex + 400);
+    expect(gateBody).toContain('"offline"');
+    expect(gateBody).toContain("#resolveHasActiveCredential(secretStore)");
+    // The retry re-invokes the bounded session refresh chain and routes an
+    // exceptional rejection into the closed startup-failure trail path.
+    const retryDefinitionIndex = pluginSource.indexOf("async #retryConnection(");
+    expect(retryDefinitionIndex).toBeGreaterThanOrEqual(0);
+    const retryBody = pluginSource.slice(retryDefinitionIndex, retryDefinitionIndex + 1_100);
+    expect(retryBody).toContain("refreshVerifiedPolicyAndRequestSnapshot");
+    expect(retryBody).toContain("#recordStartupChainFailure");
+    // The settings tab exposes the same affordance as a button.
+    expect(pluginSource).toContain("retryConnection: () =>");
   });
 
   it("carries the device-sync status onto the settings snapshot and the diagnostics export (task 12)", () => {

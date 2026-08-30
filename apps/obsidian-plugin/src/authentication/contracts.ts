@@ -40,6 +40,12 @@ export const CONNECTION_STATUS_TEXT: Readonly<Record<ConnectionState, string>> =
 
 export interface AuthenticationControls {
   readonly canLogin: boolean;
+  /**
+   * The offline dead-end escape (plugin hygiene, 2026-08-16 §12): Retry
+   * connection is enabled exactly while offline WITH an active credential —
+   * the one recoverable state that previously required a plugin reload.
+   */
+  readonly canRetryConnection: boolean;
   readonly canOpenBrowser: boolean;
   readonly canCancel: boolean;
   readonly canDisconnect: boolean;
@@ -47,8 +53,9 @@ export interface AuthenticationControls {
 
 /**
  * Derive the spec-19 control availability from credential facts: Login only
- * from the unconnected/closed-configuration states, browser/cancel while a
- * pending grant exists, Disconnect while an active credential exists.
+ * from the unconnected/closed-configuration states, Retry connection only
+ * while offline with an active credential, browser/cancel while a pending
+ * grant exists, Disconnect while an active credential exists.
  */
 export function resolveAuthenticationControls(
   state: ConnectionState,
@@ -60,35 +67,12 @@ export function resolveAuthenticationControls(
       !facts.hasPendingGrant &&
       state !== "requesting_authorization" &&
       state !== "waiting_for_approval",
+    canRetryConnection: state === "offline" && facts.hasActiveCredential,
     canOpenBrowser: facts.hasPendingGrant,
     canCancel: facts.hasPendingGrant,
     canDisconnect: facts.hasActiveCredential,
   };
 }
-
-/**
- * The closed set of plugin-handled error codes from the registry of spec 17.
- * The wire `code` stays an open string so unknown server codes surface
- * verbatim without being mistaken for a local failure.
- */
-export const DEVICE_AUTH_ERROR_CODES = [
-  "api_request_malformed",
-  "api_request_validation_failed",
-  "authentication_rate_limited",
-  "device_authorization_pending",
-  "device_authorization_slow_down",
-  "device_authorization_denied",
-  "device_authorization_expired",
-  "device_authorization_state_invalid",
-  "device_credential_invalid",
-  "device_revoked",
-  "device_token_reuse_detected",
-  "plugin_version_unsupported",
-  "database_connection_unavailable",
-] as const;
-
-/** Local-only codes the server registry never emits. */
-export const LOCAL_ERROR_CODES = ["network_unavailable", "secret_storage_unverified"] as const;
 
 /** The approved plugin version window of a 426 rejection (spec 17 details). */
 export interface ApprovedVersionBounds {
@@ -125,6 +109,17 @@ export class DeviceAuthError extends Error {
     this.approvedVersionBounds = options.approvedVersionBounds ?? null;
     this.isLocal = options.isLocal ?? false;
   }
+}
+
+/**
+ * Whether a thrown value is one mapped device-authentication failure. This
+ * guard replaces every `as DeviceAuthError` cast at the failure
+ * classification sites (plugin hygiene, 2026-08-16 §12): a foreign error
+ * whose `code` property happens to collide with a registry code can never
+ * pass and never reaches a terminal branch.
+ */
+export function isDeviceAuthError(error: unknown): error is DeviceAuthError {
+  return error instanceof DeviceAuthError;
 }
 
 /**

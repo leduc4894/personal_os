@@ -273,7 +273,10 @@ function normalizeSettings(loaded: unknown): DeviceAuthenticationSettings {
         : DEFAULT_DEVICE_NAME,
     client_instance_id: loadedClientId ?? crypto.randomUUID(),
     device_id: loadedServerDeviceId,
-    secret_record_name: loadedRecordName === null ? null : DEVICE_CREDENTIAL_RECORD_NAME,
+    // A valid stored record name round-trips unchanged (plugin hygiene,
+    // 2026-08-16 §12): the earlier rewrite to the build-time constant
+    // renamed every stored SecretStorage record on each load.
+    secret_record_name: loadedRecordName,
     pending_grant: normalizePendingGrant(candidate["pending_grant"]),
   };
 }
@@ -491,6 +494,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         void this.#persistSettings();
       },
       login: () => controller.login(),
+      retryConnection: () => this.#retryConnection(policySession, session),
       openBrowserAgain: () => controller.openBrowserAgain(),
       cancelPendingLogin: () => controller.cancelPendingLogin(),
       disconnect: () => session.disconnect(),
@@ -529,6 +533,25 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       },
     });
 
+    // Plugin hygiene (2026-08-16 §12): the ONE retry affordance for the
+    // offline dead-end — offline state with an active credential had no
+    // recovery but a plugin reload. The command stays disabled (and hidden
+    // from the palette) in every other state through the check callback;
+    // the settings tab exposes the same action behind canRetryConnection.
+    this.addCommand({
+      id: "retry-connection",
+      name: "Retry connection",
+      checkCallback: (checking) => {
+        if (!this.#isRetryConnectionAvailable(secretStore)) {
+          return false;
+        }
+        if (!checking) {
+          void this.#retryConnection(policySession, session);
+        }
+        return true;
+      },
+    });
+
     // The settings tab is registered before any bounded startup work so the
     // spec-19 affordances (Cancel pending login, Open browser again) stay
     // reachable while a pending grant resumes. The single bounded startup
@@ -545,7 +568,17 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         this.#recordStartupChainFailure(error);
       });
     } else {
-      await controller.reconcileCrashWindow();
+      try {
+        await controller.reconcileCrashWindow();
+      } catch (error) {
+        // Plugin hygiene (2026-08-16 §12): a settings-persist rejection
+        // during the crash-window reconciliation (saveData can reject) must
+        // never abort onload. The closed reason routes into the same
+        // startup-failure trail path the journal failure reporter feeds —
+        // buffered until the trail sidecar loads — and the bounded startup
+        // chain continues below.
+        this.#recordStartupChainFailure(error);
+      }
       if (startupAction === "refresh_credential") {
         // Policy keyset/snapshot are fetched only AFTER a successful token
         // refresh (spec 18), still fire-and-forget and never awaited here.
@@ -620,6 +653,44 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       this.#session !== null &&
       readDeviceSecretRecord(secretStore, DEVICE_CREDENTIAL_RECORD_NAME)?.state === "active"
     );
+  }
+
+  /**
+   * The retry affordance gate (plugin hygiene, 2026-08-16 §12): enabled
+   * exactly while offline WITH an active credential — the one recoverable
+   * state that previously required a plugin reload. The `canLogin` gating is
+   * unchanged.
+   */
+  #isRetryConnectionAvailable(secretStore: SecretStorageRecordAdapter): boolean {
+    return (
+      this.#connectionState === "offline" && this.#resolveHasActiveCredential(secretStore)
+    );
+  }
+
+  /**
+   * Re-invoke the bounded session refresh chain on explicit demand (plugin
+   * hygiene, 2026-08-16 §12): one token refresh, then the verified-policy
+   * refresh and snapshot request — the same bounded chain the startup action
+   * runs. An exceptional rejection routes into the closed startup-failure
+   * trail path (buffered until the trail loads); the refresh's own failure
+   * state and closed code already ride the state seam.
+   */
+  async #retryConnection(
+    policySession: PolicySession,
+    tokenSession: DeviceTokenSession,
+  ): Promise<void> {
+    const retryChain = tokenSession
+      .refresh()
+      .then(() =>
+        refreshVerifiedPolicyAndRequestSnapshot({
+          readAcceptedRevisionNumber: () => policySession.acceptedState?.revisionNumber ?? null,
+          refresh: () => policySession.refresh(),
+          requestSnapshot: (reason) => this.#requestAutomaticSnapshot(reason),
+        }),
+      );
+    void retryChain.catch((error: unknown) => {
+      this.#recordStartupChainFailure(error);
+    });
   }
 
   #setConnectionState(state: ConnectionState, detail: string | null): void {
