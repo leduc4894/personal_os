@@ -23,6 +23,7 @@ producer that keeps at most four submitted tasks. Both are local to this file.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
@@ -38,11 +39,15 @@ from tests.contract.object_storage.scripted_s3 import scripted_body
 from personal_os.diagnostics import DiagnosticLogger
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import InternalApplicationError
-from personal_os.object_storage import VerificationMethod, VerifiedObjectReceipt
+from personal_os.object_storage import (
+    ContentDigest,
+    VerificationMethod,
+    VerifiedObjectReceipt,
+)
 from personal_os.object_storage.errors import STREAM_INVALID, ObjectStorageError
 from personal_os.object_storage.keys import CanonicalObjectKey
 from r2_object_storage import spool as spool_module
-from r2_object_storage.adapter import R2S3ObjectStore, _run_shielded
+from r2_object_storage.adapter import R2S3ObjectStore, _run_shielded, _SingleFlightEntry
 from r2_object_storage.client import GetObjectResult, HeadObjectResult, PutObjectRequest
 from r2_object_storage.error_mapping import RetryPolicy
 from r2_object_storage.metrics import (
@@ -245,39 +250,46 @@ def build_repeating_store(
     and optional scaled limits, a three-attempt :class:`RetryPolicy`, an
     in-memory metrics sink and a captured :class:`DiagnosticLogger`. The
     scripted client repeatedly serves store traffic for generated digests
-    without contacting the network.
+    without contacting the network. The root logger gains one
+    :class:`logging.NullHandler` only while the fixture is built; its prior
+    handlers and level are restored before returning.
     """
 
     root_logger = logging.getLogger()
-    if not any(isinstance(handler, logging.NullHandler) for handler in root_logger.handlers):
-        root_logger.addHandler(logging.NullHandler())
-    spools = SpoolManager(
-        tmp_path,
-        limits=limits,
-        clock=lambda: 0.0,
-        wall_clock=lambda: 0.0,
-        disk_usage=lambda _root: SimpleNamespace(free=_FREE_SPACE_BYTES),
-    )
-    client = RepeatingStoreClient(
-        spools,
-        head_gate=head_gate,
-        head_failure=head_failure,
-        get_failure=get_failure,
-    )
-    metrics = metrics if metrics is not None else InMemoryObjectStorageMetrics()
-    logger = DiagnosticLogger({"service": "test", "environment": "test"})
-    store = R2S3ObjectStore(
-        client,
-        spools=spools,
-        retry=RetryPolicy(maximum_attempts=3),
-        metrics=metrics,
-        logger=logger,
-        now_utc=lambda: _FIXED_NOW,
-        monotonic=lambda: 0.0,
-        sleep=_no_sleep,
-        jitter=_zero_jitter,
-    )
-    return store, client, metrics
+    original_handlers = list(root_logger.handlers)
+    original_level = root_logger.level
+    root_logger.addHandler(logging.NullHandler())
+    try:
+        spools = SpoolManager(
+            tmp_path,
+            limits=limits,
+            clock=lambda: 0.0,
+            wall_clock=lambda: 0.0,
+            disk_usage=lambda _root: SimpleNamespace(free=_FREE_SPACE_BYTES),
+        )
+        client = RepeatingStoreClient(
+            spools,
+            head_gate=head_gate,
+            head_failure=head_failure,
+            get_failure=get_failure,
+        )
+        metrics = metrics if metrics is not None else InMemoryObjectStorageMetrics()
+        logger = DiagnosticLogger({"service": "test", "environment": "test"})
+        store = R2S3ObjectStore(
+            client,
+            spools=spools,
+            retry=RetryPolicy(maximum_attempts=3),
+            metrics=metrics,
+            logger=logger,
+            now_utc=lambda: _FIXED_NOW,
+            monotonic=lambda: 0.0,
+            sleep=_no_sleep,
+            jitter=_zero_jitter,
+        )
+        return store, client, metrics
+    finally:
+        root_logger.handlers[:] = original_handlers
+        root_logger.setLevel(original_level)
 
 
 def _client_error(code: str, status: int) -> ClientError:
@@ -309,18 +321,27 @@ async def run_bounded(
 
     A new task is created only while fewer than four submitted tasks remain
     pending; every completion is re-raised immediately so a failure never
-    hides behind later items.
+    hides behind later items. A failure or cancellation first cancels the still
+    pending tasks and awaits their completion (exceptions suppressed) before
+    re-raising, so no submitted task is ever abandoned mid-flight.
     """
 
     submitted: set[asyncio.Task[VerifiedObjectReceipt]] = set()
-    for store_coroutine in stores:
-        while len(submitted) >= 4:
-            done, pending = await asyncio.wait(submitted, return_when=asyncio.FIRST_COMPLETED)
-            submitted = set(pending)
-            for task in done:
-                task.result()
-        submitted.add(asyncio.create_task(store_coroutine))
-    await asyncio.gather(*submitted)
+    try:
+        for store_coroutine in stores:
+            while len(submitted) >= 4:
+                done, pending = await asyncio.wait(submitted, return_when=asyncio.FIRST_COMPLETED)
+                submitted = set(pending)
+                for task in done:
+                    task.result()
+            submitted.add(asyncio.create_task(store_coroutine))
+        await asyncio.gather(*submitted)
+    except BaseException:
+        for task in submitted:
+            task.cancel()
+        if submitted:
+            await asyncio.gather(*submitted, return_exceptions=True)
+        raise
 
 
 async def _wait_until(condition: Callable[[], bool], *, description: str) -> None:
@@ -941,6 +962,61 @@ async def test_single_flight_cleanup_failure_during_cancellation_records_interna
     ]
     assert len(failed_records) == 1
     assert failed_records[0].error_code is ErrorCode.INTERNAL_ERROR
+    _assert_no_residual_state(store, tmp_path)
+
+
+# --- Shared-outcome invariant failures --------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_waiter_without_owner_outcome_raises_internal_error(tmp_path: Path) -> None:
+    """A waiter observing a successful owner that published no outcome fails typed."""
+
+    store, _client, metrics = build_repeating_store(tmp_path)
+    payload = b"missing owner outcome payload"
+    digest = ContentDigest.parse(hashlib.sha256(payload).hexdigest())
+    owner_outcome: asyncio.Future[tuple[VerifiedObjectReceipt, VerificationMethod]] = (
+        asyncio.get_running_loop().create_future()
+    )
+    owner_outcome.set_result(None)  # type: ignore[arg-type]
+    store._single_flight[digest] = _SingleFlightEntry(future=owner_outcome, waiter_count=0)
+
+    with pytest.raises(InternalApplicationError) as raised:
+        await store.store_stream(chunks(payload), len(payload), "application/octet-stream")
+
+    assert raised.value.error_code is ErrorCode.INTERNAL_ERROR
+    failed_records = [
+        record
+        for record in metrics.operations
+        if record.operation is ObjectStorageOperation.STORE
+        and record.result is ObjectStorageResult.FAILED
+    ]
+    assert failed_records[-1].error_code is ErrorCode.INTERNAL_ERROR
+    # The seeded entry has no owner to finish it, so the entry itself stays;
+    # the waiter still detached and the receive path left no spool residue.
+    assert store.single_flight_waiter_count == 0
+    assert store.spool_manager.reserved_size_bytes == 0
+    assert store.spool_manager.in_flight_count == 0
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_finish_single_flight_without_outcome_raises_internal_error(
+    tmp_path: Path,
+) -> None:
+    """Completing an owner entry with neither cause nor outcome fails typed."""
+
+    store, _client, _metrics = build_repeating_store(tmp_path)
+    digest = ContentDigest.parse("a" * 64)
+    pending_outcome: asyncio.Future[tuple[VerifiedObjectReceipt, VerificationMethod]] = (
+        asyncio.get_running_loop().create_future()
+    )
+    store._single_flight[digest] = _SingleFlightEntry(future=pending_outcome, waiter_count=1)
+
+    with pytest.raises(InternalApplicationError) as raised:
+        await store._finish_single_flight(digest, cause=None, outcome=None)
+
+    assert raised.value.error_code is ErrorCode.INTERNAL_ERROR
     _assert_no_residual_state(store, tmp_path)
 
 

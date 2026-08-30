@@ -32,7 +32,7 @@ import shutil
 import sys
 import tempfile
 import xml.etree.ElementTree as ElementTree
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -80,10 +80,23 @@ from r2_object_storage.settings import (
 )
 from r2_object_storage.spool import SpoolManager
 
-# Diagnostic events emitted by the store must never render on the console.
-_root_logger = logging.getLogger()
-if not any(isinstance(handler, logging.NullHandler) for handler in _root_logger.handlers):
-    _root_logger.addHandler(logging.NullHandler())
+
+# Diagnostic events emitted by the store must never render on the console: one
+# NullHandler is held on the root logger for the session only, with the prior
+# handlers and level restored afterwards.
+@pytest.fixture(autouse=True, scope="session")
+def _silence_root_logger() -> Iterator[None]:
+    """Add a session-scoped root NullHandler, restoring the prior logger state."""
+    root_logger = logging.getLogger()
+    original_handlers = list(root_logger.handlers)
+    original_level = root_logger.level
+    root_logger.addHandler(logging.NullHandler())
+    try:
+        yield
+    finally:
+        root_logger.handlers[:] = original_handlers
+        root_logger.setLevel(original_level)
+
 
 # --- Dedicated test configuration surface (names only, never values) ---------
 

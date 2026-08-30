@@ -15,7 +15,7 @@ keys, upload IDs and URLs never enter a typed error or a diagnostic event.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -28,7 +28,7 @@ from tests.contract.object_storage.scripted_s3 import (
     scripted_body,
 )
 
-from personal_os.diagnostics import DiagnosticLogger
+from personal_os.diagnostics import DiagnosticLogger, diagnostic_schema_record
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.multipart_upload.contracts import (
     MULTIPART_PART_SIZE_BYTES,
@@ -108,23 +108,32 @@ def build_provider(
     logger: DiagnosticLogger | None = None,
     maximum_attempts: int = 3,
 ) -> R2MultipartStagingProvider:
-    """Build a provider with fixed, environment-free wiring over a scripted SDK fake."""
+    """Build a provider with fixed, environment-free wiring over a scripted SDK fake.
+
+    The root logger gains one :class:`logging.NullHandler` only while the
+    provider is built; its prior handlers and level are restored on return.
+    """
 
     root_logger = logging.getLogger()
-    if not any(isinstance(handler, logging.NullHandler) for handler in root_logger.handlers):
-        root_logger.addHandler(logging.NullHandler())
-    return R2MultipartStagingProvider(
-        client,
-        bucket=_BUCKET,
-        retry=RetryPolicy(maximum_attempts=maximum_attempts),
-        logger=logger
-        if logger is not None
-        else DiagnosticLogger({"service": "test", "environment": "test"}),
-        now_utc=lambda: _FIXED_NOW,
-        monotonic=lambda: 0.0,
-        sleep=_no_sleep,
-        jitter=_zero_jitter,
-    )
+    original_handlers = list(root_logger.handlers)
+    original_level = root_logger.level
+    root_logger.addHandler(logging.NullHandler())
+    try:
+        return R2MultipartStagingProvider(
+            client,
+            bucket=_BUCKET,
+            retry=RetryPolicy(maximum_attempts=maximum_attempts),
+            logger=logger
+            if logger is not None
+            else DiagnosticLogger({"service": "test", "environment": "test"}),
+            now_utc=lambda: _FIXED_NOW,
+            monotonic=lambda: 0.0,
+            sleep=_no_sleep,
+            jitter=_zero_jitter,
+        )
+    finally:
+        root_logger.handlers[:] = original_handlers
+        root_logger.setLevel(original_level)
 
 
 def _upload_id() -> MultipartProviderUploadId:
@@ -132,15 +141,15 @@ def _upload_id() -> MultipartProviderUploadId:
 
 
 class _DiagnosticRecordCapture(logging.Handler):
-    """Capture diagnostic record dicts emitted through the :class:`DiagnosticLogger`."""
+    """Capture diagnostic records emitted through the :class:`DiagnosticLogger`."""
 
     def __init__(self) -> None:
         super().__init__(level=logging.DEBUG)
-        self.events: list[dict[str, object]] = []
+        self.events: list[Mapping[str, object]] = []
 
     def emit(self, record: logging.LogRecord) -> None:
-        diagnostic = getattr(record, "_diagnostic_schema_record", None)
-        if isinstance(diagnostic, dict):
+        diagnostic = diagnostic_schema_record(record)
+        if diagnostic is not None:
             self.events.append(diagnostic)
 
 

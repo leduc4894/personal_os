@@ -19,7 +19,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
-from collections.abc import AsyncIterator, Awaitable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,10 +40,11 @@ from tests.contract.object_storage.scripted_s3 import (
 from personal_os.device_sync.contracts import DeviceContentDescriptor, DeviceSyncContext
 from personal_os.device_sync.errors import DeviceSyncError, DeviceSyncErrorCode
 from personal_os.device_sync.metrics import InMemoryDeviceSyncMetrics
-from personal_os.diagnostics import DiagnosticLogger
+from personal_os.diagnostics import DiagnosticLogger, diagnostic_schema_record
 from personal_os.diagnostics.context import DiagnosticContext, create_diagnostic_context
 from personal_os.diagnostics.events import EventName
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.error_contracts.exceptions import InternalApplicationError
 from personal_os.object_storage import (
     CanonicalMediaType,
     ContentDigest,
@@ -67,7 +68,7 @@ from r2_object_storage.metrics import (
     ObjectStorageOperation,
     ObjectStorageResult,
 )
-from r2_object_storage.spool import SpoolManager
+from r2_object_storage.spool import HashedSpool, SpoolManager
 
 _ONE_MEBIBYTE = 1_048_576
 _FIXED_NOW = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
@@ -129,31 +130,38 @@ def build_store(client: ScriptedS3Client, tmp_path: Path) -> R2S3ObjectStore:
     Supplies a :class:`SpoolManager` rooted at ``tmp_path`` with deterministic
     clocks and ample free space, a three-attempt :class:`RetryPolicy`, an
     in-memory metrics sink and a captured :class:`DiagnosticLogger`. No value is
-    read from the process environment.
+    read from the process environment. The root logger gains one
+    :class:`logging.NullHandler` only while the store is built; its prior
+    handlers and level are restored before returning.
     """
 
     root_logger = logging.getLogger()
-    if not any(isinstance(handler, logging.NullHandler) for handler in root_logger.handlers):
-        root_logger.addHandler(logging.NullHandler())
-    spools = SpoolManager(
-        tmp_path,
-        clock=lambda: 0.0,
-        wall_clock=lambda: 0.0,
-        disk_usage=lambda _root: SimpleNamespace(free=_FREE_SPACE_BYTES),
-    )
-    metrics = InMemoryObjectStorageMetrics()
-    logger = DiagnosticLogger({"service": "test", "environment": "test"})
-    return R2S3ObjectStore(
-        client,
-        spools=spools,
-        retry=RetryPolicy(maximum_attempts=3),
-        metrics=metrics,
-        logger=logger,
-        now_utc=lambda: _FIXED_NOW,
-        monotonic=lambda: 0.0,
-        sleep=_no_sleep,
-        jitter=_zero_jitter,
-    )
+    original_handlers = list(root_logger.handlers)
+    original_level = root_logger.level
+    root_logger.addHandler(logging.NullHandler())
+    try:
+        spools = SpoolManager(
+            tmp_path,
+            clock=lambda: 0.0,
+            wall_clock=lambda: 0.0,
+            disk_usage=lambda _root: SimpleNamespace(free=_FREE_SPACE_BYTES),
+        )
+        metrics = InMemoryObjectStorageMetrics()
+        logger = DiagnosticLogger({"service": "test", "environment": "test"})
+        return R2S3ObjectStore(
+            client,
+            spools=spools,
+            retry=RetryPolicy(maximum_attempts=3),
+            metrics=metrics,
+            logger=logger,
+            now_utc=lambda: _FIXED_NOW,
+            monotonic=lambda: 0.0,
+            sleep=_no_sleep,
+            jitter=_zero_jitter,
+        )
+    finally:
+        root_logger.handlers[:] = original_handlers
+        root_logger.setLevel(original_level)
 
 
 async def _chunk_stream(payloads: tuple[bytes, ...]) -> AsyncIterator[bytes]:
@@ -168,15 +176,15 @@ def chunks(*payloads: bytes) -> AsyncIterator[bytes]:
 
 
 class _DiagnosticRecordCapture(logging.Handler):
-    """Capture diagnostic record dicts emitted through the :class:`DiagnosticLogger`."""
+    """Capture diagnostic records emitted through the :class:`DiagnosticLogger`."""
 
     def __init__(self) -> None:
         super().__init__(level=logging.DEBUG)
-        self.events: list[dict[str, object]] = []
+        self.events: list[Mapping[str, object]] = []
 
     def emit(self, record: logging.LogRecord) -> None:
-        diagnostic = getattr(record, "_diagnostic_schema_record", None)
-        if isinstance(diagnostic, dict):
+        diagnostic = diagnostic_schema_record(record)
+        if diagnostic is not None:
             self.events.append(diagnostic)
 
 
@@ -194,6 +202,23 @@ def capture_diagnostic_events() -> Iterator[_DiagnosticRecordCapture]:
     finally:
         root_logger.removeHandler(capture)
         root_logger.setLevel(original_level)
+
+
+class _UnhashedVerificationSpool:
+    """Stand-in spool that completed without ever hashing its payload."""
+
+    hashed: HashedSpool | None = None
+
+    async def close(self) -> None:
+        return None
+
+
+async def _return_unhashed_verification_spool(
+    _expected_object: object, _operation: object, _tracker: object
+) -> object:
+    """Replace ``_verify_to_spool`` with a spool whose ``hashed`` is ``None``."""
+
+    return _UnhashedVerificationSpool()
 
 
 # --- Matching HEAD + If-Match GET -------------------------------------------
@@ -677,6 +702,44 @@ async def test_metrics_record_outcomes_without_digest_or_key_labels(
     assert any(record.operation is ObjectStorageOperation.RESOLVE for record in metrics.operations)
 
 
+# --- Unhashed verification spool is a typed internal invariant ----------------
+
+
+@pytest.mark.asyncio
+async def test_unhashed_verification_spool_raises_internal_error_on_resolve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Building a receipt from a spool that never hashed fails as internal error."""
+    expected = _expected(_CANONICAL_PAYLOAD)
+    client = ScriptedS3Client.matching_get(_CANONICAL_PAYLOAD)
+    store = build_store(client, tmp_path)
+    monkeypatch.setattr(store, "_verify_to_spool", _return_unhashed_verification_spool)
+
+    with pytest.raises(InternalApplicationError) as raised:
+        await store.resolve_verified_object(expected)
+
+    assert raised.value.error_code is ErrorCode.INTERNAL_ERROR
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_unhashed_verification_spool_raises_internal_error_on_reader_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reader is never yielded over a verification spool that never hashed."""
+    expected = _expected(_CANONICAL_PAYLOAD)
+    client = ScriptedS3Client.matching_get(_CANONICAL_PAYLOAD)
+    store = build_store(client, tmp_path)
+    monkeypatch.setattr(store, "_verify_to_spool", _return_unhashed_verification_spool)
+
+    with pytest.raises(InternalApplicationError) as raised:
+        async with store.open_verified_reader(expected) as _reader:
+            pytest.fail("an unhashed verification spool must never yield a reader")
+
+    assert raised.value.error_code is ErrorCode.INTERNAL_ERROR
+    assert list(tmp_path.iterdir()) == []
+
+
 # --- Expose build_store inputs for the module ------------------------------
 
 
@@ -684,17 +747,22 @@ def _build_store_inputs(
     tmp_path: Path,
 ) -> tuple[SpoolManager, RetryPolicy, InMemoryObjectStorageMetrics, DiagnosticLogger]:
     root_logger = logging.getLogger()
-    if not any(isinstance(handler, logging.NullHandler) for handler in root_logger.handlers):
-        root_logger.addHandler(logging.NullHandler())
-    spools = SpoolManager(
-        tmp_path,
-        clock=lambda: 0.0,
-        wall_clock=lambda: 0.0,
-        disk_usage=lambda _root: SimpleNamespace(free=_FREE_SPACE_BYTES),
-    )
-    metrics = InMemoryObjectStorageMetrics()
-    logger = DiagnosticLogger({"service": "test", "environment": "test"})
-    return spools, RetryPolicy(maximum_attempts=3), metrics, logger
+    original_handlers = list(root_logger.handlers)
+    original_level = root_logger.level
+    root_logger.addHandler(logging.NullHandler())
+    try:
+        spools = SpoolManager(
+            tmp_path,
+            clock=lambda: 0.0,
+            wall_clock=lambda: 0.0,
+            disk_usage=lambda _root: SimpleNamespace(free=_FREE_SPACE_BYTES),
+        )
+        metrics = InMemoryObjectStorageMetrics()
+        logger = DiagnosticLogger({"service": "test", "environment": "test"})
+        return spools, RetryPolicy(maximum_attempts=3), metrics, logger
+    finally:
+        root_logger.handlers[:] = original_handlers
+        root_logger.setLevel(original_level)
 
 
 def test_store_constructor_does_not_read_process_environment(

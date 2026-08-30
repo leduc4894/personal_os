@@ -22,6 +22,7 @@ from personal_os.diagnostics.events import EventName, SafeToken
 from personal_os.diagnostics.logging import (
     DiagnosticLogger,
     configure_diagnostics,
+    diagnostic_schema_record,
     reset_diagnostics_for_testing,
 )
 from personal_os.diagnostics.redaction import (
@@ -236,6 +237,34 @@ def test_dependency_log_is_fingerprinted_without_message(
     for forbidden in ("message", "args", "exc_info", "traceback"):
         assert forbidden not in record
     assert "/" not in record.get("pathname", "")
+
+
+def test_diagnostic_schema_record_returns_marked_mapping_or_none() -> None:
+    """The public accessor reads exactly the marker attached by ``DiagnosticLogger``."""
+
+    schema: dict[str, object] = {"event": "object_storage_operation_succeeded"}
+    marked = logging.LogRecord(
+        name="marked",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="",
+        args=None,
+        exc_info=None,
+    )
+    setattr(marked, diag_logging._MARKER, schema)
+    unmarked = logging.LogRecord(
+        name="unmarked",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="",
+        args=None,
+        exc_info=None,
+    )
+
+    assert diagnostic_schema_record(marked) == schema
+    assert diagnostic_schema_record(unmarked) is None
 
 
 def test_dependency_logger_with_invalid_name_falls_back_to_unknown_dependency(

@@ -104,6 +104,22 @@ _active_fallback_line: str = _STATIC_FALLBACK_LINE
 _fallback_guard: threading.local = threading.local()
 
 
+def diagnostic_schema_record(record: logging.LogRecord) -> Mapping[str, object] | None:
+    """Return the application diagnostic record carried by ``record``, or ``None``.
+
+    This is the public read side of the marker attribute that
+    :class:`DiagnosticLogger` attaches to every emitted record. ``None`` means
+    the record is an unmarked dependency log record (or carries a malformed
+    marker), never an application event. Test harnesses and capture handlers
+    read marked records through this accessor instead of the private attribute.
+    """
+
+    schema = getattr(record, _MARKER, None)
+    if isinstance(schema, Mapping):
+        return cast("Mapping[str, object]", schema)
+    return None
+
+
 def _current_timestamp() -> datetime:
     """Return the current UTC moment (private test seam)."""
     return datetime.now(UTC)

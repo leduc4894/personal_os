@@ -575,7 +575,9 @@ class R2S3ObjectStore:
                 )
                 raise
             hashed = verification.hashed
-            assert hashed is not None, "verification spool was not hashed"
+            if hashed is None:
+                # Internal invariant: a yielded verification spool is always hashed.
+                raise InternalApplicationError(ErrorCode.INTERNAL_ERROR) from None
             try:
                 reader = await _VerifiedObjectReader.open(hashed, verification)
             except asyncio.CancelledError:
@@ -736,7 +738,9 @@ class R2S3ObjectStore:
         method: VerificationMethod,
     ) -> VerifiedObjectReceipt:
         hashed = verification.hashed
-        assert hashed is not None, "verification spool was not hashed"
+        if hashed is None:
+            # Internal invariant: a completed verification spool is always hashed.
+            raise InternalApplicationError(ErrorCode.INTERNAL_ERROR) from None
         return VerifiedObjectReceipt(
             content_digest=hashed.content_digest,
             object_key=derive_canonical_object_key(expected.content_digest),
@@ -875,7 +879,9 @@ class R2S3ObjectStore:
                 )
             if waiter_failure is not None:
                 raise waiter_failure
-            assert outcome is not None, "a successful owner must publish its outcome"
+            if outcome is None:
+                # Internal invariant: a successful owner always publishes its outcome.
+                raise InternalApplicationError(ErrorCode.INTERNAL_ERROR) from None
             receipt, method = outcome
             if receipt.media_type != expected.media_type:
                 # The same bytes were shared, but the owner stored a different
@@ -947,7 +953,9 @@ class R2S3ObjectStore:
             if entry is None or entry.future.done():
                 return
             if cause is None:
-                assert outcome is not None, "a completed owner must carry its outcome"
+                if outcome is None:
+                    # Internal invariant: a completed owner always carries its outcome.
+                    raise InternalApplicationError(ErrorCode.INTERNAL_ERROR) from None
                 entry.future.set_result(outcome)
             elif entry.waiter_count > 0:
                 if isinstance(cause, ApplicationError):

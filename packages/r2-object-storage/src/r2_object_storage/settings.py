@@ -47,13 +47,15 @@ _MAXIMUM_CREDENTIAL_FILE_NAME_LENGTH: Final[int] = 255
 
 # Exactly ``https://<account-id>.r2.cloudflarestorage.com`` where the account id
 # is 32 lowercase hexadecimal characters, with no username, password, port,
-# path, query or fragment. HTTP and custom S3 endpoints are rejected.
-_R2_ENDPOINT_PATTERN: Final = re.compile(r"^https://[0-9a-f]{32}\.r2\.cloudflarestorage\.com$")
+# path, query or fragment. HTTP and custom S3 endpoints are rejected. The
+# validators use ``fullmatch``, so no ``^``/``$`` anchors appear in the pattern.
+_R2_ENDPOINT_PATTERN: Final = re.compile(r"https://[0-9a-f]{32}\.r2\.cloudflarestorage\.com")
 
 # Lowercase R2-compatible bucket names from 3 through 63 characters: letters,
-# digits and internal hyphens, anchored by a letter or digit so a leading or
-# trailing hyphen, uppercase and non-bucket characters are rejected.
-_R2_BUCKET_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
+# digits and internal hyphens, opening and closing with a letter or digit so a
+# leading or trailing hyphen, uppercase and non-bucket characters are rejected.
+# The validators use ``fullmatch``, so no ``^``/``$`` anchors appear.
+_R2_BUCKET_PATTERN: Final = re.compile(r"[a-z0-9][a-z0-9-]{1,61}[a-z0-9]")
 
 #: Closed map of object-storage environment names to model field names. The key
 #: set is the authoritative owned-fragment list; the repository-wide registry in
@@ -103,6 +105,7 @@ class ObjectStorageSettings(BaseModel):
 
     environment: RuntimeEnvironment = RuntimeEnvironment.LOCAL
     secret_root: Path = Path("/run/secrets")
+    """Linux serve contract — Windows hosts always set KNOWLEDGE_SECRET_ROOT."""
     r2_endpoint: str
     r2_bucket_name: str
     r2_access_key_id_file: str

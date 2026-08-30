@@ -10,6 +10,7 @@ settings module plus the shared core error/settings helpers.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -266,6 +267,41 @@ def test_invalid_credential_filename_is_rejected(tmp_path: Path, filename: str) 
         load_object_storage_settings(
             environ=_valid_environ(secret_root, spool_root, access_key_id_file=filename)
         )
+    assert raised.value.error_code is ErrorCode.OBJECT_STORAGE_CONFIGURATION_INVALID
+
+
+# --- per-platform secret-root default contract -----------------------------
+
+
+def test_secret_root_documented_default_is_the_linux_serve_path() -> None:
+    """The ``secret_root`` default is the documented Linux serve contract.
+
+    The POSIX branch is pinned structurally (the field default itself), not by
+    running on POSIX: on a POSIX host the default is absolute and the loader
+    proceeds beneath it.
+    """
+
+    assert ObjectStorageSettings.model_fields["secret_root"].default == Path("/run/secrets")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="win32 is the override-required branch")
+def test_win32_loader_requires_secret_root_override(tmp_path: Path) -> None:
+    """On win32 the Linux default is not absolute, so the loader fails closed.
+
+    Windows hosts always set ``KNOWLEDGE_SECRET_ROOT``; omitting it leaves the
+    documented Linux default, which the absolute-path validator rejects.
+    """
+
+    secret_root = tmp_path / "secrets"
+    spool_root = tmp_path / "spool"
+    secret_root.mkdir()
+    spool_root.mkdir()
+    environ = _valid_environ(secret_root, spool_root)
+    del environ["KNOWLEDGE_SECRET_ROOT"]
+
+    with pytest.raises(ObjectStorageError) as raised:
+        load_object_storage_settings(environ=environ)
+
     assert raised.value.error_code is ErrorCode.OBJECT_STORAGE_CONFIGURATION_INVALID
 
 
