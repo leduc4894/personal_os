@@ -24,9 +24,9 @@ một fix wave — commit mang bản cập nhật này. File này thay thế sna
   ×7; 2026-08-16 web-auth ×4 + acceptance-tests ×1) và index 5 row mới (xem
   [Deferred items](#deferred-items)). Các row out-of-scope (conditional/live/
   mobile/mutation-testing/CI-first-run) giữ nguyên.
-- Evidence chi tiết theo từng task: SDD ledger
-  `.superpowers/sdd/2026-08-30-child-nine-hygiene-retirement/progress.md` và
-  per-task briefs/reports trong cùng thư mục.
+- Evidence chi tiết theo từng task: 22 commit trên branch (mỗi task một commit
+  kèm test của nó); per-task reports là artifact session (gitignored, đã dọn
+  sau final review) — kết luận của mỗi report nằm trong các section dưới đây.
 
 ## Gate evidence (plan Step 1 — final verification)
 
@@ -224,9 +224,9 @@ không có item nào khác mới được defer trong wave này.
 ## Next actions
 
 1. SDD final whole-branch review trên `85fb784..HEAD` — đã hoàn tất: 4 minor
-   findings (0 merge blocker) được đóng trong đúng một fix wave (commit mang
-   bản cập nhật này); chi tiết theo từng finding tại
-   `.superpowers/sdd/2026-08-30-child-nine-hygiene-retirement/final-fix-report.md`.
+   findings (0 merge blocker) được đóng trong đúng một fix wave và một scoped
+   re-review sạch; xem diff của fix wave tại commit "fix: close the
+   final-review findings on tokens, invariants, and docs" (`4bf0cb5`).
 2. `superpowers:finishing-a-development-branch` — quyết định merge. Living
    docs (runbooks, metrics, operations) đã cập nhật tại chỗ trong các task;
    tra hiện trạng qua `docs/operations/`, không qua file này.
