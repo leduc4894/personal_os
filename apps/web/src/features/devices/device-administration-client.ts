@@ -7,9 +7,10 @@ import {
 import { createNativeFetchTransport } from "../../api/native-fetch-transport";
 import {
   CSRF_HEADER_NAME,
+  REQUEST_UNAVAILABLE_ERROR,
   createAuthenticationClient,
   readCsrfTokenFromCookieSource,
-  type ApiErrorBody,
+  unwrapEnvelope,
   type AuthenticationCallResult,
   type AuthenticationClient,
 } from "../../api/authentication-client";
@@ -41,33 +42,6 @@ export interface DeviceAdministrationClient extends AuthenticationClient {
     deviceId: string;
     deviceNameConfirmation: string;
   }): Promise<AuthenticationCallResult<AdminDeviceRevokeData>>;
-}
-
-/**
- * Mirrors the authentication client's transport failure body so both client
- * surfaces close identically when the API cannot be reached.
- */
-const REQUEST_UNAVAILABLE_ERROR: ApiErrorBody = {
-  code: "internal_error",
-  details: {},
-  message: "The request could not be completed. Check your connection and try again.",
-  retryable: true,
-};
-
-function unwrapEnvelope<T>(payload: { data?: unknown; error?: unknown }): AuthenticationCallResult<T> {
-  const envelope = (payload.data ?? payload.error ?? null) as
-    | { data?: T | null; error?: ApiErrorBody | null }
-    | null;
-  if (
-    envelope !== null &&
-    typeof envelope === "object" &&
-    envelope.data !== null &&
-    envelope.data !== undefined
-  ) {
-    return { ok: true, data: envelope.data };
-  }
-  const error = envelope !== null && typeof envelope === "object" ? envelope.error : null;
-  return { ok: false, error: error ?? REQUEST_UNAVAILABLE_ERROR };
 }
 
 export function createDeviceAdministrationClient(options: {

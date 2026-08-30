@@ -82,6 +82,15 @@ describe("DeviceApproval", () => {
     expect(localStorage).toHaveLength(0);
   });
 
+  it("preserves the query string when stripping the user code fragment", async () => {
+    stubLookup();
+    window.history.replaceState({}, "", `/device/approve?source=plugin#${DEVICE_USER_CODE}`);
+    render(<DeviceApproval client={createTestClient()} />);
+    await waitFor(() => expect(window.location.hash).toBe(""));
+    expect(window.location.search).toBe("?source=plugin");
+    expect(window.location.pathname).toBe("/device/approve");
+  });
+
   it("renders plugin metadata as escaped text only", async () => {
     const hostileDeviceName = '<img src=x onerror="alert(1)"> Sync <script>alert(2)</script>';
     window.history.replaceState({}, "", `/device/approve#${DEVICE_USER_CODE}`);
@@ -242,6 +251,30 @@ describe("DeviceApproval", () => {
     expect(screen.queryByLabelText("Authentication code")).not.toBeInTheDocument();
   });
 
+  it("returns to the grant context without approving when re-authentication is abandoned", async () => {
+    const user = userEvent.setup();
+    window.history.replaceState({}, "", `/device/approve#${DEVICE_USER_CODE}`);
+    stubLookup();
+    let approveCalls = 0;
+    server.use(
+      mockApi("post", `/api/auth/device-authorizations/${DEVICE_GRANT_ID}/approve`, () => {
+        approveCalls += 1;
+        return recentAuthenticationRequiredResponse();
+      }),
+    );
+    render(<DeviceApproval client={createTestClient()} sessionStore={createAuthenticationSessionStore()} />);
+    await screen.findByText("Personal desktop");
+    await user.click(screen.getByRole("button", { name: "Approve" }));
+    expect(
+      await screen.findByText("Confirm your password again to approve this device."),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(await screen.findByText("Personal desktop")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
+    expect(approveCalls).toBe(1);
+    expect(screen.queryByRole("heading", { name: "Device approved" })).not.toBeInTheDocument();
+  });
+
   it("closes an unrecognized code with plugin guidance", async () => {
     server.use(
       mockApi("post", "/api/auth/device-authorizations/lookup", () => deviceCredentialInvalidResponse()),
@@ -268,5 +301,23 @@ describe("DeviceApproval", () => {
     expect(note).toHaveTextContent("Too many attempts. Try again in 9 minutes.");
     expect(note.textContent).not.toContain("540");
     expect(note.textContent).not.toContain("Simulated");
+  });
+
+  it("re-runs the lookup when retrying from the rate-limited terminal view", async () => {
+    const user = userEvent.setup();
+    let lookupCalls = 0;
+    server.use(
+      mockApi("post", "/api/auth/device-authorizations/lookup", () => {
+        lookupCalls += 1;
+        return lookupCalls === 1 ? rateLimitedResponse(30) : deviceGrantContextResponse();
+      }),
+    );
+    window.history.replaceState({}, "", `/device/approve#${DEVICE_USER_CODE}`);
+    render(<DeviceApproval client={createTestClient()} />);
+    const note = await screen.findByRole("note");
+    expect(note).toHaveTextContent("Too many attempts. Try again in 1 minute.");
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("Personal desktop")).toBeInTheDocument();
+    expect(lookupCalls).toBe(2);
   });
 });

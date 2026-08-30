@@ -146,4 +146,41 @@ describe("DeviceRevokeDialog", () => {
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
     expect(onClosed).toHaveBeenCalledTimes(2);
   });
+
+  it("cycles Tab from the last focusable child back to the first", async () => {
+    const user = userEvent.setup();
+    renderDialog();
+    await user.type(screen.getByLabelText("Type the device name to confirm"), "Family laptop");
+    screen.getByRole("button", { name: "Cancel" }).focus();
+    await user.tab();
+    expect(screen.getByLabelText("Type the device name to confirm")).toHaveFocus();
+  });
+
+  it("cycles Shift+Tab from the first focusable child back to the last", async () => {
+    const user = userEvent.setup();
+    renderDialog();
+    await user.type(screen.getByLabelText("Type the device name to confirm"), "Family laptop");
+    screen.getByLabelText("Type the device name to confirm").focus();
+    await user.tab({ shift: true });
+    expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus();
+  });
+
+  it("restores focus to the opener when the dialog unmounts", () => {
+    const openerButton = document.createElement("button");
+    openerButton.type = "button";
+    openerButton.textContent = "Revoke access";
+    document.body.appendChild(openerButton);
+    openerButton.focus();
+    const { unmount } = render(
+      <DeviceRevokeDialog
+        client={createTestClient()}
+        device={adminDeviceData({ device_name: "Family laptop" })}
+        onClosed={vi.fn()}
+        onRevoked={vi.fn()}
+      />,
+    );
+    unmount();
+    expect(openerButton).toHaveFocus();
+    openerButton.remove();
+  });
 });

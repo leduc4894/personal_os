@@ -6,8 +6,10 @@ import { createApiClient } from "@workspace/api-client";
 
 import { createNativeFetchTransport } from "./native-fetch-transport";
 import {
+  REQUEST_UNAVAILABLE_ERROR,
   createAuthenticationClient,
   readCsrfTokenFromCookieSource,
+  unwrapEnvelope,
   type AuthenticationClient,
 } from "./authentication-client";
 import {
@@ -19,6 +21,7 @@ import {
   mockApi,
   recoveryCodesResponse,
   recoveryLimitedResponse,
+  sessionData,
   sessionResponse,
   totpEnrollmentResponse,
 } from "../testing/api-mock-builders";
@@ -64,6 +67,43 @@ describe("readCsrfTokenFromCookieSource", () => {
 
   it("returns null when no csrf cookie exists", () => {
     expect(readCsrfTokenFromCookieSource("theme=dark")).toBeNull();
+  });
+});
+
+describe("unwrapEnvelope", () => {
+  it("unwraps a route's data payload from its envelope", () => {
+    const session = sessionData("active");
+    expect(unwrapEnvelope({ data: { data: session, error: null } })).toEqual({
+      ok: true,
+      data: session,
+    });
+  });
+
+  it("surfaces the envelope's registered error body", () => {
+    const error = { code: "authentication_failed", details: {}, message: "Simulated failure.", retryable: false };
+    expect(unwrapEnvelope({ data: { data: null, error } })).toEqual({
+      ok: false,
+      error,
+    });
+  });
+
+  it("falls back to the shared unavailable error when no envelope data is present", () => {
+    const fallbackResult = unwrapEnvelope({});
+    expect(fallbackResult).toEqual({ ok: false, error: REQUEST_UNAVAILABLE_ERROR });
+    if (!fallbackResult.ok) {
+      expect(fallbackResult.error).toBe(REQUEST_UNAVAILABLE_ERROR);
+    }
+  });
+});
+
+describe("REQUEST_UNAVAILABLE_ERROR", () => {
+  it("is the safe generic body every transport-closed call returns", () => {
+    expect(REQUEST_UNAVAILABLE_ERROR).toEqual({
+      code: "internal_error",
+      details: {},
+      message: "The request could not be completed. Check your connection and try again.",
+      retryable: true,
+    });
   });
 });
 

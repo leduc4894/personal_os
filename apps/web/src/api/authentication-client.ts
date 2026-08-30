@@ -73,14 +73,21 @@ interface ApiEnvelope<T> {
   readonly error: ApiErrorBody | null;
 }
 
-const REQUEST_UNAVAILABLE_ERROR: ApiErrorBody = {
+/**
+ * The safe generic body every transport-closed call returns when the API
+ * cannot be reached or answers outside the envelope contract.
+ */
+export const REQUEST_UNAVAILABLE_ERROR: ApiErrorBody = {
   code: "internal_error",
   details: {},
   message: "The request could not be completed. Check your connection and try again.",
   retryable: true,
 };
 
-function unwrapEnvelope<T>(payload: { data?: unknown; error?: unknown }): AuthenticationCallResult<T> {
+/** Unwraps an API envelope into a call result; shared by every client surface. */
+export function unwrapEnvelope<T>(
+  payload: { data?: unknown; error?: unknown },
+): AuthenticationCallResult<T> {
   const envelope = (payload.data ?? payload.error ?? null) as ApiEnvelope<T> | null;
   if (
     envelope !== null &&

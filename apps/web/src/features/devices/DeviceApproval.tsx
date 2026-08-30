@@ -68,6 +68,7 @@ export function DeviceApproval({
   const [challengePassword, setChallengePassword] = useState("");
   const [reauthFields, setReauthFields] = useState({ password: "", totpCode: "" });
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isLookupRetryable, setIsLookupRetryable] = useState(false);
   const userCodeRef = useRef<string | null>(null);
   const fragmentConsumedRef = useRef(false);
   const errorRef = useRef<HTMLParagraphElement>(null);
@@ -97,10 +98,12 @@ export function DeviceApproval({
     }
     if (result.error.code === "authentication_rate_limited") {
       setTerminalMessage(rateLimitedRetryMessage(result.error) ?? GENERIC_LOOKUP_FAILURE);
+      setIsLookupRetryable(true);
       setStep("terminal-error");
       return;
     }
     setTerminalMessage(LOOKUP_FAILURE_MESSAGES[result.error.code] ?? GENERIC_LOOKUP_FAILURE);
+    setIsLookupRetryable(false);
     setStep("terminal-error");
   }, [client]);
 
@@ -120,12 +123,13 @@ export function DeviceApproval({
     }
     // Consume the fragment exactly once (spec 11.2): capture the user code
     // into memory, then strip it from the address bar so it never survives a
-    // reload, a share or the browser history.
+    // reload, a share or the browser history. The query string is preserved —
+    // it never carried the code.
     fragmentConsumedRef.current = true;
     const fragment = window.location.hash.replace(/^#/, "").trim();
     userCodeRef.current = fragment === "" ? null : fragment;
     if (window.location.hash !== "") {
-      window.history.replaceState(null, "", window.location.pathname);
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
     }
     void resolveSession();
   }, [resolveSession]);
@@ -178,6 +182,7 @@ export function DeviceApproval({
     // with the rest of the one-time flow state.
     setChallengePassword("");
     setTerminalMessage(message);
+    setIsLookupRetryable(false);
     setStep("terminal-error");
   }
 
@@ -254,6 +259,20 @@ export function DeviceApproval({
     })();
   }
 
+  /**
+   * Abandons the re-authentication gate without deciding anything: the held
+   * grant context is shown again and the partially typed credentials are
+   * dropped, exactly as they are after a successful confirmation.
+   */
+  function abandonReauthentication(): void {
+    if (isSubmitting) {
+      return;
+    }
+    setReauthFields({ password: "", totpCode: "" });
+    setErrorMessage(null);
+    setStep("context");
+  }
+
   if (step === "resolving") {
     return <p role="status">Checking the sign-in request…</p>;
   }
@@ -314,6 +333,11 @@ export function DeviceApproval({
       <section aria-labelledby="device-approval-unavailable-heading">
         <h1 id="device-approval-unavailable-heading">Device approval unavailable</h1>
         <p role="note">{step === "invalid-code" ? NO_CODE_GUIDANCE : (terminalMessage ?? GENERIC_LOOKUP_FAILURE)}</p>
+        {step === "terminal-error" && isLookupRetryable && (
+          <button type="button" onClick={() => void lookupGrant()}>
+            Retry
+          </button>
+        )}
       </section>
     );
   }
@@ -346,6 +370,9 @@ export function DeviceApproval({
           />
           <button type="submit" disabled={isSubmitting}>
             Confirm password
+          </button>
+          <button type="button" disabled={isSubmitting} onClick={abandonReauthentication}>
+            Cancel
           </button>
         </form>
         {errorMessage !== null && (

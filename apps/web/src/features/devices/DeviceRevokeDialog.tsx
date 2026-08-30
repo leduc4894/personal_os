@@ -11,6 +11,19 @@ const GENERIC_REVOKE_FAILURE = "Revoking the device failed. Try again.";
 const CONFIRMATION_MISMATCH_MESSAGE =
   "The device name did not match. Check the exact name and try again.";
 
+const FOCUSABLE_CHILD_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  '[tabindex]:not([tabindex="-1"])',
+].join(", ");
+
+function focusableChildren(root: HTMLElement): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_CHILD_SELECTOR));
+}
+
 export interface DeviceRevokeDialogProps {
   client: DeviceAdministrationClient;
   device: AdminDeviceData;
@@ -34,8 +47,55 @@ export function DeviceRevokeDialog({
   const [reauthFields, setReauthFields] = useState({ password: "", totpCode: "" });
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const errorRef = useRef<HTMLParagraphElement>(null);
+
+  // Captured before the heading effect moves focus into the dialog so the
+  // opener element can be restored when the dialog unmounts.
+  useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    return () => {
+      opener?.focus();
+    };
+  }, []);
+
+  // Minimal modal focus trap: Tab from the last focusable child cycles to the
+  // first, Shift+Tab inverts, and focus that escaped is pulled back in.
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent): void {
+      if (event.key !== "Tab" || event.metaKey || event.ctrlKey || event.altKey) {
+        return;
+      }
+      const dialog = dialogRef.current;
+      if (dialog === null) {
+        return;
+      }
+      const focusableElements = focusableChildren(dialog);
+      const firstChild = focusableElements[0];
+      const lastChild = focusableElements[focusableElements.length - 1];
+      if (firstChild === undefined || lastChild === undefined) {
+        return;
+      }
+      const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      const isFocusInsideDialog = activeElement !== null && dialog.contains(activeElement);
+      if (event.shiftKey) {
+        if (!isFocusInsideDialog || activeElement === firstChild) {
+          event.preventDefault();
+          lastChild.focus();
+        }
+        return;
+      }
+      if (!isFocusInsideDialog || activeElement === lastChild) {
+        event.preventDefault();
+        firstChild.focus();
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
 
   useEffect(() => {
     headingRef.current?.focus();
@@ -113,6 +173,7 @@ export function DeviceRevokeDialog({
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby="device-revoke-heading"
