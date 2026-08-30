@@ -138,7 +138,21 @@ and `backup-create` refuses an existing bundle id rather than overwriting.
 object copies stream in 1 MiB chunks and re-verify digest and size against the
 referenced-object claim; a failure abandons staging (removed completely),
 closes readers, releases the snapshot and records the registered
-`canonical_backup_failed` event.
+`canonical_backup_failed` event. Each referenced object is at most **100 MiB**
+(`MAXIMUM_OBJECT_SIZE_BYTES`, `src/personal_os/recovery/contracts.py`),
+enforced at both snapshot admission and manifest parse, so the whole-object
+copy buffers at most one bounded object; restore likewise reads each verified
+bundle sidecar into memory once — at most one ≤100 MiB object, held for the
+stream's lifetime — and re-emits it into object storage as bounded 1 MiB
+chunks. Every blocking filesystem step on these coroutine paths — offline
+verification, staging writes, the publish claim, bundle sidecar reads and
+writes — runs in a worker thread (`asyncio.to_thread`), never on the serving
+event loop.
+
+**Failed-operation 0/0 convention.** Every failed create, verification and
+restore records its closed metric with `object_count=0` and `byte_total=0`:
+mid-failure totals are not trustworthy, and the closed metric sink records
+only the failed outcome and bounded duration.
 
 **Offline verification (`backup-verify`).** Touches no PostgreSQL, R2 or
 Temporal port — only the backup root. Steps in the exact order: path-boundary

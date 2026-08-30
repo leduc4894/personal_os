@@ -19,7 +19,10 @@ re-verified before the safe receipt. Events carry only safe scalars, are
 always built and registry-validated, and are delivered to the optional
 composition-provided diagnostics sink; metrics carry only the closed
 operation/outcome enums; no path, key, hash, digest or raw content is ever
-disclosed.
+disclosed. Every blocking filesystem call on these coroutine paths — offline
+verification, staging writes and the publish claim, bundle sidecar reads and
+writes — runs in a worker thread through :func:`asyncio.to_thread`, never on
+the event loop.
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Final, Protocol, runtime_checkable
 from uuid import UUID
 
@@ -288,6 +292,9 @@ class RecoveryService:
             return await self._create_within_gates(command, bundle_id, started)
         except ApplicationError as error:
             duration_seconds = max(time.monotonic() - started, 0.0)
+            # Failed creates deliberately report 0/0: mid-failure totals are
+            # not trustworthy; the closed sink convention records only the
+            # failed outcome and bounded duration.
             self.metrics.record_backup(
                 operation=RecoveryOperation.CREATE,
                 outcome=RecoveryMetricOutcome.FAILED,
@@ -312,7 +319,10 @@ class RecoveryService:
                     ErrorCode.CANONICAL_RECOVERY_CONFIGURATION_INVALID,
                     safe_details={"reason": RecoveryConfigurationReason.SCHEMA_HEAD_MISMATCH},
                 )
-            if self.bundle_store.bundle_exists(bundle_id):
+            # The existence probe is a sync store method by contract; like the
+            # offline verifier it runs in a worker thread so its filesystem
+            # stat never blocks the loop.
+            if await asyncio.to_thread(self.bundle_store.bundle_exists, bundle_id):
                 raise RecoveryError(
                     ErrorCode.CANONICAL_RECOVERY_BUNDLE_EXISTS,
                     safe_details={"bundle_id": bundle_id},
@@ -438,19 +448,23 @@ class RecoveryService:
                 )
                 await writer.write_object(digest_text, bytes(buffer))
             else:
-                with writer.object_path(digest_text).open(mode="xb") as object_file:
-                    while True:
-                        chunk = await reader.read(OBJECT_COPY_CHUNK_SIZE_BYTES)
-                        if not chunk:
-                            break
-                        digest_hasher.update(chunk)
-                        object_file.write(chunk)
-                        copied_bytes += len(chunk)
+                # The port-only fallback buffers the verified chunks before the
+                # single exclusive write: each admitted object is bounded by
+                # MAXIMUM_OBJECT_SIZE_BYTES, and the open plus write run off
+                # the loop in one worker-thread helper.
+                object_chunks: list[bytes] = []
+                while chunk := await reader.read(OBJECT_COPY_CHUNK_SIZE_BYTES):
+                    digest_hasher.update(chunk)
+                    object_chunks.append(chunk)
+                    copied_bytes += len(chunk)
                 _require_verified_copy(
                     digest_hasher.hexdigest(),
                     digest_text,
                     copied_bytes,
                     expected.size_bytes,
+                )
+                await asyncio.to_thread(
+                    _write_port_object_exclusively, writer, digest_text, b"".join(object_chunks)
                 )
         return ManifestObjectEntry(
             content_sha256=digest_text,
@@ -478,9 +492,15 @@ class RecoveryService:
             )
         started = time.monotonic()
         try:
-            manifest = self.bundle_store.verify_offline(command.bundle_id)
+            # The sync offline verifier streams every bundle file digest; it
+            # keeps its sync store signature by contract and runs in a worker
+            # thread so the event loop stays responsive (row 2026-08-15 §9).
+            manifest = await asyncio.to_thread(self.bundle_store.verify_offline, command.bundle_id)
         except ApplicationError as error:
             duration_seconds = max(time.monotonic() - started, 0.0)
+            # Failed verifications deliberately report 0/0: mid-failure totals
+            # are not trustworthy; the closed sink convention records only the
+            # failed outcome and bounded duration.
             self.metrics.record_backup(
                 operation=RecoveryOperation.VERIFY,
                 outcome=RecoveryMetricOutcome.FAILED,
@@ -555,6 +575,9 @@ class RecoveryService:
             )
         except ApplicationError as error:
             duration_seconds = max(time.monotonic() - started, 0.0)
+            # Failed restores deliberately report 0/0: mid-failure totals are
+            # not trustworthy; the closed sink convention records only the
+            # failed outcome and bounded duration.
             self.metrics.record_backup(
                 operation=RecoveryOperation.RESTORE,
                 outcome=RecoveryMetricOutcome.FAILED,
@@ -676,11 +699,17 @@ class RecoveryService:
     async def _stream_bundle_object(
         self, bundle: VerifiedRecoveryBundle, entry: ManifestObjectEntry
     ) -> AsyncIterator[bytes]:
-        """Yield the verified bundle sidecar in bounded 1 MiB chunks."""
+        """Yield the verified bundle sidecar in bounded 1 MiB chunks.
 
-        with bundle.object_path(entry.content_sha256).open(mode="rb") as object_file:
-            while chunk := object_file.read(OBJECT_COPY_CHUNK_SIZE_BYTES):
-                yield chunk
+        The blocking file read runs in one worker-thread helper; the chunked
+        restore path then re-emits the bytes at the bounded chunk size.
+        """
+
+        object_bytes = await asyncio.to_thread(
+            _read_bundle_object_bytes, bundle.object_path(entry.content_sha256)
+        )
+        for offset in range(0, len(object_bytes), OBJECT_COPY_CHUNK_SIZE_BYTES):
+            yield object_bytes[offset : offset + OBJECT_COPY_CHUNK_SIZE_BYTES]
 
     async def _verify_restored_graph(
         self, manifest: RecoveryManifest, restore_target: PostgresqlRestoreTarget
@@ -768,6 +797,31 @@ def _require_verified_copy(
             ErrorCode.CANONICAL_RECOVERY_INTEGRITY_FAILED,
             safe_details={"component": RecoveryComponent.OBJECT_SET},
         )
+
+
+def _write_port_object_exclusively(
+    writer: RecoveryBundleWriter, digest_text: str, object_bytes: bytes
+) -> None:
+    """Create one port-writer object sidecar exclusively and write it once.
+
+    The shard directories behind ``object_path`` and the exclusive file write
+    are blocking filesystem work, so this helper only ever runs inside a
+    worker thread via :func:`asyncio.to_thread`.
+    """
+
+    with writer.object_path(digest_text).open(mode="xb") as object_file:
+        object_file.write(object_bytes)
+
+
+def _read_bundle_object_bytes(object_path: Path) -> bytes:
+    """Read one verified bundle sidecar file in one worker-thread call.
+
+    Only reached for objects that already passed offline verification, so the
+    read is bounded by the admission cap of ``MAXIMUM_OBJECT_SIZE_BYTES``.
+    """
+
+    with object_path.open(mode="rb") as object_file:
+        return object_file.read()
 
 
 def _expected_object_from_entry(entry: ManifestObjectEntry) -> ExpectedObject:

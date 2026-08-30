@@ -715,10 +715,18 @@ async def test_missing_r2_key_restored_via_conditional_store_with_claimed_digest
 
     manifest_entries = harness.manifest.objects
     assert len(harness.object_store.store_stream_calls) == 3
-    for entry, call in zip(manifest_entries, harness.object_store.store_stream_calls, strict=True):
+    # Restores run concurrently, and each streamed read suspends on its
+    # worker-thread file I/O, so calls complete in scheduling order — pair
+    # them by the digest each one claims, never by position.
+    calls_by_claimed_digest = {
+        call.claimed_sha256: call for call in harness.object_store.store_stream_calls
+    }
+    for entry in manifest_entries:
+        call = calls_by_claimed_digest.pop(entry.content_sha256)
         assert call.expected_size_bytes == entry.size_bytes
         assert call.media_type == entry.media_type
         assert call.claimed_sha256 == entry.content_sha256
+    assert calls_by_claimed_digest == {}
     for expected, payload in harness.fixtures:
         digest = expected.content_digest.hexadecimal
         assert harness.object_store.stored_payloads()[digest] == payload

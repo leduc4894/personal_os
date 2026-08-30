@@ -10,9 +10,11 @@ closed without clobbering it. Every failure must surface as a closed-token
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import shutil
+import threading
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -350,6 +352,49 @@ async def test_object_files_land_under_objects_sha256_first2_next2(bundle_root: 
         digest = hashlib.sha256(payload).hexdigest()
         path = final / "objects" / "sha256" / digest[0:2] / digest[2:4] / digest
         assert path.read_bytes() == payload
+
+
+@pytest.mark.asyncio
+async def test_concurrent_object_writes_tolerate_a_lost_shard_ancestor_race(
+    bundle_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concurrent shard creation must tolerate losing the shared mkdir.
+
+    Object copies run at bounded concurrency in worker threads, and every
+    shard path shares the ``objects``/``objects/sha256`` ancestors. The gate
+    holds both creators until each has finished its existence walk, so both
+    attempt the shared ancestor and exactly one ``mkdir`` loses: the loser
+    must accept the sibling's pre-created directory instead of raising a raw
+    ``FileExistsError`` that skips the typed failure surfacing and carries a
+    filesystem path.
+    """
+
+    store = FilesystemRecoveryBundleStore(bundle_root)
+    payloads = (b"race-first-canonical-object", b"race-second-canonical-object")
+
+    async with store.create_staging(_BUNDLE_ID) as writer:
+        staging_writer = cast(Any, writer)
+        shared_objects_ancestor = staging_writer.dump_path.parent / "objects"
+        real_mkdir = os.mkdir
+        creation_gate = threading.Barrier(2)
+
+        def gated_mkdir(
+            path: str | os.PathLike[str], mode: int = 0o777, *, dir_fd: int | None = None
+        ) -> None:
+            if Path(path) == shared_objects_ancestor:
+                creation_gate.wait(timeout=5.0)
+            real_mkdir(path, mode, dir_fd=dir_fd)
+
+        monkeypatch.setattr(os, "mkdir", gated_mkdir)
+        async with asyncio.TaskGroup() as task_group:
+            for payload in payloads:
+                task_group.create_task(
+                    staging_writer.write_object(hashlib.sha256(payload).hexdigest(), payload)
+                )
+
+        for payload in payloads:
+            digest = hashlib.sha256(payload).hexdigest()
+            assert staging_writer.object_path(digest).read_bytes() == payload
 
 
 def test_validate_backup_root_rejects_relative_path() -> None:

@@ -9,10 +9,13 @@ registered verified/failed events plus the closed verify metrics are recorded.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import hashlib
+import time
 from datetime import UTC, datetime
-from typing import cast
+from pathlib import Path
+from typing import Protocol, cast
 from uuid import UUID
 
 import pytest
@@ -20,7 +23,9 @@ import pytest
 from personal_os.diagnostics.events import EventName
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.object_storage import ExpectedObject
+from personal_os.recovery import bundle as bundle_module
 from personal_os.recovery import service as service_module
+from personal_os.recovery.bundle import FilesystemRecoveryBundleStore
 from personal_os.recovery.contracts import (
     CANONICAL_COUNT_TABLES,
     MANIFEST_CONTRACT,
@@ -354,3 +359,99 @@ async def test_failed_event_is_delivered_to_the_bound_diagnostics_sink(
     assert event_fields["operation"] is RecoveryOperation.VERIFY
     assert event_fields["outcome"] is RecoveryMetricOutcome.FAILED
     assert event_fields["error_code"] is ErrorCode.CANONICAL_RECOVERY_BUNDLE_INVALID
+
+
+#: Simulated slow-filesystem delay injected into each digest streaming read.
+_SLOW_FILESYSTEM_SLEEP_SECONDS = 0.05
+
+
+class StagingPayloadWriter(Protocol):
+    """The staging-writer payload surface the bundle builder exercises."""
+
+    async def write_dump(self, dump_bytes: bytes) -> None: ...
+
+    async def write_object(self, content_sha256: str, object_bytes: bytes) -> None: ...
+
+    async def finalize(self, manifest: RecoveryManifest) -> None: ...
+
+
+async def _write_valid_filesystem_bundle(bundle_root: Path) -> None:
+    """Write one complete valid bundle through the real filesystem store."""
+
+    dump_bytes = b"offline verify dump bytes"
+    payload = b"offline verify object bytes"
+    digest = hashlib.sha256(payload).hexdigest()
+    object_key = f"objects/sha256/{digest[0:2]}/{digest[2:4]}/{digest}"
+    manifest = RecoveryManifest(
+        bundle_id=_BUNDLE_ID,
+        created_at=_MANIFEST_CREATED_AT,
+        source_environment=RecoveryEnvironment.TEST.value,
+        postgresql_server_version=POSTGRESQL_SERVER_VERSION,
+        postgresql_schema_revision=POSTGRESQL_SCHEMA_REVISION,
+        postgres_dump=ManifestDumpEntry(
+            relative_path="postgres.dump",
+            size_bytes=len(dump_bytes),
+            sha256=hashlib.sha256(dump_bytes).hexdigest(),
+        ),
+        canonical_counts={table: 1 for table in CANONICAL_COUNT_TABLES},
+        objects=(
+            ManifestObjectEntry(
+                content_sha256=digest,
+                object_key=object_key,
+                size_bytes=len(payload),
+                media_type="application/octet-stream",
+                relative_path=object_key,
+            ),
+        ),
+    )
+    store = FilesystemRecoveryBundleStore(bundle_root)
+    async with store.create_staging(_BUNDLE_ID) as writer:
+        staging_writer = cast(StagingPayloadWriter, writer)
+        await staging_writer.write_dump(dump_bytes)
+        await staging_writer.write_object(digest, payload)
+        await staging_writer.finalize(manifest)
+
+
+def build_filesystem_service(bundle_root: Path) -> RecoveryService:
+    """A verify-bound service over the real filesystem bundle store."""
+
+    return RecoveryService(
+        snapshot_store=RefusingSnapshotStore(),
+        bundle_store=FilesystemRecoveryBundleStore(bundle_root),
+        dump_process=RefusingDumpProcess(),
+        object_store=RefusingObjectStore(),
+        metrics=InMemoryCanonicalBackupMetrics(),
+        clock=lambda: _MANIFEST_CREATED_AT,
+    )
+
+
+@pytest.mark.asyncio
+async def test_offline_verify_does_not_block_the_event_loop(
+    bundle_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Offline verification must leave the event loop responsive (row §9).
+
+    With a simulated slow filesystem — a blocking sleep inside the digest
+    streaming helper — an unrelated side task must complete while the
+    verification is still running; a loop-bound verify would finish first.
+    """
+
+    await _write_valid_filesystem_bundle(bundle_root)
+    original_stream_digest = bundle_module._stream_file_digest
+
+    def slow_stream_digest(path: Path) -> object:
+        time.sleep(_SLOW_FILESYSTEM_SLEEP_SECONDS)
+        return original_stream_digest(path)
+
+    monkeypatch.setattr(bundle_module, "_stream_file_digest", slow_stream_digest)
+    service = build_filesystem_service(bundle_root)
+
+    verify_task = asyncio.create_task(service.verify_bundle(build_command()))
+    side_task = asyncio.create_task(asyncio.sleep(0))
+    await asyncio.wait_for(side_task, timeout=2.0)
+    assert verify_task.done() is False  # the loop stayed responsive
+    result = await verify_task
+
+    assert result.bundle_id == _BUNDLE_ID
+    assert result.object_count == 1
+    assert result.byte_total == len(b"offline verify object bytes")

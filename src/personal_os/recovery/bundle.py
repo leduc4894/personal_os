@@ -10,7 +10,10 @@ Offline verification follows the spec 10 order exactly: boundary, final
 directory type, exact registered tree, sidecar grammar and digest, strict
 manifest parse, dump and object streaming digests in bounded 1 MiB chunks, and
 totals — with changed-file detection via pre/post ``fstat`` identity and
-hard-link aliasing rejected through an inode identity map.
+hard-link aliasing rejected through an inode identity map. Every blocking
+filesystem step on a coroutine path (exclusive writes, directory fsyncs, the
+publish claim and moves, staging removal, offline verification) runs in a
+worker thread through :func:`asyncio.to_thread`, never on the event loop.
 
 POSIX-only behaviors (private permission bits, directory fsync) are guarded by
 ``os.name`` checks; Windows rejects reparse traversal through
@@ -21,6 +24,7 @@ closed reason tokens — never a path, key, hash or raw content.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import secrets
@@ -137,14 +141,35 @@ def _apply_directory_permissions(directory: Path) -> None:
 
 
 def _create_directories_private(directory: Path) -> None:
+    """Create ``directory`` and its missing ancestors with private permissions.
+
+    Safe under concurrent shard creation: object copies run at bounded
+    concurrency in worker threads, and sibling shard paths share ancestors,
+    so another thread can claim one between this walk and its ``mkdir``. An
+    existing real directory is exactly that sibling claim and is tolerated;
+    any other occupant (a symlink, a file) re-raises so the failure stays
+    typed and closed instead of leaking a raw path-carrying ``OSError``.
+    """
+
     missing_directories: list[Path] = []
     current = directory
     while not current.exists():
         missing_directories.append(current)
         current = current.parent
     for missing_directory in reversed(missing_directories):
-        missing_directory.mkdir(mode=DIRECTORY_PERMISSIONS_POSIX)
+        try:
+            missing_directory.mkdir(mode=DIRECTORY_PERMISSIONS_POSIX)
+        except FileExistsError:
+            if missing_directory.is_symlink() or not missing_directory.is_dir():
+                raise
         _apply_directory_permissions(missing_directory)
+
+
+def _create_staging_directory(staging_path: Path) -> None:
+    """Create the unguessable staging directory with private permissions."""
+
+    staging_path.mkdir(mode=DIRECTORY_PERMISSIONS_POSIX)
+    _apply_directory_permissions(staging_path)
 
 
 def _fsync_directory(directory: Path) -> None:
@@ -396,11 +421,16 @@ class _StagingBundleWriter:
         return path
 
     async def write_dump(self, dump_bytes: bytes) -> None:
-        _write_file_exclusively(self.dump_path, dump_bytes)
+        await asyncio.to_thread(_write_file_exclusively, self.dump_path, dump_bytes)
 
     async def write_object(self, content_sha256: str, object_bytes: bytes) -> None:
         if hashlib.sha256(object_bytes).hexdigest() != content_sha256:
             raise ValueError("object bytes do not match the requested content digest")
+        await asyncio.to_thread(self._write_object_file_exclusively, content_sha256, object_bytes)
+
+    def _write_object_file_exclusively(self, content_sha256: str, object_bytes: bytes) -> None:
+        """Shard-path directory creation plus the exclusive write, off the loop."""
+
         _write_file_exclusively(self.object_path(content_sha256), object_bytes)
 
     async def finalize(self, manifest: RecoveryManifest) -> None:
@@ -410,47 +440,57 @@ class _StagingBundleWriter:
             _reject_bundle_invalid(RecoveryBundleInvalidReason.BUNDLE_ID_INVALID)
         final_path = self._root / _canonical_bundle_id_text(self._bundle_id)
         try:
-            manifest_bytes = encode_manifest(manifest)
-            _write_file_exclusively(self._staging_path / _MANIFEST_RELATIVE_PATH, manifest_bytes)
-            sidecar_bytes = f"{manifest_digest(manifest_bytes)}\n".encode("ascii")
-            _write_file_exclusively(self._staging_path / _SIDECAR_RELATIVE_PATH, sidecar_bytes)
-            _fsync_directory(self._staging_path)
-            try:
-                # The exclusive mkdir is the atomic publish claim: it fails
-                # with FileExistsError for ANY pre-existing final path (file,
-                # empty directory or complete bundle) on both POSIX and
-                # Windows — a rename-based publish could silently replace an
-                # empty directory that appears after the admission probe
-                # (spec 8.1).
-                final_path.mkdir(mode=DIRECTORY_PERMISSIONS_POSIX)
-                _apply_directory_permissions(final_path)
-            except FileExistsError as cause:
-                raise RecoveryError(
-                    ErrorCode.CANONICAL_RECOVERY_BUNDLE_EXISTS,
-                    safe_details={"bundle_id": self._bundle_id},
-                ) from cause
-            try:
-                # Every file handle was flushed and fsynced when it was
-                # written, so the same-volume moves below are safe on Windows
-                # as well (spec 8.1); crash consistency beyond that is
-                # deployment-owned.
-                for entry in sorted(self._staging_path.iterdir()):
-                    os.rename(self._staging_path / entry.name, final_path / entry.name)
-                self._staging_path.rmdir()
-                _fsync_directory(self._root)
-            except BaseException:
-                # The claim created this directory, so a failed move phase
-                # removes exactly the partial publication and never touches a
-                # pre-existing final path (none can exist past the claim).
-                shutil.rmtree(final_path, ignore_errors=True)
-                raise
+            await asyncio.to_thread(self._publish_staged_bundle, manifest, final_path)
         except BaseException:
-            self._remove_staging()
+            await asyncio.to_thread(self._remove_staging)
             raise
         self._is_finalized = True
 
+    def _publish_staged_bundle(self, manifest: RecoveryManifest, final_path: Path) -> None:
+        """Write the closing sidecars and publish the claim (spec 8.1).
+
+        Runs entirely in one worker thread: the manifest and sidecar writes,
+        the staging fsync, the exclusive ``mkdir`` claim, the per-entry moves
+        and the root fsync are all blocking filesystem work.
+        """
+
+        manifest_bytes = encode_manifest(manifest)
+        _write_file_exclusively(self._staging_path / _MANIFEST_RELATIVE_PATH, manifest_bytes)
+        sidecar_bytes = f"{manifest_digest(manifest_bytes)}\n".encode("ascii")
+        _write_file_exclusively(self._staging_path / _SIDECAR_RELATIVE_PATH, sidecar_bytes)
+        _fsync_directory(self._staging_path)
+        try:
+            # The exclusive mkdir is the atomic publish claim: it fails
+            # with FileExistsError for ANY pre-existing final path (file,
+            # empty directory or complete bundle) on both POSIX and
+            # Windows — a rename-based publish could silently replace an
+            # empty directory that appears after the admission probe
+            # (spec 8.1).
+            final_path.mkdir(mode=DIRECTORY_PERMISSIONS_POSIX)
+            _apply_directory_permissions(final_path)
+        except FileExistsError as cause:
+            raise RecoveryError(
+                ErrorCode.CANONICAL_RECOVERY_BUNDLE_EXISTS,
+                safe_details={"bundle_id": self._bundle_id},
+            ) from cause
+        try:
+            # Every file handle was flushed and fsynced when it was
+            # written, so the same-volume moves below are safe on Windows
+            # as well (spec 8.1); crash consistency beyond that is
+            # deployment-owned.
+            for entry in sorted(self._staging_path.iterdir()):
+                os.rename(self._staging_path / entry.name, final_path / entry.name)
+            self._staging_path.rmdir()
+            _fsync_directory(self._root)
+        except BaseException:
+            # The claim created this directory, so a failed move phase
+            # removes exactly the partial publication and never touches a
+            # pre-existing final path (none can exist past the claim).
+            shutil.rmtree(final_path, ignore_errors=True)
+            raise
+
     async def abandon(self) -> None:
-        self._remove_staging()
+        await asyncio.to_thread(self._remove_staging)
 
     def _remove_staging(self) -> None:
         if self._is_finalized or self._is_abandoned:
@@ -523,14 +563,13 @@ class FilesystemRecoveryBundleStore:
         self, bundle_id: UUID, bundle_text: str
     ) -> AsyncIterator[_StagingBundleWriter]:
         staging_path = self._root / f"{STAGING_NAME_PREFIX}{bundle_text}-{secrets.token_hex(16)}"
-        staging_path.mkdir(mode=DIRECTORY_PERMISSIONS_POSIX)
-        _apply_directory_permissions(staging_path)
+        await asyncio.to_thread(_create_staging_directory, staging_path)
         writer = _StagingBundleWriter(self._root, bundle_id, staging_path)
         try:
             yield writer
         finally:
             if not writer.is_finalized:
-                writer._remove_staging()
+                await asyncio.to_thread(writer._remove_staging)
 
     def open_verified(self, bundle_id: UUID) -> AbstractAsyncContextManager[VerifiedRecoveryBundle]:
         return self._verified_bundle_context(bundle_id)
@@ -539,7 +578,10 @@ class FilesystemRecoveryBundleStore:
     async def _verified_bundle_context(
         self, bundle_id: UUID
     ) -> AsyncIterator[_VerifiedFilesystemBundle]:
-        manifest = self.verify_offline(bundle_id)
+        # Offline verification streams every bundle file digest; it stays a
+        # synchronous store method by contract and runs in a worker thread so
+        # the restore coroutine never blocks the loop on it.
+        manifest = await asyncio.to_thread(self.verify_offline, bundle_id)
         bundle_directory = self._root / _canonical_bundle_id_text(bundle_id)
         yield _VerifiedFilesystemBundle(
             manifest=manifest,
