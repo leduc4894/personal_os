@@ -1,4 +1,10 @@
-"""Golden and exclusion tests for canonical safe diff hashes."""
+"""Golden and exclusion tests for canonical safe diff hashes.
+
+Fixture digests derive from the design spec's worked examples in
+``tests/fixtures/source_publication/fingerprint_golden.json`` (pinned UUIDs,
+64x'a'/64x'b' content digests); regenerate expectations only from the spec,
+never from the implementation.
+"""
 
 from __future__ import annotations
 

@@ -11,6 +11,11 @@ exposed, stored or logged.
 A safe diff hash summarizes only the content identity transition of a
 publication: source, optional base version, optional base digest and the new
 digest. No title, path or content enters the summary.
+
+Both ``parse`` classmethods share one lowercase-hex64 parser kept local to
+this module; consolidating it with ``object_storage.ContentDigest`` was
+refused by the 2026-08-14 §7 ruling (row-51 precedent: repetition over
+cross-domain abstraction while domains keep closed vocabularies).
 """
 
 from __future__ import annotations
@@ -37,6 +42,17 @@ _DIGEST_HEX_LENGTH: Final[int] = 64
 _HEX_LOWER: Final[frozenset[str]] = frozenset("0123456789abcdef")
 
 
+def _parse_hex64(value: str, *, error_message: str, length: int = _DIGEST_HEX_LENGTH) -> str:
+    """Validate ``value`` as exactly ``length`` lowercase hexadecimal characters.
+
+    Raise ``ValueError`` with ``error_message`` on any deviation, so each
+    caller keeps its contract-specific error text.
+    """
+    if len(value) != length or any(char not in _HEX_LOWER for char in value):
+        raise ValueError(error_message)
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class RequestFingerprint:
     """Lowercase hexadecimal SHA-256 of a canonical request envelope."""
@@ -46,9 +62,12 @@ class RequestFingerprint:
     @classmethod
     def parse(cls, value: str) -> RequestFingerprint:
         """Validate ``value`` as exactly 64 lowercase hexadecimal characters."""
-        if len(value) != _DIGEST_HEX_LENGTH or any(char not in _HEX_LOWER for char in value):
-            raise ValueError("value does not satisfy the canonical fingerprint contract")
-        return cls(value)
+        return cls(
+            _parse_hex64(
+                value,
+                error_message="value does not satisfy the canonical fingerprint contract",
+            )
+        )
 
     def __str__(self) -> str:
         return self.hexadecimal
@@ -63,9 +82,12 @@ class SafeDiffHash:
     @classmethod
     def parse(cls, value: str) -> SafeDiffHash:
         """Validate ``value`` as exactly 64 lowercase hexadecimal characters."""
-        if len(value) != _DIGEST_HEX_LENGTH or any(char not in _HEX_LOWER for char in value):
-            raise ValueError("value does not satisfy the canonical safe diff hash contract")
-        return cls(value)
+        return cls(
+            _parse_hex64(
+                value,
+                error_message="value does not satisfy the canonical safe diff hash contract",
+            )
+        )
 
     def __str__(self) -> str:
         return self.hexadecimal
