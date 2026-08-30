@@ -38,6 +38,11 @@ uv run python tools/canonical_core_operations.py <subcommand>
   30-minute `asyncio.wait_for`; exceeding it exits `75`
   (`recovery_command_timeout`). `pg_dump` and `pg_restore` each carry their own
   10-minute subprocess bound.
+- **Composition hygiene rulings (2026-08-15 §11).** Each compose helper
+  creates its database engine without compose-time disposal — the lazy pool
+  opens no connection until `run()`, whose `finally` disposes it on every
+  executed path — and the `canonical-core-test` Poe task stays standalone
+  instead of joining `poe verify`, which would slow every gate run.
 
 | Exit | Meaning |
 | --- | --- |

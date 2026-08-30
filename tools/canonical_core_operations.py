@@ -723,6 +723,9 @@ def _compose_bootstrap_identity(
         device_kind=invocation.device_kind,
     )
     database_settings, password = _load_database_parts(environ)
+    # The engine opens no connection at compose time (lazy pool); disposal in
+    # run()'s finally covers every executed path — compose-time disposal is
+    # deliberately absent (2026-08-15 §11 ruling).
     engine = _create_database_engine(database_settings, password)
     store = PostgresqlIdentityBootstrapStore(engine)
     service = IdentityBootstrapService(
@@ -763,6 +766,9 @@ def _compose_read_current_source(
     from postgresql_source_store.policy_enforcement import compose_policy_enforcement
 
     database_settings, password = _load_database_parts(environ)
+    # The engine opens no connection at compose time (lazy pool); disposal in
+    # run()'s finally covers every executed path — compose-time disposal is
+    # deliberately absent (2026-08-15 §11 ruling).
     engine = _create_database_engine(database_settings, password)
     policy_verifier = _policy_enforcement_verifier()
     policy_metrics = InMemoryExclusionPolicyMetrics()
@@ -815,6 +821,9 @@ def _compose_backup_create(
     del invocation
     recovery_settings = _load_canonical_recovery_settings(environ)
     database_settings, password = _load_database_parts(environ)
+    # The engine opens no connection at compose time (lazy pool); disposal in
+    # run()'s finally covers every executed path — compose-time disposal is
+    # deliberately absent (2026-08-15 §11 ruling).
     engine = _create_database_engine(database_settings, password)
     snapshot_store = PostgresqlBackupSnapshotStore(engine)
     dump_process = _compose_dump_process(password)
@@ -911,6 +920,9 @@ def _compose_restore_empty(
 
     recovery_settings = _load_canonical_recovery_settings(environ)
     database_settings, password = _load_database_parts(environ)
+    # The engine opens no connection at compose time (lazy pool); disposal in
+    # run()'s finally covers every executed path — compose-time disposal is
+    # deliberately absent (2026-08-15 §11 ruling).
     engine = _create_database_engine(database_settings, password)
     restore_target = PostgresqlRestoreTarget(engine)
     policy_verifier = _policy_enforcement_verifier()
@@ -1375,6 +1387,9 @@ def _compose_phase_one_acceptance(
     recovery_settings = _load_canonical_recovery_settings(environ)
     environment = _recovery_environment(recovery_settings.environment.value, "phase_one_acceptance")
     database_settings, password = _load_database_parts(environ)
+    # The engine opens no connection at compose time (lazy pool); disposal in
+    # run()'s finally covers every executed path — compose-time disposal is
+    # deliberately absent (2026-08-15 §11 ruling).
     engine = _create_database_engine(database_settings, password)
     # The Task 3 deferred sink wiring: the CLI's validating diagnostic logger
     # is bound into the identity store so a drift rejection without a trusted

@@ -183,7 +183,8 @@ default_item_type = "ref"
 
 # Canonical-core acceptance and recovery feature gate: the unit directories of
 # the composed domain services, adapters, runtime configuration and the
-# repository-internal operations CLI.
+# repository-internal operations CLI. Deliberately standalone: composing the
+# focused suite into `verify` would slow every gate run (2026-08-15 §11 ruling).
 [tool.poe.tasks.canonical-core-test]
 cmd = "pytest tests/unit/runtime_configuration tests/unit/identity tests/unit/sources tests/unit/recovery tests/unit/postgresql_source_store tests/unit/tools -q"
 
