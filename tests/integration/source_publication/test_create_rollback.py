@@ -21,6 +21,7 @@ import pytest_asyncio
 import sqlalchemy as sa
 from api_runtime.exclusion_policy_crypto import TrustAnchorEd25519Verifier
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from tests.integration.source_publication.conftest import expected_row_deltas
 
 from personal_os.diagnostics.context import DiagnosticContext, create_diagnostic_context
 from personal_os.error_contracts.codes import ErrorCode
@@ -318,38 +319,7 @@ async def test_returned_invariant_rejection_after_writes_rolls_back_whole_graph(
     assert {
         table_name: counts_after[table_name] - counts_before[table_name]
         for table_name in counts_after
-    } == {
-        "users": 0,
-        "workspaces": 0,
-        "devices": 0,
-        "content_objects": 0,
-        "sources": 0,
-        "source_versions": 0,
-        "sync_events": 0,
-        "projection_intents": 0,
-        "audit_events": 1,
-        "user_credentials": 0,
-        "web_sessions": 0,
-        "totp_credentials": 0,
-        "totp_recovery_codes": 0,
-        "device_token_families": 0,
-        "device_tokens": 0,
-        "device_authorization_grants": 0,
-        "authentication_throttle_buckets": 0,
-        "workspace_policy_state": 0,
-        "policy_drafts": 0,
-        "policy_draft_rules": 0,
-        "source_policies": 0,
-        "policy_rules": 0,
-        "policy_previews": 0,
-        "policy_preview_results": 0,
-        "policy_evaluations": 0,
-        "policy_signing_keys": 0,
-        "policy_keysets": 0,
-        "policy_keyset_signatures": 0,
-        "policy_reconciliation_intents": 0,
-        "small_file_upload_operations": 0,
-    }
+    } == expected_row_deltas(audit_events=1)
     assert not await _source_exists(fault_engine, command.source_id)
     rejection_audits = await preflight_harness.rejection_audit_rows(
         workspace_id=workspace.workspace_id

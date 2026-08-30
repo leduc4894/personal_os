@@ -215,7 +215,6 @@ async def test_lost_commit_acknowledgement_resolves_committed_replay_on_new_conn
 
     result = await store.commit_update(command, fingerprint, receipt, _diagnostic_context())
 
-    assert store._acknowledgement_lost_once is True
     assert result.outcome is not None
     assert result.source_id == command.source_id
     assert result.content_version == 2
@@ -227,6 +226,16 @@ async def test_lost_commit_acknowledgement_resolves_committed_replay_on_new_conn
     assert replay == result
     assert await _count_events(ambiguity_engine, command.event_id) == 1
     assert await preflight_harness.rejection_audit_rows(workspace_id=workspace.workspace_id) == []
+
+    # The lost acknowledgement is asserted through its replay-visible state,
+    # not the store's private one-shot flag: the same fault-injected store now
+    # acknowledges the exact retry directly with the committed replay (the
+    # simulated loss is spent) and adds no second event.
+    acknowledged_retry = await store.commit_update(
+        command, fingerprint, receipt, _diagnostic_context()
+    )
+    assert acknowledged_retry == result
+    assert await _count_events(ambiguity_engine, command.event_id) == 1
 
 
 @pytest.mark.asyncio

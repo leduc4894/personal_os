@@ -82,12 +82,15 @@ FORBIDDEN_DECORATOR_ATTRS: Final[frozenset[str]] = frozenset(
 )
 
 #: Source-publication endpoint vocabulary that must never appear on a surface.
+#: The route fragments are route-shaped (``/api/...``): only an
+#: endpoint-shaped declaration trips the scan, while prose uses of
+#: ``publication`` or a bare ``/sources`` mention cannot.
 PUBLICATION_ENDPOINT_TOKENS: Final[tuple[str, ...]] = (
     "source-version",
     "source_version",
     "sourceVersion",
-    "publication",
-    "/sources",
+    "/api/publications",
+    "/api/sources",
 )
 
 #: Exact line markers for separately designed public surfaces. Exclusion-policy
@@ -366,7 +369,7 @@ def test_lifecycle_route_line_masking_is_exact() -> None:
         token
         for token in PUBLICATION_ENDPOINT_TOKENS
         if token in _masked_sanctioned_surface_lines(near_miss)
-    ] == ["publication", "/sources"]
+    ] == ["/api/sources"]
 
 
 def _rendered_endpoint_surface(parsed: object) -> str:

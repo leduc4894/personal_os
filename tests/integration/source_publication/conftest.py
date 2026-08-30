@@ -246,11 +246,27 @@ class SeededVersion:
 
 
 class PreflightHarness:
-    """Seed and inspection helpers bound to one test's engine and store."""
+    """Seed and inspection helpers bound to one test's engine and store.
+
+    House pattern for behavior injection in these modules: a test subclasses
+    the store (or builds a sibling harness) and overrides one ``_*`` hook,
+    delegating through ``super()`` — see ``_HangingIntentStore`` overriding
+    ``_insert_projection_intent`` in ``test_cancellation.py`` and
+    ``_LostAcknowledgementStore`` overriding ``_commit_update_once`` in
+    ``test_ambiguous_commit.py``. Cross-object private reaches (``harness._engine``,
+    ``store._flag``) are not the pattern: the harness exposes its engine
+    through the ``engine`` property below for composition into sibling
+    harnesses, and one-shot fault injection stays private to the subclass
+    that owns it and is asserted through replay-visible behavior.
+    """
 
     def __init__(self, engine: AsyncEngine, store: PostgresqlSourcePublicationStore) -> None:
         self._engine = engine
         self._store = store
+
+    @property
+    def engine(self) -> AsyncEngine:
+        return self._engine
 
     @property
     def store(self) -> PostgresqlSourcePublicationStore:
@@ -507,4 +523,24 @@ async def preflight_harness(
         await dispose_source_store_engine(engine)
 
 
-__all__ = ["PreflightHarness", "SeededVersion", "SeededWorkspace", "preflight_harness"]
+def expected_row_deltas(**nonzero_deltas: int) -> dict[str, int]:
+    """Zero delta for every registry table, overridden by the nonzero ones.
+
+    Row-count expectations derive their key set from ``SOURCE_STORE_TABLES``
+    so they stay exhaustive over the whole migrated registry without
+    hand-copied literals drifting stale whenever a later migration adds a
+    table (every unmentioned table is asserted unchanged). A misspelled
+    override key adds an extra key the row counts never carry, so typos fail
+    loudly instead of silently asserting zero.
+    """
+
+    return {table_name: 0 for table_name in SOURCE_STORE_TABLES} | nonzero_deltas
+
+
+__all__ = [
+    "PreflightHarness",
+    "SeededVersion",
+    "SeededWorkspace",
+    "expected_row_deltas",
+    "preflight_harness",
+]

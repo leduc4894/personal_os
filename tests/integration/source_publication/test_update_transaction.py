@@ -23,6 +23,7 @@ import pytest_asyncio
 import sqlalchemy as sa
 from api_runtime.exclusion_policy_crypto import TrustAnchorEd25519Verifier
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from tests.integration.source_publication.conftest import expected_row_deltas
 
 from personal_os.diagnostics.context import DiagnosticContext, create_diagnostic_context
 from personal_os.error_contracts.codes import ErrorCode
@@ -248,38 +249,7 @@ def _row_deltas(counts_before: dict, counts_after: dict) -> dict[str, int]:
 
 
 def _assert_only_one_rejection_audit_was_added(counts_before: dict, counts_after: dict) -> None:
-    assert _row_deltas(counts_before, counts_after) == {
-        "users": 0,
-        "workspaces": 0,
-        "devices": 0,
-        "content_objects": 0,
-        "sources": 0,
-        "source_versions": 0,
-        "sync_events": 0,
-        "projection_intents": 0,
-        "audit_events": 1,
-        "user_credentials": 0,
-        "web_sessions": 0,
-        "totp_credentials": 0,
-        "totp_recovery_codes": 0,
-        "device_token_families": 0,
-        "device_tokens": 0,
-        "device_authorization_grants": 0,
-        "authentication_throttle_buckets": 0,
-        "workspace_policy_state": 0,
-        "policy_drafts": 0,
-        "policy_draft_rules": 0,
-        "source_policies": 0,
-        "policy_rules": 0,
-        "policy_previews": 0,
-        "policy_preview_results": 0,
-        "policy_evaluations": 0,
-        "policy_signing_keys": 0,
-        "policy_keysets": 0,
-        "policy_keyset_signatures": 0,
-        "policy_reconciliation_intents": 0,
-        "small_file_upload_operations": 0,
-    }
+    assert _row_deltas(counts_before, counts_after) == expected_row_deltas(audit_events=1)
 
 
 async def _seed_committed_source(harness, workspace, salt: str):
@@ -324,38 +294,15 @@ async def test_changed_update_commits_next_ordinal_graph(preflight_harness, upda
     assert result.content_digest.hexadecimal == _receipt(update_salt).content_digest.hexadecimal
     assert result.committed_at.tzinfo is not None
 
-    assert _row_deltas(counts_before, await preflight_harness.table_row_counts()) == {
-        "users": 0,
-        "workspaces": 0,
-        "devices": 0,
-        "content_objects": 1,
-        "sources": 0,
-        "source_versions": 1,
-        "sync_events": 1,
-        "projection_intents": 2,
-        "audit_events": 1,
-        "user_credentials": 0,
-        "web_sessions": 0,
-        "totp_credentials": 0,
-        "totp_recovery_codes": 0,
-        "device_token_families": 0,
-        "device_tokens": 0,
-        "device_authorization_grants": 0,
-        "authentication_throttle_buckets": 0,
-        "workspace_policy_state": 0,
-        "policy_drafts": 0,
-        "policy_draft_rules": 0,
-        "source_policies": 0,
-        "policy_rules": 0,
-        "policy_previews": 0,
-        "policy_preview_results": 0,
-        "policy_evaluations": 0,
-        "policy_signing_keys": 0,
-        "policy_keysets": 0,
-        "policy_keyset_signatures": 0,
-        "policy_reconciliation_intents": 0,
-        "small_file_upload_operations": 0,
-    }
+    assert _row_deltas(counts_before, await preflight_harness.table_row_counts()) == (
+        expected_row_deltas(
+            content_objects=1,
+            source_versions=1,
+            sync_events=1,
+            projection_intents=2,
+            audit_events=1,
+        )
+    )
 
     source_row = await _fetch_source_row(update_engine, first.source_id)
     assert source_row.source_type == "markdown"
@@ -472,38 +419,9 @@ async def test_no_change_update_writes_only_event_and_audit(
     assert result.event_sequence > first.event_sequence
     assert result.committed_at.tzinfo is not None
 
-    assert _row_deltas(counts_before, await preflight_harness.table_row_counts()) == {
-        "users": 0,
-        "workspaces": 0,
-        "devices": 0,
-        "content_objects": 0,
-        "sources": 0,
-        "source_versions": 0,
-        "sync_events": 1,
-        "projection_intents": 0,
-        "audit_events": 1,
-        "user_credentials": 0,
-        "web_sessions": 0,
-        "totp_credentials": 0,
-        "totp_recovery_codes": 0,
-        "device_token_families": 0,
-        "device_tokens": 0,
-        "device_authorization_grants": 0,
-        "authentication_throttle_buckets": 0,
-        "workspace_policy_state": 0,
-        "policy_drafts": 0,
-        "policy_draft_rules": 0,
-        "source_policies": 0,
-        "policy_rules": 0,
-        "policy_previews": 0,
-        "policy_preview_results": 0,
-        "policy_evaluations": 0,
-        "policy_signing_keys": 0,
-        "policy_keysets": 0,
-        "policy_keyset_signatures": 0,
-        "policy_reconciliation_intents": 0,
-        "small_file_upload_operations": 0,
-    }
+    assert _row_deltas(counts_before, await preflight_harness.table_row_counts()) == (
+        expected_row_deltas(sync_events=1, audit_events=1)
+    )
     assert await preflight_harness.fetch_source_updated_at(first.source_id) == updated_at_before
     source_row = await _fetch_source_row(update_engine, first.source_id)
     assert source_row.current_version_id == first.source_version_id

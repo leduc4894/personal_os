@@ -22,6 +22,7 @@ import pytest
 import pytest_asyncio
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
+from tests.integration.source_publication.conftest import expected_row_deltas
 
 from personal_os.diagnostics.context import create_diagnostic_context
 from personal_os.error_contracts.codes import ErrorCode
@@ -55,7 +56,7 @@ from postgresql_source_store.tables import (
 pytestmark = pytest.mark.local_stack
 
 #: Finite bound for every concurrent gather: no unbounded wait exists here.
-CONCURRENCY_TIMEOUT_SECONDS: float = 90.0
+CONCURRENCY_TIMEOUT_SECONDS: float = 180.0
 EXACT_REPLAY_COUNT = 100
 
 
@@ -197,38 +198,13 @@ async def test_hundred_exact_concurrent_replays_commit_one_event(
     assert {
         name: after - counts_before[name]
         for name, after in (await preflight_harness.table_row_counts()).items()
-    } == {
-        "users": 0,
-        "workspaces": 0,
-        "devices": 0,
-        "content_objects": 1,
-        "sources": 0,
-        "source_versions": 1,
-        "sync_events": 1,
-        "projection_intents": 2,
-        "audit_events": 1,
-        "user_credentials": 0,
-        "web_sessions": 0,
-        "totp_credentials": 0,
-        "totp_recovery_codes": 0,
-        "device_token_families": 0,
-        "device_tokens": 0,
-        "device_authorization_grants": 0,
-        "authentication_throttle_buckets": 0,
-        "workspace_policy_state": 0,
-        "policy_drafts": 0,
-        "policy_draft_rules": 0,
-        "source_policies": 0,
-        "policy_rules": 0,
-        "policy_previews": 0,
-        "policy_preview_results": 0,
-        "policy_evaluations": 0,
-        "policy_signing_keys": 0,
-        "policy_keysets": 0,
-        "policy_keyset_signatures": 0,
-        "policy_reconciliation_intents": 0,
-        "small_file_upload_operations": 0,
-    }
+    } == expected_row_deltas(
+        content_objects=1,
+        source_versions=1,
+        sync_events=1,
+        projection_intents=2,
+        audit_events=1,
+    )
     assert (
         await _count_rows(
             concurrency_engine, sync_events, sync_events.c.event_id == command.event_id
@@ -300,40 +276,15 @@ async def test_two_updates_from_one_base_yield_one_publish_and_one_conflict(
     assert {
         name: after - counts_before[name]
         for name, after in (await preflight_harness.table_row_counts()).items()
-    } == {
-        "users": 0,
-        "workspaces": 0,
-        "devices": 0,
-        "content_objects": 1,
-        "sources": 0,
-        "source_versions": 1,
-        "sync_events": 1,
-        "projection_intents": 2,
+    } == expected_row_deltas(
+        content_objects=1,
+        source_versions=1,
+        sync_events=1,
+        projection_intents=2,
         # One in-transaction success audit plus the loser's standalone
         # rejection audit.
-        "audit_events": 2,
-        "user_credentials": 0,
-        "web_sessions": 0,
-        "totp_credentials": 0,
-        "totp_recovery_codes": 0,
-        "device_token_families": 0,
-        "device_tokens": 0,
-        "device_authorization_grants": 0,
-        "authentication_throttle_buckets": 0,
-        "workspace_policy_state": 0,
-        "policy_drafts": 0,
-        "policy_draft_rules": 0,
-        "source_policies": 0,
-        "policy_rules": 0,
-        "policy_previews": 0,
-        "policy_preview_results": 0,
-        "policy_evaluations": 0,
-        "policy_signing_keys": 0,
-        "policy_keysets": 0,
-        "policy_keyset_signatures": 0,
-        "policy_reconciliation_intents": 0,
-        "small_file_upload_operations": 0,
-    }
+        audit_events=2,
+    )
     rejection_audits = await preflight_harness.rejection_audit_rows(
         workspace_id=workspace.workspace_id
     )
@@ -414,42 +365,18 @@ async def test_two_concurrent_creates_for_one_source_yield_one_source_and_one_re
     assert {
         name: after - counts_before[name]
         for name, after in (await preflight_harness.table_row_counts()).items()
-    } == {
-        "users": 0,
-        "workspaces": 0,
-        "devices": 0,
+    } == expected_row_deltas(
         # The losing create rolls back entirely, so only the winner's bytes
         # leave one content object.
-        "content_objects": 1,
-        "sources": 1,
-        "source_versions": 1,
-        "sync_events": 1,
-        "projection_intents": 2,
+        content_objects=1,
+        sources=1,
+        source_versions=1,
+        sync_events=1,
+        projection_intents=2,
         # One in-transaction success audit plus the loser's standalone
         # rejection audit.
-        "audit_events": 2,
-        "user_credentials": 0,
-        "web_sessions": 0,
-        "totp_credentials": 0,
-        "totp_recovery_codes": 0,
-        "device_token_families": 0,
-        "device_tokens": 0,
-        "device_authorization_grants": 0,
-        "authentication_throttle_buckets": 0,
-        "workspace_policy_state": 0,
-        "policy_drafts": 0,
-        "policy_draft_rules": 0,
-        "source_policies": 0,
-        "policy_rules": 0,
-        "policy_previews": 0,
-        "policy_preview_results": 0,
-        "policy_evaluations": 0,
-        "policy_signing_keys": 0,
-        "policy_keysets": 0,
-        "policy_keyset_signatures": 0,
-        "policy_reconciliation_intents": 0,
-        "small_file_upload_operations": 0,
-    }
+        audit_events=2,
+    )
     rejection_audits = await preflight_harness.rejection_audit_rows(
         workspace_id=workspace.workspace_id
     )

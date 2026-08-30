@@ -22,9 +22,12 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 
 from postgresql_source_store.settings import (
     CONNECT_TIMEOUT_SECONDS,
+    IDLE_IN_TRANSACTION_SESSION_TIMEOUT_SECONDS,
+    LOCK_TIMEOUT_SECONDS,
     MAX_POOL_OVERFLOW,
     POOL_SIZE,
     POOL_TIMEOUT_SECONDS,
+    STATEMENT_TIMEOUT_SECONDS,
     DatabaseRuntimeSettings,
 )
 
@@ -38,10 +41,15 @@ TRANSACTION_ISOLATION_LEVEL: Final[str] = "READ COMMITTED"
 #: Applied immediately after each ``READ COMMITTED`` begin via
 #: :func:`apply_transaction_bounds`. ``SET LOCAL`` scopes the timeouts to the
 #: current transaction only, so pooled connections carry no residual state.
+#: The milliseconds derive from the pinned settings constants (5/15/30
+#: seconds) — the literals are computed, never duplicated.
 TRANSACTION_BOUND_STATEMENTS: Final[tuple[str, ...]] = (
-    "SET LOCAL lock_timeout = '5000ms'",
-    "SET LOCAL statement_timeout = '15000ms'",
-    "SET LOCAL idle_in_transaction_session_timeout = '30000ms'",
+    f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT_SECONDS * 1000}ms'",
+    f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT_SECONDS * 1000}ms'",
+    (
+        "SET LOCAL idle_in_transaction_session_timeout = "
+        f"'{IDLE_IN_TRANSACTION_SESSION_TIMEOUT_SECONDS * 1000}ms'"
+    ),
 )
 
 

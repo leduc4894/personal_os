@@ -122,16 +122,16 @@ class _HangingIntentStore(PostgresqlSourcePublicationStore):
         )
 
 
-async def _await_pool_checked_in(engine: AsyncEngine) -> str:
-    """Poll the pool status until the cancelled checkout is returned (bounded)."""
+async def _await_pool_checked_in(engine: AsyncEngine) -> int:
+    """Poll the numeric checkout count until the cancelled checkout is returned (bounded)."""
     deadline = asyncio.get_running_loop().time() + POOL_SETTLE_TIMEOUT_SECONDS
-    status = engine.pool.status()
-    while "Checked out connections: 0" not in status:
+    checked_out = engine.pool.checkedout()
+    while checked_out != 0:
         if asyncio.get_running_loop().time() >= deadline:
             break
         await asyncio.sleep(0.05)
-        status = engine.pool.status()
-    return status
+        checked_out = engine.pool.checkedout()
+    return checked_out
 
 
 @pytest.mark.asyncio
@@ -188,8 +188,8 @@ async def test_cancellation_releases_locks_and_pool_checkout(
     # The cancelled transaction rolled back completely.
     assert await preflight_harness.table_row_counts() == counts_before
     assert await preflight_harness.rejection_audit_rows(workspace_id=workspace.workspace_id) == []
-    status = await _await_pool_checked_in(cancellation_engine)
-    assert "Checked out connections: 0" in status, status
+    checked_out = await _await_pool_checked_in(cancellation_engine)
+    assert checked_out == 0
 
     # The exact same event and key publish on the released locks and pool.
     retried = await asyncio.wait_for(
@@ -213,4 +213,4 @@ async def test_cancellation_releases_locks_and_pool_checkout(
             )
         ).scalar_one()
     assert pointer == retried.source_version_id
-    assert "Checked out connections: 0" in cancellation_engine.pool.status()
+    assert cancellation_engine.pool.checkedout() == 0

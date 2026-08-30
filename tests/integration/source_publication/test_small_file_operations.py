@@ -204,7 +204,7 @@ class SmallFileOperationHarness:
 async def small_file_harness(
     preflight_harness: PreflightHarness,
 ) -> SmallFileOperationHarness:
-    return SmallFileOperationHarness(preflight_harness._engine)
+    return SmallFileOperationHarness(preflight_harness.engine)
 
 
 @pytest_asyncio.fixture
@@ -569,7 +569,13 @@ async def test_create_reservation_persists_initial_locator_evidence(
 async def test_update_reservation_records_no_locator_evidence(
     small_file_harness: SmallFileOperationHarness, seeded_workspace: object
 ) -> None:
-    """Update rows leave the locator columns NULL — they never carried one."""
+    """Update rows keep the raw locator NULL and persist only its digest.
+
+    An update's locator is preflight policy evidence only: the reservation
+    persists just the one-way digest — the declared locator's replay identity —
+    and binds the raw column to NULL (the documented update-retry contract in
+    ``small_file_sync_operations.py``).
+    """
 
     harness = small_file_harness
     source_id = uuid4()
@@ -587,7 +593,7 @@ async def test_update_reservation_records_no_locator_evidence(
     row = await harness.operation_row(preflight.event_id)
     assert row is not None
     assert row["normalized_locator"] is None
-    assert row["locator_fingerprint"] is None
+    assert row["locator_fingerprint"] == compute_locator_fingerprint(preflight.normalized_locator)
 
 
 @pytest.mark.asyncio
@@ -636,6 +642,8 @@ async def test_pre_migration_null_locator_rows_remain_readable(
     # the locator or its digest, so the receive binding carries the canonical
     # post-terminal shape — both locator fields are null, every immutable
     # identity field stays populated so the row stays readable for replay.
+    # The durable operation identity lives on the row and the bound operation
+    # (``SmallFileUploadOperation`` itself carries only the opaque token).
     bound = await harness.store.resolve_bound_operation(
         operation.operation_token,
         harness.device_context(seeded_workspace),
@@ -643,7 +651,7 @@ async def test_pre_migration_null_locator_rows_remain_readable(
     )
     assert bound.normalized_locator is None
     assert bound.locator_fingerprint is None
-    assert bound.operation_id == operation.operation_id
+    assert bound.operation_id == row["operation_id"]
     assert bound.workspace_id == harness.device_context(seeded_workspace).workspace_id
     assert bound.device_id == harness.device_context(seeded_workspace).device_id
     assert bound.event_id == preflight.event_id

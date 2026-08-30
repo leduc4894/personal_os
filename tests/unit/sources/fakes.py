@@ -20,7 +20,7 @@ import hashlib
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Final
 from uuid import UUID, uuid4
 
@@ -71,9 +71,6 @@ OBJECT_STORE_RESOLVE: Final[str] = "object_store.resolve_verified_object"
 OBJECT_STORE_STORE_STREAM: Final[str] = "object_store.store_stream"
 POLICY_GUARD_PUBLICATION: Final[str] = "policy_guard.authorize_publication"
 POLICY_GUARD_READ: Final[str] = "policy_guard.authorize_read"
-
-#: The maximum allowed receipt age from spec section 5.3 (five minutes).
-MAXIMUM_RECEIPT_AGE: Final[timedelta] = timedelta(minutes=5)
 
 _CANONICAL_BYTES: Final[bytes] = b"canonical publication bytes"
 

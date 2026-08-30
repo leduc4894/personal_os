@@ -191,6 +191,7 @@ async def test_exact_no_change_update_replay_hydrates_no_change_outcome(
         committed_version_id=version_one.source_version_id,
         base_version_id=version_one.source_version_id,
     )
+    counts_before = await preflight_harness.table_row_counts()
 
     result = await preflight_harness.store.resolve_committed(
         no_change_command, no_change_fingerprint, _diagnostic_context()
@@ -202,6 +203,7 @@ async def test_exact_no_change_update_replay_hydrates_no_change_outcome(
     assert result.content_version == 1
     assert result.event_sequence == event_sequence
     assert result.committed_at == committed_at
+    assert await preflight_harness.table_row_counts() == counts_before
 
 
 @pytest.mark.asyncio
@@ -242,6 +244,7 @@ async def test_exact_changed_update_replay_hydrates_published_outcome(
         committed_version_id=version_two.source_version_id,
         base_version_id=version_one.source_version_id,
     )
+    counts_before = await preflight_harness.table_row_counts()
 
     result = await preflight_harness.store.resolve_committed(
         update_command, update_fingerprint, _diagnostic_context()
@@ -253,6 +256,7 @@ async def test_exact_changed_update_replay_hydrates_published_outcome(
     assert result.content_version == 2
     assert result.event_sequence == event_sequence
     assert result.committed_at == committed_at
+    assert await preflight_harness.table_row_counts() == counts_before
 
 
 @pytest.mark.asyncio
@@ -422,11 +426,13 @@ async def test_invalid_actor_rejection_after_trust_writes_actor_invalid_audit(
         await preflight_harness.store.resolve_committed(command, fingerprint, _diagnostic_context())
 
     assert captured.value.error_code is ErrorCode.SOURCE_PUBLISH_INPUT_INVALID
-    assert captured.value.safe_details.get("reason") is not None
+    assert str(captured.value.safe_details["reason"]) == "actor_invalid"
     audits = await preflight_harness.rejection_audit_rows(workspace_id=workspace.workspace_id)
     assert len(audits) == 1
     assert audits[0].reason_code == "actor_invalid"
     assert audits[0].actor_kind == actor.actor_kind.value
+    assert audits[0].workspace_id == workspace.workspace_id
+    assert audits[0].target_id == command.source_id
 
 
 @pytest.mark.asyncio

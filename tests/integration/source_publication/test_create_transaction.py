@@ -24,6 +24,7 @@ import pytest
 import pytest_asyncio
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
+from tests.integration.source_publication.conftest import expected_row_deltas
 
 from personal_os.diagnostics.context import create_diagnostic_context
 from personal_os.error_contracts.codes import ErrorCode
@@ -241,38 +242,7 @@ def _assert_only_one_rejection_audit_was_added(counts_before: dict, counts_after
     assert {
         table_name: counts_after[table_name] - counts_before[table_name]
         for table_name in counts_after
-    } == {
-        "users": 0,
-        "workspaces": 0,
-        "devices": 0,
-        "content_objects": 0,
-        "sources": 0,
-        "source_versions": 0,
-        "sync_events": 0,
-        "projection_intents": 0,
-        "audit_events": 1,
-        "user_credentials": 0,
-        "web_sessions": 0,
-        "totp_credentials": 0,
-        "totp_recovery_codes": 0,
-        "device_token_families": 0,
-        "device_tokens": 0,
-        "device_authorization_grants": 0,
-        "authentication_throttle_buckets": 0,
-        "workspace_policy_state": 0,
-        "policy_drafts": 0,
-        "policy_draft_rules": 0,
-        "source_policies": 0,
-        "policy_rules": 0,
-        "policy_previews": 0,
-        "policy_preview_results": 0,
-        "policy_evaluations": 0,
-        "policy_signing_keys": 0,
-        "policy_keysets": 0,
-        "policy_keyset_signatures": 0,
-        "policy_reconciliation_intents": 0,
-        "small_file_upload_operations": 0,
-    }
+    } == expected_row_deltas(audit_events=1)
 
 
 # --- exact canonical create graph -------------------------------------------------
@@ -311,38 +281,14 @@ async def test_create_commits_exact_canonical_graph(
     assert {
         table_name: counts_after[table_name] - counts_before[table_name]
         for table_name in counts_after
-    } == {
-        "users": 0,
-        "workspaces": 0,
-        "devices": 0,
-        "content_objects": 1,
-        "sources": 1,
-        "source_versions": 1,
-        "sync_events": 1,
-        "projection_intents": 2,
-        "audit_events": 1,
-        "user_credentials": 0,
-        "web_sessions": 0,
-        "totp_credentials": 0,
-        "totp_recovery_codes": 0,
-        "device_token_families": 0,
-        "device_tokens": 0,
-        "device_authorization_grants": 0,
-        "authentication_throttle_buckets": 0,
-        "workspace_policy_state": 0,
-        "policy_drafts": 0,
-        "policy_draft_rules": 0,
-        "source_policies": 0,
-        "policy_rules": 0,
-        "policy_previews": 0,
-        "policy_preview_results": 0,
-        "policy_evaluations": 0,
-        "policy_signing_keys": 0,
-        "policy_keysets": 0,
-        "policy_keyset_signatures": 0,
-        "policy_reconciliation_intents": 0,
-        "small_file_upload_operations": 0,
-    }
+    } == expected_row_deltas(
+        content_objects=1,
+        sources=1,
+        source_versions=1,
+        sync_events=1,
+        projection_intents=2,
+        audit_events=1,
+    )
 
     source_row = await _fetch_source_row(inspection_engine, command.source_id)
     assert source_row.workspace_id == workspace.workspace_id

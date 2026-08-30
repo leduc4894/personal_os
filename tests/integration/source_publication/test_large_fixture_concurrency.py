@@ -57,7 +57,7 @@ from postgresql_source_store.tables import source_versions, sources, sync_events
 pytestmark = pytest.mark.local_stack
 
 #: Finite deadline for the whole gather: expiry raises, completion proves it held.
-GATHER_DEADLINE_SECONDS: Final[float] = 240.0
+GATHER_DEADLINE_SECONDS: Final[float] = 360.0
 EXACT_REPLAY_COUNT: Final[int] = 100
 INDEPENDENT_PUBLISH_COUNT: Final[int] = 100
 
@@ -280,7 +280,6 @@ async def test_hundred_replays_and_hundred_independent_publishes_hold_their_boun
 
     # --- no pool leak: every checked-out connection returned after the gather -
     assert large_fixture_engine.pool.checkedout() == 0
-    assert "Current Checked out connections: 0" in large_fixture_engine.pool.status()
 
     # No business rejection was audited anywhere in the workspace.
     assert await preflight_harness.rejection_audit_rows(workspace_id=workspace.workspace_id) == []

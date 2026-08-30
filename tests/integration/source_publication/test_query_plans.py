@@ -75,31 +75,40 @@ EXPECTED_INDEX_BY_QUERY: Final[dict[str, frozenset[str]]] = {
 }
 
 
-def _approved_index_names() -> frozenset[str]:
-    """Derive the approved index set from the baseline migration source.
+def _approved_index_names_from_source(source: str) -> frozenset[str]:
+    """Derive the approved index set from baseline-migration source text.
 
     ``op.create_index`` first arguments plus the named primary-key and unique
     constraints (whose backing indexes carry the constraint name in
     PostgreSQL) are exactly the indexes migration ``20260813_01`` created.
+    The helper is a pure function of its source text so its name-shape
+    contract can be pinned without the disposable stack.
     """
 
-    tree = ast.parse(_BASELINE_MIGRATION.read_text(encoding="utf-8"))
+    tree = ast.parse(source)
     names: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
-        if (
-            node.func.attr == "create_index"
-            and node.args
-            and isinstance(node.args[0], ast.Constant)
-        ):
+        if node.func.attr == "create_index":
+            if not node.args or not isinstance(node.args[0], ast.Constant):
+                raise ValueError("unsupported index-name shape in baseline migration")
             names.add(str(node.args[0].value))
         elif node.func.attr in {"PrimaryKeyConstraint", "UniqueConstraint"}:
             for keyword in node.keywords:
-                if keyword.arg == "name" and isinstance(keyword.value, ast.Constant):
-                    names.add(str(keyword.value.value))
+                if keyword.arg != "name":
+                    continue
+                if not isinstance(keyword.value, ast.Constant):
+                    raise ValueError("unsupported index-name shape in baseline migration")
+                names.add(str(keyword.value.value))
     assert names, "the baseline migration must declare named indexes and constraints"
     return frozenset(names)
+
+
+def _approved_index_names() -> frozenset[str]:
+    """Derive the approved index set from the baseline migration file."""
+
+    return _approved_index_names_from_source(_BASELINE_MIGRATION.read_text(encoding="utf-8"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,10 +346,12 @@ def _index_names(payload: list[dict[str, Any]]) -> set[str]:
 
 
 def _sequential_scan_relations(payload: list[dict[str, Any]]) -> list[str]:
+    # ``endswith`` also flags the parallel variants (``Parallel Seq Scan``),
+    # which PostgreSQL reports as their own node types beside ``Seq Scan``.
     return [
         str(node["Relation Name"])
         for node in _plan_nodes(payload)
-        if node.get("Node Type") == "Seq Scan" and node.get("Relation Name")
+        if str(node["Node Type"]).endswith("Seq Scan") and node.get("Relation Name")
     ]
 
 

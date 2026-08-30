@@ -19,6 +19,7 @@ from personal_os.error_contracts.codes import ErrorCode
 from personal_os.error_contracts.exceptions import ConfigurationError, SecretFileError
 from personal_os.runtime_configuration.environment_names import DATABASE_ENVIRONMENT_NAMES
 from personal_os.runtime_configuration.models import RuntimeEnvironment
+from postgresql_source_store.engine import TRANSACTION_BOUND_STATEMENTS
 from postgresql_source_store.settings import (
     CONNECT_TIMEOUT_SECONDS,
     DATABASE_RUNTIME_ENVIRONMENT_FIELDS,
@@ -220,6 +221,24 @@ def test_pool_and_timeout_bounds_are_pinned() -> None:
     assert LOCK_TIMEOUT_SECONDS == 5
     assert STATEMENT_TIMEOUT_SECONDS == 15
     assert IDLE_IN_TRANSACTION_SESSION_TIMEOUT_SECONDS == 30
+
+
+def test_transaction_bound_statements_derive_from_the_pinned_timeouts() -> None:
+    """The engine owns no timeout literals of its own.
+
+    ``TRANSACTION_BOUND_STATEMENTS`` must be computed from exactly the pinned
+    settings constants imported above, so no second, drifting copy of the
+    5/15/30-second bounds can exist.
+    """
+
+    assert (
+        f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT_SECONDS * 1000}ms'",
+        f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT_SECONDS * 1000}ms'",
+        (
+            "SET LOCAL idle_in_transaction_session_timeout = "
+            f"'{IDLE_IN_TRANSACTION_SESSION_TIMEOUT_SECONDS * 1000}ms'"
+        ),
+    ) == TRANSACTION_BOUND_STATEMENTS
 
 
 # --- cross-fragment composition and frozen snapshot ------------------------
