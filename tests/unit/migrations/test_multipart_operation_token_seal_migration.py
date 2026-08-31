@@ -148,9 +148,9 @@ def test_revision_extends_the_deferred_identity_head() -> None:
 
 def test_revision_is_the_single_alembic_head() -> None:
     scripts = _script_directory()
-    # The submitted policy verdict revision ``20260829_01`` stacks on this
-    # head.
-    assert scripts.get_heads() == ["20260829_01"]
+    # The submitted policy verdict revision ``20260829_01`` and the
+    # grant-poll bucket kind revision ``20260901_01`` stack on this head.
+    assert scripts.get_heads() == ["20260901_01"]
 
 
 def test_upgrade_adds_exactly_the_three_sealed_columns() -> None:

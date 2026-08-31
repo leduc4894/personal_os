@@ -517,8 +517,13 @@ a device or mint a token before the plugin exchanges the grant.
 
 The plugin polls no faster than every five seconds with the polling secret in a
 dedicated Bearer header. Polling faster returns
-`device_authorization_slow_down` and increases the minimum interval. Closed
-outcomes are pending, approved exchange, denied, expired and invalid.
+`device_authorization_slow_down` and increases the minimum interval. The
+minimum-interval state is durable: it lives in the grant-poll pacing bucket
+(`authentication_throttle_buckets` under `bucket_kind = grant_poll`, added by
+the 2026-08-31 multi-worker pacing amendment) so every worker observes one
+PostgreSQL-authoritative pacing decision; the single-worker observable
+behavior is unchanged. Closed outcomes are pending, approved exchange, denied,
+expired and invalid.
 
 The plugin stops on deny/expiry, overwrites the pending SecretStorage value with
 a non-credential tombstone and removes its non-secret settings reference. It
@@ -822,7 +827,7 @@ two successors for one predecessor/rotation transition.
 
 ```text
 throttle_bucket_id PK
-bucket_kind
+bucket_kind = login_username | login_source | grant_creation | user_code_lookup | totp_verification | recovery_verification | grant_poll
 bucket_hash
 window_started_at
 failed_attempt_count
@@ -831,7 +836,9 @@ updated_at
 ```
 
 `(bucket_kind, bucket_hash)` is unique. No raw username or source address is
-stored.
+stored. `grant_poll` paces device-grant polling (2026-08-31 multi-worker
+amendment, revision `20260901_01`); the schema admits it before any behavior
+writes it.
 
 ### 15.9 Migration gates
 

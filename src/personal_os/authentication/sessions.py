@@ -105,7 +105,11 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class ThrottleBucketKind(StrEnum):
-    """Closed throttle-bucket kinds (spec 8.3, binding decision 2)."""
+    """Closed throttle-bucket kinds (spec 8.3, binding decision 2).
+
+    ``grant_poll`` was added by the 2026-08-31 multi-worker pacing spec
+    amendment.
+    """
 
     LOGIN_USERNAME = "login_username"
     LOGIN_SOURCE = "login_source"
@@ -113,6 +117,7 @@ class ThrottleBucketKind(StrEnum):
     USER_CODE_LOOKUP = "user_code_lookup"
     TOTP_VERIFICATION = "totp_verification"
     RECOVERY_VERIFICATION = "recovery_verification"
+    GRANT_POLL = "grant_poll"
 
 
 class SessionRotationCause(StrEnum):
