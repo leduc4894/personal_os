@@ -21,6 +21,9 @@ answers the closed poll outcome vocabulary or commits the nine-step exchange
 of spec 12 — one device, family, access token and refresh token with the
 grant anchors and the two registration audits — and replays the anchored
 exchange while the initial refresh generation stays current.
+``pace_grant_poll`` opens, doubles and resets the durable grant-poll
+pacing window of spec 11.4 in one ``grant_poll`` bucket row keyed by the
+presented credential's digest, so every worker shares one pacing decision.
 
 Secret generation and hashing stay with the caller outside the transactions.
 Every statement is schema-qualified through the Task 6 Core metadata and
@@ -30,12 +33,14 @@ runner from :mod:`postgresql_source_store.authentication_credentials`.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Final
 from uuid import UUID, uuid7
 
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from personal_os.authentication.contracts import (
@@ -72,9 +77,11 @@ from personal_os.authentication.sessions import (
 )
 from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.error_contracts.exceptions import InternalApplicationError
 from postgresql_source_store.authentication_credentials import (
     AUDIT_ACTOR_KIND_USER,
     AUDIT_RESULT_SUCCEEDED,
+    THROTTLE_BUCKET_KIND_HASH_CONSTRAINT,
     apply_throttle_bucket_failure,
     run_authentication_transaction,
 )
@@ -112,6 +119,11 @@ AUDIT_TARGET_KIND_DEVICE: Final[str] = "device"
 AUDIT_TARGET_KIND_DEVICE_TOKEN_FAMILY: Final[str] = "device_token_family"
 DEVICE_REGISTERED_AUDIT_ACTION: Final[str] = "authentication.device_registered"
 DEVICE_TOKEN_FAMILY_CREATED_AUDIT_ACTION: Final[str] = "authentication.device_token_family_created"
+
+#: Grant-poll pacing bounds (spec 11.4): the starting interval is the shared
+#: pending-poll interval and the back-off ceiling caps the doubled windows.
+_GRANT_POLL_BASE_INTERVAL_SECONDS: Final[int] = POLL_INTERVAL_SECONDS
+_GRANT_POLL_MAXIMUM_INTERVAL_SECONDS: Final[int] = 60
 
 #: Every ``device_authorization_grants`` column the typed row view carries
 #: except the two secret digests, which the domain never consumes.
@@ -190,6 +202,99 @@ class DeviceAuthorizationStore:
         )
 
     # -- throttle buckets -----------------------------------------------------------
+
+    async def pace_grant_poll(
+        self, *, polling_credential_hash: str, database_now: datetime
+    ) -> int | None:
+        """Durable grant-poll pacing under ``bucket_kind='grant_poll'`` (11.4).
+
+        The window anchors at the first admissible poll; each too-fast poll
+        doubles the anchored interval up to the cap. The bucket key is the
+        HMAC digest of the presented credential, so unknown credentials pace
+        identically without leaking existence. A keyring rotation mid-grant
+        re-keys the pacing digest once (a new bucket opens under the current
+        key); replay correctness is Task 1's two-digest match, not this
+        window's. Returns the remaining too-fast seconds, or ``None`` when
+        the poll is admissible.
+        """
+
+        async def operation(connection: AsyncConnection) -> int | None:
+            state = await self._select_bucket(
+                connection,
+                bucket_kind=ThrottleBucketKind.GRANT_POLL,
+                bucket_hash=polling_credential_hash,
+            )
+            if state is None:
+                # (Re)open the window through the guarded cold insert of the
+                # shared bucket convention: level 0, deadline now + base
+                # interval. A loser of the insert race decides against the
+                # winner's committed row, exactly like a first failure does.
+                inserted = await connection.execute(
+                    postgresql_insert(authentication_throttle_buckets)
+                    .values(
+                        throttle_bucket_id=uuid7(),
+                        bucket_kind=ThrottleBucketKind.GRANT_POLL.value,
+                        bucket_hash=polling_credential_hash,
+                        window_started_at=database_now,
+                        failed_attempt_count=0,
+                        locked_until=database_now
+                        + timedelta(seconds=_GRANT_POLL_BASE_INTERVAL_SECONDS),
+                        updated_at=database_now,
+                    )
+                    .on_conflict_do_nothing(constraint=THROTTLE_BUCKET_KIND_HASH_CONSTRAINT)
+                    .returning(authentication_throttle_buckets.c.throttle_bucket_id)
+                )
+                if inserted.one_or_none() is not None:
+                    return None
+                state = await self._select_bucket(
+                    connection,
+                    bucket_kind=ThrottleBucketKind.GRANT_POLL,
+                    bucket_hash=polling_credential_hash,
+                )
+                if state is None:
+                    # Invariant: losing the guarded insert implies the winning
+                    # row committed.
+                    raise InternalApplicationError(ErrorCode.INTERNAL_ERROR) from None
+            if state.locked_until is None or state.locked_until <= database_now:
+                # The window expired: reopen at level 0 with a fresh anchor.
+                await connection.execute(
+                    sa.update(authentication_throttle_buckets)
+                    .values(
+                        window_started_at=database_now,
+                        failed_attempt_count=0,
+                        locked_until=database_now
+                        + timedelta(seconds=_GRANT_POLL_BASE_INTERVAL_SECONDS),
+                        updated_at=database_now,
+                    )
+                    .where(
+                        authentication_throttle_buckets.c.bucket_kind
+                        == ThrottleBucketKind.GRANT_POLL.value,
+                        authentication_throttle_buckets.c.bucket_hash == polling_credential_hash,
+                    )
+                )
+                return None
+            level = state.failed_attempt_count + 1
+            interval_seconds = min(
+                _GRANT_POLL_BASE_INTERVAL_SECONDS * (2**level),
+                _GRANT_POLL_MAXIMUM_INTERVAL_SECONDS,
+            )
+            # The deadline stays anchored: window_started_at + doubled interval.
+            await connection.execute(
+                sa.update(authentication_throttle_buckets)
+                .values(
+                    failed_attempt_count=level,
+                    locked_until=state.window_started_at + timedelta(seconds=interval_seconds),
+                    updated_at=database_now,
+                )
+                .where(
+                    authentication_throttle_buckets.c.bucket_kind
+                    == ThrottleBucketKind.GRANT_POLL.value,
+                    authentication_throttle_buckets.c.bucket_hash == polling_credential_hash,
+                )
+            )
+            return max(1, math.ceil((state.locked_until - database_now).total_seconds()))
+
+        return await run_authentication_transaction(self._engine, operation)
 
     async def resolve_throttle_bucket(
         self, *, bucket_kind: ThrottleBucketKind, bucket_hash: str

@@ -129,10 +129,16 @@ The reverse proxy owns TLS termination and HSTS. It must:
   frame-ancestors 'none'`), `Referrer-Policy: no-referrer` and
   `X-Content-Type-Options: nosniff`; the proxy must not loosen them.
 
-Single-process note: the device poll pacer is deliberately in-memory (spec
-11.4 mandates no durable pacing state). `serve` runs one process; a
-multi-worker deployment needs a shared pacing store or a poll bucket kind
-added to the closed schema set before it may front more than one worker.
+Poll pacing note: grant-poll pacing is durable (2026-08-31 amendment to
+spec 11.4). Every poll — including repeat polls with unknown credentials —
+counts into one `authentication_throttle_buckets` row under
+`bucket_kind = 'grant_poll'`, keyed by the HMAC digest of the presented
+polling credential, before any credential verification. The five-second
+window anchors at the first admissible poll, doubles on every too-fast poll
+up to 60 seconds, and resets after it expires. A reverse proxy may front
+multiple `serve` workers: they all read and write the same PostgreSQL
+bucket, so the slow-down outcome and its hint reflect one shared window,
+and a restart no longer resets a plugin to the starting interval.
 
 ## Device revoke and recovery
 

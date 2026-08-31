@@ -7,10 +7,11 @@ HMAC-SHA-256 over the predecessor secret, rotation identity, family identity
 and big-endian successor generation; the access/exchange derivations under
 their own pinned labels; the opaque ``at1.``/``rt1.``/``pg1.`` credential
 formatting and parsing round trips; the pure refresh classification of exact
-replay versus confirmed reuse versus a new rotation; the in-memory poll
-pacing window; the exchange command carrying the polling digest under both
-the current and the retained previous replay key across a keyring rotation;
-and the lifetime constants of sections 13.1 and 13.2.
+replay versus confirmed reuse versus a new rotation; the exchange command
+carrying the polling digest under both the current and the retained previous
+replay key across a keyring rotation; the durable slow-down outcome the
+exchange port surfaces before any credential verification; and the lifetime
+constants of sections 13.1 and 13.2.
 """
 
 from __future__ import annotations
@@ -33,7 +34,6 @@ from personal_os.authentication.device_tokens import (
     DerivedTokenSecret,
     DeviceTokenService,
     ExchangeGrantCommand,
-    GrantPollPacer,
     StoredDeviceToken,
     StoredTokenFamily,
     classify_refresh_presentation,
@@ -375,29 +375,14 @@ def test_expired_revoked_and_stale_presentations_classify_as_reuse() -> None:
     )
 
 
-# --- poll pacing (spec 11.4) --------------------------------------------------------
-
-
-def test_poll_pacer_starts_at_five_seconds_and_backs_off() -> None:
-    pacer = GrantPollPacer()
-    assert pacer.register_pending_poll(uuid4(), _DATABASE_NOW) is None
-    grant_id = uuid4()
-    assert pacer.register_pending_poll(grant_id, _DATABASE_NOW) is None
-    fast = pacer.register_pending_poll(grant_id, _DATABASE_NOW + timedelta(seconds=2))
-    assert fast is not None and fast >= 1
-    # The rejected poll doubled the minimum interval: the next allowed poll
-    # stays one minimum interval after the last accepted one.
-    still_fast = pacer.register_pending_poll(grant_id, _DATABASE_NOW + timedelta(seconds=5))
-    assert still_fast is not None
-    assert pacer.register_pending_poll(grant_id, _DATABASE_NOW + timedelta(seconds=20)) is None
-
-
 # --- exchange command across a keyring rotation (spec 12.2, 20.1) --------------------
 
 
 _ROTATION_GRANT_ID = UUID("00000000-0000-0000-0000-00000000000a")
 _ROTATION_POLLING_CREDENTIAL = f"pg1.{_ROTATION_GRANT_ID}.{bytes(range(32)).hex()}"
 _RETAINED_ROTATION_MASTER_KEY = bytes(range(64, 96))
+_SLOW_DOWN_GRANT_ID = UUID("00000000-0000-0000-0000-00000000000b")
+_SLOW_DOWN_POLLING_CREDENTIAL = f"pg1.{_SLOW_DOWN_GRANT_ID}.{bytes(range(32, 64)).hex()}"
 
 
 class _SingleKeyKeyring:
@@ -439,6 +424,11 @@ async def test_exchange_command_carries_the_previous_key_digest_after_rotation()
     captured: dict[str, object] = {}
 
     class _CapturingExchange:
+        async def pace_grant_poll(
+            self, *, polling_credential_hash: str, database_now: datetime
+        ) -> int | None:
+            return None
+
         async def poll_exchange(self, command: ExchangeGrantCommand) -> object:
             captured["command"] = command
             raise AuthenticationError(
@@ -473,6 +463,47 @@ async def test_exchange_command_carries_the_previous_key_digest_after_rotation()
     assert command.polling_secret_hash == current
     assert command.previous_polling_secret_hash == previous
     assert current != previous
+
+
+@pytest.mark.asyncio
+async def test_exchange_grant_surfaces_the_durable_slow_down_before_verifying() -> None:
+    """Pacing runs BEFORE credential verification, so an unknown credential
+    answers the slow-down code on repeat polls before the invalid-credential
+    code, and the pacing bucket key is the exchange command's own digest
+    (BACKLOG 2026-08-16 §9)."""
+    paced: dict[str, object] = {}
+
+    class _PacingExchange:
+        async def pace_grant_poll(
+            self, *, polling_credential_hash: str, database_now: datetime
+        ) -> int | None:
+            paced["polling_credential_hash"] = polling_credential_hash
+            paced["database_now"] = database_now
+            return 4
+
+        async def poll_exchange(self, command: ExchangeGrantCommand) -> object:
+            raise AssertionError("a paced-down poll never reaches the exchange transaction")
+
+    service = DeviceTokenService(
+        exchange=_PacingExchange(),
+        tokens=_UnusedTokenTransactions(),
+        keyring=_SingleKeyKeyring(),
+        crypto=_StaticSubkeyCrypto(),
+        clock=_FixedTransactionClock(),
+    )
+
+    with pytest.raises(AuthenticationError) as raised:
+        await service.exchange_grant(
+            grant_id=_SLOW_DOWN_GRANT_ID,
+            polling_credential=_SLOW_DOWN_POLLING_CREDENTIAL,
+            diagnostic_context=create_diagnostic_context().context,
+        )
+    assert raised.value.error_code is ErrorCode.DEVICE_AUTHORIZATION_SLOW_DOWN
+    assert raised.value.safe_details["retry_after_seconds"] == 4
+    assert paced["polling_credential_hash"] == polling_credential_hash_of(
+        hmac_key=service._grant_hmac_key, polling_credential=_SLOW_DOWN_POLLING_CREDENTIAL
+    )
+    assert paced["database_now"] == _DATABASE_NOW
 
 
 # --- lifetime constants (spec 13.1, 13.2) -------------------------------------------

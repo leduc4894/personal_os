@@ -676,6 +676,9 @@ def test_poll_after_approval_exchanges_once_then_replays_identically(
     assert str(payload["refresh_credential"]).startswith("rt1.")
 
     # A lost acknowledgement replays the byte-identical exchange payload.
+    # The retry arrives one full pacing window later: the durable grant-poll
+    # bucket admits it again and the replay still renders the anchored values.
+    harness.clock.database_now_value += timedelta(seconds=5)
     replayed = harness.client.post(
         f"/api/auth/device-authorizations/{data['grant_id']}/poll",
         headers=poll_headers(str(data["polling_secret"])),

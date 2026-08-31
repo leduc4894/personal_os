@@ -35,6 +35,10 @@ BUCKET_KIND_CHECK_NAME: str = "ck_authentication_throttle_buckets__bucket_kind"
 BUCKET_TABLE_NAME: str = "authentication_throttle_buckets"
 SCHEMA_NAME: str = "knowledge"
 
+GRANT_POLL_ROW_DELETE: str = (
+    "DELETE FROM knowledge.authentication_throttle_buckets WHERE bucket_kind = 'grant_poll'"
+)
+
 ORIGINAL_SIX_KIND_CHECK: str = (
     "bucket_kind IN ('login_username', 'login_source', 'grant_creation', "
     "'user_code_lookup', 'totp_verification', 'recovery_verification')"
@@ -50,6 +54,9 @@ class _EventRecordingAlembicOp:
 
     def __init__(self) -> None:
         self.events: list[tuple[str, str, str]] = []
+
+    def execute(self, sql: object, **kwargs: Any) -> None:
+        self.events.append(("execute", str(getattr(sql, "text", sql)), ""))
 
     def drop_constraint(self, constraint_name: str, table_name: str, **kwargs: Any) -> None:
         self.events.append(("drop_constraint", constraint_name, table_name))
@@ -113,9 +120,13 @@ def test_upgrade_recreates_the_bucket_kind_check_with_the_seventh_value() -> Non
     ]
 
 
-def test_downgrade_restores_the_original_six_value_bucket_kind_check() -> None:
+def test_downgrade_deletes_grant_poll_rows_then_restores_the_six_value_check() -> None:
+    """PostgreSQL validates a freshly added CHECK against existing rows, so
+    the pacing rows the grant-poll behavior writes must be deleted before the
+    original six-value constraint is re-created (BACKLOG 2026-08-16 §13)."""
     recorder = _replay("downgrade")
     assert recorder.events == [
+        ("execute", GRANT_POLL_ROW_DELETE, ""),
         ("drop_constraint", BUCKET_KIND_CHECK_NAME, BUCKET_TABLE_NAME),
         ("create_check_constraint", BUCKET_KIND_CHECK_NAME, ORIGINAL_SIX_KIND_CHECK),
     ]

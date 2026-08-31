@@ -27,10 +27,12 @@ classifies exact replay versus confirmed reuse versus a new rotation, rotates
 the predecessor before inserting the successor and never extends the absolute
 expiry; access authentication verifies the hash under the row's derivation
 key and the token/family/device/user/workspace state on every request,
-updating the device last-seen stamp at most once per five minutes. The
-five-second pending poll pace lives in a bounded in-memory window: the
-personal-OS API serves from one process, and a restart resets every plugin to
-the documented starting interval (spec 11.4).
+updating the device last-seen stamp at most once per five minutes. Poll
+pacing is durable: the exchange port's ``pace_grant_poll`` runs before any
+credential verification, counting every poll of the same presented
+credential into one ``grant_poll`` bucket row shared by every worker, so a
+restart or a second serve process observes the same five-second anchored
+window and its doubling back-off (spec 11.4).
 
 The module imports no infrastructure SDK, composition root or web framework.
 """
@@ -39,8 +41,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import math
-from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -65,7 +65,6 @@ from personal_os.authentication.crypto import (
     parse_refresh_credential,
 )
 from personal_os.authentication.device_authorization import (
-    POLL_INTERVAL_SECONDS,
     derive_grant_replay_hmac_key,
     polling_credential_hash_of,
 )
@@ -118,12 +117,6 @@ _HKDF_SALT_BYTES: Final[bytes] = bytes(32)
 
 #: Derived secrets are exactly 32 bytes (256 bits).
 _DERIVED_SECRET_SIZE_BYTES: Final[int] = 32
-
-#: Poll-pace bounds: the starting interval doubles on every too-fast poll up
-#: to the ceiling, and the window forgets the least recently polled grant
-#: once it holds this many entries (spec 11.4).
-_MAXIMUM_POLL_INTERVAL_SECONDS: Final[int] = 60
-_POLL_PACE_WINDOW_MAXIMUM_GRANTS: Final[int] = 1024
 
 
 # --- RFC 5869 HKDF-SHA-256 over the stdlib -------------------------------------------
@@ -506,64 +499,6 @@ def classify_refresh_presentation(
     return RefreshPresentationKind.NEW_ROTATION
 
 
-# --- poll pacing (spec 11.4) -----------------------------------------------------------
-
-
-class GrantPollPacer:
-    """Bounded in-memory pending-poll pace window (spec 11.4).
-
-    The pacer counts only pending polls — an approved poll exchanges and a
-    replayed poll re-derives committed material, neither of which waits. An
-    accepted poll registers its timestamp; a too-fast poll doubles the
-    grant's minimum interval up to the ceiling without moving the timestamp,
-    so the plugin's next allowed poll stays one minimum interval after the
-    last accepted one. The window forgets the least recently polled grant
-    past its bound; a process restart resets every plugin to the documented
-    five-second starting interval.
-    """
-
-    def __init__(
-        self,
-        *,
-        starting_interval_seconds: int = POLL_INTERVAL_SECONDS,
-        maximum_interval_seconds: int = _MAXIMUM_POLL_INTERVAL_SECONDS,
-        maximum_tracked_grants: int = _POLL_PACE_WINDOW_MAXIMUM_GRANTS,
-    ) -> None:
-        self._starting_interval_seconds = starting_interval_seconds
-        self._maximum_interval_seconds = maximum_interval_seconds
-        self._maximum_tracked_grants = maximum_tracked_grants
-        self._windows: OrderedDict[UUID, tuple[datetime, int]] = OrderedDict()
-
-    def register_pending_poll(self, grant_id: UUID, database_now: datetime) -> int | None:
-        """Register one pending poll; return the closed slow-down hint.
-
-        ``None`` means the poll paces within its current minimum interval; a
-        positive value is the whole seconds remaining until the next allowed
-        poll.
-        """
-        window = self._windows.get(grant_id)
-        if window is None:
-            self._remember(grant_id, (database_now, self._starting_interval_seconds))
-            return None
-        last_polled_at, minimum_interval_seconds = window
-        elapsed = database_now - last_polled_at
-        if elapsed < timedelta(seconds=minimum_interval_seconds):
-            doubled = min(minimum_interval_seconds * 2, self._maximum_interval_seconds)
-            self._windows[grant_id] = (last_polled_at, doubled)
-            return max(
-                1,
-                math.ceil((timedelta(seconds=minimum_interval_seconds) - elapsed).total_seconds()),
-            )
-        self._remember(grant_id, (database_now, minimum_interval_seconds))
-        return None
-
-    def _remember(self, grant_id: UUID, window: tuple[datetime, int]) -> None:
-        self._windows[grant_id] = window
-        self._windows.move_to_end(grant_id)
-        while len(self._windows) > self._maximum_tracked_grants:
-            self._windows.popitem(last=False)
-
-
 # --- transaction ports -----------------------------------------------------------------
 
 
@@ -727,6 +662,12 @@ class ListedAdminDevice:
 class DeviceGrantExchangePort(Protocol):
     """The grant-side exchange transaction surface (spec 11.4, 12)."""
 
+    async def pace_grant_poll(
+        self, *, polling_credential_hash: str, database_now: datetime
+    ) -> int | None:
+        """Pace one poll by its credential digest; the hint or ``None``."""
+        ...
+
     async def poll_exchange(self, command: ExchangeGrantCommand) -> ExchangeProvisioning: ...
 
 
@@ -810,7 +751,8 @@ class DeviceTokenService:
 
     One invocation of any method takes exactly one ``database_now`` read,
     derives and hashes every secret outside the transactions, and commits
-    through the ports' single-purpose transactions. The exchange presents a
+    through the ports' single-purpose transactions. The exchange paces every
+    poll through the durable ``grant_poll`` bucket before presenting a
     polling credential whose digest selects the grant — matched under the
     current replay key or, across a keyring rotation, the retained previous
     one; a replay re-derives the committed credentials under the anchored
@@ -828,14 +770,12 @@ class DeviceTokenService:
         keyring: DeviceTokenKeyringPort,
         crypto: AuthenticationCryptoPort,
         clock: AuthenticationClockPort,
-        poll_pacer: GrantPollPacer | None = None,
         previous_master_key: bytes | None = None,
     ) -> None:
         self._exchange = exchange
         self._tokens = tokens
         self._keyring = keyring
         self._clock = clock
-        self._poll_pacer = poll_pacer if poll_pacer is not None else GrantPollPacer()
         self._grant_hmac_key = derive_grant_replay_hmac_key(
             crypto, keyring.keys_by_id()[keyring.current_key_id()]
         )
@@ -856,11 +796,14 @@ class DeviceTokenService:
     ) -> ExchangedDeviceCredentials:
         """Poll one grant; exchange it or replay the committed exchange.
 
-        The presented polling credential is the only authority: its digest
-        must select the named grant. A pending grant raises the closed
-        pending outcome with the five-second hint — with the slow-down
-        outcome once the pace window says the plugin polled faster —, a
-        denied or expired grant raises its closed code, an approved grant
+        The poll is paced before any credential verification: the digest of
+        the presented credential counts into the durable ``grant_poll``
+        bucket, so an unknown credential paces identically — a repeat poll
+        answers the slow-down outcome without leaking that the credential
+        does not exist. The presented polling credential is then the only
+        authority: its digest must select the named grant. A pending grant
+        raises the closed pending outcome with the store's five-second hint,
+        a denied or expired grant raises its closed code, an approved grant
         commits the nine-step exchange of spec 12 once, and an exchanged
         grant re-derives the byte-identical credentials while the initial
         refresh generation is still the family's current generation.
@@ -869,6 +812,17 @@ class DeviceTokenService:
         if parsed.grant_id != grant_id:
             raise AuthenticationError(ErrorCode.DEVICE_CREDENTIAL_INVALID)
         database_now = await self._clock.database_now()
+        polling_secret_hash = polling_credential_hash_of(
+            hmac_key=self._grant_hmac_key, polling_credential=polling_credential
+        )
+        retry_after_seconds = await self._exchange.pace_grant_poll(
+            polling_credential_hash=polling_secret_hash, database_now=database_now
+        )
+        if retry_after_seconds is not None:
+            raise AuthenticationError(
+                ErrorCode.DEVICE_AUTHORIZATION_SLOW_DOWN,
+                safe_details={"retry_after_seconds": retry_after_seconds},
+            )
         keys_by_id = self._keyring.keys_by_id()
         key_id = self._keyring.current_key_id()
         master_key = keys_by_id[key_id]
@@ -898,9 +852,7 @@ class DeviceTokenService:
         )
         command = ExchangeGrantCommand(
             grant_id=grant_id,
-            polling_secret_hash=polling_credential_hash_of(
-                hmac_key=self._grant_hmac_key, polling_credential=polling_credential
-            ),
+            polling_secret_hash=polling_secret_hash,
             previous_polling_secret_hash=previous_polling_secret_hash,
             device_id=device_id,
             token_family_id=token_family_id,
@@ -919,25 +871,8 @@ class DeviceTokenService:
             database_now=database_now,
             diagnostic_context=diagnostic_context,
         )
-        try:
-            provisioned = await self._exchange.poll_exchange(command)
-        except AuthenticationError as error:
-            if error.error_code is ErrorCode.DEVICE_AUTHORIZATION_PENDING:
-                self._raise_pending_or_slow_down(grant_id, error, database_now=database_now)
-            raise
+        provisioned = await self._exchange.poll_exchange(command)
         return self._render_exchanged_credentials(parsed.secret, provisioned=provisioned)
-
-    def _raise_pending_or_slow_down(
-        self, grant_id: UUID, error: AuthenticationError, *, database_now: datetime
-    ) -> None:
-        """Convert one too-fast pending poll into the slow-down outcome."""
-        retry_after_seconds = self._poll_pacer.register_pending_poll(grant_id, database_now)
-        if retry_after_seconds is None:
-            raise error
-        raise AuthenticationError(
-            ErrorCode.DEVICE_AUTHORIZATION_SLOW_DOWN,
-            safe_details={"retry_after_seconds": retry_after_seconds},
-        ) from error
 
     def _render_exchanged_credentials(
         self, polling_secret: bytes, *, provisioned: ExchangeProvisioning
@@ -1266,7 +1201,6 @@ __all__ = [
     "ExchangeGrantCommand",
     "ExchangeProvisioning",
     "ExchangedDeviceCredentials",
-    "GrantPollPacer",
     "ListedAdminDevice",
     "ParsedPollingCredential",
     "RefreshPresentationKind",

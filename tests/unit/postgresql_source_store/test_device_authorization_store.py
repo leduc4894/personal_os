@@ -8,8 +8,9 @@ decision, update behind the pending-state guard and append exactly one audit
 event; a lost race (rowcount zero) surfaces the closed state-invalid rejection
 without an audit write; user-code lookup resolves by digest and resets the
 lookup throttle bucket only for a resolvable grant; the live-grant window and
-the throttle bucket helpers follow the shared bucket conventions. No database
-is touched.
+the throttle bucket helpers follow the shared bucket conventions; the durable
+grant-poll pacing window opens, doubles its anchored interval and resets
+through the same guarded bucket SQL. No database is touched.
 """
 
 from __future__ import annotations
@@ -583,6 +584,125 @@ async def test_throttle_cold_insert_carries_the_unique_constraint_guard() -> Non
     )
     # Winning the guarded insert settles without any update statement.
     assert _statements_of(engine.connections[0], sa.Update, "authentication_throttle_buckets") == []
+
+
+# --- grant-poll pacing (spec 11.4) ----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pace_grant_poll_windows_double_and_reset() -> None:
+    digest = "a" * 64
+    engine = ScriptedEngine(
+        [
+            ScriptedResult(),  # cold select: no bucket row
+            ScriptedResult(  # guarded window insert wins: RETURNING row present
+                rows=(SimpleNamespace(throttle_bucket_id=uuid4()),)
+            ),
+            ScriptedResult(  # window select: level 0, deadline now + 5s
+                rows=(
+                    SimpleNamespace(
+                        window_started_at=_DATABASE_NOW,
+                        failed_attempt_count=0,
+                        locked_until=_DATABASE_NOW + timedelta(seconds=5),
+                    ),
+                )
+            ),
+            ScriptedResult(rowcount=1),  # first violation doubles to 10s
+            ScriptedResult(  # window select: level 1, deadline start + 10s
+                rows=(
+                    SimpleNamespace(
+                        window_started_at=_DATABASE_NOW,
+                        failed_attempt_count=1,
+                        locked_until=_DATABASE_NOW + timedelta(seconds=10),
+                    ),
+                )
+            ),
+            ScriptedResult(rowcount=1),  # second violation doubles to 20s
+            ScriptedResult(  # window select: level 2, deadline start + 20s (expired)
+                rows=(
+                    SimpleNamespace(
+                        window_started_at=_DATABASE_NOW,
+                        failed_attempt_count=2,
+                        locked_until=_DATABASE_NOW + timedelta(seconds=20),
+                    ),
+                )
+            ),
+            ScriptedResult(rowcount=1),  # reopen: level 0, deadline late + 5s
+            ScriptedResult(  # window select: reopened level 0, deadline late + 5s
+                rows=(
+                    SimpleNamespace(
+                        window_started_at=_DATABASE_NOW + timedelta(seconds=61),
+                        failed_attempt_count=0,
+                        locked_until=_DATABASE_NOW + timedelta(seconds=66),
+                    ),
+                )
+            ),
+            ScriptedResult(rowcount=1),  # violation of the reopened window
+        ]
+    )
+    store = DeviceAuthorizationStore(engine)
+
+    first_poll = await store.pace_grant_poll(
+        polling_credential_hash=digest, database_now=_DATABASE_NOW
+    )
+    assert first_poll is None
+    # too fast: 5s window anchored at the first poll
+    soon = _DATABASE_NOW + timedelta(seconds=1)
+    assert await store.pace_grant_poll(polling_credential_hash=digest, database_now=soon) == 4
+    # repeat violation doubles the anchored window (10s from window start)
+    sooner = _DATABASE_NOW + timedelta(seconds=2)
+    repeat_violation = await store.pace_grant_poll(
+        polling_credential_hash=digest, database_now=sooner
+    )
+    assert repeat_violation in {8, 9}
+    # after the window expires the poll is admissible again and the level resets
+    late = _DATABASE_NOW + timedelta(seconds=61)
+    assert await store.pace_grant_poll(polling_credential_hash=digest, database_now=late) is None
+    assert (
+        await store.pace_grant_poll(
+            polling_credential_hash=digest, database_now=late + timedelta(seconds=1)
+        )
+        == 4
+    )
+
+    # The cold window opens through the guarded insert of the shared bucket
+    # convention, keyed by the polling-credential digest under grant_poll.
+    cold_connection = engine.connections[0]
+    bucket_inserts = _statements_of(cold_connection, sa.Insert, "authentication_throttle_buckets")
+    assert len(bucket_inserts) == 1
+    parameters = _statement_parameters(bucket_inserts[0])
+    assert parameters["bucket_kind"] == ThrottleBucketKind.GRANT_POLL.value
+    assert parameters["bucket_hash"] == digest
+    assert parameters["failed_attempt_count"] == 0
+    assert parameters["locked_until"] == _DATABASE_NOW + timedelta(seconds=5)
+    assert "ON CONFLICT ON CONSTRAINT uq_authentication_throttle_buckets__kind_hash DO NOTHING" in (
+        str(bucket_inserts[0].compile(dialect=postgresql.dialect()))
+    )
+    # Every deadline stays anchored at the window start: the violations double
+    # the anchored interval and the reopen resets both level and anchor.
+    anchored_updates = [
+        _statement_parameters(statement)
+        for statement in _statements_of(
+            engine.connections[1], sa.Update, "authentication_throttle_buckets"
+        )
+    ] + [
+        _statement_parameters(statement)
+        for statement in _statements_of(
+            engine.connections[2], sa.Update, "authentication_throttle_buckets"
+        )
+    ]
+    assert [
+        (update["failed_attempt_count"], update["locked_until"]) for update in anchored_updates
+    ] == [
+        (1, _DATABASE_NOW + timedelta(seconds=10)),
+        (2, _DATABASE_NOW + timedelta(seconds=20)),
+    ]
+    reopen_update = _statement_parameters(
+        _statements_of(engine.connections[3], sa.Update, "authentication_throttle_buckets")[0]
+    )
+    assert reopen_update["window_started_at"] == late
+    assert reopen_update["failed_attempt_count"] == 0
+    assert reopen_update["locked_until"] == late + timedelta(seconds=5)
 
 
 @pytest.mark.asyncio

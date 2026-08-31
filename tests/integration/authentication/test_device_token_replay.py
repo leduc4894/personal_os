@@ -17,7 +17,9 @@ credential; the replay window closes once the
 initial refresh generation rotates; a refresh retry with the same rotation
 identity returns the exact committed successor with anchored timestamps and
 no duplicate rows; and the poll route semantics report the five-second
-pending interval and the closed slow-down outcome.
+pending interval, the durable slow-down window whose hint reflects the
+backed-off state, and the slow-down outcome repeat polls with unknown
+credentials receive before the invalid-credential code.
 """
 
 from __future__ import annotations
@@ -496,7 +498,10 @@ async def test_lost_exchange_acknowledgement_replays_identical_credentials(
     account = await harness.seed_account()
     created, exchanged = await harness.exchange(account)
 
-    # The commit succeeded but the client lost the acknowledgement and retries.
+    # The commit succeeded but the client lost the acknowledgement and retries
+    # one pacing window later, so the durable grant-poll bucket admits the
+    # retry instead of answering the slow-down outcome.
+    harness.clock.database_now_value += timedelta(seconds=5)
     retried = await harness.poll(created.grant_id, created.polling_secret)
 
     assert retried.access_credential == exchanged.access_credential
@@ -573,6 +578,9 @@ async def test_exchange_replay_is_terminated_after_first_rotation(
     rotated = await harness.refresh(rotation_id=ROTATION_A)
     assert rotated.refresh_generation == 2
 
+    # One pacing window later the replay poll is admissible again and the
+    # closed replay-window rejection — not the slow-down outcome — surfaces.
+    harness.clock.database_now_value += timedelta(seconds=5)
     with pytest.raises(AuthenticationError) as raised:
         await harness.poll(created.grant_id, created.polling_secret)
     assert raised.value.error_code is ErrorCode.DEVICE_AUTHORIZATION_STATE_INVALID
@@ -717,15 +725,31 @@ async def test_pending_poll_reports_the_five_second_interval_then_slows_down(
     assert pending.value.error_code is ErrorCode.DEVICE_AUTHORIZATION_PENDING
     assert pending.value.safe_details["retry_after_seconds"] == 5
 
-    with pytest.raises(AuthenticationError) as slow:
+    # The immediate re-poll violates the five-second window: the slow-down
+    # hint reports the seconds remaining to the deadline that was in force
+    # when the poll arrived.
+    with pytest.raises(AuthenticationError) as slowed:
         await harness.poll(pending_created.grant_id, pending_created.polling_secret)
-    assert slow.value.error_code is ErrorCode.DEVICE_AUTHORIZATION_SLOW_DOWN
-    assert slow.value.safe_details["retry_after_seconds"] >= 1
+    assert slowed.value.error_code is ErrorCode.DEVICE_AUTHORIZATION_SLOW_DOWN
+    assert slowed.value.safe_details["retry_after_seconds"] == 5
 
-    harness.clock.database_now_value += timedelta(seconds=10)
+    # The violation backed the durable window off to ten seconds from the
+    # first poll: one second later the hint reports the backed-off deadline —
+    # never a naive five-second window — so the hint cannot under-report the
+    # state the durable bucket enforces.
+    harness.clock.database_now_value += timedelta(seconds=1)
+    with pytest.raises(AuthenticationError) as backed_off:
+        await harness.poll(pending_created.grant_id, pending_created.polling_secret)
+    assert backed_off.value.error_code is ErrorCode.DEVICE_AUTHORIZATION_SLOW_DOWN
+    assert backed_off.value.safe_details["retry_after_seconds"] == 9
+
+    # Past the backed-off deadline the window expires, the level resets and
+    # the pending outcome returns with its untouched five-second hint.
+    harness.clock.database_now_value += timedelta(seconds=19)
     with pytest.raises(AuthenticationError) as allowed:
         await harness.poll(pending_created.grant_id, pending_created.polling_secret)
     assert allowed.value.error_code is ErrorCode.DEVICE_AUTHORIZATION_PENDING
+    assert allowed.value.safe_details["retry_after_seconds"] == 5
 
 
 @pytest.mark.asyncio
@@ -778,3 +802,30 @@ async def test_unknown_polling_credential_fails_closed(harness: TokenHarness) ->
     with pytest.raises(AuthenticationError) as raised:
         await harness.poll(uuid4(), "pg1.00000000-0000-0000-0000-0000000000ff.neverseen")
     assert raised.value.error_code is ErrorCode.DEVICE_CREDENTIAL_INVALID
+
+
+@pytest.mark.asyncio
+async def test_unknown_polling_credential_paces_before_failing_closed(
+    harness: TokenHarness,
+) -> None:
+    """Pacing runs before credential verification, so a repeat poll with an
+    unknown credential answers the slow-down outcome first — the throttle
+    bucket exists for it without leaking that the credential is unknown
+    (BACKLOG 2026-08-16 §9)."""
+    grant_id = uuid4()
+    polling_credential = f"pg1.{grant_id}.unseen-polling-secret-0001"
+    with pytest.raises(AuthenticationError) as first:
+        await harness.poll(grant_id, polling_credential)
+    assert first.value.error_code is ErrorCode.DEVICE_CREDENTIAL_INVALID
+
+    with pytest.raises(AuthenticationError) as repeated:
+        await harness.poll(grant_id, polling_credential)
+    assert repeated.value.error_code is ErrorCode.DEVICE_AUTHORIZATION_SLOW_DOWN
+    assert repeated.value.safe_details["retry_after_seconds"] >= 1
+
+    # The response shape for the unknown credential is unchanged once the
+    # window admits the poll again.
+    harness.clock.database_now_value += timedelta(seconds=60)
+    with pytest.raises(AuthenticationError) as admitted:
+        await harness.poll(grant_id, polling_credential)
+    assert admitted.value.error_code is ErrorCode.DEVICE_CREDENTIAL_INVALID

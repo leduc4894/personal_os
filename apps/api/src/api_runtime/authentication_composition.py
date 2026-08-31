@@ -25,9 +25,10 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Final, cast
 from uuid import UUID, uuid7
 
@@ -206,6 +207,10 @@ OFFLINE_PLUGIN_VERSION_BOUNDS: Final[PluginVersionBounds] = PluginVersionBounds(
 #: The offline graph pins the domain default window policies.
 _OFFLINE_THROTTLE_POLICY: Final[ThrottleWindowPolicy] = ThrottleWindowPolicy()
 _OFFLINE_SESSION_POLICY: Final[SessionWindowPolicy] = SessionWindowPolicy()
+
+#: Offline grant-poll pacing bounds mirror the store's durable window: the
+#: shared pending-poll interval and the spec 11.4 back-off ceiling.
+_OFFLINE_GRANT_POLL_MAXIMUM_INTERVAL_SECONDS: Final[int] = 60
 
 #: Safe reason token of the spec 20.1 startup refusal.
 _MISSING_REFERENCED_KEY_REASON: Final[SafeToken] = SafeToken.parse("keyring_missing_referenced_key")
@@ -1367,8 +1372,9 @@ class OfflineDeviceAuthorizationStore:
 
     One ``asyncio.Lock`` serializes every operation, so the offline graph
     reproduces the row-lock serialization points of the real store — one
-    terminal winner per grant, one audit action per committed transition —
-    with the real pure domain logic and the same closed rejections.
+    terminal winner per grant, one audit action per committed transition,
+    one durable grant-poll pacing window per credential digest — with the
+    real pure domain logic and the same closed rejections.
     """
 
     def __init__(self, state: OfflineAuthenticationState) -> None:
@@ -1555,6 +1561,43 @@ class OfflineDeviceAuthorizationStore:
                     "authentication.device_authorization_denied"
                 )
             return row
+
+    async def pace_grant_poll(
+        self, *, polling_credential_hash: str, database_now: datetime
+    ) -> int | None:
+        """Mirror the durable grant-poll pacing window in memory (spec 11.4).
+
+        One ``asyncio.Lock`` serializes the read-modify-write exactly like
+        the store's bucket row: the window anchors at the first admissible
+        poll, each too-fast poll doubles the anchored interval up to the
+        ceiling, and an expired window reopens at level zero. The bucket key
+        is the credential digest, so unknown credentials pace identically.
+        """
+        async with self._lock:
+            key = self._bucket(ThrottleBucketKind.GRANT_POLL, polling_credential_hash)
+            state = self._state.buckets.get(key)
+            if (
+                state is not None
+                and state.locked_until is not None
+                and state.locked_until > database_now
+            ):
+                level = state.failed_attempt_count + 1
+                interval_seconds = min(
+                    POLL_INTERVAL_SECONDS * (2**level),
+                    _OFFLINE_GRANT_POLL_MAXIMUM_INTERVAL_SECONDS,
+                )
+                self._state.buckets[key] = ThrottleBucketState(
+                    window_started_at=state.window_started_at,
+                    failed_attempt_count=level,
+                    locked_until=state.window_started_at + timedelta(seconds=interval_seconds),
+                )
+                return max(1, math.ceil((state.locked_until - database_now).total_seconds()))
+            self._state.buckets[key] = ThrottleBucketState(
+                window_started_at=database_now,
+                failed_attempt_count=0,
+                locked_until=database_now + timedelta(seconds=POLL_INTERVAL_SECONDS),
+            )
+            return None
 
     async def poll_exchange(self, command: ExchangeGrantCommand) -> ExchangeProvisioning:
         """Lock-free in-memory exchange mirroring the real transaction.

@@ -10,12 +10,15 @@ under a new closed ``grant_poll`` kind, so every worker reads one
 PostgreSQL-authoritative pacing state instead of a per-process clock. This
 revision is the schema half only: it recreates the single
 ``ck_authentication_throttle_buckets__bucket_kind`` CHECK with the seventh
-``grant_poll`` member; no behavior reads or writes the kind yet, so no row
-can hold it before the pacing task lands. Every column, index, key and other
-constraint of the buckets table is untouched.
+``grant_poll`` member. Every column, index, key and other constraint of the
+buckets table is untouched.
 
-The downgrade restores the original six-value CHECK exactly as the
-``20260816_01`` authentication revision wrote it.
+The downgrade first deletes the ``grant_poll`` rows the pacing behavior
+writes, then restores the original six-value CHECK exactly as the
+``20260816_01`` authentication revision wrote it: PostgreSQL validates a
+freshly added CHECK against existing rows, so leftover ``grant_poll`` rows
+would abort the constraint re-creation. Rows of the six retained kinds are
+untouched.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Final
 
+import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
@@ -47,6 +51,10 @@ UPGRADE_KIND_LIST: Final[tuple[str, ...]] = (
 )
 DOWNGRADE_KIND_LIST: Final[tuple[str, ...]] = UPGRADE_KIND_LIST[:-1]
 
+_GRANT_POLL_ROW_DELETE: Final[str] = (
+    f"DELETE FROM {SCHEMA_NAME}.{TABLE_NAME} WHERE bucket_kind = 'grant_poll'"
+)
+
 
 def _kind_check(kind_list: tuple[str, ...]) -> str:
     return "bucket_kind IN (" + ", ".join(f"'{kind}'" for kind in kind_list) + ")"
@@ -70,8 +78,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Restore the original six-value bucket-kind CHECK of ``20260816_01``."""
+    """Delete the pacing rows, then restore the six-value bucket-kind CHECK."""
 
+    op.execute(sa.text(_GRANT_POLL_ROW_DELETE))
     op.drop_constraint(
         _CONSTRAINT_NAME,
         TABLE_NAME,

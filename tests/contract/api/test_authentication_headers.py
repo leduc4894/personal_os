@@ -256,6 +256,9 @@ class HeaderJourney:
         step("poll-pending", pending_poll)
         approved = self.approve(created["grant_id"])
         step("approve", approved)
+        # The exchange poll arrives one full pacing window after the pending
+        # one: the durable grant-poll bucket admits it again.
+        self.clock.database_now_value += timedelta(seconds=5)
         exchanged = self.poll(created["grant_id"], created["polling_secret"])
         step("poll-exchange", exchanged, pragma=True)
         refresh_credential = str(exchanged.json()["data"]["refresh_credential"])
