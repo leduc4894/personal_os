@@ -58,8 +58,10 @@ touched by the fix wave at `3797555`:
 - BACKLOG retirement sweep — `rg` for the four row signatures over
   `docs/handoff/BACKLOG.md` returns no hits at `e58a5cd` and `3797555`
   (the only web-admin row added since is the new dead-path index below).
-- CI gate observation (design acceptance criterion 4's tail) — OPEN: see
-  Next actions; it cannot be satisfied pre-merge.
+- CI gate observation (design acceptance criterion 4's tail) — CLOSED:
+  the `authentication-e2e` CI job passed on its first post-merge run
+  (run 33359128767, push `1fd9de9..89b8f88`); see Next actions for the
+  pre-existing red workflows observed in the same push.
 
 ## Interpretive decisions (with reasons)
 
@@ -126,11 +128,18 @@ touched by the fix wave at `3797555`:
 
 ## Next actions
 
-1. After push: observe and record the `authentication-e2e` CI job's first
-   auth-journeys run on this branch (`quality.yml`) — acceptance criterion
-   4's tail. Record the run outcome durably (PR/commit note); this
-   obligation cannot be satisfied pre-merge.
-2. Merge decision via `superpowers:finishing-a-development-branch`.
+1. DONE (2026-08-31, post-merge push `1fd9de9..89b8f88`): the `quality.yml`
+   `authentication-e2e` job ("Authentication browser journeys") passed on
+   its first run against this work (run 33359128767) — acceptance
+   criterion 4 closed. That same run's `Ubuntu quality`/`Windows
+   portability` jobs, plus the `authentication acceptance`, `canonical
+   PostgreSQL baseline`, `local service stack`, and `exclusion policy
+   acceptance` workflows, failed with the identical failing-test sets as
+   the pre-branch push at `1fd9de9` (e.g. `exclusion_policy_settings`
+   SecretFileError tests, local-stack bootstrap exit 69, migration-pin
+   glob-order sensitivity in `test_no_public_api.py`): pre-existing CI
+   red owned by those domains' plans, not this work.
+2. DONE: merged to master (fast-forward `652d53d..89b8f88`) and pushed.
 3. Remove the new BACKLOG row when the next web-admin surface change either
    retires the dead `dismissInitialTotpOffer` path or wires it with real
    coverage.
