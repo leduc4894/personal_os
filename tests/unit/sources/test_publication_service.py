@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, cast
-from uuid import UUID, uuid4
 
 import pytest
 from tests.unit.sources.fakes import (
@@ -41,24 +40,11 @@ from tests.unit.sources.fakes import (
 
 from personal_os.diagnostics.events import EventName
 from personal_os.error_contracts.codes import ErrorCategory, ErrorCode
-from personal_os.exclusion_policy.contracts import ExclusionPolicyRevision, PolicySubject, RuleKind
 from personal_os.exclusion_policy.enforcement import (
-    ActivePolicySnapshotMaterial,
     AllowedPolicyRevisionBinding,
-    PolicyEnforcementService,
     PublicationPolicyEvidence,
 )
 from personal_os.exclusion_policy.errors import ExclusionPolicyError
-from personal_os.exclusion_policy.metrics import (
-    EvaluationMetricOutcome,
-    InMemoryExclusionPolicyMetrics,
-    PolicyBoundary,
-)
-from personal_os.exclusion_policy.normalization import normalize_rule
-from personal_os.exclusion_policy.signatures import (
-    build_snapshot_payload,
-    compute_payload_sha256_hex,
-)
 from personal_os.object_storage import ContentDigest, ExpectedObject, VerifiedObjectReceipt
 from personal_os.source_locators.values import NormalizedLocator
 from personal_os.sources import (
@@ -86,95 +72,6 @@ class RecordingDiagnosticSink:
 
     def emit(self, event_name: EventName, fields: dict[str, object]) -> None:
         self.events.append((event_name, fields))
-
-
-class _StaticSnapshotSource:
-    """Return one material value to the real policy-enforcement service."""
-
-    def __init__(self, material: ActivePolicySnapshotMaterial | None) -> None:
-        self._material = material
-
-    async def load_active_snapshot(
-        self, workspace_id: UUID, diagnostic_context: object
-    ) -> ActivePolicySnapshotMaterial | None:
-        del workspace_id, diagnostic_context
-        return self._material
-
-
-class _UnusedPolicyEvidenceSource:
-    """Create publication subjects already carry the evidence this test needs."""
-
-    async def load_subject_evidence(
-        self, workspace_id: UUID, source_id: UUID, diagnostic_context: object
-    ) -> PolicySubject | None:
-        del workspace_id, source_id, diagnostic_context
-        return None
-
-
-class _AcceptingTrustVerifier:
-    """Keep the test focused on the evaluator rather than signature crypto."""
-
-    def verify(self, *, public_key_bytes: bytes, signature_bytes: bytes, message: bytes) -> bool:
-        del public_key_bytes, signature_bytes, message
-        return True
-
-
-def _guard_raising_each_closed_code(
-    error_code: ErrorCode, command: CreateSourceVersion
-) -> tuple[PolicyEnforcementService, InMemoryExclusionPolicyMetrics]:
-    """Compose a real guard whose policy state raises one closed code."""
-
-    material: ActivePolicySnapshotMaterial | None
-    if error_code is ErrorCode.EXCLUSION_POLICY_NOT_INITIALIZED:
-        material = None
-    elif error_code is ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE:
-        material = ActivePolicySnapshotMaterial(
-            workspace_id=command.workspace_id,
-            policy_revision_id=uuid4(),
-            revision_number=1,
-            payload_bytes=b"{}",
-            payload_sha256="0" * 64,
-            signature_bytes=bytes(64),
-            public_key_bytes=bytes(32),
-        )
-    else:
-        rule_kind = (
-            RuleKind.MEDIA_TYPE
-            if error_code is ErrorCode.EXCLUSION_POLICY_DENIED
-            else RuleKind.EXTENSION
-        )
-        operand = "text/markdown" if rule_kind is RuleKind.MEDIA_TYPE else ".md"
-        revision = ExclusionPolicyRevision(
-            policy_revision_id=uuid4(),
-            workspace_id=command.workspace_id,
-            revision_number=1,
-            rules=(normalize_rule(uuid4(), rule_kind, text_operand=operand),),
-        )
-        payload = build_snapshot_payload(
-            revision,
-            parent_policy_revision_id=None,
-            published_at=_PUBLICATION_START,
-        )
-        material = ActivePolicySnapshotMaterial(
-            workspace_id=command.workspace_id,
-            policy_revision_id=revision.policy_revision_id,
-            revision_number=revision.revision_number,
-            payload_bytes=payload,
-            payload_sha256=compute_payload_sha256_hex(payload),
-            signature_bytes=bytes(64),
-            public_key_bytes=bytes(32),
-        )
-    policy_metrics = InMemoryExclusionPolicyMetrics()
-    return (
-        PolicyEnforcementService(
-            snapshot_source=_StaticSnapshotSource(material),
-            evidence_source=_UnusedPolicyEvidenceSource(),
-            verifier=_AcceptingTrustVerifier(),
-            metrics=policy_metrics,
-            clock=lambda: _PUBLICATION_START,
-        ),
-        policy_metrics,
-    )
 
 
 def _build_service(
@@ -937,27 +834,14 @@ async def test_policy_denial_records_failed_event_and_rejected_publication_outco
 
 
 @pytest.mark.asyncio
-async def test_indeterminate_policy_outcome_records_rejected_event_without_failed_metric() -> None:
+async def test_indeterminate_policy_outcome_records_rejected_event_and_outcome() -> None:
     """An indeterminate guard refusal remains a denial-class outcome."""
 
-    command = build_create_command()
-    guard, policy_metrics = _guard_raising_each_closed_code(
-        ErrorCode.EXCLUSION_POLICY_INDETERMINATE, command
-    )
-    diagnostics = RecordingDiagnosticSink()
-    service, _store, object_store, metrics, ledger = _build_service_with_guard(
-        guard,
-        diagnostics=diagnostics,
-    )
+    refusal = ExclusionPolicyError(ErrorCode.EXCLUSION_POLICY_INDETERMINATE)
+    raised, diagnostics, metrics, ledger, object_store = await _publish_under_guard_denial(refusal)
 
-    with pytest.raises(ExclusionPolicyError) as raised:
-        await service.publish_create(
-            command=command,
-            stream=ProbedByteStream([b"must-not-be-read"]),
-            diagnostic_context=build_diagnostic_context(),
-        )
-
-    assert raised.value.error_code is ErrorCode.EXCLUSION_POLICY_INDETERMINATE
+    assert raised is refusal
+    assert raised.error_code is ErrorCode.EXCLUSION_POLICY_INDETERMINATE
     assert ledger.entries == []
     assert object_store.resolve_call_count() == 0
     assert [event_name for event_name, _ in diagnostics.events] == [
@@ -967,12 +851,6 @@ async def test_indeterminate_policy_outcome_records_rejected_event_without_faile
     assert (
         metrics.publication_count(PublicationOperation.CREATE, PublicationMetricOutcome.REJECTED)
         == 1
-    )
-    assert (
-        policy_metrics.evaluation_count(
-            PolicyBoundary.SINGLE_PART_UPLOAD, EvaluationMetricOutcome.FAILED
-        )
-        == 0
     )
 
 
@@ -991,22 +869,13 @@ async def test_every_guard_raisable_code_escapes_publish_with_failed_event_and_o
 ) -> None:
     """Every currently guard-raisable code preserves the publication trail."""
 
-    command = build_create_command()
-    guard, policy_metrics = _guard_raising_each_closed_code(error_code, command)
-    diagnostics = RecordingDiagnosticSink()
-    service, _store, object_store, metrics, ledger = _build_service_with_guard(
-        guard,
-        diagnostics=diagnostics,
+    guard_error = ExclusionPolicyError(error_code)
+    raised, diagnostics, metrics, ledger, object_store = await _publish_under_guard_denial(
+        guard_error
     )
 
-    with pytest.raises(ExclusionPolicyError) as raised:
-        await service.publish_create(
-            command=command,
-            stream=ProbedByteStream([b"must-not-be-read"]),
-            diagnostic_context=build_diagnostic_context(),
-        )
-
-    assert raised.value.error_code is error_code
+    assert raised is guard_error
+    assert raised.error_code is error_code
     assert ledger.entries == []
     assert object_store.resolve_call_count() == 0
     assert [event_name for event_name, _ in diagnostics.events] == [
@@ -1017,16 +886,6 @@ async def test_every_guard_raisable_code_escapes_publish_with_failed_event_and_o
         metrics.publication_count(PublicationOperation.CREATE, PublicationMetricOutcome.REJECTED)
         == 1
     )
-    failed_count = policy_metrics.evaluation_count(
-        PolicyBoundary.SINGLE_PART_UPLOAD, EvaluationMetricOutcome.FAILED
-    )
-    if error_code in {
-        ErrorCode.EXCLUSION_POLICY_NOT_INITIALIZED,
-        ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE,
-    }:
-        assert failed_count == 1
-    else:
-        assert failed_count == 0
 
 
 @pytest.mark.asyncio

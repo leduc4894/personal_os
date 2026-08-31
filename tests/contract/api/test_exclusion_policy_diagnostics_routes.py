@@ -39,14 +39,16 @@ from api_runtime.exclusion_policy_composition import (
 )
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from tests.unit.exclusion_policy.test_enforcement import (
+    WORKSPACE_ID,
+    build_material,
+    build_revision,
+    build_service,
+    context,
+)
 
-from personal_os.diagnostics.context import DiagnosticContext, create_diagnostic_context
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.exclusion_policy.contracts import PolicySubject
-from personal_os.exclusion_policy.enforcement import (
-    ActivePolicySnapshotMaterial,
-    PolicyEnforcementService,
-)
 from personal_os.exclusion_policy.errors import ExclusionPolicyError
 from personal_os.exclusion_policy.metrics import (
     EvaluationMetricOutcome,
@@ -87,45 +89,6 @@ class _ReadyProbe:
     """Readiness probe stub: the diagnostics route never consults it."""
 
     async def check(self) -> None: ...
-
-
-class _BrokenSignerSnapshotSource:
-    """Return malformed signed material through the real enforcement port."""
-
-    def __init__(self) -> None:
-        self._material = ActivePolicySnapshotMaterial(
-            workspace_id=uuid4(),
-            policy_revision_id=uuid4(),
-            revision_number=1,
-            payload_bytes=b"{}",
-            payload_sha256="0" * 64,
-            signature_bytes=bytes(64),
-            public_key_bytes=bytes(32),
-        )
-
-    async def load_active_snapshot(
-        self, workspace_id: UUID, context: DiagnosticContext
-    ) -> ActivePolicySnapshotMaterial:
-        del workspace_id, context
-        return self._material
-
-
-class _UnusedEvidenceSource:
-    """The direct preflight below does not require persisted source evidence."""
-
-    async def load_subject_evidence(
-        self, workspace_id: UUID, source_id: UUID, context: DiagnosticContext
-    ) -> None:
-        del workspace_id, source_id, context
-        return None
-
-
-class _RejectingTrustVerifier:
-    """The hash mismatch closes before a trust decision can be accepted."""
-
-    def verify(self, *, public_key_bytes: bytes, signature_bytes: bytes, message: bytes) -> bool:
-        del public_key_bytes, signature_bytes, message
-        return False
 
 
 @pytest.fixture
@@ -385,26 +348,22 @@ def test_diagnostics_route_reflects_a_real_fail_closed_evaluation(
 ) -> None:
     """A corrupt signer flows through enforcement and into the Admin read model."""
 
-    service = PolicyEnforcementService(
-        snapshot_source=_BrokenSignerSnapshotSource(),
-        evidence_source=_UnusedEvidenceSource(),
-        verifier=_RejectingTrustVerifier(),
-        metrics=recorder,
-    )
+    material = build_material(build_revision(), payload_sha256="0" * 64)
+    service, _, _, _ = build_service(material=material, metrics=recorder)
 
     with pytest.raises(ExclusionPolicyError) as raised:
         asyncio.run(
             service.authorize_preflight(
-                subject=PolicySubject(workspace_id=uuid4(), source_id=uuid4()),
+                subject=PolicySubject(workspace_id=WORKSPACE_ID, source_id=uuid4()),
                 boundary=PolicyBoundary.SINGLE_PART_UPLOAD,
-                context=create_diagnostic_context().context,
+                context=context(),
             )
         )
 
     assert raised.value.error_code is ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE
     response = client.get(_ROUTE_PATH, headers=_admin_session_headers(client))
 
-    assert response.status_code == 200, response.text
+    assert response.status_code == 200
     payload = response.json()["data"]
     failed_rows = [row for row in payload["evaluation_counters"] if row["decision"] == "failed"]
     assert failed_rows == [{"boundary": "single_part_upload", "decision": "failed", "count": 1}]
