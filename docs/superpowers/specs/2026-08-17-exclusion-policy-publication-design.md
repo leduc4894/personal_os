@@ -947,7 +947,10 @@ shell. It contains:
 Preview results may join and display title/locator to the authenticated owner.
 They are escaped text, excluded from browser analytics/Sentry/breadcrumbs and
 never persisted in localStorage/sessionStorage. The page uses generated API
-contracts and TanStack Query; it does not connect to PostgreSQL or Temporal.
+contracts and a local effect-based fetch pattern (amended 2026-08-31 per the
+2026-08-17 handoff §5.2 conflict ruling: the plan's `@noble/ed25519`-only
+dependency pin governs; no data library is mandated); it does not connect to
+PostgreSQL or Temporal.
 
 Two-tab draft conflict offers reload and manual reapply. It never last-write-
 wins. Publish success replaces current metadata with the exact committed result
