@@ -95,3 +95,15 @@ path now completes before the five performance assertions run.
   boundary, not a reason to alter runtime configuration in this task.
 - Repository-wide strict mypy is already non-green in nearby fixture code;
   the focused performance gate and ruff check are green.
+
+## Review correction: truthful performance evidence
+
+Reviewer finding: source `0` is deliberately evidence-free because every fifth deterministic source lacks a version and current pointer. Therefore `perf-version-0` did not exist, and the event had no `committed_version_id`.
+
+The correction selects evidence-bearing index `1` for the stack source, event, and source-version IDs, and writes `committed_version_id` for every evidence-carrying deterministic event. Thus `perf-event-1` binds immutable `perf-version-1`, and source `1` points to that same single current version. Evidence-free rows remain null/unpointed.
+
+Command: `$env:CI='true'; $env:LOCAL_STACK_TEST_PROJECT='knowledge-ci-perf-fixture-20260831'; & 'D:\App\codex-usage\.venv\Scripts\uv.exe' run pytest tests/performance/test_exclusion_policy_performance.py -m local_stack -q --junitxml=.local/test-results/exclusion-policy-performance-fixture-repair-round-1.xml`.
+
+Result: `5 passed`, `0 errors`, `0 failures`, `101.740s`. `uv run ruff check tests/performance/test_exclusion_policy_performance.py` and `git diff --check` passed. Fixture cleanup verified `knowledge-ci-perf-fixture-20260831` as `stack_absent`.
+
+This correction does not perform the controller-owned final GitHub runner observation or BACKLOG retirement; those remain final-acceptance scope after the fixture repair.

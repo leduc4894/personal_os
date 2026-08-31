@@ -374,14 +374,14 @@ def _seed_performance_workspace(port: int, project_name: str) -> PolicyMigration
         password=SecretStr(password_text),
         owner_user_id=owner_user_id,
         workspace_id=workspace_id,
-        seeded_event_id=uuid5(_FIXTURE_NAMESPACE, "perf-seed-event"),
-        seeded_source_id=_fixture_source_id(0),
-        # The deterministic performance fixture has one committed version per
-        # source, so immutable event evidence and the current pointer are the
-        # same version for its seed source.  It does not stage the migration's
-        # deliberately unbackfillable negative row.
-        seeded_event_source_version_id=uuid5(_FIXTURE_NAMESPACE, "perf-version-0"),
-        seeded_current_source_version_id=uuid5(_FIXTURE_NAMESPACE, "perf-version-0"),
+        seeded_event_id=uuid5(_FIXTURE_NAMESPACE, "perf-event-1"),
+        seeded_source_id=_fixture_source_id(1),
+        # Index 1 is the first source that carries evidence. It has one
+        # committed version, so immutable event evidence and the current
+        # pointer are the same version. This fixture does not stage the
+        # deliberately unbackfillable migration-negative row.
+        seeded_event_source_version_id=uuid5(_FIXTURE_NAMESPACE, "perf-version-1"),
+        seeded_current_source_version_id=uuid5(_FIXTURE_NAMESPACE, "perf-version-1"),
         seeded_event_payload=b"",
         seeded_current_payload=b"",
         unbackfillable_upgrade_returncode=0,
@@ -445,6 +445,7 @@ def _seed_deterministic_fixture(sync_engine: sa.Engine, workspace_id: UUID) -> N
                 "workspace_id": workspace_id,
                 # event_sequence is GENERATED ALWAYS; the identity assigns it.
                 "source_id": source_id,
+                "committed_version_id": version_id if carries_evidence else None,
                 "idempotency_key": f"perf-event-{index:05d}",
                 "request_fingerprint": f"{index:064x}",
                 "event_type": "create",
