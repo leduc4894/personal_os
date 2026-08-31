@@ -23,6 +23,10 @@ Obsidian-plugin vitest, browser-journey and sanitized-cleanup gates.
   and performance gates.
 - `f244a68`, `a89e574`: safe, allowlisted local-stack startup diagnostics.
 - `e78253a`, `7d4974c`: multipart test-flake remediation and evidence.
+- `2f7124e`, `9c89bbe`, `df9d1c8`, `f4e43a9`: final whole-branch review
+  fixes — canonical stack docs aligned to the ratified fetch pattern, the
+  E2E status fixture pinned to the generated contract, mutation-tool and
+  test minors, and the final gate record.
 
 ## Gates
 
@@ -64,9 +68,12 @@ Obsidian-plugin vitest, browser-journey and sanitized-cleanup gates.
 - Keep the 109 mutation survivors as explicit code-stands/equivalent verdicts
   rather than creating in-scope deferrals. Cost if wrong: future tests may
   need to harden an identified boundary.
-- Treat residual TanStack mentions in historical/global architecture docs as
-  outside the Task 5 amendment; spec 17's unresolved mandate is removed.
-  Cost if wrong: a later architecture decision may need a coordinated update.
+- Residual TanStack mentions were first ruled outside the Task 5 amendment;
+  the final whole-branch review reopened that ruling, and `2f7124e` aligned
+  the numbered canonical docs (`02`, `13`, `20`) to the ratified
+  effect-based fetch pattern. Remaining mentions live only in historical
+  process records (`docs/superpowers/`, `docs/handoff/`). Cost if wrong: a
+  later architecture decision may need a coordinated update.
 - The paths-filter decision is DECLINED — the workflow also protects master
   pushes and gates the acceptance suite as a whole; a paths filter would let
   master-relevant changes skip it. Cost if wrong: the 90-minute job remains
@@ -83,8 +90,18 @@ Obsidian-plugin vitest, browser-journey and sanitized-cleanup gates.
   a future ordering guarantee would need an explicit production contract and
   a new assertion.
 
+## Deferred items
+
+- Two pre-existing strict errors in the authentication E2E specs
+  (`full-device-onboarding.spec.ts:245` unknown-to-string coercion;
+  `web-security.spec.ts:1` missing `@types/node`) confine the new root
+  `pnpm run type-check` to `tests/end_to_end/exclusion_policy` only. Out of
+  scope here — owned by the web-auth E2E domain; indexed in BACKLOG.
+
 ## Next actions
 
-1. Complete the final whole-branch review and address any findings.
+1. Final whole-branch review completed 2026-08-31: 3 Important + 4 Minor
+   findings fixed in `93c1f83..f4e43a9`; scoped re-review verdict — all
+   findings addressed, no new Critical/Important breakage.
 2. Push the final evidence commits, then finish the development branch
    workflow.
