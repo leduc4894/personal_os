@@ -23,6 +23,7 @@ from personal_os.exclusion_policy.metrics import (
     InMemoryExclusionPolicyMetrics,
     PolicyBoundary,
     PublicationMetricOutcome,
+    _validate_evaluation_error_code,
 )
 
 _FIRST_EPOCH_MS: Final[int] = 1_800_000_000_000
@@ -181,4 +182,30 @@ def test_failed_decision_without_error_code_is_rejected_by_the_diagnostics_sink(
             boundary=PolicyBoundary.SINGLE_PART_UPLOAD,
             decision=EvaluationMetricOutcome.FAILED,
             duration_seconds=0.0,
+        )
+
+
+def test_non_failed_decision_rejects_a_carried_error_code() -> None:
+    """The inverse branch of the closed-code validator stays fail-closed."""
+
+    recorder = InMemoryExclusionPolicyMetrics(epoch_ms_clock=lambda: 1_000)
+
+    with pytest.raises(ValueError, match="recordable only on the failed decision"):
+        recorder.record_evaluation(
+            boundary=PolicyBoundary.SINGLE_PART_UPLOAD,
+            decision=EvaluationMetricOutcome.ALLOWED,
+            duration_seconds=0.01,
+            error_code=ErrorCode.EXCLUSION_POLICY_DENIED,
+        )
+
+
+def test_validate_evaluation_error_code_rejects_both_invalid_shapes_directly() -> None:
+    """Directly pin both closed validator rejection branches."""
+
+    with pytest.raises(ValueError, match="failed decision requires"):
+        _validate_evaluation_error_code(EvaluationMetricOutcome.FAILED, None)
+    with pytest.raises(ValueError, match="recordable only on the failed decision"):
+        _validate_evaluation_error_code(
+            EvaluationMetricOutcome.ALLOWED,
+            ErrorCode.EXCLUSION_POLICY_DENIED,
         )
