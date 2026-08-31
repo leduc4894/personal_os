@@ -1,13 +1,16 @@
+import assert from "node:assert/strict";
+
 import { expect, type Page, type Route } from "@playwright/test";
 import { test } from "@playwright/test";
 
 import { E2E_ACCEPTED_LOGIN_PASSWORD, E2E_LOGIN_USERNAME } from "./e2e-credentials";
 
 /**
- * The web security journey (Task 12 scope): login, the skippable first-login
- * TOTP offer with a locally rendered QR, one-time recovery codes, the Security
- * surface, logout, response security headers and web-storage hygiene. The API
- * is intercepted with page.route: this spec proves the browser flow, not the
+ * The web security journeys: a password-only login lands on the devices page
+ * with no first-login TOTP interstitial, TOTP enrollment is driven from the
+ * Security surface with a locally rendered QR and one-time recovery codes,
+ * plus logout, response security headers and web-storage hygiene. The API is
+ * intercepted with page.route: this spec proves the browser flow, not the
  * backend (full-fidelity E2E belongs to the later end-to-end task).
  */
 
@@ -108,7 +111,7 @@ async function stubActiveSession(page: Page): Promise<void> {
   await page.route("**/api/auth/session", jsonResponse(envelopeBody(activeSession())));
 }
 
-test("login offers skippable TOTP enrollment with a local QR, then reveals one-time codes", async ({ page }) => {
+test("TOTP enrollment completes through the security page with a local QR and one-time codes", async ({ page }) => {
   const csrfHeaders: (string | undefined)[] = [];
   let enrollmentActionCalls = 0;
 
@@ -152,23 +155,29 @@ test("login offers skippable TOTP enrollment with a local QR, then reveals one-t
   await page.getByLabel("Username").fill(E2E_LOGIN_USERNAME);
   await page.getByLabel("Password").fill(E2E_ACCEPTED_LOGIN_PASSWORD);
   await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page).toHaveURL(/\/admin\/devices$/);
 
+  // The Security surface probes enrollment on mount and renders the offer
+  // inline: there is no enable button and no skip path on this page.
+  await page.goto("/admin/security");
+  await expect(page.getByRole("heading", { name: "Set up two-factor authentication" })).toBeVisible();
   await expect(page.getByText("E2EESUPERSECRET2345")).toBeVisible();
-  await expect(page.locator("svg").first()).toBeVisible();
+  await expect(page.locator(".qr-code svg")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Skip for now" })).toHaveCount(0);
 
   await page.getByLabel("Verification code").fill("123456");
   await page.getByRole("button", { name: "Activate" }).click();
 
+  await expect(page.getByText("Two-factor authentication is active.")).toBeVisible();
   await expect(page.getByText("AAAA-BBBB-CCCC")).toBeVisible();
-  await expect(page.getByText("Save your recovery codes")).toBeVisible();
+  await expect(page.getByText("These codes are shown only once. Store them somewhere safe.")).toBeVisible();
 
   // The state-changing calls carried the CSRF token read from the cookie jar.
   expect(csrfHeaders.every((value) => value === "e2e-csrf-value")).toBe(true);
   expect(enrollmentActionCalls).toBe(1);
 
-  await page.getByRole("button", { name: "Continue to devices" }).click();
-  await expect(page).toHaveURL(/\/admin\/devices$/);
-  // One-time values disappear once the flow continues.
+  // One-time values disappear once the codes are acknowledged.
+  await page.getByRole("button", { name: "I saved the codes" }).click();
   await expect(page.getByText("AAAA-BBBB-CCCC")).toHaveCount(0);
   await expect(page.getByText("E2EESUPERSECRET2345")).toHaveCount(0);
 
@@ -184,8 +193,9 @@ test("login offers skippable TOTP enrollment with a local QR, then reveals one-t
   }
 });
 
-test("the first-login offer can be skipped and dismissed", async ({ page }) => {
-  const enrollmentBodies: string[] = [];
+test("login lands on the devices page with no first-login TOTP interstitial", async ({ page }) => {
+  const requested: string[] = [];
+  page.on("request", (request) => requested.push(request.url()));
 
   const markSignedIn = await stubSessionActivatingOnSignIn(page);
   await page.route("**/api/auth/login", async (route) => {
@@ -196,8 +206,9 @@ test("the first-login offer can be skipped and dismissed", async ({ page }) => {
       body: envelopeBody(activeSession()),
     });
   });
+  // If the removed offer ever crept back into the login path, this stub would
+  // let it render — the journey then fails on the dialog, the ledger or both.
   await page.route("**/api/auth/totp/enrollments", async (route) => {
-    enrollmentBodies.push(route.request().postData() ?? "");
     await route.fulfill({ status: 200, headers: envelope(null), body: envelopeBody(enrollmentOffer()) });
   });
 
@@ -206,11 +217,12 @@ test("the first-login offer can be skipped and dismissed", async ({ page }) => {
   await page.getByLabel("Password").fill(E2E_ACCEPTED_LOGIN_PASSWORD);
   await page.getByRole("button", { name: "Sign in" }).click();
 
-  await expect(page.getByRole("button", { name: "Skip for now" })).toBeVisible();
-  await page.getByRole("button", { name: "Skip for now" }).click();
-
   await expect(page).toHaveURL(/\/admin\/devices$/);
-  expect(enrollmentBodies).toEqual(['{"action":"start"}', '{"action":"dismiss_initial_offer"}']);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  assert(
+    !requested.some((url) => url.includes("/api/auth/totp/enrollments")),
+    "the removed first-login offer must not reappear in the login path",
+  );
 
   const storageState = await page.evaluate(() => ({
     local: window.localStorage.length,
