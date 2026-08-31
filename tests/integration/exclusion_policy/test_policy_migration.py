@@ -22,6 +22,7 @@ import sqlalchemy as sa
 from alembic.util import CommandError
 from tests.integration.exclusion_policy.conftest import (
     PolicyMigrationHarness,
+    PolicyMigrationStack,
     run_guarded_alembic,
     run_inprocess_alembic_downgrade,
 )
@@ -36,6 +37,8 @@ def _fingerprint(*, nonce: str) -> str:
 
 
 pytestmark = pytest.mark.local_stack
+
+_PRE_LIFECYCLE_REVISION = "20260818_01"
 
 _POLICY_TABLES: frozenset[str] = frozenset(
     {
@@ -83,6 +86,17 @@ async def _application_table_count(harness: PolicyMigrationHarness) -> int:
 async def _schema_head(harness: PolicyMigrationHarness) -> str:
     head = await harness.fetch_scalar("SELECT version_num FROM public.alembic_version", {})
     return str(head)
+
+
+def test_upgrade_rejects_unbackfillable_source_event_intent_atomically(
+    policy_migration_stack: PolicyMigrationStack,
+) -> None:
+    assert policy_migration_stack.unbackfillable_upgrade_returncode != 0
+    assert (
+        policy_migration_stack.unbackfillable_upgrade_result_code
+        == "database_schema_contract_invalid"
+    )
+    assert policy_migration_stack.revision_after_unbackfillable_upgrade == _PRE_LIFECYCLE_REVISION
 
 
 @pytest.mark.asyncio
@@ -138,7 +152,13 @@ async def test_upgrade_preserves_and_backfills_existing_source_event_intents(
     origin_kind, event_id, source_version_id, policy_revision_id, status, operation = row[0]
     assert origin_kind == "source_event"
     assert event_id == stack.seeded_event_id
-    assert source_version_id == stack.seeded_source_version_id
+    assert source_version_id == stack.seeded_event_source_version_id
+    assert source_version_id != stack.seeded_current_source_version_id
+    current_source_version_id = await policy_migration_harness.fetch_scalar(
+        "SELECT current_version_id FROM knowledge.sources WHERE source_id = :source_id",
+        {"source_id": stack.seeded_source_id},
+    )
+    assert current_source_version_id == stack.seeded_current_source_version_id
     assert policy_revision_id is None
     assert status == "pending"
     assert operation == "delete"
@@ -347,7 +367,7 @@ async def test_projection_intent_origin_shapes_and_claim_isolation(
                     "projection_intent_id": uuid4(),
                     "workspace_id": stack.workspace_id,
                     "source_id": stack.seeded_source_id,
-                    "source_version_id": stack.seeded_source_version_id,
+                    "source_version_id": stack.seeded_event_source_version_id,
                 },
             )
     assert source_event_outcome.value.orig.diag.constraint_name == ("ck_projection_intents__origin")

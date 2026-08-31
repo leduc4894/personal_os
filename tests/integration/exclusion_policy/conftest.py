@@ -5,13 +5,15 @@ convention: it validates the bounded ``knowledge-ci-*`` project identity and
 the ``CI`` guard, provisions the disposable local stack through
 ``tools.local_service_stack`` (reset -> bootstrap -> config -> up), applies the
 real Alembic chain in two stages — first to the Child 2 head ``20260816_01``,
-then seeds one canonical workspace graph plus one pending source-event intent
-at that head, then upgrades to the policy head ``20260817_01`` — and in a
-``finally`` resets ONLY the named disposable project and asserts no labelled
-resource remains. The function-scoped harness fixture builds the real async
-engine per test and seeds policy graphs (draft preview, signing key, published
-revision, policy-transition intent) through schema-qualified parameter-bound
-Core statements.
+then seeds an event-bound V1 intent and advances the source to V2. A first
+upgrade attempt proves that a second intent without event-committed evidence
+fails closed at the lifecycle revision; after removing only that negative
+fixture row, the graph upgrades to head. A ``finally`` resets ONLY the named
+disposable project and asserts no labelled resource remains. The
+function-scoped harness fixture builds the real async engine per test and
+seeds policy graphs (draft preview, signing key, published revision,
+policy-transition intent) through schema-qualified parameter-bound Core
+statements.
 """
 
 from __future__ import annotations
@@ -192,7 +194,11 @@ class PolicyMigrationStack:
     workspace_id: UUID
     seeded_event_id: UUID
     seeded_source_id: UUID
-    seeded_source_version_id: UUID
+    seeded_event_source_version_id: UUID
+    seeded_current_source_version_id: UUID
+    unbackfillable_upgrade_returncode: int
+    unbackfillable_upgrade_result_code: str
+    revision_after_unbackfillable_upgrade: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,17 +244,29 @@ def _stage_policy_upgrade_and_yield(project_name: str, port: int) -> Iterator[Po
     staged = _run_alembic(environment, "upgrade", _CHILD_2_HEAD_REVISION)
     assert staged.returncode == 0, "alembic upgrade to the Child 2 head failed"
 
-    # Seed one canonical workspace graph plus one pending source-event intent
-    # at the Child 2 head, so the policy upgrade must preserve and backfill it.
+    # Seed one event-bound V1 intent, advance the source pointer to a canonical
+    # V2 lineage/event, and add one deliberately unbackfillable historical
+    # intent. The migration must use V1 event evidence, never the V2 pointer.
     owner_user_id = uuid4()
     workspace_id = uuid4()
     source_id = uuid4()
-    content_object_id = uuid4()
-    source_version_id = uuid4()
+    event_content_object_id = uuid4()
+    current_content_object_id = uuid4()
+    event_source_version_id = uuid4()
+    current_source_version_id = uuid4()
     event_id = uuid4()
+    current_event_id = uuid4()
+    unbackfillable_event_id = uuid4()
     nonce = uuid4().hex
-    content_hash = _sha256_hex(f"policy-content-{nonce}")
-    object_key = f"objects/sha256/{content_hash[:2]}/{content_hash[2:4]}/{content_hash}"
+    event_content_hash = _sha256_hex(f"policy-event-content-{nonce}")
+    current_content_hash = _sha256_hex(f"policy-current-content-{nonce}")
+    event_object_key = (
+        f"objects/sha256/{event_content_hash[:2]}/{event_content_hash[2:4]}/{event_content_hash}"
+    )
+    current_object_key = (
+        f"objects/sha256/{current_content_hash[:2]}/"
+        f"{current_content_hash[2:4]}/{current_content_hash}"
+    )
     sync_engine = sa.create_engine(
         sa.URL.create(
             "postgresql+psycopg",
@@ -286,20 +304,24 @@ def _stage_policy_upgrade_and_yield(project_name: str, port: int) -> Iterator[Po
                     "display_name": "Policy Migration Workspace",
                 },
             )
-            connection.execute(
-                sa.text(
-                    "INSERT INTO knowledge.content_objects"
-                    " (content_object_id, content_hash, object_key, byte_size, media_type,"
-                    " verified_at)"
-                    " VALUES (:content_object_id, :content_hash, :object_key, 42,"
-                    " 'text/markdown', CURRENT_TIMESTAMP - interval '1 second')"
-                ),
-                {
-                    "content_object_id": content_object_id,
-                    "content_hash": content_hash,
-                    "object_key": object_key,
-                },
-            )
+            for content_object_id, content_hash, object_key in (
+                (event_content_object_id, event_content_hash, event_object_key),
+                (current_content_object_id, current_content_hash, current_object_key),
+            ):
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO knowledge.content_objects"
+                        " (content_object_id, content_hash, object_key, byte_size, media_type,"
+                        " verified_at)"
+                        " VALUES (:content_object_id, :content_hash, :object_key, 42,"
+                        " 'text/markdown', CURRENT_TIMESTAMP - interval '1 second')"
+                    ),
+                    {
+                        "content_object_id": content_object_id,
+                        "content_hash": content_hash,
+                        "object_key": object_key,
+                    },
+                )
             connection.execute(
                 sa.text(
                     "INSERT INTO knowledge.sources"
@@ -321,10 +343,10 @@ def _stage_policy_upgrade_and_yield(project_name: str, port: int) -> Iterator[Po
                     " :content_object_id, 1, 'user', :author_id)"
                 ),
                 {
-                    "source_version_id": source_version_id,
+                    "source_version_id": event_source_version_id,
                     "workspace_id": workspace_id,
                     "source_id": source_id,
-                    "content_object_id": content_object_id,
+                    "content_object_id": event_content_object_id,
                     "author_id": owner_user_id,
                 },
             )
@@ -335,7 +357,7 @@ def _stage_policy_upgrade_and_yield(project_name: str, port: int) -> Iterator[Po
                     " WHERE workspace_id = :workspace_id AND source_id = :source_id"
                 ),
                 {
-                    "source_version_id": source_version_id,
+                    "source_version_id": event_source_version_id,
                     "workspace_id": workspace_id,
                     "source_id": source_id,
                 },
@@ -352,7 +374,7 @@ def _stage_policy_upgrade_and_yield(project_name: str, port: int) -> Iterator[Po
                     "event_id": event_id,
                     "workspace_id": workspace_id,
                     "source_id": source_id,
-                    "source_version_id": source_version_id,
+                    "source_version_id": event_source_version_id,
                     "idempotency_key": f"policy-seed-{nonce}",
                     "request_fingerprint": _sha256_hex(nonce),
                 },
@@ -374,6 +396,112 @@ def _stage_policy_upgrade_and_yield(project_name: str, port: int) -> Iterator[Po
                     "source_id": source_id,
                 },
             )
+            connection.execute(
+                sa.text(
+                    "INSERT INTO knowledge.source_versions"
+                    " (source_version_id, workspace_id, source_id, content_object_id,"
+                    " content_version, parent_version_id, author_kind, author_id)"
+                    " VALUES (:source_version_id, :workspace_id, :source_id,"
+                    " :content_object_id, 2, :parent_version_id, 'user', :author_id)"
+                ),
+                {
+                    "source_version_id": current_source_version_id,
+                    "workspace_id": workspace_id,
+                    "source_id": source_id,
+                    "content_object_id": current_content_object_id,
+                    "parent_version_id": event_source_version_id,
+                    "author_id": owner_user_id,
+                },
+            )
+            connection.execute(
+                sa.text(
+                    "INSERT INTO knowledge.sync_events"
+                    " (event_id, workspace_id, source_id, base_version_id,"
+                    " committed_version_id, idempotency_key, request_fingerprint, event_type)"
+                    " VALUES (:event_id, :workspace_id, :source_id, :base_version_id,"
+                    " :committed_version_id, :idempotency_key, :request_fingerprint, 'update')"
+                ),
+                {
+                    "event_id": current_event_id,
+                    "workspace_id": workspace_id,
+                    "source_id": source_id,
+                    "base_version_id": event_source_version_id,
+                    "committed_version_id": current_source_version_id,
+                    "idempotency_key": f"policy-current-{nonce}",
+                    "request_fingerprint": _sha256_hex(f"current-{nonce}"),
+                },
+            )
+            connection.execute(
+                sa.text(
+                    "UPDATE knowledge.sources"
+                    " SET current_version_id = :source_version_id"
+                    " WHERE workspace_id = :workspace_id AND source_id = :source_id"
+                ),
+                {
+                    "source_version_id": current_source_version_id,
+                    "workspace_id": workspace_id,
+                    "source_id": source_id,
+                },
+            )
+            connection.execute(
+                sa.text(
+                    "INSERT INTO knowledge.sync_events"
+                    " (event_id, workspace_id, source_id, base_version_id, idempotency_key,"
+                    " request_fingerprint, event_type)"
+                    " VALUES (:event_id, :workspace_id, :source_id, :base_version_id,"
+                    " :idempotency_key, :request_fingerprint, 'update')"
+                ),
+                {
+                    "event_id": unbackfillable_event_id,
+                    "workspace_id": workspace_id,
+                    "source_id": source_id,
+                    "base_version_id": current_source_version_id,
+                    "idempotency_key": f"policy-unbackfillable-{nonce}",
+                    "request_fingerprint": _sha256_hex(f"unbackfillable-{nonce}"),
+                },
+            )
+            connection.execute(
+                sa.text(
+                    "INSERT INTO knowledge.projection_intents"
+                    " (projection_intent_id, workspace_id, event_id, source_id,"
+                    " projection_kind, operation, status, available_at, created_at)"
+                    " VALUES (:projection_intent_id, :workspace_id, :event_id, :source_id,"
+                    " 'neo4j', 'delete', 'pending',"
+                    " CURRENT_TIMESTAMP - interval '1 second',"
+                    " CURRENT_TIMESTAMP - interval '1 second')"
+                ),
+                {
+                    "projection_intent_id": uuid4(),
+                    "workspace_id": workspace_id,
+                    "event_id": unbackfillable_event_id,
+                    "source_id": source_id,
+                },
+            )
+    finally:
+        sync_engine.dispose()
+
+    unbackfillable_upgrade = _run_alembic(environment, "upgrade", "head")
+    unbackfillable_upgrade_output = unbackfillable_upgrade.stdout + unbackfillable_upgrade.stderr
+    unbackfillable_upgrade_result_code = (
+        "database_schema_contract_invalid"
+        if "database_schema_contract_invalid" in unbackfillable_upgrade_output
+        else ""
+    )
+    try:
+        with sync_engine.begin() as connection:
+            revision_after_unbackfillable_upgrade = str(
+                connection.execute(
+                    sa.text("SELECT version_num FROM public.alembic_version")
+                ).scalar_one()
+            )
+            connection.execute(
+                sa.text("DELETE FROM knowledge.projection_intents WHERE event_id = :event_id"),
+                {"event_id": unbackfillable_event_id},
+            )
+            connection.execute(
+                sa.text("DELETE FROM knowledge.sync_events WHERE event_id = :event_id"),
+                {"event_id": unbackfillable_event_id},
+            )
     finally:
         sync_engine.dispose()
 
@@ -391,7 +519,11 @@ def _stage_policy_upgrade_and_yield(project_name: str, port: int) -> Iterator[Po
         workspace_id=workspace_id,
         seeded_event_id=event_id,
         seeded_source_id=source_id,
-        seeded_source_version_id=source_version_id,
+        seeded_event_source_version_id=event_source_version_id,
+        seeded_current_source_version_id=current_source_version_id,
+        unbackfillable_upgrade_returncode=unbackfillable_upgrade.returncode,
+        unbackfillable_upgrade_result_code=unbackfillable_upgrade_result_code,
+        revision_after_unbackfillable_upgrade=revision_after_unbackfillable_upgrade,
     )
 
 
