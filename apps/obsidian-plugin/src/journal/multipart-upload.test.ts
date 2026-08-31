@@ -325,6 +325,7 @@ function createHarness(options?: {
   readonly partCount?: number;
   readonly lastPartSizeBytes?: number;
   readonly requestTimeoutMs?: number;
+  readonly beforeReadRegularFileBytes?: (readCount: number) => Promise<void>;
 }): MultipartHarness {
   const database = SqliteDatabase.createEmpty(engineModule, {
     schemaVersion: JOURNAL_SCHEMA_VERSION,
@@ -342,6 +343,7 @@ function createHarness(options?: {
   });
   const server = new ScriptedMultipartServer(partCount, lastPartSizeBytes);
   const vaultBytes = new Map<string, Uint8Array>();
+  let fileReadCount = 0;
   const totalSizeBytes = (partCount - 1) * MULTIPART_PART_SIZE_BYTES + lastPartSizeBytes;
   vaultBytes.set(NORMALIZED_PATH, deterministicBytes(totalSizeBytes));
   const syncApi = createJournalSyncApi({
@@ -353,7 +355,11 @@ function createHarness(options?: {
     repository,
     syncApi,
     fileBytesReader: {
-      readRegularFileBytes: async (normalizedPath) => vaultBytes.get(normalizedPath) ?? null,
+      readRegularFileBytes: async (normalizedPath) => {
+        fileReadCount += 1;
+        await options?.beforeReadRegularFileBytes?.(fileReadCount);
+        return vaultBytes.get(normalizedPath) ?? null;
+      },
     },
     nowEpochMs: () => CLOCK_EPOCH_MS,
     requestTimeoutMs: options?.requestTimeoutMs ?? 5_000,
@@ -439,7 +445,12 @@ function nthCallIndex(
 
 describe("multipart upload runner resume and scheduling (child 7 spec 4.3, 6.2)", () => {
   it("resumes only unfinished Mobile parts with maximum two active PUTs", async () => {
-    const harness = createHarness();
+    const firstFileRead = createDeferred();
+    const harness = createHarness({
+      // Hold part 2 before it reaches the semaphore so part 3 proves that
+      // receipt chronology is not a scheduler contract.
+      beforeReadRegularFileBytes: (readCount) => (readCount === 1 ? firstFileRead.promise : Promise.resolve()),
+    });
     const event = await seedHarnessEvent(harness, { seedProgress: [1] });
     // Gate both part PUTs so the two-permit Mobile semaphore must engage.
     const gates = new Map<number, { promise: Promise<void>; resolve: () => void }>();
@@ -449,6 +460,8 @@ describe("multipart upload runner resume and scheduling (child 7 spec 4.3, 6.2)"
       return gate.promise.then(() => ({ status: 200, bodyText: "" }));
     };
     const runPromise = harness.runner.run(event, "mobile");
+    await waitUntil(() => harness.partPutNumbers()[0] === 3);
+    firstFileRead.resolve();
     await waitUntil(() => gates.size === 2);
     for (const gate of gates.values()) {
       gate.resolve();
@@ -458,7 +471,8 @@ describe("multipart upload runner resume and scheduling (child 7 spec 4.3, 6.2)"
     expect(result.outcome).toBe("committed");
     expect(harness.maxActivePartPuts()).toBeLessThanOrEqual(2);
     expect(harness.maxActivePartPuts()).toBe(2);
-    expect(harness.partPutNumbers()).toEqual([2, 3]);
+    expect(harness.partPutNumbers()).toHaveLength(2);
+    expect(harness.partPutNumbers().slice().sort((a, b) => a - b)).toEqual([2, 3]);
     // Status precedes every part URL on resume, and no create may run.
     const calls = harness.calls();
     expect(calls[0]?.kind).toBe("status");

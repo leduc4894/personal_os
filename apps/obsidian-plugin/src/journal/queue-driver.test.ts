@@ -2790,13 +2790,15 @@ describe("queue driver multipart dispatch (child 7 spec 4.3)", () => {
     expect(harness.repository.readMultipartProgress(event.eventId)).not.toBeNull();
 
     // After the bounded backoff a fresh pass resumes only the parts that
-    // never landed and finishes the frozen event. The first pass attempted
-    // part 1 once (the transport died), so the resumed pass re-uploads it.
+    // never landed and finishes the frozen event. One worker is attempted
+    // again after the transport died; concurrent receipt order is not part
+    // of the multipart contract.
     script.onPartPut = () => ({ status: 200, bodyText: "" });
     harness.advanceClock(10_000);
     const second = await runPass(harness.driver);
     expect(second).toEqual({ outcome: "completed", processedEventCount: 1 });
-    expect(script.partPutNumbers).toEqual([1, 1, 2, 3]);
+    expect(script.partPutNumbers).toHaveLength(4);
+    expect(script.partPutNumbers.slice().sort((a, b) => a - b)).toEqual([1, 1, 2, 3]);
     expect(harness.repository.readEvent(event.eventId)?.state).toBe("committed");
   });
 
