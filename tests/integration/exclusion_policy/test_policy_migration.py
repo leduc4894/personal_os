@@ -130,14 +130,15 @@ async def test_upgrade_preserves_and_backfills_existing_source_event_intents(
 ) -> None:
     stack = policy_migration_harness.stack
     row = await policy_migration_harness.fetch_all(
-        "SELECT origin_kind, event_id, policy_revision_id, status, operation"
+        "SELECT origin_kind, event_id, source_version_id, policy_revision_id, status, operation"
         " FROM knowledge.projection_intents WHERE event_id = :event_id",
         {"event_id": stack.seeded_event_id},
     )
     assert len(row) == 1
-    origin_kind, event_id, policy_revision_id, status, operation = row[0]
+    origin_kind, event_id, source_version_id, policy_revision_id, status, operation = row[0]
     assert origin_kind == "source_event"
     assert event_id == stack.seeded_event_id
+    assert source_version_id == stack.seeded_source_version_id
     assert policy_revision_id is None
     assert status == "pending"
     assert operation == "delete"
@@ -149,7 +150,7 @@ async def test_upgraded_schema_reflects_the_policy_contract(
 ) -> None:
     for table_name in _POLICY_TABLES:
         assert await _table_exists(policy_migration_harness, table_name), table_name
-    assert await _application_table_count(policy_migration_harness) == 30
+    assert await _application_table_count(policy_migration_harness) == 39
 
     origin_column = await policy_migration_harness.fetch_all(
         "SELECT is_nullable FROM information_schema.columns"
@@ -329,21 +330,24 @@ async def test_projection_intent_origin_shapes_and_claim_isolation(
         graph.policy_revision_id, source_id
     )
 
-    # A source_event row without its event reference violates the origin CHECK.
+    # A source_event row without its event reference violates only the origin
+    # CHECK: its source-version evidence is otherwise valid at the lifecycle
+    # head, so PostgreSQL cannot reject it through the stronger version CHECK.
     with pytest.raises(sa.exc.IntegrityError) as source_event_outcome:
         async with policy_migration_harness.engine.begin() as connection:
             await connection.execute(
                 sa.text(
                     "INSERT INTO knowledge.projection_intents"
                     " (projection_intent_id, workspace_id, event_id, source_id,"
-                    " projection_kind, operation, status, available_at)"
+                    " source_version_id, projection_kind, operation, status, available_at)"
                     " VALUES (:projection_intent_id, :workspace_id, NULL, :source_id,"
-                    " 'qdrant', 'delete', 'pending', CURRENT_TIMESTAMP)"
+                    " :source_version_id, 'qdrant', 'delete', 'pending', CURRENT_TIMESTAMP)"
                 ),
                 {
                     "projection_intent_id": uuid4(),
                     "workspace_id": stack.workspace_id,
-                    "source_id": source_id,
+                    "source_id": stack.seeded_source_id,
+                    "source_version_id": stack.seeded_source_version_id,
                 },
             )
     assert source_event_outcome.value.orig.diag.constraint_name == ("ck_projection_intents__origin")

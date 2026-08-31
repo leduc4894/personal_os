@@ -192,6 +192,7 @@ class PolicyMigrationStack:
     workspace_id: UUID
     seeded_event_id: UUID
     seeded_source_id: UUID
+    seeded_source_version_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,8 +243,12 @@ def _stage_policy_upgrade_and_yield(project_name: str, port: int) -> Iterator[Po
     owner_user_id = uuid4()
     workspace_id = uuid4()
     source_id = uuid4()
+    content_object_id = uuid4()
+    source_version_id = uuid4()
     event_id = uuid4()
     nonce = uuid4().hex
+    content_hash = _sha256_hex(f"policy-content-{nonce}")
+    object_key = f"objects/sha256/{content_hash[:2]}/{content_hash[2:4]}/{content_hash}"
     sync_engine = sa.create_engine(
         sa.URL.create(
             "postgresql+psycopg",
@@ -283,6 +288,20 @@ def _stage_policy_upgrade_and_yield(project_name: str, port: int) -> Iterator[Po
             )
             connection.execute(
                 sa.text(
+                    "INSERT INTO knowledge.content_objects"
+                    " (content_object_id, content_hash, object_key, byte_size, media_type,"
+                    " verified_at)"
+                    " VALUES (:content_object_id, :content_hash, :object_key, 42,"
+                    " 'text/markdown', CURRENT_TIMESTAMP - interval '1 second')"
+                ),
+                {
+                    "content_object_id": content_object_id,
+                    "content_hash": content_hash,
+                    "object_key": object_key,
+                },
+            )
+            connection.execute(
+                sa.text(
                     "INSERT INTO knowledge.sources"
                     " (workspace_id, source_id, source_type, title)"
                     " VALUES (:workspace_id, :source_id, 'markdown', :title)"
@@ -295,16 +314,45 @@ def _stage_policy_upgrade_and_yield(project_name: str, port: int) -> Iterator[Po
             )
             connection.execute(
                 sa.text(
+                    "INSERT INTO knowledge.source_versions"
+                    " (source_version_id, workspace_id, source_id, content_object_id,"
+                    " content_version, author_kind, author_id)"
+                    " VALUES (:source_version_id, :workspace_id, :source_id,"
+                    " :content_object_id, 1, 'user', :author_id)"
+                ),
+                {
+                    "source_version_id": source_version_id,
+                    "workspace_id": workspace_id,
+                    "source_id": source_id,
+                    "content_object_id": content_object_id,
+                    "author_id": owner_user_id,
+                },
+            )
+            connection.execute(
+                sa.text(
+                    "UPDATE knowledge.sources"
+                    " SET sync_state = 'active', current_version_id = :source_version_id"
+                    " WHERE workspace_id = :workspace_id AND source_id = :source_id"
+                ),
+                {
+                    "source_version_id": source_version_id,
+                    "workspace_id": workspace_id,
+                    "source_id": source_id,
+                },
+            )
+            connection.execute(
+                sa.text(
                     "INSERT INTO knowledge.sync_events"
-                    " (event_id, workspace_id, source_id, idempotency_key,"
-                    " request_fingerprint, event_type)"
-                    " VALUES (:event_id, :workspace_id, :source_id, :idempotency_key,"
-                    " :request_fingerprint, 'create')"
+                    " (event_id, workspace_id, source_id, committed_version_id,"
+                    " idempotency_key, request_fingerprint, event_type)"
+                    " VALUES (:event_id, :workspace_id, :source_id, :source_version_id,"
+                    " :idempotency_key, :request_fingerprint, 'create')"
                 ),
                 {
                     "event_id": event_id,
                     "workspace_id": workspace_id,
                     "source_id": source_id,
+                    "source_version_id": source_version_id,
                     "idempotency_key": f"policy-seed-{nonce}",
                     "request_fingerprint": _sha256_hex(nonce),
                 },
@@ -343,6 +391,7 @@ def _stage_policy_upgrade_and_yield(project_name: str, port: int) -> Iterator[Po
         workspace_id=workspace_id,
         seeded_event_id=event_id,
         seeded_source_id=source_id,
+        seeded_source_version_id=source_version_id,
     )
 
 

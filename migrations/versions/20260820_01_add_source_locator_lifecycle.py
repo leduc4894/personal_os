@@ -94,6 +94,18 @@ DELETE FROM knowledge.sync_events
 WHERE event_type IN ('rename', 'move', 'delete', 'restore');
 """
 
+_SOURCE_EVENT_INTENT_VERSION_BACKFILL_SQL: Final[str] = """
+UPDATE knowledge.projection_intents AS intent
+SET source_version_id = event.committed_version_id
+FROM knowledge.sync_events AS event
+WHERE intent.origin_kind = 'source_event'
+  AND intent.source_version_id IS NULL
+  AND intent.event_id = event.event_id
+  AND intent.workspace_id = event.workspace_id
+  AND intent.source_id = event.source_id
+  AND event.committed_version_id IS NOT NULL
+"""
+
 _FINAL_CATALOG_ASSERTION_SQL: Final[str] = """
 DO $$
 DECLARE
@@ -346,6 +358,12 @@ def upgrade() -> None:
     op.create_check_constraint(
         "ck_sources__deletion", "sources", _SOURCE_DELETION_CHECK, schema=SCHEMA_NAME
     )
+    # Source events bind immutable publication evidence.  Backfill historical
+    # delete intents from that event-owned version before strengthening the
+    # constraint; never infer provenance from the source's mutable current
+    # pointer.  Any row without provable event evidence remains NULL so the
+    # new constraint still rejects the migration closed.
+    op.execute(sa.text(_SOURCE_EVENT_INTENT_VERSION_BACKFILL_SQL))
     op.drop_constraint(
         "ck_projection_intents__operation_version",
         "projection_intents",
