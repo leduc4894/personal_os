@@ -5,8 +5,11 @@ import {
 } from "@workspace/api-client";
 
 import { createNativeFetchTransport } from "./native-fetch-transport";
-import type { AuthenticationCallResult } from "./authentication-client";
-import { REQUEST_UNAVAILABLE_ERROR, unwrapEnvelope } from "./exclusion-policy-client";
+import {
+  REQUEST_UNAVAILABLE_ERROR,
+  unwrapEnvelope,
+  type AuthenticationCallResult,
+} from "./authentication-client";
 
 export type SourceLifecycleDiagnosticsData =
   components["schemas"]["SourceLifecycleDiagnosticsData"];
@@ -19,7 +22,7 @@ export interface SourceLifecycleReader {
 /**
  * The source-lifecycle browser client: it wraps only the generated API client
  * and reuses the shared envelope unwrapping and transport-failure closing of
- * the exclusion-policy client, so every Admin read surface closes
+ * the authentication client, so every Admin read surface closes
  * identically.
  */
 export function createSourceLifecycleClient(options: {

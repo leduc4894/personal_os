@@ -7,9 +7,10 @@ import {
 import { createNativeFetchTransport } from "./native-fetch-transport";
 import {
   CSRF_HEADER_NAME,
+  REQUEST_UNAVAILABLE_ERROR,
   createAuthenticationClient,
   readCsrfTokenFromCookieSource,
-  type ApiErrorBody,
+  unwrapEnvelope,
   type AuthenticationCallResult,
   type AuthenticationClient,
 } from "./authentication-client";
@@ -85,42 +86,6 @@ export type PolicyEditorClient = PolicyStatusReading &
   PolicyDraftReplacing &
   PolicyPreviewLifecycleClient &
   PolicyPublicationTriggerClient;
-
-/**
- * Mirrors the authentication client's transport failure body so every client
- * surface closes identically when the API cannot be reached. Shared with the
- * sibling Admin clients; never duplicated per client.
- */
-export const REQUEST_UNAVAILABLE_ERROR: ApiErrorBody = {
-  code: "internal_error",
-  details: {},
-  message: "The request could not be completed. Check your connection and try again.",
-  retryable: true,
-};
-
-/**
- * Unwraps a route envelope onto the closed call-result shape: the route's
- * data payload on success, its registered error body otherwise. Shared with
- * the sibling Admin clients; never duplicated per client.
- */
-export function unwrapEnvelope<T>(payload: {
-  data?: unknown;
-  error?: unknown;
-}): AuthenticationCallResult<T> {
-  const envelope = (payload.data ?? payload.error ?? null) as
-    | { data?: T | null; error?: ApiErrorBody | null }
-    | null;
-  if (
-    envelope !== null &&
-    typeof envelope === "object" &&
-    envelope.data !== null &&
-    envelope.data !== undefined
-  ) {
-    return { ok: true, data: envelope.data };
-  }
-  const error = envelope !== null && typeof envelope === "object" ? envelope.error : null;
-  return { ok: false, error: error ?? REQUEST_UNAVAILABLE_ERROR };
-}
 
 export function createExclusionPolicyClient(options: {
   apiClient: ApiClient;
