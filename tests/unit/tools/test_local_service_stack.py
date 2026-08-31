@@ -1513,8 +1513,6 @@ def test_cli_up_failure_surfaces_only_sanitized_stack_status(
                 "temporal-namespace-bootstrap": {"exit_code": 0, "state": "running"},
                 "temporal-schema-setup": {"exit_code": 0, "state": "running"},
             },
-            "project": "knowledge-local",
-            "result_code": "stack_starting",
             "services": {
                 "neo4j": {"health": "starting", "state": "running"},
                 "postgresql": {"health": "starting", "state": "running"},

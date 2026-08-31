@@ -2479,7 +2479,7 @@ def _read_startup_failure_status(
 ) -> dict[str, object]:
     """Return the existing safe status shape or a closed unavailable token after failed startup."""
     try:
-        return _read_stack_status(
+        status = _read_stack_status(
             context,
             runner=runner,
             timeout_seconds=min(
@@ -2487,6 +2487,11 @@ def _read_startup_failure_status(
                 _remaining_seconds(deadline_monotonic, time.monotonic),
             ),
         )
+        return {
+            "state": status["state"],
+            "services": status["services"],
+            "initializers": status["initializers"],
+        }
     except StackFailure:
         return {"result_code": "stack_status_unavailable", "state": "error"}
 
