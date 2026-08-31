@@ -33,6 +33,7 @@ injected clock.
 from __future__ import annotations
 
 import math
+import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -295,7 +296,8 @@ class InMemoryExclusionPolicyMetrics:
     eviction — plus a bounded ring of :data:`_MAXIMUM_FAILURE_RECORDS` closed
     failure records stamped through the injected epoch-millisecond clock (the
     wall clock by default); :meth:`policy_diagnostics` serves immutable
-    snapshots of all three.
+    snapshots of all three. Increments and snapshots are lock-guarded for
+    multi-worker serve (BACKLOG 2026-08-24 §5.5).
     """
 
     def __init__(self, *, epoch_ms_clock: Callable[[], int] = _wall_clock_epoch_ms) -> None:
@@ -306,6 +308,7 @@ class InMemoryExclusionPolicyMetrics:
         self._publication_counters: dict[PublicationMetricOutcome, int] = {}
         self._failure_records: deque[PolicyFailureRecord] = deque(maxlen=_MAXIMUM_FAILURE_RECORDS)
         self._epoch_ms_clock = epoch_ms_clock
+        self._lock = threading.Lock()
 
     def record_evaluation(
         self,
@@ -319,36 +322,40 @@ class InMemoryExclusionPolicyMetrics:
         _validate_label("decision", EvaluationMetricOutcome, decision)
         _validate_finite_non_negative("duration_seconds", duration_seconds)
         _validate_evaluation_error_code(decision, error_code)
-        self._evaluations.append(
-            EvaluationRecord(
-                boundary=boundary,
-                decision=decision,
-                duration_seconds=duration_seconds,
-                error_code=error_code,
-            )
-        )
-        counter_key = (boundary, decision)
-        self._evaluation_counters[counter_key] = self._evaluation_counters.get(counter_key, 0) + 1
-        if decision is EvaluationMetricOutcome.FAILED:
-            # ``_validate_evaluation_error_code`` guarantees the code is present
-            # exactly on the failed decision; the check keeps the narrowing
-            # explicit for the closed record constructor below.
-            if error_code is None:  # pragma: no cover - guarded above
-                raise ValueError("the failed decision requires its closed error_code")
-            at_epoch_ms = self._epoch_ms_clock()
-            _validate_epoch_ms(at_epoch_ms)
-            self._failure_records.append(
-                PolicyFailureRecord(
+        with self._lock:
+            self._evaluations.append(
+                EvaluationRecord(
                     boundary=boundary,
+                    decision=decision,
+                    duration_seconds=duration_seconds,
                     error_code=error_code,
-                    at_epoch_ms=at_epoch_ms,
                 )
             )
+            counter_key = (boundary, decision)
+            self._evaluation_counters[counter_key] = (
+                self._evaluation_counters.get(counter_key, 0) + 1
+            )
+            if decision is EvaluationMetricOutcome.FAILED:
+                # ``_validate_evaluation_error_code`` guarantees the code is present
+                # exactly on the failed decision; the check keeps the narrowing
+                # explicit for the closed record constructor below.
+                if error_code is None:  # pragma: no cover - guarded above
+                    raise ValueError("the failed decision requires its closed error_code")
+                at_epoch_ms = self._epoch_ms_clock()
+                _validate_epoch_ms(at_epoch_ms)
+                self._failure_records.append(
+                    PolicyFailureRecord(
+                        boundary=boundary,
+                        error_code=error_code,
+                        at_epoch_ms=at_epoch_ms,
+                    )
+                )
 
     def evaluation_records(self) -> list[EvaluationRecord]:
         """A snapshot list of recorded evaluation outcomes (oldest first)."""
 
-        return list(self._evaluations)
+        with self._lock:
+            return list(self._evaluations)
 
     def record_preview(
         self,
@@ -358,15 +365,18 @@ class InMemoryExclusionPolicyMetrics:
     ) -> None:
         _validate_label("outcome", PreviewMetricOutcome, outcome)
         _validate_finite_non_negative("duration_seconds", duration_seconds)
-        self._previews.append(PreviewRecord(outcome=outcome, duration_seconds=duration_seconds))
+        with self._lock:
+            self._previews.append(PreviewRecord(outcome=outcome, duration_seconds=duration_seconds))
 
     def preview_records(self) -> list[PreviewRecord]:
         """A snapshot list of recorded preview outcomes (oldest first)."""
 
-        return list(self._previews)
+        with self._lock:
+            return list(self._previews)
 
     def preview_count(self, outcome: PreviewMetricOutcome) -> int:
-        return sum(1 for record in self._previews if record.outcome is outcome)
+        with self._lock:
+            return sum(1 for record in self._previews if record.outcome is outcome)
 
     def record_publication(
         self,
@@ -376,30 +386,35 @@ class InMemoryExclusionPolicyMetrics:
     ) -> None:
         _validate_label("outcome", PublicationMetricOutcome, outcome)
         _validate_finite_non_negative("duration_seconds", duration_seconds)
-        self._publications.append(
-            PublicationRecord(outcome=outcome, duration_seconds=duration_seconds)
-        )
-        self._publication_counters[outcome] = self._publication_counters.get(outcome, 0) + 1
+        with self._lock:
+            self._publications.append(
+                PublicationRecord(outcome=outcome, duration_seconds=duration_seconds)
+            )
+            self._publication_counters[outcome] = self._publication_counters.get(outcome, 0) + 1
 
     def publication_records(self) -> list[PublicationRecord]:
         """A snapshot list of recorded publication outcomes (oldest first)."""
 
-        return list(self._publications)
+        with self._lock:
+            return list(self._publications)
 
     def publication_count(self, outcome: PublicationMetricOutcome) -> int:
-        return self._publication_counters.get(outcome, 0)
+        with self._lock:
+            return self._publication_counters.get(outcome, 0)
 
     def evaluation_count(self, boundary: PolicyBoundary, decision: EvaluationMetricOutcome) -> int:
-        return self._evaluation_counters.get((boundary, decision), 0)
+        with self._lock:
+            return self._evaluation_counters.get((boundary, decision), 0)
 
     def policy_diagnostics(self) -> ExclusionPolicyDiagnostics:
         """Return one immutable snapshot of the policy evidence."""
 
-        return ExclusionPolicyDiagnostics(
-            evaluation_counters=MappingProxyType(dict(self._evaluation_counters)),
-            publication_counters=MappingProxyType(dict(self._publication_counters)),
-            recent_failures=tuple(self._failure_records),
-        )
+        with self._lock:
+            return ExclusionPolicyDiagnostics(
+                evaluation_counters=MappingProxyType(dict(self._evaluation_counters)),
+                publication_counters=MappingProxyType(dict(self._publication_counters)),
+                recent_failures=tuple(self._failure_records),
+            )
 
     def __repr__(self) -> str:
         return "InMemoryExclusionPolicyMetrics(redacted)"

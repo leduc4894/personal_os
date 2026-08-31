@@ -13,6 +13,7 @@ string can ever appear in one.
 
 from __future__ import annotations
 
+import threading
 from typing import Final
 
 import pytest
@@ -39,6 +40,41 @@ class _SteppingEpochClock:
         current = self._next_epoch_ms
         self._next_epoch_ms += 1
         return current
+
+
+def test_concurrent_increments_never_lose_a_count() -> None:
+    """A missing recorder lock can lose an increment during multi-worker serve."""
+
+    recorder = InMemoryExclusionPolicyMetrics(epoch_ms_clock=lambda: 1_000)
+    assert hasattr(recorder, "_lock")
+    barrier = threading.Barrier(8)
+
+    def _record() -> None:
+        barrier.wait()
+        for _ in range(50):
+            recorder.record_evaluation(
+                boundary=PolicyBoundary.SOURCE_CREATE_UPDATE,
+                decision=EvaluationMetricOutcome.ALLOWED,
+                duration_seconds=0.01,
+            )
+
+    threads = [threading.Thread(target=_record) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    snapshot = recorder.policy_diagnostics()
+    assert snapshot.evaluation_counters[
+        (PolicyBoundary.SOURCE_CREATE_UPDATE, EvaluationMetricOutcome.ALLOWED)
+    ] == 400
+    assert (
+        recorder.evaluation_count(
+            PolicyBoundary.SOURCE_CREATE_UPDATE,
+            EvaluationMetricOutcome.ALLOWED,
+        )
+        == 400
+    )
 
 
 def test_diagnostics_snapshot_carries_exact_closed_counters() -> None:
