@@ -93,6 +93,7 @@ function policyStatus(activeRevision: 0 | 1 | 2, denyRuleId: string): Record<str
       state: "running",
       updated_at: "2026-08-17T12:30:00Z",
     },
+    stale_running_previews: null,
   };
 }
 
