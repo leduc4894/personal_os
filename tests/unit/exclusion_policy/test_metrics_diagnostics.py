@@ -65,9 +65,12 @@ def test_concurrent_increments_never_lose_a_count() -> None:
         thread.join()
 
     snapshot = recorder.policy_diagnostics()
-    assert snapshot.evaluation_counters[
-        (PolicyBoundary.SOURCE_CREATE_UPDATE, EvaluationMetricOutcome.ALLOWED)
-    ] == 400
+    assert (
+        snapshot.evaluation_counters[
+            (PolicyBoundary.SOURCE_CREATE_UPDATE, EvaluationMetricOutcome.ALLOWED)
+        ]
+        == 400
+    )
     assert (
         recorder.evaluation_count(
             PolicyBoundary.SOURCE_CREATE_UPDATE,
