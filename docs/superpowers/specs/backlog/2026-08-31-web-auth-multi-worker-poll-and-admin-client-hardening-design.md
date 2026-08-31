@@ -56,9 +56,10 @@ carry verbatim-duplicated envelope helpers.
   is enforced (application vocabulary and/or DB constraint), the extension
   lands together with an Alembic revision carrying upgrade/downgrade
   tests per repo rules.
-- Spec 16/17 of the web-auth design spec is amended in the same effort for
-  the poll bucket kind and the multi-key digest (the handoff §13 ruling
-  names schema + spec amendment as the required pair).
+- Sections 11.4 and 15.8 of the web-auth design spec are amended in the same
+  effort for the durable poll pacing and the poll bucket kind, and §12.2
+  gains the two-key replay digest boundary (the handoff §13 ruling names
+  schema + spec amendment as the required pair).
 - Public wire behavior is otherwise preserved: poll outcomes, error codes,
   429 envelope shape and retry hints keep their existing contracts. No new
   production dependency. OpenAPI changes only if a plan-review decision

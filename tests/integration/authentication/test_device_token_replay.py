@@ -19,7 +19,8 @@ identity returns the exact committed successor with anchored timestamps and
 no duplicate rows; and the poll route semantics report the five-second
 pending interval, the durable slow-down window whose hint reflects the
 backed-off state, and the slow-down outcome repeat polls with unknown
-credentials receive before the invalid-credential code.
+credentials receive before the invalid-credential code. Two separately
+composed worker services over the same store share one durable poll budget.
 """
 
 from __future__ import annotations
@@ -197,6 +198,15 @@ class TokenHarness:
             clock=self.clock,
             previous_master_key=previous_master_key,
         )
+
+    def compose_worker_token_service(self) -> DeviceTokenService:
+        """One freshly composed worker service over the same durable stores.
+
+        Multi-worker ``serve`` composes one service instance per worker
+        process, so the returned instance shares no in-memory state with
+        ``token_service`` — only the store-backed durable poll budget.
+        """
+        return self._build_token_service()
 
     def rotate_keyring(self) -> None:
         """Rotate the keyring mid-grant, retaining the previous master key.
@@ -750,6 +760,60 @@ async def test_pending_poll_reports_the_five_second_interval_then_slows_down(
         await harness.poll(pending_created.grant_id, pending_created.polling_secret)
     assert allowed.value.error_code is ErrorCode.DEVICE_AUTHORIZATION_PENDING
     assert allowed.value.safe_details["retry_after_seconds"] == 5
+
+
+@pytest.mark.asyncio
+async def test_two_service_instances_share_one_durable_poll_budget(
+    harness: TokenHarness,
+) -> None:
+    """Two composed workers — separate DeviceTokenService instances over one
+    store and one polling credential — throttle against one shared durable
+    grant_poll budget, not two per-process budgets (design spec acceptance
+    criterion 3)."""
+    await harness.seed_account()
+    pending_created = await harness.grant_service.create_grant(
+        client_instance_id=uuid4(),
+        device_name="Personal desktop",
+        platform_class=DevicePlatformClass.OBSIDIAN_DESKTOP,
+        platform_name="windows",
+        plugin_version="1.4.0",
+        requested_scope=DeviceScope.OBSIDIAN_SYNC,
+        source_bucket=f"token-source-{uuid4().hex[:10]}",
+    )
+    worker_a = harness.compose_worker_token_service()
+    worker_b = harness.compose_worker_token_service()
+
+    # Worker A's first poll is admissible: the pending outcome, not slow-down.
+    with pytest.raises(AuthenticationError) as first:
+        await worker_a.exchange_grant(
+            grant_id=pending_created.grant_id,
+            polling_credential=pending_created.polling_secret,
+            diagnostic_context=harness.diagnostic_context(),
+        )
+    assert first.value.error_code is ErrorCode.DEVICE_AUTHORIZATION_PENDING
+
+    # Worker B holds none of A's in-process state, yet its immediate re-poll
+    # violates the same durable grant_poll bucket: one shared budget.
+    with pytest.raises(AuthenticationError) as slowed:
+        await worker_b.exchange_grant(
+            grant_id=pending_created.grant_id,
+            polling_credential=pending_created.polling_secret,
+            diagnostic_context=harness.diagnostic_context(),
+        )
+    assert slowed.value.error_code is ErrorCode.DEVICE_AUTHORIZATION_SLOW_DOWN
+    assert slowed.value.safe_details["retry_after_seconds"] >= 1
+
+    # Past the backed-off deadline worker B's poll is admissible again and the
+    # window has reset to the untouched five-second hint.
+    harness.clock.database_now_value += timedelta(seconds=20)
+    with pytest.raises(AuthenticationError) as admitted:
+        await worker_b.exchange_grant(
+            grant_id=pending_created.grant_id,
+            polling_credential=pending_created.polling_secret,
+            diagnostic_context=harness.diagnostic_context(),
+        )
+    assert admitted.value.error_code is ErrorCode.DEVICE_AUTHORIZATION_PENDING
+    assert admitted.value.safe_details["retry_after_seconds"] == 5
 
 
 @pytest.mark.asyncio

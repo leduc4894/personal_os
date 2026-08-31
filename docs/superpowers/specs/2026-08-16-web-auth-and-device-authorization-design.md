@@ -570,6 +570,10 @@ return the exact credentials with the original issued/expiry timestamps while
 the initial refresh generation remains current. It creates no new device,
 family, token or audit row.
 
+While the two-key keyring retains the grant-issuing key, the replay digest match
+covers the current key plus at most the single retained previous key; a keyring
+retaining more than one previous key matches the current-key digest only.
+
 After the initial refresh generation has rotated, grant polling is terminally
 consumed and may not resurrect the old generation.
 

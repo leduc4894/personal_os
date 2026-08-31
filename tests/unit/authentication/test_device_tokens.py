@@ -457,6 +457,7 @@ async def test_exchange_command_carries_the_previous_key_digest_after_rotation()
     current = polling_credential_hash_of(
         hmac_key=service._grant_hmac_key, polling_credential=_ROTATION_POLLING_CREDENTIAL
     )
+    assert isinstance(service._previous_grant_hmac_key, bytes)
     previous = polling_credential_hash_of(
         hmac_key=service._previous_grant_hmac_key, polling_credential=_ROTATION_POLLING_CREDENTIAL
     )
