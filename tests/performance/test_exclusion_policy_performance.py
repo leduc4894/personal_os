@@ -376,6 +376,17 @@ def _seed_performance_workspace(port: int, project_name: str) -> PolicyMigration
         workspace_id=workspace_id,
         seeded_event_id=uuid5(_FIXTURE_NAMESPACE, "perf-seed-event"),
         seeded_source_id=_fixture_source_id(0),
+        # The deterministic performance fixture has one committed version per
+        # source, so immutable event evidence and the current pointer are the
+        # same version for its seed source.  It does not stage the migration's
+        # deliberately unbackfillable negative row.
+        seeded_event_source_version_id=uuid5(_FIXTURE_NAMESPACE, "perf-version-0"),
+        seeded_current_source_version_id=uuid5(_FIXTURE_NAMESPACE, "perf-version-0"),
+        seeded_event_payload=b"",
+        seeded_current_payload=b"",
+        unbackfillable_upgrade_returncode=0,
+        unbackfillable_upgrade_result_code="",
+        revision_after_unbackfillable_upgrade="",
     )
 
 
