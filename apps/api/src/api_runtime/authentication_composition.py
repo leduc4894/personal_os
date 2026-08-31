@@ -246,6 +246,25 @@ class KeyringDeviceTokenKeyring:
         return self._keyring.keys_by_id
 
 
+def retained_previous_master_key(keyring: AuthenticationKeyring) -> bytes | None:
+    """Resolve the retained previous master key of a two-key keyring (20.1).
+
+    The poll replay digest must keep matching across a rotation, so the
+    exchange command carries the previous-key digest while the keyring
+    retains exactly one previous key alongside the current one — the same
+    keyring view the TOTP re-encryption leg resolves previous-key rows
+    through. A single-key keyring returns ``None``; a keyring retaining more
+    than one previous key is outside the two-key rotation model and keeps
+    the current-key-only digest of the pre-rotation behavior.
+    """
+    retained_keys = [
+        master_key
+        for key_id, master_key in keyring.keys_by_id.items()
+        if key_id != keyring.current_key_id
+    ]
+    return retained_keys[0] if len(retained_keys) == 1 else None
+
+
 class KeyringTotpSecretCodec:
     """Versioned-keyring AEAD adapter for TOTP-secret ciphertext (spec 20.1).
 
@@ -395,6 +414,7 @@ def compose_web_authentication(
             keyring=KeyringDeviceTokenKeyring(keyring),
             crypto=crypto,
             clock=clock,
+            previous_master_key=retained_previous_master_key(keyring),
         ),
         device_administration_service=DeviceAdministrationService(
             tokens=device_tokens_store,
@@ -1541,18 +1561,23 @@ class OfflineDeviceAuthorizationStore:
 
         One ``asyncio.Lock`` serializes the operation exactly like the row
         lock of the real store: the closed poll outcome vocabulary answers
-        pending, denied and expired grants before any write; an approved
-        grant commits one device, family and token pair with the grant
-        anchors and the two registration audits; an exchanged grant replays
-        the anchored identities and timestamps while generation one stays
-        current.
+        pending, denied and expired grants before any write; the polling
+        digest matches under the command's current replay key or its
+        retained-previous one, mirroring the real store's two-digest match;
+        an approved grant commits one device, family and token pair with the
+        grant anchors and the two registration audits; an exchanged grant
+        replays the anchored identities and timestamps while generation one
+        stays current.
         """
         async with self._lock:
+            matchable_digests = [command.polling_secret_hash]
+            if command.previous_polling_secret_hash is not None:
+                matchable_digests.append(command.previous_polling_secret_hash)
             row = next(
                 (
                     candidate
                     for candidate in self._state.device_grant_rows
-                    if candidate.polling_secret_hash == command.polling_secret_hash
+                    if candidate.polling_secret_hash in matchable_digests
                 ),
                 None,
             )

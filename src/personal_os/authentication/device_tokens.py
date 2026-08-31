@@ -569,7 +569,12 @@ class GrantPollPacer:
 
 @dataclass(frozen=True, slots=True)
 class ExchangeGrantCommand:
-    """One grant exchange's transactional writes (spec 12)."""
+    """One grant exchange's transactional writes (spec 12).
+
+    ``previous_polling_secret_hash`` is the polling-credential digest under
+    the retained previous replay key; set only while the two-key keyring
+    retains the grant-issuing key.
+    """
 
     grant_id: UUID
     polling_secret_hash: str = field(repr=False)
@@ -585,6 +590,7 @@ class ExchangeGrantCommand:
     family_absolute_expires_at: datetime
     database_now: datetime
     diagnostic_context: DiagnosticContext
+    previous_polling_secret_hash: str | None = field(repr=False, default=None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -805,8 +811,10 @@ class DeviceTokenService:
     One invocation of any method takes exactly one ``database_now`` read,
     derives and hashes every secret outside the transactions, and commits
     through the ports' single-purpose transactions. The exchange presents a
-    polling credential whose digest selects the grant; a replay re-derives
-    the committed credentials under the anchored key and lookup identities;
+    polling credential whose digest selects the grant — matched under the
+    current replay key or, across a keyring rotation, the retained previous
+    one; a replay re-derives the committed credentials under the anchored
+    key and lookup identities;
     the rotation pre-reads the predecessor to derive the successor hashes,
     then re-derives the response material from the committed outcome so an
     exact replay of a racing commit still renders byte-identical values.
@@ -821,6 +829,7 @@ class DeviceTokenService:
         crypto: AuthenticationCryptoPort,
         clock: AuthenticationClockPort,
         poll_pacer: GrantPollPacer | None = None,
+        previous_master_key: bytes | None = None,
     ) -> None:
         self._exchange = exchange
         self._tokens = tokens
@@ -829,6 +838,11 @@ class DeviceTokenService:
         self._poll_pacer = poll_pacer if poll_pacer is not None else GrantPollPacer()
         self._grant_hmac_key = derive_grant_replay_hmac_key(
             crypto, keyring.keys_by_id()[keyring.current_key_id()]
+        )
+        self._previous_grant_hmac_key: bytes | None = (
+            derive_grant_replay_hmac_key(crypto=crypto, master_key=previous_master_key)
+            if previous_master_key is not None
+            else None
         )
 
     # -- grant poll and exchange (spec 11.4, 12) ---------------------------------------
@@ -874,11 +888,20 @@ class DeviceTokenService:
             grant_id=grant_id,
             token_lookup_id=refresh_token_id,
         ).secret
+        previous_grant_hmac_key = self._previous_grant_hmac_key
+        previous_polling_secret_hash = (
+            polling_credential_hash_of(
+                hmac_key=previous_grant_hmac_key, polling_credential=polling_credential
+            )
+            if previous_grant_hmac_key is not None
+            else None
+        )
         command = ExchangeGrantCommand(
             grant_id=grant_id,
             polling_secret_hash=polling_credential_hash_of(
                 hmac_key=self._grant_hmac_key, polling_credential=polling_credential
             ),
+            previous_polling_secret_hash=previous_polling_secret_hash,
             device_id=device_id,
             token_family_id=token_family_id,
             access_token_id=access_token_id,

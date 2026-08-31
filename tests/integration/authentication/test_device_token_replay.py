@@ -11,7 +11,9 @@ contracts of design sections 12 and 13.4: one exchange creates exactly one
 device, family, access token and refresh token with the grant anchors and the
 two registration audit rows; a lost commit acknowledgement — the same polling
 secret polled again — re-derives byte-identical credentials with the original
-anchored timestamps and creates no new row; the replay window closes once the
+anchored timestamps and creates no new row; a keyring rotation between two
+polls of the same grant keeps that replay exact instead of failing the
+credential; the replay window closes once the
 initial refresh generation rotates; a refresh retry with the same rotation
 identity returns the exact committed successor with anchored timestamps and
 no duplicate rows; and the poll route semantics report the five-second
@@ -83,6 +85,8 @@ _DATABASE_NOW = datetime(2026, 8, 16, 12, 0, 0, tzinfo=UTC)
 _CORRECT_PASSWORD = "correct-horse-battery-staple"
 _MASTER_KEY = bytes(range(32))
 _DERIVATION_KEY_ID = "auth-key-current"
+_ROTATED_DERIVATION_KEY_ID = "auth-key-rotated"
+_ROTATED_MASTER_KEY = bytes(range(64, 96))
 _VERIFICATION_BASE_URL = "https://web-admin.example"
 
 ROTATION_A = UUID("00000000-0000-0000-0000-0000000000aa")
@@ -114,13 +118,28 @@ class StaticPasswordHasher:
 
 
 class FixedKeyring:
-    """Keyring double anchoring every derivation to the fixed master key."""
+    """Keyring double anchoring derivations to the fixed key pair.
+
+    ``rotate_current_key`` flips the current key to the rotated one while
+    both keys stay resolvable through ``keys_by_id``, mirroring the two-key
+    rotation model of the deployment keyring.
+    """
+
+    def __init__(self) -> None:
+        self._current_key_id = _DERIVATION_KEY_ID
+
+    def rotate_current_key(self) -> None:
+        """Rotate once: the fixed key stays retained for anchored rows."""
+        self._current_key_id = _ROTATED_DERIVATION_KEY_ID
 
     def current_key_id(self) -> str:
-        return _DERIVATION_KEY_ID
+        return self._current_key_id
 
     def keys_by_id(self) -> dict[str, bytes]:
-        return {_DERIVATION_KEY_ID: _MASTER_KEY}
+        return {
+            _DERIVATION_KEY_ID: _MASTER_KEY,
+            _ROTATED_DERIVATION_KEY_ID: _ROTATED_MASTER_KEY,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,16 +179,32 @@ class TokenHarness:
             ),
             verification_base_url=_VERIFICATION_BASE_URL,
         )
-        self.token_service = DeviceTokenService(
+        self.token_service = self._build_token_service()
+        self.username = f"token-owner-{uuid4().hex[:10]}"
+        self.access_credential: str | None = None
+        self.refresh_credential: str | None = None
+
+    def _build_token_service(
+        self, *, previous_master_key: bytes | None = None
+    ) -> DeviceTokenService:
+        return DeviceTokenService(
             exchange=self.grant_store,
             tokens=self.token_store,
             keyring=self.keyring,
             crypto=self.crypto,
             clock=self.clock,
+            previous_master_key=previous_master_key,
         )
-        self.username = f"token-owner-{uuid4().hex[:10]}"
-        self.access_credential: str | None = None
-        self.refresh_credential: str | None = None
+
+    def rotate_keyring(self) -> None:
+        """Rotate the keyring mid-grant, retaining the previous master key.
+
+        The deployment-level two-key rotation: the current key flips while
+        the grant-issuing key stays retained, so a poll of a grant issued
+        under the previous key must keep matching its stored digest.
+        """
+        self.keyring.rotate_current_key()
+        self.token_service = self._build_token_service(previous_master_key=_MASTER_KEY)
 
     @property
     def database_now(self) -> datetime:
@@ -462,6 +497,45 @@ async def test_lost_exchange_acknowledgement_replays_identical_credentials(
     created, exchanged = await harness.exchange(account)
 
     # The commit succeeded but the client lost the acknowledgement and retries.
+    retried = await harness.poll(created.grant_id, created.polling_secret)
+
+    assert retried.access_credential == exchanged.access_credential
+    assert retried.refresh_credential == exchanged.refresh_credential
+    assert retried.access_expires_at == exchanged.access_expires_at
+    assert retried.refresh_expires_at == exchanged.refresh_expires_at
+    assert retried.device_id == exchanged.device_id
+    assert retried.token_family_id == exchanged.token_family_id
+    assert retried.refresh_generation == exchanged.refresh_generation
+    # Advancing the clock does not move the anchored timestamps.
+    harness.clock.database_now_value += timedelta(minutes=4)
+    replayed_again = await harness.poll(created.grant_id, created.polling_secret)
+    assert replayed_again.access_credential == exchanged.access_credential
+    assert replayed_again.access_expires_at == exchanged.access_expires_at
+    assert (
+        await harness.scalar_count(
+            sa.select(sa.func.count())
+            .select_from(devices)
+            .where(devices.c.device_id == exchanged.device_id)
+        )
+        == 1
+    )
+    assert len(await harness.token_rows(exchanged.token_family_id)) == 2
+    assert len(await harness.audit_rows(exchanged.device_id)) == 1
+    assert len(await harness.audit_rows(exchanged.token_family_id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_keyring_rotation_mid_grant_preserves_exact_poll_replay(
+    harness: TokenHarness,
+) -> None:
+    """A keyring rotation between two polls of the same grant keeps the
+    exchange an exact replay instead of an invalid credential (BACKLOG §9)."""
+    account = await harness.seed_account()
+    created, exchanged = await harness.exchange(account)
+
+    # The deployment rotates the keyring between two polls of this grant.
+    harness.rotate_keyring()
+
     retried = await harness.poll(created.grant_id, created.polling_secret)
 
     assert retried.access_credential == exchanged.access_credential

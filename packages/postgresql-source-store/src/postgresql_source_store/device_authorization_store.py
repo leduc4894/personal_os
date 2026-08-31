@@ -425,7 +425,11 @@ class DeviceAuthorizationStore:
     async def poll_exchange(self, command: ExchangeGrantCommand) -> ExchangeProvisioning:
         """Lock one grant by its polling digest and exchange or replay it.
 
-        The locked grant resolves through the closed poll outcome vocabulary:
+        The digest matches under the command's current replay key or its
+        retained-previous one, so a keyring rotation between two polls of the
+        same grant keeps the exchange an exact replay; the grant-identity
+        recheck disambiguates any digest collision across grants. The
+        locked grant resolves through the closed poll outcome vocabulary:
         a pending, unexpired grant raises the pending outcome with the
         five-second hint; a denied or expired grant raises its closed code;
         an approved grant runs the nine-step exchange of spec 12 — one
@@ -438,6 +442,9 @@ class DeviceAuthorizationStore:
         decided_at = command.database_now
 
         async def operation(connection: AsyncConnection) -> ExchangeProvisioning:
+            matchable_digests = [command.polling_secret_hash]
+            if command.previous_polling_secret_hash is not None:
+                matchable_digests.append(command.previous_polling_secret_hash)
             locked = await connection.execute(
                 sa.select(
                     *_GRANT_ROW_COLUMNS,
@@ -447,9 +454,7 @@ class DeviceAuthorizationStore:
                     device_authorization_grants.c.initial_refresh_token_id,
                     device_authorization_grants.c.derivation_key_id,
                 )
-                .where(
-                    device_authorization_grants.c.polling_secret_hash == command.polling_secret_hash
-                )
+                .where(device_authorization_grants.c.polling_secret_hash.in_(matchable_digests))
                 .with_for_update(of=device_authorization_grants)
             )
             row = locked.one_or_none()

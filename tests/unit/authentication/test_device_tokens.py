@@ -8,17 +8,22 @@ and big-endian successor generation; the access/exchange derivations under
 their own pinned labels; the opaque ``at1.``/``rt1.``/``pg1.`` credential
 formatting and parsing round trips; the pure refresh classification of exact
 replay versus confirmed reuse versus a new rotation; the in-memory poll
-pacing window; and the lifetime constants of sections 13.1 and 13.2.
+pacing window; the exchange command carrying the polling digest under both
+the current and the retained previous replay key across a keyring rotation;
+and the lifetime constants of sections 13.1 and 13.2.
 """
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
 
 from personal_os.authentication.contracts import DeviceTokenState
+from personal_os.authentication.device_authorization import polling_credential_hash_of
 from personal_os.authentication.device_tokens import (
     ACCESS_TOKEN_LIFETIME_SECONDS,
     DEVICE_LAST_SEEN_MAXIMUM_UPDATE_INTERVAL,
@@ -26,6 +31,8 @@ from personal_os.authentication.device_tokens import (
     REFRESH_ABSOLUTE_LIFETIME,
     REFRESH_INACTIVITY_LIFETIME,
     DerivedTokenSecret,
+    DeviceTokenService,
+    ExchangeGrantCommand,
     GrantPollPacer,
     StoredDeviceToken,
     StoredTokenFamily,
@@ -40,6 +47,7 @@ from personal_os.authentication.device_tokens import (
     refresh_secret_hash_of,
 )
 from personal_os.authentication.errors import AuthenticationError
+from personal_os.diagnostics.context import create_diagnostic_context
 from personal_os.error_contracts.codes import ErrorCode
 
 _MASTER_KEY = bytes(range(32))
@@ -382,6 +390,89 @@ def test_poll_pacer_starts_at_five_seconds_and_backs_off() -> None:
     still_fast = pacer.register_pending_poll(grant_id, _DATABASE_NOW + timedelta(seconds=5))
     assert still_fast is not None
     assert pacer.register_pending_poll(grant_id, _DATABASE_NOW + timedelta(seconds=20)) is None
+
+
+# --- exchange command across a keyring rotation (spec 12.2, 20.1) --------------------
+
+
+_ROTATION_GRANT_ID = UUID("00000000-0000-0000-0000-00000000000a")
+_ROTATION_POLLING_CREDENTIAL = f"pg1.{_ROTATION_GRANT_ID}.{bytes(range(32)).hex()}"
+_RETAINED_ROTATION_MASTER_KEY = bytes(range(64, 96))
+
+
+class _SingleKeyKeyring:
+    """Keyring double whose single current key is the rotated-in master key."""
+
+    def current_key_id(self) -> str:
+        return "unit-key-current"
+
+    def keys_by_id(self) -> dict[str, bytes]:
+        return {"unit-key-current": _MASTER_KEY}
+
+
+class _StaticSubkeyCrypto:
+    """Crypto double deriving deterministic replay subkeys per master key."""
+
+    def derive_subkey(self, *, master_key: bytes, label: str) -> bytes:
+        return hashlib.sha256(label.encode("ascii") + master_key).digest()
+
+
+class _FixedTransactionClock:
+    """Clock double pinning the one transaction timestamp of the poll."""
+
+    async def database_now(self) -> datetime:
+        return _DATABASE_NOW
+
+
+class _UnusedTokenTransactions:
+    """Token-transaction double: the captured pending poll never reaches it."""
+
+    def __getattr__(self, attribute_name: str) -> Any:
+        raise AssertionError(f"the pending exchange path never calls {attribute_name}")
+
+
+@pytest.mark.asyncio
+async def test_exchange_command_carries_the_previous_key_digest_after_rotation() -> None:
+    """A rotation mid-grant must not break replay: the exchange command
+    carries the digest under BOTH the current and the retained previous
+    master key (BACKLOG 2026-08-16 §9)."""
+    captured: dict[str, object] = {}
+
+    class _CapturingExchange:
+        async def poll_exchange(self, command: ExchangeGrantCommand) -> object:
+            captured["command"] = command
+            raise AuthenticationError(
+                ErrorCode.DEVICE_AUTHORIZATION_PENDING,
+                safe_details={"retry_after_seconds": 5},
+            )
+
+    service = DeviceTokenService(
+        exchange=_CapturingExchange(),
+        tokens=_UnusedTokenTransactions(),
+        keyring=_SingleKeyKeyring(),
+        crypto=_StaticSubkeyCrypto(),
+        clock=_FixedTransactionClock(),
+        previous_master_key=_RETAINED_ROTATION_MASTER_KEY,
+    )
+
+    with pytest.raises(AuthenticationError) as raised:
+        await service.exchange_grant(
+            grant_id=_ROTATION_GRANT_ID,
+            polling_credential=_ROTATION_POLLING_CREDENTIAL,
+            diagnostic_context=create_diagnostic_context().context,
+        )
+    assert raised.value.error_code is ErrorCode.DEVICE_AUTHORIZATION_PENDING
+
+    command = cast("ExchangeGrantCommand", captured["command"])
+    current = polling_credential_hash_of(
+        hmac_key=service._grant_hmac_key, polling_credential=_ROTATION_POLLING_CREDENTIAL
+    )
+    previous = polling_credential_hash_of(
+        hmac_key=service._previous_grant_hmac_key, polling_credential=_ROTATION_POLLING_CREDENTIAL
+    )
+    assert command.polling_secret_hash == current
+    assert command.previous_polling_secret_hash == previous
+    assert current != previous
 
 
 # --- lifetime constants (spec 13.1, 13.2) -------------------------------------------
