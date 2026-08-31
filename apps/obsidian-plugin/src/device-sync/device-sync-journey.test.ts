@@ -32,7 +32,11 @@
 
 import { readFileSync } from "node:fs";
 import initSqlJs from "sql.js";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+
+// Parallel-coverage headroom: the real-timer settling loops can exceed Vitest's
+// 5 s default under full-suite load; this raises wall-clock budget only.
+vi.setConfig({ testTimeout: 30_000 });
 
 import { sha256Hex } from "../exclusion-policy/canonical-json";
 import type { FrozenFingerprint, JournalMeta } from "../journal/contracts";
