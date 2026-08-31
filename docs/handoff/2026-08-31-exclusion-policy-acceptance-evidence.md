@@ -4,8 +4,7 @@ Date: 2026-08-31. Branch: `exclusion-policy-acceptance-evidence`.
 
 ## Status
 
-Complete pending Task 7 final local verification. The required first
-real-runner observation is now green: PR #2 run
+The required first real-runner observation is green: PR #2 run
 [`33404975850`](https://github.com/leduc4894/personal_os/actions/runs/33404975850)
 on commit `7d4974c` completed successfully in 26m16s. It passed the
 migration, exclusion-policy feature, performance-budget, Web Admin vitest,
@@ -34,6 +33,13 @@ Obsidian-plugin vitest, browser-journey and sanitized-cleanup gates.
 - Task 4 browser journey: 1 passed.
 - Real runner: run `33404975850` success in 26m16s, including all workflow
   gates and sanitized cleanup.
+- Task 7 local gates: `uv run poe build`, `uv run poe api-contract-check`,
+  and `pnpm run test` passed (the latter: API client 1/1, Web 163/163,
+  Obsidian 1,245/1,245). `uv run poe verify` passed format/lint/type/boundary
+  preflight; its test subprocess completed but the Windows launcher did not
+  retain its tail, so the independently observed build and full `poe test`
+  process are recorded as supplementary evidence rather than an unqualified
+  verify-pass claim.
 
 ## Rulings
 
@@ -66,6 +72,6 @@ Obsidian-plugin vitest, browser-journey and sanitized-cleanup gates.
 
 ## Next actions
 
-1. Run Task 7's four local final gates and record exact evidence.
-2. Run the final whole-branch review, address any findings, then finish the
-   development branch workflow.
+1. Complete the final whole-branch review and address any findings.
+2. Push the final evidence commits, then finish the development branch
+   workflow.
