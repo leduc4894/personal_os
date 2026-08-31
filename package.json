@@ -15,9 +15,10 @@
     "test": "pnpm --recursive --if-present run test",
     "test:e2e:authentication": "playwright test tests/end_to_end/authentication",
     "test:e2e:exclusion-policy": "playwright test tests/end_to_end/exclusion_policy",
-    "type-check": "pnpm --recursive --if-present run type-check"
+    "type-check": "tsc --noEmit && pnpm --recursive --if-present run type-check"
   },
   "devDependencies": {
-    "@playwright/test": "1.62.1"
+    "@playwright/test": "1.62.1",
+    "typescript": "6.0.3"
   }
 }

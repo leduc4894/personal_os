@@ -1,5 +1,6 @@
 import { expect, type Page, type Route } from "@playwright/test";
 import { test } from "@playwright/test";
+import type { components } from "@workspace/api-client";
 
 import {
   E2E_ACCEPTED_LOGIN_PASSWORD,
@@ -65,10 +66,10 @@ function activeSession(): Record<string, unknown> {
   };
 }
 
-function policyStatus(activeRevision: 0 | 1 | 2, denyRuleId: string): Record<string, unknown> {
-  const activePolicyRevisionId =
-    activeRevision === 0 ? null : activeRevision === 1 ? REVISION_ID_EMPTY : REVISION_ID_DENY;
-  const rules: Record<string, unknown>[] =
+function policyStatus(activeRevision: 0 | 1 | 2, denyRuleId: string) {
+  const activeRevisionId = activeRevision === 1 ? REVISION_ID_EMPTY : REVISION_ID_DENY;
+  const activePolicyRevisionId = activeRevision === 0 ? null : activeRevisionId;
+  const rules: components["schemas"]["PolicyRuleData"][] =
     activeRevision === 2
       ? [
           {
@@ -88,13 +89,19 @@ function policyStatus(activeRevision: 0 | 1 | 2, denyRuleId: string): Record<str
       base_policy_revision_id: activePolicyRevisionId,
       rules,
     },
-    reconciliation: {
-      policy_revision_id: activePolicyRevisionId,
-      state: "running",
-      updated_at: "2026-08-17T12:30:00Z",
-    },
+    // The real composition returns null while no reconciliation intent exists
+    // (an unpublished workspace) and always carries the safe-error verdict.
+    reconciliation:
+      activeRevision === 0
+        ? null
+        : {
+            policy_revision_id: activeRevisionId,
+            state: "running",
+            updated_at: "2026-08-17T12:30:00Z",
+            safe_error_code: null,
+          },
     stale_running_previews: null,
-  };
+  } satisfies components["schemas"]["ExclusionPolicyStatusData"];
 }
 
 function readyPreview(options: {
