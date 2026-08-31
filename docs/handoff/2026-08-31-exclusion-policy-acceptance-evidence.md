@@ -40,6 +40,19 @@ Obsidian-plugin vitest, browser-journey and sanitized-cleanup gates.
   retain its tail, so the independently observed build and full `poe test`
   process are recorded as supplementary evidence rather than an unqualified
   verify-pass claim.
+- Final review HEAD: `uv run --all-packages --frozen poe exclusion-policy-test`
+  (CI=true, disposable `knowledge-ci-final-review-20260831`) passed in 18:28 —
+  2087 passed, 2 skipped, 1 deselected, exit 0 at `df9d1c8`. The first pass
+  exited 1 only because the backup/restore suite errors closed when the pinned
+  pg_dump/pg_restore 18.4 client tools (installed at
+  `C:\Program Files\PostgreSQL\18\bin`) are off PATH; with that directory
+  prepended the gate is green, and local reruns must prepend it.
+- The mutation report is machine-local at
+  `.local/test-results/exclusion-policy-mutation.md`; regenerate with
+  `uv run python tools/exclusion_policy_mutation_report.py --source
+  src/personal_os/exclusion_policy --tests tests/unit/exclusion_policy
+  --output .local/test-results/exclusion-policy-mutation.md`. The adjudication
+  table's line enumeration refers to it.
 
 ## Rulings
 
