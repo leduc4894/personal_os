@@ -298,6 +298,12 @@ async def policy_backup_graph(
     harness = EnforcementHarness(
         policy_migration_harness, backup_secret_root, object_store=backup_object_store
     )
+    for seeded_payload in (
+        policy_migration_harness.stack.seeded_event_payload,
+        policy_migration_harness.stack.seeded_current_payload,
+    ):
+        seeded_digest = hashlib.sha256(seeded_payload).hexdigest()
+        harness.object_store.objects[seeded_digest] = seeded_payload
     await harness.ensure_keys_initialized()
     await _complete_bare_source_pointer(
         harness, harness.base.stack.seeded_source_id, b"# Migration seeded note\nrestore-pointer"

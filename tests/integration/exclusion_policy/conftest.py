@@ -196,6 +196,8 @@ class PolicyMigrationStack:
     seeded_source_id: UUID
     seeded_event_source_version_id: UUID
     seeded_current_source_version_id: UUID
+    seeded_event_payload: bytes
+    seeded_current_payload: bytes
     unbackfillable_upgrade_returncode: int
     unbackfillable_upgrade_result_code: str
     revision_after_unbackfillable_upgrade: str
@@ -258,8 +260,10 @@ def _stage_policy_upgrade_and_yield(project_name: str, port: int) -> Iterator[Po
     current_event_id = uuid4()
     unbackfillable_event_id = uuid4()
     nonce = uuid4().hex
-    event_content_hash = _sha256_hex(f"policy-event-content-{nonce}")
-    current_content_hash = _sha256_hex(f"policy-current-content-{nonce}")
+    event_payload = f"policy-event-content-{nonce}".encode()
+    current_payload = f"policy-current-content-{nonce}".encode()
+    event_content_hash = hashlib.sha256(event_payload).hexdigest()
+    current_content_hash = hashlib.sha256(current_payload).hexdigest()
     event_object_key = (
         f"objects/sha256/{event_content_hash[:2]}/{event_content_hash[2:4]}/{event_content_hash}"
     )
@@ -304,22 +308,33 @@ def _stage_policy_upgrade_and_yield(project_name: str, port: int) -> Iterator[Po
                     "display_name": "Policy Migration Workspace",
                 },
             )
-            for content_object_id, content_hash, object_key in (
-                (event_content_object_id, event_content_hash, event_object_key),
-                (current_content_object_id, current_content_hash, current_object_key),
+            for content_object_id, content_hash, object_key, byte_size in (
+                (
+                    event_content_object_id,
+                    event_content_hash,
+                    event_object_key,
+                    len(event_payload),
+                ),
+                (
+                    current_content_object_id,
+                    current_content_hash,
+                    current_object_key,
+                    len(current_payload),
+                ),
             ):
                 connection.execute(
                     sa.text(
                         "INSERT INTO knowledge.content_objects"
                         " (content_object_id, content_hash, object_key, byte_size, media_type,"
                         " verified_at)"
-                        " VALUES (:content_object_id, :content_hash, :object_key, 42,"
+                        " VALUES (:content_object_id, :content_hash, :object_key, :byte_size,"
                         " 'text/markdown', CURRENT_TIMESTAMP - interval '1 second')"
                     ),
                     {
                         "content_object_id": content_object_id,
                         "content_hash": content_hash,
                         "object_key": object_key,
+                        "byte_size": byte_size,
                     },
                 )
             connection.execute(
@@ -521,6 +536,8 @@ def _stage_policy_upgrade_and_yield(project_name: str, port: int) -> Iterator[Po
         seeded_source_id=source_id,
         seeded_event_source_version_id=event_source_version_id,
         seeded_current_source_version_id=current_source_version_id,
+        seeded_event_payload=event_payload,
+        seeded_current_payload=current_payload,
         unbackfillable_upgrade_returncode=unbackfillable_upgrade.returncode,
         unbackfillable_upgrade_result_code=unbackfillable_upgrade_result_code,
         revision_after_unbackfillable_upgrade=revision_after_unbackfillable_upgrade,

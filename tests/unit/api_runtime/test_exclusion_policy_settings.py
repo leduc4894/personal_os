@@ -290,7 +290,7 @@ def test_load_signer_oversized_file_is_rejected(tmp_path: Path) -> None:
 def test_load_signer_rejects_insecure_file_permissions(tmp_path: Path) -> None:
     secret_path = tmp_path / "group_writable.pem"
     secret_path.write_bytes(_PEM)
-    os.chmod(secret_path, 0o640)
+    os.chmod(secret_path, 0o660)
     settings = load_settings(
         KNOWLEDGE_SECRET_ROOT=str(tmp_path),
         KNOWLEDGE_POLICY_SIGNING_KEY_FILE="group_writable.pem",
@@ -304,21 +304,21 @@ def test_load_signer_rejects_insecure_file_permissions(tmp_path: Path) -> None:
 
 
 def test_load_signer_rejects_symlink_escaping_the_secret_root(tmp_path: Path) -> None:
-    outside_root = tmp_path / "outside"
-    outside_root.mkdir()
-    outside_key = outside_root / "real.pem"
+    secret_root = tmp_path / "secrets"
+    secret_root.mkdir()
+    outside_key = tmp_path / "outside.pem"
     outside_key.write_bytes(_PEM)
-    link_path = tmp_path / "alias.pem"
+    link_path = secret_root / "alias.pem"
     try:
         link_path.symlink_to(outside_key)
     except OSError as cause:  # pragma: no cover - platform without symlink support
         pytest.skip(f"symlinks are unavailable: {cause}")
     settings = load_settings(
-        KNOWLEDGE_SECRET_ROOT=str(tmp_path),
+        KNOWLEDGE_SECRET_ROOT=str(secret_root),
         KNOWLEDGE_POLICY_SIGNING_KEY_FILE="alias.pem",
     )
     with pytest.raises(SecretFileError) as raised:
-        load_exclusion_policy_signer(settings, secret_root=tmp_path)
+        load_exclusion_policy_signer(settings, secret_root=secret_root)
     assert raised.value.error_code is ErrorCode.SECRET_FILE_OUTSIDE_ROOT
 
 
