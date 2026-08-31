@@ -44,7 +44,7 @@ Compose và deployment manifest pin exact tag cùng image digest. Nâng version 
 | Styling | Tailwind CSS |
 | Accessible components | shadcn/ui + Radix UI |
 | Markdown editor | CodeMirror 6 |
-| Server state | TanStack Query |
+| Server state | Generated API client + local effect-based fetch (no data library mandated) |
 | Local UI state | Zustand tối thiểu |
 | Forms | React Hook Form + Zod |
 | Offline cache/drafts | IndexedDB qua Dexie |

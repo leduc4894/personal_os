@@ -299,7 +299,7 @@ Acceptance:
 
 Deliverables:
 
-1. Auth shell, generated API client, TanStack Query and SSE.
+1. Auth shell, generated API client, local effect-based fetch and SSE.
 2. Search/library/source viewers.
 3. CodeMirror editor, IndexedDB drafts, version/conflict UI.
 4. Graph explorer.

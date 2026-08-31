@@ -29,7 +29,7 @@ Không xây hai frontend riêng trong giai đoạn đầu.
 - Draft autosave vào IndexedDB, không tự commit canonical version.
 - User bấm Save để commit bằng optimistic concurrency.
 - Stale base mở conflict UI; không overwrite.
-- Remote Obsidian edit được TanStack Query invalidate qua SSE hint.
+- Remote Obsidian edit được invalidate qua SSE hint bằng local effect-based fetch trên generated API client.
 - Binary source không chỉnh bytes trực tiếp trong phase đầu; metadata và transcript correction có workflow riêng.
 
 ## 4. Admin features
@@ -74,7 +74,7 @@ Feature modules không import database/Qdrant/Temporal concepts ngoài public AP
 
 ## 6. State strategy
 
-- TanStack Query: server state, invalidation, retry.
+- Generated API client + local effect-based fetch: server state, invalidation, retry — no data library mandated (ratified 2026-08-31, spec 17 amendment).
 - URL: shareable search filters, selected source/tab.
 - React local state: component interaction.
 - Zustand: chỉ cross-feature ephemeral UI state thực sự cần.
