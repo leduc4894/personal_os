@@ -1192,7 +1192,8 @@ own contracts.
   signatures and crypto exception text across HTTP diagnostics, audit, traces,
   Sentry, JUnit and production builds.
 
-Mutation testing remains deferred. It is not a completion gate for this child.
+Mutation testing for the exclusion-policy suites ran in 2026-09; it remains no
+per-child completion gate.
 
 ## 24. Performance and capacity gates
 
