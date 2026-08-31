@@ -502,6 +502,7 @@ def _stage_policy_upgrade_and_yield(project_name: str, port: int) -> Iterator[Po
         if "database_schema_contract_invalid" in unbackfillable_upgrade_output
         else ""
     )
+    revision_after_unbackfillable_upgrade = ""
     try:
         with sync_engine.begin() as connection:
             revision_after_unbackfillable_upgrade = str(

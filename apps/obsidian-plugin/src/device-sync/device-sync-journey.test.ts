@@ -34,10 +34,6 @@ import { readFileSync } from "node:fs";
 import initSqlJs from "sql.js";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
-// Parallel-coverage headroom: the real-timer settling loops can exceed Vitest's
-// 5 s default under full-suite load; this raises wall-clock budget only.
-vi.setConfig({ testTimeout: 30_000 });
-
 import { sha256Hex } from "../exclusion-policy/canonical-json";
 import type { FrozenFingerprint, JournalMeta } from "../journal/contracts";
 import { JournalCapture } from "../journal/capture";
@@ -65,6 +61,10 @@ import {
 import { createRemoteEventApplier } from "./remote-event-applier";
 import { createSyncCoordinator } from "./sync-coordinator";
 import type { SyncCoordinator } from "./sync-coordinator";
+
+// Parallel-coverage headroom: the real-timer settling loops can exceed Vitest's
+// 5 s default under full-suite load; this raises wall-clock budget only.
+vi.setConfig({ testTimeout: 30_000 });
 
 /** The real sql.js WebAssembly engine drives every journey (spec 6.1). */
 let engineModule: SqliteEngineModule;

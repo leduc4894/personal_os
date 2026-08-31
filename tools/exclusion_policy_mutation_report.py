@@ -1,10 +1,14 @@
 """Closed-set mutation report for the exclusion-policy suites.
 
 No external mutation tool supports the repository's Python 3.14 pin, so this
-runner applies a small closed mutation set (comparison-operator swaps,
-boolean-operator swaps, and integer-constant +/-1) to ``--source`` and runs
-``--tests`` per mutant. A mutant is killed when the suite exits non-zero or
-times out. Survivors are reported for hand review without captured test output.
+runner applies a small closed mutation set to ``--source`` and runs ``--tests``
+per mutant: single-operator comparison swaps (Eq<->NotEq, Lt<->GtE, Gt<->LtE),
+boolean-operator swaps (And<->Or), and integer-constant +1/-1. A mutant is
+killed when the suite exits non-zero or times out. Survivors are reported for
+hand review without captured test output.
+
+A hard kill mid-mutant (SIGKILL or power loss) leaves the mutated file on
+disk; recover the pristine sources with ``git checkout -- <source tree>``.
 """
 
 from __future__ import annotations
@@ -77,9 +81,10 @@ def _render_mutation(tree: ast.Module) -> str:
     return ast.unparse(tree)
 
 
-def _mutations_of(tree: ast.Module, source: str, path: Path) -> list[Mutation]:
+def _mutations_of(tree: ast.Module, path: Path) -> list[Mutation]:
     """Enumerate the precise closed mutation set for one parsed module."""
     mutations: list[Mutation] = []
+    pristine_source = _render_mutation(copy.deepcopy(tree))
     for target_index, node in enumerate(ast.walk(tree)):
         if isinstance(node, ast.Compare) and len(node.ops) == 1:
             comparison_replacement = _COMPARISON_SWAPS.get(type(node.ops[0]))
@@ -127,7 +132,7 @@ def _mutations_of(tree: ast.Module, source: str, path: Path) -> list[Mutation]:
                         source=_render_mutation(mutated),
                     )
                 )
-    return [mutation for mutation in mutations if mutation.source != source]
+    return [mutation for mutation in mutations if mutation.source != pristine_source]
 
 
 def _run_suite(tests: Path, timeout_seconds: int) -> MutationOutcome:
@@ -257,7 +262,7 @@ def main() -> int:
         if py_file.resolve().is_relative_to(tests_root):
             continue
         source = py_file.read_text(encoding="utf-8")
-        mutations.extend(_mutations_of(ast.parse(source), source, py_file))
+        mutations.extend(_mutations_of(ast.parse(source), py_file))
 
     run = _execute_mutations(
         mutations,
