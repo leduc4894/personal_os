@@ -1475,6 +1475,100 @@ def test_up_failure_maps_to_startup_without_automatic_down(
     assert not any("down" in call[0] or "volume" in call[0] for call in calls)
 
 
+def test_cli_up_failure_surfaces_only_sanitized_stack_status(
+    monkeypatch: pytest.MonkeyPatch,
+    stack_context: Any,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A failed Compose wait must retain the safe service/init snapshot, never raw output.
+
+    Removing the post-failure status read would regress this to the generic
+    startup token and leave hosted-runner startup failures unactionable.
+    """
+    monkeypatch.setattr(stack_module, "_cli_context", lambda _project_name: stack_context)
+    monkeypatch.setattr(stack_module, "validate_port_availability", lambda ports: None)
+
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        del timeout_seconds, environment
+        command = tuple(arguments)
+        if command[:2] == ("docker", "compose") and command[-2:] == ("version", "--short"):
+            return stack_module.CommandResult(0, "2.30.0", "")
+        if command[:3] == ("docker", "version", "--format"):
+            return stack_module.CommandResult(0, "linux/amd64", "")
+        if "up" in command:
+            return stack_module.CommandResult(1, "RAW_COMPOSE_STDOUT", "RAW_COMPOSE_STDERR")
+        if "ps" in command:
+            return stack_module.CommandResult(0, _starting_ps_output(), "")
+        return stack_module.CommandResult(0, "", "")
+
+    assert stack_module.main(["up"], runner=runner) == 69
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out) == {
+        "result_code": "stack_startup_failed",
+        "stack_status": {
+            "initializers": {
+                "postgres-provision": {"exit_code": 0, "state": "running"},
+                "temporal-namespace-bootstrap": {"exit_code": 0, "state": "running"},
+                "temporal-schema-setup": {"exit_code": 0, "state": "running"},
+            },
+            "project": "knowledge-local",
+            "result_code": "stack_starting",
+            "services": {
+                "neo4j": {"health": "starting", "state": "running"},
+                "postgresql": {"health": "starting", "state": "running"},
+                "qdrant": {"health": "starting", "state": "running"},
+                "redis": {"health": "starting", "state": "running"},
+                "temporal": {"health": "starting", "state": "running"},
+                "temporal-cli": {"health": "starting", "state": "running"},
+                "temporal-ui": {"health": "starting", "state": "running"},
+            },
+            "state": "starting",
+        },
+        "state": "error",
+    }
+    assert "RAW_COMPOSE_STDOUT" not in captured.out
+    assert "RAW_COMPOSE_STDERR" not in captured.out
+
+
+def test_cli_up_failure_surfaces_closed_status_reason_when_status_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    stack_context: Any,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An unreadable status command retains a closed fallback instead of raw failure detail."""
+    monkeypatch.setattr(stack_module, "_cli_context", lambda _project_name: stack_context)
+    monkeypatch.setattr(stack_module, "validate_port_availability", lambda ports: None)
+
+    def runner(arguments: Any, *, timeout_seconds: float, environment: Any = None) -> Any:
+        del timeout_seconds, environment
+        command = tuple(arguments)
+        if command[:2] == ("docker", "compose") and command[-2:] == ("version", "--short"):
+            return stack_module.CommandResult(0, "2.30.0", "")
+        if command[:3] == ("docker", "version", "--format"):
+            return stack_module.CommandResult(0, "linux/amd64", "")
+        if "up" in command:
+            return stack_module.CommandResult(1, "RAW_COMPOSE_STDOUT", "RAW_COMPOSE_STDERR")
+        if "ps" in command:
+            return stack_module.CommandResult(1, "RAW_STATUS_STDOUT", "RAW_STATUS_STDERR")
+        return stack_module.CommandResult(0, "", "")
+
+    assert stack_module.main(["up"], runner=runner) == 69
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out) == {
+        "result_code": "stack_startup_failed",
+        "stack_status": {"result_code": "stack_status_unavailable", "state": "error"},
+        "state": "error",
+    }
+    assert "RAW_COMPOSE_STDOUT" not in captured.out
+    assert "RAW_COMPOSE_STDERR" not in captured.out
+    assert "RAW_STATUS_STDOUT" not in captured.out
+    assert "RAW_STATUS_STDERR" not in captured.out
+
+
 def test_wait_timeout_returns_temporary_without_down_or_reset(stack_context: Any) -> None:
     calls: list[tuple[tuple[str, ...], float, dict[str, str]]] = []
     now = [0.0]

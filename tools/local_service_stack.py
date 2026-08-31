@@ -147,10 +147,22 @@ class StackFailure(Exception):
 
     exit_code: StackExitCode
     result_code: str
+    diagnostic_payload: Mapping[str, object]
 
-    def __init__(self, exit_code: StackExitCode, result_code: str) -> None:
+    def __init__(
+        self,
+        exit_code: StackExitCode,
+        result_code: str,
+        *,
+        diagnostic_payload: Mapping[str, object] | None = None,
+    ) -> None:
         object.__setattr__(self, "exit_code", exit_code)
         object.__setattr__(self, "result_code", result_code)
+        object.__setattr__(
+            self,
+            "diagnostic_payload",
+            MappingProxyType(dict(diagnostic_payload or {})),
+        )
 
     def __setattr__(self, name: str, value: object) -> None:
         if name in _EXCEPTION_BOOKKEEPING_FIELDS:
@@ -1145,7 +1157,17 @@ def stack_up(
         context=context,
     )
     if startup_result.return_code != 0:
-        raise StackFailure(StackExitCode.STARTUP, "stack_startup_failed")
+        raise StackFailure(
+            StackExitCode.STARTUP,
+            "stack_startup_failed",
+            diagnostic_payload={
+                "stack_status": _read_startup_failure_status(
+                    context,
+                    runner=runner,
+                    deadline_monotonic=deadline_monotonic,
+                )
+            },
+        )
     status = _wait_for_stack_until(
         context,
         runner=runner,
@@ -2449,6 +2471,26 @@ def _wait_for_stack_until(
         sleep(min(poll_interval_seconds, remaining_after_status))
 
 
+def _read_startup_failure_status(
+    context: StackContext,
+    *,
+    runner: CommandRunner,
+    deadline_monotonic: float,
+) -> dict[str, object]:
+    """Return the existing safe status shape or a closed unavailable token after failed startup."""
+    try:
+        return _read_stack_status(
+            context,
+            runner=runner,
+            timeout_seconds=min(
+                _STACK_STATUS_TIMEOUT_SECONDS,
+                _remaining_seconds(deadline_monotonic, time.monotonic),
+            ),
+        )
+    except StackFailure:
+        return {"result_code": "stack_status_unavailable", "state": "error"}
+
+
 def _remaining_seconds(deadline_monotonic: float, clock: Callable[[], float]) -> float:
     remaining_seconds = deadline_monotonic - clock()
     if remaining_seconds <= 0:
@@ -3113,7 +3155,10 @@ def main(
         else:
             exit_code = StackExitCode.CLI
             result_code = "invalid_cli"
-        _print_json({"result_code": result_code, "state": "error"})
+        failure_payload = (
+            dict(failure.diagnostic_payload) if isinstance(failure, StackFailure) else {}
+        )
+        _print_json({**failure_payload, "result_code": result_code, "state": "error"})
         return int(exit_code)
     except Exception:
         _print_json({"result_code": "lifecycle_internal_error", "state": "error"})
