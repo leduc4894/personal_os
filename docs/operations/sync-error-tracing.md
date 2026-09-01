@@ -541,9 +541,12 @@ Reading it during an incident:
 The same in-memory caveats as the other rings apply: the counters and ring
 are per-process and reset on API restart; they are evidence of what this
 process saw, not a durable audit trail (the audit table is the durable
-half). No Prometheus/exporter sink exists — the in-memory recorder bound in
-the serve graph is the spec-21-compliant sink; a production metrics sink
-remains a documented boundary TODO.
+half). The production metrics sink is the Prometheus text exposition route
+`GET /api/admin/metrics` (sink plan 2026-08-31, operation id
+`getMetricsExposition`) behind the same strict Web Admin session gate —
+it renders exactly these counter families from the shared recorder
+snapshot, scraped live and sanitized during the 2026-09-01 diagnostics
+smoke round.
 
 ## Policy worker diagnostics (dispatch events, reconciliation reason, stale running)
 
@@ -634,9 +637,9 @@ Two more closed surfaces close the remaining "silent reason" classes of the
   alphabet/length reduction (arbitrary class names cannot smuggle content;
   an unrepresentable name collapses to `unknown_error`) — no traceback and
   no message text ever reach the line. The fix covers the authentication
-  commands; a same-class bare `internal_error` print remains in the
-  `policy-key` CLI dispatch and is tracked in
-  [`BACKLOG.md`](../handoff/BACKLOG.md).
+  commands and the `policy-key` CLI dispatch alike (2026-08-31 sink plan,
+  Task 3): every CLI failure line of this class now carries the closed
+  token.
 
 ## Privacy invariants
 
@@ -738,9 +741,62 @@ The remediation surfaces add one failure class each to the loop:
    the rotating API diagnostics log holds the typed exchange. Restore the
    signer/worker afterwards.
 
-None of these live rounds has been observed yet — the remediation handoff
-(`docs/handoff/2026-08-24-closed-reason-surfacing-remediation.md`) tracks
-classes 1–3 as its open gate, and the policy-observability handoff
-(`docs/handoff/2026-08-24-policy-observability-remediation.md`) tracks
-class 4 as its own. No live claim of completion may be made until they
-run.
+## Live smoke round of 2026-09-01 (operator-recorded evidence)
+
+The first diagnostics live smoke round ran 2026-09-01 against a
+disposable `knowledge-ci-*` stack with the operator's real vault as the
+device under test (closed tokens, counts and timestamps only, exactly
+like the examples above; the round's plan and handoff carry the full
+narrative).
+
+**Class 4 — policy system failure (all four readbacks observed).** With
+the workspace active-policy pointer fault-injected to the never-published
+state for a bounded window (13:45:39Z–13:49:18Z), one content create
+answered the typed fail-closed denial and every surface recorded it:
+`GET /api/admin/exclusion-policy/diagnostics` carried
+`{boundary: single_part_upload, decision: failed, count: 1}` plus one
+`recent_failures` entry `{error_code: exclusion_policy_not_initialized,
+at_epoch_ms: 1788270400421}`; `GET /api/admin/sync/rejections` carried
+the same closed code on `operation: create`; the rotating API diagnostics
+log held the typed exchange — `api_request_rejected` with status 409 at
+13:46:40.422Z whose `request_id` joins the ring's epoch exactly. The
+plugin parked the probe note pending, named the reconcile stage in closed
+tokens, and after the pointer restore the note converged to committed
+with the `failed` counter frozen and fresh `allowed` evaluations
+appearing (count 11 by round end). The sink route
+`GET /api/admin/metrics` rendered the same counters in Prometheus text
+format behind the session gate (scraped twice, sanitized). The
+policy-observability row retired on this evidence.
+
+**Class 2 — stopped-worker staleness (observed and converged).** With
+every preview worker process dead and one preview row resting in an
+executable state past the 15-minute bound, the Admin policy status read
+carried exactly
+`stale_running_previews: [{policy_preview_id: …, reason:
+"worker_stale_running", age_seconds: 1437}]`. After the worker restart
+the row converged fail-closed: the worker's first sweep failed it with
+the closed code `preview_execution_deadline`, and the staleness block
+returned to null. The W1 dispatch-event class was exercised live with a
+stopped Temporal: the system answered with the typed retryable release
+(bounded-backoff claim/release cycle, attempts visible on the row) — the
+correct designed outcome for a dependency outage; the
+`preview_dispatch_unavailable` event itself fires only on the
+unexpected-exception path, which cannot be induced live without
+simulating a fault (forbidden), so its live induction stays unobserved
+with the emission pinned by the remediation's test suite.
+
+**Class 1 — wrong-origin and terminal tokens (observed on the real
+vault).** Baseline `Connection status: Connected`; pointing the plugin at
+a non-resolving HTTPS origin rendered the closed transport token
+(`network_unavailable`) in the settings detail line; restoring the origin
+converged back to `Connected`. After an admin device revoke the terminal
+case rendered `Last cleared reason: token_reuse` — a closed token of the
+credential-failure vocabulary (the dead family's next refresh classifies
+as reuse; the vocabulary surfaces it, never a bare state).
+
+**Class 3 — lifecycle rejection ring (not observed; row stays open).**
+The tombstone-restore locator conflict could not be produced: the round's
+three device-manifest recovery-path defects (see the 2026-09-01 handoff —
+the composition wiring bug fixed during the round, the queue-pass stall,
+and the cursor-gap-blocked repair) each intercepted the setup sequence.
+The closed-reason-surfacing row stays open with this evidence.
