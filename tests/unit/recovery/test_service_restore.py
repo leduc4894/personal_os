@@ -1046,7 +1046,11 @@ async def test_post_restore_schema_head_must_be_baseline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = build_restore_harness(tmp_path, object_count=1)
-    harness.restore_target.post_schema_head = "20260901_02"
+    # Epoch-dated sentinel: shipped heads are always project-lifetime dates,
+    # so this can never equal a real revision. A collision would silently
+    # disable the mismatch scenario under test, hence the guard below.
+    harness.restore_target.post_schema_head = "19700101_00"
+    assert harness.restore_target.post_schema_head != POSTGRESQL_SCHEMA_REVISION
     registry_calls = install_event_spy(monkeypatch)
 
     with pytest.raises(RecoveryError) as excinfo:

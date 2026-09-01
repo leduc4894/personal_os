@@ -1098,15 +1098,19 @@ async def test_downgrade_refuses_to_discard_operation_evidence(
     assert await _schema_head(small_file_harness) == _SMALL_FILE_HEAD
     async with small_file_harness.engine.connect() as connection:
         columns = (
-            await connection.execute(
-                sa.text(
-                    "SELECT column_name FROM information_schema.columns"
-                    " WHERE table_schema = 'knowledge'"
-                    " AND table_name = 'small_file_upload_operations'"
-                    " AND column_name IN ('normalized_locator', 'locator_fingerprint')"
+            (
+                await connection.execute(
+                    sa.text(
+                        "SELECT column_name FROM information_schema.columns"
+                        " WHERE table_schema = 'knowledge'"
+                        " AND table_name = 'small_file_upload_operations'"
+                        " AND column_name IN ('normalized_locator', 'locator_fingerprint')"
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     assert set(columns) == {"normalized_locator", "locator_fingerprint"}
     assert await small_file_harness.operation_row_count(preflight.event_id) == 1
 
