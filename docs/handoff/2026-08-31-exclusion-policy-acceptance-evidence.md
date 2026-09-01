@@ -90,14 +90,6 @@ Obsidian-plugin vitest, browser-journey and sanitized-cleanup gates.
   a future ordering guarantee would need an explicit production contract and
   a new assertion.
 
-## Deferred items
-
-- Two pre-existing strict errors in the authentication E2E specs
-  (`full-device-onboarding.spec.ts:245` unknown-to-string coercion;
-  `web-security.spec.ts:1` missing `@types/node`) confine the new root
-  `pnpm run type-check` to `tests/end_to_end/exclusion_policy` only. Out of
-  scope here — owned by the web-auth E2E domain; indexed in BACKLOG.
-
 ## Next actions
 
 1. Final whole-branch review completed 2026-08-31: 3 Important + 4 Minor

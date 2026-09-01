@@ -28,7 +28,17 @@ const DEVICE_ID = "5e4d3c2b-1a0f-4e9d-8c8b-7a6b5c4d3e2f";
 const POLLING_SECRET = "pg1.0123456789abcdef-0123-4567-89ab-cdef01234567.pollingsecretvalue";
 
 /** The exact provisioning payload of the OpenAPI device-grant contract. */
-function createdGrant(): Record<string, unknown> {
+interface DeviceGrantProvisioning {
+  grant_id: string;
+  user_code: string;
+  polling_secret: string;
+  verification_uri: string;
+  verification_uri_complete: string;
+  expires_in_seconds: number;
+  poll_interval_seconds: number;
+}
+
+function createdGrant(): DeviceGrantProvisioning {
   return {
     grant_id: GRANT_ID,
     user_code: USER_CODE,
