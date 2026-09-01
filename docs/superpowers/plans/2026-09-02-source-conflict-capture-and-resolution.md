@@ -35,7 +35,7 @@
 | HTTP adapter | `apps/api/src/api_runtime/{source_conflict_models,source_conflict_routes,source_conflict_composition}.py` | Strict device wire contract, auth, error mapping and composed service. |
 | Plugin transport/state | `apps/obsidian-plugin/src/conflicts/{contracts,api,repository,merge,controller}.ts` and journal schema/persistence files | No-byte journal facts, safe API client, merge and repair controller. |
 | Plugin UI/composition | `apps/obsidian-plugin/src/conflicts/ConflictInboxModal.ts`, `apps/obsidian-plugin/src/plugin.ts` | Explicit user interaction and composition; no domain logic in `plugin.ts`. |
-| Tests and operations | focused unit/contract/integration/plugin/E2E tests plus `docs/operations/` | TDD evidence, privacy checks, diagnostics runbook and live Desktop gate. |
+| Tests and operations | focused unit/contract/integration/plugin/E2E tests plus `docs/operations/` | TDD evidence, privacy checks, diagnostics runbook and manual live Desktop gate on a dedicated Vault test. |
 
 ### Task 1: Establish closed conflict domain contracts and diagnostics
 
@@ -581,9 +581,9 @@ pnpm --dir apps/obsidian-plugin run lint
 pnpm --dir apps/obsidian-plugin run build
 ```
 
-Then run the required Desktop WDIO Conflict Inbox journey using the local bootstrap/runbook contracts; tear down with `bash .local/serve-live-ci.sh down`. The physical Mobile matrix is not marked passed here; preserve its existing Child 9 backlog gate.
+Then run the required manual Desktop Conflict Inbox journey. Codex runs the local bootstrap/runbook contracts against `knowledge-ci-source-conflicts-20260902`, prepares only safe fixtures and gives the operator the exact steps plus expected state. The operator performs those steps in a dedicated Vault test, never the daily personal Vault, configured against that CI project. At each checkpoint Codex verifies the API/diagnostics and records only sanitized outcome, reason token, count and timestamp; content, paths, tokens and sensitive screenshots are prohibited. Tear down with `bash .local/serve-live-ci.sh down` only after the operator evidence and checkpoint verification complete. The physical Mobile matrix is not marked passed here; preserve its existing Child 9 backlog gate.
 
-Expected: all non-mobile gates PASS, the Desktop journey records sanitized success evidence, and teardown leaves `knowledge-local` down.
+Expected: all non-mobile gates PASS, the operator-backed Desktop journey records sanitized success evidence, and teardown leaves `knowledge-local` down.
 
 - [ ] **Step 5: Commit final tests and operations docs.**
 
