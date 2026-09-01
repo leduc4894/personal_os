@@ -216,6 +216,18 @@ automatically because backend enforcement is already safe.
 | Reconciliation lag | `exclusion_policy_reconciliation_lag_seconds` metric and the Admin reconciliation summary (state pending/leased/dispatched, dispatched is the resting state after the workflow acknowledges). | Intents are durable; verify the dispatcher and Temporal, then let the bounded retry/backoff converge. A superseded revision's workflow stops without later effects. |
 | Restore without the private key | Restore readiness check fails: the database's latest current key ID has no matching secret file; `serve` refuses startup; publication and content operations stay closed. | Inspect with offline tools if needed, then restore the matching private key file from the separate secret backup (or, if it is truly lost, stage a trust reset and re-onboard devices). Canonical policy state is intact — only signing/serving is blocked. |
 
+### Reconciliation intents and worker death (code-stands, 2026-08-31)
+
+Reconciliation intents carry no age-based staleness verdict by design:
+leases cover only the workflow-start call (60 s, reclaimed by any live
+worker's next cycle) and `dispatched` is the resting state of a healthy
+intent while its Temporal batches run — an age bound on it would
+false-positive. A dead worker is detected by the preview staleness sweep
+of the same sweep class (`stale_running_previews`, `worker_stale_running`).
+An honest `leased`/`dispatched` verdict requires a domain-defined
+execution deadline or heartbeat introduced with scheduling hardening;
+until that hardening lands, this is completeness, not a blind spot.
+
 ## Backup and restore
 
 Database backup includes drafts, revisions, rules, public key history, snapshot
