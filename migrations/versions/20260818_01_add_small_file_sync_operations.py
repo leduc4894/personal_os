@@ -41,6 +41,7 @@ from typing import Final
 
 import sqlalchemy as sa
 from alembic import op
+from migrations.database_migration_runtime import allow_destructive_requested
 
 # revision identifiers, used by Alembic.
 revision: str = "20260818_01"
@@ -109,10 +110,6 @@ _TERMINAL_SHAPE_CHECK: Final[str] = (
 _RESULT_KIND_CHECK: Final[str] = "result_kind IS NULL OR result_kind IN ('committed', 'no_change')"
 
 _STATE_CHECK: Final[str] = "state IN ('pending', 'receiving', 'committed', 'failed')"
-
-#: The explicit destructive operator/test gate: the same ``-x`` argument the
-#: migration environment already requires for every CLI downgrade.
-_DESTRUCTIVE_X_ARGUMENT: Final[str] = "allow_destructive"
 
 _DOWNGRADE_REFUSAL_MESSAGE: Final[str] = "small_file_sync_downgrade_requires_explicit_gate"
 
@@ -188,20 +185,16 @@ $$
 def _downgrade_gate_open() -> bool:
     """Report whether the explicit destructive x-argument is present.
 
-    Mirrors ``EnvironmentContext.get_x_argument`` resolution without importing
-    the environment surface: the ``-x`` values ride on the active command
-    options of the Alembic config. Absent command options (every in-process
-    API caller that did not opt in) leave the gate closed.
+    Thin delegate: the ``Config.cmd_opts`` x-argument read moved to the
+    shared :func:`migrations.database_migration_runtime.allow_destructive_requested`
+    helper so the later locator-lifecycle revision (``20260820_01``) can
+    preflight the same ``allow_destructive`` gate before any of its own
+    drops commit. Absent command options (every in-process API caller that
+    did not opt in) still leave the gate closed.
     """
     migration_context = op.get_context()
     context_config = getattr(migration_context, "config", None)
-    command_options = getattr(context_config, "cmd_opts", None)
-    x_arguments = getattr(command_options, "x", None) or []
-    for argument in x_arguments:
-        key, _, value = str(argument).partition("=")
-        if key == _DESTRUCTIVE_X_ARGUMENT and value == "true":
-            return True
-    return False
+    return allow_destructive_requested(context_config)
 
 
 def upgrade() -> None:

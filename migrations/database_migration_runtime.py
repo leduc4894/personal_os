@@ -6,8 +6,8 @@ baseline. It composes the existing secret-file safety rules into a frozen
 and builds a SQLAlchemy :class:`~sqlalchemy.engine.URL` plus psycopg connect
 arguments without ever rendering the URL or echoing a credential.
 
-SQLAlchemy and psycopg are approved migration-only dependencies. They are
-imported here deliberately and must never be imported from ``src/personal_os/``.
+SQLAlchemy, psycopg and Alembic are approved migration-only dependencies. They
+are imported here deliberately and must never be imported from ``src/personal_os/``.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final
 
+from alembic.config import Config
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -54,6 +55,11 @@ _POSTGRES_OPTIONS: Final[str] = (
 _MAXIMUM_HOST_LENGTH: Final[int] = 253
 _MAXIMUM_IDENTIFIER_LENGTH: Final[int] = 63
 _MAXIMUM_PASSWORD_FILE_NAME_LENGTH: Final[int] = 255
+
+#: The explicit destructive operator/test gate: the ``-x`` argument the
+#: migration environment already requires for every CLI downgrade, shared
+#: by every revision whose downgrade discards canonical evidence.
+_DESTRUCTIVE_X_ARGUMENT: Final[str] = "allow_destructive"
 
 DATABASE_ENVIRONMENT_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
     {
@@ -247,3 +253,23 @@ def build_database_connect_arguments(
         "application_name": _APPLICATION_NAME,
         "options": _POSTGRES_OPTIONS,
     }
+
+
+def allow_destructive_requested(config: Config | None) -> bool:
+    """True when the operator passed ``-x allow_destructive=true``.
+
+    Shared by every revision whose downgrade discards canonical evidence
+    so a refusal can preflight BEFORE any earlier-revision drop commits
+    (``transaction_per_migration`` commits each revision independently).
+    The read mirrors ``EnvironmentContext.get_x_argument`` resolution
+    without importing the environment surface: the ``-x`` values ride on
+    the active command options of the Alembic config, and absent command
+    options (every in-process caller that did not opt in) leave the gate
+    closed. ``config`` may be absent for exactly those in-process callers.
+    """
+    command_options = getattr(config, "cmd_opts", None)
+    for argument in getattr(command_options, "x", None) or []:
+        key, _, value = str(argument).partition("=")
+        if key == _DESTRUCTIVE_X_ARGUMENT and value == "true":
+            return True
+    return False

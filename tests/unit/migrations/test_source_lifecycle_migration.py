@@ -63,22 +63,39 @@ class _Result:
 
 
 class _Bind:
-    def __init__(self, count: int = 0) -> None:
+    """Bind double answering gate counts per evidence table.
+
+    ``small_file_rows`` defaults to ``count`` so existing replays keep the
+    historical single-number behavior; the preflight order pin and the split
+    refusal cases set it explicitly (the real SQL counts differ per table).
+    """
+
+    def __init__(self, count: int = 0, small_file_rows: int | None = None) -> None:
         self.count = count
+        self.small_file_rows = count if small_file_rows is None else small_file_rows
         self.executed: list[str] = []
 
     def execute(self, statement: object, *args: Any) -> _Result:
-        self.executed.append(str(statement))
+        statement_text = str(statement)
+        self.executed.append(statement_text)
+        if "small_file_upload_operations" in statement_text:
+            return _Result(self.small_file_rows)
         return _Result(self.count)
 
 
 class _Op:
-    def __init__(self, *, protected_rows: int = 0, x_arguments: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        protected_rows: int = 0,
+        small_file_rows: int | None = None,
+        x_arguments: list[str] | None = None,
+    ) -> None:
         self.events: list[tuple[str, str]] = []
         self.tables: dict[str, Any] = {}
         self.check_constraints: dict[str, str] = {}
         self.indexes: dict[str, tuple[tuple[Any, ...], dict[str, Any]]] = {}
-        self.bind = _Bind(protected_rows)
+        self.bind = _Bind(protected_rows, small_file_rows)
         self.context = SimpleNamespace(
             config=SimpleNamespace(cmd_opts=SimpleNamespace(x=x_arguments or []))
         )
@@ -390,9 +407,33 @@ def test_downgrade_restores_predecessor_checks_after_destructive_lifecycle_rows(
     assert lifecycle_event_delete < restored_event_check
 
 
+def test_downgrade_counts_small_file_evidence_before_the_lifecycle_gate_and_any_drop() -> None:
+    # ``transaction_per_migration`` commits each revision independently, so by
+    # the time this downgrade runs every later revision already committed its
+    # own downgrade. The small-file evidence count must therefore run FIRST —
+    # before this revision's own lifecycle gate and before any drop — so a
+    # refusal stops the walk with the locator columns still in place.
+    recorder = _replay(
+        "downgrade", protected_rows=1, small_file_rows=1, x_arguments=["allow_destructive=true"]
+    )
+    gate_sql_statements = recorder.bind.executed
+    assert len(gate_sql_statements) >= 2, gate_sql_statements
+    first_gate_sql = gate_sql_statements[0]
+    assert first_gate_sql.lstrip().upper().startswith("SELECT")
+    assert "knowledge.small_file_upload_operations" in first_gate_sql
+    second_gate_sql = gate_sql_statements[1]
+    assert "knowledge.source_locators" in second_gate_sql
+    assert "knowledge.source_tombstones" in second_gate_sql
+
+
+def test_downgrade_preflights_the_small_file_evidence_gate_before_any_drop() -> None:
+    with pytest.raises(RuntimeError, match="small_file_sync_downgrade_requires_explicit_gate"):
+        _replay("downgrade", protected_rows=0, small_file_rows=1)
+
+
 def test_downgrade_refuses_to_destroy_lifecycle_history_without_explicit_gate() -> None:
     with pytest.raises(RuntimeError, match="source_lifecycle_downgrade_requires_explicit_gate"):
-        _replay("downgrade", protected_rows=1)
+        _replay("downgrade", protected_rows=1, small_file_rows=0)
 
 
 def test_downgrade_drops_lifecycle_schema_after_explicit_gate() -> None:

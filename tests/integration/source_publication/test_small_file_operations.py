@@ -1058,6 +1058,25 @@ async def _schema_head(harness: SmallFileOperationHarness) -> str:
     return str(head)
 
 
+def _chain_head() -> str:
+    """The current single Alembic graph head (the re-upgrade target)."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    script = ScriptDirectory.from_config(Config(str(_WORKTREE_ROOT / "alembic.ini")))
+    heads = script.get_heads()
+    assert len(heads) == 1, heads
+    return str(heads[0])
+
+
+#: The locator-lifecycle revision: the highest revision whose downgrade
+#: discards small-file evidence (it drops the operation table's locator
+#: columns). A downgrade refused by the evidence gate must stop here, with
+#: that revision's destructive work never applied — never half-way through
+#: it — so the operation rows and their locator columns stay intact.
+_SMALL_FILE_HEAD = "20260820_01"
+
+
 @pytest.mark.asyncio
 async def test_downgrade_refuses_to_discard_operation_evidence(
     small_file_harness: SmallFileOperationHarness,
@@ -1072,7 +1091,23 @@ async def test_downgrade_refuses_to_discard_operation_evidence(
     with pytest.raises(CommandError):
         run_inprocess_alembic_downgrade(source_publication_stack, destructive=False)
 
-    assert await _schema_head(small_file_harness) == "20260818_01"
+    # A refused downgrade must leave NO half-applied small-file evidence
+    # schema behind: the walk stops at 20260820_01 — the revision whose
+    # downgrade drops the locator columns — with those columns and the
+    # operation rows still intact (BACKLOG 2026-08-30, migrations/small-file).
+    assert await _schema_head(small_file_harness) == _SMALL_FILE_HEAD
+    async with small_file_harness.engine.connect() as connection:
+        columns = (
+            await connection.execute(
+                sa.text(
+                    "SELECT column_name FROM information_schema.columns"
+                    " WHERE table_schema = 'knowledge'"
+                    " AND table_name = 'small_file_upload_operations'"
+                    " AND column_name IN ('normalized_locator', 'locator_fingerprint')"
+                )
+            )
+        ).scalars().all()
+    assert set(columns) == {"normalized_locator", "locator_fingerprint"}
     assert await small_file_harness.operation_row_count(preflight.event_id) == 1
 
 
@@ -1086,8 +1121,8 @@ async def test_gated_downgrade_drops_the_operation_table_and_reapplies_head(
 
     This test intentionally runs last: under the explicit destructive gate the
     migration drops the ``small_file_upload_operations`` table and returns the
-    schema exactly to the exclusion policy head, then re-applies the small-file
-    head so the stack teardown observes the latest schema.
+    schema exactly to the exclusion policy head, then re-applies the full
+    chain head so the stack teardown observes the latest schema.
     """
     stack = source_publication_stack
     await _reserve_created_operation(small_file_harness, seeded_workspace)
@@ -1109,4 +1144,6 @@ async def test_gated_downgrade_drops_the_operation_table_and_reapplies_head(
 
     reupgrade = _run_guarded_alembic(stack, "upgrade", "head")
     assert reupgrade.returncode == 0, reupgrade.stderr
-    assert await _schema_head(small_file_harness) == "20260818_01"
+    # ``upgrade head`` reaches the current graph head (revisions stack on the
+    # small-file head), not the small-file revision itself.
+    assert await _schema_head(small_file_harness) == _chain_head()

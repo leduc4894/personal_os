@@ -11,9 +11,13 @@ reconciliation proves their locator.  The lifecycle command implementation
 and the first-locator publication write are owned by later tasks.
 
 Downgrade discards lifecycle evidence only under the standard explicit
-destructive gate.  It removes lifecycle-only events and their dependent
-projection intents before restoring the predecessor event vocabulary; source
-rows and versions remain intact.
+destructive gate.  It preflights the small-file evidence gate — through the
+shared ``allow_destructive`` flag read — before its own lifecycle gate and
+before any drop, because ``transaction_per_migration`` commits each revision
+independently: a refusal must land before this revision strips the operation
+table's locator columns, never after.  It then removes lifecycle-only events
+and their dependent projection intents before restoring the predecessor
+event vocabulary; source rows and versions remain intact.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from typing import Final
 
 import sqlalchemy as sa
 from alembic import op
+from migrations.database_migration_runtime import allow_destructive_requested
 
 revision: str = "20260820_01"
 down_revision: str | None = "20260818_01"
@@ -31,7 +36,6 @@ depends_on: str | Sequence[str] | None = None
 
 SCHEMA_NAME: Final[str] = "knowledge"
 _TIMESTAMP_TYPE: Final[sa.TIMESTAMP] = sa.TIMESTAMP(timezone=True)
-_DESTRUCTIVE_X_ARGUMENT: Final[str] = "allow_destructive"
 _DOWNGRADE_REFUSAL_MESSAGE: Final[str] = "source_lifecycle_downgrade_requires_explicit_gate"
 _LOCATOR_MAXIMUM_BYTES: Final[int] = 4096
 
@@ -81,6 +85,23 @@ SELECT
         WHERE event_type IN ('rename', 'move', 'delete', 'restore')
     )
 """
+
+#: Duplicated one-line count from ``20260818_01``'s
+#: ``_DOWNGRADE_GATE_COUNT_SQL`` (migration module names begin with a digit,
+#: so the constant cannot be imported; migrations are allowed local
+#: repetition and only the ``allow_destructive`` flag read is shared): the
+#: durable operation rows — including the terminal exact-replay evidence —
+#: whose locator columns this revision's downgrade would strip.
+_SMALL_FILE_OPERATION_COUNT_SQL: Final[str] = (
+    "SELECT count(*) FROM knowledge.small_file_upload_operations"
+)
+
+#: ``20260818_01``'s ``_DOWNGRADE_REFUSAL_MESSAGE``, restated here so the
+#: preflight refuses under the same closed reason token as the
+#: evidence-owning revision.
+_SMALL_FILE_EVIDENCE_REFUSAL_MESSAGE: Final[str] = (
+    "small_file_sync_downgrade_requires_explicit_gate"
+)
 
 _LIFECYCLE_EVENT_CLEANUP_SQL: Final[str] = """
 DELETE FROM knowledge.projection_intents
@@ -138,16 +159,17 @@ $$
 
 
 def _downgrade_gate_open() -> bool:
-    """Return whether the explicit destructive Alembic x-argument is present."""
+    """Report whether the explicit destructive Alembic x-argument is present.
 
+    Thin delegate over the shared
+    :func:`migrations.database_migration_runtime.allow_destructive_requested`
+    flag reader (the ``Config.cmd_opts`` x-argument read), so this revision
+    and ``20260818_01`` gate on exactly the same ``allow_destructive``
+    value.
+    """
     migration_context = op.get_context()
-    config = getattr(migration_context, "config", None)
-    command_options = getattr(config, "cmd_opts", None)
-    for argument in getattr(command_options, "x", None) or []:
-        key, _, value = str(argument).partition("=")
-        if key == _DESTRUCTIVE_X_ARGUMENT and value == "true":
-            return True
-    return False
+    context_config = getattr(migration_context, "config", None)
+    return allow_destructive_requested(context_config)
 
 
 def upgrade() -> None:
@@ -383,9 +405,21 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Drop lifecycle history only when its recorded evidence may be discarded."""
 
-    protected_row_count = int(
-        op.get_bind().execute(sa.text(_DOWNGRADE_GATE_COUNT_SQL)).scalar_one()
+    # Preflight the SMALL-FILE evidence gate before this revision's own
+    # lifecycle gate and before ANY drop: ``transaction_per_migration``
+    # commits each revision independently, so every revision above this one
+    # has already committed its downgrade by the time this runs. Refusing
+    # here — before the locator columns drop — stops the walk with the
+    # durable operation evidence intact instead of leaving a half-applied
+    # schema behind for 20260818_01's row gate to discover too late.
+    bind = op.get_bind()
+    operation_row_count = int(
+        bind.execute(sa.text(_SMALL_FILE_OPERATION_COUNT_SQL)).scalar_one()
     )
+    if operation_row_count > 0 and not _downgrade_gate_open():
+        raise RuntimeError(_SMALL_FILE_EVIDENCE_REFUSAL_MESSAGE)
+
+    protected_row_count = int(bind.execute(sa.text(_DOWNGRADE_GATE_COUNT_SQL)).scalar_one())
     if protected_row_count > 0 and not _downgrade_gate_open():
         raise RuntimeError(_DOWNGRADE_REFUSAL_MESSAGE)
 
