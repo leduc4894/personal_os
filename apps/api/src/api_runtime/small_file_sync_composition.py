@@ -7,7 +7,11 @@ connection opens at composition — the first store call does), the real
 :class:`~personal_os.exclusion_policy.enforcement.PolicyEnforcementService`
 behind the locator-aware :class:`PolicyEnforcementSmallFileGuard` and as an
 invocation-local publication gateway guard, the durable source-publication store and
-the canonical read store over the shared engine, and the in-memory low
+the canonical read store over the shared engine, the shared Child 8
+:class:`~personal_os.source_conflicts.service.SourceConflictService` behind
+:class:`PostgresqlSmallFileConflictCaptureGateway` (the verified candidate is
+admitted into canonical ``content_objects`` and captured as a
+``stale_content`` conflict in place of publication), and the in-memory low
 cardinality metrics sinks.
 
 :func:`compose_offline_small_file_sync` builds the deterministic offline
@@ -17,7 +21,10 @@ re-preflight, payload-fingerprint matching, expiry that ends continuation but
 never terminal evidence, an idempotent guarded terminal transition), an
 object-store double performing the real size/digest verification over the
 streamed bytes, an invocation-local publication gateway over an in-memory
-idempotent publication store, and the real
+idempotent publication store,
+:class:`OfflineSmallFileConflictCaptureGateway` freezing one opaque capture
+receipt per captured event identity exactly like the durable conflict
+store's replay map, and the real
 :class:`~personal_os.small_file_sync.service.SmallFileSyncService` binding
 them together with the in-memory metrics sink and a state-owned clock. It
 reads no environment value, no secret file, no database and no provider
@@ -36,7 +43,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Final, cast
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid7
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -67,6 +74,7 @@ from personal_os.object_storage import (
 from personal_os.object_storage.errors import DIGEST_MISMATCH, SIZE_MISMATCH, ObjectStorageError
 from personal_os.small_file_sync.contracts import (
     NormalizedLocator,
+    SmallFileConflictCaptureResult,
     SmallFileDeviceContext,
     SmallFileOperation,
     SmallFilePreflight,
@@ -85,7 +93,22 @@ from personal_os.small_file_sync.ports import (
     SmallFileBoundOperation,
 )
 from personal_os.small_file_sync.service import SmallFileSyncService
+from personal_os.source_conflicts import (
+    InMemorySourceConflictMetrics,
+    SourceConflictService,
+)
+from personal_os.source_conflicts.commands import CaptureConflictCommand
+from personal_os.source_conflicts.contracts import (
+    ConflictCandidate,
+    ConflictIdempotencyKey,
+    ConflictKind,
+    SourceConflict,
+)
+from personal_os.source_conflicts.ports import (
+    SourceConflictStore,
+)
 from personal_os.sources.commands import CreateSourceVersion, UpdateSourceVersion
+from personal_os.sources.errors import SourcePublicationError
 from personal_os.sources.fingerprint import RequestFingerprint, SourceVersionCommand
 from personal_os.sources.metrics import InMemorySourcePublicationMetrics, SourcePublicationMetrics
 from personal_os.sources.ports import AwareUtcClock as SourceAwareUtcClock
@@ -98,8 +121,14 @@ from personal_os.sources.reading import (
 )
 from personal_os.sources.results import PublicationOutcome, SourceVersionPublicationResult
 from postgresql_source_store.canonical_read import PostgresqlCanonicalSourceReadStore
+from postgresql_source_store.conflict_store import PostgresqlSourceConflictStore
 from postgresql_source_store.policy_enforcement import compose_policy_enforcement
-from postgresql_source_store.publication_store import PostgresqlSourcePublicationStore
+from postgresql_source_store.publication_store import (
+    PostgresqlSourcePublicationStore,
+    content_object_by_hash_statement,
+    content_object_metadata_matches,
+    content_object_upsert_statement,
+)
 from postgresql_source_store.small_file_sync_operations import (
     PostgresqlSmallFileUploadOperationStore,
 )
@@ -181,6 +210,165 @@ class PolicyEnforcementSmallFileGuard:
             workspace_id=decision.workspace_id,
             policy_revision_number=decision.revision_number,
         )
+
+
+class PolicyEnforcementConflictCaptureGuard:
+    """Real exclusion-policy recheck behind the conflict-capture boundary.
+
+    The composition root binds the shared enforcement service here: every
+    capture and resolution re-evaluates the active signed policy over the
+    command's opaque subject — workspace, source identity and the locator
+    snapshot when one exists — at the dedicated ``conflict_capture``
+    boundary before any conflict row is written. A definite exclusion, an
+    indeterminate outcome or any fail-closed policy failure raises the
+    typed exclusion error; no locator, digest or byte is retained.
+    """
+
+    def __init__(self, *, enforcement: PolicyEnforcementService) -> None:
+        self.enforcement = enforcement
+
+    async def authorize_capture(
+        self,
+        command: CaptureConflictCommand,
+        diagnostic_context: DiagnosticContext,
+    ) -> None:
+        subject = PolicySubject(
+            workspace_id=command.workspace_id,
+            source_id=command.source_id,
+            normalized_locator=(
+                command.normalized_locator.value if command.normalized_locator is not None else None
+            ),
+        )
+        await self.enforcement.authorize_preflight(
+            subject=subject,
+            boundary=PolicyBoundary.CONFLICT_CAPTURE,
+            context=diagnostic_context,
+        )
+
+    async def authorize_resolution(
+        self,
+        conflict: SourceConflict,
+        diagnostic_context: DiagnosticContext,
+    ) -> None:
+        subject = PolicySubject(
+            workspace_id=conflict.workspace_id,
+            source_id=conflict.source_id,
+        )
+        await self.enforcement.authorize_preflight(
+            subject=subject,
+            boundary=PolicyBoundary.CONFLICT_CAPTURE,
+            context=diagnostic_context,
+        )
+
+
+class PostgresqlSmallFileConflictCaptureGateway:
+    """Capture stale-update candidates through the shared conflict service.
+
+    Verified-object admission stays on this boundary, never inside the
+    conflict domain: the candidate receipt that already cleared the
+    small-file bounded verification is admitted into canonical
+    ``content_objects`` through the exact hash-keyed upsert the publication
+    transaction performs, so the conflict's foreign-key-validated object
+    reference exists before capture. The gateway then issues one
+    :class:`~personal_os.source_conflicts.commands.CaptureConflictCommand`
+    through the shared
+    :class:`~personal_os.source_conflicts.service.SourceConflictService`
+    (policy recheck, idempotent store transaction, no current-pointer
+    change) and answers with only the opaque capture receipt. An exact
+    replay of the event identity returns the stored conflict unchanged. No
+    byte, digest, locator or object key is logged or echoed.
+    """
+
+    def __init__(
+        self,
+        *,
+        engine: AsyncEngine,
+        conflict_service: SourceConflictService,
+        conflict_store: SourceConflictStore,
+    ) -> None:
+        self._engine = engine
+        self._conflict_service = conflict_service
+        self._conflict_store = conflict_store
+
+    async def capture_stale_update(
+        self,
+        *,
+        bound_operation: SmallFileBoundOperation,
+        verified_candidate: VerifiedObjectReceipt,
+        observed_remote_version_id: UUID | None,
+        diagnostic_context: DiagnosticContext,
+    ) -> SmallFileConflictCaptureResult:
+        update_source_id = bound_operation.update_source_id
+        update_base_version_id = bound_operation.update_base_version_id
+        if update_source_id is None or update_base_version_id is None:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        verified_candidate_object_id = await self._admit_candidate_object(verified_candidate)
+        command = CaptureConflictCommand(
+            workspace_id=bound_operation.workspace_id,
+            source_id=update_source_id,
+            conflict_kind=ConflictKind.STALE_CONTENT,
+            originating_event_id=bound_operation.event_id,
+            originating_device_id=bound_operation.device_id,
+            idempotency_key=ConflictIdempotencyKey(bound_operation.idempotency_key.value),
+            base_version_id=update_base_version_id,
+            observed_remote_version_id=observed_remote_version_id,
+            candidate=ConflictCandidate.content(verified_candidate_object_id),
+            normalized_locator=None,
+        )
+        conflict = await self._conflict_service.capture_conflict(command, diagnostic_context)
+        return SmallFileConflictCaptureResult(
+            conflict_id=conflict.conflict_id,
+            source_id=update_source_id,
+            observed_remote_version_id=observed_remote_version_id,
+            captured_at=conflict.captured_at,
+        )
+
+    async def resolve_captured_conflict(
+        self,
+        *,
+        workspace_id: UUID,
+        originating_event_id: UUID,
+        diagnostic_context: DiagnosticContext,
+    ) -> SmallFileConflictCaptureResult | None:
+        conflict = await self._conflict_store.find_captured_conflict(
+            originating_event_id,
+            workspace_id,
+            diagnostic_context,
+        )
+        if conflict is None or conflict.source_id is None:
+            return None
+        return SmallFileConflictCaptureResult(
+            conflict_id=conflict.conflict_id,
+            source_id=conflict.source_id,
+            observed_remote_version_id=conflict.observed_remote_version_id,
+            captured_at=conflict.captured_at,
+        )
+
+    async def _admit_candidate_object(self, receipt: VerifiedObjectReceipt) -> UUID:
+        """Admit the verified candidate into canonical ``content_objects``.
+
+        The hash-keyed upsert deduplicates identical verified bytes; the
+        follow-up lookup plus exact metadata comparison decide reuse versus
+        the typed content-object conflict, exactly like the publication
+        transaction's own admission step.
+        """
+
+        async with self._engine.begin() as connection:
+            await connection.execute(content_object_upsert_statement(uuid7(), receipt))
+            result = await connection.execute(
+                content_object_by_hash_statement(receipt.content_digest.hexadecimal)
+            )
+            row = result.one_or_none()
+        if row is None:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        if not content_object_metadata_matches(
+            receipt,
+            object_key=row.object_key,
+            byte_size=row.byte_size,
+            media_type=row.media_type,
+        ):
+            raise SourcePublicationError(ErrorCode.SOURCE_CONTENT_OBJECT_CONFLICT)
+        return cast(UUID, row.content_object_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,6 +549,17 @@ def compose_small_file_sync(
     )
     operation_store = PostgresqlSmallFileUploadOperationStore(engine, clock=default_utc_clock)
     metrics = InMemorySmallFileSyncMetrics()
+    conflict_store = PostgresqlSourceConflictStore(engine, clock=default_utc_clock)
+    conflict_capture = PostgresqlSmallFileConflictCaptureGateway(
+        engine=engine,
+        conflict_service=SourceConflictService(
+            store=conflict_store,
+            policy_guard=PolicyEnforcementConflictCaptureGuard(enforcement=enforcement),
+            metrics=InMemorySourceConflictMetrics(),
+            clock=default_utc_clock,
+        ),
+        conflict_store=conflict_store,
+    )
     publication_gateway = BoundPolicySmallFilePublicationGateway(
         store=PostgresqlSourcePublicationStore(engine, policy_verifier=verifier),
         object_store=object_store,
@@ -376,6 +575,7 @@ def compose_small_file_sync(
         publication_gateway=publication_gateway,
         object_store=object_store,
         current_sources=PostgresqlCanonicalSourceReadStore(engine, policy_verifier=verifier),
+        conflict_capture=conflict_capture,
         metrics=metrics,
         clock=default_utc_clock,
     )
@@ -422,7 +622,8 @@ class OfflineSmallFileSyncState:
     error while it is ``None``) and ``now`` (the frozen clock moment; expiry
     and terminal timestamps derive from it). The counters prove safety
     without retaining bytes: reservations, stored digests, publication
-    commits and inserted source rows.
+    commits, inserted source rows and captured conflicts (one opaque receipt
+    per captured event identity, replayed unchanged).
     """
 
     is_policy_denied: bool = False
@@ -433,6 +634,11 @@ class OfflineSmallFileSyncState:
     stored_digests: set[str] = field(default_factory=set)
     published_source_ids: set[UUID] = field(default_factory=set)
     publication_commits: int = 0
+    #: One frozen capture receipt per (workspace, event) identity — the
+    #: offline mirror of the conflict store's event-identity replay map.
+    captured_conflicts: dict[tuple[UUID, UUID], SmallFileConflictCaptureResult] = field(
+        default_factory=dict
+    )
 
     @property
     def reservation_count(self) -> int:
@@ -441,6 +647,10 @@ class OfflineSmallFileSyncState:
     @property
     def stored_digest_count(self) -> int:
         return len(self.stored_digests)
+
+    @property
+    def conflict_capture_count(self) -> int:
+        return len(self.captured_conflicts)
 
 
 def _identity(
@@ -728,6 +938,58 @@ class OfflineCurrentSourceStore:
         return reference
 
 
+class OfflineSmallFileConflictCaptureGateway:
+    """In-memory conflict-capture double replaying by event identity.
+
+    Mirrors the real gateway's contract without canonical state: the first
+    capture of one (workspace, event) identity freezes one opaque receipt
+    into the offline state; an exact replay of that identity returns the
+    stored receipt unchanged; the membership lookup answers the preflight
+    replay (Child 8 spec 5.1). The double never sees or retains bytes —
+    only the opaque receipt crosses, keyed exactly like the durable
+    conflict store's originating-event replay map.
+    """
+
+    def __init__(self, state: OfflineSmallFileSyncState, clock: OfflineSmallFileClock) -> None:
+        self._state = state
+        self._clock = clock
+
+    async def capture_stale_update(
+        self,
+        *,
+        bound_operation: SmallFileBoundOperation,
+        verified_candidate: VerifiedObjectReceipt,
+        observed_remote_version_id: UUID | None,
+        diagnostic_context: DiagnosticContext,
+    ) -> SmallFileConflictCaptureResult:
+        del verified_candidate, diagnostic_context
+        update_source_id = bound_operation.update_source_id
+        if update_source_id is None:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        identity = (bound_operation.workspace_id, bound_operation.event_id)
+        stored = self._state.captured_conflicts.get(identity)
+        if stored is not None:
+            return stored
+        receipt = SmallFileConflictCaptureResult(
+            conflict_id=uuid4(),
+            source_id=update_source_id,
+            observed_remote_version_id=observed_remote_version_id,
+            captured_at=self._clock(),
+        )
+        self._state.captured_conflicts[identity] = receipt
+        return receipt
+
+    async def resolve_captured_conflict(
+        self,
+        *,
+        workspace_id: UUID,
+        originating_event_id: UUID,
+        diagnostic_context: DiagnosticContext,
+    ) -> SmallFileConflictCaptureResult | None:
+        del diagnostic_context
+        return self._state.captured_conflicts.get((workspace_id, originating_event_id))
+
+
 class _OfflineVerifiedObjectReader:
     """Bounded async reader over one stored offline content buffer."""
 
@@ -1002,6 +1264,7 @@ def compose_offline_small_file_sync(
         publication_gateway=publication_gateway,
         object_store=object_store,
         current_sources=OfflineCurrentSourceStore(offline_state),
+        conflict_capture=OfflineSmallFileConflictCaptureGateway(offline_state, clock),
         metrics=recorder,
         clock=clock,
     )
@@ -1014,10 +1277,13 @@ __all__ = [
     "OfflineCanonicalObjectStore",
     "OfflineCurrentSourceStore",
     "OfflineSmallFileClock",
+    "OfflineSmallFileConflictCaptureGateway",
     "OfflineSmallFileSyncState",
     "OfflineSmallFileUploadOperationStore",
     "OfflineSourcePublicationStore",
+    "PolicyEnforcementConflictCaptureGuard",
     "PolicyEnforcementSmallFileGuard",
+    "PostgresqlSmallFileConflictCaptureGateway",
     "SmallFileSyncRuntime",
     "compose_offline_small_file_sync",
     "compose_small_file_sync",

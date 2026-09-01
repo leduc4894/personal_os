@@ -469,12 +469,21 @@ def _update_body(*, digest_matches_current: bool) -> dict[str, Any]:
 
 
 def test_stale_update_base_returns_the_conflict_outcome(harness: SmallFileRouteHarness) -> None:
+    """The frozen conflict wire verdict over its new capture reservation.
+
+    The wire bytes stay exactly the plugin's parked-``blocked_conflict``
+    shape — no token, receipt or content member renders — while the server
+    now also reserves one capture operation behind the verdict so the
+    verified candidate can be retained as conflict evidence (Child 8).
+    """
+
     body = _update_body(digest_matches_current=False)
     harness.sync_state.current_reference = _current_reference(body, source_version_id=uuid4())
     response = preflight(harness, body)
     assert response.status_code == 200
     assert dict(response.json()["data"]) == {"outcome": "conflict"}
-    assert harness.sync_state.reservation_count == 0
+    assert harness.sync_state.reservation_count == 1
+    assert harness.sync_state.publication_commits == 0
 
 
 def test_matching_update_base_returns_the_no_change_outcome(

@@ -7,12 +7,15 @@ plugin client's hand-mirrored requests. The journeys pin the cross-boundary
 behaviors the plugin depends on: a create commits exactly once and answers
 the lost-response replay with the frozen receipt; the same journal identity
 re-preflight after commit replays exactly without a second publication; a
-stale update base answers the durable ``conflict`` outcome without a
-reservation; a current base whose digest equals the declared digest
-answers the frozen ``no_change`` receipt; and a device that suspends past
-the operation deadline mid-upload resumes through a same-identity
-re-preflight that re-reserves the expired operation so the event still
-completes with exactly one publication.
+stale update base answers the durable ``conflict`` outcome over its frozen
+wire shape while reserving a capture operation whose verified candidate is
+retained by the Child 8 conflict bridge without any publication, and whose
+same-token and same-event replays return the original opaque conflict
+identity; a current base whose digest equals the declared digest answers
+the frozen ``no_change`` receipt; and a device that suspends past the
+operation deadline mid-upload resumes through a same-identity re-preflight
+that re-reserves the expired operation so the event still completes with
+exactly one publication.
 """
 
 from __future__ import annotations
@@ -177,10 +180,17 @@ def test_same_identity_repreflight_after_commit_replays_exactly(
     assert harness.sync_state.publication_commits == 1
 
 
-def test_stale_update_base_answers_conflict_without_a_reservation(
+def test_stale_update_base_answers_conflict_and_reserves_a_capture_operation(
     offline_harness: SmallFileWireHarness,
 ) -> None:
-    """A base that is no longer current never opens an upload."""
+    """A base that is no longer current never opens a publication upload.
+
+    The wire verdict stays the frozen ``conflict`` outcome the plugin's
+    journal lane already parks as ``blocked_conflict`` — no receipt, token
+    or content member renders — while the server now also reserves one
+    capture operation behind it so the candidate bytes can be retained as
+    conflict evidence through the verified receive path.
+    """
 
     harness = offline_harness
     body = plugin_update_body(source_id=str(uuid4()), base_version_id=str(uuid4()))
@@ -190,7 +200,46 @@ def test_stale_update_base_answers_conflict_without_a_reservation(
     response = harness.preflight(body)
     assert response.status_code == 200, response.text
     assert dict(response.json()["data"]) == {"outcome": "conflict"}
-    assert harness.sync_state.reservation_count == 0
+    assert harness.sync_state.reservation_count == 1
+    assert harness.sync_state.publication_commits == 0
+
+
+def test_stale_update_capture_retains_candidate_and_replays_same_conflict(
+    offline_harness: SmallFileWireHarness,
+) -> None:
+    """The Child 8 capture journey: verify, capture once, replay identically.
+
+    A stale update uploads its candidate through the verified receive path;
+    the capture publishes nothing, answers only the opaque conflict
+    identity, and both replay shapes — the same operation token re-uploaded
+    and the same journal event re-preflighted — return that original
+    conflict without a second capture, reservation or publication.
+    """
+
+    harness = offline_harness
+    body = plugin_update_body(source_id=str(uuid4()), base_version_id=str(uuid4()))
+    harness.sync_state.current_reference = _current_reference(body, source_version_id=uuid4())
+
+    first = data_of(harness.preflight(body))
+    assert first["outcome"] == "conflict"
+    assert set(first) == {"outcome"}
+    assert harness.sync_state.reservation_count == 1
+    operation_token = harness.sync_state.rows[-1].operation_token.value
+
+    receipt = harness.capture_stale_candidate(operation_token, _CONTENT)
+    assert harness.sync_state.publication_commits == 0
+    assert harness.sync_state.conflict_capture_count == 1
+
+    replayed = harness.capture_stale_candidate(operation_token, _CONTENT)
+    assert replayed.conflict_id == receipt.conflict_id
+    assert harness.sync_state.conflict_capture_count == 1
+    assert harness.sync_state.publication_commits == 0
+
+    replay_preflight = data_of(harness.preflight(body))
+    assert replay_preflight["outcome"] == "conflict"
+    assert set(replay_preflight) == {"outcome"}
+    assert harness.sync_state.reservation_count == 1
+    assert harness.sync_state.conflict_capture_count == 1
     assert harness.sync_state.publication_commits == 0
 
 

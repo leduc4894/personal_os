@@ -12,9 +12,14 @@ stale and missing update bases as durable conflicts, the frozen no-change
 receipt, content-integrity failures that never publish, response-loss replay on
 both paths, exactly one canonical publication under concurrent receives,
 expiry and the server-owned size ceiling before any spool, and the closed
-durable title/type derivation for creates. Assertions use only ledger
-strings, closed enums, counts and value equality — never locator, digest,
-token or payload sentinels.
+durable title/type derivation for creates. The stale-update capture flows of
+Child 8 spec 5.1 are pinned alongside: a stale single-part-sized base answers
+the ``conflict`` outcome together with a capture operation grant, the verified
+candidate is admitted through the same bounded verification path before any
+conflict references it, capture publishes nothing, and both the same-token and
+the same-event replays return the original opaque conflict identity.
+Assertions use only ledger strings, closed enums, counts and value equality —
+never locator, digest, token or payload sentinels.
 """
 
 from __future__ import annotations
@@ -26,6 +31,8 @@ from uuid import uuid4
 
 import pytest
 from tests.unit.small_file_sync.fakes import (
+    CONFLICT_CAPTURE_GATEWAY_CAPTURE,
+    CONFLICT_CAPTURE_GATEWAY_RESOLVE,
     CURRENT_SOURCES_RESOLVE,
     OBJECT_STORE_RESOLVE,
     OBJECT_STORE_STORE_STREAM,
@@ -284,7 +291,16 @@ class TestPreflightReservation:
 
 class TestPreflightUpdateBase:
     @pytest.mark.asyncio
-    async def test_stale_base_returns_conflict_without_reservation(self) -> None:
+    async def test_stale_base_answers_conflict_with_capture_operation_grant(self) -> None:
+        """A stale base keeps the conflict verdict and now admits the candidate.
+
+        The policy/base check itself is unchanged — the current pointer still
+        names a different version than the declared base — but the conflict
+        outcome no longer strands the local edit: the server reserves one
+        capture operation so the verified-candidate receive path can retain
+        the bytes as conflict evidence instead of publishing them.
+        """
+
         preflight = build_update_preflight(source_id=uuid4(), base_version_id=uuid4())
         reference = build_current_reference(
             preflight, source_version_id=uuid4(), content_digest=ContentDigest.parse("c" * 64)
@@ -299,16 +315,49 @@ class TestPreflightUpdateBase:
 
         assert result.outcome is SmallFilePreflightOutcome.CONFLICT
         assert result.terminal_result is None
-        assert result.operation_token is None
-        assert STORE_RESERVE_OPERATION not in harness.ledger.entries
+        assert result.conflict_id is None
+        assert result.operation_token is not None
+        assert result.expires_at is not None
+        assert STORE_RESERVE_OPERATION in harness.ledger.entries
         assert CURRENT_SOURCES_RESOLVE in harness.ledger.entries
         assert PUBLICATION_COMMIT_UPDATE not in harness.ledger.entries
+        assert CONFLICT_CAPTURE_GATEWAY_CAPTURE not in harness.ledger.entries
         assert (
             harness.metrics.preflight_count(
                 SmallFileOperation.UPDATE, SmallFilePreflightOutcome.CONFLICT
             )
             == 1
         )
+
+    @pytest.mark.asyncio
+    async def test_multipart_sized_stale_base_keeps_bare_conflict_outcome(self) -> None:
+        """Above the single-part ceiling the stale base still parks bare.
+
+        No single-part verified-object transport exists for the candidate at
+        that size, so the conflict outcome carries no capture grant: capture
+        waits for the multipart completion path.
+        """
+
+        oversized_content = b"\x00" * (MAX_SINGLE_PART_FILE_SIZE_BYTES + 1)
+        preflight = build_update_preflight(
+            source_id=uuid4(), base_version_id=uuid4(), content=oversized_content
+        )
+        reference = build_current_reference(
+            preflight, source_version_id=uuid4(), content_digest=ContentDigest.parse("c" * 64)
+        )
+        harness = build_service_harness(current_reference=reference)
+
+        result = await harness.service.preflight(
+            preflight=preflight,
+            device_context=build_device_context(),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert result.outcome is SmallFilePreflightOutcome.CONFLICT
+        assert result.operation_token is None
+        assert result.expires_at is None
+        assert result.conflict_id is None
+        assert STORE_RESERVE_OPERATION not in harness.ledger.entries
 
     @pytest.mark.asyncio
     async def test_missing_update_source_returns_conflict(self) -> None:
@@ -512,6 +561,182 @@ class TestPreflightNoChange:
         assert replayed.terminal_result == terminal
         assert harness.ledger.count(STORE_RESERVE_OPERATION) == 1
         assert harness.metrics.replay_count(SmallFileOperation.UPDATE) == 1
+
+
+class TestStaleUpdateConflictCapture:
+    """Child 8 spec 5.1: stale updates retain their verified candidate bytes.
+
+    The stale base keeps the ``conflict`` preflight verdict (the policy/base
+    check is untouched) but now grants one capture operation; the candidate
+    bytes must clear the same bounded size/digest verification before any
+    conflict references them; capture publishes nothing; and both replay
+    shapes — the same event identity re-preflighted and the same operation
+    token re-uploaded — return the original opaque conflict identity.
+    """
+
+    @pytest.mark.asyncio
+    async def test_stale_verified_update_is_captured_and_replay_returns_same_conflict(
+        self,
+    ) -> None:
+        harness = build_service_harness()
+
+        first = await harness.receive_stale_update()
+        replay = await harness.replay_same_event()
+
+        assert first.conflict_id == replay.conflict_id
+        assert harness.publication_count == 0
+        assert harness.conflict_capture.capture_count == 1
+        assert replay.outcome is SmallFilePreflightOutcome.CONFLICT
+        assert replay.conflict_id is not None
+        assert replay.operation_token is None
+        assert replay.terminal_result is None
+        # The event replay recaptures nothing and allocates no new operation.
+        assert harness.ledger.count(STORE_RESERVE_OPERATION) == 1
+        assert harness.ledger.count(CONFLICT_CAPTURE_GATEWAY_CAPTURE) == 1
+        # One membership lookup per update preflight: the stale grant pass
+        # (no conflict yet) and the replay pass (the stored conflict).
+        assert harness.ledger.count(CONFLICT_CAPTURE_GATEWAY_RESOLVE) == 2
+        assert PUBLICATION_COMMIT_UPDATE not in harness.ledger.entries
+        assert (
+            harness.metrics.upload_count(
+                SmallFileOperation.UPDATE, SmallFileMetricOutcome.CONFLICT_CAPTURED
+            )
+            == 1
+        )
+        assert harness.metrics.replay_count(SmallFileOperation.UPDATE) == 1
+
+    @pytest.mark.asyncio
+    async def test_capture_receive_admits_verified_bytes_before_capture(self) -> None:
+        """The capture order is claim, verify, observe remote, capture.
+
+        No conflict may reference bytes that have not cleared the bounded
+        verification path, and the observed remote is read at capture time —
+        after verification — so the frozen evidence describes the world the
+        capture actually saw.
+        """
+
+        harness = build_service_harness()
+
+        await harness.receive_stale_update()
+
+        assert harness.ledger.entries[-4:] == [
+            STORE_RESOLVE_BOUND,
+            OBJECT_STORE_STORE_STREAM,
+            CURRENT_SOURCES_RESOLVE,
+            CONFLICT_CAPTURE_GATEWAY_CAPTURE,
+        ]
+        assert PUBLICATION_GUARD not in harness.ledger.entries
+        assert PUBLICATION_RESOLVE_COMMITTED not in harness.ledger.entries
+        assert STORE_RECORD_BOUND_TERMINAL not in harness.ledger.entries
+
+    @pytest.mark.asyncio
+    async def test_capture_receipt_carries_only_opaque_conflict_evidence(self) -> None:
+        harness = build_service_harness()
+
+        receipt = await harness.receive_stale_update()
+
+        stale_preflight = harness.stale_update_preflight
+        assert stale_preflight is not None
+        assert receipt.source_id == stale_preflight.source_id
+        assert receipt.conflict_id != stale_preflight.event_id
+        assert receipt.observed_remote_version_id != stale_preflight.base_version_id
+
+    @pytest.mark.asyncio
+    async def test_same_token_response_loss_replay_returns_the_same_conflict(self) -> None:
+        harness = build_service_harness()
+        first = await harness.receive_stale_update()
+        token = harness.stale_update_token
+        device_context = harness.stale_update_device
+        if token is None or device_context is None:  # pragma: no cover - helper contract
+            raise AssertionError("receive_stale_update must keep its granted token")
+
+        replayed = await harness.service.receive_conflict_candidate(
+            operation_token=token,
+            device_context=device_context,
+            stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert replayed == first
+        assert harness.conflict_capture.capture_count == 1
+        assert harness.publication_count == 0
+        assert PUBLICATION_COMMIT_UPDATE not in harness.ledger.entries
+
+    @pytest.mark.asyncio
+    async def test_unverified_candidate_bytes_never_reach_capture(self) -> None:
+        harness = build_service_harness()
+        device_context = build_device_context()
+        preflight = build_update_preflight(source_id=uuid4(), base_version_id=uuid4())
+        harness.current_sources.reference = build_current_reference(
+            preflight, source_version_id=uuid4(), content_digest=ContentDigest.parse("c" * 64)
+        )
+        harness.operation_store.now_override = harness.clock.moment
+        granted = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        assert granted.operation_token is not None
+
+        with pytest.raises(SmallFileSyncError) as exc_info:
+            await harness.service.receive_conflict_candidate(
+                operation_token=granted.operation_token,
+                device_context=device_context,
+                stream=ProbedByteStream([b"x" * len(SYNC_CONTENT_BYTES)]),
+                diagnostic_context=build_diagnostic_context(),
+            )
+
+        assert _error_code(exc_info.value) is ErrorCode.SMALL_FILE_CONTENT_INTEGRITY_FAILED
+        assert CONFLICT_CAPTURE_GATEWAY_CAPTURE not in harness.ledger.entries
+        # The preflight's own base check is the only current-source read: the
+        # failed capture never observes a remote over unverified bytes.
+        assert harness.ledger.count(CURRENT_SOURCES_RESOLVE) == 1
+        assert harness.publication_count == 0
+
+    @pytest.mark.asyncio
+    async def test_base_current_again_at_capture_fails_closed_and_releases_the_claim(
+        self,
+    ) -> None:
+        """A base that became current again is not a capturable stale update.
+
+        The receive fails with the closed state-invalid rejection, the claimed
+        row terminalizes as failed (reclaimable by a same-identity
+        re-preflight), and no conflict is captured or published.
+        """
+
+        harness = build_service_harness()
+        device_context = build_device_context()
+        preflight = build_update_preflight(source_id=uuid4(), base_version_id=uuid4())
+        harness.current_sources.reference = build_current_reference(
+            preflight, source_version_id=uuid4(), content_digest=ContentDigest.parse("c" * 64)
+        )
+        harness.operation_store.now_override = harness.clock.moment
+        granted = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        assert granted.operation_token is not None
+        # The remote rewinds to the declared base before the upload arrives:
+        # the update is no longer stale, so nothing may capture.
+        harness.current_sources.reference = build_current_reference(preflight)
+
+        with pytest.raises(SmallFileSyncError) as exc_info:
+            await harness.service.receive_conflict_candidate(
+                operation_token=granted.operation_token,
+                device_context=device_context,
+                stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+                diagnostic_context=build_diagnostic_context(),
+            )
+
+        assert _error_code(exc_info.value) is ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID
+        assert CONFLICT_CAPTURE_GATEWAY_CAPTURE not in harness.ledger.entries
+        assert harness.publication_count == 0
+        record = harness.operation_store.record_for_token(granted.operation_token)
+        assert record is not None
+        assert record.state == "failed"
+        assert record.safe_error_code == "small_file_upload_state_invalid"
+        assert STORE_RECORD_BOUND_TERMINAL_FAILURE in harness.ledger.entries
 
 
 class TestPreflightReplay:

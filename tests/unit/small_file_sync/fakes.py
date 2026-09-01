@@ -44,6 +44,7 @@ from personal_os.object_storage import (
 from personal_os.object_storage.errors import DIGEST_MISMATCH, SIZE_MISMATCH, ObjectStorageError
 from personal_os.small_file_sync.contracts import (
     NormalizedLocator,
+    SmallFileConflictCaptureResult,
     SmallFileDeviceContext,
     SmallFileIdempotencyKey,
     SmallFileOperation,
@@ -56,7 +57,7 @@ from personal_os.small_file_sync.contracts import (
 from personal_os.small_file_sync.errors import SmallFileSyncError
 from personal_os.small_file_sync.metrics import InMemorySmallFileSyncMetrics
 from personal_os.small_file_sync.ports import SmallFileBoundOperation
-from personal_os.small_file_sync.service import SmallFileSyncService
+from personal_os.small_file_sync.service import SmallFilePreflightResult, SmallFileSyncService
 from personal_os.sources.commands import SourceType
 from personal_os.sources.errors import SourcePublicationError
 from personal_os.sources.fingerprint import RequestFingerprint, SourceVersionCommand
@@ -84,6 +85,8 @@ PUBLICATION_GUARD: Final[str] = "publication.policy_guard.authorize_publication"
 PUBLICATION_RESOLVE_COMMITTED: Final[str] = "publication_store.resolve_committed"
 PUBLICATION_COMMIT_CREATE: Final[str] = "publication_store.commit_create"
 PUBLICATION_COMMIT_UPDATE: Final[str] = "publication_store.commit_update"
+CONFLICT_CAPTURE_GATEWAY_CAPTURE: Final[str] = "conflict_capture.capture_stale_update"
+CONFLICT_CAPTURE_GATEWAY_RESOLVE: Final[str] = "conflict_capture.resolve_captured_conflict"
 
 #: Fixed canonical content and its digest shared by the builders.
 SYNC_CONTENT_BYTES: Final[bytes] = b"small-file canonical bytes for the sync service fakes\n"
@@ -625,6 +628,69 @@ class FakeCurrentSourceStore:
 
 
 @dataclass
+class FakeConflictCaptureGateway:
+    """Conflict-capture gateway fake replaying by event identity.
+
+    Mirrors the real gateway's contract: the first capture of one
+    (workspace, event) identity mints one frozen receipt; an exact replay of
+    that identity returns the stored receipt unchanged; the membership
+    lookup answers preflight replay. Only the opaque receipt crosses back —
+    no bytes, digest or locator are retained or echoed.
+    """
+
+    ledger: CallLedger
+    clock: Callable[[], datetime]
+    capture_calls: int = 0
+    resolve_calls: int = 0
+    receipts: dict[tuple[UUID, UUID], SmallFileConflictCaptureResult] = field(default_factory=dict)
+
+    async def capture_stale_update(
+        self,
+        *,
+        bound_operation: SmallFileBoundOperation,
+        verified_candidate: VerifiedObjectReceipt,
+        observed_remote_version_id: UUID,
+        diagnostic_context: DiagnosticContext,
+    ) -> SmallFileConflictCaptureResult:
+        del verified_candidate, diagnostic_context
+        self.ledger.record(CONFLICT_CAPTURE_GATEWAY_CAPTURE)
+        self.capture_calls += 1
+        identity = (bound_operation.workspace_id, bound_operation.event_id)
+        stored = self.receipts.get(identity)
+        if stored is not None:
+            return stored
+        update_source_id = bound_operation.update_source_id
+        if update_source_id is None:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        receipt = SmallFileConflictCaptureResult(
+            conflict_id=uuid4(),
+            source_id=update_source_id,
+            observed_remote_version_id=observed_remote_version_id,
+            captured_at=self.clock(),
+        )
+        self.receipts[identity] = receipt
+        return receipt
+
+    async def resolve_captured_conflict(
+        self,
+        *,
+        workspace_id: UUID,
+        originating_event_id: UUID,
+        diagnostic_context: DiagnosticContext,
+    ) -> SmallFileConflictCaptureResult | None:
+        del diagnostic_context
+        self.ledger.record(CONFLICT_CAPTURE_GATEWAY_RESOLVE)
+        self.resolve_calls += 1
+        return self.receipts.get((workspace_id, originating_event_id))
+
+    @property
+    def capture_count(self) -> int:
+        """The number of distinct captured conflicts (replays excluded)."""
+
+        return len(self.receipts)
+
+
+@dataclass
 class AllowingSmallFilePolicyGuard:
     """Small-file policy-guard fake recording the boundary call and allowing."""
 
@@ -863,9 +929,66 @@ class ServiceHarness:
     publication_gateway: FakeSmallFilePublicationGateway
     current_sources: FakeCurrentSourceStore
     policy_guard: SmallFilePolicyGuardFake
+    conflict_capture: FakeConflictCaptureGateway
     metrics: InMemorySmallFileSyncMetrics
     ledger: CallLedger
     clock: FixedUtcClock
+    stale_update_preflight: SmallFilePreflight | None = None
+    stale_update_device: SmallFileDeviceContext | None = None
+    stale_update_token: UploadOperationToken | None = None
+
+    @property
+    def publication_count(self) -> int:
+        """The number of canonical publication commits observed."""
+
+        return self.publication_store.commit_invocations
+
+    async def receive_stale_update(self) -> SmallFileConflictCaptureResult:
+        """Run one stale-base update preflight and upload its verified candidate.
+
+        Seeds the current pointer on a different version than the declared
+        base (the stale shape), runs the preflight — which must answer the
+        ``conflict`` outcome together with the capture operation grant — and
+        streams the declared content through the conflict-candidate receive
+        path. The event identity, device context and granted token are kept
+        for :meth:`replay_same_event`.
+        """
+
+        device_context = build_device_context()
+        preflight = build_update_preflight(source_id=uuid4(), base_version_id=uuid4())
+        self.current_sources.reference = build_current_reference(
+            preflight, source_version_id=uuid4(), content_digest=ContentDigest.parse("c" * 64)
+        )
+        granted = await self.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        token = granted.operation_token
+        if token is None:
+            raise AssertionError("the stale-update preflight must grant a capture operation")
+        self.stale_update_preflight = preflight
+        self.stale_update_device = device_context
+        self.stale_update_token = token
+        return await self.service.receive_conflict_candidate(
+            operation_token=token,
+            device_context=device_context,
+            stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+    async def replay_same_event(self) -> SmallFilePreflightResult:
+        """Re-preflight the captured event identity; the same conflict answers."""
+
+        preflight = self.stale_update_preflight
+        device_context = self.stale_update_device
+        if preflight is None or device_context is None:
+            raise AssertionError("receive_stale_update must run before replay_same_event")
+        return await self.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
 
 
 def build_service_harness(
@@ -892,6 +1015,7 @@ def build_service_harness(
     publication_gateway = FakeSmallFilePublicationGateway(publication_service=publication_service)
     operation_store = FakeSmallFileUploadOperationStore(ledger=ledger, clock=clock)
     current_sources = FakeCurrentSourceStore(ledger=ledger, reference=current_reference)
+    conflict_capture = FakeConflictCaptureGateway(ledger=ledger, clock=clock)
     metrics = InMemorySmallFileSyncMetrics()
     policy_guard: SmallFilePolicyGuardFake
     if policy_guard_error is not None:
@@ -906,6 +1030,7 @@ def build_service_harness(
         publication_gateway=publication_gateway,
         object_store=object_store,
         current_sources=current_sources,
+        conflict_capture=conflict_capture,
         metrics=metrics,
         clock=clock,
     )
@@ -917,6 +1042,7 @@ def build_service_harness(
         publication_gateway=publication_gateway,
         current_sources=current_sources,
         policy_guard=policy_guard,
+        conflict_capture=conflict_capture,
         metrics=metrics,
         ledger=ledger,
         clock=clock,

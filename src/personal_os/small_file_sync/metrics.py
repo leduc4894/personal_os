@@ -55,6 +55,9 @@ class SmallFileMetricOutcome(StrEnum):
     """The closed set of content-stream outcomes used as metric labels."""
 
     COMMITTED = "committed"
+    #: The verified candidate was retained as conflict evidence (Child 8):
+    #: the stream completed and captured, but no canonical version published.
+    CONFLICT_CAPTURED = "conflict_captured"
     INTEGRITY_FAILED = "integrity_failed"
     REJECTED = "rejected"
 
