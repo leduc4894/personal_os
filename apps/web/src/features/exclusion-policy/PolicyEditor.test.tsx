@@ -317,6 +317,9 @@ describe("PolicyEditor", () => {
     ]);
   });
 
+  // Parallel-coverage headroom: the seven sequential addRule round-trips run
+  // ~1 s isolated but can exceed Vitest's 5 s default under full-suite load;
+  // this raises the wall-clock budget only, re-investigate before raising again.
   it("creates labeled closed controls for each of the seven rule kinds", async () => {
     const { client } = createFakeClient({ getStatus: statusData() });
     renderEditor(client);
@@ -342,7 +345,7 @@ describe("PolicyEditor", () => {
         .getAllByRole("option")
         .map((option) => option.textContent),
     ).toEqual(["markdown", "text", "pdf", "image", "audio", "web", "youtube"]);
-  });
+  }, 15_000);
 
   it("validates each operand grammar with closed feedback and blocks saving", async () => {
     const { client, mocks } = createFakeClient({ getStatus: statusData() });
