@@ -138,7 +138,9 @@ export type QueuePassOutcome =
   | "login_required"
   | "retry_scheduled"
   | "pass_already_running"
-  | "pass_wrapper_failed";
+  | "pass_wrapper_failed"
+  /** The lazy stall recovery (2026-09-01 live round): the pass's own await never settled; the recovery aborted its scope and released the running flag. */
+  | "pass_stall_recovered";
 
 /** The closed summary of one bounded pass: an outcome and a count only. */
 export interface QueuePassSummary {
@@ -303,7 +305,15 @@ export class JournalQueueDriver {
   readonly #syncApi: JournalSyncApi;
   readonly #fileBytesReader: QueueVaultFileReader;
   readonly #lifecycleDriver: LifecycleDriver | null;
-  readonly #passAbortController: AbortController;
+  /**
+   * The active pass's abort scope, replaced per pass: a stall recovery (or
+   * stop) aborts exactly the pass it targets, and any late result of an
+   * abandoned pass observes its own aborted scope instead of the fresh
+   * pass's controller.
+   */
+  #activePassController: AbortController | null = null;
+  /** When the running pass started (fake-clock friendly), for the stall bound. */
+  #passStartedAtEpochMs: number | null = null;
   readonly #refreshAccessToken: () => Promise<void>;
   readonly #nowEpochMs: () => number;
   readonly #createCorrelationId: () => string;
@@ -324,7 +334,6 @@ export class JournalQueueDriver {
     this.#syncApi = options.syncApi;
     this.#fileBytesReader = options.fileBytesReader;
     this.#lifecycleDriver = options.lifecycleDriver ?? null;
-    this.#passAbortController = new AbortController();
     this.#refreshAccessToken = options.refreshAccessToken;
     this.#nowEpochMs = options.nowEpochMs ?? (() => Date.now());
     this.#createCorrelationId = options.createCorrelationId ?? (() => crypto.randomUUID());
@@ -378,7 +387,7 @@ export class JournalQueueDriver {
    */
   stop(): void {
     this.#isStopped = true;
-    this.#passAbortController.abort();
+    this.#activePassController?.abort();
   }
 
   /**
@@ -387,8 +396,31 @@ export class JournalQueueDriver {
    * a trigger never queues a second pass and never recurses.
    */
   async requestPass(): Promise<QueuePassSummary> {
+    if (this.#isStopped) {
+      return { outcome: "stopped", processedEventCount: 0 };
+    }
     if (this.#isPassRunning) {
-      return { outcome: "pass_already_running", processedEventCount: 0 };
+      const startedAtEpochMs = this.#passStartedAtEpochMs;
+      if (
+        startedAtEpochMs === null ||
+        this.#nowEpochMs() - startedAtEpochMs < 2 * this.#passDeadlineMs
+      ) {
+        return { outcome: "pass_already_running", processedEventCount: 0 };
+      }
+      // Lazy stall recovery (2026-09-01 live-round finding): the running
+      // pass outlived twice its own deadline, so one of its awaits will
+      // never settle. Abort exactly its scope (late results observe their
+      // own aborted controller and are discarded), release the running
+      // flag, surface the closed stall token, and let this trigger run a
+      // fresh pass — queued work dispatches again without a reload.
+      this.#activePassController?.abort();
+      this.#activePassController = null;
+      this.#passStartedAtEpochMs = null;
+      this.#isPassRunning = false;
+      this.#diagnosticTrail?.append({
+        kind: "pass_outcome",
+        tokens: ["pass_stall_recovered"],
+      });
     }
     return this.runPass();
   }
@@ -414,6 +446,9 @@ export class JournalQueueDriver {
     }
     this.#isPassRunning = true;
     this.#lastPassWireRequestId = null;
+    const passAbortController = new AbortController();
+    this.#activePassController = passAbortController;
+    this.#passStartedAtEpochMs = this.#nowEpochMs();
     const passDeadlineEpochMs = this.#nowEpochMs() + this.#passDeadlineMs;
     const refreshBudget: RefreshBudget = { hasRefreshed: false, requiresLogin: false };
     let processedEventCount = 0;
@@ -440,7 +475,7 @@ export class JournalQueueDriver {
           do {
             try {
               lifecycleOutcome = await this.#lifecycleDriver.runOne(
-                this.#passAbortController.signal,
+                passAbortController.signal,
               );
             } catch {
               // The lifecycle driver swallows its own errors and
@@ -493,7 +528,7 @@ export class JournalQueueDriver {
               }
               try {
                 lifecycleOutcome = await this.#lifecycleDriver.runOne(
-                  this.#passAbortController.signal,
+                  passAbortController.signal,
                 );
               } catch {
                 break;
@@ -527,7 +562,12 @@ export class JournalQueueDriver {
           if (event === null) {
             break;
           }
-          continuation = await this.#processEvent(event, passDeadlineEpochMs, refreshBudget);
+          continuation = await this.#processEvent(
+            event,
+            passDeadlineEpochMs,
+            refreshBudget,
+            passAbortController,
+          );
         } catch (error) {
           // A journal failure mid-pass fails closed: the pass ends with the
           // journal as the durable truth and never crashes its trigger. The
@@ -602,6 +642,10 @@ export class JournalQueueDriver {
       // append is fire-and-forget: a stalled or failing trail must never
       // delay or break the pass.
       this.#recordPassOutcomeTrailEntry(passOutcome);
+      if (this.#activePassController === passAbortController) {
+        this.#activePassController = null;
+        this.#passStartedAtEpochMs = null;
+      }
       this.#isPassRunning = false;
     }
   }
@@ -738,6 +782,7 @@ export class JournalQueueDriver {
     event: JournalEvent,
     passDeadlineEpochMs: number,
     refreshBudget: RefreshBudget,
+    passAbortController: AbortController,
   ): Promise<PassContinuation> {
     const correlationId = this.#createCorrelationId();
     try {
@@ -782,11 +827,12 @@ export class JournalQueueDriver {
           // runner owns session resume, part scheduling and completion; a
           // thrown closed failure lands in the shared matrix below.
           return await this.#dispatchMultipartUpload(
-            event,
-            passDeadlineEpochMs,
-            refreshBudget,
-            correlationId,
-          );
+        event,
+        passDeadlineEpochMs,
+        refreshBudget,
+        correlationId,
+        passAbortController,
+      );
       }
     } catch (error) {
       if (this.#isStopped) {
@@ -845,6 +891,7 @@ export class JournalQueueDriver {
     passDeadlineEpochMs: number,
     refreshBudget: RefreshBudget,
     correlationId: string,
+    passAbortController: AbortController,
   ): Promise<PassContinuation> {
     if (this.#isPastDeadline(passDeadlineEpochMs)) {
       // A natural deadline boundary: the event keeps its `preflight`
@@ -853,7 +900,7 @@ export class JournalQueueDriver {
       return "end_deadline_boundary";
     }
     const runContext: MultipartUploadRunContext = {
-      signal: this.#passAbortController.signal,
+      signal: passAbortController.signal,
       passDeadlineEpochMs,
     };
     const issue = (): Promise<MultipartUploadRunOutcome> =>

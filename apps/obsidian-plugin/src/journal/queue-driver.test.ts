@@ -2847,3 +2847,55 @@ describe("queue driver multipart dispatch (child 7 spec 4.3)", () => {
     expect(script.partPutNumbers.slice().sort((a, b) => a - b)).toEqual([1, 2, 3]);
   });
 });
+
+// --- stalled-pass recovery (2026-09-01 live round finding) -----------------------------------------
+
+describe("queue driver stall recovery", () => {
+  it("releases a pass whose await never settles so a later trigger dispatches again", async () => {
+    // Live finding 2026-09-01: one await inside a pass hung forever (the
+    // credential refresh seam here), leaving #isPassRunning wedged so every
+    // later trigger answered pass_already_running and queued edits never
+    // dispatched until a plugin reload. Past twice the pass deadline a new
+    // trigger must declare the old pass stalled: abort its pass scope,
+    // release the running flag, surface the closed stall token, and run a
+    // real pass.
+    const harness = createHarness();
+    const event = await captureBytes(harness, "notes/stalled.md", new TextEncoder().encode("stalled refresh"));
+    let preflightCalls = 0;
+    let allowContent = false;
+    harness.installTransport({
+      preflight: async () => {
+        preflightCalls += 1;
+        return allowContent && preflightCalls >= 3
+          ? { status: 200, bodyText: SINGLE_PART_BODY }
+          : { status: 401, bodyText: errorBody("device_credential_invalid") };
+      },
+      content: async () => ({ status: 200, bodyText: COMMITTED_RECEIPT }),
+    });
+    harness.setRefreshImplementation(() => {
+      harness.refreshCalls.count += 1;
+      return harness.refreshCalls.count === 1
+        ? new Promise<void>(() => undefined)
+        : Promise.resolve();
+    });
+    const stalledPromise = harness.driver.requestPass();
+    await Promise.resolve();
+    // While the pass is inside its deadline a trigger coalesces, as before.
+    harness.advanceClock(5_000);
+    const duringStall = await harness.driver.requestPass();
+    expect(duringStall).toEqual({ outcome: "pass_already_running", processedEventCount: 0 });
+    // Past twice the pass deadline the lazy watchdog fires on the next
+    // trigger: the fresh pass refreshes (the hang was one-shot), retries,
+    // and — with content allowed from the third preflight — commits.
+    harness.advanceClock(2 * QUEUE_PASS_DEADLINE_MS + 1);
+    allowContent = true;
+    const recovered = await harness.driver.requestPass();
+    expect(recovered.outcome).toBe("completed");
+    expect(harness.repository.readEvent(event.eventId)?.state).toBe("committed");
+    const stallEntries = harness.diagnosticTrail.entries.filter(
+      (entry) => entry.tokens[0] === "pass_stall_recovered",
+    );
+    expect(stallEntries).toHaveLength(1);
+    void stalledPromise;
+  });
+});

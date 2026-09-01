@@ -397,6 +397,7 @@ const QUEUE_PASS_OUTCOME_TOKENS = [
   "retry_scheduled",
   "pass_already_running",
   "pass_wrapper_failed",
+  "pass_stall_recovered",
 ] as const satisfies readonly QueuePassOutcome[];
 
 const LIFECYCLE_RUN_OUTCOME_TOKENS = [
