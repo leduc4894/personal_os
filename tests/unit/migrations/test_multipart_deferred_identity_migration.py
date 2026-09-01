@@ -121,7 +121,7 @@ def test_revision_is_the_single_alembic_head() -> None:
     # ``20260901_01``, the device-sync scale index revision ``20260901_02``
     # and the terminal locator remediation revision ``20260901_03`` stack
     # above this head.
-    assert scripts.get_heads() == ["20260901_03"]
+    assert scripts.get_heads() == ["20260902_01"]
 
 
 def test_upgrade_relaxes_exactly_the_two_identity_columns() -> None:

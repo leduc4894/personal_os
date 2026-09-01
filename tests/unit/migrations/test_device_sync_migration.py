@@ -249,7 +249,7 @@ def test_device_sync_revision_is_the_single_alembic_head() -> None:
     # token, submitted policy verdict, grant-poll bucket kind, device-sync
     # scale index and terminal locator remediation revisions stack on the
     # run client-activity revision, so the single graph head moved past it.
-    assert scripts.get_heads() == ["20260901_03"]
+    assert scripts.get_heads() == ["20260902_01"]
     revision = scripts.get_revision(RUN_CLIENT_ACTIVITY_REVISION)
     assert revision is not None
     assert revision.down_revision == DOWNLOAD_ENTRY_ECHO_REVISION

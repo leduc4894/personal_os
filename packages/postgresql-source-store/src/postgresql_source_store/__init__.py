@@ -19,6 +19,11 @@ from postgresql_source_store.canonical_read import (
     PostgresqlCanonicalSourceReadStore,
     hydrate_canonical_source_reference,
 )
+from postgresql_source_store.conflict_store import (
+    PostgresqlSourceConflictStore,
+    SourceConflictDatabaseRetryPolicy,
+    hydrate_source_conflict,
+)
 from postgresql_source_store.device_content_catalog import (
     PostgresqlDeviceContentCatalog,
 )
@@ -81,13 +86,16 @@ __all__ = [
     "PostgresqlReadinessProbe",
     "PostgresqlRestoreTarget",
     "PostgresqlSmallFileUploadOperationStore",
+    "PostgresqlSourceConflictStore",
     "PostgresqlSourcePublicationStore",
     "ProjectionDiagnosticSink",
     "ProjectionIntentStatus",
     "ProjectionRetryPolicy",
+    "SourceConflictDatabaseRetryPolicy",
     "classify_replay",
     "compute_manifest_final_digest",
     "hydrate_canonical_source_reference",
     "hydrate_device_event",
+    "hydrate_source_conflict",
     "map_database_failure",
 ]

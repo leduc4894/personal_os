@@ -221,12 +221,13 @@ def test_no_new_alembic_revision() -> None:
         "20260901_01",
         "20260901_02",
         "20260901_03",
+        "20260902_01",
     }, (
         f"the Alembic graph must stay exactly at the baseline, authentication, "
         f"exclusion policy, small-file sync, source-lifecycle, device sync, "
         f"manifest-run client-activity, multipart upload, submitted policy "
-        f"verdict, grant-poll bucket kind, device-sync scale index and "
-        f"terminal locator remediation revisions, "
+        f"verdict, grant-poll bucket kind, device-sync scale index, terminal "
+        f"locator remediation and source-conflict revisions, "
         f"got {sorted(revisions)}"
     )
 

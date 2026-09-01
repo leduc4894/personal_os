@@ -23,6 +23,7 @@ import sqlalchemy as sa
 from sqlalchemy import TextClause
 from sqlalchemy.sql import Select
 
+from personal_os.source_conflicts.contracts import ConflictIdempotencyKey
 from personal_os.sources.commands import IdempotencyKey
 from postgresql_source_store.tables import workspace_policy_state
 
@@ -81,6 +82,35 @@ def idempotency_lock_statement(workspace_id: UUID, key: IdempotencyKey) -> TextC
     return advisory_xact_lock_statement(
         IDEMPOTENCY_LOCK_NAMESPACE,
         idempotency_lock_key(workspace_id, key),
+    )
+
+
+def conflict_idempotency_lock_key(workspace_id: UUID, key: ConflictIdempotencyKey) -> int:
+    """Derive the transaction lock key for a workspace-scoped conflict identity.
+
+    The material is the workspace UUID bytes, a NUL separator that cannot
+    appear in the canonical UUID-text key, and the exact key bytes — the same
+    frozen algorithm as :func:`idempotency_lock_key`, sharing the
+    idempotency namespace so a conflict capture or resolution serialises
+    against every other replay identity of the same workspace key.
+    """
+    material = workspace_id.bytes + b"\x00" + key.value.encode("ascii")
+    return signed_first_sha256_word(material)
+
+
+def conflict_idempotency_lock_statement(
+    workspace_id: UUID, key: ConflictIdempotencyKey
+) -> TextClause:
+    """Build the conflict idempotency advisory lock statement.
+
+    The conflict store acquires this lock before any conflict row or source
+    lock, mirroring the publication prefix (idempotency advisory lock, then
+    policy row, then source advisory lock), so a conflict transition and a
+    publication of the same source can never invert their lock order.
+    """
+    return advisory_xact_lock_statement(
+        IDEMPOTENCY_LOCK_NAMESPACE,
+        conflict_idempotency_lock_key(workspace_id, key),
     )
 
 

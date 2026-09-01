@@ -609,7 +609,13 @@ def known_base_fingerprints_statement(
 
 
 def _checkpoint_version_lateral(checkpoint_sequence: int) -> LateralFromClause:
-    """The per-source version committed by the latest event at the checkpoint."""
+    """The per-source version committed by the latest event at the checkpoint.
+
+    Only rows that commit a version participate: the conflict aggregate's
+    ``conflict_capture`` events (and stale ``conflict_resolve`` attempts)
+    carry a NULL ``committed_version_id`` by design, so a capture must never
+    shadow the latest version-committing event of its source.
+    """
 
     return (
         sa.select(sync_events.c.committed_version_id)
@@ -618,6 +624,7 @@ def _checkpoint_version_lateral(checkpoint_sequence: int) -> LateralFromClause:
             sync_events.c.source_id == sources.c.source_id,
             sync_events.c.event_sequence
             <= sa.bindparam("checkpoint_sequence", checkpoint_sequence, type_=sa.BigInteger()),
+            sync_events.c.committed_version_id.isnot(None),
         )
         .order_by(sync_events.c.event_sequence.desc())
         .limit(1)
