@@ -70,6 +70,7 @@ from personal_os.source_conflicts.errors import (
     BASE_VERSION_INVALID,
     CANDIDATE_INVALID,
     CANDIDATE_OBJECT_INVALID,
+    DELETION_APPLY_UNSUPPORTED,
     DEVICE_ID_INVALID,
     REMOTE_VERSION_INVALID,
     SOURCE_ID_INVALID,
@@ -457,7 +458,16 @@ class ConflictResolutionIdentities:
 
 @dataclass(frozen=True, slots=True)
 class _LockedSourceState:
-    """The locked ``sources`` row of the resolution recheck."""
+    """The locked ``sources`` row of the resolution recheck.
+
+    ``deleted_at`` is retained as the locked evidence the lifecycle-owned
+    deletion-apply branch (a future ``keep_local`` resolution of a
+    ``delete_remote_edit`` conflict committing a canonical delete through
+    the lifecycle domain) will recheck; this task's resolution boundary
+    refuses a deletion intent under the closed
+    ``deletion_apply_unsupported`` token before any winner commit, so the
+    column is read but not yet consumed by a decision.
+    """
 
     sync_state: str | None
     current_version_id: UUID | None
@@ -1177,11 +1187,17 @@ class PostgresqlSourceConflictStore:
             if command.resolution_kind is ConflictResolutionKind.KEEP_LOCAL
             else command.verified_candidate_object_id
         )
-        if conflict.candidate.candidate_kind is not ConflictCandidateKind.CONTENT or (
-            winning_object_id is None
-        ):
-            # A keep_local resolution acts on the retained content candidate;
-            # applying a deletion intent is lifecycle-domain work.
+        if conflict.candidate.candidate_kind is not ConflictCandidateKind.CONTENT:
+            # Applying a deletion intent is lifecycle-domain work this
+            # domain refuses under its own closed token — deliberately not
+            # the malformed-candidate verdict, because the delete candidate
+            # itself is exactly the shape the conflict kind requires.
+            raise SourceConflictError(
+                ErrorCode.SOURCE_CONFLICT_INPUT_INVALID,
+                safe_details={"reason": DELETION_APPLY_UNSUPPORTED},
+            )
+        if winning_object_id is None:
+            # A keep_local resolution acts on the retained content candidate.
             raise SourceConflictError(
                 ErrorCode.SOURCE_CONFLICT_INPUT_INVALID,
                 safe_details={"reason": CANDIDATE_INVALID},

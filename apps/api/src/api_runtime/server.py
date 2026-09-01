@@ -65,6 +65,7 @@ from api_runtime.server_settings import load_api_server_settings
 from api_runtime.small_file_sync_composition import compose_small_file_sync
 from api_runtime.source_lifecycle_composition import (
     PostgresqlSourceLifecyclePolicy,
+    compose_lifecycle_conflict_capture_gateway,
     compose_source_lifecycle_runtime,
 )
 from personal_os.diagnostics.context import bind_diagnostic_context, create_diagnostic_context
@@ -83,6 +84,7 @@ from postgresql_source_store.lifecycle_store import PostgresqlSourceLifecycleSto
 from postgresql_source_store.policy_enforcement import (
     PostgresqlActivePolicySnapshotSource,
     PostgresqlPolicySubjectEvidenceSource,
+    compose_policy_enforcement,
 )
 from postgresql_source_store.settings import (
     load_database_runtime_settings,
@@ -206,6 +208,14 @@ def run_server(
                     snapshot_source=PostgresqlActivePolicySnapshotSource(engine),
                     evidence_source=PostgresqlPolicySubjectEvidenceSource(engine),
                     verifier=lifecycle_policy_verifier,
+                ),
+                conflict_capture=compose_lifecycle_conflict_capture_gateway(
+                    engine=engine,
+                    enforcement=compose_policy_enforcement(
+                        engine,
+                        verifier=lifecycle_policy_verifier,
+                        metrics=policy_metrics,
+                    ),
                 ),
                 metrics=lifecycle_metrics,
                 web_authentication=web_authentication,

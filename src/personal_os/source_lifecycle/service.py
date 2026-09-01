@@ -11,12 +11,24 @@ commit recovery; the service never retries a failed commit (that would
 double-retry and break exact replay) and never inspects the policy
 decision to mutate canonical state.
 
+When the store rejects with the two race codes the shared conflict
+contract can represent without content bytes — a delete's version
+conflict and a rename/move/restore's locator conflict on a target it
+carries — the service hands the losing command's evidence to the
+:class:`LifecycleConflictCaptureGateway` port before re-raising the
+original typed error, so the durable conflict receipt exists while the
+retrying device sees the unchanged rejection. Capture is best-effort
+evidence retention: it mutates no pointer, locator or tombstone, and a
+typed capture failure is swallowed only because the conflict domain's own
+metrics sink already records its closed reason token.
+
 Metric labels come only from the closed
 :mod:`personal_os.source_lifecycle.metrics` vocabulary; raw locators,
 titles, fingerprints, tokens and content never become labels, messages or
 safe details. The service emits ``committed`` on a fresh successful
 commit, ``replayed`` on an exact replay, and ``rejected`` on a typed
-``SourceLifecycleError`` raised by either port.
+``SourceLifecycleError`` raised by either port (a captured race is still
+a rejection; the conflict domain's sink counts the capture itself).
 
 The constructor injects only the provider-neutral ports the service
 depends on; no FastAPI, database driver or provider SDK is imported. The
@@ -33,17 +45,26 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from personal_os.diagnostics.context import DiagnosticContext
+from personal_os.error_contracts.exceptions import ApplicationError
 from personal_os.source_lifecycle.commands import (
+    LifecycleOperation,
     SourceLifecycleCommand,
     SourceLifecycleCommitResult,
 )
-from personal_os.source_lifecycle.errors import SourceLifecycleError
-from personal_os.source_lifecycle.fingerprint import fingerprint_lifecycle_command
+from personal_os.source_lifecycle.errors import (
+    SourceLifecycleError,
+    SourceLifecycleErrorCode,
+)
+from personal_os.source_lifecycle.fingerprint import (
+    LifecycleRequestFingerprint,
+    fingerprint_lifecycle_command,
+)
 from personal_os.source_lifecycle.metrics import (
     LifecycleMetricOutcome,
     SourceLifecycleMetrics,
 )
 from personal_os.source_lifecycle.ports import (
+    LifecycleConflictCaptureGateway,
     LifecycleDeviceContext,
     SourceLifecyclePolicy,
     SourceLifecycleStore,
@@ -74,19 +95,32 @@ class SourceLifecycleService:
     """Orchestrates one idempotent source lifecycle commit over injected ports.
 
     The service depends only on the provider-neutral
-    :class:`SourceLifecycleStore` and :class:`SourceLifecyclePolicy` ports
-    and the closed low-cardinality :class:`SourceLifecycleMetrics` sink.
-    An exact replay returns the canonical committed result without any
-    policy or network work; a miss consults the policy port outside the
-    transaction and hands the resulting verdict through unchanged to the
-    atomic store commit. The store is the sole owner of locked-policy
-    re-verification, the projection-intent selection and the bounded
-    database retry, so the service never retries a failed commit and
-    never inspects the verdict.
+    :class:`SourceLifecycleStore`, :class:`SourceLifecyclePolicy` and
+    :class:`LifecycleConflictCaptureGateway` ports and the closed
+    low-cardinality :class:`SourceLifecycleMetrics` sink. An exact replay
+    returns the canonical committed result without any policy or network
+    work; a miss consults the policy port outside the transaction and hands
+    the resulting verdict through unchanged to the atomic store commit. The
+    store is the sole owner of locked-policy re-verification, the
+    projection-intent selection and the bounded database retry, so the
+    service never retries a failed commit and never inspects the verdict.
+
+    When the store rejects because a competing canonical lifecycle
+    transition won the race, the service additionally hands the losing
+    command's evidence to the conflict-capture gateway before re-raising the
+    original typed error: a delete that lost to a remote edit becomes a
+    byteless ``delete_remote_edit`` conflict and a rename/move/restore onto
+    a locator another active source holds becomes a ``locator_collision``
+    conflict preserving the locator snapshot. Only those two race shapes are
+    captured — every other typed rejection (byteless rename/move version
+    races, remote-delete state conflicts, tombstone races, idempotency
+    drift) keeps its existing locks, audit and typed error untouched, and
+    capture mutates no current pointer, locator or tombstone.
     """
 
     store: SourceLifecycleStore
     policy: SourceLifecyclePolicy
+    conflict_capture: LifecycleConflictCaptureGateway
     metrics: SourceLifecycleMetrics
     clock: Callable[[], datetime] = _default_clock
 
@@ -120,9 +154,81 @@ class SourceLifecycleService:
             )
         except SourceLifecycleError as error:
             self._record_rejection(command=command, error=error)
+            await self._capture_race_conflict(
+                command=command,
+                device_context=device_context,
+                request_fingerprint=request_fingerprint,
+                error=error,
+                diagnostic_context=diagnostic_context,
+            )
             raise
         self._record_commit(command=command, started_at=started_at)
         return result
+
+    async def _capture_race_conflict(
+        self,
+        *,
+        command: SourceLifecycleCommand,
+        device_context: LifecycleDeviceContext,
+        request_fingerprint: LifecycleRequestFingerprint,
+        error: SourceLifecycleError,
+        diagnostic_context: DiagnosticContext,
+    ) -> None:
+        """Delegate one capturable race to the shared conflict-capture port.
+
+        The classification is deliberately narrow: only the two race shapes
+        the shared conflict contract can represent without content bytes.
+        A delete rejected by a version conflict is a ``delete_remote_edit``
+        race (the gateway re-validates that canonical state really moved);
+        a rename/move/restore rejected by a locator conflict carries a
+        target locator and is a ``locator_collision`` race (the gateway
+        re-validates the holder is another active source, so idempotency
+        drift and misclassification never capture). Everything else —
+        including the locator conflicts of a delete, which has no target
+        locator — keeps its typed rejection alone.
+
+        A typed capture failure (the shared service's policy recheck or
+        idempotency verdict) never masks the lifecycle rejection: it is
+        swallowed here only because the conflict domain's own metrics sink
+        already records its closed reason token at the capture boundary,
+        leaving a readable trail without replacing the error the retrying
+        device must see. A ``None`` answer means the race was no longer
+        confirmed against capture-time canonical state, so nothing is
+        retained and the typed rejection stands.
+        """
+
+        if error.code is SourceLifecycleErrorCode.VERSION_CONFLICT and (
+            command.operation is LifecycleOperation.DELETE
+        ):
+            try:
+                await self.conflict_capture.capture_delete_remote_edit(
+                    command=command,
+                    device_context=device_context,
+                    request_fingerprint=request_fingerprint,
+                    diagnostic_context=diagnostic_context,
+                )
+            except ApplicationError:
+                return
+            return
+        if (
+            error.code is SourceLifecycleErrorCode.LOCATOR_CONFLICT
+            and command.target_locator is not None
+            and command.operation
+            in {
+                LifecycleOperation.RENAME,
+                LifecycleOperation.MOVE,
+                LifecycleOperation.RESTORE,
+            }
+        ):
+            try:
+                await self.conflict_capture.capture_locator_collision(
+                    command=command,
+                    device_context=device_context,
+                    request_fingerprint=request_fingerprint,
+                    diagnostic_context=diagnostic_context,
+                )
+            except ApplicationError:
+                return
 
     def _record_replay(
         self,

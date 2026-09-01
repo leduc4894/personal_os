@@ -96,6 +96,7 @@ def test_input_invalid_reason_vocabulary_is_closed() -> None:
         "base_version_invalid",
         "remote_version_invalid",
         "candidate_invalid",
+        "deletion_apply_unsupported",
         "locator_invalid",
         "resolution_kind_invalid",
         "resolution_event_id_invalid",

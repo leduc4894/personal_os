@@ -28,6 +28,22 @@ class LifecycleState(StrEnum):
     DELETED = "deleted"
 
 
+class LifecycleConflictKind(StrEnum):
+    """The closed conflict kinds a losing lifecycle race can retain.
+
+    Mirrors the shared conflict domain's vocabulary for exactly the two
+    races a lifecycle command can prove without content bytes: a delete
+    that lost to a remote edit, and a rename/move/restore whose target
+    locator another active source holds. A byteless rename/move version
+    race and a lifecycle op against a remotely deleted source have no
+    closed candidate shape in the shared contract, so they keep their
+    typed lifecycle rejections and never appear here.
+    """
+
+    DELETE_REMOTE_EDIT = "delete_remote_edit"
+    LOCATOR_COLLISION = "locator_collision"
+
+
 @dataclass(frozen=True, slots=True)
 class SourceLifecycleCommand:
     """Validated source locator mutation with stable UUIDv7 event identity."""
@@ -92,6 +108,41 @@ class SourceLifecycleCommand:
             and self.expected_locator == self.target_locator
         ):
             raise ValueError("expected_locator and target_locator must differ")
+
+
+@dataclass(frozen=True, slots=True)
+class LifecycleConflictCaptureReceipt:
+    """Opaque receipt of one lifecycle race retained as shared conflict evidence.
+
+    Carries only the frozen read-model identifiers of the captured conflict
+    the composition-level gateway returns: no locator value, byte, digest or
+    key crosses this boundary, and the losing lifecycle command still
+    surfaces its own typed rejection — the receipt exists for callers and
+    tests that need the captured identity, never as a commit result. A
+    lifecycle race carries no verified content bytes, so
+    ``verified_candidate_object_id`` is always ``None`` in this task's
+    captures.
+    """
+
+    conflict_id: UUID
+    workspace_id: UUID
+    source_id: UUID | None
+    conflict_kind: LifecycleConflictKind
+    verified_candidate_object_id: UUID | None
+    captured_at: datetime
+
+    def __post_init__(self) -> None:
+        reject_nil_uuid("conflict_id", self.conflict_id)
+        reject_nil_uuid("workspace_id", self.workspace_id)
+        if self.source_id is not None:
+            reject_nil_uuid("source_id", self.source_id)
+        if self.verified_candidate_object_id is not None:
+            reject_nil_uuid("verified_candidate_object_id", self.verified_candidate_object_id)
+        if not isinstance(self.conflict_kind, LifecycleConflictKind):
+            raise ValueError("conflict_kind must be a closed LifecycleConflictKind")
+        object.__setattr__(
+            self, "captured_at", normalize_utc_timestamp("captured_at", self.captured_at)
+        )
 
 
 @dataclass(frozen=True, slots=True)

@@ -25,8 +25,11 @@ from typing import Final
 from uuid import UUID, uuid4
 
 from personal_os.diagnostics.context import DiagnosticContext, create_diagnostic_context
+from personal_os.error_contracts.exceptions import ApplicationError
 from personal_os.exclusion_policy.contracts import PolicySubject
 from personal_os.source_lifecycle.commands import (
+    LifecycleConflictCaptureReceipt,
+    LifecycleConflictKind,
     LifecycleOperation,
     LifecycleState,
     SourceLifecycleCommand,
@@ -45,6 +48,8 @@ from personal_os.source_locators import NormalizedLocator
 POLICY_EVALUATE_LIFECYCLE: Final[str] = "policy.evaluate_lifecycle"
 STORE_RESOLVE_COMMITTED: Final[str] = "store.resolve_committed"
 STORE_COMMIT: Final[str] = "store.commit"
+CAPTURE_DELETE_REMOTE_EDIT: Final[str] = "conflict_capture.capture_delete_remote_edit"
+CAPTURE_LOCATOR_COLLISION: Final[str] = "conflict_capture.capture_locator_collision"
 
 
 @dataclass
@@ -230,6 +235,31 @@ def build_commit_result(
     )
 
 
+def build_conflict_receipt(
+    command: SourceLifecycleCommand,
+    conflict_kind: LifecycleConflictKind,
+    *,
+    conflict_id: UUID | None = None,
+    verified_candidate_object_id: UUID | None = None,
+    captured_at: datetime | None = None,
+) -> LifecycleConflictCaptureReceipt:
+    """An opaque capture receipt matching the losing command's race kind."""
+
+    return LifecycleConflictCaptureReceipt(
+        conflict_id=conflict_id or uuid4(),
+        workspace_id=_OFFLINE_RECEIPT_NAMESPACE,
+        source_id=command.source_id,
+        conflict_kind=conflict_kind,
+        verified_candidate_object_id=verified_candidate_object_id,
+        captured_at=captured_at or datetime(2026, 8, 20, 1, 2, 3, tzinfo=UTC),
+    )
+
+
+#: Stable non-nil workspace identity used only by receipt fixtures; never a
+#: live workspace reference.
+_OFFLINE_RECEIPT_NAMESPACE: Final[UUID] = UUID("018f47a0-7b00-7000-8000-000000000050")
+
+
 def build_diagnostic_context() -> DiagnosticContext:
     """A fresh server-owned diagnostic context for one request-bound unit of work."""
 
@@ -330,6 +360,59 @@ class FakeLifecycleStore:
         if self.commit_error is not None:
             raise self.commit_error
         return self.commit_result
+
+
+@dataclass
+class FakeLifecycleConflictCaptureGateway:
+    """Conflict-capture port fake recording the race evidence handed over.
+
+    Both capture members append to the shared ledger, retain the exact
+    ``(command, device_context, request_fingerprint)`` evidence for assertion
+    and answer with the scripted ``receipt`` (``None`` models the gateway's
+    race-not-confirmed answer) or raise the scripted typed
+    :class:`ApplicationError`. The fake never retains or echoes locators,
+    keys or fingerprints beyond the assertion lists.
+    """
+
+    ledger: CallLedger
+    receipt: LifecycleConflictCaptureReceipt | None = None
+    error: ApplicationError | None = None
+    delete_race_calls: list[
+        tuple[SourceLifecycleCommand, LifecycleDeviceContext, LifecycleRequestFingerprint]
+    ] = field(default_factory=list)
+    locator_collision_calls: list[
+        tuple[SourceLifecycleCommand, LifecycleDeviceContext, LifecycleRequestFingerprint]
+    ] = field(default_factory=list)
+
+    async def capture_delete_remote_edit(
+        self,
+        *,
+        command: SourceLifecycleCommand,
+        device_context: LifecycleDeviceContext,
+        request_fingerprint: LifecycleRequestFingerprint,
+        diagnostic_context: DiagnosticContext,
+    ) -> LifecycleConflictCaptureReceipt | None:
+        del diagnostic_context
+        self.ledger.record(CAPTURE_DELETE_REMOTE_EDIT)
+        self.delete_race_calls.append((command, device_context, request_fingerprint))
+        if self.error is not None:
+            raise self.error
+        return self.receipt
+
+    async def capture_locator_collision(
+        self,
+        *,
+        command: SourceLifecycleCommand,
+        device_context: LifecycleDeviceContext,
+        request_fingerprint: LifecycleRequestFingerprint,
+        diagnostic_context: DiagnosticContext,
+    ) -> LifecycleConflictCaptureReceipt | None:
+        del diagnostic_context
+        self.ledger.record(CAPTURE_LOCATOR_COLLISION)
+        self.locator_collision_calls.append((command, device_context, request_fingerprint))
+        if self.error is not None:
+            raise self.error
+        return self.receipt
 
 
 def build_locator_conflict_error() -> SourceLifecycleError:

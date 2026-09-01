@@ -27,6 +27,7 @@ IDEMPOTENCY_KEY_INVALID: SafeToken = SafeToken.parse("idempotency_key_invalid")
 BASE_VERSION_INVALID: SafeToken = SafeToken.parse("base_version_invalid")
 REMOTE_VERSION_INVALID: SafeToken = SafeToken.parse("remote_version_invalid")
 CANDIDATE_INVALID: SafeToken = SafeToken.parse("candidate_invalid")
+DELETION_APPLY_UNSUPPORTED: SafeToken = SafeToken.parse("deletion_apply_unsupported")
 LOCATOR_INVALID: SafeToken = SafeToken.parse("locator_invalid")
 RESOLUTION_KIND_INVALID: SafeToken = SafeToken.parse("resolution_kind_invalid")
 RESOLUTION_EVENT_ID_INVALID: SafeToken = SafeToken.parse("resolution_event_id_invalid")
@@ -34,7 +35,11 @@ REVIEWED_REMOTE_INVALID: SafeToken = SafeToken.parse("reviewed_remote_invalid")
 CANDIDATE_OBJECT_INVALID: SafeToken = SafeToken.parse("candidate_object_invalid")
 
 #: Closed reason tokens accepted by ``source_conflict_input_invalid``; one
-#: per capture or resolve field or shape rule of the spec 4.1 table.
+#: per capture or resolve field or shape rule of the spec 4.1 table. The
+#: dedicated ``deletion_apply_unsupported`` token names the resolution
+#: boundary where a ``keep_local`` resolution would have to apply a
+#: deletion intent: applying a deletion is lifecycle-domain work this
+#: domain refuses, distinct from a malformed candidate shape.
 CONFLICT_INPUT_INVALID_REASONS: tuple[SafeToken, ...] = (
     CONFLICT_KIND_INVALID,
     WORKSPACE_ID_INVALID,
@@ -45,6 +50,7 @@ CONFLICT_INPUT_INVALID_REASONS: tuple[SafeToken, ...] = (
     BASE_VERSION_INVALID,
     REMOTE_VERSION_INVALID,
     CANDIDATE_INVALID,
+    DELETION_APPLY_UNSUPPORTED,
     LOCATOR_INVALID,
     RESOLUTION_KIND_INVALID,
     RESOLUTION_EVENT_ID_INVALID,

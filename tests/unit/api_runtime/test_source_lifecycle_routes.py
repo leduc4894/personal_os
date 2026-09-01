@@ -160,6 +160,33 @@ class _StubPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class _StubConflictCapture:
+    """Conflict-capture double that never confirms a race (answers None)."""
+
+    async def capture_delete_remote_edit(
+        self,
+        *,
+        command: object,
+        device_context: LifecycleDeviceContext,
+        request_fingerprint: object,
+        diagnostic_context: object,
+    ) -> None:
+        del command, device_context, request_fingerprint, diagnostic_context
+        return None
+
+    async def capture_locator_collision(
+        self,
+        *,
+        command: object,
+        device_context: LifecycleDeviceContext,
+        request_fingerprint: object,
+        diagnostic_context: object,
+    ) -> None:
+        del command, device_context, request_fingerprint, diagnostic_context
+        return None
+
+
+@dataclass(frozen=True, slots=True)
 class _RuntimeHarness:
     """A composed runtime plus the credential the test must present."""
 
@@ -199,16 +226,19 @@ def _harness(
     )
     store = store or _StubStore(committed=_build_commit_result())
     policy = _StubPolicy(decision=decision)
+    conflict_capture = _StubConflictCapture()
     metrics = InMemorySourceLifecycleMetrics()
     service = SourceLifecycleService(
         store=store,  # type: ignore[arg-type]
         policy=policy,  # type: ignore[arg-type]
+        conflict_capture=conflict_capture,  # type: ignore[arg-type]
         metrics=metrics,
     )
     runtime = SourceLifecycleRuntime(
         service=service,
         store=store,  # type: ignore[arg-type]
         policy=policy,  # type: ignore[arg-type]
+        conflict_capture=conflict_capture,  # type: ignore[arg-type]
         metrics=metrics,
         lifecycle_diagnostics=metrics,
         web_authentication=web_authentication,  # type: ignore[arg-type]

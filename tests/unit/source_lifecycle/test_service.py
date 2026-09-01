@@ -28,15 +28,19 @@ from datetime import UTC
 
 import pytest
 from tests.unit.source_lifecycle.fakes import (
+    CAPTURE_DELETE_REMOTE_EDIT,
+    CAPTURE_LOCATOR_COLLISION,
     POLICY_EVALUATE_LIFECYCLE,
     STORE_COMMIT,
     STORE_RESOLVE_COMMITTED,
     CallLedger,
+    FakeLifecycleConflictCaptureGateway,
     FakeLifecyclePolicy,
     FakeLifecycleStore,
     SequencedUtcClock,
     build_commit_outcome_unknown_error,
     build_commit_result,
+    build_conflict_receipt,
     build_decision,
     build_delete_command,
     build_device_context,
@@ -52,8 +56,14 @@ from tests.unit.source_lifecycle.fakes import (
     build_version_conflict_error,
 )
 
-from personal_os.source_lifecycle.commands import LifecycleOperation
+from personal_os.error_contracts.codes import ErrorCode
+from personal_os.source_conflicts.errors import SourceConflictError
+from personal_os.source_lifecycle.commands import (
+    LifecycleConflictKind,
+    LifecycleOperation,
+)
 from personal_os.source_lifecycle.errors import SourceLifecycleErrorCode
+from personal_os.source_lifecycle.fingerprint import fingerprint_lifecycle_command
 from personal_os.source_lifecycle.metrics import (
     LifecycleMetricOutcome,
     SourceLifecycleMetrics,
@@ -119,6 +129,7 @@ def _build_service(
     policy: FakeLifecyclePolicy,
     metrics: _RecordingMetrics | None = None,
     clock: SequencedUtcClock | None = None,
+    conflict_capture: FakeLifecycleConflictCaptureGateway | None = None,
 ) -> SourceLifecycleService:
     """Wire the service against the in-memory fakes."""
 
@@ -136,6 +147,11 @@ def _build_service(
     return SourceLifecycleService(
         store=store,
         policy=policy,
+        conflict_capture=(
+            conflict_capture
+            if conflict_capture is not None
+            else FakeLifecycleConflictCaptureGateway(ledger=CallLedger())
+        ),
         metrics=metrics_sink,
         clock=clock,
     )
@@ -736,6 +752,356 @@ def test_source_lifecycle_service_exposes_the_injected_ports() -> None:
     assert hasattr(service.store, "resolve_committed")
     assert hasattr(service.store, "commit")
     assert hasattr(service.policy, "evaluate_lifecycle")
+
+
+# --- lifecycle race conflict capture ---------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_version_conflict_captures_delete_remote_edit_and_reraises() -> None:
+    """A delete that lost to a remote edit hands its race evidence to the
+    shared conflict-capture gateway before the typed rejection reraises."""
+
+    command = build_delete_command()
+    device_context = build_device_context()
+    decision = build_decision(device_context=device_context, command=command)
+    ledger = CallLedger()
+    capture = FakeLifecycleConflictCaptureGateway(
+        ledger=ledger,
+        receipt=build_conflict_receipt(command, LifecycleConflictKind.DELETE_REMOTE_EDIT),
+    )
+    store = FakeLifecycleStore(
+        ledger=ledger,
+        commit_result=build_commit_result(command),
+        commit_error=build_version_conflict_error(),
+    )
+    policy = FakeLifecyclePolicy(ledger=ledger, decision=decision)
+    metrics = _RecordingMetrics()
+    service = _build_service(store=store, policy=policy, metrics=metrics, conflict_capture=capture)
+
+    with pytest.raises(Exception) as exc_info:
+        await service.commit(
+            command=command,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+    from personal_os.source_lifecycle.errors import SourceLifecycleError
+
+    assert isinstance(exc_info.value, SourceLifecycleError)
+    assert exc_info.value.code is SourceLifecycleErrorCode.VERSION_CONFLICT
+    assert capture.delete_race_calls == [
+        (command, device_context, fingerprint_lifecycle_command(command))
+    ]
+    assert capture.locator_collision_calls == []
+    assert ledger.entries == [
+        STORE_RESOLVE_COMMITTED,
+        POLICY_EVALUATE_LIFECYCLE,
+        STORE_COMMIT,
+        CAPTURE_DELETE_REMOTE_EDIT,
+    ]
+    # The rejection label still records exactly once; capture adds no commit row.
+    assert (
+        metrics.rejection_count(
+            LifecycleOperation.DELETE, SourceLifecycleErrorCode.VERSION_CONFLICT
+        )
+        == 1
+    )
+    assert metrics.commit_count(LifecycleOperation.DELETE, LifecycleMetricOutcome.COMMITTED) == 0
+
+
+@pytest.mark.asyncio
+async def test_rename_version_conflict_reraises_without_capture() -> None:
+    """A byteless rename/move version race has no closed conflict kind: the
+    typed rejection propagates and the capture gateway is never consulted."""
+
+    command = build_rename_command()
+    device_context = build_device_context()
+    decision = build_decision(device_context=device_context, command=command)
+    ledger = CallLedger()
+    capture = FakeLifecycleConflictCaptureGateway(ledger=ledger)
+    store = FakeLifecycleStore(
+        ledger=ledger,
+        commit_result=build_commit_result(command),
+        commit_error=build_version_conflict_error(),
+    )
+    policy = FakeLifecyclePolicy(ledger=ledger, decision=decision)
+    service = _build_service(store=store, policy=policy, conflict_capture=capture)
+
+    with pytest.raises(Exception) as exc_info:
+        await service.commit(
+            command=command,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+    from personal_os.source_lifecycle.errors import SourceLifecycleError
+
+    assert isinstance(exc_info.value, SourceLifecycleError)
+    assert exc_info.value.code is SourceLifecycleErrorCode.VERSION_CONFLICT
+    assert capture.delete_race_calls == []
+    assert capture.locator_collision_calls == []
+    assert CAPTURE_DELETE_REMOTE_EDIT not in ledger.entries
+    assert CAPTURE_LOCATOR_COLLISION not in ledger.entries
+
+
+@pytest.mark.asyncio
+async def test_rename_locator_conflict_captures_locator_collision_and_reraises() -> None:
+    """A rename whose target is held by another active source hands the race
+    to the capture gateway with the command fingerprint intact."""
+
+    command = build_rename_command()
+    device_context = build_device_context()
+    decision = build_decision(device_context=device_context, command=command)
+    ledger = CallLedger()
+    capture = FakeLifecycleConflictCaptureGateway(
+        ledger=ledger,
+        receipt=build_conflict_receipt(command, LifecycleConflictKind.LOCATOR_COLLISION),
+    )
+    store = FakeLifecycleStore(
+        ledger=ledger,
+        commit_result=build_commit_result(command),
+        commit_error=build_locator_conflict_error(),
+    )
+    policy = FakeLifecyclePolicy(ledger=ledger, decision=decision)
+    metrics = _RecordingMetrics()
+    service = _build_service(store=store, policy=policy, metrics=metrics, conflict_capture=capture)
+
+    with pytest.raises(Exception) as exc_info:
+        await service.commit(
+            command=command,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+    from personal_os.source_lifecycle.errors import SourceLifecycleError
+
+    assert isinstance(exc_info.value, SourceLifecycleError)
+    assert exc_info.value.code is SourceLifecycleErrorCode.LOCATOR_CONFLICT
+    assert capture.locator_collision_calls == [
+        (command, device_context, fingerprint_lifecycle_command(command))
+    ]
+    assert capture.delete_race_calls == []
+    assert ledger.entries[-1] == CAPTURE_LOCATOR_COLLISION
+    assert (
+        metrics.rejection_count(
+            LifecycleOperation.RENAME, SourceLifecycleErrorCode.LOCATOR_CONFLICT
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_restore_locator_conflict_captures_locator_collision() -> None:
+    """A restore racing onto a held target locator follows the same capture
+    path as rename/move."""
+
+    command = build_restore_command()
+    device_context = build_device_context()
+    decision = build_decision(device_context=device_context, command=command)
+    ledger = CallLedger()
+    capture = FakeLifecycleConflictCaptureGateway(
+        ledger=ledger,
+        receipt=build_conflict_receipt(command, LifecycleConflictKind.LOCATOR_COLLISION),
+    )
+    store = FakeLifecycleStore(
+        ledger=ledger,
+        commit_result=build_commit_result(command),
+        commit_error=build_locator_conflict_error(),
+    )
+    policy = FakeLifecyclePolicy(ledger=ledger, decision=decision)
+    service = _build_service(store=store, policy=policy, conflict_capture=capture)
+
+    with pytest.raises(Exception) as exc_info:
+        await service.commit(
+            command=command,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+    from personal_os.source_lifecycle.errors import SourceLifecycleError
+
+    assert isinstance(exc_info.value, SourceLifecycleError)
+    assert exc_info.value.code is SourceLifecycleErrorCode.LOCATOR_CONFLICT
+    assert len(capture.locator_collision_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_locator_conflict_reraises_without_capture() -> None:
+    """A delete carries no target locator, so its locator-conflict rejection
+    never reaches the collision capture member."""
+
+    command = build_delete_command()
+    device_context = build_device_context()
+    decision = build_decision(device_context=device_context, command=command)
+    ledger = CallLedger()
+    capture = FakeLifecycleConflictCaptureGateway(ledger=ledger)
+    store = FakeLifecycleStore(
+        ledger=ledger,
+        commit_result=build_commit_result(command),
+        commit_error=build_locator_conflict_error(),
+    )
+    policy = FakeLifecyclePolicy(ledger=ledger, decision=decision)
+    service = _build_service(store=store, policy=policy, conflict_capture=capture)
+
+    with pytest.raises(Exception) as exc_info:
+        await service.commit(
+            command=command,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+    from personal_os.source_lifecycle.errors import SourceLifecycleError
+
+    assert isinstance(exc_info.value, SourceLifecycleError)
+    assert exc_info.value.code is SourceLifecycleErrorCode.LOCATOR_CONFLICT
+    assert capture.delete_race_calls == []
+    assert capture.locator_collision_calls == []
+
+
+@pytest.mark.asyncio
+async def test_capture_race_not_confirmed_answer_still_reraises_the_typed_error() -> None:
+    """A ``None`` capture answer (race no longer confirmed against canonical
+    state) keeps the original typed rejection as the surfaced outcome."""
+
+    command = build_delete_command()
+    device_context = build_device_context()
+    decision = build_decision(device_context=device_context, command=command)
+    ledger = CallLedger()
+    capture = FakeLifecycleConflictCaptureGateway(ledger=ledger, receipt=None)
+    store = FakeLifecycleStore(
+        ledger=ledger,
+        commit_result=build_commit_result(command),
+        commit_error=build_version_conflict_error(),
+    )
+    policy = FakeLifecyclePolicy(ledger=ledger, decision=decision)
+    service = _build_service(store=store, policy=policy, conflict_capture=capture)
+
+    with pytest.raises(Exception) as exc_info:
+        await service.commit(
+            command=command,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+    from personal_os.source_lifecycle.errors import SourceLifecycleError
+
+    assert isinstance(exc_info.value, SourceLifecycleError)
+    assert exc_info.value.code is SourceLifecycleErrorCode.VERSION_CONFLICT
+    assert len(capture.delete_race_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_capture_gateway_failure_does_not_mask_the_lifecycle_error() -> None:
+    """A typed conflict-capture failure never replaces the lifecycle
+    rejection; the conflict domain's own sink already carries its reason."""
+
+    command = build_delete_command()
+    device_context = build_device_context()
+    decision = build_decision(device_context=device_context, command=command)
+    ledger = CallLedger()
+    capture = FakeLifecycleConflictCaptureGateway(
+        ledger=ledger,
+        error=SourceConflictError(ErrorCode.SOURCE_CONFLICT_STATE_INVALID),
+    )
+    store = FakeLifecycleStore(
+        ledger=ledger,
+        commit_result=build_commit_result(command),
+        commit_error=build_version_conflict_error(),
+    )
+    policy = FakeLifecyclePolicy(ledger=ledger, decision=decision)
+    service = _build_service(store=store, policy=policy, conflict_capture=capture)
+
+    with pytest.raises(Exception) as exc_info:
+        await service.commit(
+            command=command,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+    from personal_os.source_lifecycle.errors import SourceLifecycleError
+
+    assert isinstance(exc_info.value, SourceLifecycleError)
+    assert exc_info.value.code is SourceLifecycleErrorCode.VERSION_CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_locator_missing_rejection_never_consults_the_capture_gateway() -> None:
+    """A lifecycle op against a remotely deleted source keeps its typed
+    error: the lifecycle command carries no content candidate, so no
+    edit-vs-delete conflict may be fabricated."""
+
+    command = build_rename_command()
+    device_context = build_device_context()
+    decision = build_decision(device_context=device_context, command=command)
+    ledger = CallLedger()
+    capture = FakeLifecycleConflictCaptureGateway(ledger=ledger)
+    store = FakeLifecycleStore(
+        ledger=ledger,
+        commit_result=build_commit_result(command),
+        commit_error=build_locator_missing_error(),
+    )
+    policy = FakeLifecyclePolicy(ledger=ledger, decision=decision)
+    service = _build_service(store=store, policy=policy, conflict_capture=capture)
+
+    with pytest.raises(Exception) as exc_info:
+        await service.commit(
+            command=command,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+    from personal_os.source_lifecycle.errors import SourceLifecycleError
+
+    assert isinstance(exc_info.value, SourceLifecycleError)
+    assert exc_info.value.code is SourceLifecycleErrorCode.LOCATOR_MISSING
+    assert capture.delete_race_calls == []
+    assert capture.locator_collision_calls == []
+
+
+@pytest.mark.asyncio
+async def test_exact_replay_never_consults_the_capture_gateway() -> None:
+    """The replay path returns before any store failure can occur, so no
+    capture attempt may ever follow an exact replay."""
+
+    command = build_rename_command()
+    committed = build_commit_result(command)
+    device_context = build_device_context()
+    ledger = CallLedger()
+    capture = FakeLifecycleConflictCaptureGateway(ledger=ledger)
+    store = FakeLifecycleStore(
+        ledger=ledger,
+        commit_result=committed,
+        committed_result=committed,
+    )
+    policy = FakeLifecyclePolicy(ledger=ledger)
+    service = _build_service(store=store, policy=policy, conflict_capture=capture)
+
+    result = await service.commit(
+        command=command,
+        device_context=device_context,
+        diagnostic_context=build_diagnostic_context(),
+    )
+
+    assert result is committed
+    assert ledger.entries == [STORE_RESOLVE_COMMITTED]
+    assert capture.delete_race_calls == []
+    assert capture.locator_collision_calls == []
+
+
+def test_service_exposes_the_injected_conflict_capture_port() -> None:
+    """The service surfaces the injected conflict-capture gateway."""
+
+    ledger = CallLedger()
+    capture = FakeLifecycleConflictCaptureGateway(ledger=ledger)
+    store = FakeLifecycleStore(
+        ledger=ledger,
+        commit_result=build_commit_result(build_rename_command()),
+    )
+    policy = FakeLifecyclePolicy(ledger=ledger)
+    service = _build_service(store=store, policy=policy, conflict_capture=capture)
+
+    assert service.conflict_capture is capture
 
 
 def test_service_constructor_rejects_missing_metrics() -> None:

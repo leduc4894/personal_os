@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4, uuid7
 
 import pytest
+from api_runtime.exclusion_policy_crypto import TrustAnchorEd25519Verifier
 from tests.integration.source_lifecycle.conftest import (
     LifecycleHarness,
     SeededSourceLocator,
@@ -371,6 +372,142 @@ async def test_delete_vs_update_delete_wins_through_source_row_lock(
     assert source_row.sync_state == "deleted"
     tombstone = await lifecycle_harness.fetch_tombstone(source_id)
     assert tombstone.delete_event_id == delete_command.event_id
+
+
+# --- service-routed races captured as conflict evidence ---------------------
+
+
+@pytest.mark.asyncio
+async def test_service_routed_target_locator_race_captures_conflict_and_preserves_audit(
+    lifecycle_harness: LifecycleHarness,
+) -> None:
+    """A service-routed loser of a target-locator race still sees the typed
+    rejection and the store's rejection audit, while its race evidence lands
+    in the shared conflict tables exactly once."""
+
+    from api_runtime.small_file_sync_composition import (
+        PolicyEnforcementConflictCaptureGuard,
+    )
+    from api_runtime.source_lifecycle_composition import (
+        PostgresqlLifecycleConflictCaptureGateway,
+    )
+
+    from personal_os.source_conflicts import InMemorySourceConflictMetrics
+    from personal_os.source_conflicts.contracts import ConflictKind
+    from personal_os.source_conflicts.service import SourceConflictService
+    from personal_os.source_lifecycle.metrics import InMemorySourceLifecycleMetrics
+    from personal_os.source_lifecycle.service import SourceLifecycleService
+    from postgresql_source_store.conflict_store import PostgresqlSourceConflictStore
+    from postgresql_source_store.policy_enforcement import compose_policy_enforcement
+
+    workspace = await lifecycle_harness.seed_workspace()
+
+    class _AllowingPolicy:
+        async def evaluate_lifecycle(
+            self,
+            command: SourceLifecycleCommand,
+            device_context,
+        ) -> LifecyclePolicyDecision:
+            locator = command.target_locator or command.expected_locator
+            return LifecyclePolicyDecision(
+                workspace_id=workspace.workspace_id,
+                outcome=LifecyclePolicyOutcome.ALLOWED,
+                policy_revision_number=1,
+                subject=_subject(
+                    workspace,
+                    command.source_id,
+                    locator=locator.value if locator is not None else None,
+                ),
+                expected_locator=command.expected_locator,
+                target_locator=command.target_locator,
+            )
+
+    engine = lifecycle_harness.engine
+    verifier = TrustAnchorEd25519Verifier()
+    conflict_store = PostgresqlSourceConflictStore(engine)
+    conflict_service = SourceConflictService(
+        store=conflict_store,
+        policy_guard=PolicyEnforcementConflictCaptureGuard(
+            enforcement=compose_policy_enforcement(engine, verifier=verifier)
+        ),
+        metrics=InMemorySourceConflictMetrics(),
+    )
+    service = SourceLifecycleService(
+        store=lifecycle_harness.lifecycle_store,
+        policy=_AllowingPolicy(),  # type: ignore[arg-type]
+        conflict_capture=PostgresqlLifecycleConflictCaptureGateway(
+            engine=engine,
+            conflict_service=conflict_service,
+        ),
+        metrics=InMemorySourceLifecycleMetrics(),
+    )
+
+    first_id = uuid4()
+    second_id = uuid4()
+    first = await lifecycle_harness.seed_active_source_with_locator(
+        workspace=workspace,
+        source_id=first_id,
+        locator=NormalizedLocator("notes/capture-first.md"),
+        title="first",
+    )
+    second = await lifecycle_harness.seed_active_source_with_locator(
+        workspace=workspace,
+        source_id=second_id,
+        locator=NormalizedLocator("notes/capture-second.md"),
+        title="second",
+    )
+    target = NormalizedLocator("notes/capture-contested.md")
+    device_context = _device_context(workspace)
+    winner_command = _command(
+        operation=LifecycleOperation.RENAME,
+        source=first,
+        expected=first.initial_locator,
+        target=target,
+    )
+    await service.commit(
+        winner_command,
+        device_context,
+        _diagnostic_context(),
+    )
+    loser_command = _command(
+        operation=LifecycleOperation.RENAME,
+        source=second,
+        expected=second.initial_locator,
+        target=target,
+    )
+    counts_before = await lifecycle_harness.table_row_counts()
+
+    with pytest.raises(SourceLifecycleError) as failure:
+        await service.commit(
+            loser_command,
+            device_context,
+            _diagnostic_context(),
+        )
+    assert failure.value.code is SourceLifecycleErrorCode.LOCATOR_CONFLICT
+    counts_after = await lifecycle_harness.table_row_counts()
+    # Two audits land: the store's preserved rejection audit for the losing
+    # locator conflict, plus the conflict domain's own capture audit.
+    assert counts_after["audit_events"] - counts_before["audit_events"] == 2
+    # The captured conflict evidence lands exactly once.
+    conflict = await conflict_store.find_captured_conflict(
+        loser_command.event_id, workspace.workspace_id, _diagnostic_context()
+    )
+    assert conflict is not None
+    assert conflict.conflict_kind is ConflictKind.LOCATOR_COLLISION
+    assert conflict.candidate.verified_candidate_object_id is None
+
+    with pytest.raises(SourceLifecycleError) as replay_failure:
+        await service.commit(
+            loser_command,
+            device_context,
+            _diagnostic_context(),
+        )
+    assert replay_failure.value.code is SourceLifecycleErrorCode.LOCATOR_CONFLICT
+    replayed = await conflict_store.find_captured_conflict(
+        loser_command.event_id, workspace.workspace_id, _diagnostic_context()
+    )
+    assert replayed is not None
+    assert replayed.conflict_id == conflict.conflict_id
 
 
 # --- restore versus move ----------------------------------------------------
