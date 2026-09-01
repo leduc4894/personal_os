@@ -295,6 +295,22 @@ def test_server_serves_the_policy_diagnostics_admin_route() -> None:
     assert "/api/admin/exclusion-policy/diagnostics" in paths
 
 
+def test_server_serves_the_policy_metrics_exposition_route() -> None:
+    """The serve graph must expose the policy counters to a scrape.
+
+    Sink plan 2026-08-31: the Prometheus text exposition renders the same
+    shared sink the diagnostics route reads, so the spec-21 counters stay
+    scrapeable in production through the authenticated admin family.
+    """
+
+    captured = RecordingServerFactory()
+    assert run_server(environ=LOCAL_ENVIRONMENT, server_factory=captured) == 0
+    application = captured.config.app
+    assert isinstance(application, FastAPI)
+    paths = {route.path for route in application.routes}
+    assert "/api/admin/metrics" in paths
+
+
 def test_server_binds_one_shared_policy_metrics_sink_at_both_composition_sites(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

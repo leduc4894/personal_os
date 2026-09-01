@@ -7,9 +7,11 @@ web-authentication runtime, the optional runtime-gated exclusion-policy,
 small-file sync, multipart upload, source-lifecycle and device-sync route
 sets — including the read-only sync rejection diagnostics Admin route of the
 small-file-sync runtime, the read-only policy diagnostics Admin route of the
-exclusion-policy runtime, the eight device sync routes of the device
-reconciliation surface, the five multipart upload session routes of the
-resumable multipart transfer and the local/test-only OpenAPI document route —
+exclusion-policy runtime, the read-only Prometheus text policy metrics
+exposition route of the exclusion-policy runtime, the eight device sync
+routes of the device reconciliation surface, the five multipart upload
+session routes of the resumable multipart transfer and the local/test-only
+OpenAPI document route —
 registers the four envelope exception handlers,
 strips FastAPI's default validation-error response from the generated
 document (the shared handler emits the canonical error envelope instead),
@@ -86,6 +88,10 @@ from api_runtime.exclusion_policy_models import (
     SignedPolicySnapshotData,
 )
 from api_runtime.exclusion_policy_routes import create_exclusion_policy_route_endpoints
+from api_runtime.metrics_exposition_routes import (
+    PROMETHEUS_TEXT_CONTENT_TYPE,
+    create_metrics_exposition_route_endpoints,
+)
 from api_runtime.multipart_upload_composition import MultipartUploadRuntime
 from api_runtime.multipart_upload_models import (
     MultipartCompletionData,
@@ -168,12 +174,18 @@ _DECLARED_DEVICE_BEARER_SCHEMES: Final[tuple[HTTPBearer, ...]] = (
 #: route-template membership the correlation middleware uses.
 _NO_STORE_HEADERS: Final[Mapping[str, str]] = MappingProxyType({"cache-control": "no-store"})
 
-#: The operations whose documented success is the binary exception to the
-#: JSON envelope (spec 7.4). The document hook below keeps their success
-#: content exactly the one ``application/octet-stream`` payload the route
-#: declared, because FastAPI unconditionally merges a default
-#: ``application/json`` schema into every custom response entry.
-_BINARY_SUCCESS_OPERATION_IDS: Final[frozenset[str]] = frozenset({"downloadDeviceSourceVersion"})
+#: The operations whose documented success is exactly one non-JSON payload:
+#: the binary exception to the JSON envelope (spec 7.4) and the Prometheus
+#: text exposition of the policy metrics sink. The document hook below keeps
+#: each success content exactly the one declared media type, because FastAPI
+#: unconditionally merges a default ``application/json`` schema into every
+#: custom response entry.
+_NON_JSON_SUCCESS_MEDIA_BY_OPERATION: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "downloadDeviceSourceVersion": "application/octet-stream",
+        "getMetricsExposition": PROMETHEUS_TEXT_CONTENT_TYPE,
+    }
+)
 
 #: Closed status-to-code table for framework ``HTTPException`` responses. The
 #: two dependency statuses (503) are absent on purpose: a bare status cannot
@@ -250,6 +262,7 @@ def create_api_application(
     if exclusion_policy is not None:
         _register_exclusion_policy_routes(app, web_authentication, exclusion_policy)
         _register_policy_diagnostics_admin_route(app, web_authentication, exclusion_policy)
+        _register_metrics_exposition_route(app, web_authentication, exclusion_policy)
     if small_file_sync is not None:
         _register_small_file_sync_routes(app, web_authentication, small_file_sync)
         _register_sync_diagnostics_admin_route(app, web_authentication, small_file_sync)
@@ -599,6 +612,39 @@ def _register_policy_diagnostics_admin_route(
     )
 
 
+def _register_metrics_exposition_route(
+    app: FastAPI,
+    web_authentication: WebAuthenticationRuntime,
+    exclusion_policy: ExclusionPolicyRuntime,
+) -> None:
+    """Register the read-only Prometheus text policy metrics route.
+
+    The route carries its manually assigned semantic operation id and its
+    single text/plain success entry — the binary exception to the JSON
+    envelope shared with the verified download route; the active-session
+    dependency of the Web Admin surface lives in the endpoint factory, and
+    the exposition carries only closed tokens and counts.
+    """
+    endpoints = create_metrics_exposition_route_endpoints(
+        web_authentication=web_authentication, exclusion_policy=exclusion_policy
+    )
+    app.add_api_route(
+        "/api/admin/metrics",
+        endpoints.get_metrics_exposition,
+        methods=["GET"],
+        operation_id="getMetricsExposition",
+        responses={
+            "200": {
+                "description": (
+                    "The closed policy evaluation and publication counters "
+                    "rendered in the Prometheus text exposition format"
+                ),
+                "content": {PROMETHEUS_TEXT_CONTENT_TYPE: {"schema": {"type": "string"}}},
+            }
+        },
+    )
+
+
 def _register_source_lifecycle_routes(
     app: FastAPI,
     web_authentication: WebAuthenticationRuntime,
@@ -934,22 +980,22 @@ def _suppress_framework_validation_error_document(app: FastAPI) -> None:
             for schema_name in _FRAMEWORK_VALIDATION_SCHEMA_NAMES:
                 schemas.pop(schema_name, None)
         _declare_device_bearer_schemes(document)
-        _strip_binary_success_default_json_media(document)
+        _strip_merged_default_json_success_media(document)
         app.openapi_schema = document
         return document
 
     app.openapi = openapi  # type: ignore[method-assign]
 
 
-def _strip_binary_success_default_json_media(document: dict[str, Any]) -> None:
-    """Keep the binary success content exactly its one octet-stream payload.
+def _strip_merged_default_json_success_media(document: dict[str, Any]) -> None:
+    """Keep each non-JSON success content exactly its one declared payload.
 
     FastAPI merges a default ``application/json`` schema into every custom
     response entry regardless of the route's response class, but the
-    documented binary-success exception (spec 7.4) answers exactly one
-    ``application/octet-stream`` payload — never a JSON component schema —
-    so the merged default is dropped here for the operations that declared
-    the binary success.
+    documented non-JSON successes — the binary payload of spec 7.4 and the
+    Prometheus text exposition of the policy metrics sink — answer exactly
+    one declared media type, never a JSON component schema, so the merged
+    default is dropped here for the operations that declared them.
     """
 
     for path_item in document.get("paths", {}).values():
@@ -958,13 +1004,16 @@ def _strip_binary_success_default_json_media(document: dict[str, Any]) -> None:
         for operation in path_item.values():
             if not isinstance(operation, dict):
                 continue
-            if operation.get("operationId") not in _BINARY_SUCCESS_OPERATION_IDS:
+            declared_media = _NON_JSON_SUCCESS_MEDIA_BY_OPERATION.get(
+                str(operation.get("operationId"))
+            )
+            if declared_media is None:
                 continue
             success = operation.get("responses", {}).get("200")
             if not isinstance(success, dict):
                 continue
             content = success.get("content")
-            if isinstance(content, dict) and "application/octet-stream" in content:
+            if isinstance(content, dict) and declared_media in content:
                 content.pop("application/json", None)
 
 

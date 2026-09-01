@@ -84,6 +84,7 @@ POST /api/admin/exclusion-policy/previews       202, starts the async preview
 GET  /api/admin/exclusion-policy/previews/{id}  202 while pending/running, 200 ready
 POST /api/admin/exclusion-policy/publications   201 new publication, 200 exact replay
 GET  /api/admin/exclusion-policy/diagnostics    200 evaluation/publication counters + recent-failure ring
+GET  /api/admin/metrics                        200 Prometheus text exposition of the same counters
 ```
 
 The diagnostics read is the observability surface of this domain: evaluation
@@ -308,3 +309,18 @@ The registry code of a `failed` evaluation never becomes a metric label; it
 rides the record and surfaces through the Admin diagnostics route
 (`GET /api/admin/exclusion-policy/diagnostics`, operator procedure in
 [`sync-error-tracing.md`](sync-error-tracing.md)).
+
+The production metrics sink is `GET /api/admin/metrics` (operation id
+`getMetricsExposition`, sink plan 2026-08-31): it renders the shared
+recorder's evaluation and publication counter families — the same snapshot
+the diagnostics route reads — in Prometheus text format (`text/plain;
+version=0.0.4; charset=utf-8`, `Cache-Control: no-store`) behind the same
+strict Web Admin session gate as the routes above; a plugin device
+credential is never accepted. Counters and closed label tokens only: the
+recent-failure ring, durations and every id, path or free-text shape never
+render, and the sink only reads — it never records. If the sink cannot read
+or render the counter snapshot, the scrape closes with the retryable
+`exclusion_policy_metrics_unavailable` (503) while evaluation keeps
+recording: the sink is read-side only and can never block an evaluation
+path. A fresh or fallback sink scrapes as the two `# TYPE` header lines
+with zero samples.

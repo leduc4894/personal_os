@@ -51,6 +51,7 @@ class ApiRouteTemplate(StrEnum):
     ADMIN_EXCLUSION_POLICY_PREVIEW = "/api/admin/exclusion-policy/previews/{policy_preview_id}"
     ADMIN_EXCLUSION_POLICY_PUBLICATIONS = "/api/admin/exclusion-policy/publications"
     ADMIN_EXCLUSION_POLICY_DIAGNOSTICS = "/api/admin/exclusion-policy/diagnostics"
+    ADMIN_POLICY_METRICS = "/api/admin/metrics"
     SYNC_EXCLUSION_POLICY_KEYSETS = "/api/sync/exclusion-policy/keysets"
     SYNC_EXCLUSION_POLICY_SNAPSHOT = "/api/sync/exclusion-policy/snapshot"
     SYNC_JOURNAL_EVENTS_PREFLIGHT = "/api/sync/journal-events/preflight"
@@ -219,14 +220,25 @@ EXCLUSION_POLICY_DIAGNOSTICS_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]]
     }
 )
 
+#: The closed policy metrics exposition admin route set (sink plan
+#: 2026-08-31): the read-only Prometheus text surface over the shared
+#: policy counters behind the Web session contract. Its payload is a
+#: per-process counter snapshot that must never come from a shared cache.
+POLICY_METRICS_EXPOSITION_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset(
+    {
+        ApiRouteTemplate.ADMIN_POLICY_METRICS,
+    }
+)
+
 #: Every route whose responses — success, service rejection and dependency
 #: failure alike — carry ``Cache-Control: no-store`` (spec 16): the
 #: authentication-bound sets plus the exclusion-policy, small-file sync,
-#: multipart upload, source lifecycle, device sync and the three diagnostics
-#: admin route sets, whose payloads are per-request policy state, signed
-#: envelopes, device-derived sync results, verified private bytes, one
-#: short-lived presigned URL and per-process rejection evidence that must
-#: never come from a shared cache.
+#: multipart upload, source lifecycle, device sync, the three diagnostics
+#: admin route sets and the policy metrics exposition route, whose payloads
+#: are per-request policy state, signed envelopes, device-derived sync
+#: results, verified private bytes, one short-lived presigned URL and
+#: per-process rejection/counter evidence that must never come from a
+#: shared cache.
 NO_STORE_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = (
     AUTHENTICATION_ROUTE_TEMPLATES
     | EXCLUSION_POLICY_ROUTE_TEMPLATES
@@ -237,6 +249,7 @@ NO_STORE_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = (
     | SYNC_DIAGNOSTICS_ROUTE_TEMPLATES
     | SOURCE_LIFECYCLE_DIAGNOSTICS_ROUTE_TEMPLATES
     | EXCLUSION_POLICY_DIAGNOSTICS_ROUTE_TEMPLATES
+    | POLICY_METRICS_EXPOSITION_ROUTE_TEMPLATES
 )
 
 #: Immutable view of the no-store template values, for classifying a raw

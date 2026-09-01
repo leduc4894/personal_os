@@ -93,6 +93,7 @@ def test_http_status_map_is_closed_for_the_api_surface() -> None:
         ErrorCode.EXCLUSION_POLICY_SNAPSHOT_OUTDATED: 409,
         ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE: 503,
         ErrorCode.EXCLUSION_POLICY_COMMIT_OUTCOME_UNKNOWN: 503,
+        ErrorCode.EXCLUSION_POLICY_METRICS_UNAVAILABLE: 503,
         # The small-file sync block of the plugin journal design (spec 10/12),
         # wired when the sync routes landed: 422 for the validation and
         # integrity verdicts, 404 for an unknown operation token, 410 for the

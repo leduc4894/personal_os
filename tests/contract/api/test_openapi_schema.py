@@ -58,6 +58,7 @@ ROUTE_OPERATION_IDS: dict[str, dict[str, str]] = {
     },
     "/api/admin/exclusion-policy/publications": {"post": "publishExclusionPolicy"},
     "/api/admin/exclusion-policy/diagnostics": {"get": "getExclusionPolicyDiagnostics"},
+    "/api/admin/metrics": {"get": "getMetricsExposition"},
     "/api/sync/exclusion-policy/keysets": {"get": "listExclusionPolicyKeysets"},
     "/api/sync/exclusion-policy/snapshot": {"get": "getExclusionPolicySnapshot"},
     "/api/sync/journal-events/preflight": {"post": "preflightJournalEventUpload"},
@@ -92,6 +93,15 @@ ROUTE_OPERATION_IDS: dict[str, dict[str, str]] = {
 _BINARY_SUCCESS_OPERATIONS: dict[tuple[str, str], dict[str, Any]] = {
     ("/api/sources/{source_id}/versions/{source_version_id}/content", "get"): {
         "200": {"type": "string", "format": "binary"}
+    }
+}
+
+#: The one documented text-success exception to the JSON envelope: the
+#: policy metrics exposition answers exactly one Prometheus text-format
+#: media entry, never a named JSON component.
+_TEXT_SUCCESS_OPERATIONS: dict[tuple[str, str], dict[str, dict[str, Any]]] = {
+    ("/api/admin/metrics", "get"): {
+        "200": {"text/plain; version=0.0.4; charset=utf-8": {"type": "string"}}
     }
 }
 
@@ -275,6 +285,20 @@ def test_every_response_references_a_named_component_schema(
                     )
                     schema = response["content"]["application/octet-stream"]["schema"]
                     assert schema == binary_responses[status], (path, method, status)
+                    continue
+                text_responses = _TEXT_SUCCESS_OPERATIONS.get((path, method), {})
+                if status in text_responses:
+                    # The documented text-success exception: the Prometheus
+                    # exposition of the policy counters carries exactly the
+                    # one declared media entry, never a JSON component schema.
+                    expected_media = text_responses[status]
+                    assert set(response["content"]) == set(expected_media), (path, method, status)
+                    ((media_type, expected_schema),) = expected_media.items()
+                    assert response["content"][media_type]["schema"] == expected_schema, (
+                        path,
+                        method,
+                        status,
+                    )
                     continue
                 if status == "304":
                     # The snapshot's not-modified response carries headers

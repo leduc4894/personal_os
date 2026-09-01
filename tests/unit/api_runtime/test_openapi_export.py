@@ -136,6 +136,7 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
         "/api/admin/exclusion-policy/previews/{policy_preview_id}",
         "/api/admin/exclusion-policy/publications",
         "/api/admin/exclusion-policy/diagnostics",
+        "/api/admin/metrics",
         "/api/sync/exclusion-policy/keysets",
         "/api/sync/exclusion-policy/snapshot",
         "/api/sync/journal-events/preflight",
@@ -230,6 +231,7 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
         document["paths"]["/api/admin/exclusion-policy/diagnostics"]["get"]["operationId"]
         == "getExclusionPolicyDiagnostics"
     )
+    assert document["paths"]["/api/admin/metrics"]["get"]["operationId"] == "getMetricsExposition"
 
 
 def test_openapi_render_omits_the_framework_validation_error_documentation() -> None:

@@ -164,9 +164,11 @@ def run_server(
             # sites (spec 2026-08-24 C2): the enforcement evaluations of the
             # small-file graph and the publish outcomes of the policy graph
             # record into the same counters, which the Web Admin diagnostics
-            # route then serves. A production sink replacing it implements the
-            # same Protocol; the compositions' no-op fallback only applies
-            # when no sink is bound at all.
+            # route and the Prometheus text exposition route then serve
+            # through the runtime's metrics_diagnostics read side. A
+            # production sink replacing it implements the same Protocol; the
+            # compositions' no-op fallback only applies when no sink is bound
+            # at all.
             policy_metrics = InMemoryExclusionPolicyMetrics()
             exclusion_policy = compose_exclusion_policy(
                 engine=engine, signer=policy_signer, metrics=policy_metrics

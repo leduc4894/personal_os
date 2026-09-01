@@ -2442,6 +2442,7 @@
           "exclusion_policy_snapshot_outdated",
           "exclusion_policy_signing_unavailable",
           "exclusion_policy_commit_outcome_unknown",
+          "exclusion_policy_metrics_unavailable",
           "small_file_preflight_invalid",
           "small_file_operation_not_found",
           "small_file_operation_expired",
@@ -5866,6 +5867,25 @@
           }
         },
         "summary": "Publish"
+      }
+    },
+    "/api/admin/metrics": {
+      "get": {
+        "description": "Render the closed policy counters in Prometheus text format.",
+        "operationId": "getMetricsExposition",
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain; version=0.0.4; charset=utf-8": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The closed policy evaluation and publication counters rendered in the Prometheus text exposition format"
+          }
+        },
+        "summary": "Get Metrics Exposition"
       }
     },
     "/api/admin/source-lifecycle/rejections": {

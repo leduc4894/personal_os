@@ -55,6 +55,7 @@ _APPROVED_HTTP_STATUS_CODES: Final[frozenset[ErrorCode]] = frozenset(
         ErrorCode.EXCLUSION_POLICY_SNAPSHOT_OUTDATED,
         ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE,
         ErrorCode.EXCLUSION_POLICY_COMMIT_OUTCOME_UNKNOWN,
+        ErrorCode.EXCLUSION_POLICY_METRICS_UNAVAILABLE,
         # The small-file sync block of the plugin journal design (spec 10/12).
         ErrorCode.SMALL_FILE_PREFLIGHT_INVALID,
         ErrorCode.SMALL_FILE_OPERATION_NOT_FOUND,
@@ -172,6 +173,7 @@ HTTP_ERROR_STATUSES: Final[Mapping[ErrorCode, int]] = MappingProxyType(
             ErrorCode.EXCLUSION_POLICY_SNAPSHOT_OUTDATED: 409,
             ErrorCode.EXCLUSION_POLICY_SIGNING_UNAVAILABLE: 503,
             ErrorCode.EXCLUSION_POLICY_COMMIT_OUTCOME_UNKNOWN: 503,
+            ErrorCode.EXCLUSION_POLICY_METRICS_UNAVAILABLE: 503,
             # The small-file sync status column of the design error contract
             # (spec 10/12): 422 for the validation and integrity verdicts,
             # 404 for an unknown operation token, 410 for the expired

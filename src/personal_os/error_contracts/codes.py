@@ -108,6 +108,7 @@ class ErrorCode(StrEnum):
     EXCLUSION_POLICY_SNAPSHOT_OUTDATED = "exclusion_policy_snapshot_outdated"
     EXCLUSION_POLICY_SIGNING_UNAVAILABLE = "exclusion_policy_signing_unavailable"
     EXCLUSION_POLICY_COMMIT_OUTCOME_UNKNOWN = "exclusion_policy_commit_outcome_unknown"
+    EXCLUSION_POLICY_METRICS_UNAVAILABLE = "exclusion_policy_metrics_unavailable"
     SMALL_FILE_PREFLIGHT_INVALID = "small_file_preflight_invalid"
     SMALL_FILE_OPERATION_NOT_FOUND = "small_file_operation_not_found"
     SMALL_FILE_OPERATION_EXPIRED = "small_file_operation_expired"
@@ -693,6 +694,18 @@ ERROR_DEFINITIONS: Final[Mapping[ErrorCode, ErrorDefinition]] = MappingProxyType
             category=ErrorCategory.DEPENDENCY,
             is_retryable=True,
             safe_message="The exclusion policy commit outcome could not be determined",
+            allowed_detail_fields=frozenset(),
+        ),
+        # The metrics-sink dependency failure of the policy observability
+        # surface (sink plan 2026-08-31): the Prometheus exposition route
+        # could not read or render the shared counter snapshot. The scrape
+        # answers this typed retryable dependency error while evaluation
+        # keeps recording — the sink is read-side only, so its failure
+        # never blocks any evaluation path.
+        ErrorCode.EXCLUSION_POLICY_METRICS_UNAVAILABLE: ErrorDefinition(
+            category=ErrorCategory.DEPENDENCY,
+            is_retryable=True,
+            safe_message="Exclusion policy metrics are unavailable",
             allowed_detail_fields=frozenset(),
         ),
         # The small-file sync block of the plugin journal design (spec 10/12):
