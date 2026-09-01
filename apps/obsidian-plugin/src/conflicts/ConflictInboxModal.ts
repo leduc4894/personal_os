@@ -55,15 +55,20 @@ function outcomeText(result: ConflictResolutionCommandResult): string {
   }
 }
 
-/** The closed failure sentence of one thrown command rejection; a foreign error never leaks its message. */
-function failureText(error: unknown): string {
+/**
+ * The closed failure sentence of one thrown rejection; a foreign error
+ * never leaks its message. The subject names the failed surface (Inbox
+ * for renders, Resolution for commands); the reason is always the closed
+ * kind/token of the caught error or the fixed `reason_unavailable`.
+ */
+function failureText(error: unknown, subject: string): string {
   if (error instanceof ConflictApiError) {
-    return `Resolution failed: ${error.kind}`;
+    return `${subject} failed: ${error.kind}`;
   }
   if (error instanceof ConflictControllerError) {
-    return `Resolution failed: ${error.reason}`;
+    return `${subject} failed: ${error.reason}`;
   }
-  return "Resolution failed: reason_unavailable";
+  return `${subject} failed: reason_unavailable`;
 }
 
 /**
@@ -101,8 +106,8 @@ export class ConflictInboxModal extends Modal {
 
   /** Run one async UI task under the render tracking; failures render the closed sentence. */
   #run(task: () => Promise<void>): void {
-    this.#renderTask = task().catch(() => {
-      this.#renderOutcome("Inbox failed: reason_unavailable");
+    this.#renderTask = task().catch((error: unknown) => {
+      this.#renderOutcome(failureText(error, "Inbox"));
     });
   }
 
@@ -237,7 +242,7 @@ export class ConflictInboxModal extends Modal {
       const result = await command();
       this.#renderOutcome(outcomeText(result));
     } catch (error) {
-      this.#renderOutcome(failureText(error));
+      this.#renderOutcome(failureText(error, "Resolution"));
     }
   }
 

@@ -204,6 +204,7 @@ interface ModalControllerFake {
   setDetail(detail: ConflictDetail): void;
   setProposal(proposal: ConflictMergeProposal): void;
   setKeepRemoteResult(result: ConflictResolutionCommandResult | Error): void;
+  setListFailure(failure: Error | null): void;
 }
 
 function createControllerFake(): ModalControllerFake {
@@ -218,6 +219,7 @@ function createControllerFake(): ModalControllerFake {
     kind: "resolved_and_applied",
     resolution: resolutionFixture(),
   };
+  let listFailure: Error | null = null;
   let listCalls = 0;
   const detailCalls: string[] = [];
   const proposalCalls: string[] = [];
@@ -226,6 +228,9 @@ function createControllerFake(): ModalControllerFake {
   const controller: ConflictController = {
     async listOpenConflicts() {
       listCalls += 1;
+      if (listFailure !== null) {
+        throw listFailure;
+      }
       return page;
     },
     async getConflictDetail(conflictId) {
@@ -290,6 +295,9 @@ function createControllerFake(): ModalControllerFake {
     },
     setKeepRemoteResult(result) {
       keepRemoteResult = result;
+    },
+    setListFailure(failure) {
+      listFailure = failure;
     },
   };
 }
@@ -385,6 +393,21 @@ describe("conflict inbox list rendering", () => {
 
     expect(paragraphTexts()).toContain("No open conflicts.");
     expect(buttonLabels()).toEqual([]);
+  });
+
+  it("renders the closed failure token of a failed list fetch, never a bare reason placeholder", async () => {
+    const fake = createControllerFake();
+    fake.setListFailure(new ConflictApiError("network_offline", true));
+
+    await openInbox(fake);
+
+    expect(fake.listCalls).toBe(1);
+    const paragraphs = paragraphTexts().join("\n");
+    expect(paragraphs).toContain("Inbox failed: network_offline");
+    expect(paragraphs).not.toContain("reason_unavailable");
+    expect(paragraphs).not.toContain(SECRET_CONTENT);
+    expect(paragraphs).not.toContain(CONFLICT_ID);
+    expect(buttonLabels()).toEqual(["Back to inbox"]);
   });
 });
 
