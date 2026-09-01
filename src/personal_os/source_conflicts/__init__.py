@@ -3,10 +3,10 @@
 Framework-neutral closed vocabularies, the immutable candidate and aggregate
 read-model values, the capture and resolve commands with the frozen
 resolution result, the typed error bound to the closed registry, the
-low-cardinality metric contracts, and the store, policy-guard and
-evidence-reader ports. The package imports no FastAPI, SQLAlchemy, R2 or
-request type; orchestration lands with the conflict service in a later
-task.
+low-cardinality metric contracts, the store, policy-guard and
+evidence-reader ports, and the capture/resolution orchestration service
+binding them. The package imports no FastAPI, SQLAlchemy, R2 or
+request type.
 """
 
 from personal_os.source_conflicts.commands import (
@@ -46,6 +46,7 @@ from personal_os.source_conflicts.ports import (
     SourceConflictPolicyGuard,
     SourceConflictStore,
 )
+from personal_os.source_conflicts.service import SourceConflictService
 
 __all__ = [
     "CONFLICT_INPUT_INVALID_REASONS",
@@ -73,6 +74,7 @@ __all__ = [
     "SourceConflictOperation",
     "SourceConflictPolicyGuard",
     "SourceConflictRejectionReason",
+    "SourceConflictService",
     "SourceConflictStore",
     "validate_candidate_for_kind",
 ]
