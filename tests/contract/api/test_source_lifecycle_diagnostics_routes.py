@@ -248,7 +248,8 @@ def test_diagnostics_route_returns_only_closed_tokens_and_counts(
     payload = response.json()["data"]
     assert set(payload) == {"commit_counters", "recent_rejections"}
     assert payload["commit_counters"] == [
-        {"operation": "rename", "outcome": "replayed", "count": 1}
+        {"operation": "rename", "outcome": "committed", "count": 1},
+        {"operation": "rename", "outcome": "replayed", "count": 1},
     ]
     (record,) = payload["recent_rejections"]
     assert set(record) == {"error_code", "at_epoch_ms", "operation"}
