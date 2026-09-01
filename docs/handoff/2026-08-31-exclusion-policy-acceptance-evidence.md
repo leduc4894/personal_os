@@ -27,6 +27,11 @@ Obsidian-plugin vitest, browser-journey and sanitized-cleanup gates.
   fixes — canonical stack docs aligned to the ratified fetch pattern, the
   E2E status fixture pinned to the generated contract, mutation-tool and
   test minors, and the final gate record.
+- `0f01834`, `9984fd5`: review-closure bookkeeping, then the durable
+  deferral fixed outright — both authentication-spec strict errors closed
+  (closed grant-fixture type; root `@types/node` 24.13.3 with
+  `types: ["node"]`), root type-check expanded to `tests/end_to_end/**`,
+  BACKLOG row retired in the closing commit.
 
 ## Gates
 
