@@ -9,8 +9,11 @@ the same identity, the server-owned reservation of a create UUID without any
 continuation while terminal results survive expiry and a same-identity
 re-preflight re-reserves the expired row (fresh token, extended deadline,
 still one row and no ``sources`` row), the exact replay of the frozen
-terminal result after a lost response, and the gated downgrade of the
-``20260818_01`` migration back to the exclusion policy head.
+terminal result after a lost response, the gated downgrade of the
+``20260818_01`` migration back to the exclusion policy head, and the
+one-shot ``20260901_03`` data remediation that clears the raw locator on
+already-terminal rows (pre-fix historical shape) while keeping the replay
+digest and leaving non-terminal rows untouched.
 """
 
 from __future__ import annotations
@@ -1044,12 +1047,15 @@ def _run_guarded_alembic(
     )
 
 
-def run_inprocess_alembic_downgrade(stack: SourcePublicationStack, *, destructive: bool) -> None:
+def run_inprocess_alembic_downgrade(
+    stack: SourcePublicationStack, *, destructive: bool, target: str = "20260817_01"
+) -> None:
     """Run ``alembic downgrade`` in-process against the disposable stack.
 
     The in-process command path leaves ``Config.cmd_opts`` unset unless
     ``destructive`` is requested, so ``migrations/env.py`` skips its own CLI
     downgrade gate and the small-file migration's own row-level gate decides.
+    ``target`` names the revision the walk stops at.
     """
     from argparse import Namespace
 
@@ -1066,7 +1072,7 @@ def run_inprocess_alembic_downgrade(stack: SourcePublicationStack, *, destructiv
         for key, value in environment.items():
             saved[key] = os.environ.get(key)
             os.environ[key] = value
-        command.downgrade(configuration, "20260817_01")
+        command.downgrade(configuration, target)
     finally:
         for key, original in saved.items():
             if original is None:
@@ -1100,6 +1106,161 @@ def _chain_head() -> str:
 #: that revision's destructive work never applied — never half-way through
 #: it — so the operation rows and their locator columns stay intact.
 _SMALL_FILE_HEAD = "20260820_01"
+
+#: The remediation revision ``20260901_03``: the highest revision before the
+#: one-shot terminal-locator data remediation, and the walk target its
+#: downgrade/re-upgrade cycle stops at.
+_PRE_REMEDIATION_HEAD = "20260901_02"
+
+
+def _terminal_locator_clear_sql() -> str:
+    """The exact guarded UPDATE the remediation revision ships.
+
+    Read straight from the migration module (its filename starts with a
+    digit, so it cannot be imported by name) so the idempotency proof
+    replays the shipped statement, not a restated copy of it.
+    """
+    import importlib.util
+
+    migration_path = (
+        _WORKTREE_ROOT
+        / "migrations"
+        / "versions"
+        / ("20260901_03_clear_terminal_small_file_locators.py")
+    )
+    assert migration_path.is_file(), f"missing remediation migration: {migration_path.name}"
+    spec = importlib.util.spec_from_file_location("terminal_locator_remediation", migration_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return str(module.TERMINAL_LOCATOR_CLEAR_SQL)
+
+
+async def _seed_pre_fix_locator_rows(
+    harness: SmallFileOperationHarness, workspace: object
+) -> tuple[dict[str, UUID], str, str]:
+    """Seed one operation row per state, every one still carrying the raw locator.
+
+    The rows emulate the historical pre-fix terminal shape — ``committed``
+    and ``failed`` rows that reached their terminal state before the
+    clear-on-terminal writers landed and so still hold the note path next to
+    the retained digest. The runtime can no longer produce that shape, so
+    the rows are written directly.
+    """
+    device_context = harness.device_context(workspace)
+    locator = "notes/remediation/before-terminal-clear-fix.md"
+    fingerprint = compute_locator_fingerprint(NormalizedLocator(locator))
+    now = datetime.now(UTC)
+    event_ids = {state: uuid4() for state in ("pending", "receiving", "committed", "failed")}
+    rows: list[dict[str, object]] = []
+    for state, event_id in event_ids.items():
+        # One uniform key set across every row: SQLAlchemy compiles the
+        # executemany INSERT from the first row's keys, so a key carried only
+        # by the committed row would be silently dropped and the row would
+        # violate the terminal-shape CHECK.
+        frozen_result = (
+            {
+                "result_kind": "committed",
+                "result_source_id": uuid4(),
+                "result_source_version_id": uuid4(),
+                "result_content_version": 1,
+                "result_committed_at": now,
+            }
+            if state == "committed"
+            else {
+                "result_kind": None,
+                "result_source_id": None,
+                "result_source_version_id": None,
+                "result_content_version": None,
+                "result_committed_at": None,
+            }
+        )
+        rows.append(
+            {
+                "operation_id": uuid4(),
+                "operation_token_hash": hashlib.sha256(
+                    f"terminal-locator-remediation-{state}".encode("ascii")
+                ).hexdigest(),
+                "workspace_id": device_context.workspace_id,
+                "device_id": device_context.device_id,
+                "event_id": event_id,
+                "idempotency_key": str(uuid4()),
+                "operation_kind": "create",
+                "declared_sha256": hashlib.sha256(f"declared-{state}".encode("ascii")).hexdigest(),
+                "declared_size_bytes": 128,
+                "declared_media_type": "text/markdown",
+                "policy_revision_number": _POLICY_REVISION_NUMBER,
+                "state": state,
+                "safe_error_code": "source_locator_conflict" if state == "failed" else None,
+                "normalized_locator": locator,
+                "locator_fingerprint": fingerprint,
+                "expires_at": now + timedelta(hours=1),
+                **frozen_result,
+            }
+        )
+    async with harness.engine.begin() as connection:
+        await connection.execute(sa.insert(small_file_upload_operations), rows)
+    return event_ids, locator, fingerprint
+
+
+@pytest.mark.asyncio
+async def test_terminal_locator_remediation_clears_historical_terminal_locators(
+    small_file_harness: SmallFileOperationHarness,
+    seeded_workspace: object,
+    source_publication_stack: SourcePublicationStack,
+) -> None:
+    """The one-shot data remediation brings pre-fix terminal rows to the
+    now-standard NULL-locator shape while keeping the replay digest."""
+
+    harness = small_file_harness
+    event_ids, locator, fingerprint = await _seed_pre_fix_locator_rows(harness, seeded_workspace)
+
+    # Walk exactly the remediation revision down: its downgrade is the
+    # documented privacy no-op, so every seeded row must survive it with the
+    # raw locator still in place — the walk proves the no-op instead of
+    # assuming it.
+    run_inprocess_alembic_downgrade(
+        source_publication_stack, destructive=False, target=_PRE_REMEDIATION_HEAD
+    )
+    assert await _schema_head(harness) == _PRE_REMEDIATION_HEAD
+    for state, event_id in event_ids.items():
+        row = await harness.operation_row(event_id)
+        assert row is not None, state
+        assert row["state"] == state
+        assert row["normalized_locator"] == locator, state
+        assert row["locator_fingerprint"] == fingerprint, state
+
+    # Re-apply only the remediation revision through the guarded CLI path.
+    reupgrade = _run_guarded_alembic(source_publication_stack, "upgrade", "head")
+    assert reupgrade.returncode == 0, reupgrade.stderr
+    assert await _schema_head(harness) == _chain_head()
+
+    # Terminal rows lose the raw note path and keep the digest; non-terminal
+    # rows keep both — the migration must not touch live negotiations.
+    expectations = {
+        "pending": locator,
+        "receiving": locator,
+        "committed": None,
+        "failed": None,
+    }
+    for state, expected_locator in expectations.items():
+        row = await harness.operation_row(event_ids[state])
+        assert row is not None, state
+        assert row["state"] == state
+        assert row["normalized_locator"] == expected_locator, state
+        assert row["locator_fingerprint"] == fingerprint, state
+
+    # Idempotency: the shipped guarded UPDATE matches zero rows once the
+    # terminal locators are already cleared, so a replayed remediation is a
+    # no-op rather than an error or a repeated mutation.
+    async with harness.engine.begin() as connection:
+        replay = await connection.execute(sa.text(_terminal_locator_clear_sql()))
+    assert replay.rowcount == 0
+    for state, expected_locator in expectations.items():
+        row = await harness.operation_row(event_ids[state])
+        assert row is not None, state
+        assert row["normalized_locator"] == expected_locator, state
+        assert row["locator_fingerprint"] == fingerprint, state
 
 
 @pytest.mark.asyncio

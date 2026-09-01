@@ -118,9 +118,10 @@ def test_revision_is_the_single_alembic_head() -> None:
     scripts = _script_directory()
     # The sealed-token revision ``20260828_04``, the submitted policy verdict
     # revision ``20260829_01``, the grant-poll bucket kind revision
-    # ``20260901_01`` and the device-sync scale index revision ``20260901_02``
-    # stack above this head.
-    assert scripts.get_heads() == ["20260901_02"]
+    # ``20260901_01``, the device-sync scale index revision ``20260901_02``
+    # and the terminal locator remediation revision ``20260901_03`` stack
+    # above this head.
+    assert scripts.get_heads() == ["20260901_03"]
 
 
 def test_upgrade_relaxes_exactly_the_two_identity_columns() -> None:
