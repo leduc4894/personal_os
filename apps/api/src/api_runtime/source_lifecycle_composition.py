@@ -330,8 +330,8 @@ class OfflineSourceLifecycleStore:
             raise self._error
         result = self._build_result(command)
         self._state.committed_results[_replay_key(command)] = result
-        # Mirror the durable store's COMMITTED emission so the offline graph
-        # observes one closed ``committed`` outcome per successful commit.
+        # The store double records no metric: the service is the sole
+        # emitter of the closed ``committed`` outcome per successful commit.
         return result
 
     def _build_result(self, command: SourceLifecycleCommand) -> SourceLifecycleCommitResult:

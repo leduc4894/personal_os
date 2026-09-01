@@ -199,7 +199,6 @@ def run_server(
                 store=PostgresqlSourceLifecycleStore(
                     engine,
                     policy_verifier=lifecycle_policy_verifier,
-                    metrics=lifecycle_metrics,
                 ),
                 policy=PostgresqlSourceLifecyclePolicy(
                     snapshot_source=PostgresqlActivePolicySnapshotSource(engine),

@@ -5,7 +5,9 @@ outcome and error code. UUIDs, idempotency keys, locators, digests, titles,
 fingerprints and tokens are never accepted as labels and never recorded.
 
 :class:`SourceLifecycleMetrics` is the injectable write-side Protocol the
-service and the durable store depend on. :class:`InMemorySourceLifecycleMetrics`
+lifecycle service depends on; the service is the sole writer, recording
+each commit and rejection exactly once.
+:class:`InMemorySourceLifecycleMetrics`
 additionally keeps commit counters, a bounded ring of commit records and a
 bounded ring of the most recent rejection records — closed error code,
 epoch-millisecond timestamp and the closed operation label standing in for

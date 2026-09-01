@@ -898,14 +898,16 @@ class PostgresqlSourceLifecycleStore:
     """Atomic lifecycle transition adapter over the canonical baseline.
 
     The store takes the composition-owned :class:`AsyncEngine`, the
-    injectable policy verifier, optional rejection diagnostic sink and
-    metrics, and an injectable UUIDv7 allocator seam. It opens no
+    injectable policy verifier, the optional rejection diagnostic sink
+    and an injectable UUIDv7 allocator seam. It opens no
     connection at construction; every method runs one
     ``READ COMMITTED`` transaction behind the pinned ``SET LOCAL``
     bounds, and every commit returns the canonical
     :class:`SourceLifecycleCommitResult` so the service can hydrate the
     API response and the dispatched projection intents from the same
-    frozen evidence.
+    frozen evidence. The store records no lifecycle metrics: the
+    orchestrating service is the sole emitter of the committed, replayed
+    and rejected outcomes.
     """
 
     def __init__(
@@ -914,7 +916,6 @@ class PostgresqlSourceLifecycleStore:
         *,
         policy_verifier: PolicyTrustAnchorVerifier,
         diagnostics: Any | None = None,
-        metrics: Any | None = None,
         retry: DatabaseRetryPolicy | None = None,
         clock: Callable[[], datetime] | None = None,
         identity_generator: Callable[[], UUID] | None = None,
@@ -922,7 +923,6 @@ class PostgresqlSourceLifecycleStore:
         self._engine = engine
         self._policy_verifier = policy_verifier
         self._diagnostics = diagnostics
-        self._metrics = metrics
         self._retry = retry if retry is not None else DatabaseRetryPolicy()
         self._clock = clock if clock is not None else _default_clock
         self._identity_generator = identity_generator if identity_generator is not None else uuid7
@@ -1066,7 +1066,6 @@ class PostgresqlSourceLifecycleStore:
             include_tombstone=command.operation is LifecycleOperation.DELETE,
             include_locator=command.operation is not LifecycleOperation.DELETE,
         )
-        started_monotonic = _monotonic()
         async with (
             self._engine.connect() as connection,
             connection.begin(),
@@ -1117,15 +1116,6 @@ class PostgresqlSourceLifecycleStore:
                 current_version_id=current_version_id,
                 active_locator=active_locator,
                 tombstone_row=tombstone_row,
-            )
-        duration = _monotonic() - started_monotonic
-        if self._metrics is not None:
-            from personal_os.source_lifecycle.metrics import LifecycleMetricOutcome
-
-            self._metrics.record_commit(
-                operation=command.operation,
-                outcome=LifecycleMetricOutcome.COMMITTED,
-                duration_seconds=duration,
             )
         return result
 
@@ -2001,12 +1991,6 @@ def _default_clock() -> datetime:
     from datetime import UTC
 
     return datetime.now(UTC)
-
-
-def _monotonic() -> float:
-    import time
-
-    return time.monotonic()
 
 
 # --- exports -----------------------------------------------------------------
