@@ -132,21 +132,41 @@ class _AdmissionWindowExpired(Exception):
     """Internal signal: local admission was not granted inside the window."""
 
 
-async def _run_shielded_cleanup(cleanup: Coroutine[object, object, None]) -> None:
+async def _run_shielded_cleanup(
+    cleanup: Coroutine[object, object, None],
+    *,
+    on_cleanup_failure: Callable[[BaseException], None] | None = None,
+) -> None:
     """Drive ``cleanup`` to completion even when the caller is cancelled.
 
     The cleanup runs as a short local task shielded from the caller's
     cancellation; a ``CancelledError`` delivered to the caller waits for the
     cleanup to finish and is then re-raised, so a spool file removal or an
     admission release can never be abandoned half-done.
+
+    A cleanup that itself fails while the caller is cancelled must never mask
+    that cancellation (same invariant as the adapter's ``_run_shielded``):
+    the ``CancelledError`` is still re-raised and the cleanup failure is
+    routed to ``on_cleanup_failure`` when the call site provides one.
+    ``on_cleanup_failure is None`` means cleanup failures on that path are
+    unobservable by design — the site has no failure-recording surface —
+    while a provided sink must land the failure on a readable surface (the
+    site's existing failure-recording path). The raw cleanup exception is
+    handed to the sink only; it is never re-raised, logged or serialized here.
     """
 
     task = asyncio.ensure_future(cleanup)
     try:
         await asyncio.shield(task)
     except asyncio.CancelledError:
-        with suppress(asyncio.CancelledError):
+        try:
             await task
+        except asyncio.CancelledError:
+            pass
+        except BaseException as cleanup_error:
+            # A failing cleanup must never mask the caller's cancellation.
+            if on_cleanup_failure is not None:
+                on_cleanup_failure(cleanup_error)
         raise
 
 
