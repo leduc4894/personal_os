@@ -63,7 +63,7 @@ import type { JournalEventStateErrorCount, JournalRepositoryDatabase } from "./j
 import type { LocalNoteSyncStatus } from "./journal/note-status";
 import {
   projectJournalSyncStatus,
-  renderJournalSyncStatusText,
+  renderJournalSyncStatus,
   syncBlockerGuidanceLines,
   SYNC_STATUS_TEXT,
 } from "./journal/status";
@@ -95,6 +95,19 @@ import { createUuidv7Factory } from "./journal/uuidv7";
 import { PolicySession } from "./exclusion-policy/policy-session";
 import type { PolicyCacheAdapter } from "./exclusion-policy/policy-cache";
 import type { PolicyIntegrityState } from "./exclusion-policy/contracts";
+import { ConflictInboxModal } from "./conflicts/ConflictInboxModal";
+import { createConflictApi } from "./conflicts/api";
+import type { ConflictController } from "./conflicts/controller";
+import { createConflictController } from "./conflicts/controller";
+import { ConflictRepository } from "./conflicts/repository";
+import {
+  createConflictCanonicalOutcomeApplier,
+  createConflictDiagnosticsTrailSink,
+  createUnavailableVerifiedCandidateUploader,
+  deriveConflictApplyStatusFacts,
+  observeUnobservedConflictControllerFailures,
+} from "./conflicts/composition";
+import type { ConflictCompositionDiagnosticsSink } from "./conflicts/composition";
 import {
   AtomicVaultWriterImpl,
   createStructuralVaultMutationSeam,
@@ -345,6 +358,16 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
   #scheduledRetryPassTimer: ReturnType<typeof setTimeout> | null = null;
   /** The deadline the outstanding timer fires at, or null when disarmed. */
   #scheduledRetryPassTargetEpochMs: number | null = null;
+  /**
+   * The composed Conflict Inbox controller (conflict inbox task 9): null
+   * before the journal starts, after unload, and on a fail-closed journal
+   * startup — the inbox command gates on exactly this fact.
+   */
+  #conflictController: ConflictController | null = null;
+  /** The conflict composition's closed-token diagnostics sink (task 9). */
+  #conflictDiagnostics: ConflictCompositionDiagnosticsSink | null = null;
+  /** The durable no-byte conflict repair repository (task 9). */
+  #conflictRepository: ConflictRepository | null = null;
 
   override async onload(): Promise<void> {
     this.#settings = normalizeSettings(await this.loadData());
@@ -552,6 +575,27 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       },
     });
 
+    // Conflict inbox task 9: the ONE explicit Conflict Inbox surface. The
+    // command is registered in onload proper — the affordance exists even
+    // when the journal startup later fails closed — and stays disabled
+    // (hidden from the palette) until a conflict controller runs. The
+    // inbox never polls conflicts, never auto-opens and runs no background
+    // merge loop: every fetch, choice and merge lives inside this modal.
+    this.addCommand({
+      id: "open-conflict-inbox",
+      name: "Open Conflict Inbox",
+      checkCallback: (checking) => {
+        const controller = this.#conflictController;
+        if (controller === null) {
+          return false;
+        }
+        if (!checking) {
+          new ConflictInboxModal(this.app, controller).open();
+        }
+        return true;
+      },
+    });
+
     // The settings tab is registered before any bounded startup work so the
     // spec-19 affordances (Cancel pending login, Open browser again) stay
     // reachable while a pending grant resumes. The single bounded startup
@@ -646,6 +690,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     this.#diagnosticTrail = null;
     this.#syncCoordinator = null;
     this.#syncStatusBarItem = null;
+    // Conflict inbox task 9: the inbox surfaces release with the journal.
+    this.#conflictController = null;
+    this.#conflictDiagnostics = null;
+    this.#conflictRepository = null;
   }
 
   #resolveHasActiveCredential(secretStore: SecretStorageRecordAdapter): boolean {
@@ -731,6 +779,31 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
    */
   #requestDeviceSyncCycle(trigger: SyncTrigger): void {
     this.#syncCoordinator?.request(trigger);
+  }
+
+  /**
+   * The ONE conflict recovery trigger (conflict inbox task 9): retry the
+   * persisted local applies of committed conflict resolutions — local
+   * application only, never another resolution, never a conflict poll.
+   * Null-safe by construction (no controller before the journal starts or
+   * after unload), fire-and-forget with a closed-token catch: a rejection
+   * of the retry surface itself reaches the trail as
+   * `conflict_apply_retry_failed`, and the status refresh keeps the
+   * parked-apply surface honest on both branches.
+   */
+  #retryConflictLocalApplies(): void {
+    const controller = this.#conflictController;
+    if (controller === null) {
+      return;
+    }
+    void controller
+      .retryPendingLocalApplies()
+      .catch(() => {
+        this.#conflictDiagnostics?.observeConflictCompositionFailure("conflict_apply_retry_failed");
+      })
+      .finally(() => {
+        this.#refreshSyncStatus();
+      });
   }
 
   /**
@@ -1033,6 +1106,49 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       this.#lifecycleCapture = lifecycleCapture;
       this.#automaticSnapshotCoordinator = automaticSnapshotCoordinator;
       this.#boundedQueuePassDispatcher = boundedQueuePassDispatcher;
+      // Conflict inbox task 9: the Conflict Inbox stack binds behind the
+      // SAME journal database seam, diagnostics trail, device-credential
+      // transport, atomic vault seam and version-download surface the
+      // device-sync lane already owns — adapters only, every behavior
+      // lives in the tested ./conflicts modules. The controller wears the
+      // foreign-throw observer so a repair-store throw that the modal
+      // would render as its fixed fallback still reaches the trail as a
+      // closed token (the Task 8 M-1 carry).
+      const conflictDiagnostics = createConflictDiagnosticsTrailSink(diagnosticTrail);
+      const conflictRepository = new ConflictRepository({ database: journalDatabase });
+      const conflictController = observeUnobservedConflictControllerFailures(
+        createConflictController({
+          api: createConflictApi({
+            transport: createObsidianDeviceSyncHttpTransport(),
+            resolveOrigin: () =>
+              parseServerOrigin(this.#settings.server_origin, {
+                allowLoopbackHttp: ALLOW_LOOPBACK_HTTP_ORIGIN,
+              }) ?? "",
+            getAccessToken: () => session.accessCredential,
+          }),
+          repairStore: conflictRepository,
+          // No verified-candidate server surface exists yet (Task 7
+          // report §1; Task 10 wires it): the interim uploader fails
+          // closed with the controller's own candidate-upload reason —
+          // no HTTP call against a nonexistent route is invented.
+          uploader: createUnavailableVerifiedCandidateUploader(),
+          applier: createConflictCanonicalOutcomeApplier({
+            database: journalDatabase,
+            repository: deviceSyncRepository,
+            seam: createStructuralVaultMutationSeam(
+              this.#createStructuralVaultSurfaceForDeviceSync(),
+              this.#createStructuralVaultAdapterSurfaceForDeviceSync(),
+            ),
+            downloadSourceVersion: (input) => deviceSyncApi.downloadSourceVersion(input),
+            diagnostics: conflictDiagnostics,
+          }),
+          diagnostics: conflictDiagnostics,
+        }),
+        conflictDiagnostics,
+      );
+      this.#conflictController = conflictController;
+      this.#conflictDiagnostics = conflictDiagnostics;
+      this.#conflictRepository = conflictRepository;
       this.app.workspace.onLayoutReady(() => {
         this.registerEvent(
           this.app.vault.on("create", (file) => {
@@ -1109,6 +1225,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         // first bounded cycle runs recovery, repair-if-required, one
         // outbound drain and one inbound page.
         this.#requestDeviceSyncCycle("startup");
+        // Conflict inbox task 9: the startup trigger retries ONLY the
+        // persisted local applies of committed conflict resolutions —
+        // never a conflict poll, never a background merge loop.
+        void this.#retryConflictLocalApplies();
         // A device returning from suspension (a backgrounded mobile
         // session, a reopened desktop window) re-enters the cadence: the
         // coordinator measures the idle gap itself, so a suspension of one
@@ -1116,6 +1236,9 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         this.registerDomEvent(document, "visibilitychange", () => {
           if (document.visibilityState === "visible") {
             this.#requestDeviceSyncCycle("resume");
+            // The foreground trigger retries the persisted conflict local
+            // applies too — the same bounded, resolution-free surface.
+            void this.#retryConflictLocalApplies();
           }
         });
       });
@@ -1498,7 +1621,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     // settings tab renders joins the sanitized export block.
     const deviceSyncStatus = this.#readDeviceSyncStatus();
     return renderSyncDiagnosticsExportBlock({
-      syncStatusLine: syncStatus === null ? null : renderJournalSyncStatusText(syncStatus),
+      syncStatusLine: syncStatus === null ? null : renderJournalSyncStatus(syncStatus),
       syncBlockerGuidance:
         syncStatus === null ? [] : [...syncBlockerGuidanceLines(syncStatus)],
       journalStoreDiagnostics: {
@@ -1695,7 +1818,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     }
     const statusBarItem = this.#syncStatusBarItem ?? this.addStatusBarItem();
     this.#syncStatusBarItem = statusBarItem;
-    statusBarItem.setText(renderJournalSyncStatusText(snapshot));
+    // Conflict inbox task 9: the composed render carries the closed
+    // `Conflict apply pending` fragment on top of the exact spec-11
+    // status text while parked conflict applies owe their Vault apply.
+    statusBarItem.setText(renderJournalSyncStatus(snapshot));
   }
 
   /**
@@ -1722,6 +1848,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
     let lifecycleBlockedReasonCodes: readonly LifecycleBlockedReasonCode[];
     let multipartSessionStateCounts: MultipartSessionStateCounts;
     let multipartSafeReasonCodes: readonly MultipartSafeReasonToken[];
+    let conflictApplyStatusFacts: ReturnType<typeof deriveConflictApplyStatusFacts>;
     try {
       eventStateErrorCounts = repository.readEventStateErrorCounts();
       lifecycleStateCounts = repository.readLifecycleStateCounts();
@@ -1730,6 +1857,13 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       lifecycleBlockedReasonCodes = repository.readLifecycleBlockedReasonCodes() as readonly LifecycleBlockedReasonCode[];
       multipartSessionStateCounts = repository.readMultipartSessionStateCounts();
       multipartSafeReasonCodes = repository.readMultipartSafeReasonCodes();
+      // Conflict inbox task 9: the parked-apply facts join the same
+      // fail-closed read boundary — every parked row counts, including an
+      // attempt-capped one (eligibility gates on the cap, not the
+      // timestamp), and only closed safe-reason tokens surface.
+      conflictApplyStatusFacts = deriveConflictApplyStatusFacts(
+        this.#conflictRepository?.readPendingLocalApplies() ?? [],
+      );
     } catch {
       // The journal store is closed or unreadable: render no status rather
       // than a wrong one (the fail-closed rule of the journal design).
@@ -1746,6 +1880,8 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       lifecycleBlockedReasonCodes,
       multipartSessionStateCounts,
       multipartSafeReasonCodes,
+      conflictApplyPendingCount: conflictApplyStatusFacts.pendingLocalApplyCount,
+      conflictApplySafeReasonTokens: conflictApplyStatusFacts.localApplySafeReasonTokens,
       hasAccessCredential: this.#session?.accessCredential != null,
       isQueuePassActive: this.#isQueuePassActive,
       lastQueuePassOutcome: this.#lastQueuePassOutcome,

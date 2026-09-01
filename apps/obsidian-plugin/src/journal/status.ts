@@ -28,6 +28,13 @@
  * multipart safe-reason tokens. The projection exposes the closed tokens
  * and counts only — never a session ID, staging key, provider upload ID,
  * ETag, presigned URL, digest, byte count or Vault path.
+ *
+ * The Conflict Inbox child (task 9) adds the closed redacted parked-apply
+ * surface: the count of journal schema v9 `conflict_local_repairs` rows
+ * that still owe their Vault apply plus the closed set of their
+ * safe-reason tokens. The composed {@link renderJournalSyncStatus} line
+ * appends the fixed `Conflict apply pending` fragment with the count —
+ * never a locator, conflict id, resolution id or timestamp.
  */
 
 import type {
@@ -40,6 +47,8 @@ import type { LifecycleLocalFileState } from "./lifecycle-contracts";
 import { LIFECYCLE_LOCAL_FILE_STATES } from "./lifecycle-contracts";
 import type { QueuePassOutcome } from "./queue-driver";
 import type { JournalEventStateErrorCount } from "./repository";
+import type { ConflictLocalRepairSafeReason } from "../conflicts/contracts";
+import { CONFLICT_LOCAL_REPAIR_SAFE_REASONS } from "../conflicts/contracts";
 
 // --- the closed vocabulary of spec 11 ------------------------------------------------------------
 
@@ -184,6 +193,10 @@ export interface JournalSyncStatusInput {
   readonly multipartSessionStateCounts?: MultipartSessionStateCounts;
   /** Closed set of observed multipart safe-reason tokens (multipart task 11). */
   readonly multipartSafeReasonCodes?: readonly MultipartSafeReasonToken[];
+  /** Number of parked conflict local applies that still owe their Vault apply (conflict inbox task 9). */
+  readonly conflictApplyPendingCount?: number;
+  /** Closed set of observed parked-apply safe reasons (conflict inbox task 9). */
+  readonly conflictApplySafeReasonTokens?: readonly ConflictLocalRepairSafeReason[];
 }
 
 /**
@@ -209,6 +222,19 @@ export interface JournalSyncStatusSnapshot {
   readonly multipartSessionStateCounts: MultipartSessionStateCounts;
   /** Closed set of multipart safe-reason tokens. Empty when none observed. */
   readonly multipartSafeReasonCodes: readonly MultipartSafeReasonToken[];
+  /**
+   * Number of parked conflict local applies that still owe their Vault
+   * apply (conflict inbox task 9). Zero when not tracked. Every parked
+   * row counts — including an attempt-capped row whose retry eligibility
+   * gates on the attempt cap, never on the timestamp (the Task 8 ruling).
+   */
+  readonly conflictApplyPendingCount: number;
+  /**
+   * Closed set of parked-apply safe-reason tokens observed right now
+   * (conflict inbox task 9). Empty when none observed. No locator,
+   * conflict id, resolution id or timestamp ever joins this surface.
+   */
+  readonly conflictApplySafeReasonTokens: readonly ConflictLocalRepairSafeReason[];
 }
 
 // --- the projection ---------------------------------------------------------------------------------
@@ -308,6 +334,10 @@ export function projectJournalSyncStatus(input: JournalSyncStatusInput): Journal
   const multipartSafeReasonCodes = normaliseMultipartSafeReasonCodes(
     input.multipartSafeReasonCodes,
   );
+  const conflictApplyPendingCount = normaliseNonNegativeCount(input.conflictApplyPendingCount);
+  const conflictApplySafeReasonTokens = normaliseConflictApplySafeReasonTokens(
+    input.conflictApplySafeReasonTokens,
+  );
   return {
     kind,
     pendingEventCount,
@@ -318,6 +348,8 @@ export function projectJournalSyncStatus(input: JournalSyncStatusInput): Journal
     lifecycleBlockedReasonCodes,
     multipartSessionStateCounts,
     multipartSafeReasonCodes,
+    conflictApplyPendingCount,
+    conflictApplySafeReasonTokens,
   };
 }
 
@@ -434,6 +466,34 @@ function normaliseMultipartSafeReasonCodes(
 }
 
 /**
+ * Restrict the parked-apply safe-reason list to the closed three-token
+ * vocabulary of journal schema v9's `conflict_local_repairs`, deduplicated
+ * in first-observed order (conflict inbox task 9): a foreign snake_case
+ * string is dropped silently at the closed gate — the closed enum is the
+ * only string surface ever exposed.
+ */
+function normaliseConflictApplySafeReasonTokens(
+  value: readonly ConflictLocalRepairSafeReason[] | undefined,
+): readonly ConflictLocalRepairSafeReason[] {
+  if (value === undefined) {
+    return [];
+  }
+  const seen = new Set<ConflictLocalRepairSafeReason>();
+  const filtered: ConflictLocalRepairSafeReason[] = [];
+  for (const candidate of value) {
+    if (
+      typeof candidate === "string" &&
+      (CONFLICT_LOCAL_REPAIR_SAFE_REASONS as readonly string[]).includes(candidate) &&
+      !seen.has(candidate)
+    ) {
+      seen.add(candidate);
+      filtered.push(candidate);
+    }
+  }
+  return filtered;
+}
+
+/**
  * Render the small status-bar text of spec 11: the exact status value plus
  * the pending count, and nothing else.
  */
@@ -441,6 +501,24 @@ export function renderJournalSyncStatusText(snapshot: JournalSyncStatusSnapshot)
   const countSuffix =
     snapshot.pendingEventCount > 0 ? ` (${snapshot.pendingEventCount})` : "";
   return `${SYNC_STATUS_TEXT[snapshot.kind]}${countSuffix}`;
+}
+
+/**
+ * The composed human-readable status line of the small surfaces (the
+ * status bar and the diagnostics export, conflict inbox task 9): the exact
+ * spec-11 status text plus, only while parked conflict local applies owe
+ * their Vault apply, the fixed `Conflict apply pending` fragment with the
+ * parked count. Closed tokens and counts only — no locator, conflict id,
+ * resolution id, timestamp or any other journal detail ever joins the
+ * line (the parked rows' retry eligibility gates on the attempt cap, not
+ * the timestamp, so the fragment reflects the owed work itself).
+ */
+export function renderJournalSyncStatus(snapshot: JournalSyncStatusSnapshot): string {
+  const baseText = renderJournalSyncStatusText(snapshot);
+  if (snapshot.conflictApplyPendingCount <= 0) {
+    return baseText;
+  }
+  return `${baseText} · Conflict apply pending (${snapshot.conflictApplyPendingCount})`;
 }
 
 /**
