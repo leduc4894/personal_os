@@ -13,6 +13,7 @@ rendering that prints IDs and status only, never key bytes or signatures.
 from __future__ import annotations
 
 import os
+from argparse import Namespace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -30,6 +31,7 @@ from api_runtime.exclusion_policy_commands import (
     plan_retired_keys,
     plan_staged_keys,
     render_policy_key_outcome,
+    run_policy_key_command,
     validate_policy_key_file_name,
     validate_policy_key_workspace_id,
     validate_policy_signing_key_id_text,
@@ -429,3 +431,29 @@ def test_outcome_lines_print_ids_and_status_only() -> None:
     )
     assert "PRIVATE KEY" not in line
     assert "signature" not in line
+
+
+# --- the emergency internal-error line carries the closed exception-class token --------
+
+
+def test_policy_key_unexpected_exception_failure_line_carries_the_closed_class_token(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _explode(arguments: Namespace) -> int:
+        raise TimeoutError("operator-secret diagnostic message")
+
+    monkeypatch.setattr(
+        "api_runtime.exclusion_policy_commands._dispatch_policy_key_command", _explode
+    )
+    arguments = Namespace(
+        policy_key_command="retire",
+        workspace_id=str(WORKSPACE_ID),
+        key_id=_CURRENT_KEY_ID,
+    )
+
+    assert run_policy_key_command(arguments) == 70
+
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "personal-api: internal_error: timeout_error"
+    assert "operator-secret diagnostic message" not in captured.out + captured.err

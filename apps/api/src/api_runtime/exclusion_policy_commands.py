@@ -30,7 +30,9 @@ PostgreSQL, settings values, logs or audit rows, and stdout carries only the
 closed status line — action, public key ID, keyset revision and the replay
 flag — never key bytes or signatures. Exit codes follow the process-shell
 conventions: ``0`` on success, ``2`` for operator-input validation, ``78``
-for typed rejections and ``70`` for unexpected internal failures.
+for typed rejections and ``70`` for unexpected internal failures; the ``70``
+stderr line appends the unexpected exception's class name as one closed
+sanitized snake_case token — never its message or traceback.
 """
 
 from __future__ import annotations
@@ -141,6 +143,17 @@ _KEY_FILE_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
 )
 _MAXIMUM_KEY_FILE_NAME_LENGTH: Final[int] = 128
+
+#: The emergency path derives one closed snake_case token from the unexpected
+#: exception's class name — same closed-token contract as the authentication
+#: commands. Camel-case boundaries become underscores, every character outside
+#: ``[a-z0-9_]`` is stripped and the result is bounded, so an adversarial class
+#: name cannot smuggle message text into the failure line; a name with nothing
+#: salvageable collapses to the fixed fallback token.
+_EXCEPTION_CLASS_BOUNDARY_PATTERN: Final[re.Pattern[str]] = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_EXCEPTION_CLASS_UNSAFE_CHARACTERS: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9_]")
+_MAXIMUM_EXCEPTION_CLASS_TOKEN_LENGTH: Final[int] = 64
+_UNKNOWN_EXCEPTION_CLASS_TOKEN: Final[str] = "unknown_error"
 
 #: One row of a signing-key read: a SQLAlchemy row mapping from the adapter's
 #: ``.mappings()`` results or an equivalent mapping in tests.
@@ -1149,6 +1162,20 @@ def _dispatch_policy_key_command(arguments: Namespace) -> int:
     return _EXIT_SUCCESS
 
 
+def _exception_class_token(error: Exception) -> str:
+    """Collapse one unexpected exception's class name to a closed token.
+
+    Only the class name is read — never the message or traceback — and the
+    sanitization keeps characters inside the shared safe-token alphabet, so the
+    emitted token stays closed-vocabulary safe by construction.
+    """
+
+    snake_case_name = _EXCEPTION_CLASS_BOUNDARY_PATTERN.sub("_", type(error).__name__).lower()
+    bounded_name = _EXCEPTION_CLASS_UNSAFE_CHARACTERS.sub("", snake_case_name)
+    token = bounded_name[:_MAXIMUM_EXCEPTION_CLASS_TOKEN_LENGTH].strip("_")
+    return token or _UNKNOWN_EXCEPTION_CLASS_TOKEN
+
+
 def run_policy_key_command(arguments: Namespace) -> int:
     """Map one ``policy-key`` invocation onto the closed exit-code contract."""
 
@@ -1163,6 +1190,9 @@ def run_policy_key_command(arguments: Namespace) -> int:
             file=sys.stderr,
         )
         return _EXIT_APPLICATION_REJECTED
-    except Exception:
-        print("personal-api: internal_error", file=sys.stderr)
+    except Exception as error:
+        print(
+            f"personal-api: internal_error: {_exception_class_token(error)}",
+            file=sys.stderr,
+        )
         return _EXIT_INTERNAL
