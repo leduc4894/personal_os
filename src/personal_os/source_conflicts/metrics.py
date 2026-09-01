@@ -82,9 +82,7 @@ SOURCE_CONFLICT_METRIC_CONTRACTS: Final[Mapping[str, frozenset[str]]] = MappingP
         "source_conflict_capture_total": frozenset({"conflict_kind", "outcome"}),
         "source_conflict_capture_duration_seconds": frozenset({"conflict_kind", "outcome"}),
         "source_conflict_resolution_total": frozenset({"resolution_kind", "outcome"}),
-        "source_conflict_resolution_duration_seconds": frozenset(
-            {"resolution_kind", "outcome"}
-        ),
+        "source_conflict_resolution_duration_seconds": frozenset({"resolution_kind", "outcome"}),
         "source_conflict_rejection_total": frozenset({"operation", "reason_code"}),
     }
 )
@@ -154,9 +152,7 @@ class InMemorySourceConflictMetrics:
 
     def __init__(self) -> None:
         self._captures: dict[tuple[ConflictKind, ConflictCaptureOutcome], int] = {}
-        self._resolutions: dict[
-            tuple[ConflictResolutionKind, _ResolutionOutcomeLabel], int
-        ] = {}
+        self._resolutions: dict[tuple[ConflictResolutionKind, _ResolutionOutcomeLabel], int] = {}
         self._rejections: dict[
             tuple[SourceConflictOperation, SourceConflictRejectionReason], int
         ] = {}
@@ -182,9 +178,7 @@ class InMemorySourceConflictMetrics:
         duration_seconds: float,
     ) -> None:
         _validate_label("resolution_kind", ConflictResolutionKind, resolution_kind)
-        if not any(
-            isinstance(outcome, outcome_type) for outcome_type in _RESOLUTION_OUTCOME_TYPES
-        ):
+        if not any(isinstance(outcome, outcome_type) for outcome_type in _RESOLUTION_OUTCOME_TYPES):
             raise ValueError("outcome label must be a closed enum member")
         _validate_finite_non_negative("duration_seconds", duration_seconds)
         key = (resolution_kind, outcome)
@@ -201,9 +195,7 @@ class InMemorySourceConflictMetrics:
         key = (operation, reason_code)
         self._rejections[key] = self._rejections.get(key, 0) + 1
 
-    def capture_count(
-        self, conflict_kind: ConflictKind, outcome: ConflictCaptureOutcome
-    ) -> int:
+    def capture_count(self, conflict_kind: ConflictKind, outcome: ConflictCaptureOutcome) -> int:
         return self._captures.get((conflict_kind, outcome), 0)
 
     def resolution_count(

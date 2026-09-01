@@ -74,9 +74,7 @@ def test_source_conflict_registry_category_retryability_and_details_are_fixed() 
 
 def test_only_the_two_dependency_outages_retry() -> None:
     for value in SOURCE_CONFLICT_ERROR_CODES:
-        assert ERROR_DEFINITIONS[ErrorCode(value)].is_retryable == (
-            value in RETRYABLE_CODES
-        ), value
+        assert ERROR_DEFINITIONS[ErrorCode(value)].is_retryable == (value in RETRYABLE_CODES), value
 
 
 def test_safe_messages_carry_no_identifiers_or_content() -> None:
@@ -172,8 +170,6 @@ def test_registry_metadata_serializes_closed_shapes_only() -> None:
         "error_code": "source_conflict_input_invalid",
         "category": "validation",
         "is_retryable": False,
-        "safe_message": ERROR_DEFINITIONS[
-            ErrorCode.SOURCE_CONFLICT_INPUT_INVALID
-        ].safe_message,
+        "safe_message": ERROR_DEFINITIONS[ErrorCode.SOURCE_CONFLICT_INPUT_INVALID].safe_message,
         "safe_details": {"reason": "candidate_object_invalid"},
     }

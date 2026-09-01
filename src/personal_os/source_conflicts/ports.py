@@ -44,7 +44,8 @@ class SourceConflictStore(Protocol):
     ``read_for_resolution`` scope one conflict to its workspace;
     ``read_for_resolution`` locks for the resolve transaction. ``resolve``
     replays by resolution event identity, rechecks the reviewed remote
-    version, current state and active policy, then either commits the
+    version and current state (the active policy is rechecked at the service
+    boundary, not inside this transaction), then either commits the
     winner or supersedes the conflict and creates the open successor.
     """
 

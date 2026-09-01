@@ -79,9 +79,10 @@ def test_conflict_status_values_match_the_state_machine() -> None:
 
 
 def test_terminal_conflict_statuses_are_exactly_resolved_and_superseded() -> None:
-    assert frozenset(
-        {ConflictStatus.RESOLVED, ConflictStatus.SUPERSEDED}
-    ) == TERMINAL_CONFLICT_STATUSES
+    assert (
+        frozenset({ConflictStatus.RESOLVED, ConflictStatus.SUPERSEDED})
+        == TERMINAL_CONFLICT_STATUSES
+    )
     assert ConflictStatus.OPEN not in TERMINAL_CONFLICT_STATUSES
     assert ConflictStatus.RESOLVING not in TERMINAL_CONFLICT_STATUSES
 
@@ -95,9 +96,10 @@ def test_conflict_resolution_kind_values_match_the_spec_text() -> None:
 
 
 def test_version_publishing_resolutions_are_exactly_keep_local_and_save_merged() -> None:
-    assert frozenset(
-        {ConflictResolutionKind.KEEP_LOCAL, ConflictResolutionKind.SAVE_MERGED}
-    ) == VERSION_PUBLISHING_RESOLUTIONS
+    assert (
+        frozenset({ConflictResolutionKind.KEEP_LOCAL, ConflictResolutionKind.SAVE_MERGED})
+        == VERSION_PUBLISHING_RESOLUTIONS
+    )
     assert ConflictResolutionKind.KEEP_REMOTE not in VERSION_PUBLISHING_RESOLUTIONS
 
 

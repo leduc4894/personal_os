@@ -116,9 +116,7 @@ class ResolveConflictCommand:
             reject_nil_uuid("verified_candidate_object_id", self.verified_candidate_object_id)
         if self.resolution_kind is ConflictResolutionKind.SAVE_MERGED:
             if self.verified_candidate_object_id is None:
-                raise ValueError(
-                    "a save_merged resolution requires a verified_candidate_object_id"
-                )
+                raise ValueError("a save_merged resolution requires a verified_candidate_object_id")
             return
         if self.verified_candidate_object_id is not None:
             raise ValueError(
@@ -167,8 +165,7 @@ class ConflictResolutionResult:
             if self.resolution_kind in VERSION_PUBLISHING_RESOLUTIONS:
                 if self.resulting_version_id is None:
                     raise ValueError(
-                        f"a {self.resolution_kind.value} resolution requires a "
-                        "resulting_version_id"
+                        f"a {self.resolution_kind.value} resolution requires a resulting_version_id"
                     )
             elif self.resulting_version_id is not None:
                 raise ValueError("a keep_remote resolution creates no source version")

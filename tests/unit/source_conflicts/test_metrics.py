@@ -98,9 +98,7 @@ def test_in_memory_metrics_record_and_count_closed_labels() -> None:
         operation=SourceConflictOperation.RESOLVE,
         reason_code=SourceConflictRejectionReason.SOURCE_CONFLICT_STATE_INVALID,
     )
-    assert (
-        recorder.capture_count(ConflictKind.STALE_CONTENT, ConflictCaptureOutcome.CAPTURED) == 1
-    )
+    assert recorder.capture_count(ConflictKind.STALE_CONTENT, ConflictCaptureOutcome.CAPTURED) == 1
     assert (
         recorder.resolution_count(
             ConflictResolutionKind.KEEP_REMOTE, ConflictResolutionOutcome.RESOLVED

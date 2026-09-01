@@ -152,9 +152,7 @@ class ConflictCandidate:
     def __post_init__(self) -> None:
         if self.candidate_kind is ConflictCandidateKind.CONTENT:
             if self.verified_candidate_object_id is None:
-                raise ValueError(
-                    "a content candidate requires a verified_candidate_object_id"
-                )
+                raise ValueError("a content candidate requires a verified_candidate_object_id")
             reject_nil_uuid("verified_candidate_object_id", self.verified_candidate_object_id)
             return
         if self.verified_candidate_object_id is not None:
@@ -177,9 +175,7 @@ class ConflictCandidate:
         )
 
 
-def validate_candidate_for_kind(
-    conflict_kind: ConflictKind, candidate: ConflictCandidate
-) -> None:
+def validate_candidate_for_kind(conflict_kind: ConflictKind, candidate: ConflictCandidate) -> None:
     """Enforce the candidate requirement of the spec 4.1 table.
 
     ``stale_content`` and ``edit_remote_delete`` conflicts require a content
@@ -262,9 +258,7 @@ class SourceConflict:
         object.__setattr__(
             self, "captured_at", normalize_utc_timestamp("captured_at", self.captured_at)
         )
-        object.__setattr__(
-            self, "closed_at", normalize_utc_timestamp("closed_at", self.closed_at)
-        )
+        object.__setattr__(self, "closed_at", normalize_utc_timestamp("closed_at", self.closed_at))
         self._validate_status_shape()
 
     def _validate_status_shape(self) -> None:
@@ -289,8 +283,7 @@ class SourceConflict:
                 or self.closed_at is not None
             ):
                 raise ValueError(
-                    "a resolving conflict carries no resulting version, successor "
-                    "or closed_at"
+                    "a resolving conflict carries no resulting version, successor or closed_at"
                 )
             return
         if self.status is ConflictStatus.RESOLVED:
@@ -308,8 +301,7 @@ class SourceConflict:
             if self.resolution_kind in VERSION_PUBLISHING_RESOLUTIONS:
                 if self.resulting_version_id is None:
                     raise ValueError(
-                        f"a {self.resolution_kind.value} resolution requires a "
-                        "resulting_version_id"
+                        f"a {self.resolution_kind.value} resolution requires a resulting_version_id"
                     )
             elif self.resulting_version_id is not None:
                 raise ValueError("a keep_remote resolution creates no source version")
