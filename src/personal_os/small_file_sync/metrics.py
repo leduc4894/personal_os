@@ -205,7 +205,9 @@ class SmallFileSyncMetricsWithRejectionDiagnostics(
 
 
 def _validate_epoch_ms(value: int) -> None:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("epoch_ms_clock_non_integer: the clock must return an int")
+    if value < 0:
         raise ValueError("epoch_ms_clock must return a non-negative integer")
 
 

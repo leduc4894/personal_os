@@ -790,6 +790,19 @@ def test_rejection_ring_timestamps_reject_a_broken_epoch_clock() -> None:
         )
 
 
+def test_rejection_ring_timestamps_distinguish_a_non_integer_clock() -> None:
+    """A non-int clock value is its own closed reason, not the generic
+    negative-integer message (BACKLOG 2026-08-23 §5)."""
+    recorder = InMemorySmallFileSyncMetrics(
+        epoch_ms_clock=lambda: "1_000",  # type: ignore[return-value]
+    )
+    with pytest.raises(ValueError, match="epoch_ms_clock_non_integer"):
+        recorder.record_rejection(
+            operation=SmallFileOperation.CREATE,
+            reason_code=SmallFileRejectionReason.SMALL_FILE_OPERATION_EXPIRED,
+        )
+
+
 # --- bound locator envelope (task 3) ----------------------------------------------------
 
 
