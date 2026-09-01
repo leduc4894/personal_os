@@ -70,7 +70,7 @@ Obsidian-plugin vitest, browser-journey and sanitized-cleanup gates.
 - Merge eve (2026-09-01): `uv run poe verify` exit 0 at `6268969`; full
   `uv run poe test` exit 0 at `4fbbeee` after the timeout headroom (the
   first two `poe test` attempts hit the marginal rule-kind test under
-  load — diagnosis in the workspace ledger).
+  load; the isolated baseline and precedent are recorded with `4fbbeee`).
 
 ## Rulings
 
