@@ -689,6 +689,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "test/specs/device-login-sync.e2e.ts",
             "test/specs/device-sync-reconciliation.e2e.ts",
             "test/specs/multipart-upload.e2e.ts",
+            "test/specs/diagnostics-surface-live-smoke.e2e.ts",
         ),
         default="test/specs/source-lifecycle.e2e.ts",
     )
