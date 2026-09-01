@@ -3,6 +3,8 @@
 Every test pins one slice of the orchestration contract:
 - Exact replay returns the canonical committed result before the policy
   port is consulted, with the metrics replay outcome recorded.
+- A fresh successful commit records the ``committed`` outcome exactly
+  once; an exact replay never records a committed counter.
 - Allowed and denied/indeterminate rename/move hand the decision
   unchanged to the store; the projection intent selection is the store's
   concern and is not re-decided by the service.
@@ -205,9 +207,37 @@ async def test_allowed_rename_hands_decision_unchanged_to_store_commit() -> None
     assert policy.calls == [(command, device_context)]
     assert store.commit_decisions == [decision]
     assert store.commit_commands == [command]
-    assert (
-        metrics.commit_count(LifecycleOperation.RENAME, LifecycleMetricOutcome.COMMITTED) == 0
-    )  # the service does not double-count COMMITTED; the store records it
+    assert metrics.commit_count(LifecycleOperation.RENAME, LifecycleMetricOutcome.COMMITTED) == 1
+
+
+@pytest.mark.asyncio
+async def test_fresh_commit_records_the_committed_counter_row() -> None:
+    """The write side records COMMITTED, so the admin route's commit_counters
+    can show a committed row (BACKLOG 2026-08-24 §5.4)."""
+
+    command = build_rename_command()
+    device_context = build_device_context()
+    decision = build_decision(
+        device_context=device_context,
+        command=command,
+        outcome=LifecyclePolicyOutcome.ALLOWED,
+    )
+    commit_result = build_commit_result(command)
+    ledger = CallLedger()
+    store = FakeLifecycleStore(ledger=ledger, commit_result=commit_result)
+    policy = FakeLifecyclePolicy(ledger=ledger, decision=decision)
+    metrics = _RecordingMetrics()
+    service = _build_service(store=store, policy=policy, metrics=metrics)
+
+    result = await service.commit(
+        command=command,
+        device_context=device_context,
+        diagnostic_context=build_diagnostic_context(),
+    )
+
+    assert result is commit_result  # fresh commit, not a replay
+    assert metrics.commit_count(LifecycleOperation.RENAME, LifecycleMetricOutcome.COMMITTED) == 1
+    assert metrics.commit_count(LifecycleOperation.RENAME, LifecycleMetricOutcome.REPLAYED) == 0
 
 
 @pytest.mark.asyncio
@@ -575,7 +605,8 @@ async def test_store_typed_error_maps_to_rejection_metric_and_propagates(
 
 @pytest.mark.asyncio
 async def test_replay_path_records_replayed_outcome_never_rejection() -> None:
-    """An exact replay records only the replayed outcome, never a rejection."""
+    """An exact replay records only the replayed outcome, never a committed
+    counter or a rejection."""
 
     command = build_rename_command()
     committed = build_commit_result(command)
@@ -597,6 +628,7 @@ async def test_replay_path_records_replayed_outcome_never_rejection() -> None:
     )
 
     assert metrics.commit_count(LifecycleOperation.RENAME, LifecycleMetricOutcome.REPLAYED) == 1
+    assert metrics.commit_count(LifecycleOperation.RENAME, LifecycleMetricOutcome.COMMITTED) == 0
     assert metrics.rejection_records == []
 
 

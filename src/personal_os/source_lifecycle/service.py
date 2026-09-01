@@ -14,10 +14,9 @@ decision to mutate canonical state.
 Metric labels come only from the closed
 :mod:`personal_os.source_lifecycle.metrics` vocabulary; raw locators,
 titles, fingerprints, tokens and content never become labels, messages or
-safe details. The service emits ``replayed`` on an exact replay,
-``rejected`` on a typed ``SourceLifecycleError`` raised by either port,
-and lets the store emit ``committed`` for the atomic transition — the
-service does not double-count committed outcomes.
+safe details. The service emits ``committed`` on a fresh successful
+commit, ``replayed`` on an exact replay, and ``rejected`` on a typed
+``SourceLifecycleError`` raised by either port.
 
 The constructor injects only the provider-neutral ports the service
 depends on; no FastAPI, database driver or provider SDK is imported. The
@@ -122,6 +121,7 @@ class SourceLifecycleService:
         except SourceLifecycleError as error:
             self._record_rejection(command=command, error=error)
             raise
+        self._record_commit(command=command, started_at=started_at)
         return result
 
     def _record_replay(
@@ -137,6 +137,22 @@ class SourceLifecycleService:
         self.metrics.record_commit(
             operation=command.operation,
             outcome=LifecycleMetricOutcome.REPLAYED,
+            duration_seconds=duration_seconds,
+        )
+
+    def _record_commit(
+        self,
+        *,
+        command: SourceLifecycleCommand,
+        started_at: datetime,
+    ) -> None:
+        """Record the closed ``committed`` outcome for one fresh successful commit."""
+
+        duration_seconds = max((self.clock() - started_at).total_seconds(), 0.0)
+        _validate_finite_non_negative("duration_seconds", duration_seconds)
+        self.metrics.record_commit(
+            operation=command.operation,
+            outcome=LifecycleMetricOutcome.COMMITTED,
             duration_seconds=duration_seconds,
         )
 
