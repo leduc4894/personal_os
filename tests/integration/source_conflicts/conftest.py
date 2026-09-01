@@ -163,6 +163,29 @@ def _run_alembic_upgrade_head(environment: dict[str, str]) -> None:
     assert current.returncode == 0, "disposable stack is not at the Alembic head"
 
 
+def build_conflict_stack_environment(port: int) -> dict[str, str]:
+    """Build the sanitized child environment for in-test Alembic invocations.
+
+    The environment names only file-backed secret locations — never a secret
+    value — and matches the environment the stack fixture upgraded under.
+    """
+    return _build_sanitized_environment(port)
+
+
+def run_alembic_arguments(
+    environment: dict[str, str], arguments: tuple[str, ...]
+) -> subprocess.CompletedProcess[str]:
+    """Run one Alembic CLI invocation against the disposable stack, unchecked."""
+    return subprocess.run(
+        ["uv", "run", "alembic", *arguments],
+        cwd=str(_WORKTREE_ROOT),
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def _count_project_resources(project_name: str) -> dict[str, int]:
     label = f"label=com.docker.compose.project={project_name}"
     commands: dict[str, list[str]] = {
@@ -494,6 +517,8 @@ __all__ = [
     "ConflictStoreHarness",
     "SeededVersion",
     "SeededWorkspace",
+    "build_conflict_stack_environment",
     "conflict_harness",
     "expected_row_deltas",
+    "run_alembic_arguments",
 ]

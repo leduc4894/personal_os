@@ -25,9 +25,10 @@ them out and the manifest checkpoint-version lateral only reads rows that
 commit a version, so no device or manifest consumer ever hydrates them.
 
 Downgrade discards conflict evidence only under the standard explicit
-destructive gate: it refuses while any conflict row exists, deletes the
-conflict-only sync events, drops the aggregate and restores the predecessor
-event vocabulary.
+destructive gate: it refuses while any conflict row exists, and with the gate
+it drops the aggregate, removes the rebuildable projection intents that
+reference the conflict events, deletes the conflict-only sync events and
+restores the predecessor event vocabulary.
 """
 
 from __future__ import annotations
@@ -119,9 +120,25 @@ _SUCCESSOR_DISTINCT_CHECK: Final[str] = (
 
 _DOWNGRADE_GATE_COUNT_SQL: Final[str] = "SELECT count(*) FROM knowledge.source_conflicts"
 
-_CONFLICT_EVENT_CLEANUP_SQL: Final[str] = (
-    "DELETE FROM knowledge.sync_events WHERE event_type IN ('conflict_capture', 'conflict_resolve')"
-)
+#: The gated cleanup removes the rebuildable projection intents of the
+#: conflict events BEFORE the events themselves: every publishing resolution
+#: inserts two ``upsert`` intents whose
+#: ``fk_projection_intents__event_source`` RESTRICTs the event delete, so the
+#: intent delete must land first or the walk would abort mid-flight on the
+#: raw foreign-key violation instead of completing under the explicit gate
+#: (the lifecycle revision's cleanup set that precedent — projections are
+#: rebuildable, canonical evidence is not).
+_CONFLICT_EVENT_CLEANUP_SQL: Final[str] = """
+DELETE FROM knowledge.projection_intents
+WHERE event_id IN (
+    SELECT event_id
+    FROM knowledge.sync_events
+    WHERE event_type IN ('conflict_capture', 'conflict_resolve')
+);
+
+DELETE FROM knowledge.sync_events
+WHERE event_type IN ('conflict_capture', 'conflict_resolve');
+"""
 
 _FINAL_CATALOG_ASSERTION_SQL: Final[str] = """
 DO $$

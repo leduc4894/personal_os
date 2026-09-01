@@ -431,3 +431,26 @@ def test_downgrade_drops_conflict_schema_and_restores_the_predecessor_vocabulary
     )
     assert "conflict_capture" in conflict_event_cleanup
     assert "conflict_resolve" in conflict_event_cleanup
+
+
+def test_downgrade_removes_conflict_projection_intents_before_conflict_events() -> None:
+    """A published resolution leaves rebuildable intents RESTRICTing the events.
+
+    Every ``keep_local``/``save_merged`` resolution inserts two upsert
+    projection intents whose ``fk_projection_intents__event_source`` uses
+    ``ON DELETE RESTRICT``; the gated cleanup must delete those intents
+    BEFORE the conflict sync events or the walk aborts mid-flight on the raw
+    foreign-key violation instead of completing under the explicit gate.
+    """
+    recorder = _replay("downgrade", conflict_rows=1, x_arguments=["allow_destructive=true"])
+    cleanup = next(
+        detail
+        for operation, detail in recorder.events
+        if operation == "execute" and "DELETE FROM knowledge.projection_intents" in detail
+    )
+    intents_delete_index = cleanup.index("DELETE FROM knowledge.projection_intents")
+    events_delete_index = cleanup.index("DELETE FROM knowledge.sync_events")
+    assert intents_delete_index < events_delete_index
+    # The intent delete reaches only the conflict events, through the
+    # closed-token subselect over the conflict event vocabulary.
+    assert "event_type IN ('conflict_capture', 'conflict_resolve')" in cleanup

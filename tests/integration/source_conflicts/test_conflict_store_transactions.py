@@ -19,7 +19,11 @@ from uuid import uuid4
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
-from tests.integration.source_conflicts.conftest import expected_row_deltas
+from tests.integration.source_conflicts.conftest import (
+    build_conflict_stack_environment,
+    expected_row_deltas,
+    run_alembic_arguments,
+)
 
 from personal_os.diagnostics.context import create_diagnostic_context
 from personal_os.error_contracts.codes import ErrorCode
@@ -573,6 +577,88 @@ async def test_resolve_rejects_key_reuse_for_a_different_resolution_event(
     with pytest.raises(SourceConflictError) as captured:
         await harness.store.resolve(reused_key_command, workspace.workspace_id, context)
     assert captured.value.error_code is ErrorCode.SOURCE_CONFLICT_IDEMPOTENCY_MISMATCH
+
+
+# --- gated downgrade walk -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_gated_downgrade_walks_cleanly_after_a_published_resolution(
+    conflict_harness,
+    source_conflict_stack,
+) -> None:
+    """The destructive gate covers the intents a published resolution leaves.
+
+    A ``keep_local`` resolution commits two upsert projection intents whose
+    ``fk_projection_intents__event_source`` RESTRICTs the conflict-event
+    delete, so an ungated downgrade must refuse while that evidence exists,
+    and the gated walk must remove the rebuildable intents before the
+    conflict events — completing the downgrade instead of aborting
+    mid-flight on the raw foreign-key violation.
+    """
+    harness = conflict_harness
+    workspace = await harness.seed_workspace()
+    source_id = uuid4()
+    conflict, seeded = await _seed_open_conflict(harness, workspace, source_id=source_id)
+    context = create_diagnostic_context().context
+    command = _resolve_command(
+        conflict.conflict_id,
+        reviewed_remote_version_id=seeded.source_version_id,
+        resolution_kind=ConflictResolutionKind.KEEP_LOCAL,
+    )
+    result = await harness.store.resolve(command, workspace.workspace_id, context)
+    assert result.resulting_version_id is not None
+    assert await harness.published_version_count(source_id) == 2
+
+    environment = build_conflict_stack_environment(source_conflict_stack.port)
+
+    refused = run_alembic_arguments(environment, ("downgrade", "20260901_03"))
+    assert refused.returncode != 0
+    # The ungated walk refuses at a closed token — the repository's Alembic
+    # environment guard fires first ("database_destructive_downgrade_refused")
+    # and this revision's own evidence gate backs it — never a raw driver
+    # error, and the database stays at head.
+    refusal_output = refused.stderr + refused.stdout
+    assert "database_destructive_downgrade_refused" in refusal_output or (
+        "source_conflict_downgrade_requires_explicit_gate" in refusal_output
+    )
+
+    downgrade = run_alembic_arguments(
+        environment, ("-x", "allow_destructive=true", "downgrade", "20260901_03")
+    )
+    assert downgrade.returncode == 0
+
+    from postgresql_source_store.tables import projection_intents, source_versions
+
+    async with harness.engine.connect() as connection:
+        conflict_table = await connection.execute(
+            sa.text("SELECT to_regclass('knowledge.source_conflicts')")
+        )
+        assert conflict_table.scalar_one() is None
+        conflict_events = await connection.execute(
+            sa.text(
+                "SELECT count(*) FROM knowledge.sync_events "
+                "WHERE event_type IN ('conflict_capture', 'conflict_resolve')"
+            )
+        )
+        assert int(conflict_events.scalar_one()) == 0
+        workspace_intents = await connection.execute(
+            sa.select(sa.func.count())
+            .select_from(projection_intents)
+            .where(projection_intents.c.workspace_id == workspace.workspace_id)
+        )
+        assert int(workspace_intents.scalar_one()) == 0
+        surviving_versions = await connection.execute(
+            sa.select(sa.func.count())
+            .select_from(source_versions)
+            .where(source_versions.c.source_id == source_id)
+        )
+        assert int(surviving_versions.scalar_one()) == 2
+
+    upgrade = run_alembic_arguments(environment, ("upgrade", "head"))
+    assert upgrade.returncode == 0
+    back_at_head = run_alembic_arguments(environment, ("current", "--check-heads"))
+    assert back_at_head.returncode == 0
 
 
 async def _table_counts(engine: AsyncEngine) -> dict[str, int]:
