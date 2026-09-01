@@ -2482,7 +2482,15 @@
           "multipart_policy_denied",
           "multipart_cleanup_failed",
           "multipart_local_content_changed",
-          "multipart_dependency_unavailable"
+          "multipart_dependency_unavailable",
+          "source_conflict_input_invalid",
+          "source_conflict_not_found",
+          "source_conflict_state_invalid",
+          "source_conflict_idempotency_mismatch",
+          "source_conflict_evidence_unavailable",
+          "source_conflict_evidence_integrity_failed",
+          "source_conflict_dependency_unavailable",
+          "source_conflict_commit_outcome_unknown"
         ],
         "title": "ErrorCode",
         "type": "string"
