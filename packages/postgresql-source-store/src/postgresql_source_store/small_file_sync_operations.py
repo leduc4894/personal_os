@@ -1154,6 +1154,18 @@ class PostgresqlSmallFileUploadOperationStore:
             raise _state_invalid()
         if row.state != STATE_RECEIVING:
             raise _state_invalid()
+        # Clear the transient raw locator while the row is still in the
+        # receiving state the clear's own guard admits; the retained digest
+        # stays so an exact replay can still confirm locator identity. A
+        # concurrent terminal winner between the two statements surfaces as
+        # a zero-row guarded update -> _state_invalid, rolling the whole
+        # transaction back.
+        if row.normalized_locator is not None:
+            cleared = await connection.execute(
+                bound_terminal_locator_clear_statement(operation_id=row.operation_id)
+            )
+            if cleared.rowcount != 1:
+                raise _state_invalid()
         guarded = await connection.execute(
             bound_terminal_failure_update_statement(
                 operation_id=row.operation_id, error_code=error_code

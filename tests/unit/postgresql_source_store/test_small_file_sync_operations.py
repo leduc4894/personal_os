@@ -995,9 +995,9 @@ class _TerminalFailureScriptedConnection:
     """Connection double serving one claimed row and applying its failure write.
 
     The double serves the durable row for every token-hash lookup and folds
-    the guarded typed-failure update back onto its own row view, so a
-    replayed call observes the terminal failure state it previously wrote
-    instead of a second write.
+    the guarded locator-clear and typed-failure updates back onto its own row
+    view, so a replayed call observes the terminal failure state it
+    previously wrote instead of a second write.
     """
 
     def __init__(self, row: dict[str, Any]) -> None:
@@ -1005,6 +1005,7 @@ class _TerminalFailureScriptedConnection:
         self.operation_state: str | None = None
         self.safe_error_code: str | None = None
         self.failed_write_count = 0
+        self.locator_clear_count = 0
 
     def begin(self) -> _ScriptedBegin:
         return _ScriptedBegin()
@@ -1019,7 +1020,12 @@ class _TerminalFailureScriptedConnection:
         if visit_name == "update":
             params = statement.compile(dialect=postgresql.dialect()).params
             if "safe_error_code" not in params:
-                raise AssertionError("unexpected update without the closed error token")
+                # The guarded locator clear runs first while the row is still
+                # in receiving: fold the nulled raw locator onto the row view.
+                assert params["normalized_locator"] is None
+                self.locator_clear_count += 1
+                self._row["normalized_locator"] = None
+                return _ScriptedResult(rowcount=1)
             self.failed_write_count += 1
             self.operation_state = params["state"]
             self.safe_error_code = params["safe_error_code"]
@@ -1059,6 +1065,10 @@ async def test_typed_rejection_moves_receiving_operation_to_failed() -> None:
 
     assert connection.operation_state == STATE_FAILED
     assert connection.safe_error_code == "source_locator_conflict"
+    # The failure transition clears the raw locator exactly like the success
+    # transition, before the guarded failure write lands.
+    assert connection.locator_clear_count == 1
+    assert row["normalized_locator"] is None
 
 
 @pytest.mark.asyncio
@@ -1077,6 +1087,7 @@ async def test_terminal_failure_replay_is_idempotent() -> None:
     )
 
     assert connection.failed_write_count == 1
+    assert connection.locator_clear_count == 1
 
 
 @pytest.mark.asyncio
