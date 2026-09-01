@@ -32,6 +32,11 @@ Obsidian-plugin vitest, browser-journey and sanitized-cleanup gates.
   (closed grant-fixture type; root `@types/node` 24.13.3 with
   `types: ["node"]`), root type-check expanded to `tests/end_to_end/**`,
   BACKLOG row retired in the closing commit.
+- `6268969`, `4fbbeee`: the plan/spec artifacts committed for the record,
+  then bounded timeout headroom for the one rule-kind PolicyEditor test
+  that exceeded Vitest's 5 s default under full-suite load (1072 ms
+  isolated, branch-untouched file; same pattern as the device-sync
+  precedent `5d61e20`).
 
 ## Gates
 
@@ -62,6 +67,10 @@ Obsidian-plugin vitest, browser-journey and sanitized-cleanup gates.
   src/personal_os/exclusion_policy --tests tests/unit/exclusion_policy
   --output .local/test-results/exclusion-policy-mutation.md`. The adjudication
   table's line enumeration refers to it.
+- Merge eve (2026-09-01): `uv run poe verify` exit 0 at `6268969`; full
+  `uv run poe test` exit 0 at `4fbbeee` after the timeout headroom (the
+  first two `poe test` attempts hit the marginal rule-kind test under
+  load — diagnosis in the workspace ledger).
 
 ## Rulings
 
