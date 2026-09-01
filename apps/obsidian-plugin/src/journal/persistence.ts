@@ -31,11 +31,13 @@ import {
   DEVICE_SYNC_SCHEMA_VERSION,
   JOURNAL_SCHEMA_VERSION,
   JournalStoreError,
+  MULTIPART_PROGRESS_SCHEMA_VERSION,
   RESTORE_RESERVATION_SCHEMA_VERSION,
   type JournalStoreErrorReason,
   journalStoreError,
   SqliteDatabase,
   migrateDeviceSyncJournalToMultipartProgressSchema,
+  migrateMultipartProgressJournalToConflictRepairSchema,
   migrateRestoreReservationJournalToDeviceSyncSchema,
 } from "./sqlite-database";
 import type {
@@ -185,15 +187,16 @@ function parseVerifiedGeneration(value: unknown): VerifiedJournalGeneration | nu
   if (typeof sha256 !== "string" || !SHA256_HEX_PATTERN.test(sha256)) {
     return null;
   }
-  // The migration source versions (v6 and v7) are accepted beside the
-  // current one (task 8, task 9): a verified v6/v7 generation is migrated
-  // in memory — v6 through v7 up to the current schema — before it may
-  // serve any read. Any other version — older, foreign or newer — fails
-  // closed here.
+  // The migration source versions (v6, v7 and v8) are accepted beside
+  // the current one (task 8, task 9, task 7): a verified v6/v7/v8
+  // generation is migrated in memory — v6 through v7 and v8 up to the
+  // current schema — before it may serve any read. Any other version —
+  // older, foreign or newer — fails closed here.
   if (
     schemaVersion !== JOURNAL_SCHEMA_VERSION &&
     schemaVersion !== RESTORE_RESERVATION_SCHEMA_VERSION &&
-    schemaVersion !== DEVICE_SYNC_SCHEMA_VERSION
+    schemaVersion !== DEVICE_SYNC_SCHEMA_VERSION &&
+    schemaVersion !== MULTIPART_PROGRESS_SCHEMA_VERSION
   ) {
     return null;
   }
@@ -233,7 +236,8 @@ function parseJournalManifest(bytes: Uint8Array): JournalGenerationManifest | nu
 function isKnownJournalMigrationSource(schemaVersion: number): boolean {
   return (
     schemaVersion === RESTORE_RESERVATION_SCHEMA_VERSION ||
-    schemaVersion === DEVICE_SYNC_SCHEMA_VERSION
+    schemaVersion === DEVICE_SYNC_SCHEMA_VERSION ||
+    schemaVersion === MULTIPART_PROGRESS_SCHEMA_VERSION
   );
 }
 
@@ -557,9 +561,10 @@ export class JournalPersistence {
    * The required table names that must be present on every verified
    * generation (spec 6.3, child 5; task 8 adds the five device-sync
    * tables of spec 8; task 9 adds the multipart progress table of child 7
-   * spec 4.1): a torn / missing table is image corruption that recovery
-   * must surface as `journal_image_invalid` instead of silently passing
-   * verification.
+   * spec 4.1; task 7 adds the conflict local repair table of Child 8
+   * spec 5.2.6/6): a torn / missing table is image corruption that
+   * recovery must surface as `journal_image_invalid` instead of silently
+   * passing verification.
    */
   static readonly #REQUIRED_JOURNAL_TABLES = [
     "journal_meta",
@@ -573,6 +578,7 @@ export class JournalPersistence {
     "remote_apply_operations",
     "echo_markers",
     "multipart_upload_progress",
+    "conflict_local_repairs",
   ] as const;
 
   /**
@@ -638,11 +644,12 @@ export class JournalPersistence {
   /**
    * Read one candidate generation back, verify it byte-exactly and open
    * it. A generation whose manifest entry names a migration source
-   * version (v6 or v7) is migrated in memory first (task 8, task 9): a
-   * v6 image walks the device-sync migration and then the multipart
-   * progress migration up to the current schema, a v7 image takes only
-   * the last step, and the migrated image is what recovery opens. Any
-   * migration failure records the existing `startup_failure`/
+   * version (v6, v7 or v8) is migrated in memory first (task 8, task 9,
+   * task 7): a v6 image walks the device-sync, multipart-progress and
+   * conflict-repair migrations up to the current schema, a v7 image
+   * takes the last two steps, a v8 image takes only the conflict-repair
+   * step, and the migrated image is what recovery opens. Any migration
+   * failure records the existing `startup_failure`/
    * `journal_recovery` trail surface before recovery falls back — never a
    * silent partial upgrade.
    */
@@ -681,7 +688,16 @@ export class JournalPersistence {
             migratedImage,
           );
         }
-        migratedImage = migrateDeviceSyncJournalToMultipartProgressSchema(
+        if (candidate.schemaVersion !== MULTIPART_PROGRESS_SCHEMA_VERSION) {
+          // A v6 image just advanced to v7; a v7 image starts here. A v8
+          // source already carries the multipart progress table and skips
+          // straight to the conflict-repair step below.
+          migratedImage = migrateDeviceSyncJournalToMultipartProgressSchema(
+            this.#engineModule,
+            migratedImage,
+          );
+        }
+        migratedImage = migrateMultipartProgressJournalToConflictRepairSchema(
           this.#engineModule,
           migratedImage,
         );

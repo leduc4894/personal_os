@@ -19,6 +19,7 @@ import {
   JOURNAL_SCHEMA_VERSION,
   SqliteDatabase,
   migrateDeviceSyncJournalToMultipartProgressSchema,
+  migrateMultipartProgressJournalToConflictRepairSchema,
   migrateRestoreReservationJournalToDeviceSyncSchema,
 } from "../journal/sqlite-database";
 import type { SqliteEngineModule } from "../journal/sqlite-database";
@@ -60,9 +61,12 @@ const DEVICE_SYNC_V7_TABLES = [
  * (task 9), so the result opens through `openFromImage`.
  */
 function migrateV6ImageToCurrentSchema(v6Image: Uint8Array): Uint8Array {
-  return migrateDeviceSyncJournalToMultipartProgressSchema(
+  return migrateMultipartProgressJournalToConflictRepairSchema(
     engineModule,
-    migrateRestoreReservationJournalToDeviceSyncSchema(engineModule, v6Image),
+    migrateDeviceSyncJournalToMultipartProgressSchema(
+      engineModule,
+      migrateRestoreReservationJournalToDeviceSyncSchema(engineModule, v6Image),
+    ),
   );
 }
 
@@ -231,6 +235,7 @@ describe("device sync schema migration (v6 to v7)", () => {
         "remote_apply_operations",
         "echo_markers",
         "multipart_upload_progress",
+        "conflict_local_repairs",
       ]) {
         const count = database.readAll(`select count(*) from ${table};`)[0]?.values[0]?.[0];
         expect(count, table).toBe(0);

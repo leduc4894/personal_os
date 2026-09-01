@@ -24,6 +24,7 @@ import {
   JOURNAL_SCHEMA_VERSION,
   SqliteDatabase,
   migrateDeviceSyncJournalToMultipartProgressSchema,
+  migrateMultipartProgressJournalToConflictRepairSchema,
 } from "./sqlite-database";
 import type { SqliteEngineModule } from "./sqlite-database";
 
@@ -1369,7 +1370,10 @@ describe("JournalRepository multipart progress persistence (task 9, spec 4.1)", 
     }
     const database = SqliteDatabase.openFromImage(
       engineModule,
-      migrateDeviceSyncJournalToMultipartProgressSchema(engineModule, v7Image),
+      migrateMultipartProgressJournalToConflictRepairSchema(
+        engineModule,
+        migrateDeviceSyncJournalToMultipartProgressSchema(engineModule, v7Image),
+      ),
     );
     const repository = new JournalRepository({
       database,

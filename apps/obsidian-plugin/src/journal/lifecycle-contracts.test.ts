@@ -168,8 +168,8 @@ describe("schema migration from Child 4 to Child 5", () => {
   it("keeps LIFECYCLE_SCHEMA_VERSION pinned to the current journal schema version", async () => {
     const { LIFECYCLE_SCHEMA_VERSION } = await import("./lifecycle-contracts");
     expect(LIFECYCLE_SCHEMA_VERSION).toBe(JOURNAL_SCHEMA_VERSION);
-    expect(LIFECYCLE_SCHEMA_VERSION).toBe(8);
-    expect(JOURNAL_SCHEMA_VERSION).toBe(8);
+    expect(LIFECYCLE_SCHEMA_VERSION).toBe(9);
+    expect(JOURNAL_SCHEMA_VERSION).toBe(9);
   });
 
   it("migrates a Child 4 journal through every schema step to the current version without losing any prior row", async () => {
@@ -183,6 +183,7 @@ describe("schema migration from Child 4 to Child 5", () => {
     );
     const {
       migrateDeviceSyncJournalToMultipartProgressSchema,
+      migrateMultipartProgressJournalToConflictRepairSchema,
       migrateRestoreReservationJournalToDeviceSyncSchema,
     } = await import(
       "./sqlite-database"
@@ -274,8 +275,12 @@ describe("schema migration from Child 4 to Child 5", () => {
       engineModule,
       v7Image,
     );
+    const v9Image = migrateMultipartProgressJournalToConflictRepairSchema(
+      engineModule,
+      v8Image,
+    );
 
-    const reopened = SqliteDatabase.openFromImage(engineModule, v8Image);
+    const reopened = SqliteDatabase.openFromImage(engineModule, v9Image);
     const meta = reopened.readJournalMeta() satisfies JournalMeta;
     expect(meta.schemaVersion).toBe(JOURNAL_SCHEMA_VERSION);
     expect(meta.dirtyGeneration).toBe(4);
@@ -316,8 +321,9 @@ describe("schema migration from Child 4 to Child 5", () => {
     ]);
     // The schema version has advanced to the current version; the
     // server-receipt column from v5, the restore-reservation column from
-    // v6, the zeroed device-sync singleton from v7 and the empty multipart
-    // progress table from v8 are all present, and every prior row reads
+    // v6, the zeroed device-sync singleton from v7, the empty multipart
+    // progress table from v8 and the empty conflict local repair table
+    // from v9 are all present, and every prior row reads
     // back with the nullable columns as null.
     expect(reopened.readSchemaVersion()).toBe(JOURNAL_SCHEMA_VERSION);
     const columnCheck = reopened.readAll(
