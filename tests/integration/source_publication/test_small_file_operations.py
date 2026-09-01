@@ -616,6 +616,29 @@ async def test_terminal_transition_clears_raw_locator_and_keeps_digest(
 
 
 @pytest.mark.asyncio
+async def test_bound_terminal_transition_clears_raw_locator_and_keeps_digest(
+    small_file_harness: SmallFileOperationHarness, seeded_workspace: object
+) -> None:
+    """A claimed receive's terminal state retains the digest, not the locator."""
+
+    harness = small_file_harness
+    device_context = harness.device_context(seeded_workspace)
+    preflight, operation = await _reserve_created_operation(harness, seeded_workspace)
+    assert operation.reserved_source_id is not None
+    bound = await harness.store.resolve_bound_operation(
+        operation.operation_token, device_context, _context()
+    )
+    result = _terminal_result(source_id=operation.reserved_source_id)
+    await harness.store.record_bound_terminal_result(bound, result, _context())
+
+    row = await harness.operation_row(preflight.event_id)
+    assert row is not None
+    assert row["state"] == "committed"
+    assert row["normalized_locator"] is None
+    assert row["locator_fingerprint"] == compute_locator_fingerprint(preflight.normalized_locator)
+
+
+@pytest.mark.asyncio
 async def test_pre_migration_null_locator_rows_remain_readable(
     small_file_harness: SmallFileOperationHarness, seeded_workspace: object
 ) -> None:

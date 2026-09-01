@@ -1185,18 +1185,23 @@ class PostgresqlSmallFileUploadOperationStore:
             raise _state_invalid()
         if row.state != STATE_RECEIVING:
             raise _state_invalid()
+        # Clear the transient raw locator while the row is still in the
+        # receiving state the clear's own guard admits; the retained digest
+        # stays so an exact replay can still confirm locator identity. A
+        # concurrent terminal winner between the two statements surfaces as
+        # a zero-row guarded update -> _state_invalid, rolling the whole
+        # transaction back.
+        if row.normalized_locator is not None:
+            cleared = await connection.execute(
+                bound_terminal_locator_clear_statement(operation_id=row.operation_id)
+            )
+            if cleared.rowcount != 1:
+                raise _state_invalid()
         guarded = await connection.execute(
             bound_terminal_result_update_statement(operation_id=row.operation_id, result=result)
         )
         if guarded.rowcount != 1:
             raise _state_invalid()
-        # Clear the transient raw locator on the bound terminal transition;
-        # the retained digest stays for exact replay. The guard admits only
-        # the receiving state, matching the bound terminal predicate.
-        if row.normalized_locator is not None:
-            await connection.execute(
-                bound_terminal_locator_clear_statement(operation_id=row.operation_id)
-            )
 
     async def _resolve_terminal_result_once(
         self, preflight: SmallFilePreflight, device_context: SmallFileDeviceContext
@@ -1369,19 +1374,23 @@ class PostgresqlSmallFileUploadOperationStore:
             raise _state_invalid()
         if _is_expired(row.expires_at, self._clock()):
             raise _operation_expired()
+        # Clear the transient raw locator while the row is still in the
+        # pre-terminal state the clear's own guard admits; the retained
+        # digest stays so an exact replay can still confirm locator
+        # identity. A concurrent terminal winner between the two statements
+        # surfaces as a zero-row terminal update -> _state_invalid, rolling
+        # the whole transaction back.
+        if row.normalized_locator is not None:
+            cleared = await connection.execute(
+                terminal_locator_clear_statement(operation_id=row.operation_id)
+            )
+            if cleared.rowcount != 1:
+                raise _state_invalid()
         guarded = await connection.execute(
             terminal_result_update_statement(operation_id=row.operation_id, result=result)
         )
         if guarded.rowcount != 1:
             raise _state_invalid()
-        # Clear the transient raw locator on terminal transition; the retained
-        # digest stays on the row so an exact replay can still confirm the
-        # locator identity. The guard admits only the non-terminal states, so
-        # a concurrent terminal winner is visible as a zero-row update.
-        if row.normalized_locator is not None:
-            await connection.execute(
-                terminal_locator_clear_statement(operation_id=row.operation_id)
-            )
 
     async def _fetch_identity_row(
         self,
