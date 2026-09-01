@@ -17,7 +17,6 @@ trigger instead. Non-load-bearing hygiene rows use `Before Phase 2 closure
 
 | Added | Domain | Item | Implement by | Details |
 |---|---|---|---|---|
-| 2026-08-14 | infra (pre-existing) | Circular import in `tests/unit/runtime_configuration/test_secret_files.py` breaks directory-scoped pytest collection; full-suite gate unaffected | Before next runtime-configuration change | [handoff §15](2026-08-14-content-addressable-object-storage.md) |
 | 2026-08-15 | api-contract | `openapi-typescript@7.13.0` peer-declares `typescript@^5.x` while the workspace pins `6.0.3` (standing install warning; resurface on any pin bump) | At next TypeScript pin bump | [handoff §1](2026-08-15-api-runtime-contract-foundation.md) |
 | 2026-08-16 | ci-workflows (pre-existing) | Stack workflows other than `authentication-acceptance.yml` lack the mutual project-name/guard consistency pins | Before next stack workflow change | [handoff §15](2026-08-16-web-authentication-and-device-authorization.md) |
 | 2026-08-18 | small-file-sync | Child-4 reference-device evidence (Desktop + Mobile Obsidian) PENDING — operator records sanitized rows per the documented procedure; automated gates cannot substitute | Before Child 9 acceptance closure | [handoff §5](2026-08-18-plugin-journal-small-file-sync.md) |

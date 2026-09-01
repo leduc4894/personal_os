@@ -28,7 +28,7 @@ from enum import StrEnum
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, TextIO, cast
+from typing import TYPE_CHECKING, Final, TextIO, cast
 from uuid import UUID
 
 from personal_os.diagnostics.context import (
@@ -52,7 +52,12 @@ from personal_os.diagnostics.redaction import (
     normalize_exception_type,
 )
 from personal_os.error_contracts.exceptions import ApplicationError
-from personal_os.runtime_configuration.models import RuntimeSettings, ServiceName
+
+if TYPE_CHECKING:
+    # Type-only dependency: importing ``runtime_configuration`` here at runtime
+    # would create a package cycle (``runtime_configuration.secret_files``
+    # imports ``diagnostics.events``, whose package init imports this module).
+    from personal_os.runtime_configuration.models import RuntimeSettings, ServiceName
 
 type RejectionCounterHook = Callable[[EventName], None]
 
