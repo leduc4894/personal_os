@@ -842,6 +842,11 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       const repository = new JournalRepository({
         database: journalDatabase,
         createId: createJournalId,
+        // Spec 12.4: completing a device repair must clear the persistence
+        // sticky reconcile flag through this callback, or every later
+        // generation commit re-clobbers the durable clear and re-arms the
+        // reconcile loop (the 2026-09-01 live-round wedge).
+        onDeviceSyncRepairComplete: () => persistence.markReconcileComplete(),
       });
       const vaultReader = this.#createCaptureVaultReader();
       const lifecycleVaultReader = this.#createLifecycleVaultReader(vaultReader);

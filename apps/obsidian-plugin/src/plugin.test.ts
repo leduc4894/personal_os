@@ -122,6 +122,22 @@ describe("Obsidian plugin composition root", () => {
     expect(persistBody).toContain("loadData()");
   });
 
+  it("wires the repository repair-complete notification to the persistence sticky-flag clear", () => {
+    // The sticky in-memory reconcile flag can only clear through the
+    // repository's repair-completion callback (spec 12.4). An unwired
+    // composition (the 2026-09-01 live-round wedge: a rebuilt journal's
+    // reconcile loop re-armed forever and kept the queue lane stopped, so
+    // queued uploads never dispatched) leaves the flag re-clobbering the
+    // durable clear on every later generation commit.
+    const repositoryIndex = pluginSource.indexOf("new JournalRepository({");
+    expect(repositoryIndex).toBeGreaterThanOrEqual(0);
+    const wiringIndex = pluginSource.indexOf(
+      "onDeviceSyncRepairComplete: () => persistence.markReconcileComplete()",
+      repositoryIndex,
+    );
+    expect(wiringIndex).toBeGreaterThan(repositoryIndex);
+  });
+
   it("pins the production origin policy to HTTPS-only", () => {
     expect(pluginSource).toContain("ALLOW_LOOPBACK_HTTP_ORIGIN = false");
   });
