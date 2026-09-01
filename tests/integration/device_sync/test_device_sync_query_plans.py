@@ -18,12 +18,18 @@ for the seven device sync hot queries:
 
 Every query must use at least one index created by the shipped migrations,
 every index the plans touch must belong to the approved set, and no plan may
-sequentially scan a populated relation. ``source_tombstones`` is deliberately
-pinned at 300 rows and outside the populated set: the schema authority owns
-no ``restore_event_id`` index (the delete-side unique index covers the
-delete join), so the restore-side hydration join stays bounded by this
-pinned fixture size rather than by an index this child may not add; the
-driving access and every other populated relation must still be indexed.
+sequentially scan a populated relation. Beyond the seven single-workspace
+hot queries, two scale pins close the 2026-08-26 device-sync BACKLOG row: a
+second, minority workspace's pull page must drive on the composite
+``ix_sync_events__workspace_event_sequence`` index, and the tombstone
+restore-event lookup must use the shipped partial
+``ix_source_tombstones__restore_event_id`` index (the delete-side unique
+index covers the delete join). ``source_tombstones`` stays deliberately
+pinned at 300 rows and outside the populated set — its restore-side
+hydration join stays bounded by this pinned fixture size inside the pull
+plans, while the dedicated lookup pin proves the restore key itself owns a
+shipped index; the driving access and every other populated relation must
+still be indexed.
 
 The integration tests are gated by the ``local_stack`` marker; the
 disposable CI stack is the gate.
@@ -125,6 +131,13 @@ _SEED_ROW_COUNT: Final[int] = 12_000
 _CURSOR_WORKSPACE_COUNT: Final[int] = 1_000
 _CURSOR_DEVICES_PER_WORKSPACE: Final[int] = 5
 _INSERT_BATCH_SIZE: Final[int] = 1_000
+
+#: The minority second workspace's event population for the multi-workspace
+#: pull pin: more than one full pull page (201 entries), yet a small
+#: minority share of the table — the regime where the composite index's
+#: workspace-prefixed ordered delivery is decisively cheaper than filtering
+#: the global sequence index across the primary workspace's rows.
+_SECOND_WORKSPACE_EVENT_COUNT: Final[int] = 400
 
 #: Every relation populated at scale; a sequential scan over one of these is
 #: the unbounded access the plan forbids. ``source_tombstones`` stays pinned
@@ -708,6 +721,160 @@ async def test_pull_page_statement_is_indexed(
     async with populated_device_sync_store.engine.connect() as connection:
         payload = await _explain(connection, statement)
     _assert_indexed_access(payload, "pull_page")
+
+
+async def _seed_second_workspace_minority(
+    engine: AsyncEngine, workspace: DeviceSyncWorkspace
+) -> int:
+    """Seed one minority workspace's event population at pull-page scale.
+
+    The rows mirror the primary population's shape (one content object,
+    source and version per event, the device present on every third event)
+    through the same batched schema-qualified Core inserts, then
+    re-``ANALYZE`` ``sync_events`` so the planner sees both workspaces'
+    statistics. Returns the workspace's maximum event sequence.
+    """
+
+    nonce = uuid4().hex
+    now = datetime.now(UTC)
+    content_object_ids = [uuid4() for _ in range(_SECOND_WORKSPACE_EVENT_COUNT)]
+    source_ids = [uuid4() for _ in range(_SECOND_WORKSPACE_EVENT_COUNT)]
+    version_ids = [uuid4() for _ in range(_SECOND_WORKSPACE_EVENT_COUNT)]
+    event_ids = [uuid4() for _ in range(_SECOND_WORKSPACE_EVENT_COUNT)]
+    async with engine.begin() as connection:
+        content_object_rows = []
+        source_rows = []
+        version_rows = []
+        event_rows = []
+        for index in range(_SECOND_WORKSPACE_EVENT_COUNT):
+            content_hash = hashlib.sha256(
+                f"ds-plan-minority-{nonce}-{index}".encode("ascii")
+            ).hexdigest()
+            content_object_rows.append(
+                {
+                    "content_object_id": content_object_ids[index],
+                    "content_hash": content_hash,
+                    "object_key": (
+                        f"objects/sha256/{content_hash[:2]}/{content_hash[2:4]}/{content_hash}"
+                    ),
+                    "byte_size": 96,
+                    "media_type": "text/markdown",
+                    "verified_at": now,
+                }
+            )
+            source_rows.append(
+                {
+                    "source_id": source_ids[index],
+                    "workspace_id": workspace.workspace_id,
+                    "source_type": "markdown",
+                    "title": f"Device plan minority source {index:05d}",
+                    "sync_state": "pending",
+                    "current_version_id": None,
+                }
+            )
+            version_rows.append(
+                {
+                    "source_version_id": version_ids[index],
+                    "workspace_id": workspace.workspace_id,
+                    "source_id": source_ids[index],
+                    "content_object_id": content_object_ids[index],
+                    "content_version": 1,
+                    "author_kind": "device",
+                    "author_id": workspace.device_id,
+                }
+            )
+            event_rows.append(
+                {
+                    "event_id": event_ids[index],
+                    "workspace_id": workspace.workspace_id,
+                    "source_id": source_ids[index],
+                    "device_id": workspace.device_id if index % 3 == 0 else None,
+                    "committed_version_id": version_ids[index],
+                    "base_version_id": None,
+                    "idempotency_key": f"ds-plan-minority-{nonce}-{index:06d}",
+                    "request_fingerprint": hashlib.sha256(
+                        f"ds-plan-minority-{nonce}-{index:06d}".encode("ascii")
+                    ).hexdigest(),
+                    "event_type": "create",
+                }
+            )
+        for batch in _batches(content_object_rows):
+            await connection.execute(sa.insert(content_objects), batch)
+        for batch in _batches(source_rows):
+            await connection.execute(sa.insert(sources), batch)
+        for batch in _batches(version_rows):
+            await connection.execute(sa.insert(source_versions), batch)
+        sequences: list[int] = []
+        for batch in _batches(event_rows):
+            inserted = await connection.execute(
+                sa.insert(sync_events).values(batch).returning(sync_events.c.event_sequence)
+            )
+            sequences.extend(int(row.event_sequence) for row in inserted)
+        await connection.execute(sa.text("ANALYZE knowledge.sync_events"))
+    return max(sequences)
+
+
+@pytest.mark.asyncio
+async def test_multi_workspace_pull_page_uses_the_composite_index(
+    populated_device_sync_store: DeviceSyncQueryPlanPopulation,
+) -> None:
+    """A second workspace makes the workspace-scoped pull index load-bearing.
+
+    The single-workspace pins drive on the global event-sequence unique
+    index because the primary workspace owns every row. The harness's
+    existing workspace seed call adds a second, minority workspace whose
+    events commit above the primary's maximum sequence — the multi-workspace
+    shape the 2026-08-26 device-sync BACKLOG row deferred — and its pull
+    page must drive on the composite ``(workspace_id, event_sequence)``
+    index instead of filtering the global unique index across the primary
+    workspace's rows.
+    """
+
+    second_workspace = await seed_device_sync_workspace(populated_device_sync_store.engine)
+    maximum_sequence = await _seed_second_workspace_minority(
+        populated_device_sync_store.engine, second_workspace
+    )
+    statement = device_pull_page_statement(
+        second_workspace.workspace_id,
+        after_sequence=0,
+        through_sequence=maximum_sequence,
+        limit=201,
+    )
+    async with populated_device_sync_store.engine.connect() as connection:
+        payload = await _explain(connection, statement)
+    assert _index_names(payload) & {"ix_sync_events__workspace_event_sequence"}
+
+
+@pytest.mark.asyncio
+async def test_tombstone_restore_lookup_is_indexed(
+    populated_device_sync_store: DeviceSyncQueryPlanPopulation,
+) -> None:
+    """The restore-side hydration key must reach a shipped partial index.
+
+    The pull page hydrates each restore event's tombstone through
+    ``source_tombstones.restore_event_id``; the delete-side unique index
+    covers the delete join, and this pin (the 2026-08-26 device-sync BACKLOG
+    row) proves the restore key owns its shipped partial index, so the
+    lookup stays bounded by the index rather than by the pinned fixture
+    size of the relation.
+    """
+
+    async with populated_device_sync_store.engine.connect() as connection:
+        restore_event_id = (
+            await connection.execute(
+                sa.select(source_tombstones.c.restore_event_id)
+                .where(source_tombstones.c.restore_event_id.is_not(None))
+                .limit(1)
+            )
+        ).scalar_one()
+        payload = await _explain(
+            connection,
+            sa.select(source_tombstones).where(
+                source_tombstones.c.restore_event_id
+                == sa.bindparam("restore_event_id", restore_event_id)
+            ),
+        )
+    assert _index_names(payload) & {"ix_source_tombstones__restore_event_id"}
 
 
 @pytest.mark.asyncio
