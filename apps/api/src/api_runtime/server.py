@@ -10,8 +10,8 @@ private key through the same secret-file boundary, loads the R2
 object-storage settings and their two credential files through the same
 boundary, configures structured diagnostics, builds the database lifecycle,
 the web-authentication runtime, the exclusion-policy runtime, the
-small-file sync runtime, the multipart upload runtime and the device sync
-runtime over the real PostgreSQL
+small-file sync runtime, the multipart upload runtime, the device sync
+runtime and the source conflict runtime over the real PostgreSQL
 and R2 adapters (each R2 client opens lazily at the first store call inside
 the serving loop), and
 builds the FastAPI application (wiring the lifecycle into the application
@@ -63,6 +63,7 @@ from api_runtime.exclusion_policy_settings import (
 from api_runtime.multipart_upload_composition import compose_multipart_upload
 from api_runtime.server_settings import load_api_server_settings
 from api_runtime.small_file_sync_composition import compose_small_file_sync
+from api_runtime.source_conflict_composition import compose_source_conflicts
 from api_runtime.source_lifecycle_composition import (
     PostgresqlSourceLifecyclePolicy,
     compose_lifecycle_conflict_capture_gateway,
@@ -230,6 +231,18 @@ def run_server(
                 object_storage_credentials=object_storage_credentials,
                 logger=logger,
             )
+            # The source conflict runtime shares the engine for the durable
+            # conflict store and owns its own lazy R2 client manager so the
+            # verified evidence reader stays independently disposable; the
+            # client opens only at the first evidence read inside the
+            # serving loop and closes with the process on shutdown.
+            source_conflicts = compose_source_conflicts(
+                engine=engine,
+                object_storage_settings=object_storage_settings,
+                object_storage_credentials=object_storage_credentials,
+                logger=logger,
+                policy_metrics=policy_metrics,
+            )
 
             @asynccontextmanager
             async def database_lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -259,6 +272,8 @@ def run_server(
                         await multipart_upload.aclose()
                     if device_sync.aclose is not None:
                         await device_sync.aclose()
+                    if source_conflicts.aclose is not None:
+                        await source_conflicts.aclose()
                     await lifecycle.stop()
 
             application = create_api_application(
@@ -270,6 +285,7 @@ def run_server(
                 multipart_upload=multipart_upload,
                 source_lifecycle=source_lifecycle,
                 device_sync=device_sync,
+                source_conflicts=source_conflicts,
                 event_sink=logger,
                 lifespan=database_lifespan,
             )

@@ -79,7 +79,7 @@ def policy_harness() -> Iterator[SmallFileWireHarness]:
 #: The cross-language contract hash: both language replays consume these
 #: exact bytes; changing the corpus means updating this registry in the same
 #: commit.
-WIRE_GOLDEN_SHA256: Final[str] = "25a165179cefc77578593554ee15967495762309ab79ea1377f633f033ab85c3"
+WIRE_GOLDEN_SHA256: Final[str] = "a204eecd128bbe4f4c91dcc6dfa871f8f09f123a6fc8bb1f82d2fc4403533832"
 
 #: The TypeScript replay suite that must read the fixture file.
 TS_REPLAY_SOURCE: Final[str] = "apps/obsidian-plugin/src/journal/sync-wire-contract.test.ts"

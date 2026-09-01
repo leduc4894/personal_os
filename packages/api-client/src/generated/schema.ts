@@ -694,6 +694,96 @@ export type paths = {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/sync/conflicts": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * List Conflicts
+         * @description Page the credential workspace's open conflicts in stable order.
+         */
+        readonly get: operations["listSourceConflicts"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/sync/conflicts/{conflict_id}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Get Conflict
+         * @description Render one conflict's safe metadata, choices and evidence identity.
+         */
+        readonly get: operations["getSourceConflict"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/sync/conflicts/{conflict_id}/evidence/{role}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Download Evidence
+         * @description Stream one role's exact verified evidence bytes.
+         *
+         *     The conflict is re-read inside the credential workspace and the
+         *     exclusion policy re-evaluated over exactly that read before the
+         *     verified reader opens: a denial, an unknown conflict or an
+         *     unappliable role answers the canonical JSON envelope with the
+         *     reader still closed. Only then does the exact expected object
+         *     resolve, the verified reader open and prime its first chunk inside
+         *     the endpoint, so pre-stream failures never start a broken
+         *     transport. The response carries the exact canonical media type and
+         *     byte length of the verified bytes.
+         */
+        readonly get: operations["downloadSourceConflictEvidence"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/sync/conflicts/{conflict_id}/resolve": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Resolve Conflict
+         * @description Resolve one conflict behind the policy recheck, atomically.
+         */
+        readonly post: operations["resolveSourceConflict"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/sync/cursor-acknowledgements": {
         readonly parameters: {
             readonly query?: never;
@@ -1574,6 +1664,51 @@ export type components = {
              */
             readonly warnings: readonly components["schemas"]["ApiWarning"][];
         };
+        /** ApiEnvelope[SourceConflictDetailData] */
+        readonly ApiEnvelope_SourceConflictDetailData_: {
+            readonly data: components["schemas"]["SourceConflictDetailData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[SourceConflictPageData] */
+        readonly ApiEnvelope_SourceConflictPageData_: {
+            readonly data: components["schemas"]["SourceConflictPageData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[SourceConflictResolutionData] */
+        readonly ApiEnvelope_SourceConflictResolutionData_: {
+            readonly data: components["schemas"]["SourceConflictResolutionData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
         /** ApiEnvelope[SourceLifecycleCommitData] */
         readonly ApiEnvelope_SourceLifecycleCommitData_: {
             readonly data: components["schemas"]["SourceLifecycleCommitData"] | null;
@@ -1652,6 +1787,55 @@ export type components = {
             /** Message */
             readonly message: string;
         };
+        /**
+         * ConflictCandidateKind
+         * @description Whether a conflict retains verified content bytes or a deletion intent.
+         * @enum {string}
+         */
+        readonly ConflictCandidateKind: "content" | "delete";
+        /**
+         * ConflictEvidenceRole
+         * @description The three immutable evidence roles the verified-read boundary streams.
+         *
+         *     ``CANDIDATE`` exists only while the conflict retains a content candidate;
+         *     a delete conflict has no candidate bytes and the reader fails closed.
+         * @enum {string}
+         */
+        readonly ConflictEvidenceRole: "base" | "remote" | "candidate";
+        /**
+         * ConflictKind
+         * @description Closed vocabulary of conflict kinds (spec 4.1 table).
+         *
+         *     ``STALE_CONTENT`` and ``EDIT_REMOTE_DELETE`` retain verified content
+         *     bytes; ``DELETE_REMOTE_EDIT`` carries only a deletion intent; a
+         *     ``LOCATOR_COLLISION`` carries a locator snapshot and retains content
+         *     bytes only when the local bytes changed.
+         * @enum {string}
+         */
+        readonly ConflictKind: "stale_content" | "edit_remote_delete" | "delete_remote_edit" | "locator_collision";
+        /**
+         * ConflictResolutionKind
+         * @description The only explicit user choices that close a conflict (spec 3.8).
+         * @enum {string}
+         */
+        readonly ConflictResolutionKind: "keep_remote" | "keep_local" | "save_merged";
+        /**
+         * ConflictResolutionOutcome
+         * @description Closed terminal outcomes of one resolution attempt.
+         *
+         *     ``RESOLVED`` commits the winner; ``STALE_SUCCESSOR`` records the attempt
+         *     as stale against the reviewed remote, supersedes the conflict and opens
+         *     a successor bound to the newer observed remote. Both are frozen and
+         *     returned unchanged by an exact replay of the resolution event identity.
+         * @enum {string}
+         */
+        readonly ConflictResolutionOutcome: "resolved" | "stale_successor";
+        /**
+         * ConflictStatus
+         * @description Closed aggregate states of the conflict state machine (spec 4.3).
+         * @enum {string}
+         */
+        readonly ConflictStatus: "open" | "resolving" | "resolved" | "superseded";
         /**
          * CursorAcknowledgementRequest
          * @description The strict cursor acknowledgement body (spec 7.2).
@@ -3021,11 +3205,19 @@ export type components = {
          *
          *     ``single_part_upload`` carries only the opaque operation token and its
          *     expiry; ``committed_replay`` and ``no_change`` carry only the frozen
-         *     terminal result; ``excluded`` and ``conflict`` carry no payload member at
-         *     all. Responses render with ``exclude_unset`` so each outcome emits
-         *     exactly its own members.
+         *     terminal result; ``excluded`` and ``multipart_upload`` carry no payload
+         *     member at all. The Child 8 ``conflict`` outcome carries either the same
+         *     opaque operation grant — the capture reservation whose verified
+         *     candidate the client uploads for retention as conflict evidence — or
+         *     exactly the opaque conflict identity a same-identity replay returns
+         *     after capture; a conflict that cannot retain bytes yet (a missing
+         *     source, or a size above the single-part routing constant) carries no
+         *     payload member at all. Responses render with ``exclude_unset`` so each
+         *     outcome emits exactly its own members.
          */
         readonly SmallFilePreflightData: {
+            /** Conflict Id */
+            readonly conflict_id?: string | null;
             /** Expires At */
             readonly expires_at?: string | null;
             /** Operation Id */
@@ -3166,6 +3358,185 @@ export type components = {
          * @enum {string}
          */
         readonly SmallFileTerminalResultKind: "committed" | "no_change";
+        /**
+         * SourceConflictData
+         * @description One conflict's safe metadata: the frozen read model on the wire.
+         *
+         *     Every member is an opaque identifier, a closed label or a normalized
+         *     UTC timestamp. The credential-derived workspace is deliberately absent
+         *     (it is the caller's own), and no locator snapshot, object key, digest
+         *     or provider detail ever renders. The optional members follow the
+         *     domain's exact status shapes: an open conflict carries no resolution
+         *     evidence, a resolving one the attempt identity, a resolved one the
+         *     winner and — only under a publishing choice — the resulting version,
+         *     and a superseded one its successor.
+         */
+        readonly SourceConflictData: {
+            /** Base Version Id */
+            readonly base_version_id: string | null;
+            readonly candidate_kind: components["schemas"]["ConflictCandidateKind"];
+            /**
+             * Captured At
+             * Format: date-time
+             */
+            readonly captured_at: string;
+            /** Closed At */
+            readonly closed_at: string | null;
+            /**
+             * Conflict Id
+             * Format: uuid
+             */
+            readonly conflict_id: string;
+            readonly conflict_kind: components["schemas"]["ConflictKind"];
+            /** Observed Remote Version Id */
+            readonly observed_remote_version_id: string | null;
+            /**
+             * Originating Device Id
+             * Format: uuid
+             */
+            readonly originating_device_id: string;
+            /**
+             * Originating Event Id
+             * Format: uuid
+             */
+            readonly originating_event_id: string;
+            /** Resolution Event Id */
+            readonly resolution_event_id: string | null;
+            readonly resolution_kind: components["schemas"]["ConflictResolutionKind"] | null;
+            /** Resulting Version Id */
+            readonly resulting_version_id: string | null;
+            /** Source Id */
+            readonly source_id: string | null;
+            readonly status: components["schemas"]["ConflictStatus"];
+            /** Successor Conflict Id */
+            readonly successor_conflict_id: string | null;
+            /** Verified Candidate Object Id */
+            readonly verified_candidate_object_id: string | null;
+        };
+        /**
+         * SourceConflictDetailData
+         * @description One conflict's detail: the safe metadata plus the offered choices.
+         *
+         *     ``choices`` carries exactly the resolution kinds this conflict still
+         *     admits (see :func:`allowed_resolution_choices`), so the Inbox can never
+         *     offer an unappliable choice.
+         */
+        readonly SourceConflictDetailData: {
+            /** Base Version Id */
+            readonly base_version_id: string | null;
+            readonly candidate_kind: components["schemas"]["ConflictCandidateKind"];
+            /**
+             * Captured At
+             * Format: date-time
+             */
+            readonly captured_at: string;
+            /** Choices */
+            readonly choices: readonly components["schemas"]["ConflictResolutionKind"][];
+            /** Closed At */
+            readonly closed_at: string | null;
+            /**
+             * Conflict Id
+             * Format: uuid
+             */
+            readonly conflict_id: string;
+            readonly conflict_kind: components["schemas"]["ConflictKind"];
+            /** Observed Remote Version Id */
+            readonly observed_remote_version_id: string | null;
+            /**
+             * Originating Device Id
+             * Format: uuid
+             */
+            readonly originating_device_id: string;
+            /**
+             * Originating Event Id
+             * Format: uuid
+             */
+            readonly originating_event_id: string;
+            /** Resolution Event Id */
+            readonly resolution_event_id: string | null;
+            readonly resolution_kind: components["schemas"]["ConflictResolutionKind"] | null;
+            /** Resulting Version Id */
+            readonly resulting_version_id: string | null;
+            /** Source Id */
+            readonly source_id: string | null;
+            readonly status: components["schemas"]["ConflictStatus"];
+            /** Successor Conflict Id */
+            readonly successor_conflict_id: string | null;
+            /** Verified Candidate Object Id */
+            readonly verified_candidate_object_id: string | null;
+        };
+        /**
+         * SourceConflictPageData
+         * @description One bounded page of the workspace's open conflicts.
+         *
+         *     ``next_exclusive_start_conflict_id`` is the stable continuation cursor
+         *     (the last identity of this page) whenever the page filled its bound.
+         */
+        readonly SourceConflictPageData: {
+            /** Conflicts */
+            readonly conflicts: readonly components["schemas"]["SourceConflictData"][];
+            /** Has More */
+            readonly has_more: boolean;
+            /** Next Exclusive Start Conflict Id */
+            readonly next_exclusive_start_conflict_id: string | null;
+        };
+        /**
+         * SourceConflictResolutionData
+         * @description The frozen outcome of one explicit resolution attempt.
+         *
+         *     ``resolved`` commits the winner — with exactly one resulting version
+         *     only under ``keep_local``/``save_merged`` — and ``stale_successor``
+         *     binds the open successor created against the newer observed remote; a
+         *     same-identity replay receives this value unchanged.
+         */
+        readonly SourceConflictResolutionData: {
+            /**
+             * Completed At
+             * Format: date-time
+             */
+            readonly completed_at: string;
+            /**
+             * Conflict Id
+             * Format: uuid
+             */
+            readonly conflict_id: string;
+            readonly outcome: components["schemas"]["ConflictResolutionOutcome"];
+            /**
+             * Resolution Event Id
+             * Format: uuid
+             */
+            readonly resolution_event_id: string;
+            readonly resolution_kind: components["schemas"]["ConflictResolutionKind"];
+            /** Resulting Version Id */
+            readonly resulting_version_id: string | null;
+            /** Successor Conflict Id */
+            readonly successor_conflict_id: string | null;
+        };
+        /**
+         * SourceConflictResolveRequest
+         * @description The strict explicit-resolution body (spec 6).
+         *
+         *     Carries exactly the new event identity, its fresh idempotency key, the
+         *     closed resolution choice, the reviewed remote version and the optional
+         *     verified object reference of an already-uploaded merged result — never
+         *     raw bytes, a digest, a locator, a workspace or a device selector. The
+         *     merged result itself travels only through the existing verified upload
+         *     flow; this body references it, it never carries it.
+         */
+        readonly SourceConflictResolveRequest: {
+            /** Idempotency Key */
+            readonly idempotency_key: string;
+            /**
+             * Resolution Event Id
+             * Format: uuid
+             */
+            readonly resolution_event_id: string;
+            readonly resolution_kind: components["schemas"]["ConflictResolutionKind"];
+            /** Reviewed Remote Version Id */
+            readonly reviewed_remote_version_id?: string | null;
+            /** Verified Candidate Object Id */
+            readonly verified_candidate_object_id?: string | null;
+        };
         /**
          * SourceFingerprintData
          * @description The settled-byte hash/size/media identity evidence of one version.
@@ -4182,6 +4553,100 @@ export interface operations {
                 };
                 content: {
                     readonly "application/octet-stream": string;
+                };
+            };
+        };
+    };
+    readonly listSourceConflicts: {
+        readonly parameters: {
+            readonly query?: {
+                readonly limit?: number;
+                readonly exclusive_start_conflict_id?: string | null;
+            };
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_SourceConflictPageData_"];
+                };
+            };
+        };
+    };
+    readonly getSourceConflict: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly conflict_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_SourceConflictDetailData_"];
+                };
+            };
+        };
+    };
+    readonly downloadSourceConflictEvidence: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly conflict_id: string;
+                readonly role: components["schemas"]["ConflictEvidenceRole"];
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description The exact verified evidence bytes of the closed role as one binary payload with its exact Content-Type and Content-Length headers */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/octet-stream": string;
+                };
+            };
+        };
+    };
+    readonly resolveSourceConflict: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly conflict_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["SourceConflictResolveRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_SourceConflictResolutionData_"];
                 };
             };
         };

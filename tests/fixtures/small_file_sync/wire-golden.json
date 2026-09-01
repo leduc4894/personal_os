@@ -34,7 +34,7 @@
       "name": "preflight_conflict",
       "surface": "preflight",
       "status": 200,
-      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d05\",\"data\":{\"outcome\":\"conflict\"},\"warnings\":[],\"error\":null}",
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d05\",\"data\":{\"outcome\":\"conflict\",\"operation_id\":\"AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-Zz\",\"expires_at\":\"2026-08-18T10:00:00Z\"},\"warnings\":[],\"error\":null}",
       "plugin_expectation": { "kind": "preflight_outcome", "outcome": "conflict" }
     },
     {

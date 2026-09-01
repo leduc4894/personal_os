@@ -468,22 +468,43 @@ def _update_body(*, digest_matches_current: bool) -> dict[str, Any]:
     }
 
 
-def test_stale_update_base_returns_the_conflict_outcome(harness: SmallFileRouteHarness) -> None:
-    """The frozen conflict wire verdict over its new capture reservation.
+def test_stale_update_base_returns_the_conflict_outcome_with_its_capture_grant(
+    harness: SmallFileRouteHarness,
+) -> None:
+    """The conflict wire verdict now surfaces its capture grant (Child 8).
 
-    The wire bytes stay exactly the plugin's parked-``blocked_conflict``
-    shape — no token, receipt or content member renders — while the server
-    now also reserves one capture operation behind the verdict so the
-    verified candidate can be retained as conflict evidence (Child 8).
+    A stale single-part-sized update reserves one capture operation, and the
+    preflight answer carries exactly the plugin needs to reach the captured
+    conflict: the outcome, the opaque operation grant with its expiry, and
+    — on a same-identity replay after capture — the replayed conflict
+    identity. No terminal result, receipt or content member ever renders.
     """
 
     body = _update_body(digest_matches_current=False)
     harness.sync_state.current_reference = _current_reference(body, source_version_id=uuid4())
     response = preflight(harness, body)
     assert response.status_code == 200
-    assert dict(response.json()["data"]) == {"outcome": "conflict"}
+    data = dict(response.json()["data"])
+    assert set(data) == {"outcome", "operation_id", "expires_at"}
+    assert data["outcome"] == "conflict"
+    token = str(data["operation_id"])
+    assert 32 <= len(token) <= 128
+    assert all(char.isalnum() or char in {"-", "_"} for char in token)
+    assert data["expires_at"] is not None
     assert harness.sync_state.reservation_count == 1
     assert harness.sync_state.publication_commits == 0
+
+
+def test_missing_current_reference_returns_the_bare_conflict_verdict(
+    harness: SmallFileRouteHarness,
+) -> None:
+    """A conflict that cannot retain bytes yet stays payload-free."""
+
+    harness.sync_state.current_reference = None
+    response = preflight(harness, _update_body(digest_matches_current=False))
+    assert response.status_code == 200
+    assert dict(response.json()["data"]) == {"outcome": "conflict"}
+    assert harness.sync_state.reservation_count == 0
 
 
 def test_matching_update_base_returns_the_no_change_outcome(

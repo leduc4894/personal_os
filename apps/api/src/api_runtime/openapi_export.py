@@ -29,6 +29,7 @@ from api_runtime.device_sync_composition import compose_offline_device_sync
 from api_runtime.exclusion_policy_composition import compose_offline_exclusion_policy
 from api_runtime.multipart_upload_composition import compose_offline_multipart_upload
 from api_runtime.small_file_sync_composition import compose_offline_small_file_sync
+from api_runtime.source_conflict_composition import compose_offline_source_conflicts
 from api_runtime.source_lifecycle_composition import compose_offline_source_lifecycle
 from personal_os.runtime_configuration.models import RuntimeEnvironment
 
@@ -53,10 +54,10 @@ def create_contract_application() -> FastAPI:
     The fixed test environment keeps the OpenAPI document route enabled, the
     injected probe performs no I/O, and the deterministic offline
     authentication, exclusion-policy, small-file-sync, multipart-upload,
-    source-lifecycle and device-sync runtimes carry fixed non-secret ports:
-    no environment value, key file, database or provider client is ever
-    read, and the application lifespan is never entered because the document
-    is read directly from the route graph.
+    source-lifecycle, device-sync and source-conflict runtimes carry fixed
+    non-secret ports: no environment value, key file, database or provider
+    client is ever read, and the application lifespan is never entered
+    because the document is read directly from the route graph.
     """
     return create_api_application(
         environment=RuntimeEnvironment.TEST,
@@ -67,6 +68,7 @@ def create_contract_application() -> FastAPI:
         multipart_upload=compose_offline_multipart_upload(),
         source_lifecycle=compose_offline_source_lifecycle(),
         device_sync=compose_offline_device_sync(),
+        source_conflicts=compose_offline_source_conflicts(),
     )
 
 

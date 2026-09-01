@@ -29,10 +29,11 @@ SYNC_OPERATION_IDS: Final[dict[tuple[str, str], str]] = {
     ("/api/uploads/{operation_id}/content", "put"): "uploadSmallFileContent",
 }
 
-#: The exact members the preflight data schema may expose (spec 10.1): one
-#: typed outcome plus at most the upload handle/expiry or the frozen result.
+#: The exact members the preflight data schema may expose (spec 10.1 and the
+#: Child 8 conflict bridge): one typed outcome plus at most the upload
+#: handle/expiry, the frozen result, or the replayed conflict identity.
 PREFLIGHT_DATA_MEMBERS: Final[frozenset[str]] = frozenset(
-    {"outcome", "operation_id", "expires_at", "result"}
+    {"outcome", "operation_id", "expires_at", "result", "conflict_id"}
 )
 
 #: The exact members of the safe canonical receipt (spec 10.3).

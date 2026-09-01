@@ -155,6 +155,10 @@ def test_openapi_render_is_byte_identical_and_has_no_machine_values() -> None:
         "/api/sync/manifests/{manifest_run_id}/actions",
         "/api/sync/manifests/{manifest_run_id}/complete",
         "/api/sources/{source_id}/versions/{source_version_id}/content",
+        "/api/sync/conflicts",
+        "/api/sync/conflicts/{conflict_id}",
+        "/api/sync/conflicts/{conflict_id}/evidence/{role}",
+        "/api/sync/conflicts/{conflict_id}/resolve",
     }
     assert document["paths"]["/api/health/live"]["get"]["operationId"] == "getApiLiveness"
     assert document["paths"]["/api/health/ready"]["get"]["operationId"] == "getApiReadiness"
