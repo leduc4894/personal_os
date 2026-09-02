@@ -1307,6 +1307,7 @@ describe("device-sync two-device journeys (production stack)", () => {
     stack.coordinator.request("explicit_repair");
     await flushCycles();
     expect(stack.deviceSyncRepository.readState().barrierReason).toBe("device_cursor_gap");
+    expect(server.plannedActions().map((action) => action.action_kind)).toEqual(["conflict", "apply_tombstone"]);
 
     stack.coordinator.request("explicit_repair");
     await flushCycles();
@@ -1331,6 +1332,10 @@ describe("device-sync two-device journeys (production stack)", () => {
     expect(reconvergedState.appliedSequence).toBe(reconvergedState.acknowledgedSequence);
     expect(reconvergedState.appliedSequence).toBe(state.appliedSequence);
     expect(server.completions).toHaveLength(completions + 1);
+    // The converged retry's whole plan re-observes only the peer's preserved
+    // closed divergence: no new conflict/repair action appears for the
+    // recreated locator, whose tombstone settled and left the capture.
+    expect(server.plannedActions().map((action) => action.action_kind)).toEqual(["conflict"]);
   });
 
   it("restarts exactly one fresh checkpoint-bound run after a policy advance", async () => {
