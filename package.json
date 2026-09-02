@@ -12,7 +12,7 @@
     "format": "pnpm --recursive --if-present run format",
     "format:check": "pnpm --recursive --if-present run format:check",
     "lint": "pnpm --recursive --if-present run lint",
-    "test": "pnpm --recursive --if-present run test",
+    "test": "pnpm --workspace-concurrency=1 --recursive --if-present run test",
     "test:e2e:authentication": "playwright test tests/end_to_end/authentication",
     "test:e2e:exclusion-policy": "playwright test tests/end_to_end/exclusion_policy",
     "type-check": "tsc --noEmit && pnpm --recursive --if-present run type-check"

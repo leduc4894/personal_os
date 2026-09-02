@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import tomllib
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import Any, cast
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REAL_PYPROJECT = REPO_ROOT / "pyproject.toml"
+ROOT_PACKAGE_JSON = REPO_ROOT / "package.json"
 FAILING_PIPELINE_DIR = REPO_ROOT / "tests" / "fixtures" / "quality" / "failing_pipeline"
 
 # The canonical public-gate order that `uv run poe verify` must run end to end.
@@ -71,4 +73,15 @@ def test_failing_pipeline_propagates_nonzero_and_surfaces_build() -> None:
         "the failing stage must be identifiable on poe's stdout stream:\n"
         + completed.stdout
         + completed.stderr
+    )
+
+
+def test_root_test_script_serializes_workspace_suites() -> None:
+    package_json = json.loads(ROOT_PACKAGE_JSON.read_text(encoding="utf-8"))
+    assert package_json["scripts"]["test"] == (
+        "pnpm --workspace-concurrency=1 --recursive --if-present run test"
+    ), (
+        "the root test script must pin --workspace-concurrency=1 so the Web and "
+        "Obsidian-plugin jsdom suites run sequentially instead of racing under "
+        "pnpm's default parallel workspace fan-out"
     )
