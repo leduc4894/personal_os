@@ -3,12 +3,13 @@
 - **Plan:** `docs/superpowers/plans/2026-09-02-source-conflict-capture-and-resolution.md`
 - **Spec:** `docs/superpowers/specs/2026-09-02-source-conflict-capture-and-resolution-design.md`
 - **Branch:** `source-conflict-capture-and-resolution` (from `master` @ `937508b`)
-- **Final code SHA:** `65e7714`
+- **Final code SHA:** `65e7714` (+ docs-only follow-ups through the merge head)
 - **Status:** COMPLETE for all automated gates — Tasks 1-10 done, every
-  non-mobile gate PASS. The ONE remaining plan obligation is the
-  operator-backed manual Desktop Conflict Inbox journey (prepared, NOT
-  run — see Next actions). Branch awaits that evidence, then merge
-  decision.
+  non-mobile gate PASS. The operator-backed manual Desktop Conflict Inbox
+  journey was **deferred to BACKLOG by operator decision (2026-09-02)**;
+  the branch merged to master without it. The journey remains the
+  outstanding live-evidence obligation before the Conflict Inbox is
+  considered live-proven (BACKLOG row with milestone).
 
 ## Gate status (evidence)
 
@@ -20,7 +21,7 @@
 | `CI=true LOCAL_STACK_TEST_PROJECT=knowledge-ci-source-conflicts-20260902 uv run poe device-sync-test` | PASS (exit 0) | 1859 passed / 2 skipped in 17m11s |
 | Conflict live-stack suites (`tests/integration/source_conflicts -m local_stack`) | PASS (exit 0) | 26 passed incl. the 7 race tests (`test_resolution_races.py`) |
 | Plugin `vitest run` / `type-check` / `lint` / `build` | PASS (all exit 0) | 1441 tests; `dist/main.js` built |
-| Manual Desktop Conflict Inbox journey | **PENDING — operator** | Runbook section ready (`docs/operations/source-conflict-resolution.md`); CI project left UP for the round; no manual gate claimed |
+| Manual Desktop Conflict Inbox journey | **DEFERRED by operator decision (2026-09-02)** | Runbook section ready (`docs/operations/source-conflict-resolution.md`); BACKLOG row added with `Before Child 9 operations acceptance`; no manual gate claimed |
 | Physical Mobile matrix | Not attempted by design | Existing Child 9 backlog rows own it (see BACKLOG mobile-live rows) |
 
 Pre-existing master integration failures did not surface in any selected
@@ -125,7 +126,7 @@ plan's file scope; BACKLOG rows added with milestones.
 
 | Item | Verdict |
 |---|---|
-| Manual Desktop Conflict Inbox journey | Operator gate, scheduled next (this handoff's Next actions); NOT deferred to BACKLOG — it is the plan's own remaining obligation, prepared end to end |
+| Manual Desktop Conflict Inbox journey | Deferred by operator decision (2026-09-02); BACKLOG row with milestone added — see the runbook for the full procedure and the BACKLOG row for the six extra final-review exercises |
 | Physical Mobile acceptance matrix | Out of scope by plan (Child 9 gate); existing BACKLOG mobile-live rows own it — no new row |
 | Candidate GC / Web conflict UI / cursor-gap remediation | Out of scope by plan self-review; no row (owned by their own future plans) |
 | Sibling-orphan cleanup sweep (failed-apply staging siblings) | Out of Task 10's tested behavior; BACKLOG row added (maintenance) |
@@ -136,16 +137,16 @@ plan's file scope; BACKLOG rows added with milestones.
 
 ## Next actions
 
-1. Operator runs the Desktop Conflict Inbox journey per
-   `docs/operations/source-conflict-resolution.md` against the live CI
-   project `knowledge-ci-source-conflicts-20260902` (stack is UP; run
+1. Operator runs the Desktop Conflict Inbox journey per the BACKLOG row
+   and `docs/operations/source-conflict-resolution.md` against a live CI
+   project (re-stand with `CI=true bash .local/serve-live-ci.sh up
+   knowledge-ci-source-conflicts-20260902`; run
    `CI=true uv run python tools/obsidian_live_acceptance_bootstrap.py
-   --project-name knowledge-ci-source-conflicts-20260902 --wdio-spec
-   test/specs/device-sync-reconciliation.e2e.ts` first if the operator
+   --project-name knowledge-ci-source-conflicts-20260902 ...` first if the
    round wants TOTP+policy seeded — or just its bootstrap phases).
-   Record sanitized evidence (outcome, reason token, count, timestamp).
-2. Codex verifies the API checkpoints after the journey (conflict
-   resolved, exactly one winning version, zero open conflicts).
-3. `bash .local/serve-live-ci.sh down` (leaves `knowledge-local` down).
-4. Merge decision for the branch; task reports live under
-   `.superpowers/sdd/2026-09-02-source-conflict-capture-and-resolution/`.
+   Record sanitized evidence (outcome, reason token, count, timestamp);
+   include the six final-review exercises listed in the BACKLOG row.
+2. After the journey: Codex verifies the API checkpoints (conflict
+   resolved, exactly one winning version, zero open conflicts), then
+   `bash .local/serve-live-ci.sh down` (leaves `knowledge-local` down),
+   and removes the BACKLOG row.
