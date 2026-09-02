@@ -74,7 +74,6 @@ async def _seed_lifecycle_evidence(
         locator=NormalizedLocator("notes/old.md"),
     )
     # The initial create event left one sync_event row and one open locator.
-    second_locator = NormalizedLocator("notes/renamed.md")
     intent_id = uuid4()
     # The direct intent insert must parent on the canonical create event, not
     # on the source-version identity; the assertions pin that contract: the
@@ -147,7 +146,6 @@ async def _seed_lifecycle_evidence(
     return {
         "source_id": source_id,
         "current_version_id": seeded.current_version_id,
-        "second_locator": second_locator,
         "intent_id": intent_id,
     }
 
@@ -361,26 +359,9 @@ async def test_snapshot_open_tombstone_count_matches_postgres_state(
         locator=NormalizedLocator("notes/old.md"),
     )
 
-    from datetime import UTC
-    from datetime import datetime as _dt
-    from uuid import uuid7 as _uuid7
-
-    from personal_os.diagnostics.context import create_diagnostic_context
-    from personal_os.exclusion_policy.contracts import PolicySubject
-    from personal_os.source_lifecycle.commands import (
-        LifecycleOperation,
-        SourceLifecycleCommand,
-    )
-    from personal_os.source_lifecycle.fingerprint import fingerprint_lifecycle_command
-    from personal_os.source_lifecycle.ports import (
-        LifecycleDeviceContext,
-        LifecyclePolicyDecision,
-        LifecyclePolicyOutcome,
-    )
-
     delete_command = SourceLifecycleCommand(
         source_id=source_id,
-        event_id=_uuid7(),
+        event_id=uuid7(),
         idempotency_key="delete-1",
         operation=LifecycleOperation.DELETE,
         expected_version_id=seeded.current_version_id,
@@ -388,7 +369,7 @@ async def test_snapshot_open_tombstone_count_matches_postgres_state(
         target_locator=None,
         tombstone_id=None,
         policy_revision=1,
-        client_timestamp=_dt(2026, 8, 20, 1, 2, 3, tzinfo=UTC),
+        client_timestamp=datetime(2026, 8, 20, 1, 2, 3, tzinfo=UTC),
     )
     delete_decision = LifecyclePolicyDecision(
         workspace_id=workspace.workspace_id,

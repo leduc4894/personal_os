@@ -128,8 +128,6 @@ NOT BACKLOG rows):
 - No equality cross-check remains for snapshot tombstone counts — the snapshot
   API exposes a global count, so the test asserts inclusively (`>=`); an
   equality check would need a per-scope count API.
-- Redundant function-local imports remain in the open-tombstone-count test.
-- Dead `second_locator` in `_seed_lifecycle_evidence`.
 
 ## Next actions
 
