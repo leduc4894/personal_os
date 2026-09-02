@@ -34,6 +34,10 @@
 import { sha256Hex } from "../exclusion-policy/canonical-json";
 import type { FrozenFingerprint } from "../journal/contracts";
 import type { JournalStoreErrorReason } from "../journal/sqlite-database";
+import {
+  buildRollbackSiblingLocator,
+  buildTempSiblingLocator,
+} from "./atomic-vault-mutation";
 import type {
   ApplyFailureStage,
   DeviceSyncReason,
@@ -43,31 +47,13 @@ import type {
 
 // --- the frozen sibling naming ------------------------------------------------------------------------
 
-const TEMP_SIBLING_SUFFIX = "device-sync-tmp";
-const ROLLBACK_SIBLING_SUFFIX = "device-sync-rb";
-
-function parentPrefixOf(locator: string): string {
-  const lastSlash = locator.lastIndexOf("/");
-  return lastSlash === -1 ? "" : `${locator.slice(0, lastSlash)}/`;
-}
+// The sibling naming lives in the shared mutation primitive this writer
+// consumes; the re-export keeps this module's public surface unchanged.
+export { buildRollbackSiblingLocator, buildTempSiblingLocator };
 
 function baseNameOf(locator: string): string {
   const lastSlash = locator.lastIndexOf("/");
   return lastSlash === -1 ? locator : locator.slice(lastSlash + 1);
-}
-
-/**
- * The same-directory hidden temporary sibling of one target locator:
- * `notes/.a.md.device-sync-tmp-<token>`. Same directory guarantees the
- * staging write never crosses a folder boundary the Vault owns.
- */
-export function buildTempSiblingLocator(targetLocator: string, token: string): string {
-  return `${parentPrefixOf(targetLocator)}.${baseNameOf(targetLocator)}.${TEMP_SIBLING_SUFFIX}-${token}`;
-}
-
-/** The same-directory hidden rollback sibling holding the verified old bytes. */
-export function buildRollbackSiblingLocator(targetLocator: string, token: string): string {
-  return `${parentPrefixOf(targetLocator)}.${baseNameOf(targetLocator)}.${ROLLBACK_SIBLING_SUFFIX}-${token}`;
 }
 
 // --- the apply inputs and outcomes ---------------------------------------------------------------------
