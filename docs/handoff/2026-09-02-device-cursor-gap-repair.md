@@ -69,15 +69,15 @@ in the module docstring).
 ## Deferred items (verdicts)
 
 - **Journey-test `console.log` leftovers** (GAP/ED PLAN debug lines, ~1243-1245 and
-  ~1412, from earlier round commit `8cc9515`) — out of scope (pre-existing, another
-  round's journeys); BACKLOG row added 2026-09-02, implement before the next
-  device-sync live round.
-- **Stale cross-reference in the retained closed-reason row** (BACKLOG L27 still
-  says "see the 2026-09-01 device-sync rows below") — out of scope: that row belongs
-  to the closed-reason-surfacing domain; its own trigger ("after the
-  device-manifest recovery fixes land") is now satisfied, so its owner should
-  refresh the row text (and the live parity note below) on the next touch. The
-  existing row is that item's BACKLOG index — no duplicate row added.
+  ~1412, from earlier round commit `8cc9515`) — HANDLED in the post-plan cleanup
+  (same branch, 2026-09-02): all five debug lines deleted, journey file 10/10
+  green, `tsc --noEmit` clean; the interim BACKLOG row was removed on completion.
+- **Stale cross-reference in the retained closed-reason row** — HANDLED in the
+  post-plan cleanup: the row now states its three device-manifest blockers have
+  all landed (login origin `f87b1d3`, pass-stall fix in the 2026-09-01 round,
+  cursor-gap repair this branch) and its fired trigger was replaced by the file's
+  standard operator-evidence gate (`Before Child 9 operations acceptance`). The
+  remaining readback work belongs to the closed-reason-surfacing domain.
 - **Live parity of the "frozen open run" premise** — the reproduction's
   frozen-open-server-run deadlock is harness-verified and code-traced, but the live
   2026-09-01 shape is still inference. Next actions carry the re-verification; not
@@ -91,6 +91,4 @@ in the module docstring).
 1. On the next device-sync live round (the closed-reason row's trigger — now
    satisfied): confirm a delete-and-recreate Repair sync converges on the real
    stack, and let the closed-reason-surfacing owner refresh their BACKLOG row.
-2. Delete the journey debug `console.log` lines in the next journey-file edit
-   (BACKLOG row 2026-09-02 device-sync).
-3. Merge `device-cursor-gap-repair` per the finishing-branch decision.
+2. Merge `device-cursor-gap-repair` per the finishing-branch decision.
