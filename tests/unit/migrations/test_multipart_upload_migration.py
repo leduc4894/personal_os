@@ -234,7 +234,7 @@ def test_multipart_revision_extends_the_manifest_client_activity_head() -> None:
 
 def test_multipart_revision_is_chained_below_the_operation_size_bound_head() -> None:
     scripts = ScriptDirectory.from_config(Config(str(ALEMBIC_INI_PATH)))
-    assert scripts.get_heads() == ["20260902_01"]
+    assert scripts.get_heads() == ["20260902_02"]
     revision = scripts.get_revision(MULTIPART_REVISION)
     assert revision is not None
     assert revision.down_revision == MANIFEST_CLIENT_ACTIVITY_REVISION

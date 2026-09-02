@@ -431,6 +431,27 @@ def _reflected_column_facts(conn: psycopg.Connection[Any], table_name: str) -> d
     }
 
 
+#: The dismissal-retirement revision ``20260902_02`` drops the obsolete
+#: nullable ``totp_prompt_dismissed_at`` beyond the authentication head this
+#: suite pins. The DML metadata describes the current head, so the reflected
+#: authentication-head ``user_credentials`` carries exactly this column
+#: extra, with its original ``20260816_01`` facts; every other reflected
+#: column must still match the metadata exactly.
+_RETIRED_DISMISSAL_COLUMN_FACTS: dict[str, tuple[str, int | None, str]] = {
+    "totp_prompt_dismissed_at": ("timestamp with time zone", None, "YES"),
+}
+
+
+def _assert_reflected_columns_match_the_dml_metadata(
+    conn: psycopg.Connection[Any], table_name: str
+) -> None:
+    """Exact column reflection against the DML metadata, plus the known drift."""
+    expected = _expected_column_facts(SOURCE_STORE_TABLES[table_name])
+    if table_name == "user_credentials":
+        expected = {**expected, **_RETIRED_DISMISSAL_COLUMN_FACTS}
+    assert _reflected_column_facts(conn, table_name) == expected, table_name
+
+
 def _reflected_constraints(conn: psycopg.Connection[Any], table_name: str) -> dict[str, str]:
     return {
         row[0]: row[1]
@@ -510,10 +531,7 @@ def _reflected_authentication_catalog(conn: psycopg.Connection[Any]) -> dict[str
 def _assert_authentication_catalog_matches_contracts(conn: psycopg.Connection[Any]) -> None:
     """Exact-head reflection: columns, constraints, indexes and foreign keys."""
     for table_name in sorted(AUTH_TABLES):
-        metadata_table = SOURCE_STORE_TABLES[table_name]
-        assert _reflected_column_facts(conn, table_name) == _expected_column_facts(
-            metadata_table
-        ), table_name
+        _assert_reflected_columns_match_the_dml_metadata(conn, table_name)
         assert _reflected_constraints(conn, table_name) == CONSTRAINT_MANIFEST[table_name], (
             table_name
         )
@@ -617,9 +635,7 @@ def test_authentication_schema_upgrade_from_empty_database(
     assert _current_revision(conn) == AUTH_REVISION
     assert _knowledge_tables(conn) == BASELINE_TABLES | AUTH_TABLES
     for table_name in AUTH_TABLES:
-        assert _reflected_column_facts(conn, table_name) == _expected_column_facts(
-            SOURCE_STORE_TABLES[table_name]
-        ), table_name
+        _assert_reflected_columns_match_the_dml_metadata(conn, table_name)
 
 
 # --- Database-enforced matrix checks -----------------------------------------
@@ -706,9 +722,8 @@ def _seed_baseline_graph(conn: psycopg.Connection[Any]) -> None:
 
 _INSERT_USER_CREDENTIALS_SQL = (
     "INSERT INTO knowledge.user_credentials "
-    "(user_id, workspace_id, password_hash, credential_revision, "
-    " totp_prompt_dismissed_at, password_changed_at) "
-    "VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)"
+    "(user_id, workspace_id, password_hash, credential_revision, password_changed_at) "
+    "VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)"
 )
 
 _INSERT_WEB_SESSION_SQL = (
@@ -906,14 +921,14 @@ def test_authentication_matrix_checks_reject_inconsistent_rows(
     _assert_rejected(
         conn,
         _INSERT_USER_CREDENTIALS_SQL,
-        (_USER_ID, _WORKSPACE_ID, "not-a-phc-hash", 1, None),
+        (_USER_ID, _WORKSPACE_ID, "not-a-phc-hash", 1),
         expected_sqlstate="23514",
         expected_constraint="ck_user_credentials__password_hash",
     )
     _assert_rejected(
         conn,
         _INSERT_USER_CREDENTIALS_SQL,
-        (_USER_ID, _WORKSPACE_ID, _PHC_HASH, 0, None),
+        (_USER_ID, _WORKSPACE_ID, _PHC_HASH, 0),
         expected_sqlstate="23514",
         expected_constraint="ck_user_credentials__credential_revision",
     )

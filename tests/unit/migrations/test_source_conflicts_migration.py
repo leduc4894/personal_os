@@ -147,7 +147,9 @@ def _named_constraints(table: Any) -> dict[str, Any]:
 
 def test_revision_stacks_directly_on_the_terminal_locator_head() -> None:
     scripts = ScriptDirectory.from_config(Config(str(ALEMBIC_INI_PATH)))
-    assert scripts.get_heads() == [SOURCE_CONFLICTS_REVISION]
+    # The dismissal-retirement revision ``20260902_02`` stacks beyond the
+    # source-conflict revision, so the single graph head moved past it.
+    assert scripts.get_heads() == ["20260902_02"]
     revision = scripts.get_revision(SOURCE_CONFLICTS_REVISION)
     assert revision is not None
     assert revision.down_revision == TERMINAL_LOCATOR_REMEDIATION_REVISION

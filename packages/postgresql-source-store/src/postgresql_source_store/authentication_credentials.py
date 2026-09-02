@@ -843,7 +843,6 @@ class CredentialStore:
                 .values(
                     password_hash=command.new_password_hash,
                     credential_revision=next_credential_revision,
-                    totp_prompt_dismissed_at=None,
                     password_changed_at=command.database_now,
                     updated_at=command.database_now,
                 )

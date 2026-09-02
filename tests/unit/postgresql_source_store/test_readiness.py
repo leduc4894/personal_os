@@ -96,7 +96,7 @@ def test_probe_satisfies_canonical_database_readiness_probe_protocol() -> None:
 
 @pytest.mark.asyncio
 async def test_readiness_accepts_connectivity_and_exact_single_head() -> None:
-    engine = ScriptedEngine(connectivity=1, revisions=("20260902_01",))
+    engine = ScriptedEngine(connectivity=1, revisions=("20260902_02",))
     await PostgresqlReadinessProbe(engine).check()
     assert engine.executed_sql == [
         "SELECT 1",

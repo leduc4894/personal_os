@@ -215,7 +215,6 @@ user_credentials: Final[Table] = Table(
     Column("workspace_id", sa.Uuid(), nullable=False),
     Column("password_hash", sa.String(length=255), nullable=False),
     Column("credential_revision", sa.BigInteger(), nullable=False),
-    Column("totp_prompt_dismissed_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
     Column("password_changed_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
     Column("created_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
     Column("updated_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),

@@ -51,6 +51,13 @@ DEVICE_SYNC_REVISION: str = "20260826_01"
 DOWNLOAD_ENTRY_ECHO_REVISION: str = "20260826_02"
 SCHEMA_NAME: str = "knowledge"
 
+#: Columns the dismissal-retirement revision ``20260902_02`` drops after the
+#: authentication head: the DML metadata describes the current head, so the
+#: replayed ``20260816_01`` tables carry exactly these columns extra.
+RETIREMENT_DROPPED_COLUMNS: dict[str, frozenset[str]] = {
+    "user_credentials": frozenset({"totp_prompt_dismissed_at"}),
+}
+
 EXPECTED_AUTH_TABLES = {
     "user_credentials",
     "web_sessions",
@@ -727,17 +734,18 @@ def _in_list_values(expression: str) -> frozenset[str]:
 
 def test_alembic_graph_has_exactly_one_head_beyond_the_authentication_revision() -> None:
     # Subsequent policy, small-file, lifecycle, device sync, multipart,
-    # grant-poll bucket kind, device-sync scale index and terminal locator
-    # remediation revisions stack on this revision, so the single graph head
-    # moved past authentication.
+    # grant-poll bucket kind, device-sync scale index, terminal locator
+    # remediation and source-conflict revisions stack on this revision, and
+    # the dismissal-retirement revision ``20260902_02`` stacks beyond those,
+    # so the single graph head moved past authentication.
     script_directory = _script_directory()
-    assert script_directory.get_heads() == ["20260902_01"]
+    assert script_directory.get_heads() == ["20260902_02"]
 
 
 def test_authentication_revision_stacks_on_the_canonical_baseline_root() -> None:
     script_directory = _script_directory()
     revisions = list(script_directory.walk_revisions())
-    assert len(revisions) == 17
+    assert len(revisions) == 18
     baseline = script_directory.get_revision(BASELINE_REVISION)
     assert baseline is not None
     assert baseline.down_revision is None
@@ -750,8 +758,8 @@ def test_authentication_revision_stacks_on_the_canonical_baseline_root() -> None
 
 def test_canonical_revision_constant_is_the_current_graph_head() -> None:
     # The canonical revision authority always pins the current graph head; the
-    # source-conflict migration ``20260902_01`` is that head now.
-    assert CANONICAL_POSTGRESQL_SCHEMA_REVISION == "20260902_01"
+    # dismissal-retirement revision ``20260902_02`` is that head now.
+    assert CANONICAL_POSTGRESQL_SCHEMA_REVISION == "20260902_02"
 
 
 # ---------------------------------------------------------------------------
@@ -774,7 +782,14 @@ def test_dml_metadata_covers_every_authentication_column_and_type() -> None:
         assert dml_table.schema == SCHEMA_NAME, table_name
         dml_columns = {column.name: _column_signature(column) for column in dml_table.columns}
         migration_columns = {
-            column.name: _column_signature(column) for column in migration_table.columns
+            column.name: _column_signature(column)
+            for column in migration_table.columns
+            # The dismissal-retirement revision ``20260902_02`` drops the
+            # obsolete nullable dismissal timestamp after the authentication
+            # head; the DML metadata describes the current head, so the
+            # replayed authentication tables carry exactly these columns
+            # extra and every other column must still match exactly.
+            if column.name not in RETIREMENT_DROPPED_COLUMNS.get(table_name, frozenset())
         }
         assert dml_columns == migration_columns, table_name
 

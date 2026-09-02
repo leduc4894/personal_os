@@ -3,16 +3,18 @@
 The Alembic migrations ``20260813_01`` (baseline), ``20260816_01``
 (authentication schema), ``20260817_01`` (exclusion policy schema),
 ``20260818_01`` (small-file sync operations), ``20260820_01`` (source
-lifecycle schema), ``20260826_01`` (device sync schema) and ``20260902_01``
-(source-conflict schema) are the DDL authority. This test
+lifecycle schema), ``20260826_01`` (device sync schema), ``20260902_01``
+(source-conflict schema) and ``20260902_02`` (dismissal-timestamp
+retirement) are the DDL authority. This test
 loads the migration modules, replays their ``upgrade()`` against a recording
 stub of ``alembic.op`` (including the policy migration's
-``add_column``/``alter_column`` evolution of ``projection_intents``) and
-compares the forty schema-qualified tables the migrations create with
-the typed DML metadata in ``postgresql_source_store.tables``: identical table
-names, schema, column names, column types and nullability, with full coverage
-in both directions and no ``create_all()`` path anywhere in the adapter
-package.
+``add_column``/``alter_column`` evolution of ``projection_intents`` and the
+retirement revision's ``drop_column`` of the obsolete dismissal timestamp)
+and compares the forty schema-qualified tables the migrations create with
+the typed DML metadata in ``postgresql_source_store.tables``: identical
+table names, schema, column names, column types and nullability, with full
+coverage in both directions and no ``create_all()`` path anywhere in the
+adapter package.
 """
 
 from __future__ import annotations
@@ -50,6 +52,7 @@ MIGRATION_GLOBS: tuple[str, ...] = (
     "20260901_02*.py",
     "20260901_03*.py",
     "20260902_01*.py",
+    "20260902_02*.py",
 )
 MIGRATION_DIRECTORY = REPO_ROOT / "migrations" / "versions"
 PACKAGE_SOURCE_ROOT = (
@@ -168,7 +171,11 @@ class _RecordingAlembicOp:
         self._table(table_name).append_column(column)
 
     def drop_column(self, table_name: str, column_name: str, **kwargs: Any) -> None:
-        self._table(table_name).drop_column(column_name)
+        # SQLAlchemy Core tables have no public ``drop_column``; the recorded
+        # table drops the column through its column collection instead, so a
+        # later revision's drop survives the chain replay.
+        table = self._table(table_name)
+        table._columns.remove(table.columns[column_name])
 
     def alter_column(self, table_name: str, column_name: str, **kwargs: Any) -> None:
         column = self._table(table_name).columns[column_name]
