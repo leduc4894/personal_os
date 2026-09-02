@@ -4,8 +4,11 @@ Branch: `plugin-single-origin-login`. Final code commit: `6b60df0`
 (`docs: standardize plugin public origin`); branch block `f87b1d3` (plugin
 login transport opens the server-minted verification URL, no client-side
 derivation), `742e89c` (API admits native device-grant requests without an
-`Origin` header), `6b60df0` (one-origin tooling/docs). The closure commit
-(this handoff plus the BACKLOG edit) is the branch tip.
+`Origin` header), `6b60df0` (one-origin tooling/docs), and the in-plan
+tooling fix `f16854b` (`fix: add bootstrap-only mode to live acceptance
+helper`). Closure commits: `348cbae` (first closure pass) and the branch
+tip `docs: record in-plan launcher hardening` (this handoff revision plus
+the BACKLOG row deletions).
 
 Resolved deferred finding (BACKLOG row retired by this round): the 2026-09-01
 device-sync row "Plugin login button derives the browser URL from
@@ -100,35 +103,41 @@ counts, timestamps. No origin, hostname, URL, path, user code, or credential.
 
 ## Deferred items (verdicts)
 
-Both deferred items are tooling observations from the live round, out of
-this plan's code scope; each got exactly one BACKLOG row:
+Both tooling findings from the live round were first mis-filed as
+deferred; both were then fixed in-plan, in-session (per the workspace
+AGENTS.md rule that simple in-scope findings must land before the final
+handoff), and their BACKLOG rows deleted:
 
-- **`serve-live-ci.sh` does not fail on its own bind failure** (owner:
-  local launcher tooling maintenance). The launcher's readiness probe can
-  be answered by any process on the API port, so the first `up` reported
-  all-ready while the fresh API had died — the incident above. Verdict:
-  defer; recovery was complete and verified, but the launcher should fail
-  closed. BACKLOG row (local-launcher tooling), implement by: at next
-  `.local` launcher maintenance, before the next disposable live journey.
-- **`tools/obsidian_live_acceptance_bootstrap.py` has no WDIO-free /
-  bootstrap-only mode** (owner: live-acceptance tooling). Journey prep had
-  to drive the helper's phases programmatically (same module, same
-  commands, same closed failure codes, mirroring
-  `_execute_live_acceptance` up to and including policy publication,
-  minus the WDIO tail). Verdict: defer; the phases are the helper's own
-  and outcomes were verified, but a `--bootstrap-only` flag removes the
-  seam. BACKLOG row (live-acceptance tooling), implement by: before the
-  next manual Desktop live journey.
+- **`serve-live-ci.sh` bind-failure gating — FIXED in-plan (2026-09-02).**
+  The launcher now proves the services IT launched are still alive and
+  logged no startup/bind failure (`Application startup failed` /
+  `Exiting.` / address-in-use markers) BEFORE trusting any readiness 200,
+  and re-checks launched-PID liveness after the probes — a stale foreign
+  process holding the port can no longer make a dead fresh service read
+  as ready. Per repo policy this is a working-tree edit to the gitignored
+  `.local/serve-live-ci.sh` (decision 1): verified with `bash -n`,
+  deliberately untracked, lands in no commit.
+- **`tools/obsidian_live_acceptance_bootstrap.py` WDIO-free mode — FIXED
+  in-plan, commit `f16854b`.** The helper gained a `--bootstrap-only`
+  flag that reuses the same phases through policy publication
+  (journey-ready success token `obsidian_live_bootstrap_ready`, exit 0)
+  and skips the WDIO tail; the closed failure-code taxonomy is unchanged.
+  Future manual Desktop journey prep uses the flag instead of driving
+  the helper's phases programmatically.
 
-No in-scope finding was deferred; the previously deferred plugin-login
-finding is resolved and its row deleted (done work lives in git history).
+No finding from this plan remains deferred; the previously deferred
+plugin-login finding is resolved and its row deleted (done work lives in
+git history).
 
 ## Next actions
 
 1. Branch review/merge per the SDD controller's plan (whole-branch review
    still owns the workspace ledger).
-2. If the launcher/bootstrap tooling rows are picked up, land them before
-   the next disposable live journey (see the two BACKLOG rows above).
+2. The hardened launcher lives only in the working tree (gitignored
+   `.local/`, decision 1) — treat the bind/liveness gating as part of the
+   machine-local contract when re-creating `.local/` elsewhere, and use
+   `tools/obsidian_live_acceptance_bootstrap.py --bootstrap-only`
+   (commit `f16854b`) for future manual Desktop journey prep.
 3. The dedicated test vault's plugin copy remains pointed at the now-torn
    -down CI project — expected post-round state; any future journey
    re-runs bootstrap per its runbook.
@@ -138,4 +147,5 @@ finding is resolved and its row deleted (done work lives in git history).
 SDD workspace:
 `.superpowers/sdd/2026-09-02-plugin-single-origin-login/` retained until
 the whole-branch review; sanitized step evidence lives in
-`task-4-live-report.md` and `task-4-journey-evidence.md` there.
+`task-4-live-report.md`, `task-4-journey-evidence.md`, and the in-plan
+tooling-fix report `task-4-fix-report.md` there.
