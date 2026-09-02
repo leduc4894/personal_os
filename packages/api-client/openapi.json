@@ -6265,7 +6265,7 @@
       },
       "TotpEnrollmentData": {
         "additionalProperties": false,
-        "description": "The response payload of one enrollment action (spec 10.1).\n\n``start`` carries the one-time offer — never a secret or pending row in\nany other surface.",
+        "description": "The response payload of one enrollment action (spec 10.1).\n\nOnly ``start`` returns an enrollment: the Base32 secret and pending\nrow appear here and in no other response surface.",
         "properties": {
           "action": {
             "$ref": "#/components/schemas/TotpEnrollmentAction"

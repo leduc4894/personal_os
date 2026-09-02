@@ -183,8 +183,8 @@ class TotpEnrollmentOfferData(BaseModel):
 class TotpEnrollmentData(BaseModel):
     """The response payload of one enrollment action (spec 10.1).
 
-    ``start`` carries the one-time offer — never a secret or pending row in
-    any other surface.
+    Only ``start`` returns an enrollment: the Base32 secret and pending
+    row appear here and in no other response surface.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
