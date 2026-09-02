@@ -15,11 +15,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
+import json
 import os
 import subprocess
 import sys
 from asyncio import AbstractEventLoop
 from collections.abc import Callable, Iterator
+from contextlib import redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -147,6 +150,34 @@ def _run_stack_steps(project_name: str) -> None:
         assert return_code == 0, f"local-stack step '{argv[0]}' failed with code {return_code}"
 
 
+def _read_stack_state(project_name: str) -> str:
+    """Read the closed stack state without exposing command output to test logs."""
+
+    captured = io.StringIO()
+    with redirect_stdout(captured):
+        return_code = stack_main(["status", "--project-name", project_name])
+    try:
+        payload = json.loads(captured.getvalue())
+    except json.JSONDecodeError:
+        pytest.fail("disposable stack status was not a JSON document")
+    state = payload.get("state") if isinstance(payload, dict) else None
+    if return_code == 0 and state == "ready":
+        return "ready"
+    if return_code == 2 and state == "absent":
+        return "absent"
+    pytest.fail("disposable stack must be ready or absent before integration ownership is chosen")
+
+
+def _prepare_source_publication_stack(project_name: str) -> bool:
+    """Return whether this fixture owns lifecycle cleanup for the CI stack."""
+
+    state = _read_stack_state(project_name)
+    if state == "ready":
+        return False
+    _run_stack_steps(project_name)
+    return True
+
+
 def _run_alembic_upgrade_head(environment: dict[str, str]) -> None:
     result = subprocess.run(
         ["uv", "run", "alembic", "upgrade", "head"],
@@ -203,7 +234,7 @@ class SourcePublicationStack:
 def source_publication_stack() -> Iterator[SourcePublicationStack]:
     project_name = _require_project_name()
     port = _resolved_host_port()
-    _run_stack_steps(project_name)
+    owns_stack = _prepare_source_publication_stack(project_name)
     environment = _build_sanitized_environment(port)
     _run_alembic_upgrade_head(environment)
     settings = load_database_runtime_settings(environ=environment)
@@ -213,19 +244,20 @@ def source_publication_stack() -> Iterator[SourcePublicationStack]:
             project_name=project_name, port=port, settings=settings, password=password
         )
     finally:
-        try:
-            stack_main(
-                [
-                    "reset",
-                    "--project-name",
-                    project_name,
-                    "--confirm-project",
-                    project_name,
-                    "--non-interactive",
-                ]
-            )
-        finally:
-            _assert_project_absent(project_name)
+        if owns_stack:
+            try:
+                stack_main(
+                    [
+                        "reset",
+                        "--project-name",
+                        project_name,
+                        "--confirm-project",
+                        project_name,
+                        "--non-interactive",
+                    ]
+                )
+            finally:
+                _assert_project_absent(project_name)
 
 
 @dataclass(frozen=True, slots=True)
