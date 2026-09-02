@@ -1611,20 +1611,33 @@ async function createPluginForOnloadContract(): Promise<RegisteringPlugin> {
 }
 
 describe("Obsidian plugin onload contract (conflict inbox task 9)", () => {
-  it("opens the Conflict Inbox only through an explicit plugin command", async () => {
-    const plugin = await createPluginForOnloadContract();
-    await plugin.onload();
-    expect(plugin.registeredCommandIds()).toContain("open-conflict-inbox");
-  });
+  // Both contract tests run the REAL onload(): the journal stack loads the
+  // sql.js wasm binary and walks the fail-closed startup path, which can
+  // exceed the default 5s deadline under coverage instrumentation — the
+  // explicit deadline keeps the real-journey contract stable on loaded
+  // machines without weakening what it proves.
+  it(
+    "opens the Conflict Inbox only through an explicit plugin command",
+    async () => {
+      const plugin = await createPluginForOnloadContract();
+      await plugin.onload();
+      expect(plugin.registeredCommandIds()).toContain("open-conflict-inbox");
+    },
+    20_000,
+  );
 
-  it("registers the established command surface alongside the inbox command", async () => {
-    const plugin = await createPluginForOnloadContract();
-    await plugin.onload();
-    expect(plugin.registeredCommandIds()).toEqual([
-      "copy-sync-diagnostics",
-      "run-sync-self-check",
-      "retry-connection",
-      "open-conflict-inbox",
-    ]);
-  });
+  it(
+    "registers the established command surface alongside the inbox command",
+    async () => {
+      const plugin = await createPluginForOnloadContract();
+      await plugin.onload();
+      expect(plugin.registeredCommandIds()).toEqual([
+        "copy-sync-diagnostics",
+        "run-sync-self-check",
+        "retry-connection",
+        "open-conflict-inbox",
+      ]);
+    },
+    20_000,
+  );
 });
