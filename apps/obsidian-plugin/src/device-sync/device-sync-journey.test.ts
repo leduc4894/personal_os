@@ -1240,9 +1240,6 @@ describe("device-sync two-device journeys (production stack)", () => {
     // manifest repair proved the universe through C, gap included.
     expect(state.appliedSequence).toBe(5);
     expect(state.acknowledgedSequence).toBe(5);
-    console.log("GAP PLAN:", JSON.stringify(server.plannedActions().map((a) => [a.action_kind, a.checkpoint_locator])));
-    console.log("GAP TRAIL:", stack.trail.rendered());
-    console.log("GAP VAULT KEYS:", JSON.stringify(await stack.vault.listRegularFilePaths()));
     expect(stack.vault.fileBytes(LOCATOR)).toEqual(bytes);
     expect(server.completions).toHaveLength(1);
   });
@@ -1409,8 +1406,6 @@ describe("device-sync two-device journeys (production stack)", () => {
     // The deletion survives (no upload of vanished bytes); the stale
     // upload settled as the closed action-stale reason with exactly one
     // readable observation, and the run still completed and converged.
-    console.log("ED PLAN:", JSON.stringify(server.plannedActions().map((a) => a.action_kind)));
-    console.log("ED TRAIL:", JSON.stringify(stack.trail.rendered()));
     expect(stack.vault.has(LOCATOR)).toBe(false);
     expect(stack.trail.rendered()).toContain("device_manifest_action_stale");
     const state = stack.deviceSyncRepository.readState();
