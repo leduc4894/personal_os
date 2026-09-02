@@ -291,6 +291,23 @@ def test_an_open_content_conflict_without_a_resolvable_media_type_fails_closed()
     )
 
 
+def test_an_edit_remote_delete_conflict_offers_only_keep_remote() -> None:
+    """The resolver refuses publishing onto a deleted source (Task 10).
+
+    The candidate IS verified content, but the remote state is the
+    deletion: keep_local/save_merged would publish onto a deleted source
+    and close with the typed state guard, so neither unappliable choice is
+    ever offered.
+    """
+
+    edit_remote_delete = _conflict(conflict_kind=ConflictKind.EDIT_REMOTE_DELETE)
+    for candidate_media_type in ("text/markdown", "application/octet-stream", None):
+        choices = allowed_resolution_choices(
+            edit_remote_delete, candidate_media_type=candidate_media_type
+        )
+        assert choices == (ConflictResolutionKind.KEEP_REMOTE,)
+
+
 def test_a_byteless_conflict_offers_only_keep_remote() -> None:
     delete_remote_edit = _conflict(
         conflict_kind=ConflictKind.DELETE_REMOTE_EDIT,

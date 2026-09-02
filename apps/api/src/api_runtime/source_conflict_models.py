@@ -249,17 +249,26 @@ def allowed_resolution_choices(
     retained bytes — offers only ``keep_remote``: applying its deletion
     intent is lifecycle-domain work the resolver refuses under
     ``deletion_apply_unsupported``, and that guard covers every publishing
-    choice, so neither ``keep_local`` nor ``save_merged`` may be offered. A
-    content candidate always offers the two whole-object choices, and the
-    merge choice joins them only when the candidate's resolved media type
-    is the spec-named ``text/markdown``; an unresolvable media type fails
-    closed to the two whole-object choices rather than promising a merge
-    the Inbox cannot run.
+    choice, so neither ``keep_local`` nor ``save_merged`` may be offered.
+    An ``edit_remote_delete`` conflict offers only ``keep_remote`` for the
+    same "never offer an unappliable choice" discipline: the resolver
+    refuses to publish onto a deleted source (its own closed state guard),
+    so accepting the reviewed deletion is the only applicable outcome; the
+    retained candidate bytes stay immutable evidence, and restoring the
+    local edit remains a fresh create the journal lane owns. A
+    ``stale_content`` or content-bearing ``locator_collision`` candidate
+    always offers the two whole-object choices, and the merge choice joins
+    them only when the candidate's resolved media type is the spec-named
+    ``text/markdown``; an unresolvable media type fails closed to the two
+    whole-object choices rather than promising a merge the Inbox cannot
+    run.
     """
 
     if conflict.status is not ConflictStatus.OPEN:
         return ()
     if conflict.candidate.candidate_kind is not ConflictCandidateKind.CONTENT:
+        return (ConflictResolutionKind.KEEP_REMOTE,)
+    if conflict.conflict_kind is ConflictKind.EDIT_REMOTE_DELETE:
         return (ConflictResolutionKind.KEEP_REMOTE,)
     choices = (ConflictResolutionKind.KEEP_REMOTE, ConflictResolutionKind.KEEP_LOCAL)
     if candidate_media_type is not None and is_mergeable_conflict_media_type(candidate_media_type):
