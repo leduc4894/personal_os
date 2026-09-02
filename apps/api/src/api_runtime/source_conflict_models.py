@@ -176,6 +176,20 @@ class SourceConflictResolutionData(BaseModel):
     completed_at: datetime
 
 
+class SourceConflictCandidateData(BaseModel):
+    """The opaque receipt of one verified resolution-candidate upload.
+
+    The single safe member of the ``save_merged`` upload answer: the
+    verified object reference the resolve command carries verbatim. No
+    digest, object key, provider detail or content byte is a member, so
+    none can ever render.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    verified_candidate_object_id: UUID
+
+
 def _input_invalid(reason: SafeToken | None = None) -> SourceConflictError:
     if reason is None:
         return SourceConflictError(ErrorCode.SOURCE_CONFLICT_INPUT_INVALID)
@@ -305,6 +319,7 @@ def source_conflict_resolution_data(
 __all__ = [
     "DEFAULT_CONFLICT_PAGE_LIMIT",
     "MAX_CONFLICT_PAGE_LIMIT",
+    "SourceConflictCandidateData",
     "SourceConflictData",
     "SourceConflictDetailData",
     "SourceConflictPageData",

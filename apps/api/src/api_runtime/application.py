@@ -118,6 +118,7 @@ from api_runtime.small_file_sync_models import (
 from api_runtime.small_file_sync_routes import create_small_file_sync_route_endpoints
 from api_runtime.source_conflict_composition import SourceConflictRuntime
 from api_runtime.source_conflict_models import (
+    SourceConflictCandidateData,
     SourceConflictDetailData,
     SourceConflictPageData,
     SourceConflictResolutionData,
@@ -994,6 +995,22 @@ def _register_source_conflict_routes(
         methods=["POST"],
         operation_id="resolveSourceConflict",
         response_model=ApiEnvelope[SourceConflictResolutionData],
+    )
+    app.add_api_route(
+        "/api/sync/conflicts/{conflict_id}/candidate",
+        endpoints.upload_candidate,
+        methods=["PUT"],
+        operation_id="uploadSourceConflictResolutionCandidate",
+        response_model=ApiEnvelope[SourceConflictCandidateData],
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "description": ("The exact raw merged-result bytes of the resolution candidate"),
+                "content": {
+                    "application/octet-stream": {"schema": {"type": "string", "format": "binary"}}
+                },
+            }
+        },
     )
 
 

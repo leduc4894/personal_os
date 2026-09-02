@@ -27,6 +27,9 @@ IDEMPOTENCY_KEY_INVALID: SafeToken = SafeToken.parse("idempotency_key_invalid")
 BASE_VERSION_INVALID: SafeToken = SafeToken.parse("base_version_invalid")
 REMOTE_VERSION_INVALID: SafeToken = SafeToken.parse("remote_version_invalid")
 CANDIDATE_INVALID: SafeToken = SafeToken.parse("candidate_invalid")
+CANDIDATE_DIGEST_INVALID: SafeToken = SafeToken.parse("candidate_digest_invalid")
+CANDIDATE_SIZE_INVALID: SafeToken = SafeToken.parse("candidate_size_invalid")
+CANDIDATE_MEDIA_TYPE_INVALID: SafeToken = SafeToken.parse("candidate_media_type_invalid")
 DELETION_APPLY_UNSUPPORTED: SafeToken = SafeToken.parse("deletion_apply_unsupported")
 LOCATOR_INVALID: SafeToken = SafeToken.parse("locator_invalid")
 RESOLUTION_KIND_INVALID: SafeToken = SafeToken.parse("resolution_kind_invalid")
@@ -39,7 +42,9 @@ CANDIDATE_OBJECT_INVALID: SafeToken = SafeToken.parse("candidate_object_invalid"
 #: dedicated ``deletion_apply_unsupported`` token names the resolution
 #: boundary where a ``keep_local`` resolution would have to apply a
 #: deletion intent: applying a deletion is lifecycle-domain work this
-#: domain refuses, distinct from a malformed candidate shape.
+#: domain refuses, distinct from a malformed candidate shape. The three
+#: ``candidate_*_invalid`` declaration tokens name the resolution-candidate
+#: upload boundary's declared digest, size and media-type grammars.
 CONFLICT_INPUT_INVALID_REASONS: tuple[SafeToken, ...] = (
     CONFLICT_KIND_INVALID,
     WORKSPACE_ID_INVALID,
@@ -50,6 +55,9 @@ CONFLICT_INPUT_INVALID_REASONS: tuple[SafeToken, ...] = (
     BASE_VERSION_INVALID,
     REMOTE_VERSION_INVALID,
     CANDIDATE_INVALID,
+    CANDIDATE_DIGEST_INVALID,
+    CANDIDATE_SIZE_INVALID,
+    CANDIDATE_MEDIA_TYPE_INVALID,
     DELETION_APPLY_UNSUPPORTED,
     LOCATOR_INVALID,
     RESOLUTION_KIND_INVALID,

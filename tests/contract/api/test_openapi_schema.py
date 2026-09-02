@@ -90,6 +90,9 @@ ROUTE_OPERATION_IDS: dict[str, dict[str, str]] = {
     "/api/sync/conflicts/{conflict_id}": {"get": "getSourceConflict"},
     "/api/sync/conflicts/{conflict_id}/evidence/{role}": {"get": "downloadSourceConflictEvidence"},
     "/api/sync/conflicts/{conflict_id}/resolve": {"post": "resolveSourceConflict"},
+    "/api/sync/conflicts/{conflict_id}/candidate": {
+        "put": "uploadSourceConflictResolutionCandidate"
+    },
 }
 
 #: The documented binary-success exceptions to the JSON envelope (spec 7.4

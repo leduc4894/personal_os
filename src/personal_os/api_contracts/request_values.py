@@ -77,6 +77,7 @@ class ApiRouteTemplate(StrEnum):
     SYNC_CONFLICT = "/api/sync/conflicts/{conflict_id}"
     SYNC_CONFLICT_EVIDENCE = "/api/sync/conflicts/{conflict_id}/evidence/{role}"
     SYNC_CONFLICT_RESOLUTION = "/api/sync/conflicts/{conflict_id}/resolve"
+    SYNC_CONFLICT_CANDIDATE = "/api/sync/conflicts/{conflict_id}/candidate"
     OPENAPI_DOCUMENT = "/api/openapi.json"
     UNMATCHED = "unmatched"
 
@@ -248,6 +249,7 @@ SOURCE_CONFLICT_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset(
         ApiRouteTemplate.SYNC_CONFLICT,
         ApiRouteTemplate.SYNC_CONFLICT_EVIDENCE,
         ApiRouteTemplate.SYNC_CONFLICT_RESOLUTION,
+        ApiRouteTemplate.SYNC_CONFLICT_CANDIDATE,
     }
 )
 

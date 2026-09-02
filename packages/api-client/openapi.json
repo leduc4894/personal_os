@@ -1658,6 +1658,51 @@
         "title": "ApiEnvelope[SmallFileTerminalResultData]",
         "type": "object"
       },
+      "ApiEnvelope_SourceConflictCandidateData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceConflictCandidateData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[SourceConflictCandidateData]",
+        "type": "object"
+      },
       "ApiEnvelope_SourceConflictDetailData_": {
         "additionalProperties": false,
         "properties": {
@@ -5402,6 +5447,22 @@
         "title": "SmallFileTerminalResultKind",
         "type": "string"
       },
+      "SourceConflictCandidateData": {
+        "additionalProperties": false,
+        "description": "The opaque receipt of one verified resolution-candidate upload.\n\nThe single safe member of the ``save_merged`` upload answer: the\nverified object reference the resolve command carries verbatim. No\ndigest, object key, provider detail or content byte is a member, so\nnone can ever render.",
+        "properties": {
+          "verified_candidate_object_id": {
+            "format": "uuid",
+            "title": "Verified Candidate Object Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "verified_candidate_object_id"
+        ],
+        "title": "SourceConflictCandidateData",
+        "type": "object"
+      },
       "SourceConflictData": {
         "additionalProperties": false,
         "description": "One conflict's safe metadata: the frozen read model on the wire.\n\nEvery member is an opaque identifier, a closed label or a normalized\nUTC timestamp. The credential-derived workspace is deliberately absent\n(it is the caller's own), and no locator snapshot, object key, digest\nor provider detail ever renders. The optional members follow the\ndomain's exact status shapes: an open conflict carries no resolution\nevidence, a resolving one the attempt identity, a resolved one the\nwinner and — only under a publishing choice — the resulting version,\nand a superseded one its successor.",
@@ -7446,6 +7507,73 @@
           }
         ],
         "summary": "Get Conflict"
+      }
+    },
+    "/api/sync/conflicts/{conflict_id}/candidate": {
+      "put": {
+        "description": "Admit one verified resolution candidate for an open conflict.\n\nThe ``save_merged`` upload half of spec 5.2: the conflict is re-read\ninside the credential workspace (an unknown or cross-workspace\nconflict answers the closed 404 before anything else), only an open\ncontent-bearing conflict accepts a candidate, and the exclusion\npolicy is re-evaluated over exactly that read BEFORE any byte\ncrosses — a denial answers the closed 403 with the uploader still\nclosed. The declared digest and canonical media type travel as\nheaders and the exact size as the request's declared content length;\nthe bounded stream limiter enforces the server-owned single-part\nceiling and read deadline, the verified-object path proves the\nbytes, and the answer is only the opaque verified object reference\nthe resolve command carries verbatim. A mismatch between the\ndeclared fingerprint and the delivered bytes is the closed integrity\nfailure — no candidate is ever admitted from unverified bytes.",
+        "operationId": "uploadSourceConflictResolutionCandidate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conflict_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conflict Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-candidate-sha256",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "X-Candidate-Sha256",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-candidate-media-type",
+            "required": true,
+            "schema": {
+              "title": "X-Candidate-Media-Type",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "description": "The exact raw merged-result bytes of the resolution candidate",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_SourceConflictCandidateData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Upload Candidate"
       }
     },
     "/api/sync/conflicts/{conflict_id}/evidence/{role}": {

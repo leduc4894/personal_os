@@ -703,3 +703,225 @@ def test_offline_defaults_are_an_empty_first_page(harness: SourceConflictRouteHa
     data = response.json()["data"]
     assert data["conflicts"] == []
     assert data["has_more"] is False
+
+
+# --- the resolution-candidate upload (spec 5.2 / Task 10) ---------------------------------------
+
+
+def _candidate_headers(harness: SourceConflictRouteHarness, content: bytes) -> dict[str, str]:
+    from hashlib import sha256
+
+    return {
+        **bearer(harness),
+        "Content-Type": "application/octet-stream",
+        "x-candidate-sha256": sha256(content).hexdigest(),
+        "x-candidate-media-type": "text/markdown",
+    }
+
+
+def test_candidate_upload_admits_verified_merged_bytes_content_addressed(
+    harness: SourceConflictRouteHarness,
+) -> None:
+    """The save_merged upload answers only the opaque object reference."""
+
+    harness.state.open_conflicts = (_conflict(),)
+    merged = b"# merged three-way result\n"
+    response = harness.client.put(
+        f"/api/sync/conflicts/{_CONFLICT_ID}/candidate",
+        headers=_candidate_headers(harness, merged),
+        content=merged,
+    )
+    assert response.status_code == 200, response.text
+    data = dict(response.json()["data"])
+    assert set(data) == {"verified_candidate_object_id"}
+    assert response.headers["cache-control"] == "no-store"
+
+    repeat = harness.client.put(
+        f"/api/sync/conflicts/{_CONFLICT_ID}/candidate",
+        headers=_candidate_headers(harness, merged),
+        content=merged,
+    )
+    assert repeat.status_code == 200, repeat.text
+    assert dict(repeat.json()["data"]) == data
+    # Content-addressed admission: identical bytes, one object reference.
+    assert len(harness.state.admitted_candidate_digests) == 1
+
+
+def test_candidate_upload_demands_the_device_credential(
+    harness: SourceConflictRouteHarness,
+) -> None:
+    merged = b"merged"
+    response = harness.client.put(
+        f"/api/sync/conflicts/{_CONFLICT_ID}/candidate",
+        headers={
+            "x-candidate-sha256": "0" * 64,
+            "x-candidate-media-type": "text/markdown",
+        },
+        content=merged,
+    )
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "device_credential_invalid"
+
+
+def test_candidate_upload_answers_unknown_conflict_before_any_admission(
+    harness: SourceConflictRouteHarness,
+) -> None:
+    merged = b"merged"
+    response = harness.client.put(
+        f"/api/sync/conflicts/{uuid4()}/candidate",
+        headers=_candidate_headers(harness, merged),
+        content=merged,
+    )
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "source_conflict_not_found"
+    assert harness.state.candidate_upload_calls == []
+
+
+def test_candidate_upload_rejects_terminal_conflict_and_byteless_candidate(
+    harness: SourceConflictRouteHarness,
+) -> None:
+    from datetime import timedelta
+
+    harness.state.open_conflicts = (
+        _conflict(
+            status=ConflictStatus.RESOLVED,
+            resolution_kind=ConflictResolutionKind.KEEP_REMOTE,
+            resolution_event_id=uuid4(),
+            closed_at=_CAPTURED_AT + timedelta(minutes=5),
+        ),
+    )
+    merged = b"merged"
+    terminal = harness.client.put(
+        f"/api/sync/conflicts/{_CONFLICT_ID}/candidate",
+        headers=_candidate_headers(harness, merged),
+        content=merged,
+    )
+    assert terminal.status_code == 409
+    assert terminal.json()["error"]["code"] == "source_conflict_state_invalid"
+
+    harness.state.open_conflicts = (
+        _conflict(
+            conflict_kind=ConflictKind.DELETE_REMOTE_EDIT,
+            candidate=ConflictCandidate.delete(),
+        ),
+    )
+    byteless = harness.client.put(
+        f"/api/sync/conflicts/{_CONFLICT_ID}/candidate",
+        headers=_candidate_headers(harness, merged),
+        content=merged,
+    )
+    assert byteless.status_code == 422
+    error = byteless.json()["error"]
+    assert error["code"] == "source_conflict_input_invalid"
+    assert error["details"]["reason"] == "candidate_invalid"
+    assert harness.state.candidate_upload_calls == []
+
+
+def test_candidate_upload_rechecks_policy_before_any_byte_crosses(
+    harness: SourceConflictRouteHarness,
+) -> None:
+    harness.state.open_conflicts = (_conflict(),)
+    harness.state.is_policy_denied = True
+    merged = b"merged"
+    response = harness.client.put(
+        f"/api/sync/conflicts/{_CONFLICT_ID}/candidate",
+        headers=_candidate_headers(harness, merged),
+        content=merged,
+    )
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "exclusion_policy_denied"
+    assert harness.state.candidate_upload_calls == []
+
+
+def test_candidate_upload_rejects_unverified_bytes_with_the_integrity_code(
+    harness: SourceConflictRouteHarness,
+) -> None:
+    harness.state.open_conflicts = (_conflict(),)
+    delivered = b"the bytes actually delivered"
+    from hashlib import sha256
+
+    response = harness.client.put(
+        f"/api/sync/conflicts/{_CONFLICT_ID}/candidate",
+        headers={
+            **bearer(harness),
+            "Content-Type": "application/octet-stream",
+            "x-candidate-sha256": sha256(b"different declared bytes").hexdigest(),
+            "x-candidate-media-type": "text/markdown",
+        },
+        content=delivered,
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "source_conflict_evidence_integrity_failed"
+    assert harness.state.admitted_candidate_digests == set()
+
+
+def test_candidate_upload_rejects_non_canonical_media_type_declaration(
+    harness: SourceConflictRouteHarness,
+) -> None:
+    harness.state.open_conflicts = (_conflict(),)
+    merged = b"merged"
+    from hashlib import sha256
+
+    response = harness.client.put(
+        f"/api/sync/conflicts/{_CONFLICT_ID}/candidate",
+        headers={
+            **bearer(harness),
+            "Content-Type": "application/octet-stream",
+            "x-candidate-sha256": sha256(merged).hexdigest(),
+            "x-candidate-media-type": "not a canonical media type",
+        },
+        content=merged,
+    )
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "source_conflict_input_invalid"
+    assert error["details"]["reason"] == "candidate_media_type_invalid"
+
+
+def test_candidate_upload_maps_uploader_dependency_outage_retryable(
+    harness: SourceConflictRouteHarness,
+) -> None:
+    harness.state.open_conflicts = (_conflict(),)
+    harness.state.candidate_upload_error = SourceConflictError(
+        ErrorCode.SOURCE_CONFLICT_DEPENDENCY_UNAVAILABLE
+    )
+    merged = b"merged"
+    response = harness.client.put(
+        f"/api/sync/conflicts/{_CONFLICT_ID}/candidate",
+        headers=_candidate_headers(harness, merged),
+        content=merged,
+    )
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "source_conflict_dependency_unavailable"
+    assert response.json()["error"]["retryable"] is True
+
+
+def test_candidate_upload_missing_digest_header_closes_validation(
+    harness: SourceConflictRouteHarness,
+) -> None:
+    harness.state.open_conflicts = (_conflict(),)
+    merged = b"merged"
+    response = harness.client.put(
+        f"/api/sync/conflicts/{_CONFLICT_ID}/candidate",
+        headers={
+            **bearer(harness),
+            "Content-Type": "application/octet-stream",
+            "x-candidate-media-type": "text/markdown",
+        },
+        content=merged,
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "api_request_validation_failed"
+    assert harness.state.candidate_upload_calls == []
+
+
+def test_candidate_declared_size_parser_closes_each_invalid_shape() -> None:
+    from api_runtime.source_conflict_routes import parse_candidate_declared_size_bytes
+
+    assert parse_candidate_declared_size_bytes("12") == 12
+    assert parse_candidate_declared_size_bytes("0") == 0
+    for invalid in (None, "", "not-a-number", "-1", "16777217", "99999999999999999999"):
+        with pytest.raises(SourceConflictError) as captured:
+            parse_candidate_declared_size_bytes(invalid)
+        assert captured.value.error_code is ErrorCode.SOURCE_CONFLICT_INPUT_INVALID
+        assert captured.value.safe_details["reason"].value == "candidate_size_invalid"

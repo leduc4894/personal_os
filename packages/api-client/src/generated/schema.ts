@@ -734,6 +734,41 @@ export type paths = {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/sync/conflicts/{conflict_id}/candidate": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        /**
+         * Upload Candidate
+         * @description Admit one verified resolution candidate for an open conflict.
+         *
+         *     The ``save_merged`` upload half of spec 5.2: the conflict is re-read
+         *     inside the credential workspace (an unknown or cross-workspace
+         *     conflict answers the closed 404 before anything else), only an open
+         *     content-bearing conflict accepts a candidate, and the exclusion
+         *     policy is re-evaluated over exactly that read BEFORE any byte
+         *     crosses — a denial answers the closed 403 with the uploader still
+         *     closed. The declared digest and canonical media type travel as
+         *     headers and the exact size as the request's declared content length;
+         *     the bounded stream limiter enforces the server-owned single-part
+         *     ceiling and read deadline, the verified-object path proves the
+         *     bytes, and the answer is only the opaque verified object reference
+         *     the resolve command carries verbatim. A mismatch between the
+         *     declared fingerprint and the delivered bytes is the closed integrity
+         *     failure — no candidate is ever admitted from unverified bytes.
+         */
+        readonly put: operations["uploadSourceConflictResolutionCandidate"];
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/sync/conflicts/{conflict_id}/evidence/{role}": {
         readonly parameters: {
             readonly query?: never;
@@ -1697,6 +1732,21 @@ export type components = {
         /** ApiEnvelope[SmallFileTerminalResultData] */
         readonly ApiEnvelope_SmallFileTerminalResultData_: {
             readonly data: components["schemas"]["SmallFileTerminalResultData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[SourceConflictCandidateData] */
+        readonly ApiEnvelope_SourceConflictCandidateData_: {
+            readonly data: components["schemas"]["SourceConflictCandidateData"] | null;
             readonly error: components["schemas"]["ApiErrorBody"] | null;
             /**
              * Request Id
@@ -3435,6 +3485,22 @@ export type components = {
          */
         readonly SmallFileTerminalResultKind: "committed" | "no_change";
         /**
+         * SourceConflictCandidateData
+         * @description The opaque receipt of one verified resolution-candidate upload.
+         *
+         *     The single safe member of the ``save_merged`` upload answer: the
+         *     verified object reference the resolve command carries verbatim. No
+         *     digest, object key, provider detail or content byte is a member, so
+         *     none can ever render.
+         */
+        readonly SourceConflictCandidateData: {
+            /**
+             * Verified Candidate Object Id
+             * Format: uuid
+             */
+            readonly verified_candidate_object_id: string;
+        };
+        /**
          * SourceConflictData
          * @description One conflict's safe metadata: the frozen read model on the wire.
          *
@@ -4674,6 +4740,36 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["ApiEnvelope_SourceConflictDetailData_"];
+                };
+            };
+        };
+    };
+    readonly uploadSourceConflictResolutionCandidate: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header: {
+                readonly "x-candidate-sha256": string;
+                readonly "x-candidate-media-type": string;
+            };
+            readonly path: {
+                readonly conflict_id: string;
+            };
+            readonly cookie?: never;
+        };
+        /** @description The exact raw merged-result bytes of the resolution candidate */
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/octet-stream": string;
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_SourceConflictCandidateData_"];
                 };
             };
         };

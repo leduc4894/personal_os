@@ -30,11 +30,12 @@ call evidence.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Final, Protocol
-from uuid import UUID, uuid4
+from typing import Any, Final, Protocol, cast
+from uuid import UUID, uuid4, uuid7
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -84,6 +85,11 @@ from postgresql_source_store.conflict_store import (
 )
 from postgresql_source_store.engine import apply_transaction_bounds
 from postgresql_source_store.policy_enforcement import compose_policy_enforcement
+from postgresql_source_store.publication_store import (
+    content_object_by_hash_statement,
+    content_object_metadata_matches,
+    content_object_upsert_statement,
+)
 from postgresql_source_store.tables import (
     content_objects,
     source_versions,
@@ -147,18 +153,43 @@ class ConflictEvidenceCatalog(Protocol):
     ) -> ConflictEvidenceDescriptor: ...
 
 
+class ConflictCandidateUploader(Protocol):
+    """The verified admission seam for one resolution candidate (spec 5.2).
+
+    A ``save_merged`` resolution references an already-uploaded verified
+    object; this seam is the wire-facing half that admits one such object:
+    the declared digest, size and media type cross with the raw stream, the
+    object store's bounded verification path proves the bytes, and the
+    hash-keyed canonical admission deduplicates identical content exactly
+    like the publication transaction. The answer is only the opaque
+    verified object reference — no digest, object key or provider detail
+    ever crosses back.
+    """
+
+    async def upload_candidate(
+        self,
+        *,
+        conflict: SourceConflict,
+        declared: ExpectedObject,
+        stream: AsyncIterator[bytes],
+        diagnostic_context: DiagnosticContext,
+    ) -> UUID: ...
+
+
 @dataclass(frozen=True, slots=True)
 class SourceConflictRuntime:
     """One composed source conflict runtime the conflict routes consume.
 
     ``service`` orchestrates capture and resolution; ``store`` serves the
     safe reads (open listing and detail); ``policy_guard`` is the recheck
-    the evidence stream must pass before any byte opens; ``evidence`` is
-    the verified streaming reader; ``evidence_catalog`` resolves the safe
-    content metadata the detail choices and the exact content headers
-    need. ``aclose`` is the serve graph's disposal hook — closing the R2
-    client and its spool reservations on shutdown; the offline graph owns
-    no resource and leaves it unset.
+    the evidence stream and candidate upload must pass before any byte
+    crosses; ``evidence`` is the verified streaming reader;
+    ``evidence_catalog`` resolves the safe content metadata the detail
+    choices and the exact content headers need; ``candidate_uploader``
+    admits one verified resolution candidate and answers its opaque object
+    reference. ``aclose`` is the serve graph's disposal hook — closing the
+    R2 client and its spool reservations on shutdown; the offline graph
+    owns no resource and leaves it unset.
     """
 
     service: SourceConflictService
@@ -166,6 +197,7 @@ class SourceConflictRuntime:
     policy_guard: SourceConflictPolicyGuard
     evidence: ConflictEvidenceReader
     evidence_catalog: ConflictEvidenceCatalog
+    candidate_uploader: ConflictCandidateUploader
     aclose: Callable[[], Awaitable[None]] | None = None
 
 
@@ -387,6 +419,67 @@ class PostgresqlConflictEvidenceReader:
         ).one_or_none()
 
 
+class PostgresqlConflictCandidateUploader:
+    """Verified admission of one resolution candidate into canonical state.
+
+    The wire-facing half of spec 5.2's ``save_merged`` discipline: the
+    declared digest, size and canonical media type cross with the raw
+    stream, the object store's bounded spool/verification path proves the
+    bytes before anything may reference them, and the identical hash-keyed
+    canonical admission the publication transaction performs deduplicates
+    equal content — an interrupted upload repeated with the same bytes
+    admits the same object. The answer is only the opaque verified object
+    reference. No byte, digest, key or locator is logged or echoed.
+    """
+
+    def __init__(self, *, engine: AsyncEngine, objects: CanonicalObjectStore) -> None:
+        self._engine = engine
+        self._objects = objects
+
+    async def upload_candidate(
+        self,
+        *,
+        conflict: SourceConflict,
+        declared: ExpectedObject,
+        stream: AsyncIterator[bytes],
+        diagnostic_context: DiagnosticContext,
+    ) -> UUID:
+        del diagnostic_context
+        try:
+            receipt = await self._objects.store_stream(
+                stream,
+                declared.size_bytes,
+                declared.media_type.value,
+                declared.content_digest.hexadecimal,
+            )
+        except ObjectStorageError as cause:
+            raise _map_evidence_object_failure(cause) from cause
+        if (
+            receipt.content_digest != declared.content_digest
+            or receipt.size_bytes != declared.size_bytes
+            or receipt.media_type != declared.media_type
+        ):
+            raise SourceConflictError(ErrorCode.SOURCE_CONFLICT_EVIDENCE_INTEGRITY_FAILED)
+        try:
+            async with self._engine.begin() as connection:
+                await connection.execute(content_object_upsert_statement(uuid7(), receipt))
+                row = (
+                    await connection.execute(
+                        content_object_by_hash_statement(receipt.content_digest.hexadecimal)
+                    )
+                ).one_or_none()
+        except sa.exc.SQLAlchemyError:
+            raise SourceConflictError(ErrorCode.SOURCE_CONFLICT_DEPENDENCY_UNAVAILABLE) from None
+        if row is None or not content_object_metadata_matches(
+            receipt,
+            object_key=row.object_key,
+            byte_size=row.byte_size,
+            media_type=row.media_type,
+        ):
+            raise SourceConflictError(ErrorCode.SOURCE_CONFLICT_EVIDENCE_INTEGRITY_FAILED)
+        return cast(UUID, row.content_object_id)
+
+
 def compose_source_conflicts(
     *,
     engine: AsyncEngine,
@@ -419,6 +512,7 @@ def compose_source_conflicts(
         logger=logger,
     )
     evidence_reader = PostgresqlConflictEvidenceReader(engine=engine, objects=object_store)
+    candidate_uploader = PostgresqlConflictCandidateUploader(engine=engine, objects=object_store)
     service = SourceConflictService(
         store=store,
         policy_guard=policy_guard,
@@ -431,6 +525,7 @@ def compose_source_conflicts(
         policy_guard=policy_guard,
         evidence=evidence_reader,
         evidence_catalog=evidence_reader,
+        candidate_uploader=candidate_uploader,
         aclose=object_store.close,
     )
 
@@ -474,6 +569,14 @@ class OfflineSourceConflictState:
     describe_calls: list[tuple[UUID, ConflictEvidenceRole, UUID]] = field(default_factory=list)
     #: The offline mirror of the conflict store's event-identity replay map.
     captured_by_event: dict[tuple[UUID, UUID], SourceConflict] = field(default_factory=dict)
+    #: Resolution-candidate upload knobs and captured evidence: the typed
+    #: error knob (``None`` keeps the verifying default), one call record
+    #: per attempt, and the content-addressed reference map proving the
+    #: same bytes always answer the same opaque reference.
+    candidate_upload_error: SourceConflictError | None = None
+    candidate_upload_calls: list[tuple[UUID, ExpectedObject]] = field(default_factory=list)
+    candidate_object_by_digest: dict[str, UUID] = field(default_factory=dict)
+    admitted_candidate_digests: set[str] = field(default_factory=set)
 
 
 class OfflineSourceConflictStore:
@@ -714,6 +817,45 @@ class OfflineConflictEvidenceCatalog:
         )
 
 
+class OfflineConflictCandidateUploader:
+    """Offline resolution-candidate double verifying the declared bytes.
+
+    Performs the real size/digest verification over the streamed bytes,
+    admits the verified digest into the offline state (content-addressed:
+    the same bytes always answer the same object reference for one test),
+    and honors the state's typed error knob. The double never retains or
+    echoes the bytes — only the opaque reference and the digest set cross.
+    """
+
+    def __init__(self, state: OfflineSourceConflictState) -> None:
+        self._state = state
+
+    async def upload_candidate(
+        self,
+        *,
+        conflict: SourceConflict,
+        declared: ExpectedObject,
+        stream: AsyncIterator[bytes],
+        diagnostic_context: DiagnosticContext,
+    ) -> UUID:
+        del diagnostic_context
+        self._state.candidate_upload_calls.append((conflict.conflict_id, declared))
+        if self._state.candidate_upload_error is not None:
+            raise self._state.candidate_upload_error
+        content = bytearray()
+        async for chunk in stream:
+            content.extend(chunk)
+        computed = hashlib.sha256(content).hexdigest()
+        if len(content) != declared.size_bytes or computed != declared.content_digest.hexadecimal:
+            raise SourceConflictError(ErrorCode.SOURCE_CONFLICT_EVIDENCE_INTEGRITY_FAILED)
+        reference = self._state.candidate_object_by_digest.get(computed)
+        if reference is None:
+            reference = uuid4()
+            self._state.candidate_object_by_digest[computed] = reference
+            self._state.admitted_candidate_digests.add(computed)
+        return reference
+
+
 def compose_offline_source_conflicts(
     *,
     state: OfflineSourceConflictState | None = None,
@@ -734,18 +876,22 @@ def compose_offline_source_conflicts(
         policy_guard=policy_guard,
         evidence=OfflineConflictEvidenceReader(offline_state),
         evidence_catalog=OfflineConflictEvidenceCatalog(offline_state),
+        candidate_uploader=OfflineConflictCandidateUploader(offline_state),
     )
 
 
 __all__ = [
+    "ConflictCandidateUploader",
     "ConflictEvidenceCatalog",
     "ConflictEvidenceDescriptor",
+    "OfflineConflictCandidateUploader",
     "OfflineConflictClock",
     "OfflineConflictEvidenceCatalog",
     "OfflineConflictEvidenceReader",
     "OfflineConflictPolicyGuard",
     "OfflineSourceConflictState",
     "OfflineSourceConflictStore",
+    "PostgresqlConflictCandidateUploader",
     "PostgresqlConflictEvidenceReader",
     "SourceConflictRuntime",
     "compose_offline_source_conflicts",

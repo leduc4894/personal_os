@@ -1,35 +1,40 @@
 """Source conflict Conflict Inbox endpoints (Child 8 spec 6).
 
-The four endpoints are created per composed runtime: each closure binds the
+The five endpoints are created per composed runtime: each closure binds the
 source conflict service, the conflict store, the policy guard, the verified
-evidence reader and its catalog, plus the device-token service of the
-composed web authentication runtime, so the application factory only
-registers the semantic operation ids and response models. The surface
-accepts exactly the ``obsidian_sync`` access Bearer credential — session
-cookies, refresh and polling credentials close with the registered
-invalid-credential code — and derives the workspace from the resolved token
-context; no request field ever selects one, so no call can reach a
-cross-workspace conflict. The routes are thin adapters: they validate wire
-data through the strict boundary models, map closed domain errors, and
-carry no conflict business logic. The evidence stream re-reads the
-conflict inside the credential workspace, re-evaluates the exclusion
-policy over exactly that read, and only then resolves the exact expected
-object and opens the verified reader — the first chunk is primed inside
-the endpoint, so membership, policy and integrity failures render the
-canonical JSON envelope instead of a broken stream, and the exact bytes
-carry their exact canonical content headers. Responses carry the canonical
-envelope and ``Cache-Control: no-store`` and never expose a locator, raw
-object key, digest, provider receipt or any cross-workspace identity.
+evidence reader with its catalog and the verified resolution-candidate
+uploader, plus the device-token service of the composed web authentication
+runtime, so the application factory only registers the semantic operation
+ids and response models. The surface accepts exactly the ``obsidian_sync``
+access Bearer credential — session cookies, refresh and polling credentials
+close with the registered invalid-credential code — and derives the
+workspace from the resolved token context; no request field ever selects
+one, so no call can reach a cross-workspace conflict. The routes are thin
+adapters: they validate wire data through the strict boundary models, map
+closed domain errors, and carry no conflict business logic. The evidence
+stream re-reads the conflict inside the credential workspace, re-evaluates
+the exclusion policy over exactly that read, and only then resolves the
+exact expected object and opens the verified reader — the first chunk is
+primed inside the endpoint, so membership, policy and integrity failures
+render the canonical JSON envelope instead of a broken stream, and the
+exact bytes carry their exact canonical content headers. The candidate
+upload follows the same ordering — workspace-scoped read, open
+content-bearing shape, policy recheck, then the bounded verified-object
+admission — and answers only the opaque object reference. Responses carry
+the canonical envelope and ``Cache-Control: no-store`` and never expose a
+locator, raw object key, digest, provider receipt or any cross-workspace
+identity.
 """
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Annotated, Final, cast
 from uuid import UUID
 
-from fastapi import Depends, Query, Request
+from fastapi import Depends, Header, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials
 
@@ -38,10 +43,12 @@ from api_runtime.authentication_dependencies import (
     ACCESS_BEARER_SCHEME,
     extract_bearer_credential,
 )
+from api_runtime.small_file_sync_routes import bounded_content_stream
 from api_runtime.source_conflict_composition import SourceConflictRuntime
 from api_runtime.source_conflict_models import (
     DEFAULT_CONFLICT_PAGE_LIMIT,
     MAX_CONFLICT_PAGE_LIMIT,
+    SourceConflictCandidateData,
     SourceConflictDetailData,
     SourceConflictPageData,
     SourceConflictResolutionData,
@@ -57,6 +64,8 @@ from personal_os.authentication.contracts import AuthenticatedDeviceContext, Dev
 from personal_os.authentication.errors import AuthenticationError
 from personal_os.diagnostics.context import DiagnosticContext, current_diagnostic_context
 from personal_os.error_contracts.codes import ErrorCode
+from personal_os.object_storage import CanonicalMediaType, ContentDigest, ExpectedObject
+from personal_os.small_file_sync.contracts import MAX_SINGLE_PART_FILE_SIZE_BYTES
 from personal_os.source_conflicts.contracts import (
     ConflictCandidateKind,
     ConflictEvidenceRole,
@@ -64,19 +73,34 @@ from personal_os.source_conflicts.contracts import (
     ConflictStatus,
     SourceConflict,
 )
-from personal_os.source_conflicts.errors import SourceConflictError
+from personal_os.source_conflicts.errors import (
+    CANDIDATE_DIGEST_INVALID,
+    CANDIDATE_INVALID,
+    CANDIDATE_MEDIA_TYPE_INVALID,
+    CANDIDATE_SIZE_INVALID,
+    SourceConflictError,
+)
 
 #: Response headers every JSON source conflict response carries.
 _NO_STORE_HEADERS: Final[dict[str, str]] = {"cache-control": "no-store"}
 
+#: Wire grammar of the resolution-candidate digest declaration header: the
+#: exact lowercase SHA-256 text form (64 hex characters).
+_CANDIDATE_SHA256_HEADER_PATTERN: Final[str] = r"^[0-9a-f]{64}$"
+
+#: The bounded read window of one candidate upload stream, mirroring the
+#: publication content stream's read deadline.
+CANDIDATE_READ_DEADLINE_SECONDS: Final[float] = 120.0
+
 
 @dataclass(frozen=True, slots=True)
 class SourceConflictRouteEndpoints:
-    """The four endpoint callables of the closed source conflict route set."""
+    """The five endpoint callables of the closed source conflict route set."""
 
     list_conflicts: Callable[..., Awaitable[JSONResponse]]
     get_conflict: Callable[..., Awaitable[JSONResponse]]
     download_evidence: Callable[..., Awaitable[StreamingResponse]]
+    upload_candidate: Callable[..., Awaitable[JSONResponse]]
     resolve_conflict: Callable[..., Awaitable[JSONResponse]]
 
 
@@ -89,6 +113,27 @@ def _bound_diagnostic_context() -> DiagnosticContext:
     return context
 
 
+def parse_candidate_declared_size_bytes(declared_size_text: str | None) -> int:
+    """Parse the candidate upload's declared byte size, or reject typed.
+
+    The declared size is the request's own ``Content-Length`` text; a
+    missing, malformed, negative or over-ceiling declaration closes with the
+    closed ``candidate_size_invalid`` reason of the input-validation
+    rejection before any byte crosses.
+    """
+
+    try:
+        declared_size_bytes = int(declared_size_text) if declared_size_text else -1
+    except ValueError:
+        declared_size_bytes = -1
+    if not 0 <= declared_size_bytes <= MAX_SINGLE_PART_FILE_SIZE_BYTES:
+        raise SourceConflictError(
+            ErrorCode.SOURCE_CONFLICT_INPUT_INVALID,
+            safe_details={"reason": CANDIDATE_SIZE_INVALID},
+        )
+    return declared_size_bytes
+
+
 def _request_id() -> UUID:
     context = current_diagnostic_context()
     if context is None:
@@ -97,7 +142,12 @@ def _request_id() -> UUID:
 
 
 def _success_json(
-    data: SourceConflictPageData | SourceConflictDetailData | SourceConflictResolutionData,
+    data: (
+        SourceConflictPageData
+        | SourceConflictDetailData
+        | SourceConflictResolutionData
+        | SourceConflictCandidateData
+    ),
 ) -> JSONResponse:
     envelope = success_envelope(request_id=_request_id(), data=data)
     return JSONResponse(
@@ -119,6 +169,7 @@ def create_source_conflict_route_endpoints(
     policy_guard = source_conflicts.policy_guard
     evidence_reader = source_conflicts.evidence
     evidence_catalog = source_conflicts.evidence_catalog
+    candidate_uploader = source_conflicts.candidate_uploader
 
     async def require_sync_device(
         request: Request,
@@ -286,6 +337,81 @@ def create_source_conflict_route_endpoints(
             },
         )
 
+    async def upload_candidate(
+        request: Request,
+        conflict_id: UUID,
+        x_candidate_sha256: Annotated[str, Header(pattern=_CANDIDATE_SHA256_HEADER_PATTERN)],
+        x_candidate_media_type: Annotated[str, Header()],
+        device: AuthenticatedDeviceContext = Depends(  # noqa: B008
+            require_sync_device
+        ),
+    ) -> JSONResponse:
+        """Admit one verified resolution candidate for an open conflict.
+
+        The ``save_merged`` upload half of spec 5.2: the conflict is re-read
+        inside the credential workspace (an unknown or cross-workspace
+        conflict answers the closed 404 before anything else), only an open
+        content-bearing conflict accepts a candidate, and the exclusion
+        policy is re-evaluated over exactly that read BEFORE any byte
+        crosses — a denial answers the closed 403 with the uploader still
+        closed. The declared digest and canonical media type travel as
+        headers and the exact size as the request's declared content length;
+        the bounded stream limiter enforces the server-owned single-part
+        ceiling and read deadline, the verified-object path proves the
+        bytes, and the answer is only the opaque verified object reference
+        the resolve command carries verbatim. A mismatch between the
+        declared fingerprint and the delivered bytes is the closed integrity
+        failure — no candidate is ever admitted from unverified bytes.
+        """
+        request.scope["route_template"] = ApiRouteTemplate.SYNC_CONFLICT_CANDIDATE
+        diagnostic_context = _bound_diagnostic_context()
+        conflict = await store.read(conflict_id, device.workspace_id, diagnostic_context)
+        if conflict.status is not ConflictStatus.OPEN:
+            raise SourceConflictError(ErrorCode.SOURCE_CONFLICT_STATE_INVALID)
+        if conflict.candidate.candidate_kind is not ConflictCandidateKind.CONTENT:
+            raise SourceConflictError(
+                ErrorCode.SOURCE_CONFLICT_INPUT_INVALID,
+                safe_details={"reason": CANDIDATE_INVALID},
+            )
+        await policy_guard.authorize_resolution(conflict, diagnostic_context)
+        try:
+            digest = ContentDigest.parse(x_candidate_sha256)
+        except ValueError:
+            raise SourceConflictError(
+                ErrorCode.SOURCE_CONFLICT_INPUT_INVALID,
+                safe_details={"reason": CANDIDATE_DIGEST_INVALID},
+            ) from None
+        try:
+            media_type = CanonicalMediaType.parse(x_candidate_media_type)
+        except ValueError:
+            raise SourceConflictError(
+                ErrorCode.SOURCE_CONFLICT_INPUT_INVALID,
+                safe_details={"reason": CANDIDATE_MEDIA_TYPE_INVALID},
+            ) from None
+        declared_size_bytes = parse_candidate_declared_size_bytes(
+            request.headers.get("content-length")
+        )
+        declared = ExpectedObject(
+            content_digest=digest,
+            size_bytes=declared_size_bytes,
+            media_type=media_type,
+        )
+        stream = bounded_content_stream(
+            request.stream(),
+            maximum_bytes=MAX_SINGLE_PART_FILE_SIZE_BYTES,
+            deadline_seconds=CANDIDATE_READ_DEADLINE_SECONDS,
+            monotonic_clock=time.monotonic,
+        )
+        verified_candidate_object_id = await candidate_uploader.upload_candidate(
+            conflict=conflict,
+            declared=declared,
+            stream=stream,
+            diagnostic_context=diagnostic_context,
+        )
+        return _success_json(
+            SourceConflictCandidateData(verified_candidate_object_id=verified_candidate_object_id)
+        )
+
     async def resolve_conflict(
         request: Request,
         conflict_id: UUID,
@@ -309,6 +435,7 @@ def create_source_conflict_route_endpoints(
         list_conflicts=list_conflicts,
         get_conflict=get_conflict,
         download_evidence=download_evidence,
+        upload_candidate=upload_candidate,
         resolve_conflict=resolve_conflict,
     )
 
