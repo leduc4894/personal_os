@@ -388,11 +388,10 @@ continues directly to the authenticated application without starting an
 enrollment. Security exposes the optional enrollment control when the user
 chooses to enable it.
 
-`POST /api/auth/totp/enrollments` accepts one strict discriminated action.
-`start` follows the enrollment flow below and requires recent
-re-authentication. `dismiss_initial_offer` requires an active session, exact
-Origin and CSRF proof, records `totp_prompt_dismissed_at`, returns no secret and
-does not create a pending credential. No additional dismissal endpoint exists.
+`POST /api/auth/totp/enrollments` accepts one strict discriminated action:
+`start`, which follows the enrollment flow below and requires recent
+re-authentication. Optional enrollment therefore begins from Security, while
+recovery replacement remains mandatory. No dismissal action or endpoint exists.
 
 Enrollment requires recent re-auth and:
 
@@ -713,7 +712,6 @@ user_id PK/FK
 workspace_id FK
 password_hash
 credential_revision
-totp_prompt_dismissed_at nullable
 password_changed_at
 created_at
 updated_at
@@ -873,7 +871,7 @@ PUT  /api/auth/password
 
 ```text
 POST   /api/auth/totp/verify
-POST   /api/auth/totp/enrollments  # action = start | dismiss_initial_offer
+POST   /api/auth/totp/enrollments  # action = start
 POST   /api/auth/totp/enrollments/{enrollment_id}/verify
 POST   /api/auth/totp/recovery
 POST   /api/auth/totp/recovery-codes/regenerate
