@@ -1,0 +1,114 @@
+# Source Conflict Capture and Resolution — Handoff
+
+- **Plan:** `docs/superpowers/plans/2026-09-02-source-conflict-capture-and-resolution.md`
+- **Spec:** `docs/superpowers/specs/2026-09-02-source-conflict-capture-and-resolution-design.md`
+- **Branch:** `source-conflict-capture-and-resolution` (from `master` @ `937508b`)
+- **Final code SHA:** `65e7714`
+- **Status:** COMPLETE for all automated gates — Tasks 1-10 done, every
+  non-mobile gate PASS. The ONE remaining plan obligation is the
+  operator-backed manual Desktop Conflict Inbox journey (prepared, NOT
+  run — see Next actions). Branch awaits that evidence, then merge
+  decision.
+
+## Gate status (evidence)
+
+| Gate | Result | Evidence |
+|---|---|---|
+| `uv run poe verify` | PASS (exit 0) | python 4605 passed / 21 skipped; obsidian-plugin 1441 passed (64 files, incl. the 8 conflict E2E journeys); web 163; all builds green. Full log tails in `.superpowers/sdd/2026-09-02-source-conflict-capture-and-resolution/task-10-report.md` §7 |
+| `uv run poe api-contract-check` | PASS (exit 0) | `api_contract_current`; OpenAPI snapshot + generated client regenerated for the two new routes (`uploadSmallFileConflictContent`, `uploadSourceConflictResolutionCandidate`) |
+| `CI=true bash .local/serve-live-ci.sh up knowledge-ci-source-conflicts-20260902` | PASS (exit 0) | api ready, web-admin ready (38000), tunnel `knowledge-api-verify` ready. Two bootstrap branches were diagnosed first — see Decisions #4 |
+| `CI=true LOCAL_STACK_TEST_PROJECT=knowledge-ci-source-conflicts-20260902 uv run poe device-sync-test` | PASS (exit 0) | 1859 passed / 2 skipped in 17m11s |
+| Conflict live-stack suites (`tests/integration/source_conflicts -m local_stack`) | PASS (exit 0) | 26 passed incl. the 7 race tests (`test_resolution_races.py`) |
+| Plugin `vitest run` / `type-check` / `lint` / `build` | PASS (all exit 0) | 1441 tests; `dist/main.js` built |
+| Manual Desktop Conflict Inbox journey | **PENDING — operator** | Runbook section ready (`docs/operations/source-conflict-resolution.md`); CI project left UP for the round; no manual gate claimed |
+| Physical Mobile matrix | Not attempted by design | Existing Child 9 backlog rows own it (see BACKLOG mobile-live rows) |
+
+Pre-existing master failures (lifecycle transactions, backup/restore, one
+projection dispatch, query-plans setup) did not surface in any selected
+gate run and were not touched.
+
+## What landed (Task 10; Tasks 1-9 in their task reports)
+
+1. `982816b` — A1+A3: `PUT /api/uploads/{operation_id}/conflict-content`
+   (capture over HTTP, publication route untouched) + `edit_remote_delete`
+   capture for the missing-source preflight branch with capture-time
+   deletion re-validation; wire-golden `conflict_capture` corpus entry.
+2. `55cc8c4` — A2: `PUT /api/sync/conflicts/{conflict_id}/candidate`
+   (digest/media-type headers, policy recheck before bytes, verified
+   admission, content-addressed) — the `save_merged` upload half.
+3. `504cbc5` — plugin bindings: conflict grant upload in the journal lane
+   (`blocked_conflict` only after the capture settles), conflict outcome
+   grant/identity parsing, `uploadResolutionCandidate` client, the REAL
+   verified-candidate uploader replacing the Task 9 interim.
+4. `91f2208` — `edit_remote_delete` offers only `keep_remote` (never an
+   unappliable publishing choice onto a deleted source).
+5. `71b5324` — races / privacy contract / table metadata / plugin E2E spec
+   (`test/specs/source-conflict-resolution.e2e.ts` in the vitest include).
+6. `7535887` — operations runbook `docs/operations/source-conflict-resolution.md`
+   + tombstone-runbook cross-link + `docs/README.md` operations section.
+7. `f1bf44f` — sanctioned the Child 8 surfaces in the no-public-API and
+   no-policy-bypass guards (pre-existing failures since Task 6/9, found by
+   the final `poe verify`).
+8. `d83209e` + `65e7714` — test stabilization (real-onload deadline) and
+   race-fixture fixes (unique salts, seeded version counts).
+
+## Decisions (interpretations of spec/brief, with reasons)
+
+1. **Capture upload as a sibling route** — surfacing a capture receipt on
+   the frozen `ApiEnvelope[SmallFileTerminalResultData]` upload route
+   would change a frozen contract (Task 6 ruling); the sibling
+   `/conflict-content` route keeps both wire shapes closed.
+2. **A2 as a direct conflict-keyed upload with declared headers** — the
+   carry hint's "new resolution-candidate operation" would need a
+   synthetic journal-event preflight identity (a resolution candidate is
+   not a journal event); the direct route follows the same verified-object
+   discipline (bounded ceiling, digest verification, policy recheck before
+   bytes, hash-keyed admission). Orphan admitted objects are
+   content-addressed and GC stays excluded by the plan.
+3. **Two-resolvers mandated snippet adapted** — with the Task 1-3 store a
+   two-fresh-identity gather always ends with the loser reading a terminal
+   row (typed `source_conflict_state_invalid`, spec §7 row 4 "no second
+   winner"), so `any(STALE_SUCCESSOR)` cannot hold there; the mandated
+   test name/gather/"at most one winning version" are kept, the
+   same-identity replay race and the remote-advance stale-successor race
+   are pinned separately in the same file.
+4. **Fresh-CI bootstrap branches (environment)** — (a) a stale
+   `.local/run-serve.py` held port 8000 (RESTART.md's stop-old-first rule);
+   terminated. (b) a fresh CI database has no identity/policy keyset, so
+   the API refuses startup (`exclusion_policy_not_initialized`); seeded
+   the DB-level half (`canonical_core_operations.py bootstrap-identity`,
+   `personal-api policy-key initialize`) per the acceptance-bootstrap
+   chain, after which `serve-live-ci.sh up` passed. The operator round
+   still runs the HTTP half (TOTP + policy publish) via
+   `tools/obsidian_live_acceptance_bootstrap.py`.
+5. **Binary safe-info panel (spec §5.2.2) — code stands without it.** The
+   Task 6 wire contract renders only opaque identifiers and closed labels;
+   adding size/hash members to the detail did not meet the Task 10 bar.
+   Deviation ruling recorded in the runbook; the binary journey shows the
+   two whole-object choices with no editor (E2E-pinned).
+
+## Deferred items (verdicts)
+
+| Item | Verdict |
+|---|---|
+| Manual Desktop Conflict Inbox journey | Operator gate, scheduled next (this handoff's Next actions); NOT deferred to BACKLOG — it is the plan's own remaining obligation, prepared end to end |
+| Physical Mobile acceptance matrix | Out of scope by plan (Child 9 gate); existing BACKLOG mobile-live rows own it — no new row |
+| Candidate GC / Web conflict UI / cursor-gap remediation | Out of scope by plan self-review; no row (owned by their own future plans) |
+| Sibling-orphan cleanup sweep (failed-apply staging siblings) | Out of Task 10's tested behavior; BACKLOG row added (maintenance) |
+| Shared stage/verify/replace core extraction (device-sync writer vs conflict applier) | Refactor-only; BACKLOG row added (maintenance) |
+
+## Next actions
+
+1. Operator runs the Desktop Conflict Inbox journey per
+   `docs/operations/source-conflict-resolution.md` against the live CI
+   project `knowledge-ci-source-conflicts-20260902` (stack is UP; run
+   `CI=true uv run python tools/obsidian_live_acceptance_bootstrap.py
+   --project-name knowledge-ci-source-conflicts-20260902 --wdio-spec
+   test/specs/device-sync-reconciliation.e2e.ts` first if the operator
+   round wants TOTP+policy seeded — or just its bootstrap phases).
+   Record sanitized evidence (outcome, reason token, count, timestamp).
+2. Codex verifies the API checkpoints after the journey (conflict
+   resolved, exactly one winning version, zero open conflicts).
+3. `bash .local/serve-live-ci.sh down` (leaves `knowledge-local` down).
+4. Merge decision for the branch; task reports live under
+   `.superpowers/sdd/2026-09-02-source-conflict-capture-and-resolution/`.
