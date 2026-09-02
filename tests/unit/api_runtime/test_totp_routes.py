@@ -327,7 +327,6 @@ def test_enrollment_start_returns_the_one_time_provisioning_uri(client: TestClie
     assert response.status_code == 200, response.text
     data = response.json()["data"]
     assert data["action"] == "start"
-    assert data["dismissed_at"] is None
     enrollment = data["enrollment"]
     assert enrollment["provisioning_uri"].startswith("otpauth://totp/")
     assert "secret=" in enrollment["provisioning_uri"]
@@ -353,7 +352,7 @@ def test_enrollment_start_requires_recent_reauthentication(client: TestClient) -
     assert response.headers["cache-control"] == "no-store"
 
 
-def test_dismiss_initial_offer_records_no_secret_and_no_pending_row(
+def test_enrollment_action_rejects_dismissal_with_validation_failure(
     client: TestClient,
 ) -> None:
     state = OfflineAuthenticationState(totp_active=False)
@@ -364,12 +363,9 @@ def test_dismiss_initial_offer_records_no_secret_and_no_pending_row(
             headers=authenticated_headers(cookies),
             json={"action": "dismiss_initial_offer"},
         )
-        assert response.status_code == 200, response.text
-        data = response.json()["data"]
-        assert data["action"] == "dismiss_initial_offer"
-        assert data["enrollment"] is None
-        assert data["dismissed_at"]
-        assert state.totp_prompt_dismissed_at is not None
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "api_request_validation_failed"
+        assert response.headers["cache-control"] == "no-store"
         assert state.totp_credential_rows == []
 
 

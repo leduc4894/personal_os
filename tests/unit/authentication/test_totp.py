@@ -178,10 +178,7 @@ def test_enrollment_expiry_is_ten_minutes() -> None:
 
 
 def test_enrollment_action_vocabulary_is_closed() -> None:
-    assert {action.value for action in TotpEnrollmentAction} == {
-        "start",
-        "dismiss_initial_offer",
-    }
+    assert {action.value for action in TotpEnrollmentAction} == {"start"}
 
 
 # --- recovery values ----------------------------------------------------------------------

@@ -225,29 +225,19 @@ def create_totp_route_endpoints(
         if outcome.public_error is not None:
             return _error_json(AuthenticationError(outcome.public_error))
         started = outcome.started
-        if started is not None:
-            return _success_json(
-                TotpEnrollmentData(
-                    action=TotpEnrollmentAction.START,
-                    enrollment=TotpEnrollmentOfferData(
-                        enrollment_id=started.enrollment_id,
-                        provisioning_uri=started.provisioning_uri,
-                        secret=started.secret_base32,
-                        expires_at=started.enrollment_expires_at,
-                    ),
-                    dismissed_at=None,
-                ),
-                headers=_NO_STORE_NO_CACHE_HEADERS,
-            )
-        dismissed_at = outcome.dismissed_at
-        if dismissed_at is None:
+        if started is None:
             raise InternalApplicationError(ErrorCode.INTERNAL_ERROR)
         return _success_json(
             TotpEnrollmentData(
-                action=TotpEnrollmentAction.DISMISS_INITIAL_OFFER,
-                enrollment=None,
-                dismissed_at=dismissed_at,
-            )
+                action=TotpEnrollmentAction.START,
+                enrollment=TotpEnrollmentOfferData(
+                    enrollment_id=started.enrollment_id,
+                    provisioning_uri=started.provisioning_uri,
+                    secret=started.secret_base32,
+                    expires_at=started.enrollment_expires_at,
+                ),
+            ),
+            headers=_NO_STORE_NO_CACHE_HEADERS,
         )
 
     async def verify_enrollment(

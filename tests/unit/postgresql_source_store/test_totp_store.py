@@ -350,24 +350,6 @@ async def test_insert_pending_enrollment_refuses_an_active_credential() -> None:
     ]
 
 
-@pytest.mark.asyncio
-async def test_record_prompt_dismissal_writes_only_the_dismissal_timestamp() -> None:
-    engine = ScriptedEngine(
-        [ScriptedResult(rows=(_user_credential_row(),)), ScriptedResult(rowcount=1)]
-    )
-    store = TotpStore(engine, secret_codec=ScriptedTotpCodec())
-    dismissed_at = await store.record_prompt_dismissal(
-        user_id=_USER_ID, workspace_id=_WORKSPACE_ID, database_now=_DATABASE_NOW
-    )
-    assert dismissed_at == _DATABASE_NOW
-    connection = engine.connections[0]
-    assert _statements_of(connection, sa.sql.dml.Insert, "totp_credentials") == []
-    update_parameters = _statement_parameters(
-        _statements_of(connection, sa.sql.dml.Update, "user_credentials")[0]
-    )
-    assert update_parameters["totp_prompt_dismissed_at"] == _DATABASE_NOW
-
-
 # --- enrollment verification and activation ---------------------------------------------
 
 

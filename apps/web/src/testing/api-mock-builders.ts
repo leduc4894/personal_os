@@ -40,7 +40,6 @@ export function sessionResponse(state: SessionData["state"]): HttpResponse<Defau
 export function totpEnrollmentData(): TotpEnrollmentData {
   return {
     action: "start",
-    dismissed_at: null,
     enrollment: {
       enrollment_id: "e26e0f1c-9884-4d84-a2c3-9d64a0b1f001",
       expires_at: "2026-08-16T09:10:00Z",

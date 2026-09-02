@@ -183,15 +183,14 @@ class TotpEnrollmentOfferData(BaseModel):
 class TotpEnrollmentData(BaseModel):
     """The response payload of one enrollment action (spec 10.1).
 
-    ``start`` carries the one-time offer; ``dismiss_initial_offer`` carries
-    only the recorded dismissal moment — never a secret or pending row.
+    ``start`` carries the one-time offer — never a secret or pending row in
+    any other surface.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     action: TotpEnrollmentAction
     enrollment: TotpEnrollmentOfferData | None = None
-    dismissed_at: datetime | None = None
 
 
 class RecoveryCodesData(BaseModel):

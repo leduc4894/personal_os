@@ -63,7 +63,6 @@ function pendingTotpSession(): Record<string, unknown> {
 function enrollmentOffer(): Record<string, unknown> {
   return {
     action: "start",
-    dismissed_at: null,
     enrollment: {
       enrollment_id: "11111111-2222-4333-8444-555555555555",
       expires_at: "2026-08-16T09:10:00Z",

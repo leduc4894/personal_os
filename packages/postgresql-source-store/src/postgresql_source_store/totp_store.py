@@ -187,33 +187,6 @@ class TotpStore:
 
         return await run_authentication_transaction(self._engine, operation)
 
-    async def record_prompt_dismissal(
-        self, *, user_id: UUID, workspace_id: UUID, database_now: datetime
-    ) -> datetime:
-        """Record the skippable-offer dismissal on the credential row (10.1)."""
-
-        async def operation(connection: AsyncConnection) -> datetime:
-            locked = await connection.execute(
-                sa.select(user_credentials.c.user_id)
-                .where(
-                    user_credentials.c.user_id == user_id,
-                    user_credentials.c.workspace_id == workspace_id,
-                )
-                .with_for_update(of=user_credentials)
-            )
-            if locked.one_or_none() is None:
-                raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
-            updated = await connection.execute(
-                sa.update(user_credentials)
-                .values(totp_prompt_dismissed_at=database_now, updated_at=database_now)
-                .where(user_credentials.c.user_id == user_id)
-            )
-            if updated.rowcount != 1:
-                raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
-            return database_now
-
-        return await run_authentication_transaction(self._engine, operation)
-
     # -- enrollment ---------------------------------------------------------------------
 
     async def insert_pending_enrollment(

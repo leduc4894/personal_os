@@ -716,7 +716,6 @@ class OfflineAuthenticationState:
         self.login_locked_out_audit_actions: list[str] = []
         self.login_buckets: dict[str, ThrottleBucketState] = {}
         self.source_buckets: dict[str, ThrottleBucketState] = {}
-        self.totp_prompt_dismissed_at: datetime | None = None
         self.totp_credential_rows: list[OfflineTotpCredentialRow] = []
         self.recovery_code_rows: list[OfflineRecoveryCodeRow] = []
         self.device_grant_rows: list[OfflineDeviceGrantRow] = []
@@ -1087,14 +1086,6 @@ class OfflineTotpStore:
                 row.user_id == user_id and row.state is TotpCredentialState.ACTIVE
                 for row in self._state.totp_credential_rows
             )
-
-    async def record_prompt_dismissal(
-        self, *, user_id: UUID, workspace_id: UUID, database_now: datetime
-    ) -> datetime:
-        del user_id, workspace_id
-        async with self._lock:
-            self._state.totp_prompt_dismissed_at = database_now
-            return database_now
 
     async def insert_pending_enrollment(
         self, command: InsertPendingEnrollmentCommand

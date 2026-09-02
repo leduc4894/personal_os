@@ -6258,30 +6258,17 @@
       "TotpEnrollmentAction": {
         "description": "The strict discriminated enrollment action vocabulary (spec 10.1).",
         "enum": [
-          "start",
-          "dismiss_initial_offer"
+          "start"
         ],
         "title": "TotpEnrollmentAction",
         "type": "string"
       },
       "TotpEnrollmentData": {
         "additionalProperties": false,
-        "description": "The response payload of one enrollment action (spec 10.1).\n\n``start`` carries the one-time offer; ``dismiss_initial_offer`` carries\nonly the recorded dismissal moment — never a secret or pending row.",
+        "description": "The response payload of one enrollment action (spec 10.1).\n\n``start`` carries the one-time offer — never a secret or pending row in\nany other surface.",
         "properties": {
           "action": {
             "$ref": "#/components/schemas/TotpEnrollmentAction"
-          },
-          "dismissed_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Dismissed At"
           },
           "enrollment": {
             "anyOf": [

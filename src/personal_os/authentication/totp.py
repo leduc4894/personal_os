@@ -108,7 +108,6 @@ class TotpEnrollmentAction(StrEnum):
     """The strict discriminated enrollment action vocabulary (spec 10.1)."""
 
     START = "start"
-    DISMISS_INITIAL_OFFER = "dismiss_initial_offer"
 
 
 # --- pure computation --------------------------------------------------------------------
@@ -448,10 +447,6 @@ class TotpTransactionPort(Protocol):
 
     async def has_active_totp(self, *, user_id: UUID) -> bool: ...
 
-    async def record_prompt_dismissal(
-        self, *, user_id: UUID, workspace_id: UUID, database_now: datetime
-    ) -> datetime: ...
-
     async def insert_pending_enrollment(
         self, command: InsertPendingEnrollmentCommand
     ) -> InsertedPendingEnrollment: ...
@@ -553,7 +548,6 @@ class TotpEnrollmentActionOutcome:
 
     public_error: ErrorCode | None
     started: StartedTotpEnrollment | None
-    dismissed_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -734,20 +728,10 @@ class TotpService:
         action: TotpEnrollmentAction,
         diagnostic_context: DiagnosticContext,
     ) -> TotpEnrollmentActionOutcome:
-        """Run one strict enrollment action: ``start`` or the dismissal."""
+        """Run one strict enrollment action: the explicit ``start``."""
         database_now = await self._clock.database_now()
         resolved = await self._resolve_challenge(session_secret, database_now=database_now)
         session = resolved.session
-        if action is TotpEnrollmentAction.DISMISS_INITIAL_OFFER:
-            self._require_current_active_session(session, resolved.current_credential_revision)
-            dismissed_at = await self._transactions.record_prompt_dismissal(
-                user_id=session.user_id,
-                workspace_id=session.workspace_id,
-                database_now=database_now,
-            )
-            return TotpEnrollmentActionOutcome(
-                public_error=None, started=None, dismissed_at=dismissed_at
-            )
         if session.state not in REPLACEMENT_ELIGIBLE_SESSION_STATES:
             raise AuthenticationError(ErrorCode.AUTHENTICATION_REQUIRED)
         if not is_recently_authenticated(
@@ -756,7 +740,6 @@ class TotpService:
             return TotpEnrollmentActionOutcome(
                 public_error=ErrorCode.RECENT_AUTHENTICATION_REQUIRED,
                 started=None,
-                dismissed_at=None,
             )
         secret = generate_totp_secret()
         sealed = self.secret_codec.seal_secret(plaintext=secret)
@@ -780,7 +763,6 @@ class TotpService:
                 enrollment_expires_at=inserted.enrollment_expires_at,
                 database_now=database_now,
             ),
-            dismissed_at=None,
         )
 
     async def verify_enrollment(

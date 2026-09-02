@@ -3847,18 +3847,16 @@ export type components = {
          * @description The strict discriminated enrollment action vocabulary (spec 10.1).
          * @enum {string}
          */
-        readonly TotpEnrollmentAction: "start" | "dismiss_initial_offer";
+        readonly TotpEnrollmentAction: "start";
         /**
          * TotpEnrollmentData
          * @description The response payload of one enrollment action (spec 10.1).
          *
-         *     ``start`` carries the one-time offer; ``dismiss_initial_offer`` carries
-         *     only the recorded dismissal moment — never a secret or pending row.
+         *     ``start`` carries the one-time offer — never a secret or pending row in
+         *     any other surface.
          */
         readonly TotpEnrollmentData: {
             readonly action: components["schemas"]["TotpEnrollmentAction"];
-            /** Dismissed At */
-            readonly dismissed_at?: string | null;
             readonly enrollment?: components["schemas"]["TotpEnrollmentOfferData"] | null;
         };
         /**
