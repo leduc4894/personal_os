@@ -86,6 +86,22 @@ gate run and were not touched.
    adding size/hash members to the detail did not meet the Task 10 bar.
    Deviation ruling recorded in the runbook; the binary journey shows the
    two whole-object choices with no editor (E2E-pinned).
+6. **Resolve-path policy recheck at the service boundary (spec §5.2.4).**
+   The spec's canonical transaction lists the active policy among what the
+   resolver validates "in one canonical transaction"; the implementation
+   rechecks the reviewed remote version and the current source state inside
+   the store transaction, while the exclusion-policy recheck runs at the
+   service boundary over the row-locked conflict read (the store port
+   carries no policy evidence). Reason: widening the Task 1/2 store ports
+   to carry in-transaction policy evidence was ruled out to keep the store
+   port closed. Residual risk: a sub-second window where a policy revision
+   published between the guard's allow and the store commit lets one
+   resolution through, caught fail-closed at the next boundary that
+   re-evaluates policy (the evidence read, the next capture, the next
+   resolution). The tradeoff is documented honestly in
+   `src/personal_os/source_conflicts/service.py` (module docstring); the
+   lifecycle domain does recheck policy in-transaction, and optional parity
+   hardening with its approach is a future task.
 
 ## Deferred items (verdicts)
 
@@ -96,6 +112,7 @@ gate run and were not touched.
 | Candidate GC / Web conflict UI / cursor-gap remediation | Out of scope by plan self-review; no row (owned by their own future plans) |
 | Sibling-orphan cleanup sweep (failed-apply staging siblings) | Out of Task 10's tested behavior; BACKLOG row added (maintenance) |
 | Shared stage/verify/replace core extraction (device-sync writer vs conflict applier) | Refactor-only; BACKLOG row added (maintenance) |
+| `knowledge.source_conflicts` absent from the backup manifest's `SNAPSHOT_LOCK_ORDER` (35 tables, v4) | Out of Task 2's file scope (backup domain v4 pinned by its own tests); BACKLOG row with milestone |
 
 ## Next actions
 

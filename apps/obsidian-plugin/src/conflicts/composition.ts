@@ -18,11 +18,12 @@
  * version-based download surface (`downloadSourceVersion`: the conflict
  * evidence API is role-based, not version-based, so it cannot serve a
  * version winner);
- * - the interim verified-candidate uploader: no server route produces a
- * `verified_candidate_object_id` for an open conflict's resolution today
- * (Task 7 report §1), so the port fails closed with the controller's own
- * candidate-upload reason — Task 10's server surface swaps in the real
- * binding behind this exact port shape;
+ * - the real verified-candidate uploader (the Task 10 swap-in) over the
+ *   conflict wire client's `uploadResolutionCandidate` route
+ *   (`PUT /api/sync/conflicts/{conflict_id}/candidate`): the merged draft's
+ *   SHA-256 is derived locally, the exact bytes and their declared
+ *   fingerprint travel to the open conflict's candidate route, and only the
+ *   opaque verified object reference crosses back;
  * - the closed-token diagnostics trail sink, the foreign-throw observer
  * of the modal command surface (the Task 8 M-1 carry: a repair-store
  * throw the modal would render as `reason_unavailable` reaches the trail
