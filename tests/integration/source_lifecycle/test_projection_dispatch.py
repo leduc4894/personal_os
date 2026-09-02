@@ -24,7 +24,8 @@ from tests.integration.source_lifecycle.conftest import (
 )
 
 from personal_os.diagnostics.context import create_diagnostic_context
-from personal_os.exclusion_policy.contracts import PolicySubject
+from personal_os.exclusion_policy.contracts import PolicySubject, RuleKind
+from personal_os.exclusion_policy.normalization import normalize_rule
 from personal_os.source_lifecycle.commands import (
     LifecycleOperation,
     SourceLifecycleCommand,
@@ -104,6 +105,29 @@ def _command(
         policy_revision=1,
         client_timestamp=datetime(2026, 8, 20, 1, 2, 3, tzinfo=UTC),
     )
+
+
+async def _seed_denied_source_policy(
+    lifecycle_harness: LifecycleHarness,
+    workspace: SeededWorkspace,
+    source_id: UUID,
+) -> None:
+    """Publish the signed exact-source deny rule the locked policy must honor."""
+
+    seeded_policy = await lifecycle_harness.seed_signed_policy(
+        workspace,
+        (
+            normalize_rule(
+                uuid4(),
+                RuleKind.EXACT_SOURCE_ID,
+                source_id_operand=source_id,
+            ),
+        ),
+    )
+    # The empty allow-all seed is revision 1: the workspace state row starts
+    # at active_revision_number=0 and seed_signed_policy increments by one,
+    # so the deny revision legitimately lands beyond the empty seed.
+    assert seeded_policy.revision_number > 1
 
 
 # --- lifecycle intents are dispatched unchanged ------------------------------
@@ -272,7 +296,7 @@ async def test_lifecycle_restore_intent_emits_two_upsert_intents_via_dispatch(
 async def test_lifecycle_denied_rename_intent_dispatch_row_carries_delete_operation(
     lifecycle_harness: LifecycleHarness,
 ) -> None:
-    """A denied rename still commits the locator transition and writes ``delete`` intents."""
+    """A locked-policy denied rename writes ``delete`` intents for dispatch."""
 
     workspace = await lifecycle_harness.seed_workspace()
     source_id = uuid4()
@@ -295,6 +319,7 @@ async def test_lifecycle_denied_rename_intent_dispatch_row_carries_delete_operat
         expected=seeded.initial_locator.value,
         target=target.value,
     )
+    await _seed_denied_source_policy(lifecycle_harness, workspace, source_id)
 
     result = await lifecycle_harness.lifecycle_store.commit(
         command,

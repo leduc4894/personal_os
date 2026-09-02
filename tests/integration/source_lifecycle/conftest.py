@@ -36,7 +36,9 @@ from tests.integration.source_publication.conftest import (
     SourcePublicationStack,
     source_publication_stack,
 )
+from tools.signed_policy_seed import SeededSignedPolicy, seed_signed_policy
 
+from personal_os.exclusion_policy.contracts import ExclusionRule
 from personal_os.source_locators import NormalizedLocator
 from postgresql_source_store.engine import create_source_store_engine, dispose_source_store_engine
 from postgresql_source_store.lifecycle_store import PostgresqlSourceLifecycleStore
@@ -138,6 +140,18 @@ class LifecycleHarness:
         # Reuse the publication-stack helper: it already provisions the
         # workspace policy state and the empty signed policy seed.
         return await self._seed_publication_workspace()
+
+    async def seed_signed_policy(
+        self, workspace: SeededWorkspace, rules: tuple[ExclusionRule, ...]
+    ) -> SeededSignedPolicy:
+        """Publish one more genuinely signed revision over the workspace's active policy."""
+
+        return await seed_signed_policy(
+            self._engine,
+            workspace_id=workspace.workspace_id,
+            published_by_user_id=workspace.owner_user_id,
+            rules=rules,
+        )
 
     async def seed_active_source_with_locator(
         self,
@@ -372,8 +386,6 @@ class LifecycleHarness:
                 )
             )
         # Seed the empty signed policy so locked policy enforcement is a no-op.
-        from tools.signed_policy_seed import seed_signed_policy
-
         await seed_signed_policy(
             self._engine,
             workspace_id=workspace_id,

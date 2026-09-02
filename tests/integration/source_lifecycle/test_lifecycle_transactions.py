@@ -5,13 +5,14 @@ Every test runs through the real async engine against the migrated
 asserts the exact active/history locator rows, the sync event sequence, the
 two projection intents (with ``source_version_id`` equal to
 ``sources.current_version_id``), the tombstone shape and the redacted audit
-record. Allowed rename/move/restore select upsert intents; denied or
-indeterminate rename/move/restore select delete intents; delete always
-selects delete intents. Rollback tests inject failures after every write
-boundary and assert nothing remains. The tests cover title derivation,
-exactly one tombstone per deleted source, locator uniqueness, version and
-locator conflicts, the canonical lock order and the diagnostic-only
-rejection paths.
+record. Allowed rename/move/restore select upsert intents; denied
+rename/move/restore select delete intents, asserted through a real
+signed deny rule published over the workspace's locked policy; delete
+always selects delete intents. Rollback tests inject failures after
+every write boundary and assert nothing remains. The tests cover title
+derivation, exactly one tombstone per deleted source, locator
+uniqueness, version and locator conflicts, the canonical lock order and
+the diagnostic-only rejection paths.
 """
 
 from __future__ import annotations
@@ -29,7 +30,8 @@ from tests.integration.source_lifecycle.conftest import (
 
 from personal_os.diagnostics.context import create_diagnostic_context
 from personal_os.error_contracts.exceptions import InternalApplicationError
-from personal_os.exclusion_policy.contracts import PolicySubject
+from personal_os.exclusion_policy.contracts import PolicySubject, RuleKind
+from personal_os.exclusion_policy.normalization import normalize_rule
 from personal_os.source_lifecycle.commands import (
     LifecycleOperation,
     SourceLifecycleCommitResult,
@@ -114,6 +116,29 @@ def _command(
     )
 
 
+async def _seed_denied_source_policy(
+    lifecycle_harness: LifecycleHarness,
+    workspace: SeededWorkspace,
+    source_id: UUID,
+) -> None:
+    """Publish the signed exact-source deny rule the locked policy must honor."""
+
+    seeded_policy = await lifecycle_harness.seed_signed_policy(
+        workspace,
+        (
+            normalize_rule(
+                uuid4(),
+                RuleKind.EXACT_SOURCE_ID,
+                source_id_operand=source_id,
+            ),
+        ),
+    )
+    # The empty allow-all seed is revision 1: the workspace state row starts
+    # at active_revision_number=0 and seed_signed_policy increments by one,
+    # so the deny revision legitimately lands beyond the empty seed.
+    assert seeded_policy.revision_number > 1
+
+
 # --- rename allowed -----------------------------------------------------------
 
 
@@ -183,15 +208,12 @@ async def test_allowed_rename_closes_old_locator_opens_target_updates_title(
         assert intent.status == "pending"
 
 
-# --- rename denied / indeterminate ------------------------------------------
+# --- rename denied -----------------------------------------------------------
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "outcome", [LifecyclePolicyOutcome.DENIED, LifecyclePolicyOutcome.INDETERMINATE]
-)
 async def test_denied_rename_still_commits_locator_state_with_delete_intents(
-    lifecycle_harness: LifecycleHarness, outcome: LifecyclePolicyOutcome
+    lifecycle_harness: LifecycleHarness,
 ) -> None:
     workspace = await lifecycle_harness.seed_workspace()
     source_id = uuid4()
@@ -210,11 +232,12 @@ async def test_denied_rename_still_commits_locator_state_with_delete_intents(
     )
     decision = _decision(
         workspace,
-        outcome=outcome,
+        outcome=LifecyclePolicyOutcome.DENIED,
         source_id=source_id,
         expected=seeded.initial_locator.value,
         target=target.value,
     )
+    await _seed_denied_source_policy(lifecycle_harness, workspace, source_id)
 
     result = await lifecycle_harness.lifecycle_store.commit(
         command,
@@ -304,6 +327,7 @@ async def test_denied_move_still_commits_locator_state_with_delete_intents(
         expected=seeded.initial_locator.value,
         target=target.value,
     )
+    await _seed_denied_source_policy(lifecycle_harness, workspace, source_id)
 
     result = await lifecycle_harness.lifecycle_store.commit(
         command,
@@ -374,7 +398,7 @@ async def test_delete_closes_locator_creates_tombstone_and_emits_two_delete_inte
         assert intent.operation == "delete"
 
 
-# --- restore allowed / denied / indeterminate ----------------------------------
+# --- restore allowed / denied ----------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -450,11 +474,8 @@ async def test_allowed_restore_closes_tombstone_and_opens_target(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "outcome", [LifecyclePolicyOutcome.DENIED, LifecyclePolicyOutcome.INDETERMINATE]
-)
-async def test_denied_or_indeterminate_restore_still_emits_two_delete_intents(
-    lifecycle_harness: LifecycleHarness, outcome: LifecyclePolicyOutcome
+async def test_denied_restore_still_emits_two_delete_intents(
+    lifecycle_harness: LifecycleHarness,
 ) -> None:
     workspace = await lifecycle_harness.seed_workspace()
     source_id = uuid4()
@@ -496,11 +517,12 @@ async def test_denied_or_indeterminate_restore_still_emits_two_delete_intents(
     )
     restore_decision = _decision(
         workspace,
-        outcome=outcome,
+        outcome=LifecyclePolicyOutcome.DENIED,
         source_id=source_id,
         expected=None,
         target=target.value,
     )
+    await _seed_denied_source_policy(lifecycle_harness, workspace, source_id)
 
     result = await lifecycle_harness.lifecycle_store.commit(
         restore_command,
