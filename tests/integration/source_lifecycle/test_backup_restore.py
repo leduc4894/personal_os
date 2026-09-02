@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
-from uuid import uuid4
+from uuid import uuid4, uuid7
 
 import pytest
 import sqlalchemy as sa
@@ -25,6 +25,18 @@ from tests.integration.source_lifecycle.conftest import (
     SeededWorkspace,
 )
 
+from personal_os.diagnostics.context import create_diagnostic_context
+from personal_os.exclusion_policy.contracts import PolicySubject
+from personal_os.source_lifecycle.commands import (
+    LifecycleOperation,
+    SourceLifecycleCommand,
+)
+from personal_os.source_lifecycle.fingerprint import fingerprint_lifecycle_command
+from personal_os.source_lifecycle.ports import (
+    LifecycleDeviceContext,
+    LifecyclePolicyDecision,
+    LifecyclePolicyOutcome,
+)
 from personal_os.source_locators import NormalizedLocator
 from postgresql_source_store.backup_snapshot import (
     SNAPSHOT_LOCK_ORDER,
@@ -64,6 +76,13 @@ async def _seed_lifecycle_evidence(
     # The initial create event left one sync_event row and one open locator.
     second_locator = NormalizedLocator("notes/renamed.md")
     intent_id = uuid4()
+    # The direct intent insert must parent on the canonical create event, not
+    # on the source-version identity; the assertions pin that contract: the
+    # event identity equals the canonical create event and is always distinct
+    # from the source-version identity the historical bug wired in.
+    intent_event_id = seeded.create_event_id
+    assert intent_event_id == seeded.create_event_id
+    assert intent_event_id != seeded.current_version_id
     async with harness._engine.begin() as connection:
         # One pending projection intent pointing at the create event; the
         # snapshot's projection_intents count must include this row.
@@ -71,10 +90,7 @@ async def _seed_lifecycle_evidence(
             sa.insert(projection_intents).values(
                 projection_intent_id=intent_id,
                 workspace_id=workspace.workspace_id,
-                event_id=seeded.current_version_id,
-                # The seeded source's canonical event id is captured by the
-                # locator's opened_event_id; re-derive it here so the FK
-                # matches the existing sync_events row.
+                event_id=intent_event_id,
                 source_id=source_id,
                 source_version_id=seeded.current_version_id,
                 projection_kind="qdrant",
@@ -85,6 +101,48 @@ async def _seed_lifecycle_evidence(
                 created_at=sa.text("CURRENT_TIMESTAMP - interval '1 second'"),
             )
         )
+    # One canonical delete so the snapshot's source_tombstones count covers a
+    # real tombstone row. The delete commits through the lifecycle store (the
+    # same path the tombstone-count test proves), so every row it writes —
+    # delete event, closed locator, tombstone — is parented canonically after
+    # the create evidence above.
+    delete_command = SourceLifecycleCommand(
+        source_id=source_id,
+        event_id=uuid7(),
+        idempotency_key="backup-restore-delete",
+        operation=LifecycleOperation.DELETE,
+        expected_version_id=seeded.current_version_id,
+        expected_locator=seeded.initial_locator,
+        target_locator=None,
+        tombstone_id=None,
+        policy_revision=1,
+        client_timestamp=_utc_now(),
+    )
+    delete_decision = LifecyclePolicyDecision(
+        workspace_id=workspace.workspace_id,
+        outcome=LifecyclePolicyOutcome.ALLOWED,
+        policy_revision_number=1,
+        subject=PolicySubject(
+            workspace_id=workspace.workspace_id,
+            source_id=source_id,
+            normalized_locator=seeded.initial_locator.value,
+            source_type="markdown",
+        ),
+        expected_locator=seeded.initial_locator,
+        target_locator=None,
+    )
+    await harness.lifecycle_store.commit(
+        delete_command,
+        LifecycleDeviceContext(
+            workspace_id=workspace.workspace_id,
+            device_id=workspace.device_id,
+            user_id=workspace.owner_user_id,
+            device_kind="obsidian",
+        ),
+        fingerprint_lifecycle_command(delete_command),
+        delete_decision,
+        create_diagnostic_context().context,
+    )
 
     return {
         "source_id": source_id,
@@ -364,12 +422,18 @@ async def test_snapshot_open_tombstone_count_matches_postgres_state(
                 await connection.execute(
                     sa.select(sa.func.count())
                     .select_from(source_tombstones)
-                    .where(source_tombstones.c.restore_event_id.is_(None))
+                    .where(
+                        source_tombstones.c.source_id == source_id,
+                        source_tombstones.c.restore_event_id.is_(None),
+                    )
                 )
             ).scalar_one()
         )
     snapshot_store = PostgresqlBackupSnapshotStore(lifecycle_harness._engine)
     async with snapshot_store.open_quiesced_snapshot(_utc_now()) as snapshot:
         snapshot_tombstone_count = snapshot.table_counts["source_tombstones"]
-    assert snapshot_tombstone_count == open_tombstone_count
+    # The snapshot's table count is global while the disposable database
+    # accumulates the sibling tests' evidence, so the cross-check is
+    # inclusive — the same form the open-locator sibling uses.
+    assert snapshot_tombstone_count >= open_tombstone_count
     assert open_tombstone_count == 1

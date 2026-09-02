@@ -97,6 +97,11 @@ class SeededSourceLocator:
     pointer at the moment the lifecycle harness is built; it must be passed
     to lifecycle commands as ``expected_version_id`` so the adapter's
     version conflict check is exercised against a real committed row.
+    ``create_event_id`` is the identity of the canonical create
+    ``sync_events`` row the seed inserted (the event that opened the
+    initial locator); direct ``projection_intents`` seeds must parent on
+    this event, never on ``current_version_id``, so the
+    ``fk_projection_intents__event_source`` foreign key holds.
     ``initial_locator`` is the workspace-unique path the source's first
     ``source_locators`` row carries.
     """
@@ -106,6 +111,7 @@ class SeededSourceLocator:
     device_id: UUID
     source_id: UUID
     current_version_id: UUID
+    create_event_id: UUID
     initial_locator: NormalizedLocator
 
 
@@ -230,6 +236,7 @@ class LifecycleHarness:
             device_id=device_id,
             source_id=source_id,
             current_version_id=source_version_id,
+            create_event_id=event_id,
             initial_locator=locator,
         )
 

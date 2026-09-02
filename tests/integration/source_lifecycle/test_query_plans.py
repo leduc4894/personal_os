@@ -91,12 +91,11 @@ _POPULATED_RELATIONS: Final[frozenset[str]] = frozenset(
 
 #: The index each hot query must use, keyed by query name.
 _EXPECTED_INDEX_BY_QUERY: Final[dict[str, frozenset[str]]] = {
-    "replay_by_event": frozenset(
-        {
-            "uq_sync_events__workspace_event",
-            "uq_sync_events__source_event",
-        }
-    ),
+    # The replay-by-event statement is a global ``event_id`` lookup with no
+    # workspace/source predicate, so the primary key is the canonical access
+    # path; the composite unique indexes lead with workspace_id / source_id
+    # and cannot serve this statement shape.
+    "replay_by_event": frozenset({"pk_sync_events"}),
     "replay_by_idempotency": frozenset({"uq_sync_events__idempotency_key"}),
     "active_locator_by_source": frozenset({"uq_source_locators_active_source"}),
     "active_locator_by_workspace_path": frozenset({"uq_source_locators_active_workspace_path"}),
@@ -178,14 +177,17 @@ async def _seed_population(engine: AsyncEngine) -> LifecycleQueryPlanPopulation:
                 "verified_at": datetime.now(UTC),
             }
         )
+    # The sources <-> source_versions foreign keys are circular, so the
+    # sources are inserted pending first and activated once their versions
+    # exist — the order the canonical writer produces.
     source_rows = [
         {
             "source_id": source_ids[index],
             "workspace_id": workspace_id,
             "source_type": "markdown",
             "title": f"Lifecycle query plan source {index:05d}",
-            "sync_state": "active",
-            "current_version_id": version_ids[index],
+            "sync_state": "pending",
+            "current_version_id": None,
         }
         for index in range(_SEED_ROW_COUNT)
     ]
@@ -241,6 +243,15 @@ async def _seed_population(engine: AsyncEngine) -> LifecycleQueryPlanPopulation:
         }
         for index in range(_SEED_ROW_COUNT)
     ]
+    # Each intent's event parent must be one of the canonical create events
+    # this batch inserts (an FK-valid parent) and must never be one of the
+    # source-version identities — the historical version-as-event bug class.
+    # The check compares against independent identity sets, not the
+    # construction expression, so rewiring the rows fails before the insert.
+    batch_event_ids = {row["event_id"] for row in event_rows}
+    batch_version_ids = set(version_ids)
+    assert all(row["event_id"] in batch_event_ids for row in intent_rows)
+    assert all(row["event_id"] not in batch_version_ids for row in intent_rows)
 
     async with engine.begin() as connection:
         await connection.execute(
@@ -262,6 +273,26 @@ async def _seed_population(engine: AsyncEngine) -> LifecycleQueryPlanPopulation:
             (content_objects, content_object_rows),
             (sources, source_rows),
             (source_versions, version_rows),
+        ):
+            for batch in _batches(rows):
+                await connection.execute(sa.insert(table), batch)
+        await connection.execute(
+            sa.update(sources)
+            .values(
+                sync_state="active",
+                current_version_id=sa.bindparam("pointer_version_id"),
+                updated_at=sa.text("CURRENT_TIMESTAMP"),
+            )
+            .where(
+                sources.c.workspace_id == workspace_id,
+                sources.c.source_id == sa.bindparam("b_source_id"),
+            ),
+            [
+                {"pointer_version_id": version_id, "b_source_id": source_id}
+                for version_id, source_id in zip(version_ids, source_ids, strict=True)
+            ],
+        )
+        for table, rows in (
             (sync_events, event_rows),
             (source_locators, locator_rows),
             (projection_intents, intent_rows),
@@ -410,7 +441,7 @@ def _assert_indexed_access(payload: list[dict[str, Any]], query_name: str) -> No
 async def test_replay_by_event_lookup_is_indexed(
     populated_lifecycle_store: LifecycleQueryPlanPopulation,
 ) -> None:
-    """The replay by event_id lookup must go through the (workspace_id, event_id) unique index."""
+    """The global replay by event_id lookup must go through the primary key index."""
 
     statement = sync_event_lookup_by_event_statement(populated_lifecycle_store.sample_event_id)
     async with populated_lifecycle_store.engine.connect() as connection:
