@@ -26,18 +26,22 @@ typed business rejection never leaves the claimed row fenced in
 ``receiving``; retryable and untyped failures keep their resume behavior.
 
 The Child 8 conflict bridge (spec 5.1) rides the same two-step shape: a
-single-part-sized update preflighted on a stale base keeps its ``conflict``
-verdict and reserves one capture operation instead, a same-identity
-re-preflight answers the stored conflict before the normal classifier, and
+single-part-sized update preflighted on a stale base — or on a source the
+server deleted under the local edit — keeps its ``conflict`` verdict and
+reserves one capture operation instead, a same-identity re-preflight
+answers the stored conflict before the normal classifier, and
 :meth:`SmallFileSyncService.receive_conflict_candidate` verifies the
 candidate bytes through the identical bounded path before the
-conflict-capture gateway retains them in place of publication — capturing
-nothing on the current pointer and answering only the opaque conflict
-identity, which both the same-token and same-event replays return
-unchanged. A captured operation deliberately holds its claimed-row fence:
-the durable store port exposes no honest terminal transition for a capture,
-so the replay contract is carried by the conflict aggregate's own event
-identity, and a same-token re-upload re-verifies and replays idempotently.
+conflict-capture gateway retains them in place of publication — as a
+``stale_content`` conflict when the base merely went stale and as an
+``edit_remote_delete`` conflict when the current reference cannot be
+served — capturing nothing on the current pointer and answering only the
+opaque conflict identity, which both the same-token and same-event replays
+return unchanged. A captured operation deliberately holds its claimed-row
+fence: the durable store port exposes no honest terminal transition for a
+capture, so the replay contract is carried by the conflict aggregate's own
+event identity, and a same-token re-upload re-verifies and replays
+idempotently.
 
 The module imports no FastAPI, SQLAlchemy, R2 SDK or request type; it never
 copies a locator, digest, token, byte count or provider detail into an error
@@ -562,13 +566,15 @@ class SmallFileSyncService:
         """Resolve the update base; ``None`` opens the single-part upload.
 
         The policy/base check itself is unchanged. A missing current
-        reference is the durable ``conflict`` outcome — no overwrite, no
-        reservation. A base that is no longer current keeps that same
-        ``conflict`` verdict and, for a single-part-sized update, now
+        reference — a source the server deleted under the local edit — keeps
+        the durable ``conflict`` verdict and, for a single-part-sized update,
         reserves one capture operation whose grant the result carries: the
         client uploads its candidate through the conflict-candidate receive
-        path, which verifies the bytes and captures them as conflict
-        evidence instead of publishing (Child 8 spec 5.1). A current base
+        path, which verifies the bytes and captures them as
+        ``edit_remote_delete`` evidence instead of publishing. A base that is
+        no longer current keeps that same ``conflict`` verdict and grant
+        shape, capturing instead as ``stale_content`` (Child 8 spec 5.1). A
+        current base
         whose committed digest equals the declared digest is the safe
         ``no_change`` receipt: the operation is reserved and the confirmed
         current base frozen as its terminal result so a lost response
@@ -595,10 +601,32 @@ class SmallFileSyncService:
                 diagnostic_context,
             )
         except CanonicalReadStateError:
+            # The current reference cannot be served — most notably a source
+            # the server deleted under the local edit (an edit-remote-delete
+            # race of Child 8 spec 4.1). The verdict stays ``conflict`` with
+            # no overwrite and no reservation: a single-part-sized update
+            # keeps one capture operation grant so the verified candidate is
+            # retained as ``edit_remote_delete`` evidence, while larger sizes
+            # keep the payload-free outcome exactly as before.
+            if preflight.size_bytes > MAX_SINGLE_PART_FILE_SIZE_BYTES:
+                self._record_preflight(
+                    preflight.operation, SmallFilePreflightOutcome.CONFLICT, started_at
+                )
+                return SmallFilePreflightResult(outcome=SmallFilePreflightOutcome.CONFLICT)
+            operation = await self.operation_store.reserve_operation(
+                preflight=preflight,
+                device_context=device_context,
+                policy_binding=policy_binding,
+                diagnostic_context=diagnostic_context,
+            )
             self._record_preflight(
                 preflight.operation, SmallFilePreflightOutcome.CONFLICT, started_at
             )
-            return SmallFilePreflightResult(outcome=SmallFilePreflightOutcome.CONFLICT)
+            return SmallFilePreflightResult(
+                outcome=SmallFilePreflightOutcome.CONFLICT,
+                operation_token=operation.operation_token,
+                expires_at=operation.expires_at,
+            )
         except ExclusionPolicyError as error:
             # The read boundary's transaction-final recheck denied or could
             # not decide the subject: the preflight outcome contract stays
@@ -840,12 +868,33 @@ class SmallFileSyncService:
         # saw. A base that became current again is not a capturable stale
         # update: the closed state-invalid rejection releases the claim for
         # a same-identity re-preflight instead of capturing or publishing.
-        reference = await self.current_sources.resolve_current(
-            ReadCurrentSourceCommand(
-                workspace_id=device_context.workspace_id, source_id=update_source_id
-            ),
-            diagnostic_context,
-        )
+        try:
+            reference = await self.current_sources.resolve_current(
+                ReadCurrentSourceCommand(
+                    workspace_id=device_context.workspace_id, source_id=update_source_id
+                ),
+                diagnostic_context,
+            )
+        except CanonicalReadStateError:
+            # The current reference cannot be served. The gateway re-validates
+            # the deletion against capture-time canonical state and retains the
+            # verified candidate as an ``edit_remote_delete`` conflict; a race
+            # it cannot confirm answers ``None`` and this receive fails closed
+            # with no capture, no publication and the claim released for a
+            # same-identity re-preflight (Child 8 spec 4.1 row 2).
+            captured = await self.conflict_capture.capture_edit_remote_delete(
+                bound_operation=bound,
+                verified_candidate=receipt,
+                diagnostic_context=diagnostic_context,
+            )
+            if captured is None:
+                raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID) from None
+            self.metrics.record_upload(
+                operation=bound.operation,
+                outcome=SmallFileMetricOutcome.CONFLICT_CAPTURED,
+                duration_seconds=self._elapsed_seconds_since(started_at),
+            )
+            return captured
         if reference.source_version_id == update_base_version_id:
             raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
         captured = await self.conflict_capture.capture_stale_update(

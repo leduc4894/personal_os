@@ -56,6 +56,7 @@ class ApiRouteTemplate(StrEnum):
     SYNC_EXCLUSION_POLICY_SNAPSHOT = "/api/sync/exclusion-policy/snapshot"
     SYNC_JOURNAL_EVENTS_PREFLIGHT = "/api/sync/journal-events/preflight"
     UPLOAD_CONTENT = "/api/uploads/{operation_id}/content"
+    UPLOAD_CONFLICT_CONTENT = "/api/uploads/{operation_id}/conflict-content"
     UPLOAD_MULTIPART_SESSIONS = "/api/uploads/multipart-sessions"
     UPLOAD_MULTIPART_SESSION = "/api/uploads/multipart-sessions/{session_id}"
     UPLOAD_MULTIPART_SESSION_PART_URL = (
@@ -145,6 +146,7 @@ SMALL_FILE_SYNC_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset(
     {
         ApiRouteTemplate.SYNC_JOURNAL_EVENTS_PREFLIGHT,
         ApiRouteTemplate.UPLOAD_CONTENT,
+        ApiRouteTemplate.UPLOAD_CONFLICT_CONTENT,
     }
 )
 

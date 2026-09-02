@@ -1088,6 +1088,36 @@ export type paths = {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/uploads/{operation_id}/conflict-content": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        /**
+         * Upload Conflict Candidate Content
+         * @description Retain one stale-update candidate as conflict evidence.
+         *
+         *     The Child 8 counterpart of the publication content stream over the
+         *     same durable operation row: a preflighted ``conflict`` grant uploads
+         *     its candidate bytes here, the same bounded ceiling and read deadline
+         *     guard the stream, the identical verified-object path proves the bytes
+         *     before anything references them, and the answer is only the opaque
+         *     capture receipt — the conflict identity, never a publication receipt.
+         *     A publication operation can never double as a capture operation: the
+         *     binding itself rejects that shape with the closed state-invalid
+         *     code.
+         */
+        readonly put: operations["uploadSmallFileConflictContent"];
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/uploads/{operation_id}/content": {
         readonly parameters: {
             readonly query?: never;
@@ -1607,6 +1637,21 @@ export type components = {
         /** ApiEnvelope[SignedPolicySnapshotData] */
         readonly ApiEnvelope_SignedPolicySnapshotData_: {
             readonly data: components["schemas"]["SignedPolicySnapshotData"] | null;
+            readonly error: components["schemas"]["ApiErrorBody"] | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            readonly request_id: string;
+            /**
+             * Warnings
+             * @default []
+             */
+            readonly warnings: readonly components["schemas"]["ApiWarning"][];
+        };
+        /** ApiEnvelope[SmallFileConflictCaptureData] */
+        readonly ApiEnvelope_SmallFileConflictCaptureData_: {
+            readonly data: components["schemas"]["SmallFileConflictCaptureData"] | null;
             readonly error: components["schemas"]["ApiErrorBody"] | null;
             /**
              * Request Id
@@ -3194,6 +3239,37 @@ export type components = {
             readonly signature: components["schemas"]["PolicySnapshotSignatureData"];
         };
         /**
+         * SmallFileConflictCaptureData
+         * @description The safe capture receipt of one conflict-candidate upload.
+         *
+         *     The exact answer a stale-base or remote-delete capture returns — and an
+         *     exact replay of the same operation token or event identity returns
+         *     unchanged: the opaque conflict identity, the conflict-bound source, the
+         *     observed remote version at capture time (``null`` exactly when the
+         *     remote state is the deletion of an ``edit_remote_delete`` capture) and
+         *     the capture moment. No digest, object key, receipt or provider detail is
+         *     a member, so none can ever render.
+         */
+        readonly SmallFileConflictCaptureData: {
+            /**
+             * Captured At
+             * Format: date-time
+             */
+            readonly captured_at: string;
+            /**
+             * Conflict Id
+             * Format: uuid
+             */
+            readonly conflict_id: string;
+            /** Observed Remote Version Id */
+            readonly observed_remote_version_id: string | null;
+            /**
+             * Source Id
+             * Format: uuid
+             */
+            readonly source_id: string;
+        };
+        /**
          * SmallFileOperation
          * @description Closed vocabulary of preflight operations (spec 10.1: create/update).
          * @enum {string}
@@ -3210,10 +3286,10 @@ export type components = {
          *     opaque operation grant — the capture reservation whose verified
          *     candidate the client uploads for retention as conflict evidence — or
          *     exactly the opaque conflict identity a same-identity replay returns
-         *     after capture; a conflict that cannot retain bytes yet (a missing
-         *     source, or a size above the single-part routing constant) carries no
-         *     payload member at all. Responses render with ``exclude_unset`` so each
-         *     outcome emits exactly its own members.
+         *     after capture; a conflict whose candidate cannot be retained through the
+         *     single-part transport (a size above the single-part routing constant)
+         *     carries no payload member at all. Responses render with ``exclude_unset``
+         *     so each outcome emits exactly its own members.
          */
         readonly SmallFilePreflightData: {
             /** Conflict Id */
@@ -5005,6 +5081,33 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["ApiEnvelope_MultipartPartUrlData_"];
+                };
+            };
+        };
+    };
+    readonly uploadSmallFileConflictContent: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly operation_id: string;
+            };
+            readonly cookie?: never;
+        };
+        /** @description The exact raw candidate bytes of the conflict-granted capture operation */
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/octet-stream": string;
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ApiEnvelope_SmallFileConflictCaptureData_"];
                 };
             };
         };

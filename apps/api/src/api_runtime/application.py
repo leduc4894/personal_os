@@ -111,6 +111,7 @@ from api_runtime.small_file_sync_diagnostics_routes import (
     create_sync_diagnostics_admin_route_endpoints,
 )
 from api_runtime.small_file_sync_models import (
+    SmallFileConflictCaptureData,
     SmallFilePreflightData,
     SmallFileTerminalResultData,
 )
@@ -740,6 +741,24 @@ def _register_small_file_sync_routes(
             "requestBody": {
                 "required": True,
                 "description": ("The exact raw content bytes of the preflight-bound file"),
+                "content": {
+                    "application/octet-stream": {"schema": {"type": "string", "format": "binary"}}
+                },
+            }
+        },
+    )
+    app.add_api_route(
+        "/api/uploads/{operation_id}/conflict-content",
+        endpoints.upload_conflict_candidate_content,
+        methods=["PUT"],
+        operation_id="uploadSmallFileConflictContent",
+        response_model=ApiEnvelope[SmallFileConflictCaptureData],
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "description": (
+                    "The exact raw candidate bytes of the conflict-granted capture operation"
+                ),
                 "content": {
                     "application/octet-stream": {"schema": {"type": "string", "format": "binary"}}
                 },

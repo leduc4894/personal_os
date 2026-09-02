@@ -45,6 +45,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Final, cast
 from uuid import UUID, uuid4, uuid7
 
+import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from api_runtime.exclusion_policy_crypto import Ed25519PolicySigner, TrustAnchorEd25519Verifier
@@ -132,6 +133,7 @@ from postgresql_source_store.publication_store import (
 from postgresql_source_store.small_file_sync_operations import (
     PostgresqlSmallFileUploadOperationStore,
 )
+from postgresql_source_store.tables import sources
 from r2_object_storage.adapter import R2S3ObjectStore
 from r2_object_storage.client import (
     GetObjectResult,
@@ -322,6 +324,65 @@ class PostgresqlSmallFileConflictCaptureGateway:
             observed_remote_version_id=observed_remote_version_id,
             captured_at=conflict.captured_at,
         )
+
+    async def capture_edit_remote_delete(
+        self,
+        *,
+        bound_operation: SmallFileBoundOperation,
+        verified_candidate: VerifiedObjectReceipt,
+        diagnostic_context: DiagnosticContext,
+    ) -> SmallFileConflictCaptureResult | None:
+        if not await self._source_state_is_deleted(bound_operation):
+            # The read-state failure does not describe a deleted source at
+            # capture time, so the race is not confirmed and nothing may be
+            # retained (the caller fails closed).
+            return None
+        update_source_id = bound_operation.update_source_id
+        update_base_version_id = bound_operation.update_base_version_id
+        if update_source_id is None or update_base_version_id is None:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        verified_candidate_object_id = await self._admit_candidate_object(verified_candidate)
+        command = CaptureConflictCommand(
+            workspace_id=bound_operation.workspace_id,
+            source_id=update_source_id,
+            conflict_kind=ConflictKind.EDIT_REMOTE_DELETE,
+            originating_event_id=bound_operation.event_id,
+            originating_device_id=bound_operation.device_id,
+            idempotency_key=ConflictIdempotencyKey(bound_operation.idempotency_key.value),
+            base_version_id=update_base_version_id,
+            observed_remote_version_id=None,
+            candidate=ConflictCandidate.content(verified_candidate_object_id),
+            normalized_locator=None,
+        )
+        conflict = await self._conflict_service.capture_conflict(command, diagnostic_context)
+        return SmallFileConflictCaptureResult(
+            conflict_id=conflict.conflict_id,
+            source_id=update_source_id,
+            observed_remote_version_id=None,
+            captured_at=conflict.captured_at,
+        )
+
+    async def _source_state_is_deleted(self, bound_operation: SmallFileBoundOperation) -> bool:
+        """Re-validate the deletion race against capture-time canonical state.
+
+        The canonical read boundary only proved the current reference
+        unservable; the capture may name a deleted source only when the
+        ``sources`` row itself carries the canonical deleted state, exactly
+        like the lifecycle gateway's race re-validation.
+        """
+
+        update_source_id = bound_operation.update_source_id
+        if update_source_id is None:
+            return False
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                sa.select(sources.c.sync_state).where(
+                    sources.c.workspace_id == bound_operation.workspace_id,
+                    sources.c.source_id == update_source_id,
+                )
+            )
+            state = result.scalar_one_or_none()
+        return state == "deleted"
 
     async def resolve_captured_conflict(
         self,
@@ -639,6 +700,11 @@ class OfflineSmallFileSyncState:
     captured_conflicts: dict[tuple[UUID, UUID], SmallFileConflictCaptureResult] = field(
         default_factory=dict
     )
+    #: The edit-remote-delete race confirmation knob: the offline mirror of
+    #: the real adapter's capture-time deletion re-validation over canonical
+    #: state. Only an update whose source is inside this set captures as an
+    #: ``edit_remote_delete`` conflict; anything else fails closed.
+    deleted_source_ids: set[UUID] = field(default_factory=set)
 
     @property
     def reservation_count(self) -> int:
@@ -945,9 +1011,12 @@ class OfflineSmallFileConflictCaptureGateway:
     capture of one (workspace, event) identity freezes one opaque receipt
     into the offline state; an exact replay of that identity returns the
     stored receipt unchanged; the membership lookup answers the preflight
-    replay (Child 8 spec 5.1). The double never sees or retains bytes —
-    only the opaque receipt crosses, keyed exactly like the durable
-    conflict store's originating-event replay map.
+    replay (Child 8 spec 5.1). ``deleted_source_ids`` mirrors the real
+    adapter's capture-time deletion re-validation: an edit-remote-delete
+    capture confirms only a source inside that set and answers ``None``
+    otherwise. The double never sees or retains bytes — only the opaque
+    receipt crosses, keyed exactly like the durable conflict store's
+    originating-event replay map.
     """
 
     def __init__(self, state: OfflineSmallFileSyncState, clock: OfflineSmallFileClock) -> None:
@@ -974,6 +1043,30 @@ class OfflineSmallFileConflictCaptureGateway:
             conflict_id=uuid4(),
             source_id=update_source_id,
             observed_remote_version_id=observed_remote_version_id,
+            captured_at=self._clock(),
+        )
+        self._state.captured_conflicts[identity] = receipt
+        return receipt
+
+    async def capture_edit_remote_delete(
+        self,
+        *,
+        bound_operation: SmallFileBoundOperation,
+        verified_candidate: VerifiedObjectReceipt,
+        diagnostic_context: DiagnosticContext,
+    ) -> SmallFileConflictCaptureResult | None:
+        del verified_candidate, diagnostic_context
+        update_source_id = bound_operation.update_source_id
+        if update_source_id is None or update_source_id not in self._state.deleted_source_ids:
+            return None
+        identity = (bound_operation.workspace_id, bound_operation.event_id)
+        stored = self._state.captured_conflicts.get(identity)
+        if stored is not None:
+            return stored
+        receipt = SmallFileConflictCaptureResult(
+            conflict_id=uuid4(),
+            source_id=update_source_id,
+            observed_remote_version_id=None,
             captured_at=self._clock(),
         )
         self._state.captured_conflicts[identity] = receipt

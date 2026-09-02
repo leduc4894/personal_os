@@ -1478,6 +1478,51 @@
         "title": "ApiEnvelope[SignedPolicySnapshotData]",
         "type": "object"
       },
+      "ApiEnvelope_SmallFileConflictCaptureData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SmallFileConflictCaptureData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[SmallFileConflictCaptureData]",
+        "type": "object"
+      },
       "ApiEnvelope_SmallFilePreflightData_": {
         "additionalProperties": false,
         "properties": {
@@ -5010,6 +5055,47 @@
         "title": "SignedPolicySnapshotData",
         "type": "object"
       },
+      "SmallFileConflictCaptureData": {
+        "additionalProperties": false,
+        "description": "The safe capture receipt of one conflict-candidate upload.\n\nThe exact answer a stale-base or remote-delete capture returns — and an\nexact replay of the same operation token or event identity returns\nunchanged: the opaque conflict identity, the conflict-bound source, the\nobserved remote version at capture time (``null`` exactly when the\nremote state is the deletion of an ``edit_remote_delete`` capture) and\nthe capture moment. No digest, object key, receipt or provider detail is\na member, so none can ever render.",
+        "properties": {
+          "captured_at": {
+            "format": "date-time",
+            "title": "Captured At",
+            "type": "string"
+          },
+          "conflict_id": {
+            "format": "uuid",
+            "title": "Conflict Id",
+            "type": "string"
+          },
+          "observed_remote_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Remote Version Id"
+          },
+          "source_id": {
+            "format": "uuid",
+            "title": "Source Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "conflict_id",
+          "source_id",
+          "observed_remote_version_id",
+          "captured_at"
+        ],
+        "title": "SmallFileConflictCaptureData",
+        "type": "object"
+      },
       "SmallFileOperation": {
         "description": "Closed vocabulary of preflight operations (spec 10.1: create/update).",
         "enum": [
@@ -5021,7 +5107,7 @@
       },
       "SmallFilePreflightData": {
         "additionalProperties": false,
-        "description": "One completed preflight: exactly one typed outcome and its safe payload.\n\n``single_part_upload`` carries only the opaque operation token and its\nexpiry; ``committed_replay`` and ``no_change`` carry only the frozen\nterminal result; ``excluded`` and ``multipart_upload`` carry no payload\nmember at all. The Child 8 ``conflict`` outcome carries either the same\nopaque operation grant — the capture reservation whose verified\ncandidate the client uploads for retention as conflict evidence — or\nexactly the opaque conflict identity a same-identity replay returns\nafter capture; a conflict that cannot retain bytes yet (a missing\nsource, or a size above the single-part routing constant) carries no\npayload member at all. Responses render with ``exclude_unset`` so each\noutcome emits exactly its own members.",
+        "description": "One completed preflight: exactly one typed outcome and its safe payload.\n\n``single_part_upload`` carries only the opaque operation token and its\nexpiry; ``committed_replay`` and ``no_change`` carry only the frozen\nterminal result; ``excluded`` and ``multipart_upload`` carry no payload\nmember at all. The Child 8 ``conflict`` outcome carries either the same\nopaque operation grant — the capture reservation whose verified\ncandidate the client uploads for retention as conflict evidence — or\nexactly the opaque conflict identity a same-identity replay returns\nafter capture; a conflict whose candidate cannot be retained through the\nsingle-part transport (a size above the single-part routing constant)\ncarries no payload member at all. Responses render with ``exclude_unset``\nso each outcome emits exactly its own members.",
         "properties": {
           "conflict_id": {
             "anyOf": [
@@ -8037,6 +8123,54 @@
           }
         ],
         "summary": "Issue Part Url"
+      }
+    },
+    "/api/uploads/{operation_id}/conflict-content": {
+      "put": {
+        "description": "Retain one stale-update candidate as conflict evidence.\n\nThe Child 8 counterpart of the publication content stream over the\nsame durable operation row: a preflighted ``conflict`` grant uploads\nits candidate bytes here, the same bounded ceiling and read deadline\nguard the stream, the identical verified-object path proves the bytes\nbefore anything references them, and the answer is only the opaque\ncapture receipt — the conflict identity, never a publication receipt.\nA publication operation can never double as a capture operation: the\nbinding itself rejects that shape with the closed state-invalid\ncode.",
+        "operationId": "uploadSmallFileConflictContent",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{32,128}$",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "description": "The exact raw candidate bytes of the conflict-granted capture operation",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_SmallFileConflictCaptureData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Upload Conflict Candidate Content"
       }
     },
     "/api/uploads/{operation_id}/content": {

@@ -86,6 +86,9 @@ PUBLICATION_RESOLVE_COMMITTED: Final[str] = "publication_store.resolve_committed
 PUBLICATION_COMMIT_CREATE: Final[str] = "publication_store.commit_create"
 PUBLICATION_COMMIT_UPDATE: Final[str] = "publication_store.commit_update"
 CONFLICT_CAPTURE_GATEWAY_CAPTURE: Final[str] = "conflict_capture.capture_stale_update"
+CONFLICT_CAPTURE_GATEWAY_EDIT_REMOTE_DELETE: Final[str] = (
+    "conflict_capture.capture_edit_remote_delete"
+)
 CONFLICT_CAPTURE_GATEWAY_RESOLVE: Final[str] = "conflict_capture.resolve_captured_conflict"
 
 #: Fixed canonical content and its digest shared by the builders.
@@ -634,8 +637,12 @@ class FakeConflictCaptureGateway:
     Mirrors the real gateway's contract: the first capture of one
     (workspace, event) identity mints one frozen receipt; an exact replay of
     that identity returns the stored receipt unchanged; the membership
-    lookup answers preflight replay. Only the opaque receipt crosses back —
-    no bytes, digest or locator are retained or echoed.
+    lookup answers preflight replay. ``deleted_source_ids`` is the
+    capture-time canonical-state re-validation knob of the edit-remote-delete
+    race: only a source inside it confirms the deletion race, anything else
+    answers ``None`` exactly like the durable adapter's unconfirmed race.
+    Only the opaque receipt crosses back — no bytes, digest or locator are
+    retained or echoed.
     """
 
     ledger: CallLedger
@@ -643,6 +650,7 @@ class FakeConflictCaptureGateway:
     capture_calls: int = 0
     resolve_calls: int = 0
     receipts: dict[tuple[UUID, UUID], SmallFileConflictCaptureResult] = field(default_factory=dict)
+    deleted_source_ids: set[UUID] = field(default_factory=set)
 
     async def capture_stale_update(
         self,
@@ -666,6 +674,32 @@ class FakeConflictCaptureGateway:
             conflict_id=uuid4(),
             source_id=update_source_id,
             observed_remote_version_id=observed_remote_version_id,
+            captured_at=self.clock(),
+        )
+        self.receipts[identity] = receipt
+        return receipt
+
+    async def capture_edit_remote_delete(
+        self,
+        *,
+        bound_operation: SmallFileBoundOperation,
+        verified_candidate: VerifiedObjectReceipt,
+        diagnostic_context: DiagnosticContext,
+    ) -> SmallFileConflictCaptureResult | None:
+        del verified_candidate, diagnostic_context
+        self.ledger.record(CONFLICT_CAPTURE_GATEWAY_EDIT_REMOTE_DELETE)
+        self.capture_calls += 1
+        identity = (bound_operation.workspace_id, bound_operation.event_id)
+        stored = self.receipts.get(identity)
+        if stored is not None:
+            return stored
+        update_source_id = bound_operation.update_source_id
+        if update_source_id is None or update_source_id not in self.deleted_source_ids:
+            return None
+        receipt = SmallFileConflictCaptureResult(
+            conflict_id=uuid4(),
+            source_id=update_source_id,
+            observed_remote_version_id=None,
             captured_at=self.clock(),
         )
         self.receipts[identity] = receipt
@@ -987,6 +1021,41 @@ class ServiceHarness:
         return await self.service.preflight(
             preflight=preflight,
             device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+    async def receive_deleted_source_update(self) -> SmallFileConflictCaptureResult:
+        """Run one missing-source update preflight and upload its candidate.
+
+        Leaves the current reference unservable (the canonical read boundary
+        raises the typed read-state error of a source the server deleted) and
+        confirms the deletion race through the gateway fake's canonical-state
+        knob, so the verified candidate is retained as ``edit_remote_delete``
+        evidence. The event identity, device context and granted token are
+        kept for a same-event replay.
+        """
+
+        device_context = build_device_context()
+        preflight = build_update_preflight(source_id=uuid4(), base_version_id=uuid4())
+        self.current_sources.reference = None
+        self.conflict_capture.deleted_source_ids.add(preflight.source_id)
+        granted = await self.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        token = granted.operation_token
+        if token is None:
+            raise AssertionError(
+                "the missing-source update preflight must grant a capture operation"
+            )
+        self.stale_update_preflight = preflight
+        self.stale_update_device = device_context
+        self.stale_update_token = token
+        return await self.service.receive_conflict_candidate(
+            operation_token=token,
+            device_context=device_context,
+            stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
             diagnostic_context=build_diagnostic_context(),
         )
 

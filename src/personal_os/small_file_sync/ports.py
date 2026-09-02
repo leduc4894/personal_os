@@ -115,8 +115,13 @@ class SmallFileConflictCaptureGateway(Protocol):
     admission stays on this boundary, never inside the conflict domain — and
     returns only the opaque capture receipt; the underlying capture replays
     by the event's idempotency identity, so a duplicate delivery returns the
-    original conflict. ``resolve_captured_conflict`` is the replay lookup a
-    same-identity preflight performs before its normal
+    original conflict. ``capture_edit_remote_delete`` retains the verified
+    candidate of an update whose current reference could not be served
+    because the server deleted the source: the adapter re-validates the
+    deletion against capture-time canonical state and answers ``None`` —
+    nothing retained — when the race is not confirmed, mirroring the
+    lifecycle gateway's discipline. ``resolve_captured_conflict`` is the
+    replay lookup a same-identity preflight performs before its normal
     published/no-change classifier (Child 8 spec 5.1). No raw byte, digest,
     locator or object key crosses this boundary in either direction.
     """
@@ -129,6 +134,14 @@ class SmallFileConflictCaptureGateway(Protocol):
         observed_remote_version_id: UUID | None,
         diagnostic_context: DiagnosticContext,
     ) -> SmallFileConflictCaptureResult: ...
+
+    async def capture_edit_remote_delete(
+        self,
+        *,
+        bound_operation: BoundSmallFileOperation,
+        verified_candidate: VerifiedObjectReceipt,
+        diagnostic_context: DiagnosticContext,
+    ) -> SmallFileConflictCaptureResult | None: ...
 
     async def resolve_captured_conflict(
         self,

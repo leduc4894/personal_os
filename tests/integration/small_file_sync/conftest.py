@@ -19,7 +19,7 @@ revoke route, so every scenario crosses the real HTTP route stack.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -60,7 +60,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from httpx import Response
 
-from personal_os.diagnostics.context import DiagnosticContext, create_diagnostic_context
+from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.exclusion_policy.contracts import (
     ExclusionPolicyRevision,
     ExclusionRule,
@@ -83,7 +83,6 @@ from personal_os.object_storage import VerifiedObjectReceipt
 from personal_os.runtime_configuration.models import RuntimeEnvironment
 from personal_os.small_file_sync.contracts import (
     SmallFileConflictCaptureResult,
-    SmallFileDeviceContext,
 )
 from personal_os.small_file_sync.metrics import InMemorySmallFileSyncMetrics
 from personal_os.small_file_sync.service import SmallFileSyncService
@@ -217,39 +216,47 @@ class SmallFileWireHarness:
             ),
         )
 
+    def upload_conflict_candidate(
+        self, token: str, content: bytes, *, credential: str | None = None
+    ) -> Response:
+        """Upload one granted capture operation's candidate over the wire."""
+
+        return cast(
+            Response,
+            self.client.put(
+                f"/api/uploads/{token}/conflict-content",
+                headers={
+                    "Authorization": f"Bearer {credential or self.device.access_credential}",
+                    "Content-Type": "application/octet-stream",
+                },
+                content=content,
+            ),
+        )
+
     def capture_stale_candidate(
         self, operation_token: str, content: bytes
     ) -> SmallFileConflictCaptureResult:
         """Drive the conflict-candidate receive of one granted capture operation.
 
-        The Task 4 bridge is domain-level: the wire renderer still answers the
-        plugin's frozen preflight contract, so the capture journey drives the
-        composed service directly over the same offline graph the routes use.
+        The Child 8 wire surface: the capture upload travels the dedicated
+        conflict-content route and the envelope's data member is the frozen
+        capture receipt. Kept as the domain-typed convenience over
+        :meth:`upload_conflict_candidate` for journeys asserting on the
+        opaque receipt members.
         """
 
-        if self.service is None:
-            raise AssertionError("this harness composition exposes no service handle")
-        row = next(
-            (row for row in self.sync_state.rows if row.operation_token.value == operation_token),
-            None,
-        )
-        if row is None:
-            raise AssertionError("the granted capture operation is not in the offline state")
-        device_context = SmallFileDeviceContext(
-            device_id=self.device.device_id,
-            workspace_id=row.device_context.workspace_id,
-        )
-
-        async def _stream() -> AsyncIterator[bytes]:
-            yield content
-
-        return asyncio.run(
-            self.service.receive_conflict_candidate(
-                operation_token=row.operation_token,
-                device_context=device_context,
-                stream=_stream(),
-                diagnostic_context=create_diagnostic_context().context,
-            )
+        response = self.upload_conflict_candidate(operation_token, content)
+        assert response.status_code == 200, response.text
+        data = dict(response.json()["data"])
+        return SmallFileConflictCaptureResult(
+            conflict_id=UUID(str(data["conflict_id"])),
+            source_id=UUID(str(data["source_id"])),
+            observed_remote_version_id=(
+                UUID(str(data["observed_remote_version_id"]))
+                if data["observed_remote_version_id"] is not None
+                else None
+            ),
+            captured_at=datetime.fromisoformat(str(data["captured_at"])),
         )
 
 

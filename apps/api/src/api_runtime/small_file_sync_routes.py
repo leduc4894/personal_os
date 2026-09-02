@@ -1,6 +1,6 @@
 """Small-file sync plugin endpoints (spec 10.1-10.3).
 
-The two endpoints are created per composed runtime: each closure binds the
+The three endpoints are created per composed runtime: each closure binds the
 small-file sync service, the device-token service of the composed web
 authentication runtime and the request-bounded content-stream limiter, so the
 application factory only registers the semantic operation ids and response
@@ -9,12 +9,14 @@ credential — session cookies, refresh and polling credentials close with the
 registered invalid-credential code — and derives workspace and device from
 the resolved token context; no request body ever selects one. The preflight
 body converts to the frozen domain value through the strict boundary models,
-and the content route streams the raw request body through the limiter that
-enforces the server-owned single-part ceiling and an explicit read deadline
-before any byte can reach the spool/verification path, so an over-size or
-stalled body can never publish. Responses carry the canonical envelope and
-``Cache-Control: no-store`` and never expose a receipt, object key or
-provider detail.
+and the two content routes stream the raw request body through the limiter
+that enforces the server-owned single-part ceiling and an explicit read
+deadline before any byte can reach the spool/verification path, so an
+over-size or stalled body can never publish or capture. The publication
+stream answers the frozen terminal receipt; the conflict-candidate stream
+answers only the opaque capture receipt of Child 8 spec 5.1. Responses carry
+the canonical envelope and ``Cache-Control: no-store`` and never expose a
+receipt, object key or provider detail.
 """
 
 from __future__ import annotations
@@ -37,9 +39,11 @@ from api_runtime.authentication_dependencies import (
 )
 from api_runtime.small_file_sync_composition import SmallFileSyncRuntime
 from api_runtime.small_file_sync_models import (
+    SmallFileConflictCaptureData,
     SmallFilePreflightData,
     SmallFilePreflightRequest,
     SmallFileTerminalResultData,
+    small_file_conflict_capture_data,
     small_file_preflight_data,
     small_file_terminal_result_data,
     to_domain_preflight,
@@ -75,10 +79,11 @@ _OPERATION_TOKEN_PATTERN: Final[str] = r"^[A-Za-z0-9_-]{32,128}$"
 
 @dataclass(frozen=True, slots=True)
 class SmallFileSyncRouteEndpoints:
-    """The two endpoint callables of the closed small-file sync route set."""
+    """The three endpoint callables of the closed small-file sync route set."""
 
     preflight_journal_event: Callable[..., Awaitable[JSONResponse]]
     upload_content: Callable[..., Awaitable[JSONResponse]]
+    upload_conflict_candidate_content: Callable[..., Awaitable[JSONResponse]]
 
 
 async def bounded_content_stream(
@@ -142,7 +147,9 @@ def _request_id() -> UUID:
     return context.request_id
 
 
-def _success_json(data: SmallFilePreflightData | SmallFileTerminalResultData) -> JSONResponse:
+def _success_json(
+    data: SmallFilePreflightData | SmallFileTerminalResultData | SmallFileConflictCaptureData,
+) -> JSONResponse:
     envelope = success_envelope(request_id=_request_id(), data=data)
     return JSONResponse(
         content=envelope.model_dump(mode="json", exclude_unset=True),
@@ -231,9 +238,50 @@ def create_small_file_sync_route_endpoints(
         )
         return _success_json(small_file_terminal_result_data(terminal))
 
+    async def upload_conflict_candidate_content(
+        request: Request,
+        operation_id: Annotated[str, Path(pattern=_OPERATION_TOKEN_PATTERN)],
+        device: AuthenticatedDeviceContext = Depends(  # noqa: B008
+            require_sync_device
+        ),
+    ) -> JSONResponse:
+        """Retain one stale-update candidate as conflict evidence.
+
+        The Child 8 counterpart of the publication content stream over the
+        same durable operation row: a preflighted ``conflict`` grant uploads
+        its candidate bytes here, the same bounded ceiling and read deadline
+        guard the stream, the identical verified-object path proves the bytes
+        before anything references them, and the answer is only the opaque
+        capture receipt — the conflict identity, never a publication receipt.
+        A publication operation can never double as a capture operation: the
+        binding itself rejects that shape with the closed state-invalid
+        code.
+        """
+        request.scope["route_template"] = ApiRouteTemplate.UPLOAD_CONFLICT_CONTENT
+        try:
+            operation_token = UploadOperationToken(operation_id)
+        except ValueError:
+            raise ApiTransportError(ErrorCode.API_REQUEST_VALIDATION_FAILED) from None
+        stream = bounded_content_stream(
+            request.stream(),
+            maximum_bytes=MAX_SINGLE_PART_FILE_SIZE_BYTES,
+            deadline_seconds=CONTENT_READ_DEADLINE_SECONDS,
+            monotonic_clock=monotonic_clock,
+        )
+        captured = await service.receive_conflict_candidate(
+            operation_token=operation_token,
+            device_context=SmallFileDeviceContext(
+                device_id=device.device_id, workspace_id=device.workspace_id
+            ),
+            stream=stream,
+            diagnostic_context=_bound_diagnostic_context(),
+        )
+        return _success_json(small_file_conflict_capture_data(captured))
+
     return SmallFileSyncRouteEndpoints(
         preflight_journal_event=preflight_journal_event,
         upload_content=upload_content,
+        upload_conflict_candidate_content=upload_conflict_candidate_content,
     )
 
 

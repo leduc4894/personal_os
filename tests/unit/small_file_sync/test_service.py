@@ -32,6 +32,7 @@ from uuid import uuid4
 import pytest
 from tests.unit.small_file_sync.fakes import (
     CONFLICT_CAPTURE_GATEWAY_CAPTURE,
+    CONFLICT_CAPTURE_GATEWAY_EDIT_REMOTE_DELETE,
     CONFLICT_CAPTURE_GATEWAY_RESOLVE,
     CURRENT_SOURCES_RESOLVE,
     OBJECT_STORE_RESOLVE,
@@ -360,7 +361,18 @@ class TestPreflightUpdateBase:
         assert STORE_RESERVE_OPERATION not in harness.ledger.entries
 
     @pytest.mark.asyncio
-    async def test_missing_update_source_returns_conflict(self) -> None:
+    async def test_missing_update_source_grants_capture_operation_for_single_part(
+        self,
+    ) -> None:
+        """A source the server deleted under the local edit keeps its candidate.
+
+        The unservable current reference keeps the durable ``conflict``
+        verdict — no overwrite, no publication — and a single-part-sized
+        update now reserves one capture operation so the verified candidate
+        can be retained as ``edit_remote_delete`` evidence instead of being
+        stranded (Child 8 spec 4.1 row 2).
+        """
+
         harness = build_service_harness(current_reference=None)
         preflight = build_update_preflight(source_id=uuid4(), base_version_id=uuid4())
 
@@ -371,8 +383,34 @@ class TestPreflightUpdateBase:
         )
 
         assert result.outcome is SmallFilePreflightOutcome.CONFLICT
-        assert STORE_RESERVE_OPERATION not in harness.ledger.entries
+        assert result.operation_token is not None
+        assert result.expires_at is not None
+        assert result.conflict_id is None
+        assert result.terminal_result is None
+        assert STORE_RESERVE_OPERATION in harness.ledger.entries
         assert PUBLICATION_COMMIT_UPDATE not in harness.ledger.entries
+
+    @pytest.mark.asyncio
+    async def test_missing_update_source_above_single_part_keeps_bare_conflict(self) -> None:
+        """Above the single-part ceiling the missing source still parks bare."""
+
+        oversized_content = b"\x00" * (MAX_SINGLE_PART_FILE_SIZE_BYTES + 1)
+        harness = build_service_harness(current_reference=None)
+        preflight = build_update_preflight(
+            source_id=uuid4(), base_version_id=uuid4(), content=oversized_content
+        )
+
+        result = await harness.service.preflight(
+            preflight=preflight,
+            device_context=build_device_context(),
+            diagnostic_context=build_diagnostic_context(),
+        )
+
+        assert result.outcome is SmallFilePreflightOutcome.CONFLICT
+        assert result.operation_token is None
+        assert result.expires_at is None
+        assert result.conflict_id is None
+        assert STORE_RESERVE_OPERATION not in harness.ledger.entries
 
     @pytest.mark.asyncio
     async def test_changed_content_over_current_base_opens_upload(self) -> None:
@@ -659,6 +697,72 @@ class TestStaleUpdateConflictCapture:
 
         assert replayed == first
         assert harness.conflict_capture.capture_count == 1
+        assert harness.publication_count == 0
+        assert PUBLICATION_COMMIT_UPDATE not in harness.ledger.entries
+
+    @pytest.mark.asyncio
+    async def test_deleted_source_update_is_captured_as_edit_remote_delete(self) -> None:
+        """An edit racing a remote delete retains its verified candidate.
+
+        The unservable current reference routes the capture through the
+        edit-remote-delete gateway member; the receipt binds the edited
+        source with no observed remote version (the remote state is the
+        deletion), publishes nothing, and the same-event re-preflight
+        answers the stored conflict before the classifier.
+        """
+
+        harness = build_service_harness()
+
+        receipt = await harness.receive_deleted_source_update()
+        replay = await harness.replay_same_event()
+
+        stale_preflight = harness.stale_update_preflight
+        assert stale_preflight is not None
+        assert receipt.source_id == stale_preflight.source_id
+        assert receipt.observed_remote_version_id is None
+        assert harness.conflict_capture.capture_count == 1
+        assert CONFLICT_CAPTURE_GATEWAY_EDIT_REMOTE_DELETE in harness.ledger.entries
+        assert CONFLICT_CAPTURE_GATEWAY_CAPTURE not in harness.ledger.entries
+        assert harness.publication_count == 0
+        assert PUBLICATION_COMMIT_UPDATE not in harness.ledger.entries
+        assert replay.outcome is SmallFilePreflightOutcome.CONFLICT
+        assert replay.conflict_id == receipt.conflict_id
+        assert replay.operation_token is None
+
+    @pytest.mark.asyncio
+    async def test_unconfirmed_edit_remote_delete_race_fails_closed(self) -> None:
+        """A read-state failure the gateway cannot confirm captures nothing.
+
+        The gateway answers ``None`` when capture-time canonical state does
+        not confirm the deletion race; the receive must fail closed with the
+        typed state-invalid rejection — no capture, no publication — so the
+        claim is released for a same-identity re-preflight.
+        """
+
+        harness = build_service_harness()
+        device_context = build_device_context()
+        preflight = build_update_preflight(source_id=uuid4(), base_version_id=uuid4())
+        harness.current_sources.reference = None
+        # The deletion-race confirmation knob deliberately omits the source.
+        granted = await harness.service.preflight(
+            preflight=preflight,
+            device_context=device_context,
+            diagnostic_context=build_diagnostic_context(),
+        )
+        token = granted.operation_token
+        if token is None:  # pragma: no cover - helper contract
+            raise AssertionError("the missing-source preflight must grant a capture operation")
+
+        with pytest.raises(ApplicationError) as captured:
+            await harness.service.receive_conflict_candidate(
+                operation_token=token,
+                device_context=device_context,
+                stream=ProbedByteStream([SYNC_CONTENT_BYTES]),
+                diagnostic_context=build_diagnostic_context(),
+            )
+
+        assert captured.value.error_code is ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID
+        assert harness.conflict_capture.capture_count == 0
         assert harness.publication_count == 0
         assert PUBLICATION_COMMIT_UPDATE not in harness.ledger.entries
 

@@ -63,6 +63,7 @@ ROUTE_OPERATION_IDS: dict[str, dict[str, str]] = {
     "/api/sync/exclusion-policy/snapshot": {"get": "getExclusionPolicySnapshot"},
     "/api/sync/journal-events/preflight": {"post": "preflightJournalEventUpload"},
     "/api/uploads/{operation_id}/content": {"put": "uploadSmallFileContent"},
+    "/api/uploads/{operation_id}/conflict-content": {"put": "uploadSmallFileConflictContent"},
     "/api/uploads/multipart-sessions": {"post": "createMultipartUploadSession"},
     "/api/uploads/multipart-sessions/{session_id}": {"get": "getMultipartUploadSession"},
     "/api/uploads/multipart-sessions/{session_id}/parts/{part_number}/url": {
