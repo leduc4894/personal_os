@@ -173,7 +173,6 @@ def test_fresh_disposable_bootstrap_activates_totp_before_live_journey(
         workspace_key="duc-knowledge",
         server_origin="http://127.0.0.1:8000",
         allowed_origin="https://app.example.test",
-        plugin_origin="https://api.example.test",
         password_file=password_file,
         runtime_environment={"CI": "true", "KNOWLEDGE_ENVIRONMENT": "local"},
     )
@@ -310,7 +309,6 @@ def test_fresh_activation_uses_a_new_totp_step_for_policy_publication(
         workspace_key="duc-knowledge",
         server_origin="http://127.0.0.1:8000",
         allowed_origin="https://app.example.test",
-        plugin_origin="https://api.example.test",
         password_file=password_file,
         runtime_environment={"CI": "true", "KNOWLEDGE_ENVIRONMENT": "local"},
     )
@@ -379,7 +377,6 @@ def test_malformed_totp_helper_output_runs_enrollment_before_wdio(tmp_path: Path
         workspace_key="duc-knowledge",
         server_origin="http://127.0.0.1:8000",
         allowed_origin="https://app.example.test",
-        plugin_origin="https://api.example.test",
         password_file=password_file,
         runtime_environment={"CI": "true", "KNOWLEDGE_ENVIRONMENT": "local"},
     )
@@ -417,7 +414,6 @@ def test_active_totp_rerun_skips_enrollment_and_preflights_before_wdio(
         workspace_key="duc-knowledge",
         server_origin="http://127.0.0.1:8000",
         allowed_origin="https://app.example.test",
-        plugin_origin="https://api.example.test",
         password_file=password_file,
         runtime_environment={"CI": "true", "KNOWLEDGE_ENVIRONMENT": "local"},
     )
@@ -496,7 +492,6 @@ def test_policy_publication_uses_an_older_totp_step_than_wdio_onboarding(
         workspace_key="duc-knowledge",
         server_origin="http://127.0.0.1:8000",
         allowed_origin="https://app.example.test",
-        plugin_origin="https://api.example.test",
         password_file=password_file,
         runtime_environment={"CI": "true", "KNOWLEDGE_ENVIRONMENT": "local"},
     )
@@ -561,7 +556,6 @@ def test_failed_post_enrollment_preflight_never_publishes_or_runs_wdio(
         workspace_key="duc-knowledge",
         server_origin="http://127.0.0.1:8000",
         allowed_origin="https://app.example.test",
-        plugin_origin="https://api.example.test",
         password_file=password_file,
         runtime_environment={"CI": "true", "KNOWLEDGE_ENVIRONMENT": "local"},
     )
@@ -609,7 +603,6 @@ def test_invalid_project_fails_before_any_external_operation(tmp_path: Path) -> 
             workspace_key="duc-knowledge",
             server_origin="http://127.0.0.1:8000",
             allowed_origin="https://app.example.test",
-            plugin_origin="https://api.example.test",
             password_file=tmp_path / "unused",
             runtime_environment={"CI": "true"},
         ),
@@ -656,7 +649,6 @@ def test_launcher_settings_reach_totp_policy_and_wdio_children(tmp_path: Path) -
         repository_root=tmp_path,
         project_name="knowledge-ci-loaded-environment",
         server_origin="http://127.0.0.1:8010",
-        plugin_origin="https://plugin.example.test",
         environ={"CI": "true", "PATH": "test-path"},
     )
     observed_environments: dict[str, Mapping[str, str]] = {}
@@ -715,10 +707,15 @@ def test_launcher_settings_reach_totp_policy_and_wdio_children(tmp_path: Path) -
         "KNOWLEDGE_AUTH_MAX_PLUGIN_VERSION",
     }
     assert required_helper_names.issubset(observed_environments["totp"])
+    # Single-origin login task 3: one public origin serves the browser and
+    # the plugin fixtures — both E2E origin values are the one
+    # `KNOWLEDGE_AUTH_ALLOWED_ORIGIN` literal read from the launcher script;
+    # no separate plugin origin exists anywhere.
+    public_origin = launcher_values["KNOWLEDGE_AUTH_ALLOWED_ORIGIN"]
     expected_e2e_environment = {
         "E2E_SERVER_ORIGIN": "http://127.0.0.1:8010",
-        "E2E_ALLOWED_ORIGIN": "https://admin.example.test",
-        "E2E_PLUGIN_ORIGIN": "https://plugin.example.test",
+        "E2E_ALLOWED_ORIGIN": public_origin,
+        "E2E_PLUGIN_ORIGIN": public_origin,
         "E2E_WEB_USERNAME": "duc",
         "E2E_WEB_PASSWORD_FILE": str(secret_root.resolve() / "web-credential-password.key"),
         "E2E_TOTP_HELPER": ".local/e2e-totp-code.py",
@@ -726,6 +723,10 @@ def test_launcher_settings_reach_totp_policy_and_wdio_children(tmp_path: Path) -
     for child_name in ("policy", "wdio"):
         for name, value in expected_e2e_environment.items():
             assert observed_environments[child_name][name] == value
+    assert (
+        observed_environments["wdio"]["E2E_ALLOWED_ORIGIN"]
+        == observed_environments["wdio"]["E2E_PLUGIN_ORIGIN"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -802,7 +803,6 @@ def test_failed_wdio_reports_the_last_closed_lifecycle_phase(
             workspace_key="duc-knowledge",
             server_origin="http://127.0.0.1:8000",
             allowed_origin="https://app.example.test",
-            plugin_origin="https://api.example.test",
             password_file=password_file,
             runtime_environment={"CI": "true", "KNOWLEDGE_ENVIRONMENT": "local"},
         ),
@@ -884,7 +884,6 @@ def test_failed_wdio_maps_malformed_or_unsafe_phase_status_to_generic_code(
             workspace_key="duc-knowledge",
             server_origin="http://127.0.0.1:8000",
             allowed_origin="https://app.example.test",
-            plugin_origin="https://api.example.test",
             password_file=password_file,
             runtime_environment={"CI": "true", "KNOWLEDGE_ENVIRONMENT": "local"},
         ),

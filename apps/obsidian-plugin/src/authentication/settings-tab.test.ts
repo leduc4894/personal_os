@@ -66,7 +66,9 @@ describe("DeviceAuthenticationSettingTab source contract", () => {
   it("exposes the exact spec-19 control set", () => {
     expect(extractObsidianImportNames(tabSource)).toContain("PluginSettingTab");
     for (const requiredControl of [
-      "Server origin",
+      // Single-origin login task 3: the field is labeled as the one public
+      // workspace origin, not as a server/API origin.
+      "Public workspace origin",
       "Device name",
       "Connection status",
       "Login",
@@ -78,6 +80,19 @@ describe("DeviceAuthenticationSettingTab source contract", () => {
     ]) {
       expect(tabSource).toContain(requiredControl);
     }
+  });
+
+  it("labels the origin field as the one public workspace origin (single-origin login task 3)", () => {
+    // One public origin serves the Web Admin and proxies /api/* to the API;
+    // the plugin Settings field points at that origin — never at a direct
+    // API hostname. The stored settings key stays `server_origin`, so only
+    // the visible label and guidance change.
+    const sectionIndex = tabSource.indexOf('"Public workspace origin"');
+    expect(sectionIndex).toBeGreaterThanOrEqual(0);
+    const sectionSnippet = tabSource.slice(sectionIndex, sectionIndex + 500);
+    expect(sectionSnippet).toContain("Web Admin");
+    expect(sectionSnippet).toContain("/api");
+    expect(sectionSnippet).not.toContain("api.ducinvest.com");
   });
 
   it("derives the status text and controls from the closed contracts", () => {

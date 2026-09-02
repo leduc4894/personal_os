@@ -52,8 +52,11 @@ export const config: WebdriverIOConfig = {
       path.join(fixturePluginDirectory, "data.json"),
       JSON.stringify({
         // The plugin refuses loopback HTTP origins (ALLOW_LOOPBACK_HTTP_ORIGIN
-        // is false), so the harness vault points at the public API origin.
-        server_origin: process.env.E2E_PLUGIN_ORIGIN ?? "https://api.ducinvest.com",
+        // is false), so the harness vault points at the one public workspace
+        // origin — the same origin that serves the Web Admin and proxies
+        // /api/*. The default is that public origin, never a direct API
+        // hostname.
+        server_origin: process.env.E2E_PLUGIN_ORIGIN ?? "https://app.ducinvest.com",
       }),
     );
   },

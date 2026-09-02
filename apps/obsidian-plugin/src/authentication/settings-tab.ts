@@ -1,8 +1,9 @@
 /**
- * The one settings tab of the plugin (spec 19): exact server origin, editable
- * device name, closed connection status, Login, Open browser again, Cancel
- * pending login and Disconnect. The tab renders from a snapshot and delegates
- * every action to the injected view; it holds no state of its own.
+ * The one settings tab of the plugin (spec 19): the one public workspace
+ * origin, editable device name, closed connection status, Login, Open
+ * browser again, Cancel pending login and Disconnect. The tab renders from
+ * a snapshot and delegates every action to the injected view; it holds no
+ * state of its own.
  */
 
 import { PluginSettingTab, Setting } from "obsidian";
@@ -220,9 +221,13 @@ export class DeviceAuthenticationSettingTab extends PluginSettingTab {
       .setName("Sync status by note")
       .setDesc(renderLocalNoteSyncStatusList(snapshot.localNoteSyncStatuses));
 
+    // Single-origin login task 3: the field is the ONE public workspace
+    // origin — the origin that serves the Web Admin and proxies /api/* to
+    // the API. The plugin has no separate API origin, and the stored
+    // settings key stays `server_origin` for compatibility.
     new Setting(containerEl)
-      .setName("Server origin")
-      .setDesc("Exact HTTPS origin of the personal knowledge API")
+      .setName("Public workspace origin")
+      .setDesc("Public origin that serves the Web Admin and proxies /api/* to the knowledge API")
       .addText((text) =>
         text
           .setPlaceholder("https://vault.example.com")

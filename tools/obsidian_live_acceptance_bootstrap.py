@@ -163,7 +163,6 @@ class LiveAcceptanceConfig:
     workspace_key: str
     server_origin: str
     allowed_origin: str
-    plugin_origin: str
     password_file: Path
     runtime_environment: Mapping[str, str]
     totp_helper: str = ".local/e2e-totp-code.py"
@@ -337,8 +336,11 @@ def _live_child_environment(config: LiveAcceptanceConfig) -> Mapping[str, str]:
     environment.update(
         {
             "E2E_SERVER_ORIGIN": config.server_origin,
+            # One public origin serves the browser and the plugin fixtures:
+            # the plugin origin is the validated allowed origin itself, and
+            # a local E2E_SERVER_ORIGIN is never a plugin setting.
             "E2E_ALLOWED_ORIGIN": config.allowed_origin,
-            "E2E_PLUGIN_ORIGIN": config.plugin_origin,
+            "E2E_PLUGIN_ORIGIN": config.allowed_origin,
             "E2E_WEB_USERNAME": config.username,
             "E2E_WEB_PASSWORD_FILE": str(config.password_file),
             "E2E_TOTP_HELPER": config.totp_helper,
@@ -640,7 +642,6 @@ def build_live_acceptance_config(
     repository_root: Path,
     project_name: str,
     server_origin: str,
-    plugin_origin: str,
     wdio_spec: str = "test/specs/source-lifecycle.e2e.ts",
     keep_wdio_phase_status: bool = False,
     environ: Mapping[str, str],
@@ -666,7 +667,6 @@ def build_live_acceptance_config(
         workspace_key="duc-knowledge",
         server_origin=server_origin,
         allowed_origin=launcher_exports["KNOWLEDGE_AUTH_ALLOWED_ORIGIN"],
-        plugin_origin=plugin_origin,
         wdio_spec=wdio_spec,
         keep_wdio_phase_status=keep_wdio_phase_status,
         password_file=secret_root / "web-credential-password.key",
@@ -681,7 +681,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--project-name", required=True)
     parser.add_argument("--server-origin", default="http://127.0.0.1:8000")
-    parser.add_argument("--plugin-origin", default="https://api.ducinvest.com")
     parser.add_argument(
         "--wdio-spec",
         choices=(
@@ -705,7 +704,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             repository_root=repository_root,
             project_name=cast(str, arguments.project_name),
             server_origin=cast(str, arguments.server_origin),
-            plugin_origin=cast(str, arguments.plugin_origin),
             wdio_spec=cast(str, arguments.wdio_spec),
             keep_wdio_phase_status=bool(arguments.keep_wdio_phase_status),
             environ=os.environ,

@@ -6,8 +6,10 @@ trust, snapshot verification, rotation, offline cache and Vault preservation
 against the live local stack (knowledge-local, PostgreSQL/Temporal compose)
 exposed through a Cloudflare Tunnel at `https://app.ducinvest.com`
 (single public origin for the Web Admin and `/api/*`; the plugin uses the
-same origin). Server-side timestamps cited below come from the API
-diagnostic log recorded during the session.
+same origin — changing it requires updating `KNOWLEDGE_AUTH_ALLOWED_ORIGIN`
+and then restarting the API, the Web Admin and the tunnel routing).
+Server-side timestamps cited below come from the API diagnostic log recorded
+during the session.
 
 The journey itself surfaced and fixed three real cross-surface defects
 before any scenario below could pass — recorded here because that is the
