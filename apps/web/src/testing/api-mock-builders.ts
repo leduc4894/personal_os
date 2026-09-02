@@ -54,12 +54,6 @@ export function totpEnrollmentResponse(): HttpResponse<DefaultBodyType> {
   return HttpResponse.json(envelope(totpEnrollmentData()));
 }
 
-export function dismissedEnrollmentResponse(): HttpResponse<DefaultBodyType> {
-  return HttpResponse.json(
-    envelope({ action: "dismiss_initial_offer", dismissed_at: "2026-08-16T08:05:00Z", enrollment: null }),
-  );
-}
-
 export function recoveryCodesData(): RecoveryCodesData {
   return {
     codes: ["ABCD-EFGH-IJKL", "MNOP-QRST-UVWX", "YZ23-4567-89AB"],

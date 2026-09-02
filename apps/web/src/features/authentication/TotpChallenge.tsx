@@ -173,7 +173,6 @@ export interface TotpEnrollmentOfferProps {
   /** Recovery-limited replacement cannot be skipped (spec 10.3). */
   requireCompletion?: boolean | undefined;
   onCompleted: (codes: RecoveryCodesData) => void;
-  onSkipped?: (() => void) | undefined;
 }
 
 /**
@@ -186,7 +185,6 @@ export function TotpEnrollmentOffer({
   enrollment,
   requireCompletion = false,
   onCompleted,
-  onSkipped,
 }: TotpEnrollmentOfferProps): ReactNode {
   const [code, setCode] = useState("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -231,17 +229,6 @@ export function TotpEnrollmentOffer({
     }
     const genericMessage = "Activation failed. Check the code and try again.";
     setErrorMessage(rateLimitedRetryMessage(result.error) ?? genericMessage);
-  }
-
-  async function skip(): Promise<void> {
-    setIsSubmitting(true);
-    const result = await client.dismissInitialTotpOffer();
-    setIsSubmitting(false);
-    if (!result.ok) {
-      setErrorMessage(rateLimitedRetryMessage(result.error) ?? "Skipping failed. Try again.");
-      return;
-    }
-    onSkipped?.();
   }
 
   return (
@@ -289,11 +276,6 @@ export function TotpEnrollmentOffer({
           Activate
         </button>
       </form>
-      {!requireCompletion && onSkipped !== undefined && (
-        <button type="button" disabled={isSubmitting} onClick={() => void skip()}>
-          Skip for now
-        </button>
-      )}
       {errorMessage !== null && <ErrorAnnouncement message={errorMessage} />}
     </section>
   );

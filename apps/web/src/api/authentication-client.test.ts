@@ -16,7 +16,6 @@ import {
   CSRF_COOKIE_VALUE,
   MOCK_API_BASE_URL,
   authenticationFailedResponse,
-  dismissedEnrollmentResponse,
   installMockCsrfCookie,
   mockApi,
   recoveryCodesResponse,
@@ -249,20 +248,6 @@ describe("createAuthenticationClient", () => {
     });
     expect(result).toMatchObject({ ok: true, data: { revision: 3 } });
     expect(seenRequests[0]?.headers.get("x-csrf-token")).toBe(CSRF_COOKIE_VALUE);
-  });
-
-  it("dismisses the first-login offer through the enrollment action route", async () => {
-    installMockCsrfCookie();
-    const seenBodies: string[] = [];
-    server.use(
-      mockApi("post", "/api/auth/totp/enrollments", async ({ request }) => {
-        seenBodies.push(await request.text());
-        return dismissedEnrollmentResponse();
-      }),
-    );
-    const result = await createTestClient().dismissInitialTotpOffer();
-    expect(result).toMatchObject({ ok: true, data: { action: "dismiss_initial_offer" } });
-    expect(seenBodies).toEqual(['{"action":"dismiss_initial_offer"}']);
   });
 
   it("surfaces the registry error body of a failed call", async () => {

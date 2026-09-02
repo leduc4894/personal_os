@@ -29,7 +29,6 @@ import {
 import {
   MOCK_API_BASE_URL,
   authenticationFailedResponse,
-  dismissedEnrollmentResponse,
   enrollmentStateInvalidResponse,
   errorBody,
   installMockCsrfCookie,
@@ -40,7 +39,6 @@ import {
   recoveryLimitedResponse,
   sessionData,
   sessionResponse,
-  totpEnrollmentData,
   totpEnrollmentResponse,
   unauthenticatedResponse,
 } from "../../testing/api-mock-builders";
@@ -88,7 +86,6 @@ function createSpyClient(behavior: {
     startTotpEnrollment: vi.fn().mockResolvedValue(
       behavior.startTotpEnrollment ?? callFailure("totp_enrollment_state_invalid"),
     ),
-    dismissInitialTotpOffer: vi.fn().mockResolvedValue({ ok: true, data: totpEnrollmentData() }),
     verifyTotpEnrollment: vi.fn().mockResolvedValue({ ok: true, data: recoveryCodesData() }),
     startTotpRecovery: vi.fn().mockResolvedValue(
       behavior.startTotpRecovery ?? callFailure("authentication_failed"),

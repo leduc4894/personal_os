@@ -182,7 +182,6 @@ describe("TotpEnrollmentOffer", () => {
         client={createTestClient()}
         enrollment={testEnrollment()}
         onCompleted={vi.fn()}
-        onSkipped={vi.fn()}
       />,
     );
     expect(container.querySelector("svg")).not.toBeNull();
@@ -201,7 +200,6 @@ describe("TotpEnrollmentOffer", () => {
         client={createTestClient()}
         enrollment={testEnrollment()}
         onCompleted={vi.fn()}
-        onSkipped={vi.fn()}
       />,
     );
     await user.click(screen.getByRole("button", { name: "Copy secret" }));
@@ -225,7 +223,6 @@ describe("TotpEnrollmentOffer", () => {
         client={createTestClient()}
         enrollment={testEnrollment()}
         onCompleted={onCompleted}
-        onSkipped={vi.fn()}
       />,
     );
     await user.type(screen.getByLabelText("Verification code"), "123456");
@@ -241,47 +238,15 @@ describe("TotpEnrollmentOffer", () => {
     expect(seenRequests[0]?.headers.get("x-csrf-token")).toBe(CSRF_COOKIE_VALUE);
   });
 
-  it("skips the first-login offer through the dismissal action", async () => {
-    const user = userEvent.setup();
-    const seenBodies: string[] = [];
-    server.use(
-      mockApi("post", "/api/auth/totp/enrollments", async ({ request }) => {
-        seenBodies.push(await request.text());
-        return recoveryCodesResponse();
-      }),
-    );
-    const onSkipped = vi.fn();
+  it("renders the ordinary enrollment offer without a skip control", () => {
     render(
       <TotpEnrollmentOffer
         client={createTestClient()}
         enrollment={testEnrollment()}
         onCompleted={vi.fn()}
-        onSkipped={onSkipped}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "Skip for now" }));
-    await waitFor(() => expect(onSkipped).toHaveBeenCalledTimes(1));
-    expect(seenBodies).toEqual(['{"action":"dismiss_initial_offer"}']);
-  });
-
-  it("keeps the offer open with a closed error when the dismissal fails", async () => {
-    const user = userEvent.setup();
-    server.use(mockApi("post", "/api/auth/totp/enrollments", () => authenticationFailedResponse()));
-    const onSkipped = vi.fn();
-    render(
-      <TotpEnrollmentOffer
-        client={createTestClient()}
-        enrollment={testEnrollment()}
-        onCompleted={vi.fn()}
-        onSkipped={onSkipped}
-      />,
-    );
-    await user.click(screen.getByRole("button", { name: "Skip for now" }));
-    const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("Skipping failed. Try again.");
-    expect(alert.textContent).not.toContain("Simulated");
-    expect(onSkipped).not.toHaveBeenCalled();
-    expect(screen.getByText("JBSWY3DPEHPK3PXP")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Skip for now" })).not.toBeInTheDocument();
   });
 
   it("hides the skip control when replacement is required", () => {
@@ -308,7 +273,6 @@ describe("TotpEnrollmentOffer", () => {
         client={createTestClient()}
         enrollment={testEnrollment()}
         onCompleted={vi.fn()}
-        onSkipped={vi.fn()}
       />,
     );
     const codeInput = screen.getByLabelText("Verification code");
@@ -332,7 +296,6 @@ describe("TotpEnrollmentOffer", () => {
         client={createTestClient()}
         enrollment={testEnrollment()}
         onCompleted={vi.fn()}
-        onSkipped={vi.fn()}
       />,
     );
     await user.type(screen.getByLabelText("Verification code"), "123456");

@@ -175,7 +175,6 @@ export function LoginForm({
           enrollment={enrollment}
           requireCompletion={step === "replacement"}
           onCompleted={handleEnrollmentCompleted}
-          onSkipped={undefined}
         />
       </>
     );

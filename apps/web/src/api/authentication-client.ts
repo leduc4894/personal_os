@@ -29,7 +29,6 @@ export interface AuthenticationClient {
   changePassword(input: { newPassword: string }): Promise<AuthenticationCallResult<SessionData>>;
   verifyTotpChallenge(input: { code: string }): Promise<AuthenticationCallResult<SessionData>>;
   startTotpEnrollment(): Promise<AuthenticationCallResult<TotpEnrollmentData>>;
-  dismissInitialTotpOffer(): Promise<AuthenticationCallResult<TotpEnrollmentData>>;
   verifyTotpEnrollment(input: {
     enrollmentId: string;
     code: string;
@@ -171,15 +170,6 @@ export function createAuthenticationClient(options: {
       return call(() =>
         apiClient.POST("/api/auth/totp/enrollments", {
           body: { action: "start" },
-          credentials: "include",
-          headers: csrfHeaders(),
-        }),
-      );
-    },
-    dismissInitialTotpOffer() {
-      return call(() =>
-        apiClient.POST("/api/auth/totp/enrollments", {
-          body: { action: "dismiss_initial_offer" },
           credentials: "include",
           headers: csrfHeaders(),
         }),
