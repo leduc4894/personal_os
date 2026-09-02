@@ -62,6 +62,11 @@ APPROVED_PROVIDER_COMPOSITIONS: Final[frozenset[Path]] = frozenset(
         REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "small_file_sync_composition.py",
         REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "device_sync_composition.py",
         REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "multipart_upload_composition.py",
+        # The conflict serve composition (Child 8 spec 6) is the same
+        # serving-path class: it binds the lazy R2 client behind the
+        # guarded verified evidence reader and the guarded resolution-
+        # candidate admission of the approved member-caller set below.
+        REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "source_conflict_composition.py",
         REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "server.py",
         REPO_ROOT / "apps" / "worker" / "src" / "workflow_worker" / "multipart_cleanup_workflow.py",
     }
@@ -106,6 +111,14 @@ APPROVED_OBJECT_STORE_MODULES: Final[frozenset[Path]] = frozenset(
         REPO_ROOT / "src" / "personal_os" / "multipart_upload" / "service.py",
         REPO_ROOT / "packages" / "r2-object-storage" / "src" / "r2_object_storage" / "adapter.py",
         REPO_ROOT / "src" / "personal_os" / "object_storage" / "contracts.py",
+        # The verified evidence reader and resolution-candidate admission of
+        # the Child 8 conflict design (spec 5.2/6): the reader opens only
+        # through the workspace-scoped, policy-rechecked route composition,
+        # and the candidate admission's bounded spool/verification runs only
+        # after the same policy recheck allowed the upload against the open
+        # conflict — its admission into canonical content objects is the
+        # exact hash-keyed upsert the publication transaction performs.
+        REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "source_conflict_composition.py",
     }
 )
 

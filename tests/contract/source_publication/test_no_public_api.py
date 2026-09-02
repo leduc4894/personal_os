@@ -50,6 +50,13 @@ SANCTIONED_PLUGIN_JOURNAL_ROOT: Final[Path] = (
 SANCTIONED_DEVICE_SYNC_PLUGIN_ROOT: Final[Path] = (
     REPO_ROOT / "apps" / "obsidian-plugin" / "src" / "device-sync"
 )
+#: The plugin Conflict Inbox client directory — the Obsidian-side surface
+#: of the Child 8 conflict design (spec 6): its winner downloads and safe
+#: metadata legitimately name canonical source and version identity, and
+#: it declares no source-publication endpoint of its own.
+SANCTIONED_CONFLICT_PLUGIN_ROOT: Final[Path] = (
+    REPO_ROOT / "apps" / "obsidian-plugin" / "src" / "conflicts"
+)
 SANCTIONED_SOURCE_LIFECYCLE_API_FILES: Final[frozenset[Path]] = frozenset(
     {
         REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "source_lifecycle_composition.py",
@@ -144,14 +151,22 @@ def _is_sanctioned_policy_surface(path: Path) -> bool:
     declares a source-publication endpoint. The three exact source-lifecycle
     API modules are likewise the designed lifecycle surface; the general API
     application stays scanned and only its exact lifecycle route line is
-    masked. Every other file is scanned in full, and the OpenAPI endpoint scan
-    below still proves no raw source-publication endpoint reaches a document.
+    masked. The ``source_conflict*`` modules and the plugin ``conflicts``
+    directory are the designed Conflict Inbox surface (Child 8 spec 6):
+    their evidence reads and winner downloads legitimately name canonical
+    source and version identity, while the bytes themselves flow only
+    through the verified reader/candidate compositions — none of it
+    declares a source-publication endpoint. Every other file is scanned in
+    full, and the OpenAPI endpoint scan below still proves no raw
+    source-publication endpoint reaches a document.
     """
     if path.name.startswith(("exclusion_policy", "exclusion-policy")):
         return True
     if path.name.startswith(("small_file_sync", "small-file-sync")):
         return True
     if path.name.startswith(("device_sync", "device-sync")):
+        return True
+    if path.name.startswith(("source_conflict", "source-conflict")):
         return True
     if path.name.startswith(("multipart_upload", "multipart-upload")):
         # The sanctioned multipart upload surface of the resumable
@@ -164,6 +179,8 @@ def _is_sanctioned_policy_surface(path: Path) -> bool:
     if SANCTIONED_PLUGIN_JOURNAL_ROOT in path.parents:
         return True
     if SANCTIONED_DEVICE_SYNC_PLUGIN_ROOT in path.parents:
+        return True
+    if SANCTIONED_CONFLICT_PLUGIN_ROOT in path.parents:
         return True
     if path in SANCTIONED_SOURCE_LIFECYCLE_API_FILES:
         return True
@@ -326,6 +343,7 @@ def test_sanction_scope_covers_exactly_the_designed_surfaces() -> None:
         REPO_ROOT / "apps" / "api" / "src" / "api_runtime" / "small_file_sync_routes.py",
         REPO_ROOT / "apps" / "obsidian-plugin" / "src" / "journal" / "sync-api.ts",
         REPO_ROOT / "apps" / "obsidian-plugin" / "src" / "exclusion-policy" / "snapshot.ts",
+        REPO_ROOT / "apps" / "obsidian-plugin" / "src" / "conflicts" / "api.ts",
         *sorted(SANCTIONED_SOURCE_LIFECYCLE_API_FILES),
     )
     for path in sanctioned:
