@@ -1247,6 +1247,25 @@ describe("device-sync two-device journeys (production stack)", () => {
     expect(server.completions).toHaveLength(1);
   });
 
+  it("repairs a cursor gap created inside delete-and-recreate reconciliation", async () => {
+    const server = new ScriptedServer();
+    const stack = buildPluginStack(server);
+    await server.commitCreate(LOCATOR, bytesOf("committed bytes"));
+    stack.coordinator.request("startup");
+    await flushCycles();
+
+    stack.vault.deleteFile(LOCATOR);
+    stack.vault.setFileBytes(LOCATOR, bytesOf("recreated bytes"));
+    server.deferSequences(1);
+    stack.coordinator.request("explicit_repair");
+    await flushCycles();
+    expect(stack.deviceSyncRepository.readState().barrierReason).toBe("device_cursor_gap");
+
+    stack.coordinator.request("explicit_repair");
+    await flushCycles();
+    expect(stack.deviceSyncRepository.readState().barrierGeneration).toBeNull();
+  });
+
   it("restarts exactly one fresh checkpoint-bound run after a policy advance", async () => {
     const server = new ScriptedServer();
     const stack = buildPluginStack(server);
