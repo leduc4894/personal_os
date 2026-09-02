@@ -23,6 +23,18 @@ const GRANT_DATA = {
   poll_interval_seconds: 5,
 };
 
+/**
+ * The single-public-origin fixture: the API base and every verification URL
+ * the server mints share one origin, so browser actions must consume the
+ * server-provided URLs verbatim.
+ */
+const SINGLE_PUBLIC_ORIGIN = "https://workspace.example";
+const SINGLE_ORIGIN_GRANT_DATA = {
+  ...GRANT_DATA,
+  verification_uri: `${SINGLE_PUBLIC_ORIGIN}/device/approve`,
+  verification_uri_complete: `${SINGLE_PUBLIC_ORIGIN}/device/approve#ABCD-EFGH`,
+};
+
 const EXCHANGE_DATA = {
   grant_id: "6e5cb1a2-0000-4000-8000-00000000000a",
   device_id: "77777777-7777-4777-8777-777777777777",
@@ -645,6 +657,38 @@ describe("cancel and resume", () => {
     });
     expect(harness.transport.pollGrant).not.toHaveBeenCalled();
     expect(harness.settings.pending_grant).toBeNull();
+  });
+});
+
+describe("browser actions stay on the single public origin", () => {
+  it("opens the server-minted verification_uri_complete on login", async () => {
+    const harness = createHarness({ server_origin: SINGLE_PUBLIC_ORIGIN });
+    harness.transport.createGrant.mockResolvedValue(SINGLE_ORIGIN_GRANT_DATA);
+    harness.transport.pollGrant.mockResolvedValue(EXCHANGE_DATA);
+
+    const loginPromise = harness.controller.login();
+    await harness.timeline.releaseOneDelay();
+    await loginPromise;
+
+    expect(harness.openUrl).toHaveBeenCalledTimes(1);
+    expect(harness.openUrl).toHaveBeenCalledWith(
+      SINGLE_ORIGIN_GRANT_DATA.verification_uri_complete,
+    );
+  });
+
+  it("reopens the single-origin verification_uri with the user-code fragment", async () => {
+    const harness = createHarness({ server_origin: SINGLE_PUBLIC_ORIGIN });
+    harness.transport.createGrant.mockResolvedValue(SINGLE_ORIGIN_GRANT_DATA);
+    harness.transport.pollGrant.mockResolvedValue(EXCHANGE_DATA);
+
+    const loginPromise = harness.controller.login();
+    await harness.timeline.settle();
+    harness.controller.openBrowserAgain();
+    expect(harness.openUrl).toHaveBeenLastCalledWith(
+      `${SINGLE_ORIGIN_GRANT_DATA.verification_uri}#${SINGLE_ORIGIN_GRANT_DATA.user_code}`,
+    );
+    await harness.timeline.releaseOneDelay();
+    await loginPromise;
   });
 });
 

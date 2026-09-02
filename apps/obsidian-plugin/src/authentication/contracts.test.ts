@@ -9,7 +9,7 @@ import {
   resolveAuthenticationControls,
   validateDeviceName,
 } from "./contracts";
-import type { DeviceHttpRequest, DeviceHttpResponse, DeviceHttpTransport } from "./contracts";
+import type { DeviceHttpResponse, DeviceHttpTransport } from "./contracts";
 
 function httpResponse(status: number, body: unknown): DeviceHttpResponse {
   return { status, bodyText: typeof body === "string" ? body : JSON.stringify(body) };
@@ -266,7 +266,6 @@ describe("createDeviceApiTransport", () => {
       headers: {
         "content-type": "application/json",
         accept: "application/json",
-        origin: "https://vault.example.com",
       },
       body: JSON.stringify({
         client_instance_id: "11111111-1111-4111-8111-111111111111",
@@ -279,18 +278,17 @@ describe("createDeviceApiTransport", () => {
     });
   });
 
-  it("sends the configured origin header on grant creation because the server's exact-origin gate requires it", async () => {
-    // The unauthenticated grant-creation endpoint enforces an exact Origin
-    // match against the server's allowed origin (web-authentication design
-    // section 8), and Obsidian's requestUrl never adds an Origin header by
-    // itself — without this header every real-device Login answers 403
-    // csrf_validation_failed and the plugin degrades to the offline state.
+  it("targets the configured public origin in the URL and sends no origin header", async () => {
+    // Grant creation is a native Obsidian request, not a browser fetch: the
+    // request URL itself targets the configured public origin and no Origin
+    // header is forged — the browser security boundary begins at the
+    // server-minted verification URL.
     const calls: unknown[] = [];
     const http: DeviceHttpTransport = async (request) => {
       calls.push(request);
       return successEnvelope(createGrantData());
     };
-    const transport = createDeviceApiTransport(http, () => "https://vault.example.com");
+    const transport = createDeviceApiTransport(http, () => "https://workspace.example");
 
     await transport.createGrant({
       client_instance_id: "11111111-1111-4111-8111-111111111111",
@@ -301,8 +299,12 @@ describe("createDeviceApiTransport", () => {
       requested_scope: "obsidian_sync",
     });
 
-    const request = calls[0] as DeviceHttpRequest;
-    expect(request.headers.origin).toBe("https://vault.example.com");
+    expect(calls).toEqual([
+      expect.objectContaining({
+        url: "https://workspace.example/api/auth/device-authorizations",
+        headers: expect.not.objectContaining({ origin: expect.anything() }),
+      }),
+    ]);
   });
 
   it("presents the polling secret as the dedicated Bearer credential", async () => {
