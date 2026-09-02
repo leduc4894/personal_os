@@ -19,7 +19,8 @@ import { sha256Hex } from "../exclusion-policy/canonical-json";
 import type { FrozenFingerprint } from "../journal/contracts";
 import { JOURNAL_SCHEMA_VERSION, SqliteDatabase } from "../journal/sqlite-database";
 import type { SqliteEngineModule } from "../journal/sqlite-database";
-import type { PreparedRemoteApply } from "./contracts";
+import type { PreparedRemoteApply, RemoteApplyTransition } from "./contracts";
+import type { DeviceSyncRepository as DeviceSyncRepositoryPort } from "./contracts";
 import {
   AtomicVaultWriterImpl,
   buildRollbackSiblingLocator,
@@ -52,6 +53,7 @@ beforeAll(async () => {
 const SOURCE_ID = "99999999-9999-4999-8999-999999999999";
 const EVENT_ID = "88888888-8888-4888-8888-888888888888";
 const TEMP_TOKEN = "77777777-7777-4777-8777-777777777777";
+const EVENT_SEQUENCE = 1;
 
 function bytesOf(text: string): Uint8Array {
   return new TextEncoder().encode(text);
@@ -140,7 +142,11 @@ class FakeVaultSeam implements VaultMutationSeam {
   }
 }
 
-function createHarness(): {
+function createHarness(
+  wrapRepository: (
+    repository: DeviceSyncRepository,
+  ) => DeviceSyncRepositoryPort = (repository) => repository,
+): {
   readonly repository: DeviceSyncRepository;
   readonly database: SqliteDatabase;
   readonly seam: FakeVaultSeam;
@@ -155,7 +161,7 @@ function createHarness(): {
   });
   const repository = new DeviceSyncRepository({ database });
   const seam = new FakeVaultSeam();
-  const writer = new AtomicVaultWriterImpl({ repository, seam });
+  const writer = new AtomicVaultWriterImpl({ repository: wrapRepository(repository), seam });
   return { repository, database, seam, writer };
 }
 
@@ -293,6 +299,98 @@ describe("AtomicVaultWriter temporary sibling staging", () => {
   });
 });
 
+// --- the durable temp_verified ordering ---------------------------------------------------------------
+
+describe("AtomicVaultWriter durable temp_verified ordering", () => {
+  /**
+   * A bound-method delegate over the real repository (the applier suite's
+   * pattern): private fields keep working because every method runs with
+   * the original receiver, and the plain object stays structurally
+   * assignable to the writer's repository port while the wrapper records
+   * every durable remote-apply transition.
+   */
+  function transitionRecordingRepository(
+    repository: DeviceSyncRepository,
+    transitions: RemoteApplyTransition[],
+  ): DeviceSyncRepositoryPort {
+    const delegate: Record<string, unknown> = {};
+    for (const key of Object.getOwnPropertyNames(Object.getPrototypeOf(repository))) {
+      if (key === "constructor") {
+        continue;
+      }
+      const value = (repository as unknown as Record<string, unknown>)[key];
+      if (typeof value === "function") {
+        delegate[key] = value.bind(repository);
+      }
+    }
+    const originalTransition = repository.transitionRemoteApply.bind(repository);
+    delegate["transitionRemoteApply"] = async (input: RemoteApplyTransition): Promise<void> => {
+      await originalTransition(input);
+      transitions.push(input);
+    };
+    return delegate as unknown as DeviceSyncRepositoryPort;
+  }
+
+  it("records temp_verified before the seam's first visible mutation", async () => {
+    const transitions: RemoteApplyTransition[] = [];
+    const durableStateAtFirstVisibleMutation: string[] = [];
+    const { repository, seam, writer } = createHarness((real) =>
+      transitionRecordingRepository(real, transitions),
+    );
+    const { base, next } = await prepareContentApply(repository);
+    seam.setFileBytes("notes/a.md", bytesOf("base content"));
+    // The first VISIBLE mutation of an updated apply is the occupied
+    // target moving aside to the hidden rollback sibling; the durable
+    // row must already sit at temp_verified when it happens.
+    seam.onAction = (method, from) => {
+      const isTargetMovingAside = method === "renameLocator" && from === "notes/a.md";
+      if (isTargetMovingAside && durableStateAtFirstVisibleMutation.length === 0) {
+        durableStateAtFirstVisibleMutation.push(
+          repository.readUnfinishedApply()?.state ?? "absent",
+        );
+      }
+    };
+
+    await writer.stageAndReplace(contentInput(base, next));
+
+    expect(durableStateAtFirstVisibleMutation).toEqual(["temp_verified"]);
+    expect(transitions).toContainEqual({
+      eventSequence: EVENT_SEQUENCE,
+      state: "temp_verified",
+      tempToken: TEMP_TOKEN,
+    });
+  });
+
+  it("records temp_verified before the rename-in that creates a created apply's target", async () => {
+    const transitions: RemoteApplyTransition[] = [];
+    const durableStateAtFirstVisibleMutation: string[] = [];
+    const { repository, seam, writer } = createHarness((real) =>
+      transitionRecordingRepository(real, transitions),
+    );
+    const { next } = await prepareContentApply(repository, "created");
+    // The created target is absent: the first visible mutation is the
+    // verified temp renaming IN to the target locator.
+    seam.onAction = (method, _from, to) => {
+      const isTargetRenameIn = method === "renameLocator" && to === "notes/a.md";
+      if (isTargetRenameIn && durableStateAtFirstVisibleMutation.length === 0) {
+        durableStateAtFirstVisibleMutation.push(
+          repository.readUnfinishedApply()?.state ?? "absent",
+        );
+      }
+    };
+
+    await writer.stageAndReplace(
+      contentInput(next, next, {
+        operation: "created",
+        baseFingerprint: null,
+        bytes: bytesOf("remote next content"),
+      }),
+    );
+
+    expect(durableStateAtFirstVisibleMutation).toEqual(["temp_verified"]);
+  });
+});
+
 // --- occupied-target and base-fingerprint conflicts --------------------------------------------------
 
 describe("AtomicVaultWriter occupied-target and base-fingerprint conflicts", () => {
@@ -316,7 +414,9 @@ describe("AtomicVaultWriter occupied-target and base-fingerprint conflicts", () 
     expect(new TextDecoder().decode(seam.files.get("notes/a.md") ?? new Uint8Array())).toBe(
       "someone else lives here",
     );
-    expect(seam.trashLog).toEqual([buildTempSiblingLocator("notes/a.md", TEMP_TOKEN)]);
+    // The shape check refuses before anything is staged: no hidden bytes
+    // are ever written (and nothing needs trashing) for a refused apply.
+    expect(seam.trashLog).toEqual([]);
     expect(repository.readUnfinishedApply()?.state).toBe("prepared");
   });
 
@@ -343,6 +443,71 @@ describe("AtomicVaultWriter occupied-target and base-fingerprint conflicts", () 
 
     expect(error.stage).toBe("vault_mutation");
     expect(error.reason).toBe("device_manifest_local_diverged");
+  });
+});
+
+// --- the shared primitive's failure mapping -----------------------------------------------------------
+
+describe("AtomicVaultWriter shared-primitive failure mapping", () => {
+  it("maps a refused staging write to the closed verify_temp stage and reason", async () => {
+    const { repository, seam, writer } = createHarness();
+    const { base, next } = await prepareContentApply(repository);
+    seam.setFileBytes("notes/a.md", bytesOf("base content"));
+    seam.createFile = async (): Promise<void> => {
+      throw new Error("vault write refused");
+    };
+
+    const error = await writerErrorOf(writer.stageAndReplace(contentInput(base, next)));
+
+    expect(error.stage).toBe("verify_temp");
+    expect(error.reason).toBe("device_apply_vault_failed");
+    expect(error.retryable).toBe(true);
+    // Nothing was staged, so nothing was mutated and the durable row
+    // still sits at prepared.
+    expect(new TextDecoder().decode(seam.files.get("notes/a.md") ?? new Uint8Array())).toBe(
+      "base content",
+    );
+    expect(repository.readUnfinishedApply()?.state).toBe("prepared");
+  });
+
+  it("maps a failed base-proof readback to the closed local-diverged conflict reason", async () => {
+    const { repository, seam, writer } = createHarness();
+    const { base, next } = await prepareContentApply(repository);
+    seam.setFileBytes("notes/a.md", bytesOf("base content"));
+    const originalReadBytes = seam.readBytes.bind(seam);
+    seam.readBytes = async (locator: string): Promise<Uint8Array | null> => {
+      if (locator === "notes/a.md") {
+        throw new Error("vault read refused");
+      }
+      return await originalReadBytes(locator);
+    };
+
+    const error = await writerErrorOf(writer.stageAndReplace(contentInput(base, next)));
+
+    // The base byte proof rides the shared primitive; its refusal keeps
+    // the writer's divergence token so the applier settles it durably.
+    expect(error.stage).toBe("vault_mutation");
+    expect(error.reason).toBe("device_manifest_local_diverged");
+    expect(error.retryable).toBe(false);
+    expect(repository.readUnfinishedApply()?.state).toBe("prepared");
+  });
+
+  it("maps a refused replace to the closed vault_mutation stage with the durable proof standing", async () => {
+    const { repository, seam, writer } = createHarness();
+    const { base, next } = await prepareContentApply(repository);
+    seam.setFileBytes("notes/a.md", bytesOf("base content"));
+    seam.renameLocator = async (): Promise<void> => {
+      throw new Error("vault rename refused");
+    };
+
+    const error = await writerErrorOf(writer.stageAndReplace(contentInput(base, next)));
+
+    expect(error.stage).toBe("vault_mutation");
+    expect(error.reason).toBe("device_apply_vault_failed");
+    expect(error.retryable).toBe(true);
+    // The durable temp_verified proof precedes the refused replace, so
+    // recovery resumes the staged bytes instead of re-staging them.
+    expect(repository.readUnfinishedApply()?.state).toBe("temp_verified");
   });
 });
 

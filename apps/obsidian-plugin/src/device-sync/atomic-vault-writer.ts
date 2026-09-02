@@ -2,13 +2,20 @@
  * The atomic Vault writer (device cursor and manifest reconciliation,
  * task 10, spec 8.1, 11).
  *
- * Content applies stage verified bytes in a SAME-DIRECTORY hidden
- * temporary sibling, verify them against the expected final fingerprint,
- * persist `temp_verified`, perform the narrow replace with a retained
- * rollback sibling (the verified old bytes), verify the final bytes,
- * and leave `vault_mutated` to the caller's single transition. Locator
- * applies rename after proving the prior bytes and an unoccupied
- * target; tombstones trash through the Vault trash path —
+ * Content applies prove the writer's own target-shape discipline first
+ * (an occupied target for `updated`, an absent target for
+ * `created`/`restored`), then delegate the whole byte discipline — stage
+ * verified bytes in a SAME-DIRECTORY hidden temporary sibling, verify
+ * them, prove the occupied target's pinned base, narrow-replace with a
+ * retained rollback sibling, verify the final bytes — to the shared
+ * mutation primitive (`stageVerifyAndReplaceVaultContent`). The durable
+ * `temp_verified` transition stays the writer's own: it glues to the
+ * primitive's FIRST VISIBLE mutation (immediately before the first
+ * rename), so a crash before that point still finds the durable row at
+ * `prepared` while every crash after it resumes from the verified
+ * staging bytes. `vault_mutated` is left to the caller's single
+ * transition. Locator applies rename after proving the prior bytes and
+ * an unoccupied target; tombstones trash through the Vault trash path —
  * `Vault.trash(file, false)` — with NO hard-delete fallback anywhere.
  *
  * Crash recovery (`recover`) reconciles one durable
@@ -35,9 +42,12 @@ import { sha256Hex } from "../exclusion-policy/canonical-json";
 import type { FrozenFingerprint } from "../journal/contracts";
 import type { JournalStoreErrorReason } from "../journal/sqlite-database";
 import {
+  AtomicVaultMutationFailure,
   buildRollbackSiblingLocator,
   buildTempSiblingLocator,
+  stageVerifyAndReplaceVaultContent,
 } from "./atomic-vault-mutation";
+import type { AtomicVaultMutationResult } from "./atomic-vault-mutation";
 import type {
   ApplyFailureStage,
   DeviceSyncReason,
@@ -50,11 +60,6 @@ import type {
 // The sibling naming lives in the shared mutation primitive this writer
 // consumes; the re-export keeps this module's public surface unchanged.
 export { buildRollbackSiblingLocator, buildTempSiblingLocator };
-
-function baseNameOf(locator: string): string {
-  const lastSlash = locator.lastIndexOf("/");
-  return lastSlash === -1 ? locator : locator.slice(lastSlash + 1);
-}
 
 // --- the apply inputs and outcomes ---------------------------------------------------------------------
 
@@ -244,9 +249,13 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 /**
  * Whether one locator is one of the writer's own hidden siblings: the Vault
  * index never lists dot-prefixed paths, so they ride the adapter instead.
+ * (The base-name slice is inlined here on purpose — the shared sibling
+ * naming, including its own base-name helper, lives in the primitive.)
  */
 function isHiddenSiblingLocator(locator: string): boolean {
-  return baseNameOf(locator).startsWith(".");
+  const lastSlash = locator.lastIndexOf("/");
+  const baseName = lastSlash === -1 ? locator : locator.slice(lastSlash + 1);
+  return baseName.startsWith(".");
 }
 
 /**
@@ -383,89 +392,94 @@ export class AtomicVaultWriterImpl implements AtomicVaultWriter {
 
   async stageAndReplace(input: ContentApplyInput): Promise<VerifiedVaultMutation> {
     const target = input.targetLocator;
-    const tempLocator = buildTempSiblingLocator(target, input.tempToken);
 
-    // 1. Stage the bytes in the same-directory temporary sibling and
-    //    verify them against the expected final fingerprint.
-    try {
-      if (await this.#seam.locatorExists(tempLocator)) {
-        // Exact-temp cleanup of a stale sibling from an earlier attempt.
-        await this.#seam.trashLocator(tempLocator);
-      }
-      await this.#seam.createFile(tempLocator, input.bytes);
-    } catch (error) {
-      throw this.#wrap(error, "verify_temp", "device_apply_vault_failed", true);
-    }
-    const stagedBytes = await this.#readOrNull(tempLocator, "verify_temp");
-    if (!(await hashesTo(stagedBytes, input.expectedFinalFingerprint))) {
-      await this.#trashQuietly(tempLocator);
-      throw writerError("verify_temp", "device_apply_vault_failed", true);
-    }
-
-    // 2. Prove the pre-mutation expectation: an unoccupied target for
-    //    created/restored, the pinned base bytes for updated.
+    // 1. The writer's own target-shape discipline — STRICTER than the
+    //    primitive's occupied-target base proof and retained here on
+    //    purpose: an updated apply demands an OCCUPIED target (absence
+    //    is local divergence), a created or restored apply demands an
+    //    ABSENT target. The occupancy proof is existence-only; the
+    //    pinned-base byte proof rides the primitive's prove-base step
+    //    so the target keeps exactly one pre-replace byte read, and the
+    //    refusal lands before anything is staged.
     const isUpdate = input.operation === "updated";
-    let hadTarget = false;
     if (isUpdate) {
-      const currentBytes = await this.#readOrNull(target, "vault_mutation");
-      hadTarget = currentBytes !== null;
-      if (currentBytes === null) {
-        await this.#trashQuietly(tempLocator);
-        throw writerError("vault_mutation", "device_manifest_local_diverged", false);
-      }
-      if (input.baseFingerprint !== null && !(await hashesTo(currentBytes, input.baseFingerprint))) {
-        await this.#trashQuietly(tempLocator);
+      if (!(await this.#seam.locatorExists(target))) {
         throw writerError("vault_mutation", "device_manifest_local_diverged", false);
       }
     } else if (await this.#seam.locatorExists(target)) {
-      await this.#trashQuietly(tempLocator);
       throw writerError("vault_mutation", "device_manifest_target_occupied", false);
     }
 
-    // 3. Persist temp_verified before any mutation (content operations
-    //    only — the lattice bars `restored` from the temp state).
-    if (input.operation === "created" || input.operation === "updated") {
-      try {
-        await this.#repository.transitionRemoteApply({
-          eventSequence: input.eventSequence,
-          state: "temp_verified",
-          tempToken: input.tempToken,
-        });
-      } catch (error) {
-        const reason = storeReasonOf(error) ?? "device_apply_vault_failed";
+    // 2. The durable temp_verified proof (content operations only — the
+    //    lattice bars `restored` from the temp state) must land BETWEEN
+    //    the staged-bytes verification and the first visible mutation,
+    //    the same durable point the inline discipline used: a crash
+    //    before it finds the row at `prepared` (abandon + clean), a
+    //    crash after it resumes from the verified staging bytes. The
+    //    primitive owns staging, verification and replace as ONE byte
+    //    discipline, so the proof glues to the seam: the sequencing
+    //    wrapper below fires the transition immediately before the
+    //    primitive's first rename — always the first VISIBLE mutation —
+    //    and never before the staged bytes were written and verified.
+    let durableProofFailure: unknown = null;
+    let hasDurableProof = input.operation === "restored";
+    const seam = this.#seam;
+    const sequencedSeam: VaultMutationSeam = {
+      locatorExists: (locator) => seam.locatorExists(locator),
+      createFile: (locator, bytes) => seam.createFile(locator, bytes),
+      readBytes: (locator) => seam.readBytes(locator),
+      trashLocator: (locator) => seam.trashLocator(locator),
+      renameLocator: async (fromLocator, toLocator) => {
+        if (!hasDurableProof) {
+          hasDurableProof = true;
+          try {
+            await this.#repository.transitionRemoteApply({
+              eventSequence: input.eventSequence,
+              state: "temp_verified",
+              tempToken: input.tempToken,
+            });
+          } catch (error) {
+            // Refuse the visible mutation; the mapped refusal surfaces
+            // below with the writer's own verify_temp/store-reason
+            // mapping, never as a replace failure.
+            durableProofFailure = error;
+            throw error;
+          }
+        }
+        await seam.renameLocator(fromLocator, toLocator);
+      },
+    };
+
+    // 3. The shared byte discipline owns every seam mutation from here:
+    //    stage the hidden sibling (cleaning a stale sibling of exactly
+    //    this token first), verify the staged bytes, prove the occupied
+    //    target's pinned base, narrow-replace with retained rollback
+    //    evidence, verify the final bytes — restoring the verified old
+    //    bytes on mismatch. The base proof stays an updated-only
+    //    discipline: created/restored targets were proven absent above.
+    let mutated: AtomicVaultMutationResult;
+    try {
+      mutated = await stageVerifyAndReplaceVaultContent({
+        seam: sequencedSeam,
+        targetLocator: target,
+        tempToken: input.tempToken,
+        bytes: input.bytes,
+        expectedFinalFingerprint: input.expectedFinalFingerprint,
+        expectedBaseFingerprint: isUpdate ? input.baseFingerprint : null,
+      });
+    } catch (error) {
+      if (durableProofFailure !== null) {
+        const reason = storeReasonOf(durableProofFailure) ?? "device_apply_vault_failed";
         throw writerError("verify_temp", reason, false);
       }
-    }
-
-    // 4. The narrow replace with retained rollback evidence: the old
-    //    bytes move to the rollback sibling, the verified temp moves in.
-    const rollbackLocator = isUpdate && hadTarget
-      ? buildRollbackSiblingLocator(target, input.tempToken)
-      : null;
-    try {
-      if (rollbackLocator !== null) {
-        await this.#seam.renameLocator(target, rollbackLocator);
-      }
-      await this.#seam.renameLocator(tempLocator, target);
-    } catch (error) {
-      throw this.#wrap(error, "vault_mutation", "device_apply_vault_failed", true);
-    }
-
-    // 5. Verify the final bytes; on mismatch restore the verified old
-    //    bytes through the rollback sibling.
-    const finalBytes = await this.#readOrNull(target, "verify_final");
-    if (!(await hashesTo(finalBytes, input.expectedFinalFingerprint))) {
-      const restoredToBase = rollbackLocator !== null
-        ? await this.#restoreRollback(target, rollbackLocator, input.baseFingerprint)
-        : false;
-      throw writerError("verify_final", "device_apply_vault_failed", false, restoredToBase);
+      throw this.#mapMutationFailure(error);
     }
 
     return {
       targetLocator: target,
       verifiedFingerprint: input.expectedFinalFingerprint,
       tempToken: input.tempToken,
-      rollbackToken: rollbackLocator !== null ? input.tempToken : null,
+      rollbackToken: mutated.rollbackLocator !== null ? input.tempToken : null,
     };
   }
 
@@ -566,14 +580,35 @@ export class AtomicVaultWriterImpl implements AtomicVaultWriter {
     return writerError(stage, reason, retryable);
   }
 
-  /** Best-effort trash of one sibling; the outcome is never blocked by it. */
-  async #trashQuietly(locator: string): Promise<void> {
-    try {
-      await this.#seam.trashLocator(locator);
-    } catch {
-      // A leftover hidden sibling is not data loss; the apply outcome
-      // still surfaces through its own closed stage.
+  /**
+   * Map the shared primitive's private typed failure onto the writer's
+   * closed stage/reason vocabulary — no new public tokens, the same
+   * pairs the inline discipline raised. A prove-base refusal keeps the
+   * divergence token (the applier settles it durably as a conflict);
+   * the staged-bytes and replace refusals stay retryable vault failures.
+   */
+  #mapMutationFailure(error: unknown): AtomicVaultWriterError {
+    if (error instanceof AtomicVaultMutationFailure) {
+      switch (error.stage) {
+        case "stage":
+        case "verify_staged":
+          return writerError("verify_temp", "device_apply_vault_failed", true);
+        case "prove_base":
+          return writerError("vault_mutation", "device_manifest_local_diverged", false);
+        case "replace":
+          return writerError("vault_mutation", "device_apply_vault_failed", true);
+        case "verify_final":
+          return writerError(
+            "verify_final",
+            "device_apply_vault_failed",
+            false,
+            error.restoredToBase,
+          );
+      }
     }
+    // The primitive's contract allows no other escape; a foreign throw
+    // still surfaces through the closed vault failure token, never raw.
+    return writerError("vault_mutation", "device_apply_vault_failed", true);
   }
 
   /** Restore the verified old bytes from the rollback sibling; true only when the base proof passes again. */
