@@ -1250,13 +1250,60 @@ describe("device-sync two-device journeys (production stack)", () => {
   it("repairs a cursor gap created inside delete-and-recreate reconciliation", async () => {
     const server = new ScriptedServer();
     const stack = buildPluginStack(server);
+    const peerLocator = "notes/journey-recreated-peer.md";
     await server.commitCreate(LOCATOR, bytesOf("committed bytes"));
+    await server.commitCreate(peerLocator, bytesOf("peer committed bytes"));
     stack.coordinator.request("startup");
     await flushCycles();
 
+    // The delete-and-recreate: the committed file is deleted locally and the
+    // same locator returns with different bytes, while a peer file keeps its
+    // own unsynced edit so the run's plan settles one closed local
+    // divergence. The uploaded recreate is durably proven: the admitted
+    // repair upload whose committed receipt binds the canonical source and
+    // version (the exact committed evidence of the echo below).
     stack.vault.deleteFile(LOCATOR);
     stack.vault.setFileBytes(LOCATOR, bytesOf("recreated bytes"));
-    server.deferSequences(1);
+    stack.vault.setFileBytes(peerLocator, bytesOf("peer edited bytes"));
+    const admission = await stack.capture.admitForRepair(LOCATOR);
+    const recreateSourceId = uuidOf(`source${LOCATOR}`);
+    const recreateVersionId = uuidOf(`version${LOCATOR}2`);
+    if (admission === null || admission.outcome !== "event_recorded") {
+      throw new Error("the recreate admission must record an event");
+    }
+    await stack.journalRepository.recordCommittedReceipt({
+      eventId: admission.event.eventId,
+      sourceId: recreateSourceId,
+      baseVersionId: recreateVersionId,
+    });
+    const evidence = stack.journalRepository.readLocalFileByPath(LOCATOR);
+    if (
+      evidence === null ||
+      evidence.sourceId !== recreateSourceId ||
+      evidence.baseVersionId !== recreateVersionId ||
+      evidence.lastCommittedFingerprint === null
+    ) {
+      throw new Error("the committed recreate evidence row is incomplete");
+    }
+    const recreateFingerprint = evidence.lastCommittedFingerprint;
+
+    // Inside the reconciliation — after the run's checkpoint bound at the
+    // settled cursor — the server defers one sequence number, our uploaded
+    // recreate commits across the gap (the self-origin echo the committed
+    // evidence proves) and the tombstone of our delete upload lands on the
+    // canonical source. The run's checkpoint stays frozen at the cursor
+    // while the planned tombstone needs the sequence past it.
+    server.onFirstStart = async () => {
+      server.deferSequences(1);
+      await server.commitSelfOriginEcho({
+        locator: LOCATOR,
+        sourceId: recreateSourceId,
+        versionId: recreateVersionId,
+        fingerprint: recreateFingerprint,
+      });
+      await server.commitDelete(LOCATOR);
+    };
+
     stack.coordinator.request("explicit_repair");
     await flushCycles();
     expect(stack.deviceSyncRepository.readState().barrierReason).toBe("device_cursor_gap");
