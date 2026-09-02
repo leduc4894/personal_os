@@ -238,13 +238,62 @@ describe("journal sync api outcome parsing (spec 10.1 table)", () => {
       },
     ],
     ["excluded", { outcome: "excluded" }, { outcome: "excluded" }],
-    ["conflict", { outcome: "conflict" }, { outcome: "conflict" }],
+    [
+      "conflict with a capture grant",
+      { outcome: "conflict", operation_id: OPERATION_ID, expires_at: "2026-08-18T01:00:00Z" },
+      { outcome: "conflict", operationId: OPERATION_ID, conflictId: null },
+    ],
+    [
+      "conflict with the replayed identity",
+      { outcome: "conflict", conflict_id: SOURCE_ID },
+      { outcome: "conflict", operationId: null, conflictId: SOURCE_ID },
+    ],
+    [
+      "bare conflict without a grant",
+      { outcome: "conflict" },
+      { outcome: "conflict", operationId: null, conflictId: null },
+    ],
   ])("parses the %s outcome into its closed shape", async (_name, data, expected) => {
     const transport = createRecordingTransport(async () => ({
       status: 200,
       bodyText: successBody(data),
     }));
     await expect(createApi(transport).preflightJournalEvent(PREFLIGHT_INPUT)).resolves.toEqual(expected);
+  });
+
+  it("parses the opaque conflict identity of one capture upload", async () => {
+    const transport = createRecordingTransport(async () => ({
+      status: 200,
+      bodyText: successBody({
+        conflict_id: SOURCE_ID,
+        source_id: SOURCE_ID,
+        observed_remote_version_id: SOURCE_VERSION_ID,
+        captured_at: "2026-08-18T00:00:00Z",
+      }),
+    }));
+    await expect(
+      createApi(transport).uploadSmallFileConflictCandidate({
+        operationId: OPERATION_ID,
+        contentBytes: new Uint8Array(4),
+      }),
+    ).resolves.toEqual({ conflictId: SOURCE_ID });
+    expect(transport.requests[0]?.url).toBe(
+      `${ORIGIN}/api/uploads/${OPERATION_ID}/conflict-content`,
+    );
+    expect(transport.requests[0]?.method).toBe("PUT");
+  });
+
+  it("fails a malformed capture receipt closed", async () => {
+    const transport = createRecordingTransport(async () => ({
+      status: 200,
+      bodyText: successBody({ conflict_id: "not-a-uuid" }),
+    }));
+    await expect(
+      createApi(transport).uploadSmallFileConflictCandidate({
+        operationId: OPERATION_ID,
+        contentBytes: new Uint8Array(4),
+      }),
+    ).rejects.toMatchObject({ kind: "server_error" });
   });
 
   it("parses the content receipt of one committed stream", async () => {

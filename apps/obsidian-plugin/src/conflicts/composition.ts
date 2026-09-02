@@ -50,6 +50,7 @@ import type { SyncDiagnosticsTrail } from "../journal/sync-diagnostics-trail";
 import { JOURNAL_STORE_ERROR_REASONS } from "../journal/sqlite-database";
 import type { JournalStoreErrorReason } from "../journal/sqlite-database";
 import { ConflictApiError } from "./api";
+import type { ConflictApi } from "./api";
 import { CONFLICT_CONTROLLER_DIAGNOSTIC_REASONS } from "./controller";
 import { CanonicalApplyError, ConflictControllerError } from "./controller";
 import type {
@@ -514,24 +515,38 @@ export function createConflictCanonicalOutcomeApplier(
   };
 }
 
-// --- the interim verified-candidate uploader ---------------------------------------------------------
+// --- the real verified-candidate uploader ---------------------------------------------------------
 
 /**
- * The interim verified-candidate uploader: no server route produces a
- * verified candidate object for an open conflict's resolution today
- * (Task 7 report §1), so the port fails closed with the controller's own
- * `conflict_candidate_upload_failed` reason — the controller observes
- * the closed token on its diagnostics sink and the modal renders it.
- * Task 10's server surface swaps in the real binding behind this exact
- * port shape; no HTTP call against a nonexistent route is invented here.
+ * The real verified-candidate uploader over the conflict wire client
+ * (Task 10): the merged draft's SHA-256 is derived locally, the exact bytes
+ * and their declared fingerprint travel to the open conflict's candidate
+ * route, and only the opaque verified object reference crosses back. A wire
+ * failure maps onto the controller's own closed
+ * `conflict_candidate_upload_failed` reason — the controller observes the
+ * closed token on its diagnostics sink and the modal renders it; nothing
+ * about the wire failure (status, code, URL, digest) is ever surfaced.
  */
-export function createUnavailableVerifiedCandidateUploader(): VerifiedCandidateUploader {
+export function createConflictVerifiedCandidateUploader(api: ConflictApi): VerifiedCandidateUploader {
   return {
     async uploadVerifiedCandidate(
       upload: VerifiedCandidateUpload,
     ): Promise<VerifiedCandidateReceipt> {
-      void upload;
-      throw new ConflictControllerError("conflict_candidate_upload_failed");
+      try {
+        const digestHex = await sha256Hex(upload.bytes);
+        const verifiedCandidateObjectId = await api.uploadResolutionCandidate({
+          conflictId: upload.conflictId,
+          bytes: upload.bytes,
+          mediaType: upload.mediaType,
+          sha256: digestHex,
+        });
+        return { verifiedCandidateObjectId };
+      } catch (error) {
+        if (error instanceof ConflictControllerError) {
+          throw error;
+        }
+        throw new ConflictControllerError("conflict_candidate_upload_failed");
+      }
     },
   };
 }

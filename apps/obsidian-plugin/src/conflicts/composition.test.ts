@@ -30,7 +30,7 @@ import {
   CONFLICT_COMPOSITION_DIAGNOSTIC_REASONS,
   createConflictCanonicalOutcomeApplier,
   createConflictDiagnosticsTrailSink,
-  createUnavailableVerifiedCandidateUploader,
+  createConflictVerifiedCandidateUploader,
   deriveConflictApplyStatusFacts,
   observeUnobservedConflictControllerFailures,
 } from "./composition";
@@ -522,13 +522,60 @@ describe("Conflict apply status facts (Task 9 composition)", () => {
   });
 });
 
-// --- the interim verified-candidate uploader ---------------------------------------------------------
+// --- the real verified-candidate uploader -----------------------------------------------------------
 
-describe("Unavailable verified candidate uploader (Task 9 interim)", () => {
-  it("fails closed with the controller's own candidate-upload reason", async () => {
-    const uploader: VerifiedCandidateUploader = createUnavailableVerifiedCandidateUploader();
+describe("Conflict verified candidate uploader (Task 10 binding)", () => {
+  it("derives the digest locally and carries only the opaque reference back", async () => {
+    const bytes = new TextEncoder().encode("# merged draft\n");
+    const uploads: {
+      conflictId: string;
+      mediaType: string;
+      sha256: string;
+      byteLength: number;
+    }[] = [];
+    const api = {
+      async uploadResolutionCandidate(input: {
+        conflictId: string;
+        bytes: Uint8Array;
+        mediaType: string;
+        sha256: string;
+      }): Promise<string> {
+        uploads.push({
+          conflictId: input.conflictId,
+          mediaType: input.mediaType,
+          sha256: input.sha256,
+          byteLength: input.bytes.byteLength,
+        });
+        return "33333333-3333-4333-8333-333333333334";
+      },
+    } as unknown as import("./api").ConflictApi;
+    const uploader: VerifiedCandidateUploader = createConflictVerifiedCandidateUploader(api);
+
+    const receipt = await uploader.uploadVerifiedCandidate({
+      conflictId: "11111111-1111-4111-8111-111111111111",
+      bytes,
+      mediaType: "text/markdown",
+    });
+
+    expect(receipt.verifiedCandidateObjectId).toBe("33333333-3333-4333-8333-333333333334");
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0]?.conflictId).toBe("11111111-1111-4111-8111-111111111111");
+    expect(uploads[0]?.mediaType).toBe("text/markdown");
+    expect(uploads[0]?.byteLength).toBe(bytes.byteLength);
+    expect(uploads[0]?.sha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("maps a wire failure onto the controller's closed candidate-upload reason", async () => {
+    const api = {
+      async uploadResolutionCandidate(): Promise<string> {
+        throw new ConflictApiError("dependency_unavailable", true);
+      },
+    } as unknown as import("./api").ConflictApi;
+    const uploader: VerifiedCandidateUploader = createConflictVerifiedCandidateUploader(api);
+
     const thrown = await uploader
       .uploadVerifiedCandidate({
+        conflictId: "11111111-1111-4111-8111-111111111111",
         bytes: new TextEncoder().encode("draft"),
         mediaType: "text/markdown",
       })

@@ -1437,7 +1437,7 @@ describe("Obsidian plugin composition root", () => {
     expect(controllerIndex).toBeGreaterThan(trailLoadIndex);
     const controllerBody = pluginSource.slice(controllerIndex, controllerIndex + 1_400);
     expect(controllerBody).toContain("repairStore: conflictRepository");
-    expect(controllerBody).toContain("uploader: createUnavailableVerifiedCandidateUploader()");
+    expect(controllerBody).toContain("uploader: createConflictVerifiedCandidateUploader(conflictApi)");
     expect(controllerBody).toContain("applier: createConflictCanonicalOutcomeApplier({");
     expect(controllerBody).toContain("diagnostics: conflictDiagnostics");
     const applierIndex = pluginSource.indexOf("createConflictCanonicalOutcomeApplier({");

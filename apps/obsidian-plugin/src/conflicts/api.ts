@@ -25,12 +25,12 @@
  * evidence wire surface carries no digest header, so the length
  * verification is the boundary; decoding the bytes is Task 8's concern.
  *
- * NOTE on `save_merged` (Task 6 carry-over): the resolve body references
- * an already-uploaded verified candidate object — this client carries
- * the reference verbatim but provides NO upload operation, because the
- * server currently exposes no device route that produces a verified
- * candidate object for an open conflict's resolution (the small-file
- * conflict-capture receive is domain-level only). See the Task 7 report.
+ * NOTE on `save_merged` (Task 6 carry-over, resolved by Task 10): the
+ * resolve body references an already-uploaded verified candidate object.
+ * `uploadResolutionCandidate` is the upload half — it admits the merged
+ * bytes against the open conflict's candidate route and returns the opaque
+ * object reference the resolve command carries verbatim; raw content never
+ * enters a resolve body.
  *
  * Privacy (spec 9): failures carry one closed kind and a static message
  * only — status numbers, registry codes, response bodies, URLs, tokens,
@@ -143,6 +143,14 @@ export interface ConflictListInput {
 export interface ConflictEvidenceInput {
   readonly conflictId: string;
   readonly role: ConflictEvidenceRole;
+}
+
+/** One resolution-candidate upload: the conflict, the merged bytes and their exact fingerprint. */
+export interface ConflictCandidateUploadInput {
+  readonly conflictId: string;
+  readonly bytes: Uint8Array;
+  readonly mediaType: string;
+  readonly sha256: string;
 }
 
 // --- envelope parsing --------------------------------------------------------------------------------
@@ -274,11 +282,18 @@ export interface ConflictApi {
    */
   downloadConflictEvidence(input: ConflictEvidenceInput): Promise<VerifiedConflictEvidence>;
   /**
+   * Admit one merged result as a verified resolution candidate and receive
+   * the opaque object reference a `save_merged` resolve command carries
+   * verbatim. The request is validated against the client-side grammar
+   * BEFORE any transport contact; the declared digest and canonical media
+   * type travel as headers and the exact bytes as the raw body.
+   */
+  uploadResolutionCandidate(input: ConflictCandidateUploadInput): Promise<string>;
+  /**
    * Post one explicit resolution. The request is validated against the
    * server's field grammar BEFORE any transport contact; a
-   * `save_merged` request carries only the verified object reference it
-   * was given — this client offers no candidate upload (see the module
-   * note on the Task 6 carry-over).
+   * `save_merged` request carries only the verified object reference
+   * `uploadResolutionCandidate` returned — never raw content.
    */
   resolveConflict(input: ConflictResolveInput): Promise<ConflictResolution>;
 }
@@ -416,6 +431,49 @@ export function createConflictApi(options: ConflictApiOptions): ConflictApi {
         throw conflictApiError("evidence_download_invalid", false);
       }
       return { bytes, mediaType, sizeBytes: declaredSize };
+    },
+
+    async uploadResolutionCandidate(input): Promise<string> {
+      const accessToken = requireAccessToken();
+      const conflictPath = requireUuidPath(input.conflictId);
+      if (
+        typeof input.sha256 !== "string" ||
+        !/^[0-9a-f]{64}$/.test(input.sha256) ||
+        typeof input.mediaType !== "string" ||
+        !CANONICAL_MEDIA_TYPE_PATTERN.test(input.mediaType) ||
+        !(input.bytes instanceof Uint8Array)
+      ) {
+        throw conflictApiError("input_invalid", false);
+      }
+      const body = input.bytes.buffer.slice(
+        input.bytes.byteOffset,
+        input.bytes.byteOffset + input.bytes.byteLength,
+      ) as ArrayBuffer;
+      const response = await send({
+        url: `${resolveOrigin()}/api/sync/conflicts/${conflictPath}/candidate`,
+        method: "PUT",
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          "content-type": "application/octet-stream",
+          accept: "application/json",
+          "x-candidate-sha256": input.sha256,
+          "x-candidate-media-type": input.mediaType,
+        },
+        body,
+      });
+      if (response.status !== 200) {
+        parseEnvelope(response.status, response.bodyText);
+        throw conflictApiError("server_error", true);
+      }
+      const { data } = parseEnvelope(response.status, response.bodyText);
+      if (!isRecord(data) || typeof data["verified_candidate_object_id"] !== "string") {
+        throw conflictApiError("server_error", true);
+      }
+      const verifiedCandidateObjectId = data["verified_candidate_object_id"];
+      if (!UUID_PATTERN.test(verifiedCandidateObjectId)) {
+        throw conflictApiError("server_error", true);
+      }
+      return verifiedCandidateObjectId;
     },
 
     async resolveConflict(input): Promise<ConflictResolution> {

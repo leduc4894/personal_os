@@ -111,6 +111,7 @@ export class ConflictControllerError extends Error {
 
 /** One upload of edited merge bytes through the verified-candidate boundary. */
 export interface VerifiedCandidateUpload {
+  readonly conflictId: string;
   readonly bytes: Uint8Array;
   readonly mediaType: string;
 }
@@ -121,11 +122,10 @@ export interface VerifiedCandidateReceipt {
 }
 
 /**
- * The verified-candidate uploader PORT: turns edited merge bytes plus a
- * media type descriptor into an opaque verified object reference. No
- * server route produces such a reference for an open conflict's resolution
- * today (Task 7 report §1), so this stays an injected port — unit tests
- * drive fakes and Task 10's server surface provides the real binding.
+ * The verified-candidate uploader PORT: turns the open conflict's identity,
+ * its edited merge bytes and a media type descriptor into an opaque verified
+ * object reference. Task 10 binds the real server surface (the conflict's
+ * candidate route) behind this port; unit tests drive fakes.
  */
 export interface VerifiedCandidateUploader {
   uploadVerifiedCandidate(upload: VerifiedCandidateUpload): Promise<VerifiedCandidateReceipt>;
@@ -495,6 +495,7 @@ export function createConflictController(
       }
       try {
         const receipt = await uploader.uploadVerifiedCandidate({
+          conflictId,
           bytes: encodedDraft,
           mediaType: CONFLICT_MERGE_UPLOAD_MEDIA_TYPE,
         });

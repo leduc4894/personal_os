@@ -139,6 +139,9 @@ function createFakeApi(): FakeConflictApiState {
   let resolution: ConflictResolution = buildResolution("resolved");
   let resolveFailure: Error | null = null;
   const api: ConflictApi = {
+    async uploadResolutionCandidate(): Promise<string> {
+      throw new ConflictApiError("input_invalid", false);
+    },
     async listConflicts(): Promise<ConflictPage> {
       return { conflicts: [...details.values()], hasMore: false, nextExclusiveStartConflictId: null };
     },
@@ -275,15 +278,15 @@ function createFakeApplier(): {
 
 function createFakeUploader(): {
   uploader: VerifiedCandidateUploader;
-  uploads: { bytes: Uint8Array; mediaType: string }[];
+  uploads: { conflictId: string; bytes: Uint8Array; mediaType: string }[];
   failWith(failure: Error | null): void;
 } {
-  const uploads: { bytes: Uint8Array; mediaType: string }[] = [];
+  const uploads: { conflictId: string; bytes: Uint8Array; mediaType: string }[] = [];
   let failure: Error | null = null;
   return {
     uploader: {
       async uploadVerifiedCandidate(upload) {
-        uploads.push({ bytes: upload.bytes, mediaType: upload.mediaType });
+        uploads.push({ conflictId: upload.conflictId, bytes: upload.bytes, mediaType: upload.mediaType });
         if (failure !== null) {
           throw failure;
         }

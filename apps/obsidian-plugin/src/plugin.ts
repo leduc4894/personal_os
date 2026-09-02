@@ -103,7 +103,7 @@ import { ConflictRepository } from "./conflicts/repository";
 import {
   createConflictCanonicalOutcomeApplier,
   createConflictDiagnosticsTrailSink,
-  createUnavailableVerifiedCandidateUploader,
+  createConflictVerifiedCandidateUploader,
   deriveConflictApplyStatusFacts,
   observeUnobservedConflictControllerFailures,
 } from "./conflicts/composition";
@@ -1116,22 +1116,23 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       // closed token (the Task 8 M-1 carry).
       const conflictDiagnostics = createConflictDiagnosticsTrailSink(diagnosticTrail);
       const conflictRepository = new ConflictRepository({ database: journalDatabase });
+      const conflictApi = createConflictApi({
+        transport: createObsidianDeviceSyncHttpTransport(),
+        resolveOrigin: () =>
+          parseServerOrigin(this.#settings.server_origin, {
+            allowLoopbackHttp: ALLOW_LOOPBACK_HTTP_ORIGIN,
+          }) ?? "",
+        getAccessToken: () => session.accessCredential,
+      });
       const conflictController = observeUnobservedConflictControllerFailures(
         createConflictController({
-          api: createConflictApi({
-            transport: createObsidianDeviceSyncHttpTransport(),
-            resolveOrigin: () =>
-              parseServerOrigin(this.#settings.server_origin, {
-                allowLoopbackHttp: ALLOW_LOOPBACK_HTTP_ORIGIN,
-              }) ?? "",
-            getAccessToken: () => session.accessCredential,
-          }),
+          api: conflictApi,
           repairStore: conflictRepository,
-          // No verified-candidate server surface exists yet (Task 7
-          // report §1; Task 10 wires it): the interim uploader fails
-          // closed with the controller's own candidate-upload reason —
-          // no HTTP call against a nonexistent route is invented.
-          uploader: createUnavailableVerifiedCandidateUploader(),
+          // The real verified-candidate upload surface (Task 10): a
+          // save_merged draft first becomes a verified object through the
+          // open conflict's candidate route and the resolve carries only
+          // the opaque reference.
+          uploader: createConflictVerifiedCandidateUploader(conflictApi),
           applier: createConflictCanonicalOutcomeApplier({
             database: journalDatabase,
             repository: deviceSyncRepository,

@@ -325,6 +325,68 @@ describe("conflict api verified evidence download (spec 6)", () => {
 
 // --- resolve ---------------------------------------------------------------------------------------
 
+describe("conflict api resolution-candidate upload (Task 10)", () => {
+  const MERGED_BYTES = new TextEncoder().encode("# merged three-way result\n");
+
+  async function mergedDigest(): Promise<string> {
+    return await import("../exclusion-policy/canonical-json").then((module) =>
+      module.sha256Hex(MERGED_BYTES),
+    );
+  }
+
+  it("puts the exact bytes with declared headers and decodes the opaque reference", async () => {
+    const digest = await mergedDigest();
+    const transport = createRecordingTransport(async () =>
+      jsonResponse(200, successBody({ verified_candidate_object_id: VERIFIED_CANDIDATE_OBJECT_ID })),
+    );
+    const reference = await createApi(transport).uploadResolutionCandidate({
+      conflictId: CONFLICT_ID,
+      bytes: MERGED_BYTES,
+      mediaType: "text/markdown",
+      sha256: digest,
+    });
+
+    expect(reference).toBe(VERIFIED_CANDIDATE_OBJECT_ID);
+    const request = transport.requests[0];
+    expect(request?.method).toBe("PUT");
+    expect(request?.url).toBe(`${ORIGIN}/api/sync/conflicts/${CONFLICT_ID}/candidate`);
+    expect(request?.headers["x-candidate-sha256"]).toBe(digest);
+    expect(request?.headers["x-candidate-media-type"]).toBe("text/markdown");
+    expect(request?.headers["content-type"]).toBe("application/octet-stream");
+    expect(new Uint8Array(request?.body as ArrayBuffer)).toEqual(MERGED_BYTES);
+  });
+
+  it("rejects a malformed declared digest before any transport attempt", async () => {
+    const transport = createRecordingTransport(async () =>
+      jsonResponse(200, successBody({ verified_candidate_object_id: VERIFIED_CANDIDATE_OBJECT_ID })),
+    );
+    await expect(
+      createApi(transport).uploadResolutionCandidate({
+        conflictId: CONFLICT_ID,
+        bytes: MERGED_BYTES,
+        mediaType: "text/markdown",
+        sha256: "not-a-digest",
+      }),
+    ).rejects.toMatchObject({ kind: "input_invalid" });
+    expect(transport.requests).toHaveLength(0);
+  });
+
+  it("maps the server integrity rejection onto the closed evidence verdict", async () => {
+    const digest = await mergedDigest();
+    const transport = createRecordingTransport(async () =>
+      jsonResponse(422, errorBody("source_conflict_evidence_integrity_failed")),
+    );
+    await expect(
+      createApi(transport).uploadResolutionCandidate({
+        conflictId: CONFLICT_ID,
+        bytes: MERGED_BYTES,
+        mediaType: "text/markdown",
+        sha256: digest,
+      }),
+    ).rejects.toMatchObject({ kind: "evidence_integrity_failed", canRetry: false });
+  });
+});
+
 describe("conflict api resolve construction (spec 6)", () => {
   it("posts the strict resolution body and decodes the resolved outcome", async () => {
     const transport = createRecordingTransport(async () =>
