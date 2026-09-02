@@ -6,6 +6,12 @@ the closed state machine, the safe operator actions, the handling of
 `reconcile_required`, the exact replay semantics, the deletion
 semantics and the redacted diagnostics the plugin surfaces.
 
+A stale base, an edit racing a remote delete or a delete racing a remote
+edit is no longer terminal parking: the Child 8 conflict lane captures
+the losing side as immutable evidence and the user resolves it through
+the Conflict Inbox — see
+[`source-conflict-resolution.md`](source-conflict-resolution.md).
+
 The operator surface is small and deliberately redacted:
 
 - One **status-bar item** with one of the six spec-11 closed values plus
