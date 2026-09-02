@@ -18,6 +18,10 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import { sha256Hex } from "../exclusion-policy/canonical-json";
 import type { VerifiedDownload } from "../device-sync/api";
+import {
+  buildRollbackSiblingLocator,
+  buildTempSiblingLocator,
+} from "../device-sync/atomic-vault-mutation";
 import { DeviceSyncRepository } from "../device-sync/repository";
 import type { VaultMutationSeam } from "../device-sync/atomic-vault-writer";
 import { createSyncDiagnosticsTrail } from "../journal/sync-diagnostics-trail";
@@ -100,10 +104,21 @@ function createInMemoryVaultSeam(
 ): VaultMutationSeam & {
   readonly files: Map<string, Uint8Array>;
   isFinalRenameCorrupt: boolean;
+  /** The one locator whose read refuses (an injected mid-apply failure). */
+  failingReadLocator: string | null;
+  /** Refuse the rename-in of a staged temp sibling (an injected replace failure). */
+  isTempRenameRefused: boolean;
 } {
   const files = new Map<string, Uint8Array>(initialFiles);
-  const seam: VaultMutationSeam & { files: Map<string, Uint8Array>; isFinalRenameCorrupt: boolean } = {
+  const seam: VaultMutationSeam & {
+    files: Map<string, Uint8Array>;
+    isFinalRenameCorrupt: boolean;
+    failingReadLocator: string | null;
+    isTempRenameRefused: boolean;
+  } = {
     isFinalRenameCorrupt: false,
+    failingReadLocator: null,
+    isTempRenameRefused: false,
     files,
     async locatorExists(locator) {
       return files.has(locator);
@@ -112,6 +127,9 @@ function createInMemoryVaultSeam(
       files.set(locator, new Uint8Array(bytes));
     },
     async readBytes(locator) {
+      if (locator === seam.failingReadLocator) {
+        throw new Error("injected read refusal");
+      }
       const bytes = files.get(locator);
       return bytes === undefined ? null : new Uint8Array(bytes);
     },
@@ -126,6 +144,12 @@ function createInMemoryVaultSeam(
       if (seam.isFinalRenameCorrupt && fromLocator.includes(".device-sync-tmp-")) {
         files.set(toLocator, new Uint8Array([99, 98, 97]));
         return;
+      }
+      // Refuse the same rename-in edge without moving anything: the
+      // replace fails AFTER the old bytes reached the rollback sibling.
+      if (seam.isTempRenameRefused && fromLocator.includes(".device-sync-tmp-")) {
+        files.set(fromLocator, bytes);
+        throw new Error("injected rename refusal");
       }
       files.set(toLocator, bytes);
     },
@@ -472,6 +496,61 @@ describe("Conflict canonical outcome applier (Task 9 composition)", () => {
       reason: "conflict_echo_marker_failed",
       contextReason: "journal_mutation_failed",
     });
+  });
+
+  it("cleans only its staging sibling after failed apply", async () => {
+    const harness = await createApplierHarness();
+    // A foreign token's hidden sibling must survive every sweep untouched.
+    const foreignTempLocator = buildTempSiblingLocator(LOCATOR, "foreign-opaque-token");
+    await harness.seam.createFile(
+      foreignTempLocator,
+      new TextEncoder().encode("foreign staging bytes"),
+    );
+    // The target read refuses AFTER staging, so every attempt fails at the
+    // base proof with the staged temp sibling still on disk — only the
+    // failed apply's own sweep (or its next attempt) can remove it.
+    harness.seam.failingReadLocator = LOCATOR;
+
+    await expect(
+      harness.applier.applyCanonicalOutcome(remoteVersionCommand()),
+    ).rejects.toMatchObject({ stage: "vault_apply" });
+    await expect(
+      harness.applier.applyCanonicalOutcome(remoteVersionCommand()),
+    ).rejects.toMatchObject({ stage: "vault_apply" });
+
+    // The failed apply removed exactly its own token's staging sibling...
+    expect(
+      await harness.seam.locatorExists(buildTempSiblingLocator(LOCATOR, RESOLUTION_EVENT_ID)),
+    ).toBe(false);
+    // ...while the foreign token's hidden sibling stays untouched.
+    expect(await harness.seam.locatorExists(foreignTempLocator)).toBe(true);
+    expect(
+      new TextDecoder().decode(harness.seam.files.get(foreignTempLocator) ?? new Uint8Array()),
+    ).toBe("foreign staging bytes");
+  });
+
+  it("preserves the rollback sibling holding old bytes when the replace stage fails", async () => {
+    const harness = await createApplierHarness();
+    // The rename-in of the staged sibling refuses, so the replace fails
+    // AFTER the old bytes already moved to the rollback sibling — the
+    // rollback then holds the ONLY copy of the old bytes and must never
+    // be swept by the failed apply's cleanup.
+    harness.seam.isTempRenameRefused = true;
+
+    await expect(
+      harness.applier.applyCanonicalOutcome(remoteVersionCommand()),
+    ).rejects.toMatchObject({ stage: "vault_apply" });
+
+    const rollbackLocator = buildRollbackSiblingLocator(LOCATOR, RESOLUTION_EVENT_ID);
+    expect(await harness.seam.locatorExists(rollbackLocator)).toBe(true);
+    expect(
+      new TextDecoder().decode(harness.seam.files.get(rollbackLocator) ?? new Uint8Array()),
+    ).toBe("local candidate bytes");
+    // The staged winner sibling is still cleaned by its exact token: its
+    // bytes are re-derivable, the old bytes are not.
+    expect(
+      await harness.seam.locatorExists(buildTempSiblingLocator(LOCATOR, RESOLUTION_EVENT_ID)),
+    ).toBe(false);
   });
 });
 

@@ -3,12 +3,12 @@
  *
  * This module binds the Task 8 ports the controller depends on:
  *
- * - the concrete {@link CanonicalOutcomeApplier} over the atomic Vault
- *   writer's own seam discipline (`AtomicVaultWriterImpl`'s
- * same-directory hidden staging sibling, verified bytes, narrow replace
- * with a retained rollback sibling, and the Vault trash path for
- * tombstones) plus the journal's exact echo markers, so the plugin's own
- * apply is suppressed by the capture lane instead of re-uploaded;
+ * - the concrete {@link CanonicalOutcomeApplier} over the shared atomic
+ *   Vault mutation primitive (`stageVerifyAndReplaceVaultContent`:
+ *   same-directory hidden staging sibling, verified bytes, narrow replace
+ *   with a retained rollback sibling — plus the Vault trash path for
+ *   tombstones) and the journal's exact echo markers, so the plugin's own
+ *   apply is suppressed by the capture lane instead of re-uploaded;
  * - the journal-side locator resolution of one apply command (the
  * `local_files` mapping of the conflict's source), which refuses closed
  * at the winner stage for the sourceless `locator_collision` shape and
@@ -40,9 +40,11 @@
 import { sha256Hex } from "../exclusion-policy/canonical-json";
 import type { DownloadSourceVersionInput, VerifiedDownload } from "../device-sync/api";
 import {
-  buildRollbackSiblingLocator,
+  AtomicVaultMutationFailure,
   buildTempSiblingLocator,
-} from "../device-sync/atomic-vault-writer";
+  cleanupExactVaultSiblings,
+  stageVerifyAndReplaceVaultContent,
+} from "../device-sync/atomic-vault-mutation";
 import type { VaultMutationSeam } from "../device-sync/atomic-vault-writer";
 import type { DeviceSyncRepository, EchoMarker, VaultObservation } from "../device-sync/contracts";
 import type { FrozenFingerprint } from "../journal/contracts";
@@ -274,18 +276,6 @@ export interface ConflictCanonicalOutcomeApplierOptions {
   readonly mintEchoMarkerSequence?: (() => number) | undefined;
 }
 
-/** Whether the bytes hash to exactly the pinned fingerprint. */
-async function hashesTo(
-  bytes: Uint8Array | null,
-  fingerprint: FrozenFingerprint,
-): Promise<boolean> {
-  return (
-    bytes !== null &&
-    bytes.byteLength === fingerprint.sizeBytes &&
-    (await sha256Hex(bytes)) === fingerprint.sha256
-  );
-}
-
 /** Best-effort sibling cleanup; the apply outcome never blocks on it. */
 async function trashQuietly(seam: VaultMutationSeam, locator: string): Promise<void> {
   try {
@@ -309,11 +299,13 @@ async function readBytesOrFail(seam: VaultMutationSeam, locator: string): Promis
  * Build the concrete canonical outcome applier. One apply resolves the
  * target locator from the journal, proves the winner bytes (the verified
  * version download or the in-memory merged draft), records the exact
- * echo marker BEFORE any Vault mutation, then walks the atomic writer's
- * own stage/verify/narrow-replace discipline (or the trash path for a
- * tombstone). A failure throws the controller's closed
- * {@link CanonicalApplyError} staging; a failed apply consumes its own
- * marker best-effort so it can never suppress a later real observation.
+ * echo marker BEFORE any Vault mutation, then walks the shared mutation
+ * primitive's stage/verify/narrow-replace discipline (or the trash path
+ * for a tombstone). A failure throws the controller's closed
+ * {@link CanonicalApplyError} staging; a failed apply sweeps exactly its
+ * own token-named staging siblings (stage-guarded so the sweep can never
+ * destroy the rollback evidence) and consumes its own marker best-effort
+ * so it can never suppress a later real observation.
  */
 export function createConflictCanonicalOutcomeApplier(
   options: ConflictCanonicalOutcomeApplierOptions,
@@ -348,66 +340,39 @@ export function createConflictCanonicalOutcomeApplier(
   }
 
   /**
-   * Stage the bytes in the same-directory hidden sibling, verify them,
-   * prove the target's current shape, then narrow-replace with a
-   * retained rollback sibling and verify the final bytes — the
-   * AtomicVaultWriterImpl discipline minus its device-event durable row
-   * (a conflict apply owns no cursor sequence; its durable fact is the
-   * no-byte parked repair row).
+   * Clean exactly the failed apply's own token-named hidden siblings,
+   * guarded by the mutation primitive's failure stage (spec 3/4).
+   * Before the replace begins (`stage`, `verify_staged`, `prove_base`)
+   * only the staged temp sibling can exist and the target is untouched
+   * by the failed attempt, so the full exact-token sweep can never lose
+   * data. From the replace on, the rollback sibling may hold the ONLY
+   * copy of the old bytes and is never swept: a replace-stage failure
+   * still removes the staged temp sibling alone (its winner bytes are
+   * re-derivable; the parked repair row keeps the apply owed), while a
+   * verify_final failure has no sweepable sibling left — the replace
+   * consumed the temp, and the rollback was either consumed by the
+   * successful restore or must stay preserved for recovery.
    */
-  async function stageVerifyAndReplace(
+  async function cleanFailedMutationSiblings(
+    error: unknown,
     locator: string,
     tempToken: string,
-    bytes: Uint8Array,
-    fingerprint: FrozenFingerprint,
   ): Promise<void> {
-    const tempLocator = buildTempSiblingLocator(locator, tempToken);
-    // 1. Stage and verify the winner bytes in the hidden sibling.
-    try {
-      if (await seam.locatorExists(tempLocator)) {
-        await seam.trashLocator(tempLocator);
-      }
-      await seam.createFile(tempLocator, bytes);
-    } catch {
-      throw new CanonicalApplyError("vault_apply");
+    if (!(error instanceof AtomicVaultMutationFailure)) {
+      // A foreign throw proves nothing about the disk; sweep nothing.
+      return;
     }
-    if (!(await hashesTo(await readBytesOrFail(seam, tempLocator), fingerprint))) {
-      await trashQuietly(seam, tempLocator);
-      throw new CanonicalApplyError("vault_apply");
-    }
-    // 2. Prove the target's current shape: an occupied target keeps a
-    //    rollback sibling of its verified old bytes; an absent target
-    //    renames straight in (the created shape).
-    const hadTarget = (await readBytesOrFail(seam, locator)) !== null;
-    const rollbackLocator = hadTarget
-      ? buildRollbackSiblingLocator(locator, tempToken)
-      : null;
-    // 3. The narrow replace.
-    try {
-      if (rollbackLocator !== null) {
-        await seam.renameLocator(locator, rollbackLocator);
-      }
-      await seam.renameLocator(tempLocator, locator);
-    } catch {
-      throw new CanonicalApplyError("vault_apply");
-    }
-    // 4. Verify the final bytes; on mismatch restore the verified old
-    //    bytes through the rollback sibling.
-    if (!(await hashesTo(await readBytesOrFail(seam, locator), fingerprint))) {
-      if (rollbackLocator !== null) {
-        try {
-          await seam.trashLocator(locator);
-          await seam.renameLocator(rollbackLocator, locator);
-        } catch {
-          // The rollback sibling keeps the verified old bytes; the
-          // closed vault_apply failure parks the owed repair.
-        }
-      }
-      throw new CanonicalApplyError("vault_apply");
-    }
-    // 5. The retained rollback sibling's cleanup is best-effort.
-    if (rollbackLocator !== null) {
-      await trashQuietly(seam, rollbackLocator);
+    switch (error.stage) {
+      case "stage":
+      case "verify_staged":
+      case "prove_base":
+        await cleanupExactVaultSiblings(seam, { targetLocator: locator, tempToken });
+        return;
+      case "replace":
+        await trashQuietly(seam, buildTempSiblingLocator(locator, tempToken));
+        return;
+      case "verify_final":
+        return;
     }
   }
 
@@ -505,12 +470,26 @@ export function createConflictCanonicalOutcomeApplier(
         throw new CanonicalApplyError("vault_apply");
       }
       try {
-        await stageVerifyAndReplace(locator, command.resolutionEventId, bytes, fingerprint);
+        const mutated = await stageVerifyAndReplaceVaultContent({
+          seam,
+          targetLocator: locator,
+          tempToken: command.resolutionEventId,
+          bytes,
+          expectedFinalFingerprint: fingerprint,
+          // A conflict apply is canonical: it proves only the target's
+          // SHAPE (occupied → retained rollback; absent → created
+          // shape), never a pinned base — the resolution already decided
+          // the winner over the local bytes.
+          expectedBaseFingerprint: null,
+        });
+        // The retained rollback sibling's cleanup is best-effort.
+        if (mutated.rollbackLocator !== null) {
+          await trashQuietly(seam, mutated.rollbackLocator);
+        }
       } catch (error) {
+        await cleanFailedMutationSiblings(error, locator, command.resolutionEventId);
         await consumeMarkerQuietly(marker);
-        throw error instanceof CanonicalApplyError
-          ? error
-          : new CanonicalApplyError("vault_apply");
+        throw new CanonicalApplyError("vault_apply");
       }
     },
   };
