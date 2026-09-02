@@ -4,9 +4,8 @@
 
 ## Status
 
-Implementation is ready to commit on branch `ci-stack-fixture-ownership`.
-The prior commit was `220ea5b`; the implementation commit SHA is assigned at
-commit time.
+Implementation was committed on branch `ci-stack-fixture-ownership` as
+`219f1c9` (`test: preserve external ci stack ownership`).
 
 ## Decision
 
