@@ -5,9 +5,10 @@ Branch: `plugin-single-origin-login`. Final code commit: `f16854b`
 `f87b1d3` (plugin login transport opens the server-minted verification URL,
 no client-side derivation), `742e89c` (API admits native device-grant
 requests without an `Origin` header) and `6b60df0` (one-origin tooling/docs;
-final feature commit). Closure commits: `348cbae` (first closure pass) and
-the branch tip `docs: record in-plan launcher hardening` (this handoff
-revision plus the BACKLOG row deletions).
+final feature commit). Closure commits: `348cbae` (first closure pass),
+`650a40f` (in-plan launcher hardening record), and the final-review wave
+(`21109a0` test pins + spec literal fixes, `3588eaf` tip verification
+evidence, plus this revision).
 
 Resolved deferred finding (BACKLOG row retired by this round): the 2026-09-01
 device-sync row "Plugin login button derives the browser URL from
@@ -147,8 +148,8 @@ git history).
 
 ## Workspace
 
-SDD workspace:
-`.superpowers/sdd/2026-09-02-plugin-single-origin-login/` retained until
-the whole-branch review; sanitized step evidence lives in
-`task-4-live-report.md`, `task-4-journey-evidence.md`, and the in-plan
-tooling-fix report `task-4-fix-report.md` there.
+SDD workspace `.superpowers/sdd/2026-09-02-plugin-single-origin-login/` was
+scratch for this round and has been deleted after the clean whole-branch
+review (and fix wave + scoped re-review). The durable record is git history
+on this branch plus the sanitized evidence inlined in this handoff; the
+review-wave commits are `21109a0` and `3588eaf`.
