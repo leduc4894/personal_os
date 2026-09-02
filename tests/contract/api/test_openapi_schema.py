@@ -63,6 +63,7 @@ ROUTE_OPERATION_IDS: dict[str, dict[str, str]] = {
     "/api/sync/exclusion-policy/snapshot": {"get": "getExclusionPolicySnapshot"},
     "/api/sync/journal-events/preflight": {"post": "preflightJournalEventUpload"},
     "/api/uploads/{operation_id}/content": {"put": "uploadSmallFileContent"},
+    "/api/uploads/{operation_id}/conflict-content": {"put": "uploadSmallFileConflictContent"},
     "/api/uploads/multipart-sessions": {"post": "createMultipartUploadSession"},
     "/api/uploads/multipart-sessions/{session_id}": {"get": "getMultipartUploadSession"},
     "/api/uploads/multipart-sessions/{session_id}/parts/{part_number}/url": {
@@ -85,15 +86,26 @@ ROUTE_OPERATION_IDS: dict[str, dict[str, str]] = {
     "/api/sources/{source_id}/versions/{source_version_id}/content": {
         "get": "downloadDeviceSourceVersion"
     },
+    "/api/sync/conflicts": {"get": "listSourceConflicts"},
+    "/api/sync/conflicts/{conflict_id}": {"get": "getSourceConflict"},
+    "/api/sync/conflicts/{conflict_id}/evidence/{role}": {"get": "downloadSourceConflictEvidence"},
+    "/api/sync/conflicts/{conflict_id}/resolve": {"post": "resolveSourceConflict"},
+    "/api/sync/conflicts/{conflict_id}/candidate": {
+        "put": "uploadSourceConflictResolutionCandidate"
+    },
 }
 
-#: The one documented binary-success exception to the JSON envelope (spec
-#: 7.4): the verified device download answers ``application/octet-stream``
-#: with its exact content headers, never a named JSON component.
+#: The documented binary-success exceptions to the JSON envelope (spec 7.4
+# and Child 8 spec 6): the verified device download and the verified source
+# conflict evidence download answer ``application/octet-stream`` with their
+# exact content headers, never a named JSON component.
 _BINARY_SUCCESS_OPERATIONS: dict[tuple[str, str], dict[str, Any]] = {
     ("/api/sources/{source_id}/versions/{source_version_id}/content", "get"): {
         "200": {"type": "string", "format": "binary"}
-    }
+    },
+    ("/api/sync/conflicts/{conflict_id}/evidence/{role}", "get"): {
+        "200": {"type": "string", "format": "binary"}
+    },
 }
 
 #: The one documented text-success exception to the JSON envelope: the
@@ -201,6 +213,14 @@ STRICT_MODEL_SCHEMA_NAMES: tuple[str, ...] = (
     "ApiEnvelope_MultipartSessionStatusData_",
     "ApiEnvelope_MultipartPartUrlData_",
     "ApiEnvelope_MultipartCompletionData_",
+    "SourceConflictData",
+    "SourceConflictDetailData",
+    "SourceConflictPageData",
+    "SourceConflictResolveRequest",
+    "SourceConflictResolutionData",
+    "ApiEnvelope_SourceConflictPageData_",
+    "ApiEnvelope_SourceConflictDetailData_",
+    "ApiEnvelope_SourceConflictResolutionData_",
 )
 
 _URL_PATTERN = re.compile(r"\w+://")

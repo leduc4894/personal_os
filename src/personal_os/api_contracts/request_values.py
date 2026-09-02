@@ -56,6 +56,7 @@ class ApiRouteTemplate(StrEnum):
     SYNC_EXCLUSION_POLICY_SNAPSHOT = "/api/sync/exclusion-policy/snapshot"
     SYNC_JOURNAL_EVENTS_PREFLIGHT = "/api/sync/journal-events/preflight"
     UPLOAD_CONTENT = "/api/uploads/{operation_id}/content"
+    UPLOAD_CONFLICT_CONTENT = "/api/uploads/{operation_id}/conflict-content"
     UPLOAD_MULTIPART_SESSIONS = "/api/uploads/multipart-sessions"
     UPLOAD_MULTIPART_SESSION = "/api/uploads/multipart-sessions/{session_id}"
     UPLOAD_MULTIPART_SESSION_PART_URL = (
@@ -72,6 +73,11 @@ class ApiRouteTemplate(StrEnum):
     SYNC_MANIFEST_ACTIONS = "/api/sync/manifests/{manifest_run_id}/actions"
     SYNC_MANIFEST_COMPLETE = "/api/sync/manifests/{manifest_run_id}/complete"
     SYNC_SOURCE_VERSION_CONTENT = "/api/sources/{source_id}/versions/{source_version_id}/content"
+    SYNC_CONFLICTS = "/api/sync/conflicts"
+    SYNC_CONFLICT = "/api/sync/conflicts/{conflict_id}"
+    SYNC_CONFLICT_EVIDENCE = "/api/sync/conflicts/{conflict_id}/evidence/{role}"
+    SYNC_CONFLICT_RESOLUTION = "/api/sync/conflicts/{conflict_id}/resolve"
+    SYNC_CONFLICT_CANDIDATE = "/api/sync/conflicts/{conflict_id}/candidate"
     OPENAPI_DOCUMENT = "/api/openapi.json"
     UNMATCHED = "unmatched"
 
@@ -141,6 +147,7 @@ SMALL_FILE_SYNC_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset(
     {
         ApiRouteTemplate.SYNC_JOURNAL_EVENTS_PREFLIGHT,
         ApiRouteTemplate.UPLOAD_CONTENT,
+        ApiRouteTemplate.UPLOAD_CONFLICT_CONTENT,
     }
 )
 
@@ -230,15 +237,31 @@ POLICY_METRICS_EXPOSITION_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = 
     }
 )
 
+#: The closed source conflict route set of the Conflict Inbox design
+#: (Child 8 spec 6): the open-conflict listing, the safe detail, the
+#: policy-rechecked verified evidence stream and the idempotent resolve,
+#: all behind the ``obsidian_sync`` access Bearer credential with the
+#: workspace derived from the resolved token context — never a request
+#: field. The evidence bytes carry the strictest cache-suppression posture.
+SOURCE_CONFLICT_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = frozenset(
+    {
+        ApiRouteTemplate.SYNC_CONFLICTS,
+        ApiRouteTemplate.SYNC_CONFLICT,
+        ApiRouteTemplate.SYNC_CONFLICT_EVIDENCE,
+        ApiRouteTemplate.SYNC_CONFLICT_RESOLUTION,
+        ApiRouteTemplate.SYNC_CONFLICT_CANDIDATE,
+    }
+)
+
 #: Every route whose responses — success, service rejection and dependency
 #: failure alike — carry ``Cache-Control: no-store`` (spec 16): the
 #: authentication-bound sets plus the exclusion-policy, small-file sync,
-#: multipart upload, source lifecycle, device sync, the three diagnostics
-#: admin route sets and the policy metrics exposition route, whose payloads
-#: are per-request policy state, signed envelopes, device-derived sync
-#: results, verified private bytes, one short-lived presigned URL and
-#: per-process rejection/counter evidence that must never come from a
-#: shared cache.
+#: multipart upload, source lifecycle, device sync, source conflict, the
+#: three diagnostics admin route sets and the policy metrics exposition
+#: route, whose payloads are per-request policy state, signed envelopes,
+#: device-derived sync results, verified private bytes, one short-lived
+#: presigned URL and per-process rejection/counter evidence that must never
+#: come from a shared cache.
 NO_STORE_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = (
     AUTHENTICATION_ROUTE_TEMPLATES
     | EXCLUSION_POLICY_ROUTE_TEMPLATES
@@ -246,6 +269,7 @@ NO_STORE_ROUTE_TEMPLATES: Final[frozenset[ApiRouteTemplate]] = (
     | MULTIPART_UPLOAD_ROUTE_TEMPLATES
     | SOURCE_LIFECYCLE_ROUTE_TEMPLATES
     | DEVICE_SYNC_ROUTE_TEMPLATES
+    | SOURCE_CONFLICT_ROUTE_TEMPLATES
     | SYNC_DIAGNOSTICS_ROUTE_TEMPLATES
     | SOURCE_LIFECYCLE_DIAGNOSTICS_ROUTE_TEMPLATES
     | EXCLUSION_POLICY_DIAGNOSTICS_ROUTE_TEMPLATES

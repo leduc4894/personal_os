@@ -102,18 +102,19 @@ def test_grant_poll_pacing_revision_extends_the_closed_bucket_kind_set() -> None
 
 
 def test_canonical_schema_revision_points_at_the_new_head() -> None:
-    # The terminal locator remediation revision ``20260901_03`` is the head now.
+    # The source-conflict revision ``20260902_01`` is the head now.
     from personal_os.database_schema import CANONICAL_POSTGRESQL_SCHEMA_REVISION
 
-    assert CANONICAL_POSTGRESQL_SCHEMA_REVISION == "20260901_03"
+    assert CANONICAL_POSTGRESQL_SCHEMA_REVISION == "20260902_01"
 
 
 def test_grant_poll_pacing_revision_is_chained_below_the_device_sync_scale_index_head() -> None:
-    # The device-sync scale index revision ``20260901_02`` and the terminal
-    # locator remediation revision ``20260901_03`` stack on the grant-poll
-    # bucket kind revision, so the single graph head moved past it.
+    # The device-sync scale index revision ``20260901_02``, the terminal
+    # locator remediation revision ``20260901_03`` and the source-conflict
+    # revision ``20260902_01`` stack on the grant-poll bucket kind revision,
+    # so the single graph head moved past it.
     scripts = _script_directory()
-    assert scripts.get_heads() == ["20260901_03"]
+    assert scripts.get_heads() == ["20260902_01"]
 
 
 def test_upgrade_recreates_the_bucket_kind_check_with_the_seventh_value() -> None:

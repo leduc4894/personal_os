@@ -121,12 +121,14 @@ type RawResponse = { status: number; bodyText: string };
 
 type PreflightHandler = (body: Record<string, unknown>) => Promise<RawResponse>;
 type ContentHandler = (bytes: Uint8Array) => Promise<RawResponse>;
+type ConflictContentHandler = (request: SyncHttpRequest, bytes: Uint8Array) => Promise<RawResponse>;
 
 interface ScriptedTransport {
   readonly preflightRequests: SyncHttpRequest[];
   readonly preflightBodies: Record<string, unknown>[];
   readonly contentRequests: SyncHttpRequest[];
   readonly contentBytes: Uint8Array[];
+  readonly conflictContentRequests: SyncHttpRequest[];
   readonly maximumInFlightRequests: number;
 }
 
@@ -139,6 +141,7 @@ interface ScriptedTransport {
 function createScriptedHandlers(handlers: {
   preflight: PreflightHandler;
   content?: ContentHandler;
+  conflictContent?: ConflictContentHandler;
   multipart?: (request: SyncHttpRequest) => Promise<RawResponse | null> | null;
 }): ScriptedTransport & {
   readonly transport: (request: SyncHttpRequest) => Promise<RawResponse>;
@@ -147,6 +150,7 @@ function createScriptedHandlers(handlers: {
   const preflightBodies: Record<string, unknown>[] = [];
   const contentRequests: SyncHttpRequest[] = [];
   const contentBytes: Uint8Array[] = [];
+  const conflictContentRequests: SyncHttpRequest[] = [];
   let inFlightRequests = 0;
   let maximumInFlightRequests = 0;
   return {
@@ -154,6 +158,7 @@ function createScriptedHandlers(handlers: {
     preflightBodies,
     contentRequests,
     contentBytes,
+    conflictContentRequests,
     get maximumInFlightRequests(): number {
       return maximumInFlightRequests;
     },
@@ -169,6 +174,14 @@ function createScriptedHandlers(handlers: {
         }
         if (request.method === "PUT") {
           const bytes = new Uint8Array(request.body as ArrayBuffer);
+          if (request.url.endsWith("/conflict-content")) {
+            conflictContentRequests.push(request);
+            const conflictContent = handlers.conflictContent;
+            if (conflictContent === undefined) {
+              throw new Error("unexpected conflict-content request");
+            }
+            return await conflictContent(request, bytes);
+          }
           contentRequests.push(request);
           contentBytes.push(bytes);
           const content = handlers.content;
@@ -274,6 +287,7 @@ interface DriverHarness {
     handlers: {
       preflight: PreflightHandler;
       content?: ContentHandler;
+      conflictContent?: ConflictContentHandler;
       multipart?: (request: SyncHttpRequest) => Promise<RawResponse | null> | null;
     },
   ) => ScriptedTransport;
@@ -540,6 +554,86 @@ describe("queue driver outcome mapping (spec 10.1 table, 12)", () => {
     expect(stored?.state).toBe("blocked_conflict");
     expect(stored?.safeError).toBe("blocked_conflict");
     expect(harness.repository.readLocalFileByPath("notes/stale.md")?.sourceId).toBeNull();
+  });
+
+  it("uploads a granted conflict candidate through the conflict lane and parks blocked_conflict", async () => {
+    const staleBytes = new TextEncoder().encode("stale base");
+    const harness = createHarness();
+    const event = await captureBytes(harness, "notes/granted.md", staleBytes);
+    const scripted = harness.installTransport({
+      preflight: async () => ({
+        status: 200,
+        bodyText: successBody({
+          outcome: "conflict",
+          operation_id: OPERATION_ID,
+          expires_at: "2026-08-18T01:00:00Z",
+        }),
+      }),
+      content: async () => {
+        throw new Error("the publication lane must never receive a capture grant");
+      },
+      conflictContent: async (_request, bytes) => {
+        expect(bytes).toEqual(staleBytes);
+        return {
+          status: 200,
+          bodyText: successBody({
+            conflict_id: "44444444-4444-4444-8444-444444444444",
+            source_id: SOURCE_ID,
+            observed_remote_version_id: SOURCE_VERSION_ID,
+            captured_at: "2026-08-18T00:00:00Z",
+          }),
+        };
+      },
+    });
+    await runPass(harness.driver);
+    const stored = harness.repository.readEvent(event.eventId);
+    expect(stored?.state).toBe("blocked_conflict");
+    expect(stored?.safeError).toBe("blocked_conflict");
+    expect(scripted.conflictContentRequests).toHaveLength(1);
+    expect(scripted.conflictContentRequests[0]?.url).toBe(
+      `${ORIGIN}/api/uploads/${OPERATION_ID}/conflict-content`,
+    );
+    expect(scripted.contentRequests).toHaveLength(0);
+    expect(harness.repository.readLocalFileByPath("notes/granted.md")?.sourceId).toBeNull();
+  });
+
+  it("parks a replayed conflict identity without any upload", async () => {
+    const harness = createHarness();
+    const event = await captureBytes(harness, "notes/replayed.md", new TextEncoder().encode("replayed"));
+    const scripted = harness.installTransport({
+      preflight: async () => ({
+        status: 200,
+        bodyText: successBody({ outcome: "conflict", conflict_id: "44444444-4444-4444-8444-444444444444" }),
+      }),
+      conflictContent: async () => {
+        throw new Error("a replayed conflict identity captures nothing");
+      },
+    });
+    await runPass(harness.driver);
+    const stored = harness.repository.readEvent(event.eventId);
+    expect(stored?.state).toBe("blocked_conflict");
+    expect(scripted.conflictContentRequests).toHaveLength(0);
+  });
+
+  it("keeps retry eligibility when the capture upload fails on the wire", async () => {
+    const harness = createHarness();
+    const event = await captureBytes(harness, "notes/failed-capture.md", new TextEncoder().encode("capture"));
+    harness.installTransport({
+      preflight: async () => ({
+        status: 200,
+        bodyText: successBody({
+          outcome: "conflict",
+          operation_id: OPERATION_ID,
+          expires_at: "2026-08-18T01:00:00Z",
+        }),
+      }),
+      conflictContent: async () => ({ status: 503, bodyText: errorBody("small_file_dependency_unavailable") }),
+    });
+    await runPass(harness.driver);
+    const stored = harness.repository.readEvent(event.eventId);
+    expect(stored?.state).not.toBe("blocked_conflict");
+    expect(stored?.state).toBe("waiting_retry");
+    expect(harness.repository.readLocalFileByPath("notes/failed-capture.md")?.sourceId).toBeNull();
   });
 
   it("persists the no-op receipt of a no_change preflight", async () => {

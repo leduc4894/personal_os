@@ -79,7 +79,7 @@ def policy_harness() -> Iterator[SmallFileWireHarness]:
 #: The cross-language contract hash: both language replays consume these
 #: exact bytes; changing the corpus means updating this registry in the same
 #: commit.
-WIRE_GOLDEN_SHA256: Final[str] = "25a165179cefc77578593554ee15967495762309ab79ea1377f633f033ab85c3"
+WIRE_GOLDEN_SHA256: Final[str] = "23ede789bc5647b59c108e32a5477e5aabda39f6a08c8b7ae83eca948366f0b4"
 
 #: The TypeScript replay suite that must read the fixture file.
 TS_REPLAY_SOURCE: Final[str] = "apps/obsidian-plugin/src/journal/sync-wire-contract.test.ts"
@@ -273,6 +273,13 @@ def _offline_drivers(offline_harness: SmallFileWireHarness) -> dict[str, Callabl
         _seeded_current_base(offline_harness, body, current_version_id=uuid4())
         return offline_harness.preflight(body)
 
+    def conflict_capture() -> Any:
+        body = _update_body(source_id=str(uuid4()), base_version_id=str(uuid4()))
+        _seeded_current_base(offline_harness, body, current_version_id=uuid4())
+        granted = offline_harness.preflight(body)
+        token = str(granted.json()["data"]["operation_id"])
+        return offline_harness.upload_conflict_candidate(token, _CONTENT)
+
     def upload_committed() -> Any:
         token = _single_part_upload(offline_harness, _create_body())
         return offline_harness.upload(token, _CONTENT)
@@ -318,6 +325,7 @@ def _offline_drivers(offline_harness: SmallFileWireHarness) -> dict[str, Callabl
         "preflight_committed_replay": committed_replay,
         "preflight_no_change": no_change,
         "preflight_conflict": conflict,
+        "conflict_capture": conflict_capture,
         "upload_committed": upload_committed,
         "error_small_file_size_limit_exceeded": size_limit,
         "error_small_file_content_integrity_failed": integrity_failed,

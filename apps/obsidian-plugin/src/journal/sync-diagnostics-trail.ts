@@ -35,6 +35,13 @@
  * verdict — never a presigned URL, query signature, provider identity,
  * ETag, staging key, digest or path.
  *
+ * The Conflict Inbox child (task 9) adds the `conflict_failure` kind:
+ * exactly one closed token of the conflict composition vocabulary of
+ * `src/conflicts/composition.ts` (the controller's nine diagnostic
+ * reasons plus the composition's own three), optionally followed by one
+ * closed store-reason context token — never a locator, conflict id,
+ * resolution id, digest, merge text or any other journal detail.
+ *
  * The trail persists as ONE JSON sidecar (`sync-diagnostics-trail.json`)
  * through the journal file store port bound to the Vault's plugin
  * directory. A corrupt or unreadable sidecar resets the trail to empty
@@ -64,6 +71,8 @@ import type {
   DeviceSyncReason,
   ReconcileFailureStage,
 } from "../device-sync/contracts";
+import { CONFLICT_COMPOSITION_DIAGNOSTIC_REASONS } from "../conflicts/composition";
+import type { ConflictCompositionDiagnosticReason } from "../conflicts/composition";
 import { JOURNAL_SAFE_ERROR_LABELS, MULTIPART_SAFE_REASON_TOKENS } from "./contracts";
 import type { JournalSafeErrorLabel, MultipartSafeReasonToken } from "./contracts";
 import type { RestoreReservationRefusal } from "./lifecycle-contracts";
@@ -125,6 +134,9 @@ export const MAX_SYNC_DIAGNOSTICS_TRAIL_APPEND_FAILURES = 999;
  * reads that never stop sync. The `multipart_failure` kind (multipart
  * task 11, child 7 spec 7) names the resumable multipart runner's
  * swallowed best-effort abort/clear reasons and terminal local verdicts.
+ * The `conflict_failure` kind (conflict inbox task 9) names the Conflict
+ * Inbox's controller and composition failures — parked local applies and
+ * inbox command failures that never stop the sync lanes.
  */
 export const SYNC_DIAGNOSTIC_KINDS = [
   "wire_failure",
@@ -140,6 +152,7 @@ export const SYNC_DIAGNOSTIC_KINDS = [
   "reconcile_failure",
   "composition_read_failure",
   "multipart_failure",
+  "conflict_failure",
 ] as const;
 
 export type SyncDiagnosticKind = (typeof SYNC_DIAGNOSTIC_KINDS)[number];
@@ -171,7 +184,8 @@ export type SyncDiagnosticClosedToken =
   | CredentialFailureStage
   | CompositionReadStage
   | SyncMultipartFailureStageToken
-  | MultipartSafeReasonToken;
+  | MultipartSafeReasonToken
+  | ConflictCompositionDiagnosticReason;
 
 /**
  * The closed row-state tokens a `journal_failure` entry may carry when a
@@ -433,6 +447,8 @@ const CLOSED_DIAGNOSTIC_TOKEN_SET: ReadonlySet<string> = new Set<string>([
   // The multipart failure stages and safe-reason tokens (multipart task 11).
   ...SYNC_MULTIPART_FAILURE_STAGE_TOKENS,
   ...MULTIPART_SAFE_REASON_TOKENS,
+  // The conflict composition reasons (conflict inbox task 9).
+  ...CONFLICT_COMPOSITION_DIAGNOSTIC_REASONS,
 ]);
 
 const SYNC_API_ENVELOPE_ERROR_CODE_SET: ReadonlySet<string> = new Set<string>(

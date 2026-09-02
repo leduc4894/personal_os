@@ -13,9 +13,10 @@ surfaces as the typed ``small_file_preflight_invalid`` with its single closed
 size is already over the ceiling. The response renderers project domain
 results onto strict payloads: the preflight data carries exactly the members
 its one typed outcome admits — rendered with ``exclude_unset`` so no outcome
-leaks another outcome's payload — and the terminal result carries only the
-safe canonical receipt members of spec 10.3, never an object key, provider
-detail or digest.
+leaks another outcome's payload, the Child 8 ``conflict`` outcome included
+(the capture grant, the replayed conflict identity, or neither) — and the
+terminal result carries only the safe canonical receipt members of spec
+10.3, never an object key, provider detail or digest.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from personal_os.object_storage import CanonicalMediaType, ContentDigest
 from personal_os.small_file_sync.contracts import (
     MAX_UPLOAD_FILE_SIZE_BYTES,
     NormalizedLocator,
+    SmallFileConflictCaptureResult,
     SmallFileIdempotencyKey,
     SmallFileOperation,
     SmallFilePreflight,
@@ -114,9 +116,15 @@ class SmallFilePreflightData(BaseModel):
 
     ``single_part_upload`` carries only the opaque operation token and its
     expiry; ``committed_replay`` and ``no_change`` carry only the frozen
-    terminal result; ``excluded`` and ``conflict`` carry no payload member at
-    all. Responses render with ``exclude_unset`` so each outcome emits
-    exactly its own members.
+    terminal result; ``excluded`` and ``multipart_upload`` carry no payload
+    member at all. The Child 8 ``conflict`` outcome carries either the same
+    opaque operation grant — the capture reservation whose verified
+    candidate the client uploads for retention as conflict evidence — or
+    exactly the opaque conflict identity a same-identity replay returns
+    after capture; a conflict whose candidate cannot be retained through the
+    single-part transport (a size above the single-part routing constant)
+    carries no payload member at all. Responses render with ``exclude_unset``
+    so each outcome emits exactly its own members.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -125,6 +133,27 @@ class SmallFilePreflightData(BaseModel):
     operation_id: str | None = None
     expires_at: datetime | None = None
     result: SmallFileTerminalResultData | None = None
+    conflict_id: UUID | None = None
+
+
+class SmallFileConflictCaptureData(BaseModel):
+    """The safe capture receipt of one conflict-candidate upload.
+
+    The exact answer a stale-base or remote-delete capture returns — and an
+    exact replay of the same operation token or event identity returns
+    unchanged: the opaque conflict identity, the conflict-bound source, the
+    observed remote version at capture time (``null`` exactly when the
+    remote state is the deletion of an ``edit_remote_delete`` capture) and
+    the capture moment. No digest, object key, receipt or provider detail is
+    a member, so none can ever render.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    conflict_id: UUID
+    source_id: UUID
+    observed_remote_version_id: UUID | None
+    captured_at: datetime
 
 
 def _preflight_invalid(reason: SafeToken) -> SmallFileSyncError:
@@ -223,6 +252,27 @@ def small_file_preflight_data(result: SmallFilePreflightResult) -> SmallFilePref
             operation_id=token.value,
             expires_at=expires_at,
         )
+    if result.outcome is SmallFilePreflightOutcome.CONFLICT:
+        # The Child 8 conflict bridge surfaces the capture grant — the same
+        # opaque operation handle and expiry the single-part upload carries —
+        # or exactly the replayed conflict identity of an already captured
+        # event; a conflict that cannot retain bytes yet stays payload-free.
+        # A grant and an identity never travel together: the replay
+        # membership lookup answers before any new reservation exists.
+        if result.conflict_id is not None:
+            return SmallFilePreflightData(
+                outcome=result.outcome,
+                conflict_id=result.conflict_id,
+            )
+        token = result.operation_token
+        expires_at = result.expires_at
+        if token is not None and expires_at is not None:
+            return SmallFilePreflightData(
+                outcome=result.outcome,
+                operation_id=token.value,
+                expires_at=expires_at,
+            )
+        return SmallFilePreflightData(outcome=result.outcome)
     if result.terminal_result is not None:
         return SmallFilePreflightData(
             outcome=result.outcome,
@@ -231,10 +281,25 @@ def small_file_preflight_data(result: SmallFilePreflightResult) -> SmallFilePref
     return SmallFilePreflightData(outcome=result.outcome)
 
 
+def small_file_conflict_capture_data(
+    captured: SmallFileConflictCaptureResult,
+) -> SmallFileConflictCaptureData:
+    """Render the frozen capture receipt onto its strict wire payload."""
+
+    return SmallFileConflictCaptureData(
+        conflict_id=captured.conflict_id,
+        source_id=captured.source_id,
+        observed_remote_version_id=captured.observed_remote_version_id,
+        captured_at=captured.captured_at,
+    )
+
+
 __all__ = [
+    "SmallFileConflictCaptureData",
     "SmallFilePreflightData",
     "SmallFilePreflightRequest",
     "SmallFileTerminalResultData",
+    "small_file_conflict_capture_data",
     "small_file_preflight_data",
     "small_file_terminal_result_data",
     "to_domain_preflight",

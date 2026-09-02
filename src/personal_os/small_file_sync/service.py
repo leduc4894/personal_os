@@ -5,6 +5,8 @@ injected ports only — the durable upload-operation store, the locator-aware
 exclusion-policy guard, the current-source resolver, the canonical object
 store, the existing
 :class:`~personal_os.small_file_sync.ports.SmallFilePublicationGateway`,
+the Child 8
+:class:`~personal_os.small_file_sync.ports.SmallFileConflictCaptureGateway`,
 the closed low-cardinality metrics sink and the aware UTC clock. Preflight
 re-evaluates policy server-side before any store or object-store access,
 replays a frozen terminal result exactly, resolves the update base (stale,
@@ -23,6 +25,24 @@ state carrying its closed registry token, then re-raised unchanged, so a
 typed business rejection never leaves the claimed row fenced in
 ``receiving``; retryable and untyped failures keep their resume behavior.
 
+The Child 8 conflict bridge (spec 5.1) rides the same two-step shape: a
+single-part-sized update preflighted on a stale base — or on a source the
+server deleted under the local edit — keeps its ``conflict`` verdict and
+reserves one capture operation instead, a same-identity re-preflight
+answers the stored conflict before the normal classifier, and
+:meth:`SmallFileSyncService.receive_conflict_candidate` verifies the
+candidate bytes through the identical bounded path before the
+conflict-capture gateway retains them in place of publication — as a
+``stale_content`` conflict when the base merely went stale and as an
+``edit_remote_delete`` conflict when the current reference cannot be
+served — capturing nothing on the current pointer and answering only the
+opaque conflict identity, which both the same-token and same-event replays
+return unchanged. A captured operation deliberately holds its claimed-row
+fence: the durable store port exposes no honest terminal transition for a
+capture, so the replay contract is carried by the conflict aggregate's own
+event identity, and a same-token re-upload re-verifies and replays
+idempotently.
+
 The module imports no FastAPI, SQLAlchemy, R2 SDK or request type; it never
 copies a locator, digest, token, byte count or provider detail into an error
 message, safe detail or metric label. Two derivations are pinned here
@@ -39,6 +59,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
 from typing import Final
+from uuid import UUID
 
 from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.error_contracts.codes import ErrorCode
@@ -53,6 +74,7 @@ from personal_os.object_storage import (
 from personal_os.object_storage.errors import ObjectStorageError
 from personal_os.small_file_sync.contracts import (
     MAX_SINGLE_PART_FILE_SIZE_BYTES,
+    SmallFileConflictCaptureResult,
     SmallFileDeviceContext,
     SmallFileOperation,
     SmallFilePreflight,
@@ -70,6 +92,7 @@ from personal_os.small_file_sync.metrics import (
 from personal_os.small_file_sync.ports import (
     AwareUtcClock,
     SmallFileBoundOperation,
+    SmallFileConflictCaptureGateway,
     SmallFilePolicyGuard,
     SmallFilePublicationGateway,
     SmallFileUploadOperationStore,
@@ -225,15 +248,23 @@ class SmallFilePreflightResult:
     detail. ``committed_replay`` and ``no_change`` carry the frozen terminal
     receipt; ``multipart_upload`` routes a file strictly above the single-part
     routing constant into the resumable multipart transport and — like
-    ``excluded`` and ``conflict`` — carries no payload at all: the client
-    obtains its opaque session, geometry and URLs only from the multipart
-    session endpoints, never from this result.
+    ``excluded`` — carries no payload at all: the client obtains its opaque
+    session, geometry and URLs only from the multipart session endpoints,
+    never from this result. The Child 8 ``conflict`` outcome carries either
+    the same opaque operation grant — a stale single-part-sized update whose
+    verified candidate the client uploads for capture — or exactly the
+    opaque conflict identity a same-identity replay returns after capture;
+    a conflict that cannot retain bytes yet (a missing source, or a size
+    above the single-part routing constant) carries no payload at all, and
+    no conflict result ever carries a terminal result, receipt or raw
+    content.
     """
 
     outcome: SmallFilePreflightOutcome
     terminal_result: SmallFileTerminalResult | None = None
     operation_token: UploadOperationToken | None = None
     expires_at: datetime | None = None
+    conflict_id: UUID | None = None
 
     def __post_init__(self) -> None:
         if self.outcome is SmallFilePreflightOutcome.SINGLE_PART_UPLOAD:
@@ -241,6 +272,8 @@ class SmallFilePreflightResult:
                 raise ValueError("single_part_upload requires the operation token and expiry")
             if self.terminal_result is not None:
                 raise ValueError("single_part_upload carries no terminal result")
+            if self.conflict_id is not None:
+                raise ValueError("single_part_upload carries no conflict identity")
             return
         if self.outcome in (
             SmallFilePreflightOutcome.COMMITTED_REPLAY,
@@ -250,13 +283,25 @@ class SmallFilePreflightResult:
                 raise ValueError("replay outcomes require the frozen terminal result")
             if self.operation_token is not None or self.expires_at is not None:
                 raise ValueError("replay outcomes allocate no upload operation")
+            if self.conflict_id is not None:
+                raise ValueError("replay outcomes carry no conflict identity")
+            return
+        if self.outcome is SmallFilePreflightOutcome.CONFLICT:
+            if self.terminal_result is not None:
+                raise ValueError("a conflict outcome carries no terminal result")
+            has_grant = self.operation_token is not None or self.expires_at is not None
+            if has_grant and (self.operation_token is None or self.expires_at is None):
+                raise ValueError("a conflict capture grant requires the token and expiry")
+            if has_grant and self.conflict_id is not None:
+                raise ValueError("a conflict capture grant carries no conflict identity")
             return
         if (
             self.terminal_result is not None
             or self.operation_token is not None
             or self.expires_at is not None
+            or self.conflict_id is not None
         ):
-            raise ValueError("excluded, conflict and multipart outcomes carry no safe payload")
+            raise ValueError("excluded and multipart outcomes carry no safe payload")
 
 
 @dataclass(slots=True)
@@ -281,6 +326,7 @@ class SmallFileSyncService:
     publication_gateway: SmallFilePublicationGateway
     object_store: CanonicalObjectStore
     current_sources: CanonicalSourceReadStore
+    conflict_capture: SmallFileConflictCaptureGateway
     metrics: SmallFileSyncMetrics
     clock: AwareUtcClock
 
@@ -350,6 +396,60 @@ class SmallFileSyncService:
             )
             raise
 
+    async def receive_conflict_candidate(
+        self,
+        *,
+        operation_token: UploadOperationToken,
+        device_context: SmallFileDeviceContext,
+        stream: AsyncIterable[bytes],
+        diagnostic_context: DiagnosticContext,
+    ) -> SmallFileConflictCaptureResult:
+        """Bind one stale-update candidate stream to its capture operation.
+
+        The Child 8 counterpart of :meth:`receive` over the same durable
+        operation row and the same bounded verification path: the stream is
+        spooled and fully verified before anything may reference it, the
+        current source is re-read to freeze the remote the capture observed,
+        and the verified candidate is handed to the conflict-capture gateway
+        in place of publication. The returned receipt carries only the
+        opaque conflict identity — never a publication receipt or raw
+        content — and an exact replay of the same token or event identity
+        returns the original conflict unchanged.
+        """
+
+        started_at = self.clock()
+        # A failed binding (unknown token, credential mismatch, expiry, dead
+        # state) raises the store's own closed error unmetered, exactly like
+        # the publication receive.
+        bound = await self.operation_store.resolve_bound_operation(
+            operation_token, device_context, diagnostic_context
+        )
+        if bound.terminal_result is not None:
+            # A publication operation never doubles as a capture operation.
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        try:
+            return await self._capture_once(
+                bound=bound,
+                device_context=device_context,
+                stream=stream,
+                diagnostic_context=diagnostic_context,
+                started_at=started_at,
+            )
+        except ApplicationError as error:
+            upload_outcome = SmallFileMetricOutcome.REJECTED
+            if isinstance(error, SmallFileSyncError):
+                if error.error_code is ErrorCode.SMALL_FILE_CONTENT_INTEGRITY_FAILED:
+                    upload_outcome = SmallFileMetricOutcome.INTEGRITY_FAILED
+                self._record_rejection(bound.operation, error)
+            if not error.is_retryable:
+                await self._persist_typed_rejection(bound, error.error_code, diagnostic_context)
+            self.metrics.record_upload(
+                operation=bound.operation,
+                outcome=upload_outcome,
+                duration_seconds=self._elapsed_seconds_since(started_at),
+            )
+            raise
+
     async def _preflight_once(
         self,
         *,
@@ -396,6 +496,29 @@ class SmallFileSyncService:
             self._record_preflight(preflight.operation, outcome, started_at)
             return SmallFilePreflightResult(outcome=outcome, terminal_result=frozen)
         if preflight.operation is SmallFileOperation.UPDATE:
+            # Conflict-membership replay (Child 8 spec 5.1): a captured event
+            # answers with its stored conflict before the normal base
+            # classifier can reserve or publish anything. The frozen
+            # publication/no-change replay lookup above runs first because it
+            # also carries the payload-substitution guard — a different
+            # fingerprint under the same identity rejects there, so the
+            # membership lookup can key on the event identity alone. A
+            # captured event never holds a terminal publication result, so
+            # the two replay families never collide.
+            captured = await self.conflict_capture.resolve_captured_conflict(
+                workspace_id=device_context.workspace_id,
+                originating_event_id=preflight.event_id,
+                diagnostic_context=diagnostic_context,
+            )
+            if captured is not None:
+                self.metrics.record_replay(operation=preflight.operation)
+                self._record_preflight(
+                    preflight.operation, SmallFilePreflightOutcome.CONFLICT, started_at
+                )
+                return SmallFilePreflightResult(
+                    outcome=SmallFilePreflightOutcome.CONFLICT,
+                    conflict_id=captured.conflict_id,
+                )
             base_result = await self._check_update_base(
                 preflight=preflight,
                 device_context=device_context,
@@ -442,18 +565,26 @@ class SmallFileSyncService:
     ) -> SmallFilePreflightResult | None:
         """Resolve the update base; ``None`` opens the single-part upload.
 
-        A missing current reference or a base that is no longer current is
-        the durable ``conflict`` outcome — no overwrite, no reservation. A
-        current base whose committed digest equals the declared digest is the
-        safe ``no_change`` receipt: the operation is reserved and the
-        confirmed current base frozen as its terminal result so a lost
-        response replays the exact no-op. A typed policy DENIAL raised by
-        the read boundary's locked recheck is the same terminal ``excluded``
-        outcome the authorize boundary produces (spec 9/10.1) — it never
-        escapes as an error envelope the route would answer with 403. A
-        policy SYSTEM failure propagates as the typed error behind the closed
-        409/503 envelope instead (policy-observability remediation C1); both
-        sides record their closed registry code into the rejection ring.
+        The policy/base check itself is unchanged. A missing current
+        reference — a source the server deleted under the local edit — keeps
+        the durable ``conflict`` verdict and, for a single-part-sized update,
+        reserves one capture operation whose grant the result carries: the
+        client uploads its candidate through the conflict-candidate receive
+        path, which verifies the bytes and captures them as
+        ``edit_remote_delete`` evidence instead of publishing. A base that is
+        no longer current keeps that same ``conflict`` verdict and grant
+        shape, capturing instead as ``stale_content`` (Child 8 spec 5.1). A
+        current base
+        whose committed digest equals the declared digest is the safe
+        ``no_change`` receipt: the operation is reserved and the confirmed
+        current base frozen as its terminal result so a lost response
+        replays the exact no-op. A typed policy DENIAL raised by the read
+        boundary's locked recheck is the same terminal ``excluded`` outcome
+        the authorize boundary produces (spec 9/10.1) — it never escapes as
+        an error envelope the route would answer with 403. A policy SYSTEM
+        failure propagates as the typed error behind the closed 409/503
+        envelope instead (policy-observability remediation C1); both sides
+        record their closed registry code into the rejection ring.
         """
 
         update_source_id = preflight.source_id
@@ -470,10 +601,32 @@ class SmallFileSyncService:
                 diagnostic_context,
             )
         except CanonicalReadStateError:
+            # The current reference cannot be served — most notably a source
+            # the server deleted under the local edit (an edit-remote-delete
+            # race of Child 8 spec 4.1). The verdict stays ``conflict`` with
+            # no overwrite and no reservation: a single-part-sized update
+            # keeps one capture operation grant so the verified candidate is
+            # retained as ``edit_remote_delete`` evidence, while larger sizes
+            # keep the payload-free outcome exactly as before.
+            if preflight.size_bytes > MAX_SINGLE_PART_FILE_SIZE_BYTES:
+                self._record_preflight(
+                    preflight.operation, SmallFilePreflightOutcome.CONFLICT, started_at
+                )
+                return SmallFilePreflightResult(outcome=SmallFilePreflightOutcome.CONFLICT)
+            operation = await self.operation_store.reserve_operation(
+                preflight=preflight,
+                device_context=device_context,
+                policy_binding=policy_binding,
+                diagnostic_context=diagnostic_context,
+            )
             self._record_preflight(
                 preflight.operation, SmallFilePreflightOutcome.CONFLICT, started_at
             )
-            return SmallFilePreflightResult(outcome=SmallFilePreflightOutcome.CONFLICT)
+            return SmallFilePreflightResult(
+                outcome=SmallFilePreflightOutcome.CONFLICT,
+                operation_token=operation.operation_token,
+                expires_at=operation.expires_at,
+            )
         except ExclusionPolicyError as error:
             # The read boundary's transaction-final recheck denied or could
             # not decide the subject: the preflight outcome contract stays
@@ -489,10 +642,33 @@ class SmallFileSyncService:
             )
             return SmallFilePreflightResult(outcome=SmallFilePreflightOutcome.EXCLUDED)
         if reference.source_version_id != update_base_version_id:
+            # Stale base (Child 8 spec 5.1): the verdict stays ``conflict``,
+            # but a single-part-sized update now reserves one capture
+            # operation so the client uploads its candidate through the same
+            # verified receive path; capture — not publication — then retains
+            # the bytes as conflict evidence. Above the single-part routing
+            # constant no verified-object transport exists for the candidate
+            # in this slice, so the outcome stays payload-free exactly as
+            # before.
+            if preflight.size_bytes > MAX_SINGLE_PART_FILE_SIZE_BYTES:
+                self._record_preflight(
+                    preflight.operation, SmallFilePreflightOutcome.CONFLICT, started_at
+                )
+                return SmallFilePreflightResult(outcome=SmallFilePreflightOutcome.CONFLICT)
+            operation = await self.operation_store.reserve_operation(
+                preflight=preflight,
+                device_context=device_context,
+                policy_binding=policy_binding,
+                diagnostic_context=diagnostic_context,
+            )
             self._record_preflight(
                 preflight.operation, SmallFilePreflightOutcome.CONFLICT, started_at
             )
-            return SmallFilePreflightResult(outcome=SmallFilePreflightOutcome.CONFLICT)
+            return SmallFilePreflightResult(
+                outcome=SmallFilePreflightOutcome.CONFLICT,
+                operation_token=operation.operation_token,
+                expires_at=operation.expires_at,
+            )
         if reference.expected_object.content_digest != preflight.sha256:
             return None
         operation = await self.operation_store.reserve_operation(
@@ -647,6 +823,92 @@ class SmallFileSyncService:
             bound_operation=bound,
             diagnostic_context=diagnostic_context,
         )
+
+    async def _capture_once(
+        self,
+        *,
+        bound: SmallFileBoundOperation,
+        device_context: SmallFileDeviceContext,
+        stream: AsyncIterable[bytes],
+        diagnostic_context: DiagnosticContext,
+        started_at: datetime,
+    ) -> SmallFileConflictCaptureResult:
+        # Verified-object admission precedes everything (Child 8 spec 3.3):
+        # the server-owned single-part ceiling and the full byte-size and
+        # SHA-256 verification run before any conflict may reference the
+        # bytes, and a mismatch is the closed integrity failure that never
+        # captures.
+        if bound.declared_size_bytes > MAX_SINGLE_PART_FILE_SIZE_BYTES:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_SIZE_LIMIT_EXCEEDED)
+        if bound.operation is not SmallFileOperation.UPDATE:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        update_source_id = bound.update_source_id
+        update_base_version_id = bound.update_base_version_id
+        if update_source_id is None or update_base_version_id is None:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        try:
+            receipt = await self.object_store.store_stream(
+                stream,
+                bound.declared_size_bytes,
+                bound.declared_media_type.value,
+                bound.declared_sha256.hexadecimal,
+            )
+        except ObjectStorageError as error:
+            if error.error_code in _RECEIVE_INTEGRITY_FAILURE_CODES:
+                raise SmallFileSyncError(ErrorCode.SMALL_FILE_CONTENT_INTEGRITY_FAILED) from error
+            raise
+        if (
+            receipt.content_digest != bound.declared_sha256
+            or receipt.size_bytes != bound.declared_size_bytes
+            or receipt.media_type != bound.declared_media_type
+        ):
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_CONTENT_INTEGRITY_FAILED)
+        # The observed remote is read at capture time — after verification —
+        # so the frozen evidence describes exactly the world the capture
+        # saw. A base that became current again is not a capturable stale
+        # update: the closed state-invalid rejection releases the claim for
+        # a same-identity re-preflight instead of capturing or publishing.
+        try:
+            reference = await self.current_sources.resolve_current(
+                ReadCurrentSourceCommand(
+                    workspace_id=device_context.workspace_id, source_id=update_source_id
+                ),
+                diagnostic_context,
+            )
+        except CanonicalReadStateError:
+            # The current reference cannot be served. The gateway re-validates
+            # the deletion against capture-time canonical state and retains the
+            # verified candidate as an ``edit_remote_delete`` conflict; a race
+            # it cannot confirm answers ``None`` and this receive fails closed
+            # with no capture, no publication and the claim released for a
+            # same-identity re-preflight (Child 8 spec 4.1 row 2).
+            captured = await self.conflict_capture.capture_edit_remote_delete(
+                bound_operation=bound,
+                verified_candidate=receipt,
+                diagnostic_context=diagnostic_context,
+            )
+            if captured is None:
+                raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID) from None
+            self.metrics.record_upload(
+                operation=bound.operation,
+                outcome=SmallFileMetricOutcome.CONFLICT_CAPTURED,
+                duration_seconds=self._elapsed_seconds_since(started_at),
+            )
+            return captured
+        if reference.source_version_id == update_base_version_id:
+            raise SmallFileSyncError(ErrorCode.SMALL_FILE_UPLOAD_STATE_INVALID)
+        captured = await self.conflict_capture.capture_stale_update(
+            bound_operation=bound,
+            verified_candidate=receipt,
+            observed_remote_version_id=reference.source_version_id,
+            diagnostic_context=diagnostic_context,
+        )
+        self.metrics.record_upload(
+            operation=bound.operation,
+            outcome=SmallFileMetricOutcome.CONFLICT_CAPTURED,
+            duration_seconds=self._elapsed_seconds_since(started_at),
+        )
+        return captured
 
     async def _persist_typed_rejection(
         self,

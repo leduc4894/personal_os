@@ -153,6 +153,19 @@ def test_http_status_map_is_closed_for_the_api_surface() -> None:
         ErrorCode.MULTIPART_CLEANUP_FAILED: 503,
         ErrorCode.MULTIPART_LOCAL_CONTENT_CHANGED: 409,
         ErrorCode.MULTIPART_DEPENDENCY_UNAVAILABLE: 503,
+        # The source conflict block of the Conflict Inbox design (Child 8
+        # spec 7), wired when the conflict routes landed: 422 for the input
+        # and evidence-integrity verdicts, 404 for an unknown conflict or
+        # unavailable evidence, 409 for the state and idempotency conflicts,
+        # and 503 for the two retryable dependency outcomes.
+        ErrorCode.SOURCE_CONFLICT_INPUT_INVALID: 422,
+        ErrorCode.SOURCE_CONFLICT_NOT_FOUND: 404,
+        ErrorCode.SOURCE_CONFLICT_STATE_INVALID: 409,
+        ErrorCode.SOURCE_CONFLICT_IDEMPOTENCY_MISMATCH: 409,
+        ErrorCode.SOURCE_CONFLICT_EVIDENCE_UNAVAILABLE: 404,
+        ErrorCode.SOURCE_CONFLICT_EVIDENCE_INTEGRITY_FAILED: 422,
+        ErrorCode.SOURCE_CONFLICT_DEPENDENCY_UNAVAILABLE: 503,
+        ErrorCode.SOURCE_CONFLICT_COMMIT_OUTCOME_UNKNOWN: 503,
     }
 
 

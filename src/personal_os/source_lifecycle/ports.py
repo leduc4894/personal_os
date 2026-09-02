@@ -10,6 +10,7 @@ from uuid import UUID
 from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.exclusion_policy.contracts import PolicySubject
 from personal_os.source_lifecycle.commands import (
+    LifecycleConflictCaptureReceipt,
     SourceLifecycleCommand,
     SourceLifecycleCommitResult,
 )
@@ -106,6 +107,42 @@ class SourceLifecycleStore(Protocol):
     ) -> SourceLifecycleCommitResult: ...
 
 
+class LifecycleConflictCaptureGateway(Protocol):
+    """Retain one losing lifecycle race as shared conflict evidence.
+
+    The Child 8 bridge seam: the composition root binds the shared conflict
+    machinery behind this port, so the lifecycle domain depends on a
+    provider-neutral capability instead of the conflict domain module.
+    Both members receive the losing command with its request fingerprint —
+    the exact replay identity the derived capture key binds to — and the
+    credential-derived device context; they answer with only the opaque
+    receipt, or ``None`` when the race is no longer confirmed against
+    capture-time canonical state (the caller then keeps the original typed
+    rejection and nothing is retained). Capture changes no source current
+    pointer, closes no locator and creates no tombstone; a same-identity
+    redelivery replays the stored conflict unchanged. No byte, digest,
+    locator or object key crosses this boundary in either direction.
+    """
+
+    async def capture_delete_remote_edit(
+        self,
+        *,
+        command: SourceLifecycleCommand,
+        device_context: LifecycleDeviceContext,
+        request_fingerprint: LifecycleRequestFingerprint,
+        diagnostic_context: DiagnosticContext,
+    ) -> LifecycleConflictCaptureReceipt | None: ...
+
+    async def capture_locator_collision(
+        self,
+        *,
+        command: SourceLifecycleCommand,
+        device_context: LifecycleDeviceContext,
+        request_fingerprint: LifecycleRequestFingerprint,
+        diagnostic_context: DiagnosticContext,
+    ) -> LifecycleConflictCaptureReceipt | None: ...
+
+
 class SourceLifecyclePolicy(Protocol):
     """Service-level lifecycle policy seam (spec 11).
 
@@ -128,6 +165,7 @@ class SourceLifecyclePolicy(Protocol):
 
 __all__ = [
     "LifecycleCommitResult",
+    "LifecycleConflictCaptureGateway",
     "LifecycleDeviceContext",
     "LifecyclePolicyDecision",
     "LifecyclePolicyOutcome",

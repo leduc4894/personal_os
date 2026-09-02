@@ -90,12 +90,12 @@ def test_terminal_locator_remediation_revision_stacks_on_the_device_sync_head() 
 def test_canonical_schema_revision_points_at_the_new_head() -> None:
     from personal_os.database_schema import CANONICAL_POSTGRESQL_SCHEMA_REVISION
 
-    assert CANONICAL_POSTGRESQL_SCHEMA_REVISION == TERMINAL_LOCATOR_REMEDIATION_REVISION
+    assert CANONICAL_POSTGRESQL_SCHEMA_REVISION == "20260902_01"
 
 
 def test_terminal_locator_remediation_revision_is_the_single_alembic_head() -> None:
     scripts = _script_directory()
-    assert scripts.get_heads() == [TERMINAL_LOCATOR_REMEDIATION_REVISION]
+    assert scripts.get_heads() == ["20260902_01"]
 
 
 def test_upgrade_emits_exactly_one_guarded_terminal_locator_clear() -> None:

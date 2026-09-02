@@ -30,6 +30,7 @@ import {
   SYNC_STATUS_KINDS,
   SYNC_STATUS_TEXT,
   projectJournalSyncStatus,
+  renderJournalSyncStatus,
   renderJournalSyncStatusText,
   syncBlockerGuidanceLines,
   LIFECYCLE_BLOCKED_REASON_CODES,
@@ -1089,5 +1090,86 @@ describe("closed multipart status surface (multipart task 11)", () => {
     expect(snapshot.multipartSessionStateCounts.uploading).toBe(1);
     expect(snapshot.multipartSessionStateCounts.committed).toBe(0);
     expect(snapshot.multipartSafeReasonCodes).toEqual(["multipart_part_url_rejected"]);
+  });
+
+  // --- the conflict inbox pending-apply surface (Task 9) ---------------------------------------------
+
+  it("surfaces local_apply_pending with a closed token and no locator", () => {
+    const snapshot = projectJournalSyncStatus(
+      projectInput({
+        conflictApplyPendingCount: 1,
+        conflictApplySafeReasonTokens: ["vault_apply_failed"],
+      }),
+    );
+    expect(renderJournalSyncStatus(snapshot)).toContain("Conflict apply pending");
+  });
+
+  it("renders the exact closed pending-apply line with the count and no locator", () => {
+    const snapshot = projectJournalSyncStatus(
+      projectInput({
+        conflictApplyPendingCount: 2,
+        conflictApplySafeReasonTokens: ["resolution_committed", "winner_download_failed"],
+      }),
+    );
+    expect(renderJournalSyncStatus(snapshot)).toBe("Ready · Conflict apply pending (2)");
+  });
+
+  it("keeps the status-bar text unchanged while no conflict apply is pending", () => {
+    const snapshot = projectJournalSyncStatus(projectInput());
+    expect(renderJournalSyncStatus(snapshot)).toBe("Ready");
+  });
+
+  it("keeps an attempt-capped parked apply visible regardless of its retry timestamp", () => {
+    // The Task 8 ruling: RETRY eligibility gates on attemptCount >= the
+    // cap, never on the timestamp alone — and the status surface carries
+    // no timestamp input at all, so a capped row (next retry far in the
+    // future, human attention owed) projects exactly like a due row.
+    const cappedRowSnapshot = projectJournalSyncStatus(
+      projectInput({ conflictApplyPendingCount: 1, conflictApplySafeReasonTokens: ["vault_apply_failed"] }),
+    );
+    const dueRowSnapshot = projectJournalSyncStatus(
+      projectInput({ conflictApplyPendingCount: 1, conflictApplySafeReasonTokens: ["vault_apply_failed"] }),
+    );
+    expect(renderJournalSyncStatus(cappedRowSnapshot)).toBe(
+      renderJournalSyncStatus(dueRowSnapshot),
+    );
+    expect(cappedRowSnapshot.conflictApplyPendingCount).toBe(1);
+  });
+
+  it("drops a foreign safe-reason token at the closed gate", () => {
+    const snapshot = projectJournalSyncStatus(
+      projectInput({
+        conflictApplyPendingCount: 1,
+        conflictApplySafeReasonTokens: [
+          "vault_apply_failed",
+          "notes/secret-path.md" as never,
+          "winner_download_failed",
+        ],
+      }),
+    );
+    expect(snapshot.conflictApplySafeReasonTokens).toEqual([
+      "vault_apply_failed",
+      "winner_download_failed",
+    ]);
+  });
+
+  it("keeps the conflict apply surface free of identity sentinels", () => {
+    const snapshot = projectJournalSyncStatus(
+      projectInput({
+        conflictApplyPendingCount: 3,
+        conflictApplySafeReasonTokens: ["vault_apply_failed"],
+      }),
+    );
+    const telemetry = `${JSON.stringify(snapshot)} ${renderJournalSyncStatus(snapshot)}`;
+    for (const forbidden of [
+      "notes/",
+      ".md",
+      "conflict_id",
+      "resolution_event_id",
+      "sha256",
+      "https://",
+    ]) {
+      expect(telemetry).not.toContain(forbidden);
+    }
   });
 });

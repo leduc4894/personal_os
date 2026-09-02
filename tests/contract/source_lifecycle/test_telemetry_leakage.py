@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from tests.unit.source_lifecycle.fakes import (
     CallLedger,
+    FakeLifecycleConflictCaptureGateway,
     FakeLifecyclePolicy,
     FakeLifecycleStore,
     SequencedUtcClock,
@@ -87,6 +88,12 @@ def _moment(offset_seconds: float = 0) -> datetime:
     return base + timedelta(seconds=offset_seconds)
 
 
+def _never_capturing_gateway() -> FakeLifecycleConflictCaptureGateway:
+    """A conflict-capture double that answers None and never reaches a sink."""
+
+    return FakeLifecycleConflictCaptureGateway(ledger=CallLedger())
+
+
 def test_typed_lifecycle_error_never_leaks_locator_or_decision_text() -> None:
     """A typed store failure must not copy locator or decision text into the error."""
 
@@ -129,6 +136,7 @@ def test_metrics_labels_only_carry_operation_outcome_and_error_code() -> None:
     service = SourceLifecycleService(
         store=store,
         policy=policy,
+        conflict_capture=_never_capturing_gateway(),
         metrics=metrics,
         clock=clock,
     )
@@ -165,6 +173,7 @@ def test_rejection_metric_carries_only_the_closed_error_code_label() -> None:
     service = SourceLifecycleService(
         store=store,
         policy=policy,
+        conflict_capture=_never_capturing_gateway(),
         metrics=metrics,
         clock=clock,
     )
@@ -200,6 +209,7 @@ def test_locator_and_decision_text_never_appear_in_captured_logs(
     service = SourceLifecycleService(
         store=store,
         policy=policy,
+        conflict_capture=_never_capturing_gateway(),
         metrics=metrics,
         clock=clock,
     )
@@ -238,6 +248,7 @@ def test_typed_rejection_propagates_without_copying_cause_text(
     service = SourceLifecycleService(
         store=store,
         policy=policy,
+        conflict_capture=_never_capturing_gateway(),
         metrics=metrics,
         clock=clock,
     )
@@ -273,6 +284,7 @@ def test_service_protocols_are_provider_neutral() -> None:
     service = SourceLifecycleService(
         store=store,
         policy=policy,
+        conflict_capture=_never_capturing_gateway(),
         metrics=metrics,
         clock=SequencedUtcClock(moments=[_moment(0), _moment(1)]),
     )

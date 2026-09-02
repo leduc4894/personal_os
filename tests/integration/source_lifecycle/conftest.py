@@ -121,6 +121,12 @@ class LifecycleHarness:
         self._lifecycle_store = lifecycle_store
 
     @property
+    def engine(self) -> AsyncEngine:
+        """The shared engine the seeded stores run on (read-only access)."""
+
+        return self._engine
+
+    @property
     def publication_store(self) -> PostgresqlSourcePublicationStore:
         return self._publication_store
 

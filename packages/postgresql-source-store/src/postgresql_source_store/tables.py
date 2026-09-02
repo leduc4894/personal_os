@@ -1,14 +1,15 @@
 """Schema-qualified SQLAlchemy Core table metadata for DML against the baseline.
 
 The Alembic migrations ``20260813_01``, ``20260816_01``, ``20260817_01``,
-``20260818_01``, ``20260820_01``, ``20260826_01`` and ``20260828_01`` are the DDL
-authority: they own the schema, columns, constraints, indexes and triggers. This
-module is the typed DML representation of exactly the thirty-nine migrated tables:
-identical table names, schema (``knowledge``), column names, column types,
-nullability and primary keys, contract-tested against the migration sources. There
-is deliberately no ``create_all()`` path and no constraint duplication: check,
-unique and foreign key constraints stay owned by the migrations, while reads and
-writes address the tables through this metadata.
+``20260818_01``, ``20260820_01``, ``20260826_01``, ``20260828_01`` and
+``20260902_01`` are the DDL authority: they own the schema, columns,
+constraints, indexes and triggers. This module is the typed DML
+representation of exactly the forty migrated tables: identical table names,
+schema (``knowledge``), column names, column types, nullability and primary
+keys, contract-tested against the migration sources. There is deliberately no
+``create_all()`` path and no constraint duplication: check, unique and
+foreign key constraints stay owned by the migrations, while reads and writes
+address the tables through this metadata.
 """
 
 from __future__ import annotations
@@ -738,10 +739,41 @@ multipart_parts: Final[Table] = Table(
     sa.PrimaryKeyConstraint("multipart_part_id", name="pk_multipart_parts"),
 )
 
+#: The server-authoritative conflict aggregate (migration ``20260902_01``).
+#: The ``normalized_locator`` column is the immutable locator snapshot that
+#: exists only to cross the store boundary into canonical state; the capture
+#: and resolution idempotency columns are opaque UUID-text identities that
+#: never render in a repr, log or metric label.
+source_conflicts: Final[Table] = Table(
+    "source_conflicts",
+    _SOURCE_STORE_METADATA,
+    Column("conflict_id", sa.Uuid(), nullable=False),
+    Column("workspace_id", sa.Uuid(), nullable=False),
+    Column("source_id", sa.Uuid(), nullable=True),
+    Column("conflict_kind", sa.Text(), nullable=False),
+    Column("status", sa.Text(), nullable=False),
+    Column("originating_event_id", sa.Uuid(), nullable=False),
+    Column("originating_device_id", sa.Uuid(), nullable=False),
+    Column("capture_idempotency_key", sa.String(length=36), nullable=False),
+    Column("base_version_id", sa.Uuid(), nullable=True),
+    Column("observed_remote_version_id", sa.Uuid(), nullable=True),
+    Column("candidate_kind", sa.Text(), nullable=False),
+    Column("verified_candidate_object_id", sa.Uuid(), nullable=True),
+    Column("normalized_locator", sa.Text(), nullable=True),
+    Column("resolution_kind", sa.Text(), nullable=True),
+    Column("resolution_event_id", sa.Uuid(), nullable=True),
+    Column("resolution_idempotency_key", sa.String(length=36), nullable=True),
+    Column("resulting_version_id", sa.Uuid(), nullable=True),
+    Column("successor_conflict_id", sa.Uuid(), nullable=True),
+    Column("captured_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=False),
+    Column("closed_at", _TIMESTAMP_WITH_TIME_ZONE, nullable=True),
+    sa.PrimaryKeyConstraint("conflict_id", name="pk_source_conflicts"),
+)
+
 #: Single frozen metadata collection owning every DML table.
 SOURCE_STORE_METADATA: Final[MetaData] = _SOURCE_STORE_METADATA
 
-#: Immutable name-indexed view of the thirty-nine migrated tables, keyed by
+#: Immutable name-indexed view of the forty migrated tables, keyed by
 #: their unqualified table names (``metadata.tables`` itself is
 #: schema-qualified).
 SOURCE_STORE_TABLES: Final[Mapping[str, Table]] = MappingProxyType(
@@ -758,6 +790,7 @@ SOURCE_STORE_TABLES: Final[Mapping[str, Table]] = MappingProxyType(
             projection_intents,
             source_locators,
             source_tombstones,
+            source_conflicts,
             audit_events,
             user_credentials,
             web_sessions,

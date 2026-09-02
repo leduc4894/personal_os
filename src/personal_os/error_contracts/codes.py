@@ -149,6 +149,14 @@ class ErrorCode(StrEnum):
     MULTIPART_CLEANUP_FAILED = "multipart_cleanup_failed"
     MULTIPART_LOCAL_CONTENT_CHANGED = "multipart_local_content_changed"
     MULTIPART_DEPENDENCY_UNAVAILABLE = "multipart_dependency_unavailable"
+    SOURCE_CONFLICT_INPUT_INVALID = "source_conflict_input_invalid"
+    SOURCE_CONFLICT_NOT_FOUND = "source_conflict_not_found"
+    SOURCE_CONFLICT_STATE_INVALID = "source_conflict_state_invalid"
+    SOURCE_CONFLICT_IDEMPOTENCY_MISMATCH = "source_conflict_idempotency_mismatch"
+    SOURCE_CONFLICT_EVIDENCE_UNAVAILABLE = "source_conflict_evidence_unavailable"
+    SOURCE_CONFLICT_EVIDENCE_INTEGRITY_FAILED = "source_conflict_evidence_integrity_failed"
+    SOURCE_CONFLICT_DEPENDENCY_UNAVAILABLE = "source_conflict_dependency_unavailable"
+    SOURCE_CONFLICT_COMMIT_OUTCOME_UNKNOWN = "source_conflict_commit_outcome_unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -970,6 +978,64 @@ ERROR_DEFINITIONS: Final[Mapping[ErrorCode, ErrorDefinition]] = MappingProxyType
             category=ErrorCategory.DEPENDENCY,
             is_retryable=True,
             safe_message="A multipart upload dependency is temporarily unavailable",
+            allowed_detail_fields=frozenset(),
+        ),
+        # The source-conflict block of the Conflict Inbox design (Child 8
+        # spec 7): input, not-found, state, idempotency and evidence codes
+        # are terminal for the triggering request — the stale-remote branch
+        # is a typed STALE_SUCCESSOR outcome, never an error — while the two
+        # dependency outages retry with bounded jitter. Only
+        # ``source_conflict_input_invalid`` accepts a safe detail, the single
+        # closed ``reason`` token; conflict UUIDs, locators, digests, object
+        # keys and any content never enter a safe detail. HTTP statuses are
+        # wired into the closed api_contracts status map when the routes
+        # land.
+        ErrorCode.SOURCE_CONFLICT_INPUT_INVALID: ErrorDefinition(
+            category=ErrorCategory.VALIDATION,
+            is_retryable=False,
+            safe_message="Source conflict input is invalid",
+            allowed_detail_fields=frozenset({"reason"}),
+        ),
+        ErrorCode.SOURCE_CONFLICT_NOT_FOUND: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The source conflict does not exist",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.SOURCE_CONFLICT_STATE_INVALID: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The source conflict state does not accept this action",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.SOURCE_CONFLICT_IDEMPOTENCY_MISMATCH: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="The source conflict idempotency key was reused with a different request",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.SOURCE_CONFLICT_EVIDENCE_UNAVAILABLE: ErrorDefinition(
+            category=ErrorCategory.CONFLICT,
+            is_retryable=False,
+            safe_message="Source conflict evidence is unavailable",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.SOURCE_CONFLICT_EVIDENCE_INTEGRITY_FAILED: ErrorDefinition(
+            category=ErrorCategory.INTEGRITY,
+            is_retryable=False,
+            safe_message="Source conflict evidence failed integrity verification",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.SOURCE_CONFLICT_DEPENDENCY_UNAVAILABLE: ErrorDefinition(
+            category=ErrorCategory.DEPENDENCY,
+            is_retryable=True,
+            safe_message="A source conflict dependency is temporarily unavailable",
+            allowed_detail_fields=frozenset(),
+        ),
+        ErrorCode.SOURCE_CONFLICT_COMMIT_OUTCOME_UNKNOWN: ErrorDefinition(
+            category=ErrorCategory.DEPENDENCY,
+            is_retryable=True,
+            safe_message="The source conflict commit outcome could not be determined",
             allowed_detail_fields=frozenset(),
         ),
     }

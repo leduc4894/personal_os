@@ -7,12 +7,15 @@ plugin client's hand-mirrored requests. The journeys pin the cross-boundary
 behaviors the plugin depends on: a create commits exactly once and answers
 the lost-response replay with the frozen receipt; the same journal identity
 re-preflight after commit replays exactly without a second publication; a
-stale update base answers the durable ``conflict`` outcome without a
-reservation; a current base whose digest equals the declared digest
-answers the frozen ``no_change`` receipt; and a device that suspends past
-the operation deadline mid-upload resumes through a same-identity
-re-preflight that re-reserves the expired operation so the event still
-completes with exactly one publication.
+stale update base answers the durable ``conflict`` outcome over its frozen
+wire shape while reserving a capture operation whose verified candidate is
+retained by the Child 8 conflict bridge without any publication, and whose
+same-token and same-event replays return the original opaque conflict
+identity; a current base whose digest equals the declared digest answers
+the frozen ``no_change`` receipt; and a device that suspends past the
+operation deadline mid-upload resumes through a same-identity re-preflight
+that re-reserves the expired operation so the event still completes with
+exactly one publication.
 """
 
 from __future__ import annotations
@@ -177,10 +180,17 @@ def test_same_identity_repreflight_after_commit_replays_exactly(
     assert harness.sync_state.publication_commits == 1
 
 
-def test_stale_update_base_answers_conflict_without_a_reservation(
+def test_stale_update_base_answers_conflict_and_reserves_a_capture_operation(
     offline_harness: SmallFileWireHarness,
 ) -> None:
-    """A base that is no longer current never opens an upload."""
+    """A base that is no longer current never opens a publication upload.
+
+    The wire verdict stays the frozen ``conflict`` outcome — no receipt, no
+    result member — but now carries the capture grant: the same opaque
+    operation handle and expiry the single-part upload carries, naming the
+    one capture operation whose verified candidate the client uploads for
+    retention as conflict evidence through the conflict-content route.
+    """
 
     harness = offline_harness
     body = plugin_update_body(source_id=str(uuid4()), base_version_id=str(uuid4()))
@@ -189,9 +199,114 @@ def test_stale_update_base_answers_conflict_without_a_reservation(
 
     response = harness.preflight(body)
     assert response.status_code == 200, response.text
-    assert dict(response.json()["data"]) == {"outcome": "conflict"}
-    assert harness.sync_state.reservation_count == 0
+    data = dict(response.json()["data"])
+    assert data["outcome"] == "conflict"
+    assert set(data) == {"outcome", "operation_id", "expires_at"}
+    assert isinstance(data["operation_id"], str) and len(data["operation_id"]) >= 32
+    assert harness.sync_state.reservation_count == 1
     assert harness.sync_state.publication_commits == 0
+
+
+def test_stale_update_capture_retains_candidate_and_replays_same_conflict(
+    offline_harness: SmallFileWireHarness,
+) -> None:
+    """The Child 8 capture journey: verify, capture once, replay identically.
+
+    A stale update uploads its candidate through the conflict-content wire
+    route; the capture publishes nothing, answers only the opaque conflict
+    identity, and both replay shapes — the same operation token re-uploaded
+    and the same journal event re-preflighted — return that original
+    conflict without a second capture, reservation or publication.
+    """
+
+    harness = offline_harness
+    body = plugin_update_body(source_id=str(uuid4()), base_version_id=str(uuid4()))
+    harness.sync_state.current_reference = _current_reference(body, source_version_id=uuid4())
+
+    first = data_of(harness.preflight(body))
+    assert first["outcome"] == "conflict"
+    assert set(first) == {"outcome", "operation_id", "expires_at"}
+    assert harness.sync_state.reservation_count == 1
+    operation_token = harness.sync_state.rows[-1].operation_token.value
+
+    capture_response = harness.upload_conflict_candidate(operation_token, _CONTENT)
+    assert capture_response.status_code == 200, capture_response.text
+    receipt_data = dict(capture_response.json()["data"])
+    assert set(receipt_data) == {
+        "conflict_id",
+        "source_id",
+        "observed_remote_version_id",
+        "captured_at",
+    }
+    assert receipt_data["source_id"] == body["source_id"]
+    assert receipt_data["observed_remote_version_id"] != body["base_version_id"]
+    assert harness.sync_state.publication_commits == 0
+    assert harness.sync_state.conflict_capture_count == 1
+
+    replayed = harness.capture_stale_candidate(operation_token, _CONTENT)
+    assert str(replayed.conflict_id) == receipt_data["conflict_id"]
+    assert harness.sync_state.conflict_capture_count == 1
+    assert harness.sync_state.publication_commits == 0
+
+    replay_preflight = data_of(harness.preflight(body))
+    assert replay_preflight["outcome"] == "conflict"
+    assert set(replay_preflight) == {"outcome", "conflict_id"}
+    assert replay_preflight["conflict_id"] == receipt_data["conflict_id"]
+    assert harness.sync_state.reservation_count == 1
+    assert harness.sync_state.conflict_capture_count == 1
+    assert harness.sync_state.publication_commits == 0
+
+
+def test_remote_deleted_update_captures_edit_remote_delete_over_the_wire(
+    offline_harness: SmallFileWireHarness,
+) -> None:
+    """A local edit of a server-deleted source captures over the wire.
+
+    The current reference cannot be served, so the preflight keeps the
+    ``conflict`` verdict with a capture grant; the candidate upload captures
+    an ``edit_remote_delete`` conflict with no observed remote version — the
+    remote state is the deletion — and publishes nothing. A same-event
+    re-preflight answers the stored conflict identity.
+    """
+
+    harness = offline_harness
+    body = plugin_update_body(source_id=str(uuid4()), base_version_id=str(uuid4()))
+    harness.sync_state.current_reference = None
+    harness.sync_state.deleted_source_ids.add(UUID(str(body["source_id"])))
+
+    granted = data_of(harness.preflight(body))
+    assert granted["outcome"] == "conflict"
+    assert set(granted) == {"outcome", "operation_id", "expires_at"}
+    operation_token = harness.sync_state.rows[-1].operation_token.value
+
+    receipt = harness.capture_stale_candidate(operation_token, _CONTENT)
+    assert receipt.source_id == UUID(str(body["source_id"]))
+    assert receipt.observed_remote_version_id is None
+    assert harness.sync_state.publication_commits == 0
+    assert harness.sync_state.conflict_capture_count == 1
+
+    replay_preflight = data_of(harness.preflight(body))
+    assert replay_preflight["outcome"] == "conflict"
+    assert set(replay_preflight) == {"outcome", "conflict_id"}
+    assert replay_preflight["conflict_id"] == str(receipt.conflict_id)
+
+
+def test_publication_operation_cannot_double_as_a_capture_operation(
+    offline_harness: SmallFileWireHarness,
+) -> None:
+    """A publication grant uploaded through the capture route fails closed."""
+
+    harness = offline_harness
+    body = plugin_create_body()
+    token = single_part_token(harness, body)
+
+    rejected = harness.upload_conflict_candidate(token, _CONTENT)
+
+    assert rejected.status_code == 409
+    error = dict(rejected.json())["error"]
+    assert error["code"] == "small_file_upload_state_invalid"
+    assert harness.sync_state.publication_commits == 0
+    assert harness.sync_state.conflict_capture_count == 0
 
 
 def test_matching_update_base_freezes_the_no_change_receipt(

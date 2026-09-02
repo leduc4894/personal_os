@@ -233,7 +233,12 @@ export interface SmallFileTerminalReceipt {
  * operation handle and `multipart_upload`, which opens no operation token
  * and carries no signed URL, key or provider detail — the runner obtains
  * the session through the dedicated create endpoint. Every other outcome
- * finishes the event without uploading.
+ * finishes the event without uploading. The child 8 `conflict` verdict
+ * carries at most one of its two safe payloads: the capture grant
+ * (`operationId`) whose verified candidate the journal uploads through the
+ * conflict-content route, or the stored conflict identity
+ * (`conflictId`) a same-identity replay answers after capture — neither
+ * when no single-part verified-object transport could be granted.
  */
 export type JournalPreflightOutcome =
   | { readonly outcome: "single_part_upload"; readonly operationId: string }
@@ -241,10 +246,29 @@ export type JournalPreflightOutcome =
   | { readonly outcome: "committed_replay"; readonly receipt: SmallFileTerminalReceipt }
   | { readonly outcome: "no_change"; readonly receipt: SmallFileTerminalReceipt }
   | { readonly outcome: "excluded" }
-  | { readonly outcome: "conflict" };
+  | {
+      readonly outcome: "conflict";
+      readonly operationId: string | null;
+      readonly conflictId: string | null;
+    };
 
 /** The content-stream request: the preflight-bound handle and the exact bytes. */
 export interface SmallFileContentUploadInput {
+  readonly operationId: string;
+  readonly contentBytes: Uint8Array;
+}
+
+/**
+ * The opaque receipt of one conflict-candidate capture upload (child 8
+ * spec 5.1): only the stored conflict identity crosses back — no receipt,
+ * object key, provider detail or digest.
+ */
+export interface ConflictCaptureReceipt {
+  readonly conflictId: string;
+}
+
+/** The capture-upload request: the granted capture handle and the exact bytes. */
+export interface SmallFileConflictCandidateUploadInput {
   readonly operationId: string;
   readonly contentBytes: Uint8Array;
 }
@@ -648,6 +672,14 @@ export interface JournalSyncApiOptions {
 export interface JournalSyncApi {
   preflightJournalEvent(input: JournalEventPreflightInput): Promise<JournalPreflightOutcome>;
   uploadSmallFileContent(input: SmallFileContentUploadInput): Promise<SmallFileTerminalReceipt>;
+  /**
+   * Retain one granted capture operation's candidate as conflict evidence
+   * (child 8 spec 5.1): the answer is only the stored conflict identity,
+   * and an exact replay of the same handle returns that identity unchanged.
+   */
+  uploadSmallFileConflictCandidate(
+    input: SmallFileConflictCandidateUploadInput,
+  ): Promise<ConflictCaptureReceipt>;
   /** Create or exactly replay the one multipart session bound to a frozen preflight operation. */
   createMultipartUploadSession(input: JournalEventPreflightInput): Promise<MultipartSessionPlan>;
   /** Observe the safe session state, reconciling the provider-observed completed parts. */
@@ -747,8 +779,28 @@ export function createJournalSyncApi(options: JournalSyncApiOptions): JournalSyn
           return { outcome: "no_change", receipt: parseTerminalReceipt(data["result"]) };
         case "excluded":
           return { outcome: "excluded" };
-        case "conflict":
-          return { outcome: "conflict" };
+        case "conflict": {
+          // At most one safe payload travels with the verdict: the capture
+          // grant (an operation handle) or the stored conflict identity of a
+          // same-identity replay — never both, and neither when no
+          // single-part verified-object transport could be granted.
+          const operationId = data["operation_id"];
+          const conflictId = data["conflict_id"];
+          const hasGrant =
+            typeof operationId === "string" && OPERATION_TOKEN_PATTERN.test(operationId);
+          const hasConflict = typeof conflictId === "string" && UUID_PATTERN.test(conflictId);
+          if (!hasGrant && operationId !== undefined && operationId !== null) {
+            throw syncApiError("server_error");
+          }
+          if (!hasConflict && conflictId !== undefined && conflictId !== null) {
+            throw syncApiError("server_error");
+          }
+          return {
+            outcome: "conflict",
+            operationId: hasGrant ? operationId : null,
+            conflictId: hasConflict ? conflictId : null,
+          };
+        }
         default:
           throw syncApiError("server_error");
       }
@@ -774,6 +826,32 @@ export function createJournalSyncApi(options: JournalSyncApiOptions): JournalSyn
         throw syncApiError("server_error");
       }
       return parseTerminalReceipt(data);
+    },
+
+    async uploadSmallFileConflictCandidate(input): Promise<ConflictCaptureReceipt> {
+      const accessToken = requireAccessToken();
+      const body = input.contentBytes.buffer.slice(
+        input.contentBytes.byteOffset,
+        input.contentBytes.byteOffset + input.contentBytes.byteLength,
+      ) as ArrayBuffer;
+      const { data } = await perform({
+        url: `${resolveOrigin()}/api/uploads/${encodeURIComponent(input.operationId)}/conflict-content`,
+        method: "PUT",
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          "content-type": "application/octet-stream",
+          accept: "application/json",
+        },
+        body,
+      });
+      if (!isRecord(data)) {
+        throw syncApiError("server_error");
+      }
+      const conflictId = data["conflict_id"];
+      if (typeof conflictId !== "string" || !UUID_PATTERN.test(conflictId)) {
+        throw syncApiError("server_error");
+      }
+      return { conflictId };
     },
 
     async createMultipartUploadSession(input): Promise<MultipartSessionPlan> {

@@ -804,8 +804,13 @@ export class JournalQueueDriver {
           await this.#closeTerminal(event.eventId, "excluded_policy", "excluded_policy", correlationId);
           return "continue";
         case "conflict":
-          await this.#closeTerminal(event.eventId, "blocked_conflict", "blocked_conflict", correlationId);
-          return "continue";
+          return await this.#retainConflictCandidate(
+            event,
+            outcome,
+            passDeadlineEpochMs,
+            refreshBudget,
+            correlationId,
+          );
         case "committed_replay":
           await this.#repository.recordCommittedReceipt({
             eventId: event.eventId,
@@ -973,6 +978,107 @@ export class JournalQueueDriver {
       case "pass_deadline_reached":
         return "end_deadline_boundary";
     }
+  }
+
+  /**
+   * Retain one conflict verdict's candidate as durable conflict evidence
+   * (child 8 spec 5.1). A same-identity replay (the stored conflict
+   * identity) and a verdict without a grant park the event terminal as
+   * `blocked_conflict`, exactly as before. A granted capture operation
+   * uploads the event's still-frozen bytes through the conflict-content
+   * route — never the publication route — and only then parks the event:
+   * the conflict now lives server-side and the Inbox reaches it through
+   * the Conflict API. Bytes that vanished or changed locally cannot become
+   * evidence (the successor event owns the newer bytes), so the event parks
+   * the same terminal way with no overwrite and no retry. A failed capture
+   * upload never terminalizes as a network failure: the event keeps its
+   * retry eligibility and the next same-identity preflight answers the
+   * conflict again, while the server's capture replays idempotently by
+   * event identity. The transport-ambiguous resume path stays on the
+   * publication lane only — a capture grant never resumes through it.
+   */
+  async #retainConflictCandidate(
+    event: JournalEvent,
+    outcome: Extract<JournalPreflightOutcome, { outcome: "conflict" }>,
+    passDeadlineEpochMs: number,
+    refreshBudget: RefreshBudget,
+    correlationId: string,
+  ): Promise<PassContinuation> {
+    const operationId = outcome.operationId;
+    if (outcome.conflictId !== null || operationId === null) {
+      await this.#closeTerminal(
+        event.eventId,
+        "blocked_conflict",
+        "blocked_conflict",
+        correlationId,
+      );
+      return "continue";
+    }
+    if (this.#isPastDeadline(passDeadlineEpochMs)) {
+      // A natural deadline boundary: the event keeps its preflight
+      // eligibility, so a later pass answers the conflict verdict again.
+      return "end_deadline_boundary";
+    }
+    try {
+      await this.#streamConflictCandidate(
+        event,
+        operationId,
+        passDeadlineEpochMs,
+        refreshBudget,
+        correlationId,
+      );
+    } catch (error) {
+      if (this.#isStopped) {
+        return "end_stopped";
+      }
+      // The upload failed before any capture: the event keeps its retry
+      // eligibility through the shared failure matrix (trail, retry state)
+      // and the next preflight answers the conflict verdict again.
+      return await this.#handleFailure(event.eventId, error, correlationId, refreshBudget);
+    }
+    if (this.#isStopped) {
+      return "end_stopped";
+    }
+    await this.#closeTerminal(
+      event.eventId,
+      "blocked_conflict",
+      "blocked_conflict",
+      correlationId,
+    );
+    return "continue";
+  }
+
+  async #streamConflictCandidate(
+    event: JournalEvent,
+    operationId: string,
+    passDeadlineEpochMs: number,
+    refreshBudget: RefreshBudget,
+    correlationId: string,
+  ): Promise<void> {
+    void correlationId;
+    const localFile = this.#repository.readLocalFileByLocalFileId(event.localFileId);
+    if (localFile === null) {
+      return;
+    }
+    const contentBytes = await this.#fileBytesReader.readRegularFileBytes(localFile.normalizedPath);
+    if (contentBytes === null) {
+      return;
+    }
+    // Client re-fingerprint (spec 7.2, 10.2): only bytes that still match
+    // the frozen digest and size may become conflict evidence; changed
+    // bytes belong to the successor event the watcher already recorded.
+    const currentFingerprint = await deriveFrozenFingerprint(contentBytes);
+    if (
+      currentFingerprint.sha256 !== event.fingerprint.sha256 ||
+      currentFingerprint.sizeBytes !== event.fingerprint.sizeBytes
+    ) {
+      return;
+    }
+    await this.#requestWithDeadline(
+      () => this.#syncApi.uploadSmallFileConflictCandidate({ operationId, contentBytes }),
+      passDeadlineEpochMs,
+      refreshBudget,
+    );
   }
 
   async #streamContent(

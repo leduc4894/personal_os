@@ -19,6 +19,10 @@
 import initSqlJs from "sql.js";
 
 import {
+  CONFLICT_LOCAL_REPAIR_ACTIONS,
+  CONFLICT_LOCAL_REPAIR_SAFE_REASONS,
+} from "../conflicts/contracts";
+import {
   JOURNAL_RECOVERY_STATES,
   MAX_MULTIPART_PART_COUNT,
   MULTIPART_PART_SIZE_BYTES,
@@ -93,8 +97,24 @@ import type { JournalMeta, JournalRecoveryState } from "./contracts";
  * v7 row — file mapping, event, attempt, lifecycle operand, reservation,
  * cursor, barrier, apply and echo marker — survives unchanged and the new
  * table starts empty.
+ *
+ * Version 9 (conflict local repair, task 7, Child 8 spec 5.2.6/6) adds
+ * the `conflict_local_repairs` table of the Conflict Inbox repair state:
+ * one row per still-owed local apply, carrying ONLY the conflict UUID,
+ * the resolution event identity, the closed target action, the closed
+ * safe reason and the retry bookkeeping (attempt count, next eligible
+ * retry epoch, created/updated epochs). No evidence bytes, merged draft
+ * bytes, version id, path, locator or digest column exists — byte and
+ * path storage are unrepresentable in the schema itself, and the CHECK
+ * constraints pin the closed vocabularies of
+ * `../conflicts/contracts.ts` (single source of truth). The v8 → v9
+ * migration (`migrateMultipartProgressJournalToConflictRepairSchema`)
+ * is lossless: every v8 row — file mapping, event, attempt, lifecycle
+ * operand, reservation, cursor, barrier, manifest progress, remote
+ * apply, echo marker and multipart progress — survives unchanged and
+ * the new table starts empty.
  */
-export const JOURNAL_SCHEMA_VERSION = 8;
+export const JOURNAL_SCHEMA_VERSION = 9;
 
 // --- closed failure reasons ---------------------------------------------------------------
 
@@ -452,6 +472,34 @@ create table if not exists multipart_upload_progress (
 );
 `;
 
+// --- conflict local repair schema (task 7, Child 8 spec 5.2.6/6) --------------------------------------
+
+/**
+ * The durable no-byte repair fact of one resolved-but-not-yet-applied
+ * conflict (Child 8 spec 5.2.6/6): the conflict UUID, the resolution
+ * event identity, the closed target action, the closed safe reason and
+ * the retry bookkeeping — nothing else. No column exists for evidence
+ * bytes, merged draft bytes, a version id, a path, a locator or a
+ * digest: byte and path storage are unrepresentable in the schema, and
+ * the CHECK constraints pin the closed vocabularies of
+ * `../conflicts/contracts.ts` (their single source of truth — the DDL
+ * renders from the same runtime constants the repository validates
+ * against). The repair worker re-reads the conflict detail over the
+ * wire for the winner identity, so the row stays minimal.
+ */
+const CONFLICT_LOCAL_REPAIRS_DDL = `
+create table if not exists conflict_local_repairs (
+  conflict_id text primary key,
+  resolution_event_id text not null,
+  target_action text not null check (target_action in (${sqlTextList(CONFLICT_LOCAL_REPAIR_ACTIONS)})),
+  safe_reason text not null check (safe_reason in (${sqlTextList(CONFLICT_LOCAL_REPAIR_SAFE_REASONS)})),
+  attempt_count integer not null check (attempt_count >= 0),
+  next_eligible_retry_epoch_ms integer check (next_eligible_retry_epoch_ms >= 0),
+  created_at_epoch_ms integer not null check (created_at_epoch_ms >= 0),
+  updated_at_epoch_ms integer not null check (updated_at_epoch_ms >= 0)
+);
+`;
+
 const JOURNAL_SCHEMA_DDL = [
   JOURNAL_META_DDL,
   LOCAL_FILES_DDL,
@@ -464,6 +512,7 @@ const JOURNAL_SCHEMA_DDL = [
   REMOTE_APPLY_OPERATIONS_DDL,
   ECHO_MARKERS_DDL,
   MULTIPART_UPLOAD_PROGRESS_DDL,
+  CONFLICT_LOCAL_REPAIRS_DDL,
 ].join("");
 
 /**
@@ -500,10 +549,18 @@ export const RESTORE_RESERVATION_SCHEMA_VERSION = 6;
 /**
  * The device-sync schema version (7). The v7 → v8 migration
  * (`migrateDeviceSyncJournalToMultipartProgressSchema`, task 9, child 7
- * spec 4.1) adds the `multipart_upload_progress` table; the function pins
- * this constant as the source version it accepts.
+ * spec 4.1) adds the `multipart_upload_progress` table; the function pins this
+ * constant as the source version it accepts.
  */
 export const DEVICE_SYNC_SCHEMA_VERSION = 7;
+
+/**
+ * The multipart-progress schema version (8). The v8 → v9 migration
+ * (`migrateMultipartProgressJournalToConflictRepairSchema`, task 7,
+ * Child 8 spec 5.2.6/6) adds the `conflict_local_repairs` table; the
+ * function pins this constant as the source version it accepts.
+ */
+export const MULTIPART_PROGRESS_SCHEMA_VERSION = 8;
 
 // --- closed failure reasons ---------------------------------------------------------------
 
@@ -974,6 +1031,121 @@ export function migrateDeviceSyncJournalToMultipartProgressSchema(
     engine.exec("begin immediate;");
     try {
       engine.exec(MULTIPART_PROGRESS_MIGRATION_DDL);
+      engine.exec("commit;");
+    } catch (error) {
+      try {
+        engine.exec("rollback;");
+      } catch {
+        // Best-effort rollback: the closed reason below is the answer.
+      }
+      throw error instanceof JournalStoreError
+        ? error
+        : journalStoreError("journal_mutation_failed");
+    }
+    return engine.export();
+  } catch (error) {
+    // sql.js surfaces lazy open failures ("file is not a database") at the
+    // first statement, not at construction: those bytes are not a journal
+    // image. Closed store reasons pass through untouched.
+    throw error instanceof JournalStoreError ? error : journalStoreError("journal_image_invalid");
+  } finally {
+    engine.close();
+  }
+}
+
+// --- the v8 → v9 conflict local repair schema migration (task 7, Child 8 spec 5.2.6/6) ----------
+
+/**
+ * The v8 → v9 migration DDL: the `conflict_local_repairs` table of
+ * Child 8 spec 5.2.6/6 plus the schema bookkeeping bump. The
+ * destination version is pinned to `9` here (NOT interpolated from
+ * {@link JOURNAL_SCHEMA_VERSION}) so a future v9 → v10 migration can
+ * layer on top of this block without rewriting this DDL.
+ */
+const CONFLICT_LOCAL_REPAIR_MIGRATION_DDL = [
+  CONFLICT_LOCAL_REPAIRS_DDL,
+  "update journal_meta set schema_version = 9 where singleton_key = 1;",
+  "pragma user_version = 9;",
+].join("");
+
+/**
+ * Whether one candidate v8 image carries the full journal surface the
+ * migration builds on: the meta row, every pre-v7 table, all five
+ * device-sync tables of spec 8 and the multipart progress table of
+ * child 7 spec 4.1. A missing table is image corruption the migration
+ * must fail closed on, never a silent partial upgrade.
+ */
+function multipartProgressJournalImageLooksValid(engine: SqliteDatabaseEngine): boolean {
+  try {
+    const metaRows = engine.exec(
+      "select schema_version from journal_meta where singleton_key = 1;",
+    );
+    if (metaRows[0]?.values[0] === undefined) {
+      return false;
+    }
+    const tables = engine.exec(
+      "select name from sqlite_master where type = 'table' order by name;",
+    );
+    const tableNames = (tables[0]?.values ?? []).map((row) => row[0]);
+    const required = [
+      "device_sync_state",
+      "echo_markers",
+      "journal_attempts",
+      "journal_events",
+      "journal_meta",
+      "lifecycle_event_operands",
+      "local_files",
+      "manifest_action_progress",
+      "manifest_page_progress",
+      "multipart_upload_progress",
+      "remote_apply_operations",
+    ];
+    for (const name of required) {
+      if (!(tableNames as readonly unknown[]).includes(name)) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Migrate one multipart-progress (`pragma user_version = 8`) journal
+ * image to the v9 conflict local repair schema in memory (task 7, Child
+ * 8 spec 5.2.6/6). The migration creates the no-byte repair table and
+ * stamps the schema bookkeeping; every existing v8 row — file mapping,
+ * journal event, attempt, lifecycle operand, restore reservation,
+ * cursor singleton, barrier, manifest progress, remote apply, echo
+ * marker and multipart progress — survives untouched, and the new table
+ * starts empty. The input image is never mutated; the function returns
+ * the upgraded image and runs the DDL inside one
+ * `begin immediate ... commit` transaction so a torn migration leaves
+ * the original image intact.
+ */
+export function migrateMultipartProgressJournalToConflictRepairSchema(
+  engineModule: SqliteEngineModule,
+  image: ArrayLike<number>,
+): Uint8Array {
+  let engine: SqliteDatabaseEngine;
+  try {
+    engine = new engineModule.Database(image);
+  } catch {
+    // Bytes that are not a SQLite image at all never execute a statement.
+    throw journalStoreError("journal_image_invalid");
+  }
+  try {
+    const currentVersion = readUserVersionOf(engine);
+    if (currentVersion !== MULTIPART_PROGRESS_SCHEMA_VERSION) {
+      throw journalStoreError("journal_schema_unsupported");
+    }
+    if (!multipartProgressJournalImageLooksValid(engine)) {
+      throw journalStoreError("journal_image_invalid");
+    }
+    engine.exec("begin immediate;");
+    try {
+      engine.exec(CONFLICT_LOCAL_REPAIR_MIGRATION_DDL);
       engine.exec("commit;");
     } catch (error) {
       try {

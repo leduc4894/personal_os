@@ -109,6 +109,21 @@ EVENT_TYPE_BY_DATABASE_TOKEN: Final[Mapping[str, DeviceEventType]] = {
     "restore": DeviceEventType.RESTORED,
 }
 
+#: The device-deliverable ``sync_events.event_type`` tokens. The conflict
+#: revision ``20260902_01`` admits the server-authoritative
+#: ``conflict_capture`` and ``conflict_resolve`` tokens for the conflict
+#: aggregate's accepted events; those are conflict-API evidence, never device
+#: operations, so the pull page filters them out instead of letting
+#: :func:`hydrate_device_event` fail closed on an unknown token.
+DEVICE_DELIVERABLE_EVENT_TOKENS: Final[tuple[str, ...]] = (
+    "create",
+    "update",
+    "rename",
+    "move",
+    "delete",
+    "restore",
+)
+
 #: One hydration row: a SQLAlchemy row mapping from the adapter's
 #: ``.mappings()`` results or an equivalent mapping in tests.
 type _MappedRow = RowMapping | Mapping[str, Any]
@@ -343,7 +358,10 @@ def device_pull_page_statement(
     (the locators the event opened and closed, the locator the source held
     open at an update's own sequence, the tombstones it opened and closed,
     and the base/current versions' content objects) instead of a second
-    stored event body.
+    stored event body. Only the device-deliverable event tokens are paged:
+    the conflict aggregate's server-authoritative ``conflict_capture`` and
+    ``conflict_resolve`` events ride the same sequence but reach devices
+    through the conflict API, never the event pull.
     """
 
     opened_locator = source_locators.alias("opened_locator")
@@ -444,6 +462,7 @@ def device_pull_page_statement(
             sync_events.c.workspace_id == workspace_id,
             sync_events.c.event_sequence > sa.bindparam("after_sequence", after_sequence),
             sync_events.c.event_sequence <= sa.bindparam("through_sequence", through_sequence),
+            sync_events.c.event_type.in_(DEVICE_DELIVERABLE_EVENT_TOKENS),
         )
         .order_by(sync_events.c.event_sequence.asc())
         .limit(sa.bindparam("pull_limit", limit))

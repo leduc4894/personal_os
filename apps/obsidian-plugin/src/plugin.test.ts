@@ -1,6 +1,253 @@
 import { readFileSync } from "node:fs";
 import * as ts from "typescript";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// The runtime onload harness needs the whole Obsidian adapter surface the
+// composition root pulls in; the static contract suite below reads only
+// the plugin source text and stays untouched by the mock.
+vi.mock("obsidian", () => {
+  class MockElement {
+    readonly style: Record<string, string> = {};
+    value = "";
+
+    empty(): void {
+      // Live-DOM tracking is unnecessary for the onload contract.
+    }
+
+    createEl(tag: string, options?: { readonly text?: string }): MockElement {
+      void tag;
+      void options;
+      return new MockElement();
+    }
+
+    createDiv(): MockElement {
+      return new MockElement();
+    }
+
+    setText(text: string): void {
+      void text;
+    }
+
+    addEventListener(): void {
+      // noop
+    }
+
+    removeEventListener(): void {
+      // noop
+    }
+  }
+
+  class MockButtonComponent {
+    setCta(): MockButtonComponent {
+      return this;
+    }
+
+    setButtonText(): MockButtonComponent {
+      return this;
+    }
+
+    setDisabled(): MockButtonComponent {
+      return this;
+    }
+
+    onClick(): MockButtonComponent {
+      return this;
+    }
+
+    setTooltip(): MockButtonComponent {
+      return this;
+    }
+
+    setIcon(): MockButtonComponent {
+      return this;
+    }
+  }
+
+  class Setting {
+    constructor(container?: unknown) {
+      void container;
+    }
+
+    setName(): Setting {
+      return this;
+    }
+
+    setDesc(): Setting {
+      return this;
+    }
+
+    setClass(): Setting {
+      return this;
+    }
+
+    setHeading(): Setting {
+      return this;
+    }
+
+    addText(): Setting {
+      return this;
+    }
+
+    addTextArea(): Setting {
+      return this;
+    }
+
+    addToggle(): Setting {
+      return this;
+    }
+
+    addDropdown(): Setting {
+      return this;
+    }
+
+    addButton(): Setting {
+      return this;
+    }
+
+    addExtraButton(): Setting {
+      return this;
+    }
+  }
+
+  class Modal {
+    readonly contentEl = new MockElement();
+    readonly titleEl = new MockElement();
+
+    constructor(app?: unknown) {
+      void app;
+    }
+
+    open(): void {
+      this.onOpen();
+    }
+
+    close(): void {
+      this.onClose();
+    }
+
+    onOpen(): void {
+      // noop
+    }
+
+    onClose(): void {
+      // noop
+    }
+  }
+
+  class Notice {
+    readonly #message: string;
+
+    constructor(message: string, duration?: number) {
+      this.#message = message;
+      void duration;
+    }
+
+    get message(): string {
+      return this.#message;
+    }
+  }
+
+  class PluginSettingTab {
+    readonly containerEl = new MockElement();
+
+    constructor(app: unknown, plugin: unknown) {
+      void app;
+      void plugin;
+    }
+
+    display(): void {
+      // noop
+    }
+
+    hide(): void {
+      // noop
+    }
+  }
+
+  class Plugin {
+    readonly app: unknown;
+    readonly manifest: unknown;
+    readonly #commandIds: string[] = [];
+
+    constructor(app: unknown, manifest: unknown) {
+      this.app = app;
+      this.manifest = manifest;
+    }
+
+    addCommand(command: { readonly id: string }): { readonly id: string } {
+      this.#commandIds.push(command.id);
+      return command;
+    }
+
+    registeredCommandIds(): readonly string[] {
+      return [...this.#commandIds];
+    }
+
+    addSettingTab(tab: unknown): void {
+      void tab;
+    }
+
+    addStatusBarItem(): { readonly setText: (text: string) => void } {
+      return {
+        setText: (text: string): void => {
+          void text;
+        },
+      };
+    }
+
+    addRibbonIcon(): unknown {
+      return null;
+    }
+
+    registerEvent(ref: unknown): unknown {
+      void ref;
+      return null;
+    }
+
+    registerDomEvent(...args: unknown[]): unknown {
+      void args;
+      return null;
+    }
+
+    register(callback: unknown): void {
+      void callback;
+    }
+
+    registerMarkdownPostProcessor(): unknown {
+      return null;
+    }
+
+    async loadData(): Promise<unknown> {
+      return null;
+    }
+
+    async saveData(data: unknown): Promise<void> {
+      void data;
+    }
+  }
+
+  const Platform = {
+    isIosApp: false,
+    isAndroidApp: false,
+    isWin: true,
+    isMacOS: false,
+    isLinux: false,
+    isDesktop: true,
+    isMobile: false,
+    isMobileApp: false,
+  };
+
+  const requestUrl = async (): Promise<{ readonly status: number; readonly text: string }> => ({
+    status: 200,
+    text: "{}",
+  });
+
+  class TFile {
+    readonly memberScope = "file";
+  }
+
+  return { Modal, Notice, Plugin, PluginSettingTab, Platform, requestUrl, Setting, TFile, MockButtonComponent };
+});
 
 const pluginPath = new URL("./plugin.ts", import.meta.url);
 const pluginSource = readFileSync(pluginPath, "utf8");
@@ -208,7 +455,9 @@ describe("Obsidian plugin composition root", () => {
     expect(pluginSource).toContain('"Repair sync"');
     // Plugin hygiene (2026-08-16 §12) adds the ONE retry affordance.
     expect(pluginSource).toContain('id: "retry-connection"');
-    expect(pluginSource.match(/addCommand\(/g)?.length ?? 0).toBe(5);
+    // Conflict inbox task 9 adds the ONE explicit inbox command.
+    expect(pluginSource).toContain('id: "open-conflict-inbox"');
+    expect(pluginSource.match(/addCommand\(/g)?.length ?? 0).toBe(6);
     expect(pluginSource).not.toContain("#runExistingFilesScan");
     expect(pluginSource).not.toContain("#drainExistingFilesScanQueue");
     expect(pluginSource).not.toContain("#confirmExistingFilesScan");
@@ -485,7 +734,9 @@ describe("Obsidian plugin composition root", () => {
     expect(pluginSource).toContain("addStatusBarItem");
     expect(pluginSource).toContain("#refreshSyncStatus");
     expect(pluginSource).toContain("projectJournalSyncStatus");
-    expect(pluginSource).toContain("renderJournalSyncStatusText");
+    // Conflict inbox task 9: the composed render carries the conflict
+    // pending fragment on top of the exact spec-11 status text.
+    expect(pluginSource).toContain("renderJournalSyncStatus(snapshot)");
     // The settings snapshot carries the SAME redacted projection (spec 11).
     expect(pluginSource).toContain("SYNC_STATUS_TEXT");
     expect(pluginSource).toContain("syncBlockerGuidanceLines");
@@ -1175,4 +1426,218 @@ describe("Obsidian plugin composition root", () => {
       expect(pluginSource).not.toContain(forbiddenText);
     }
   });
+
+  it("composes the conflict inbox stack behind the journal and diagnostics trail (task 9)", () => {
+    // The conflict stack binds AFTER the trail load (its diagnostics ride
+    // the same sidecar) and over the same journal database seam.
+    const trailLoadIndex = pluginSource.indexOf("await diagnosticTrail.load()");
+    const conflictApiIndex = pluginSource.indexOf("createConflictApi({");
+    expect(conflictApiIndex).toBeGreaterThan(trailLoadIndex);
+    const controllerIndex = pluginSource.indexOf("createConflictController({");
+    expect(controllerIndex).toBeGreaterThan(trailLoadIndex);
+    const controllerBody = pluginSource.slice(controllerIndex, controllerIndex + 1_400);
+    expect(controllerBody).toContain("repairStore: conflictRepository");
+    expect(controllerBody).toContain("uploader: createConflictVerifiedCandidateUploader(conflictApi)");
+    expect(controllerBody).toContain("applier: createConflictCanonicalOutcomeApplier({");
+    expect(controllerBody).toContain("diagnostics: conflictDiagnostics");
+    const applierIndex = pluginSource.indexOf("createConflictCanonicalOutcomeApplier({");
+    const applierBody = pluginSource.slice(applierIndex, applierIndex + 800);
+    expect(applierBody).toContain("database: journalDatabase");
+    expect(applierBody).toContain("repository: deviceSyncRepository");
+    expect(applierBody).toContain(
+      "downloadSourceVersion: (input) => deviceSyncApi.downloadSourceVersion(input)",
+    );
+    expect(applierBody).toContain("createStructuralVaultMutationSeam(");
+    // The whole controller wears the foreign-throw observer (M-1).
+    expect(pluginSource).toContain("observeUnobservedConflictControllerFailures(");
+    // The repository over the same single serialized writer.
+    expect(pluginSource).toContain("new ConflictRepository({ database: journalDatabase })");
+  });
+
+  it("opens the Conflict Inbox only through an explicit gated command (task 9)", () => {
+    const inboxIndex = pluginSource.indexOf('id: "open-conflict-inbox"');
+    expect(inboxIndex).toBeGreaterThanOrEqual(0);
+    const inboxBody = pluginSource.slice(inboxIndex, inboxIndex + 500);
+    expect(inboxBody).toContain('"Open Conflict Inbox"');
+    expect(inboxBody).toContain("checkCallback");
+    expect(inboxBody).toContain("ConflictInboxModal");
+    expect(inboxBody).not.toContain("setInterval");
+    expect(inboxBody).not.toContain("registerInterval");
+    // The command registration lives in onload proper, so the affordance
+    // exists even when the journal startup failed closed.
+    const onloadIndex = pluginSource.indexOf("override async onload(): Promise<void>");
+    const startCaptureIndex = pluginSource.indexOf("#startJournalCapture(): Promise<void>");
+    expect(onloadIndex).toBeGreaterThanOrEqual(0);
+    expect(startCaptureIndex).toBeGreaterThan(onloadIndex);
+    expect(inboxIndex).toBeGreaterThan(onloadIndex);
+    expect(inboxIndex).toBeLessThan(startCaptureIndex);
+  });
+
+  it("retries persisted conflict local applies only on startup and foreground resume (task 9)", () => {
+    const retryIndex = pluginSource.indexOf("#retryConflictLocalApplies(): void");
+    expect(retryIndex).toBeGreaterThanOrEqual(0);
+    // Exactly the two triggers: the layout-ready startup and the
+    // foreground resume; never a Vault-event or explicit-repair trigger.
+    expect(pluginSource.match(/void this\.#retryConflictLocalApplies\(\);/g)?.length ?? 0).toBe(2);
+    const startupCycleIndex = pluginSource.indexOf('this.#requestDeviceSyncCycle("startup")');
+    const startupRetryIndex = pluginSource.indexOf("void this.#retryConflictLocalApplies();");
+    expect(startupRetryIndex).toBeGreaterThan(startupCycleIndex);
+    const resumeCycleIndex = pluginSource.indexOf('#requestDeviceSyncCycle("resume")');
+    const resumeRetryIndex = pluginSource.indexOf(
+      "void this.#retryConflictLocalApplies();",
+      startupRetryIndex + 1,
+    );
+    expect(resumeRetryIndex).toBeGreaterThan(resumeCycleIndex);
+    // No conflict polling and no background merge loop anywhere: the
+    // inbox lists and merges only inside the explicit modal.
+    expect(pluginSource).not.toContain("listConflicts");
+    expect(pluginSource).not.toContain("buildMergeProposal");
+    // The retry is fire-and-forget with a closed-token catch and a status
+    // refresh; nothing is logged.
+    const retryBody = pluginSource.slice(retryIndex, retryIndex + 700);
+    expect(retryBody).toContain("retryPendingLocalApplies()");
+    expect(retryBody).toContain("conflict_apply_retry_failed");
+    expect(retryBody).toContain("#refreshSyncStatus()");
+    expect(retryBody).not.toContain("console.");
+  });
+
+  it("wires the pending conflict apply facts into the live status projection (task 9)", () => {
+    const projectionHeaderIndex = pluginSource.indexOf(
+      "#projectSyncStatus(): JournalSyncStatusSnapshot | null",
+    );
+    expect(projectionHeaderIndex).toBeGreaterThanOrEqual(0);
+    const projectionBody = pluginSource.slice(projectionHeaderIndex, projectionHeaderIndex + 3_000);
+    expect(projectionBody).toContain("deriveConflictApplyStatusFacts(");
+    expect(projectionBody).toContain("conflictApplyPendingCount:");
+    expect(projectionBody).toContain("conflictApplySafeReasonTokens:");
+    // The export block renders the same composed line.
+    const builderIndex = pluginSource.indexOf("#buildSyncDiagnosticsExportBlock(): string");
+    const builderBody = pluginSource.slice(builderIndex, builderIndex + 1_800);
+    expect(builderBody).toContain("renderJournalSyncStatus(syncStatus)");
+    // The journal release clears the conflict surfaces with the rest.
+    const releaseIndex = pluginSource.indexOf("#releaseJournalResources(): void");
+    const releaseBody = pluginSource.slice(releaseIndex, releaseIndex + 900);
+    expect(releaseBody).toContain("this.#conflictController = null");
+  });
+});
+
+// --- the runtime onload harness (conflict inbox task 9) -------------------------------------------
+
+/**
+ * The fake Obsidian app the onload contract needs: the vendored engine
+ * read fails closed, so the journal startup records its closed
+ * startup-failure tokens and onload still completes.
+ */
+function createFakeObsidianApp(): { readonly app: unknown } {
+  const files = new Map<string, ArrayBuffer>();
+  const adapter = {
+    exists: async (path: string): Promise<boolean> => files.has(path),
+    readBinary: async (path: string): Promise<ArrayBuffer> => {
+      void path;
+      throw new Error("engine binary unavailable in the onload contract harness");
+    },
+    writeBinary: async (path: string, data: ArrayBuffer): Promise<void> => {
+      files.set(path, data.slice(0));
+    },
+    rename: async (fromPath: string, toPath: string): Promise<void> => {
+      void fromPath;
+      void toPath;
+    },
+    remove: async (path: string): Promise<void> => {
+      files.delete(path);
+    },
+    mkdir: async (path: string): Promise<void> => {
+      void path;
+    },
+    list: async (): Promise<{ readonly files: readonly string[] }> => ({
+      files: [...files.keys()],
+    }),
+  };
+  const secrets = new Map<string, string>();
+  const app = {
+    secretStorage: {
+      setSecret: (recordName: string, value: string): void => {
+        secrets.set(recordName, value);
+      },
+      getSecret: (recordName: string): string | null => secrets.get(recordName) ?? null,
+    },
+    vault: {
+      configDir: ".obsidian",
+      adapter,
+      getFiles: (): readonly unknown[] => [],
+      getAbstractFileByPath: (path: string): unknown => {
+        void path;
+        return null;
+      },
+      createBinary: async (path: string, data: ArrayBuffer): Promise<void> => {
+        void path;
+        void data;
+      },
+      readBinary: async (path: string): Promise<ArrayBuffer> => {
+        void path;
+        throw new Error("vault read unexpected in the onload contract harness");
+      },
+      rename: async (): Promise<void> => {
+        // noop
+      },
+      trash: async (): Promise<void> => {
+        // noop
+      },
+      on: (): unknown => null,
+    },
+    workspace: {
+      onLayoutReady: (callback: () => void): void => {
+        void callback;
+        // The fail-closed journal startup never reaches layout-ready work.
+      },
+    },
+  };
+  return { app };
+}
+
+/** The mocked Obsidian Plugin's registration surface the harness reads. */
+type RegisteringPlugin = import("./plugin").default & {
+  registeredCommandIds(): readonly string[];
+};
+
+/** Build one plugin instance over the fake app for the onload contract. */
+async function createPluginForOnloadContract(): Promise<RegisteringPlugin> {
+  const { default: KnowledgeWorkspacePlugin } = await import("./plugin");
+  const { app } = createFakeObsidianApp();
+  return new KnowledgeWorkspacePlugin(app as never, {
+    id: "knowledge-workspace",
+    version: "0.0.0",
+  } as never) as RegisteringPlugin;
+}
+
+describe("Obsidian plugin onload contract (conflict inbox task 9)", () => {
+  // Both contract tests run the REAL onload(): the journal stack loads the
+  // sql.js wasm binary and walks the fail-closed startup path, which can
+  // exceed the default 5s deadline under coverage instrumentation — the
+  // explicit deadline keeps the real-journey contract stable on loaded
+  // machines without weakening what it proves.
+  it(
+    "opens the Conflict Inbox only through an explicit plugin command",
+    async () => {
+      const plugin = await createPluginForOnloadContract();
+      await plugin.onload();
+      expect(plugin.registeredCommandIds()).toContain("open-conflict-inbox");
+    },
+    20_000,
+  );
+
+  it(
+    "registers the established command surface alongside the inbox command",
+    async () => {
+      const plugin = await createPluginForOnloadContract();
+      await plugin.onload();
+      expect(plugin.registeredCommandIds()).toEqual([
+        "copy-sync-diagnostics",
+        "run-sync-self-check",
+        "retry-connection",
+        "open-conflict-inbox",
+      ]);
+    },
+    20_000,
+  );
 });

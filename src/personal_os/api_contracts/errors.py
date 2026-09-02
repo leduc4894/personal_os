@@ -105,6 +105,16 @@ _APPROVED_HTTP_STATUS_CODES: Final[frozenset[ErrorCode]] = frozenset(
         ErrorCode.MULTIPART_CLEANUP_FAILED,
         ErrorCode.MULTIPART_LOCAL_CONTENT_CHANGED,
         ErrorCode.MULTIPART_DEPENDENCY_UNAVAILABLE,
+        # The source-conflict block of the Conflict Inbox design (Child 8
+        # spec 7), wired when the conflict routes landed.
+        ErrorCode.SOURCE_CONFLICT_INPUT_INVALID,
+        ErrorCode.SOURCE_CONFLICT_NOT_FOUND,
+        ErrorCode.SOURCE_CONFLICT_STATE_INVALID,
+        ErrorCode.SOURCE_CONFLICT_IDEMPOTENCY_MISMATCH,
+        ErrorCode.SOURCE_CONFLICT_EVIDENCE_UNAVAILABLE,
+        ErrorCode.SOURCE_CONFLICT_EVIDENCE_INTEGRITY_FAILED,
+        ErrorCode.SOURCE_CONFLICT_DEPENDENCY_UNAVAILABLE,
+        ErrorCode.SOURCE_CONFLICT_COMMIT_OUTCOME_UNKNOWN,
     }
 )
 
@@ -232,6 +242,19 @@ HTTP_ERROR_STATUSES: Final[Mapping[ErrorCode, int]] = MappingProxyType(
             ErrorCode.MULTIPART_CLEANUP_FAILED: 503,
             ErrorCode.MULTIPART_LOCAL_CONTENT_CHANGED: 409,
             ErrorCode.MULTIPART_DEPENDENCY_UNAVAILABLE: 503,
+            # The source-conflict status column of the Child 8 design error
+            # contract (spec 7): 422 for the input and evidence-integrity
+            # verdicts, 404 for an unknown conflict or retained evidence a
+            # role no longer has, 409 for the state and idempotency
+            # conflicts, and 503 for the two retryable dependency outcomes.
+            ErrorCode.SOURCE_CONFLICT_INPUT_INVALID: 422,
+            ErrorCode.SOURCE_CONFLICT_NOT_FOUND: 404,
+            ErrorCode.SOURCE_CONFLICT_STATE_INVALID: 409,
+            ErrorCode.SOURCE_CONFLICT_IDEMPOTENCY_MISMATCH: 409,
+            ErrorCode.SOURCE_CONFLICT_EVIDENCE_UNAVAILABLE: 404,
+            ErrorCode.SOURCE_CONFLICT_EVIDENCE_INTEGRITY_FAILED: 422,
+            ErrorCode.SOURCE_CONFLICT_DEPENDENCY_UNAVAILABLE: 503,
+            ErrorCode.SOURCE_CONFLICT_COMMIT_OUTCOME_UNKNOWN: 503,
         }
     )
 )

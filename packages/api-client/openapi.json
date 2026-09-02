@@ -1478,6 +1478,51 @@
         "title": "ApiEnvelope[SignedPolicySnapshotData]",
         "type": "object"
       },
+      "ApiEnvelope_SmallFileConflictCaptureData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SmallFileConflictCaptureData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[SmallFileConflictCaptureData]",
+        "type": "object"
+      },
       "ApiEnvelope_SmallFilePreflightData_": {
         "additionalProperties": false,
         "properties": {
@@ -1611,6 +1656,186 @@
           "error"
         ],
         "title": "ApiEnvelope[SmallFileTerminalResultData]",
+        "type": "object"
+      },
+      "ApiEnvelope_SourceConflictCandidateData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceConflictCandidateData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[SourceConflictCandidateData]",
+        "type": "object"
+      },
+      "ApiEnvelope_SourceConflictDetailData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceConflictDetailData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[SourceConflictDetailData]",
+        "type": "object"
+      },
+      "ApiEnvelope_SourceConflictPageData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceConflictPageData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[SourceConflictPageData]",
+        "type": "object"
+      },
+      "ApiEnvelope_SourceConflictResolutionData_": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceConflictResolutionData"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "data",
+          "error"
+        ],
+        "title": "ApiEnvelope[SourceConflictResolutionData]",
         "type": "object"
       },
       "ApiEnvelope_SourceLifecycleCommitData_": {
@@ -1810,6 +2035,66 @@
         ],
         "title": "ApiWarning",
         "type": "object"
+      },
+      "ConflictCandidateKind": {
+        "description": "Whether a conflict retains verified content bytes or a deletion intent.",
+        "enum": [
+          "content",
+          "delete"
+        ],
+        "title": "ConflictCandidateKind",
+        "type": "string"
+      },
+      "ConflictEvidenceRole": {
+        "description": "The three immutable evidence roles the verified-read boundary streams.\n\n``CANDIDATE`` exists only while the conflict retains a content candidate;\na delete conflict has no candidate bytes and the reader fails closed.",
+        "enum": [
+          "base",
+          "remote",
+          "candidate"
+        ],
+        "title": "ConflictEvidenceRole",
+        "type": "string"
+      },
+      "ConflictKind": {
+        "description": "Closed vocabulary of conflict kinds (spec 4.1 table).\n\n``STALE_CONTENT`` and ``EDIT_REMOTE_DELETE`` retain verified content\nbytes; ``DELETE_REMOTE_EDIT`` carries only a deletion intent; a\n``LOCATOR_COLLISION`` carries a locator snapshot and retains content\nbytes only when the local bytes changed.",
+        "enum": [
+          "stale_content",
+          "edit_remote_delete",
+          "delete_remote_edit",
+          "locator_collision"
+        ],
+        "title": "ConflictKind",
+        "type": "string"
+      },
+      "ConflictResolutionKind": {
+        "description": "The only explicit user choices that close a conflict (spec 3.8).",
+        "enum": [
+          "keep_remote",
+          "keep_local",
+          "save_merged"
+        ],
+        "title": "ConflictResolutionKind",
+        "type": "string"
+      },
+      "ConflictResolutionOutcome": {
+        "description": "Closed terminal outcomes of one resolution attempt.\n\n``RESOLVED`` commits the winner; ``STALE_SUCCESSOR`` records the attempt\nas stale against the reviewed remote, supersedes the conflict and opens\na successor bound to the newer observed remote. Both are frozen and\nreturned unchanged by an exact replay of the resolution event identity.",
+        "enum": [
+          "resolved",
+          "stale_successor"
+        ],
+        "title": "ConflictResolutionOutcome",
+        "type": "string"
+      },
+      "ConflictStatus": {
+        "description": "Closed aggregate states of the conflict state machine (spec 4.3).",
+        "enum": [
+          "open",
+          "resolving",
+          "resolved",
+          "superseded"
+        ],
+        "title": "ConflictStatus",
+        "type": "string"
       },
       "CursorAcknowledgementRequest": {
         "additionalProperties": false,
@@ -2482,7 +2767,15 @@
           "multipart_policy_denied",
           "multipart_cleanup_failed",
           "multipart_local_content_changed",
-          "multipart_dependency_unavailable"
+          "multipart_dependency_unavailable",
+          "source_conflict_input_invalid",
+          "source_conflict_not_found",
+          "source_conflict_state_invalid",
+          "source_conflict_idempotency_mismatch",
+          "source_conflict_evidence_unavailable",
+          "source_conflict_evidence_integrity_failed",
+          "source_conflict_dependency_unavailable",
+          "source_conflict_commit_outcome_unknown"
         ],
         "title": "ErrorCode",
         "type": "string"
@@ -4807,6 +5100,47 @@
         "title": "SignedPolicySnapshotData",
         "type": "object"
       },
+      "SmallFileConflictCaptureData": {
+        "additionalProperties": false,
+        "description": "The safe capture receipt of one conflict-candidate upload.\n\nThe exact answer a stale-base or remote-delete capture returns — and an\nexact replay of the same operation token or event identity returns\nunchanged: the opaque conflict identity, the conflict-bound source, the\nobserved remote version at capture time (``null`` exactly when the\nremote state is the deletion of an ``edit_remote_delete`` capture) and\nthe capture moment. No digest, object key, receipt or provider detail is\na member, so none can ever render.",
+        "properties": {
+          "captured_at": {
+            "format": "date-time",
+            "title": "Captured At",
+            "type": "string"
+          },
+          "conflict_id": {
+            "format": "uuid",
+            "title": "Conflict Id",
+            "type": "string"
+          },
+          "observed_remote_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Remote Version Id"
+          },
+          "source_id": {
+            "format": "uuid",
+            "title": "Source Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "conflict_id",
+          "source_id",
+          "observed_remote_version_id",
+          "captured_at"
+        ],
+        "title": "SmallFileConflictCaptureData",
+        "type": "object"
+      },
       "SmallFileOperation": {
         "description": "Closed vocabulary of preflight operations (spec 10.1: create/update).",
         "enum": [
@@ -4818,8 +5152,20 @@
       },
       "SmallFilePreflightData": {
         "additionalProperties": false,
-        "description": "One completed preflight: exactly one typed outcome and its safe payload.\n\n``single_part_upload`` carries only the opaque operation token and its\nexpiry; ``committed_replay`` and ``no_change`` carry only the frozen\nterminal result; ``excluded`` and ``conflict`` carry no payload member at\nall. Responses render with ``exclude_unset`` so each outcome emits\nexactly its own members.",
+        "description": "One completed preflight: exactly one typed outcome and its safe payload.\n\n``single_part_upload`` carries only the opaque operation token and its\nexpiry; ``committed_replay`` and ``no_change`` carry only the frozen\nterminal result; ``excluded`` and ``multipart_upload`` carry no payload\nmember at all. The Child 8 ``conflict`` outcome carries either the same\nopaque operation grant — the capture reservation whose verified\ncandidate the client uploads for retention as conflict evidence — or\nexactly the opaque conflict identity a same-identity replay returns\nafter capture; a conflict whose candidate cannot be retained through the\nsingle-part transport (a size above the single-part routing constant)\ncarries no payload member at all. Responses render with ``exclude_unset``\nso each outcome emits exactly its own members.",
         "properties": {
+          "conflict_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conflict Id"
+          },
           "expires_at": {
             "anyOf": [
               {
@@ -5100,6 +5446,500 @@
         ],
         "title": "SmallFileTerminalResultKind",
         "type": "string"
+      },
+      "SourceConflictCandidateData": {
+        "additionalProperties": false,
+        "description": "The opaque receipt of one verified resolution-candidate upload.\n\nThe single safe member of the ``save_merged`` upload answer: the\nverified object reference the resolve command carries verbatim. No\ndigest, object key, provider detail or content byte is a member, so\nnone can ever render.",
+        "properties": {
+          "verified_candidate_object_id": {
+            "format": "uuid",
+            "title": "Verified Candidate Object Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "verified_candidate_object_id"
+        ],
+        "title": "SourceConflictCandidateData",
+        "type": "object"
+      },
+      "SourceConflictData": {
+        "additionalProperties": false,
+        "description": "One conflict's safe metadata: the frozen read model on the wire.\n\nEvery member is an opaque identifier, a closed label or a normalized\nUTC timestamp. The credential-derived workspace is deliberately absent\n(it is the caller's own), and no locator snapshot, object key, digest\nor provider detail ever renders. The optional members follow the\ndomain's exact status shapes: an open conflict carries no resolution\nevidence, a resolving one the attempt identity, a resolved one the\nwinner and — only under a publishing choice — the resulting version,\nand a superseded one its successor.",
+        "properties": {
+          "base_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Version Id"
+          },
+          "candidate_kind": {
+            "$ref": "#/components/schemas/ConflictCandidateKind"
+          },
+          "captured_at": {
+            "format": "date-time",
+            "title": "Captured At",
+            "type": "string"
+          },
+          "closed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closed At"
+          },
+          "conflict_id": {
+            "format": "uuid",
+            "title": "Conflict Id",
+            "type": "string"
+          },
+          "conflict_kind": {
+            "$ref": "#/components/schemas/ConflictKind"
+          },
+          "observed_remote_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Remote Version Id"
+          },
+          "originating_device_id": {
+            "format": "uuid",
+            "title": "Originating Device Id",
+            "type": "string"
+          },
+          "originating_event_id": {
+            "format": "uuid",
+            "title": "Originating Event Id",
+            "type": "string"
+          },
+          "resolution_event_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution Event Id"
+          },
+          "resolution_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConflictResolutionKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "resulting_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resulting Version Id"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ConflictStatus"
+          },
+          "successor_conflict_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Successor Conflict Id"
+          },
+          "verified_candidate_object_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified Candidate Object Id"
+          }
+        },
+        "required": [
+          "conflict_id",
+          "source_id",
+          "conflict_kind",
+          "status",
+          "originating_event_id",
+          "originating_device_id",
+          "base_version_id",
+          "observed_remote_version_id",
+          "candidate_kind",
+          "verified_candidate_object_id",
+          "captured_at",
+          "resolution_kind",
+          "resolution_event_id",
+          "resulting_version_id",
+          "successor_conflict_id",
+          "closed_at"
+        ],
+        "title": "SourceConflictData",
+        "type": "object"
+      },
+      "SourceConflictDetailData": {
+        "additionalProperties": false,
+        "description": "One conflict's detail: the safe metadata plus the offered choices.\n\n``choices`` carries exactly the resolution kinds this conflict still\nadmits (see :func:`allowed_resolution_choices`), so the Inbox can never\noffer an unappliable choice.",
+        "properties": {
+          "base_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Version Id"
+          },
+          "candidate_kind": {
+            "$ref": "#/components/schemas/ConflictCandidateKind"
+          },
+          "captured_at": {
+            "format": "date-time",
+            "title": "Captured At",
+            "type": "string"
+          },
+          "choices": {
+            "items": {
+              "$ref": "#/components/schemas/ConflictResolutionKind"
+            },
+            "title": "Choices",
+            "type": "array"
+          },
+          "closed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closed At"
+          },
+          "conflict_id": {
+            "format": "uuid",
+            "title": "Conflict Id",
+            "type": "string"
+          },
+          "conflict_kind": {
+            "$ref": "#/components/schemas/ConflictKind"
+          },
+          "observed_remote_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Remote Version Id"
+          },
+          "originating_device_id": {
+            "format": "uuid",
+            "title": "Originating Device Id",
+            "type": "string"
+          },
+          "originating_event_id": {
+            "format": "uuid",
+            "title": "Originating Event Id",
+            "type": "string"
+          },
+          "resolution_event_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution Event Id"
+          },
+          "resolution_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConflictResolutionKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "resulting_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resulting Version Id"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ConflictStatus"
+          },
+          "successor_conflict_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Successor Conflict Id"
+          },
+          "verified_candidate_object_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified Candidate Object Id"
+          }
+        },
+        "required": [
+          "conflict_id",
+          "source_id",
+          "conflict_kind",
+          "status",
+          "originating_event_id",
+          "originating_device_id",
+          "base_version_id",
+          "observed_remote_version_id",
+          "candidate_kind",
+          "verified_candidate_object_id",
+          "captured_at",
+          "resolution_kind",
+          "resolution_event_id",
+          "resulting_version_id",
+          "successor_conflict_id",
+          "closed_at",
+          "choices"
+        ],
+        "title": "SourceConflictDetailData",
+        "type": "object"
+      },
+      "SourceConflictPageData": {
+        "additionalProperties": false,
+        "description": "One bounded page of the workspace's open conflicts.\n\n``next_exclusive_start_conflict_id`` is the stable continuation cursor\n(the last identity of this page) whenever the page filled its bound.",
+        "properties": {
+          "conflicts": {
+            "items": {
+              "$ref": "#/components/schemas/SourceConflictData"
+            },
+            "title": "Conflicts",
+            "type": "array"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "next_exclusive_start_conflict_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Exclusive Start Conflict Id"
+          }
+        },
+        "required": [
+          "conflicts",
+          "has_more",
+          "next_exclusive_start_conflict_id"
+        ],
+        "title": "SourceConflictPageData",
+        "type": "object"
+      },
+      "SourceConflictResolutionData": {
+        "additionalProperties": false,
+        "description": "The frozen outcome of one explicit resolution attempt.\n\n``resolved`` commits the winner — with exactly one resulting version\nonly under ``keep_local``/``save_merged`` — and ``stale_successor``\nbinds the open successor created against the newer observed remote; a\nsame-identity replay receives this value unchanged.",
+        "properties": {
+          "completed_at": {
+            "format": "date-time",
+            "title": "Completed At",
+            "type": "string"
+          },
+          "conflict_id": {
+            "format": "uuid",
+            "title": "Conflict Id",
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ConflictResolutionOutcome"
+          },
+          "resolution_event_id": {
+            "format": "uuid",
+            "title": "Resolution Event Id",
+            "type": "string"
+          },
+          "resolution_kind": {
+            "$ref": "#/components/schemas/ConflictResolutionKind"
+          },
+          "resulting_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resulting Version Id"
+          },
+          "successor_conflict_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Successor Conflict Id"
+          }
+        },
+        "required": [
+          "outcome",
+          "conflict_id",
+          "resolution_event_id",
+          "resolution_kind",
+          "resulting_version_id",
+          "successor_conflict_id",
+          "completed_at"
+        ],
+        "title": "SourceConflictResolutionData",
+        "type": "object"
+      },
+      "SourceConflictResolveRequest": {
+        "additionalProperties": false,
+        "description": "The strict explicit-resolution body (spec 6).\n\nCarries exactly the new event identity, its fresh idempotency key, the\nclosed resolution choice, the reviewed remote version and the optional\nverified object reference of an already-uploaded merged result — never\nraw bytes, a digest, a locator, a workspace or a device selector. The\nmerged result itself travels only through the existing verified upload\nflow; this body references it, it never carries it.",
+        "properties": {
+          "idempotency_key": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "resolution_event_id": {
+            "format": "uuid",
+            "title": "Resolution Event Id",
+            "type": "string"
+          },
+          "resolution_kind": {
+            "$ref": "#/components/schemas/ConflictResolutionKind"
+          },
+          "reviewed_remote_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed Remote Version Id"
+          },
+          "verified_candidate_object_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified Candidate Object Id"
+          }
+        },
+        "required": [
+          "resolution_event_id",
+          "idempotency_key",
+          "resolution_kind"
+        ],
+        "title": "SourceConflictResolveRequest",
+        "type": "object"
       },
       "SourceFingerprintData": {
         "additionalProperties": false,
@@ -6578,6 +7418,255 @@
         "summary": "Download Source Version"
       }
     },
+    "/api/sync/conflicts": {
+      "get": {
+        "description": "Page the credential workspace's open conflicts in stable order.",
+        "operationId": "listSourceConflicts",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "exclusive_start_conflict_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Exclusive Start Conflict Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_SourceConflictPageData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "List Conflicts"
+      }
+    },
+    "/api/sync/conflicts/{conflict_id}": {
+      "get": {
+        "description": "Render one conflict's safe metadata, choices and evidence identity.",
+        "operationId": "getSourceConflict",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conflict_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conflict Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_SourceConflictDetailData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Get Conflict"
+      }
+    },
+    "/api/sync/conflicts/{conflict_id}/candidate": {
+      "put": {
+        "description": "Admit one verified resolution candidate for an open conflict.\n\nThe ``save_merged`` upload half of spec 5.2: the conflict is re-read\ninside the credential workspace (an unknown or cross-workspace\nconflict answers the closed 404 before anything else), only an open\ncontent-bearing conflict accepts a candidate, and the exclusion\npolicy is re-evaluated over exactly that read BEFORE any byte\ncrosses — a denial answers the closed 403 with the uploader still\nclosed. The declared digest and canonical media type travel as\nheaders and the exact size as the request's declared content length;\nthe bounded stream limiter enforces the server-owned single-part\nceiling and read deadline, the verified-object path proves the\nbytes, and the answer is only the opaque verified object reference\nthe resolve command carries verbatim. A mismatch between the\ndeclared fingerprint and the delivered bytes is the closed integrity\nfailure — no candidate is ever admitted from unverified bytes.",
+        "operationId": "uploadSourceConflictResolutionCandidate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conflict_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conflict Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-candidate-sha256",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "X-Candidate-Sha256",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-candidate-media-type",
+            "required": true,
+            "schema": {
+              "title": "X-Candidate-Media-Type",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "description": "The exact raw merged-result bytes of the resolution candidate",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_SourceConflictCandidateData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Upload Candidate"
+      }
+    },
+    "/api/sync/conflicts/{conflict_id}/evidence/{role}": {
+      "get": {
+        "description": "Stream one role's exact verified evidence bytes.\n\nThe conflict is re-read inside the credential workspace and the\nexclusion policy re-evaluated over exactly that read before the\nverified reader opens: a denial, an unknown conflict or an\nunappliable role answers the canonical JSON envelope with the\nreader still closed. Only then does the exact expected object\nresolve, the verified reader open and prime its first chunk inside\nthe endpoint, so pre-stream failures never start a broken\ntransport. The response carries the exact canonical media type and\nbyte length of the verified bytes.",
+        "operationId": "downloadSourceConflictEvidence",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conflict_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conflict Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "role",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ConflictEvidenceRole"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The exact verified evidence bytes of the closed role as one binary payload with its exact Content-Type and Content-Length headers"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Download Evidence"
+      }
+    },
+    "/api/sync/conflicts/{conflict_id}/resolve": {
+      "post": {
+        "description": "Resolve one conflict behind the policy recheck, atomically.",
+        "operationId": "resolveSourceConflict",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conflict_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conflict Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceConflictResolveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_SourceConflictResolutionData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Resolve Conflict"
+      }
+    },
     "/api/sync/cursor-acknowledgements": {
       "post": {
         "description": "Advance the durable cursor after local terminalization.",
@@ -7162,6 +8251,54 @@
           }
         ],
         "summary": "Issue Part Url"
+      }
+    },
+    "/api/uploads/{operation_id}/conflict-content": {
+      "put": {
+        "description": "Retain one stale-update candidate as conflict evidence.\n\nThe Child 8 counterpart of the publication content stream over the\nsame durable operation row: a preflighted ``conflict`` grant uploads\nits candidate bytes here, the same bounded ceiling and read deadline\nguard the stream, the identical verified-object path proves the bytes\nbefore anything references them, and the answer is only the opaque\ncapture receipt — the conflict identity, never a publication receipt.\nA publication operation can never double as a capture operation: the\nbinding itself rejects that shape with the closed state-invalid\ncode.",
+        "operationId": "uploadSmallFileConflictContent",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]{32,128}$",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "description": "The exact raw candidate bytes of the conflict-granted capture operation",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiEnvelope_SmallFileConflictCaptureData_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "AccessCredential": []
+          }
+        ],
+        "summary": "Upload Conflict Candidate Content"
       }
     },
     "/api/uploads/{operation_id}/content": {

@@ -23,6 +23,7 @@ from dataclasses import dataclass
 import pytest
 from tests.unit.source_lifecycle.fakes import (
     CallLedger,
+    FakeLifecycleConflictCaptureGateway,
     FakeLifecyclePolicy,
     FakeLifecycleStore,
     build_commit_result,
@@ -115,7 +116,12 @@ async def test_fresh_commit_records_exactly_one_committed_row_in_the_shared_reco
     recorder = InMemorySourceLifecycleMetrics()
     store = LegacyRecordingLifecycleStore(ledger=ledger, commit_result=commit_result)
     policy = FakeLifecyclePolicy(ledger=ledger, decision=decision)
-    service = SourceLifecycleService(store=store, policy=policy, metrics=recorder)
+    service = SourceLifecycleService(
+        store=store,
+        policy=policy,
+        conflict_capture=FakeLifecycleConflictCaptureGateway(ledger=ledger),
+        metrics=recorder,
+    )
 
     result = await service.commit(
         command=command,
@@ -150,7 +156,12 @@ async def test_exact_replay_records_exactly_one_replayed_row_and_no_committed_ro
         committed_result=committed,
     )
     policy = FakeLifecyclePolicy(ledger=ledger)
-    service = SourceLifecycleService(store=store, policy=policy, metrics=recorder)
+    service = SourceLifecycleService(
+        store=store,
+        policy=policy,
+        conflict_capture=FakeLifecycleConflictCaptureGateway(ledger=ledger),
+        metrics=recorder,
+    )
 
     result = await service.commit(
         command=command,
@@ -191,7 +202,12 @@ async def test_wiring_the_recorder_into_the_recording_store_doubles_the_committe
         metrics=recorder,
     )
     policy = FakeLifecyclePolicy(ledger=ledger, decision=decision)
-    service = SourceLifecycleService(store=store, policy=policy, metrics=recorder)
+    service = SourceLifecycleService(
+        store=store,
+        policy=policy,
+        conflict_capture=FakeLifecycleConflictCaptureGateway(ledger=ledger),
+        metrics=recorder,
+    )
 
     await service.commit(
         command=command,

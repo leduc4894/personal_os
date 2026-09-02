@@ -64,6 +64,13 @@ Codex, Claude và các AI client khác truy cập tri thức qua MCP hoặc API 
 - Không đưa raw source content vào log, metric, trace hoặc error report.
 - Chỉ triển khai các contracts được mô tả trong bộ tài liệu này.
 
+## Runbook vận hành (operations)
+
+Các runbook vận hành sống trong [`operations/`](operations/), liên kết từ
+`20-IMPLEMENTATION_PLAN.md` theo từng phase. Runbook conflict mới nhất:
+[`operations/source-conflict-resolution.md`](operations/source-conflict-resolution.md)
+(Conflict Inbox, capture lane, reason-token readback và Desktop live journey).
+
 ## Trạng thái tài liệu
 
 Tài liệu mô tả target architecture. “Đã chọn” nghĩa là quyết định thiết kế phải được implementation và acceptance tests tuân thủ.

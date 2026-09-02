@@ -34,8 +34,15 @@
       "name": "preflight_conflict",
       "surface": "preflight",
       "status": 200,
-      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d05\",\"data\":{\"outcome\":\"conflict\"},\"warnings\":[],\"error\":null}",
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d05\",\"data\":{\"outcome\":\"conflict\",\"operation_id\":\"AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-Zz\",\"expires_at\":\"2026-08-18T10:00:00Z\"},\"warnings\":[],\"error\":null}",
       "plugin_expectation": { "kind": "preflight_outcome", "outcome": "conflict" }
+    },
+    {
+      "name": "conflict_capture",
+      "surface": "conflict_content",
+      "status": 200,
+      "body_text": "{\"request_id\":\"6f0bfe2e-9c1a-4b7e-8d34-2a1c5f6b7d07\",\"data\":{\"conflict_id\":\"44444444-4444-4444-8444-444444444444\",\"source_id\":\"11111111-1111-4111-8111-111111111111\",\"observed_remote_version_id\":\"22222222-2222-4222-8222-222222222222\",\"captured_at\":\"2026-08-18T00:00:00Z\"},\"warnings\":[],\"error\":null}",
+      "plugin_expectation": { "kind": "conflict_capture", "conflictId": "44444444-4444-4444-8444-444444444444" }
     },
     {
       "name": "upload_committed",

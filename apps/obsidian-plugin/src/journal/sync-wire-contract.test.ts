@@ -32,14 +32,20 @@ function isDeviceSyncSurface(surface: string): surface is DeviceSyncSurface {
 
 interface WireGoldenEntry {
   readonly name: string;
-  readonly surface: "preflight" | "content" | DeviceSyncSurface;
+  readonly surface: "preflight" | "content" | "conflict_content" | DeviceSyncSurface;
   readonly status: number;
   readonly body_text: string;
   readonly plugin_expectation: {
-    readonly kind: "preflight_outcome" | "committed_receipt" | "failure" | "device_sync_failure";
+    readonly kind:
+      | "preflight_outcome"
+      | "committed_receipt"
+      | "conflict_capture"
+      | "failure"
+      | "device_sync_failure";
     readonly outcome?: string;
     readonly sourceId?: string;
     readonly contentVersion?: number;
+    readonly conflictId?: string;
     readonly failureKind?: string;
     readonly reason?: string;
   };
@@ -134,6 +140,7 @@ async function replayEntry(entry: WireGoldenEntry): Promise<{
   outcome: string;
   receiptSourceId?: string | undefined;
   receiptContentVersion?: number | undefined;
+  conflictId?: string | undefined;
   failureKind?: string | undefined;
   reason?: string | undefined;
 }> {
@@ -168,6 +175,17 @@ async function replayEntry(entry: WireGoldenEntry): Promise<{
       return onFailure(error);
     }
   }
+  if (entry.surface === "conflict_content") {
+    try {
+      const receipt = await syncApi.uploadSmallFileConflictCandidate({
+        operationId: OPERATION_ID,
+        contentBytes: CONTENT,
+      });
+      return { outcome: "conflict_capture", conflictId: receipt.conflictId };
+    } catch (error) {
+      return onFailure(error);
+    }
+  }
   try {
     const receipt = await syncApi.uploadSmallFileContent({
       operationId: OPERATION_ID,
@@ -197,6 +215,10 @@ describe("shared small-file sync wire-contract corpus (spec 10, 12)", () => {
           expect(landing.outcome, entry.name).toBe("committed");
           expect(landing.receiptSourceId, entry.name).toBe(expectation.sourceId);
           expect(landing.receiptContentVersion, entry.name).toBe(expectation.contentVersion);
+          break;
+        case "conflict_capture":
+          expect(landing.outcome, entry.name).toBe("conflict_capture");
+          expect(landing.conflictId, entry.name).toBe(expectation.conflictId);
           break;
         case "failure":
           expect(landing.outcome, entry.name).toBe("failure");

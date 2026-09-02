@@ -47,6 +47,7 @@ from api_runtime.small_file_sync_composition import (
     OfflineCanonicalObjectStore,
     OfflineCurrentSourceStore,
     OfflineSmallFileClock,
+    OfflineSmallFileConflictCaptureGateway,
     OfflineSmallFileSyncState,
     OfflineSmallFileUploadOperationStore,
     OfflineSourcePublicationStore,
@@ -80,6 +81,9 @@ from personal_os.exclusion_policy.signatures import (
 )
 from personal_os.object_storage import VerifiedObjectReceipt
 from personal_os.runtime_configuration.models import RuntimeEnvironment
+from personal_os.small_file_sync.contracts import (
+    SmallFileConflictCaptureResult,
+)
 from personal_os.small_file_sync.metrics import InMemorySmallFileSyncMetrics
 from personal_os.small_file_sync.service import SmallFileSyncService
 from personal_os.sources.fingerprint import RequestFingerprint, SourceVersionCommand
@@ -185,6 +189,7 @@ class SmallFileWireHarness:
     client: TestClient
     sync_state: OfflineSmallFileSyncState
     device: ExchangeDevice
+    service: SmallFileSyncService | None = None
     snapshot_source: MutableActivePolicySnapshotSource | None = None
     publication_store: PolicyAwareInMemorySourcePublicationStore | None = None
 
@@ -209,6 +214,49 @@ class SmallFileWireHarness:
                 },
                 content=content,
             ),
+        )
+
+    def upload_conflict_candidate(
+        self, token: str, content: bytes, *, credential: str | None = None
+    ) -> Response:
+        """Upload one granted capture operation's candidate over the wire."""
+
+        return cast(
+            Response,
+            self.client.put(
+                f"/api/uploads/{token}/conflict-content",
+                headers={
+                    "Authorization": f"Bearer {credential or self.device.access_credential}",
+                    "Content-Type": "application/octet-stream",
+                },
+                content=content,
+            ),
+        )
+
+    def capture_stale_candidate(
+        self, operation_token: str, content: bytes
+    ) -> SmallFileConflictCaptureResult:
+        """Drive the conflict-candidate receive of one granted capture operation.
+
+        The Child 8 wire surface: the capture upload travels the dedicated
+        conflict-content route and the envelope's data member is the frozen
+        capture receipt. Kept as the domain-typed convenience over
+        :meth:`upload_conflict_candidate` for journeys asserting on the
+        opaque receipt members.
+        """
+
+        response = self.upload_conflict_candidate(operation_token, content)
+        assert response.status_code == 200, response.text
+        data = dict(response.json()["data"])
+        return SmallFileConflictCaptureResult(
+            conflict_id=UUID(str(data["conflict_id"])),
+            source_id=UUID(str(data["source_id"])),
+            observed_remote_version_id=(
+                UUID(str(data["observed_remote_version_id"]))
+                if data["observed_remote_version_id"] is not None
+                else None
+            ),
+            captured_at=datetime.fromisoformat(str(data["captured_at"])),
         )
 
 
@@ -237,12 +285,14 @@ def offline_wire_harness() -> Iterator[SmallFileWireHarness]:
     """Compose the offline graph and mint one live device credential."""
 
     sync_state = OfflineSmallFileSyncState()
-    application = _build_application(compose_offline_small_file_sync(state=sync_state))
+    runtime = compose_offline_small_file_sync(state=sync_state)
+    application = _build_application(runtime)
     with TestClient(application, base_url=ORIGIN) as client:
         yield SmallFileWireHarness(
             client=client,
             sync_state=sync_state,
             device=exchange_device_credential(client, device_name="Journey desktop"),
+            service=runtime.service,
         )
 
 
@@ -497,12 +547,14 @@ def policy_wire_harness() -> Iterator[SmallFileWireHarness]:
         enforcement=enforcement,
     )
     sync_metrics = InMemorySmallFileSyncMetrics()
+    conflict_capture = OfflineSmallFileConflictCaptureGateway(sync_state, clock)
     service = SmallFileSyncService(
         operation_store=OfflineSmallFileUploadOperationStore(sync_state, clock),
         policy_guard=PolicyEnforcementSmallFileGuard(enforcement=enforcement),
         publication_gateway=publication_gateway,
         object_store=object_store,
         current_sources=OfflineCurrentSourceStore(sync_state),
+        conflict_capture=conflict_capture,
         metrics=sync_metrics,
         clock=clock,
     )
@@ -518,6 +570,7 @@ def policy_wire_harness() -> Iterator[SmallFileWireHarness]:
             client=client,
             sync_state=sync_state,
             device=exchange_device_credential(client, device_name="Policy desktop"),
+            service=service,
             snapshot_source=snapshot_source,
             publication_store=publication_store,
         )

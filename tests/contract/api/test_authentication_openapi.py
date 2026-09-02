@@ -39,6 +39,7 @@ CREDENTIAL_ROUTE_SECURITY: Final[dict[tuple[str, str], str]] = {
     ("/api/sync/exclusion-policy/snapshot", "get"): "AccessCredential",
     ("/api/sync/journal-events/preflight", "post"): "AccessCredential",
     ("/api/uploads/{operation_id}/content", "put"): "AccessCredential",
+    ("/api/uploads/{operation_id}/conflict-content", "put"): "AccessCredential",
     ("/api/uploads/multipart-sessions", "post"): "AccessCredential",
     ("/api/uploads/multipart-sessions/{session_id}", "get"): "AccessCredential",
     ("/api/uploads/multipart-sessions/{session_id}/parts/{part_number}/url", "post"): (
@@ -58,6 +59,11 @@ CREDENTIAL_ROUTE_SECURITY: Final[dict[tuple[str, str], str]] = {
         "/api/sources/{source_id}/versions/{source_version_id}/content",
         "get",
     ): "AccessCredential",
+    ("/api/sync/conflicts", "get"): "AccessCredential",
+    ("/api/sync/conflicts/{conflict_id}", "get"): "AccessCredential",
+    ("/api/sync/conflicts/{conflict_id}/evidence/{role}", "get"): "AccessCredential",
+    ("/api/sync/conflicts/{conflict_id}/resolve", "post"): "AccessCredential",
+    ("/api/sync/conflicts/{conflict_id}/candidate", "put"): "AccessCredential",
 }
 CREDENTIAL_ROUTE_PATHS: Final[frozenset[str]] = frozenset(
     path for path, _method in CREDENTIAL_ROUTE_SECURITY

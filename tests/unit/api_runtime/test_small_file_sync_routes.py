@@ -468,13 +468,146 @@ def _update_body(*, digest_matches_current: bool) -> dict[str, Any]:
     }
 
 
-def test_stale_update_base_returns_the_conflict_outcome(harness: SmallFileRouteHarness) -> None:
+def test_stale_update_base_returns_the_conflict_outcome_with_its_capture_grant(
+    harness: SmallFileRouteHarness,
+) -> None:
+    """The conflict wire verdict now surfaces its capture grant (Child 8).
+
+    A stale single-part-sized update reserves one capture operation, and the
+    preflight answer carries exactly the plugin needs to reach the captured
+    conflict: the outcome, the opaque operation grant with its expiry, and
+    — on a same-identity replay after capture — the replayed conflict
+    identity. No terminal result, receipt or content member ever renders.
+    """
+
     body = _update_body(digest_matches_current=False)
     harness.sync_state.current_reference = _current_reference(body, source_version_id=uuid4())
     response = preflight(harness, body)
     assert response.status_code == 200
-    assert dict(response.json()["data"]) == {"outcome": "conflict"}
-    assert harness.sync_state.reservation_count == 0
+    data = dict(response.json()["data"])
+    assert set(data) == {"outcome", "operation_id", "expires_at"}
+    assert data["outcome"] == "conflict"
+    token = str(data["operation_id"])
+    assert 32 <= len(token) <= 128
+    assert all(char.isalnum() or char in {"-", "_"} for char in token)
+    assert data["expires_at"] is not None
+    assert harness.sync_state.reservation_count == 1
+    assert harness.sync_state.publication_commits == 0
+
+
+def test_missing_current_reference_grants_the_capture_operation(
+    harness: SmallFileRouteHarness,
+) -> None:
+    """A server-deleted source keeps the conflict verdict and its grant."""
+
+    harness.sync_state.current_reference = None
+    body = _update_body(digest_matches_current=False)
+    harness.sync_state.deleted_source_ids.add(UUID(str(body["source_id"])))
+    response = preflight(harness, body)
+    assert response.status_code == 200
+    data = dict(response.json()["data"])
+    assert data["outcome"] == "conflict"
+    assert set(data) == {"outcome", "operation_id", "expires_at"}
+    assert harness.sync_state.reservation_count == 1
+    assert harness.sync_state.publication_commits == 0
+
+
+_DECLARED_CANDIDATE: Final[bytes] = b"# changed local bytes\n"
+
+
+def test_conflict_content_route_captures_the_verified_candidate(
+    harness: SmallFileRouteHarness,
+) -> None:
+    """The capture grant is exercisable over the wire (Child 8 spec 5.1).
+
+    A stale-base preflight grant uploads its candidate through the dedicated
+    conflict-content route; the answer is exactly the opaque capture
+    receipt, a same-token replay returns the frozen conflict, and no
+    publication ever runs.
+    """
+
+    body = _update_body(digest_matches_current=False)
+    harness.sync_state.current_reference = _current_reference(body, source_version_id=uuid4())
+    granted = dict(preflight(harness, body).json()["data"])
+    token = str(granted["operation_id"])
+
+    response = harness.client.put(
+        f"/api/uploads/{token}/conflict-content",
+        headers={**bearer(harness), "Content-Type": "application/octet-stream"},
+        content=_DECLARED_CANDIDATE,
+    )
+
+    assert response.status_code == 200, response.text
+    data = dict(response.json()["data"])
+    assert set(data) == {
+        "conflict_id",
+        "source_id",
+        "observed_remote_version_id",
+        "captured_at",
+    }
+    assert data["source_id"] == body["source_id"]
+    assert response.headers["cache-control"] == "no-store"
+    assert harness.sync_state.conflict_capture_count == 1
+    assert harness.sync_state.publication_commits == 0
+
+    replayed = harness.client.put(
+        f"/api/uploads/{token}/conflict-content",
+        headers={**bearer(harness), "Content-Type": "application/octet-stream"},
+        content=_DECLARED_CANDIDATE,
+    )
+    assert replayed.status_code == 200, replayed.text
+    assert dict(replayed.json()["data"]) == data
+    assert harness.sync_state.conflict_capture_count == 1
+
+
+def test_conflict_content_route_demands_the_device_access_credential(
+    harness: SmallFileRouteHarness,
+) -> None:
+    response = harness.client.put(
+        f"/api/uploads/{'a' * 40}/conflict-content",
+        headers={"Content-Type": "application/octet-stream"},
+        content=_CONTENT,
+    )
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "device_credential_invalid"
+
+
+def test_conflict_content_route_rejects_a_publication_operation_token(
+    harness: SmallFileRouteHarness,
+) -> None:
+    """A publication grant can never double as a capture grant."""
+
+    token = single_part_token(harness, create_body())
+
+    response = harness.client.put(
+        f"/api/uploads/{token}/conflict-content",
+        headers={**bearer(harness), "Content-Type": "application/octet-stream"},
+        content=_CONTENT,
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "small_file_upload_state_invalid"
+    assert harness.sync_state.publication_commits == 0
+    assert harness.sync_state.conflict_capture_count == 0
+
+
+def test_conflict_content_route_rejects_digest_mismatch_without_capturing(
+    harness: SmallFileRouteHarness,
+) -> None:
+    body = _update_body(digest_matches_current=False)
+    harness.sync_state.current_reference = _current_reference(body, source_version_id=uuid4())
+    granted = dict(preflight(harness, body).json()["data"])
+    token = str(granted["operation_id"])
+
+    response = harness.client.put(
+        f"/api/uploads/{token}/conflict-content",
+        headers={**bearer(harness), "Content-Type": "application/octet-stream"},
+        content=b"different bytes that fail the declared digest",
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "small_file_content_integrity_failed"
+    assert harness.sync_state.conflict_capture_count == 0
 
 
 def test_matching_update_base_returns_the_no_change_outcome(

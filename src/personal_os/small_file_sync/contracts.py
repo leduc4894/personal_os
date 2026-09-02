@@ -109,6 +109,34 @@ class SmallFileTerminalResultKind(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class SmallFileConflictCaptureResult:
+    """One captured stale-update conflict's opaque receipt (Child 8 spec 5.1).
+
+    The only outcome shape a conflict capture ever hands a client: the opaque
+    conflict identity, the source the conflict is bound to, the remote
+    version observed at capture time and the capture moment. No publication
+    receipt, source version, content version, digest, object key or byte
+    count is a member — a captured conflict published nothing, so none can
+    render. An exact replay of the capture event identity returns this value
+    unchanged.
+    """
+
+    conflict_id: UUID
+    source_id: UUID
+    observed_remote_version_id: UUID | None
+    captured_at: datetime
+
+    def __post_init__(self) -> None:
+        reject_nil_uuid("conflict_id", self.conflict_id)
+        reject_nil_uuid("source_id", self.source_id)
+        if self.observed_remote_version_id is not None:
+            reject_nil_uuid("observed_remote_version_id", self.observed_remote_version_id)
+        object.__setattr__(
+            self, "captured_at", normalize_utc_timestamp("captured_at", self.captured_at)
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class SmallFileIdempotencyKey:
     """Stable event idempotency key in canonical UUID text form.
 

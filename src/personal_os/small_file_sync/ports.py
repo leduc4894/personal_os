@@ -3,7 +3,9 @@
 The seams task 6 (durable PostgreSQL adapter) and task 7
 (:class:`~personal_os.small_file_sync.service.SmallFileSyncService`) build
 on: the injectable aware UTC clock, the durable upload-operation store and
-the server-side exclusion-policy guard. The store port exposes no SQLAlchemy
+the server-side exclusion-policy guard, plus the Child 8
+conflict-capture gateway through which a verified stale-update candidate is
+retained as conflict evidence. The store port exposes no SQLAlchemy
 row, database exception, R2 key, receipt or provider payload, and receives
 the server-owned :class:`~personal_os.diagnostics.context.DiagnosticContext`
 for correlation. Token minting, expiry durations and row locking are the
@@ -15,12 +17,15 @@ from __future__ import annotations
 from collections.abc import AsyncIterable, Callable
 from datetime import datetime
 from typing import Protocol
+from uuid import UUID
 
 from personal_os.diagnostics.context import DiagnosticContext
 from personal_os.error_contracts.codes import ErrorCode
 from personal_os.exclusion_policy.enforcement import AllowedPolicyRevisionBinding
+from personal_os.object_storage import VerifiedObjectReceipt
 from personal_os.small_file_sync.contracts import (
     BoundSmallFileOperation,
+    SmallFileConflictCaptureResult,
     SmallFileDeviceContext,
     SmallFilePreflight,
     SmallFileTerminalResult,
@@ -39,7 +44,11 @@ type AwareUtcClock = Callable[[], datetime]
 #: :class:`SmallFileBoundOperation` see the same shape through this alias.
 SmallFileBoundOperation = BoundSmallFileOperation
 
-__all__ = ["BoundSmallFileOperation", "SmallFileBoundOperation"]
+__all__ = [
+    "BoundSmallFileOperation",
+    "SmallFileBoundOperation",
+    "SmallFileConflictCaptureGateway",
+]
 
 
 class SmallFilePolicyGuard(Protocol):
@@ -92,6 +101,55 @@ class SmallFilePublicationGateway(Protocol):
         bound_operation: SmallFileBoundOperation,
         diagnostic_context: DiagnosticContext,
     ) -> SourceVersionPublicationResult: ...
+
+
+class SmallFileConflictCaptureGateway(Protocol):
+    """Retain one verified stale-update candidate as conflict evidence.
+
+    The Child 8 bridge seam: the composition root binds the shared
+    :class:`~personal_os.source_conflicts.service.SourceConflictService`
+    behind this port, so the small-file domain depends on a provider-neutral
+    capability instead of the conflict domain module. ``capture_stale_update``
+    receives the operation's frozen identity and the receipt of bytes that
+    already cleared the bounded size/digest verification — verified-object
+    admission stays on this boundary, never inside the conflict domain — and
+    returns only the opaque capture receipt; the underlying capture replays
+    by the event's idempotency identity, so a duplicate delivery returns the
+    original conflict. ``capture_edit_remote_delete`` retains the verified
+    candidate of an update whose current reference could not be served
+    because the server deleted the source: the adapter re-validates the
+    deletion against capture-time canonical state and answers ``None`` —
+    nothing retained — when the race is not confirmed, mirroring the
+    lifecycle gateway's discipline. ``resolve_captured_conflict`` is the
+    replay lookup a same-identity preflight performs before its normal
+    published/no-change classifier (Child 8 spec 5.1). No raw byte, digest,
+    locator or object key crosses this boundary in either direction.
+    """
+
+    async def capture_stale_update(
+        self,
+        *,
+        bound_operation: BoundSmallFileOperation,
+        verified_candidate: VerifiedObjectReceipt,
+        observed_remote_version_id: UUID | None,
+        diagnostic_context: DiagnosticContext,
+    ) -> SmallFileConflictCaptureResult: ...
+
+    async def capture_edit_remote_delete(
+        self,
+        *,
+        bound_operation: BoundSmallFileOperation,
+        verified_candidate: VerifiedObjectReceipt,
+        diagnostic_context: DiagnosticContext,
+    ) -> SmallFileConflictCaptureResult | None: ...
+
+    async def resolve_captured_conflict(
+        self,
+        *,
+        workspace_id: UUID,
+        originating_event_id: UUID,
+        diagnostic_context: DiagnosticContext,
+    ) -> SmallFileConflictCaptureResult | None: ...
 
 
 class SmallFileUploadOperationStore(Protocol):

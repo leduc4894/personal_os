@@ -360,6 +360,8 @@ describe("sync diagnostics trail contract v2 (device cursor and manifest reconci
   });
 
   it("admits the five new kinds into the closed kind vocabulary", () => {
+    // Conflict inbox task 9 adds the `conflict_failure` kind (the sixth
+    // extension kind) for the controller/composition failure tokens.
     expect(SYNC_DIAGNOSTIC_KINDS).toEqual([
       "wire_failure",
       "pass_outcome",
@@ -374,6 +376,7 @@ describe("sync diagnostics trail contract v2 (device cursor and manifest reconci
       "reconcile_failure",
       "composition_read_failure",
       "multipart_failure",
+      "conflict_failure",
     ]);
   });
 
@@ -941,6 +944,105 @@ describe("sync diagnostics trail multipart_failure entries (multipart task 11)",
       "uploadId",
     ]) {
       expect(sidecarText).not.toContain(forbiddenText);
+    }
+  });
+});
+
+
+// --- the conflict inbox failure surface (Task 9) ------------------------------------------------------
+
+describe("sync diagnostics trail conflict failure surface", () => {
+  it("round-trips one conflict_failure entry through the sidecar reload", async () => {
+    const store = new FakeTrailFileStore();
+    const trail = createSyncDiagnosticsTrail({ fileStore: store });
+    await trail.load();
+    await trail.append({
+      kind: "conflict_failure",
+      tokens: ["conflict_vault_apply_failed"],
+    });
+    await trail.append({
+      kind: "conflict_failure",
+      tokens: ["conflict_repair_store_failed", "journal_mutation_failed"],
+    });
+
+    const reloaded = createSyncDiagnosticsTrail({ fileStore: store });
+    await reloaded.load();
+    expect(reloaded.readEntries()).toEqual([
+      { kind: "conflict_failure", atEpochMs: expect.any(Number), tokens: ["conflict_vault_apply_failed"] },
+      {
+        kind: "conflict_failure",
+        atEpochMs: expect.any(Number),
+        tokens: ["conflict_repair_store_failed", "journal_mutation_failed"],
+      },
+    ]);
+  });
+
+  it("admits every closed conflict composition reason as a trail token", async () => {
+    const { CONFLICT_COMPOSITION_DIAGNOSTIC_REASONS } = await import("../conflicts/composition");
+    const store = new FakeTrailFileStore();
+    const trail = createSyncDiagnosticsTrail({ fileStore: store });
+    await trail.load();
+    for (const reason of CONFLICT_COMPOSITION_DIAGNOSTIC_REASONS) {
+      await trail.append({ kind: "conflict_failure", tokens: [reason] });
+    }
+    expect(trail.readEntries()).toHaveLength(CONFLICT_COMPOSITION_DIAGNOSTIC_REASONS.length);
+  });
+
+  it("rejects a foreign conflict_failure token at the closed sidecar gate", async () => {
+    // A hand-crafted sidecar carrying a path-shaped token under the
+    // conflict_failure kind fails the closed token gate: the load resets
+    // the trail and records the bounded `trail_reset` entry.
+    const store = new FakeTrailFileStore();
+    const foreignSidecar = new TextEncoder().encode(
+      JSON.stringify({
+        contract: SYNC_DIAGNOSTICS_TRAIL_CONTRACT,
+        entries: [
+          { kind: "conflict_failure", at_epoch_ms: 1, tokens: ["notes/secret-path.md"] },
+        ],
+      }),
+    );
+    await store.writeBinary(SYNC_DIAGNOSTICS_TRAIL_FILE_NAME, foreignSidecar.slice().buffer as ArrayBuffer);
+    const reset = createSyncDiagnosticsTrail({ fileStore: store });
+    await reset.load();
+    expect(reset.readEntries()).toEqual([
+      { kind: "trail_reset", atEpochMs: expect.any(Number), tokens: [] },
+    ]);
+  });
+
+  it("never carries a conflict_failure stop reason into the derived stop reasons", async () => {
+    const { deriveSyncStopReasonTokens } = await import("./sync-diagnostics-export");
+    const store = new FakeTrailFileStore();
+    const trail = createSyncDiagnosticsTrail({ fileStore: store });
+    await trail.load();
+    await trail.append({ kind: "conflict_failure", tokens: ["conflict_vault_apply_failed"] });
+    expect(deriveSyncStopReasonTokens(trail.readEntries())).toEqual([]);
+  });
+
+  it("renders the conflict failure tail sanitized in the export block", async () => {
+    const { renderSyncDiagnosticsExportBlock } = await import("./sync-diagnostics-export");
+    const store = new FakeTrailFileStore();
+    const trail = createSyncDiagnosticsTrail({ fileStore: store });
+    await trail.load();
+    await trail.append({
+      kind: "conflict_failure",
+      tokens: ["conflict_repair_store_failed", "journal_mutation_failed"],
+    });
+    const block = renderSyncDiagnosticsExportBlock({
+      syncStatusLine: null,
+      syncBlockerGuidance: [],
+      journalStoreDiagnostics: {
+        lastJournalFailureReasons: [],
+        generationPublishFailureCount: 0,
+        lastGenerationPublishFailureReasons: [],
+      },
+      trailEntryCount: trail.readEntries().length,
+      trailAppendFailureCount: 0,
+      trailTail: trail.readEntries(),
+    });
+    expect(block).toContain("conflict_failure");
+    expect(block).toContain("conflict_repair_store_failed");
+    for (const forbiddenText of ["notes/", ".md", "conflict_id", "https://"]) {
+      expect(block).not.toContain(forbiddenText);
     }
   });
 });

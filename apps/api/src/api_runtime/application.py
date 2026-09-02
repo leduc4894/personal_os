@@ -4,14 +4,16 @@ The factory composes exactly two health routes plus the five session/password
 routes, six TOTP/recovery routes, seven browser device-authorization and
 device-token routes, two Admin device routes of the injected
 web-authentication runtime, the optional runtime-gated exclusion-policy,
-small-file sync, multipart upload, source-lifecycle and device-sync route
-sets — including the read-only sync rejection diagnostics Admin route of the
+small-file sync, multipart upload, source-lifecycle, device-sync and
+source-conflict route sets — including the read-only sync rejection
+diagnostics Admin route of the
 small-file-sync runtime, the read-only policy diagnostics Admin route of the
 exclusion-policy runtime, the read-only Prometheus text policy metrics
 exposition route of the exclusion-policy runtime, the eight device sync
-routes of the device reconciliation surface, the five multipart upload
-session routes of the resumable multipart transfer and the local/test-only
-OpenAPI document route —
+routes of the device reconciliation surface, the four source conflict
+Conflict Inbox routes of the source-conflict runtime, the five multipart
+upload session routes of the resumable multipart transfer and the
+local/test-only OpenAPI document route —
 registers the four envelope exception handlers,
 strips FastAPI's default validation-error response from the generated
 document (the shared handler emits the canonical error envelope instead),
@@ -109,10 +111,19 @@ from api_runtime.small_file_sync_diagnostics_routes import (
     create_sync_diagnostics_admin_route_endpoints,
 )
 from api_runtime.small_file_sync_models import (
+    SmallFileConflictCaptureData,
     SmallFilePreflightData,
     SmallFileTerminalResultData,
 )
 from api_runtime.small_file_sync_routes import create_small_file_sync_route_endpoints
+from api_runtime.source_conflict_composition import SourceConflictRuntime
+from api_runtime.source_conflict_models import (
+    SourceConflictCandidateData,
+    SourceConflictDetailData,
+    SourceConflictPageData,
+    SourceConflictResolutionData,
+)
+from api_runtime.source_conflict_routes import create_source_conflict_route_endpoints
 from api_runtime.source_lifecycle_composition import SourceLifecycleRuntime
 from api_runtime.source_lifecycle_diagnostics_models import SourceLifecycleDiagnosticsData
 from api_runtime.source_lifecycle_diagnostics_routes import (
@@ -183,6 +194,7 @@ _NO_STORE_HEADERS: Final[Mapping[str, str]] = MappingProxyType({"cache-control":
 _NON_JSON_SUCCESS_MEDIA_BY_OPERATION: Final[Mapping[str, str]] = MappingProxyType(
     {
         "downloadDeviceSourceVersion": "application/octet-stream",
+        "downloadSourceConflictEvidence": "application/octet-stream",
         "getMetricsExposition": PROMETHEUS_TEXT_CONTENT_TYPE,
     }
 )
@@ -214,17 +226,18 @@ def create_api_application(
     multipart_upload: MultipartUploadRuntime | None = None,
     source_lifecycle: SourceLifecycleRuntime | None = None,
     device_sync: DeviceSyncRuntime | None = None,
+    source_conflicts: SourceConflictRuntime | None = None,
     event_sink: DiagnosticEventSink | None = None,
     lifespan: Lifespan[FastAPI] | None = None,
 ) -> FastAPI:
     """Compose the runnable API application for one runtime environment.
 
-    The exclusion-policy, small-file-sync, multipart-upload, source-lifecycle
-    and device-sync runtimes are optional only so the authentication-only
-    contract compositions of the earlier children stay constructible; the
-    serve graph and the full contract document always compose them, and the
-    routes register only when the runtime is present — never through router
-    auto-discovery.
+    The exclusion-policy, small-file-sync, multipart-upload, source-lifecycle,
+    device-sync and source-conflict runtimes are optional only so the
+    authentication-only contract compositions of the earlier children stay
+    constructible; the serve graph and the full contract document always
+    compose them, and the routes register only when the runtime is present —
+    never through router auto-discovery.
     """
     app = FastAPI(
         title="Personal Knowledge API",
@@ -275,6 +288,8 @@ def create_api_application(
         )
     if device_sync is not None:
         _register_device_sync_routes(app, web_authentication, device_sync)
+    if source_conflicts is not None:
+        _register_source_conflict_routes(app, web_authentication, source_conflicts)
     _classify_openapi_route(app)
     _suppress_framework_validation_error_document(app)
     # The pure-ASGI correlation middleware declares read-only ``Mapping``
@@ -733,6 +748,24 @@ def _register_small_file_sync_routes(
             }
         },
     )
+    app.add_api_route(
+        "/api/uploads/{operation_id}/conflict-content",
+        endpoints.upload_conflict_candidate_content,
+        methods=["PUT"],
+        operation_id="uploadSmallFileConflictContent",
+        response_model=ApiEnvelope[SmallFileConflictCaptureData],
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "description": (
+                    "The exact raw candidate bytes of the conflict-granted capture operation"
+                ),
+                "content": {
+                    "application/octet-stream": {"schema": {"type": "string", "format": "binary"}}
+                },
+            }
+        },
+    )
 
 
 def _register_multipart_upload_routes(
@@ -899,6 +932,82 @@ def _register_device_sync_routes(
                         "description": "The exact lowercase SHA-256 of the streamed bytes",
                         "schema": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
                     },
+                },
+            }
+        },
+    )
+
+
+def _register_source_conflict_routes(
+    app: FastAPI,
+    web_authentication: WebAuthenticationRuntime,
+    source_conflicts: SourceConflictRuntime,
+) -> None:
+    """Register the closed source conflict route set (Child 8 spec 6).
+
+    Each route carries its manually assigned semantic operation id and the
+    envelope response model of its strict payload; the access Bearer
+    dependency, the credential-derived workspace scope and the closed error
+    mapping live in the endpoint factory. The binary evidence download
+    documents its success as exactly one ``application/octet-stream``
+    binary payload with its exact content headers — the same documented
+    exception to the JSON envelope as the verified device download — and
+    never a form, callback or presigned target.
+    """
+    endpoints = create_source_conflict_route_endpoints(
+        web_authentication=web_authentication, source_conflicts=source_conflicts
+    )
+    app.add_api_route(
+        "/api/sync/conflicts",
+        endpoints.list_conflicts,
+        methods=["GET"],
+        operation_id="listSourceConflicts",
+        response_model=ApiEnvelope[SourceConflictPageData],
+    )
+    app.add_api_route(
+        "/api/sync/conflicts/{conflict_id}",
+        endpoints.get_conflict,
+        methods=["GET"],
+        operation_id="getSourceConflict",
+        response_model=ApiEnvelope[SourceConflictDetailData],
+    )
+    app.add_api_route(
+        "/api/sync/conflicts/{conflict_id}/evidence/{role}",
+        endpoints.download_evidence,
+        methods=["GET"],
+        operation_id="downloadSourceConflictEvidence",
+        responses={
+            "200": {
+                "description": (
+                    "The exact verified evidence bytes of the closed role as one "
+                    "binary payload with its exact Content-Type and Content-Length "
+                    "headers"
+                ),
+                "content": {
+                    "application/octet-stream": {"schema": {"type": "string", "format": "binary"}}
+                },
+            }
+        },
+    )
+    app.add_api_route(
+        "/api/sync/conflicts/{conflict_id}/resolve",
+        endpoints.resolve_conflict,
+        methods=["POST"],
+        operation_id="resolveSourceConflict",
+        response_model=ApiEnvelope[SourceConflictResolutionData],
+    )
+    app.add_api_route(
+        "/api/sync/conflicts/{conflict_id}/candidate",
+        endpoints.upload_candidate,
+        methods=["PUT"],
+        operation_id="uploadSourceConflictResolutionCandidate",
+        response_model=ApiEnvelope[SourceConflictCandidateData],
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "description": ("The exact raw merged-result bytes of the resolution candidate"),
+                "content": {
+                    "application/octet-stream": {"schema": {"type": "string", "format": "binary"}}
                 },
             }
         },

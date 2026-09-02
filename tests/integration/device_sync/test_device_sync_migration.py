@@ -665,7 +665,7 @@ async def _assert_reupgraded_state(stack: SourcePublicationStack) -> None:
                     " WHERE table_schema = 'knowledge'"
                 )
             )
-            assert int(table_count.scalar_one()) == 39
+            assert int(table_count.scalar_one()) == 40
             cursor_count = await connection.execute(
                 sa.select(sa.func.count()).select_from(device_cursors)
             )
@@ -697,7 +697,7 @@ async def _assert_submitted_policy_allowed_column_present(
                     " WHERE table_schema = 'knowledge'"
                 )
             )
-            assert int(table_count.scalar_one()) == 39
+            assert int(table_count.scalar_one()) == 40
     finally:
         await dispose_source_store_engine(engine)
 
@@ -725,8 +725,9 @@ async def _assert_submitted_policy_allowed_column_absent(
                     " WHERE table_schema = 'knowledge'"
                 )
             )
-            # A column add changes no catalog counts, so the schema keeps its
-            # full application-table set after the downgrade.
+            # A column add changes no catalog counts, so the schema keeps
+            # every table the downgrade target owns: the walk dropped only
+            # the source-conflict aggregate of ``20260902_01`` above it.
             assert int(table_count.scalar_one()) == 39
     finally:
         await dispose_source_store_engine(engine)
@@ -768,7 +769,8 @@ def test_submitted_policy_allowed_column_survives_upgrade_and_downgrade(
     exists as a nullable boolean (NULL marks legacy rows appended before the
     revision).  Downgrade to the sealed-operation-token revision: the column
     is absent.  A column add changes no catalog counts, so the schema keeps
-    its 39 application tables on both sides of the round trip.
+    every application table each side owns — 40 at head, 39 below the
+    source-conflict revision ``20260902_01`` whose aggregate the walk drops.
     """
 
     upgrade = _alembic("upgrade", "head")

@@ -617,6 +617,9 @@ def test_metric_contracts_pin_exact_names_and_label_dimensions() -> None:
 def test_metric_label_values_are_closed_enums() -> None:
     assert {outcome.value for outcome in SmallFileMetricOutcome} == {
         "committed",
+        # The Child 8 capture outcome: the stream completed and the verified
+        # candidate was retained as conflict evidence, with no publication.
+        "conflict_captured",
         "integrity_failed",
         "rejected",
     }

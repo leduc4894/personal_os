@@ -781,7 +781,7 @@ const V6_SEEDED_LOCAL_FILE_SQL = [
 async function writeVerifiedOlderStore(
   store: InMemoryJournalFileStore,
   options: {
-    readonly schemaVersion: 6 | 7;
+    readonly schemaVersion: 6 | 7 | 8;
     readonly isReconcileRequired: boolean;
     readonly isMigrationBroken?: boolean;
   },
@@ -793,7 +793,11 @@ async function writeVerifiedOlderStore(
   const engine = new engineModule.Database(currentImage);
   try {
     engine.exec("begin immediate;");
-    engine.exec("drop table multipart_upload_progress;");
+    engine.exec("drop table conflict_local_repairs;");
+    if (options.schemaVersion !== 8) {
+      // Only a pre-v8 lineage lacks the multipart progress table.
+      engine.exec("drop table multipart_upload_progress;");
+    }
     if (options.schemaVersion === 6) {
       for (const table of DEVICE_SYNC_V7_TABLES) {
         engine.exec(`drop table ${table};`);
@@ -1012,6 +1016,76 @@ describe("JournalPersistence v7 to v8 migration (task 9, child 7 spec 4.1)", () 
       generationNumber: 2,
       schemaVersion: JOURNAL_SCHEMA_VERSION,
     });
+    reopened.close();
+  });
+});
+
+describe("JournalPersistence v8 to v9 migration (task 7, Child 8 spec 6)", () => {
+  it("migrates a verified v8 generation and publishes the v9 generation before exposing the journal", async () => {
+    const store = new InMemoryJournalFileStore();
+    await writeVerifiedOlderStore(store, { isReconcileRequired: true, schemaVersion: 8 });
+
+    const journal = await openedPersistence(store);
+    expect(journal.recoveryState).toBe("verified_generation_loaded");
+    expect(journal.verifiedGenerationNumber).toBe(2);
+
+    const manifest = await readManifest(store);
+    expect(manifest.current).toMatchObject({
+      generationNumber: 2,
+      schemaVersion: JOURNAL_SCHEMA_VERSION,
+    });
+    expect(manifest.prior).toMatchObject({ generationNumber: 1, schemaVersion: 8 });
+    expect(await store.exists(generationFileName(1))).toBe(true);
+    expect(await store.exists(generationFileName(2))).toBe(true);
+
+    expect(journal.readJournalMeta().schemaVersion).toBe(JOURNAL_SCHEMA_VERSION);
+    expect(journal.readJournalMeta().isReconcileRequired).toBe(true);
+
+    // Every v8 row survived, and the no-byte repair table starts empty.
+    const fileCount = journal.readAll("select count(*) from local_files;")[0]?.values[0]?.[0];
+    expect(fileCount).toBe(1);
+    const repairRowCount = journal.readAll(
+      "select count(*) from conflict_local_repairs;",
+    )[0]?.values[0]?.[0];
+    expect(repairRowCount).toBe(0);
+    journal.close();
+  });
+
+  it("reopens the migrated v9 generation without migrating again", async () => {
+    const store = new InMemoryJournalFileStore();
+    await writeVerifiedOlderStore(store, { isReconcileRequired: false, schemaVersion: 8 });
+    const first = await openedPersistence(store);
+    first.close();
+
+    const reopened = await openedPersistence(store);
+    expect(reopened.recoveryState).toBe("verified_generation_loaded");
+    expect(reopened.verifiedGenerationNumber).toBe(2);
+    const manifest = await readManifest(store);
+    expect(manifest.current).toMatchObject({
+      generationNumber: 2,
+      schemaVersion: JOURNAL_SCHEMA_VERSION,
+    });
+    reopened.close();
+  });
+
+  it("falls back to the retained v8 prior generation and migrates it when the newest image is torn", async () => {
+    const store = new InMemoryJournalFileStore();
+    await writeVerifiedOlderStore(store, { isReconcileRequired: false, schemaVersion: 8 });
+    const migrated = await openedPersistence(store);
+    migrated.close();
+    // Tear the newest migrated generation: recovery must fall back to the
+    // retained v8 prior generation and migrate that image again.
+    const tornBytes = (await store.readBinary(generationFileName(2))).slice(0, 64);
+    await store.writeBinary(generationFileName(2), tornBytes);
+
+    const reopened = await openedPersistence(store);
+    expect(reopened.recoveryState).toBe("prior_generation_recovered");
+    expect(reopened.verifiedGenerationNumber).toBe(2);
+    const manifest = await readManifest(store);
+    expect(manifest.current.schemaVersion).toBe(JOURNAL_SCHEMA_VERSION);
+    expect(manifest.prior).toMatchObject({ generationNumber: 1, schemaVersion: 8 });
+    const fileCount = reopened.readAll("select count(*) from local_files;")[0]?.values[0]?.[0];
+    expect(fileCount).toBe(1);
     reopened.close();
   });
 });
