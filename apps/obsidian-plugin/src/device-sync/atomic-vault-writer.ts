@@ -427,7 +427,23 @@ export class AtomicVaultWriterImpl implements AtomicVaultWriter {
     const sequencedSeam: VaultMutationSeam = {
       locatorExists: (locator) => seam.locatorExists(locator),
       createFile: (locator, bytes) => seam.createFile(locator, bytes),
-      readBytes: (locator) => seam.readBytes(locator),
+      readBytes: async (locator) => {
+        const bytes = await seam.readBytes(locator);
+        if (bytes === null && !hasDurableProof && isUpdate && locator === target) {
+          // The target of an UPDATED apply vanished mid-apply — between
+          // the occupied-target shape check and the base proof, a window
+          // that spans the whole staging write. The primitive would take
+          // the created shape and silently skip the pinned-base proof;
+          // refuse instead, exactly the divergence the base fingerprint
+          // exists to catch. The !hasDurableProof gate matches only the
+          // prove-base read: every later read of the target follows the
+          // first rename (and the durable proof), and the primitive owns
+          // the null handling of those. The throw maps to prove_base →
+          // the divergence refusal below.
+          throw writerError("vault_mutation", "device_manifest_local_diverged", false);
+        }
+        return bytes;
+      },
       trashLocator: (locator) => seam.trashLocator(locator),
       renameLocator: async (fromLocator, toLocator) => {
         if (!hasDurableProof) {

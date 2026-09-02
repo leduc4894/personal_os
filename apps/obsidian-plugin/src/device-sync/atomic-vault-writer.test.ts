@@ -17,7 +17,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import { sha256Hex } from "../exclusion-policy/canonical-json";
 import type { FrozenFingerprint } from "../journal/contracts";
-import { JOURNAL_SCHEMA_VERSION, SqliteDatabase } from "../journal/sqlite-database";
+import { JOURNAL_SCHEMA_VERSION, SqliteDatabase, journalStoreError } from "../journal/sqlite-database";
 import type { SqliteEngineModule } from "../journal/sqlite-database";
 import type { PreparedRemoteApply, RemoteApplyTransition } from "./contracts";
 import type { DeviceSyncRepository as DeviceSyncRepositoryPort } from "./contracts";
@@ -306,13 +306,11 @@ describe("AtomicVaultWriter durable temp_verified ordering", () => {
    * A bound-method delegate over the real repository (the applier suite's
    * pattern): private fields keep working because every method runs with
    * the original receiver, and the plain object stays structurally
-   * assignable to the writer's repository port while the wrapper records
-   * every durable remote-apply transition.
+   * assignable to the writer's repository port.
    */
-  function transitionRecordingRepository(
+  function boundRepositoryDelegate(
     repository: DeviceSyncRepository,
-    transitions: RemoteApplyTransition[],
-  ): DeviceSyncRepositoryPort {
+  ): DeviceSyncRepositoryPort & Record<string, unknown> {
     const delegate: Record<string, unknown> = {};
     for (const key of Object.getOwnPropertyNames(Object.getPrototypeOf(repository))) {
       if (key === "constructor") {
@@ -323,12 +321,21 @@ describe("AtomicVaultWriter durable temp_verified ordering", () => {
         delegate[key] = value.bind(repository);
       }
     }
+    return delegate as DeviceSyncRepositoryPort & Record<string, unknown>;
+  }
+
+  /** A delegate that records every durable remote-apply transition. */
+  function transitionRecordingRepository(
+    repository: DeviceSyncRepository,
+    transitions: RemoteApplyTransition[],
+  ): DeviceSyncRepositoryPort {
+    const delegate = boundRepositoryDelegate(repository);
     const originalTransition = repository.transitionRemoteApply.bind(repository);
     delegate["transitionRemoteApply"] = async (input: RemoteApplyTransition): Promise<void> => {
       await originalTransition(input);
       transitions.push(input);
     };
-    return delegate as unknown as DeviceSyncRepositoryPort;
+    return delegate as DeviceSyncRepositoryPort;
   }
 
   it("records temp_verified before the seam's first visible mutation", async () => {
@@ -389,6 +396,35 @@ describe("AtomicVaultWriter durable temp_verified ordering", () => {
 
     expect(durableStateAtFirstVisibleMutation).toEqual(["temp_verified"]);
   });
+
+  it("surfaces a refused temp_verified transition as verify_temp with the store reason and no mutation", async () => {
+    const { repository, seam, writer } = createHarness((real) => {
+      const delegate = boundRepositoryDelegate(real);
+      delegate["transitionRemoteApply"] = async (): Promise<void> => {
+        throw journalStoreError("journal_mutation_failed");
+      };
+      return delegate as DeviceSyncRepositoryPort;
+    });
+    const { base, next } = await prepareContentApply(repository);
+    seam.setFileBytes("notes/a.md", bytesOf("base content"));
+
+    const error = await writerErrorOf(writer.stageAndReplace(contentInput(base, next)));
+
+    // The refusal aborts the first visible mutation and surfaces through
+    // the writer's own verify_temp/store-reason mapping — never as a
+    // replace failure and never with a second transition attempt.
+    expect(error.stage).toBe("verify_temp");
+    expect(error.reason).toBe("journal_mutation_failed");
+    expect(error.retryable).toBe(false);
+    // No visible mutation happened, the durable row stays prepared, and
+    // the staged sibling remains as recovery evidence.
+    expect(seam.renameLog).toEqual([]);
+    expect(new TextDecoder().decode(seam.files.get("notes/a.md") ?? new Uint8Array())).toBe(
+      "base content",
+    );
+    expect(seam.files.has(buildTempSiblingLocator("notes/a.md", TEMP_TOKEN))).toBe(true);
+    expect(repository.readUnfinishedApply()?.state).toBe("prepared");
+  });
 });
 
 // --- occupied-target and base-fingerprint conflicts --------------------------------------------------
@@ -443,6 +479,34 @@ describe("AtomicVaultWriter occupied-target and base-fingerprint conflicts", () 
 
     expect(error.stage).toBe("vault_mutation");
     expect(error.reason).toBe("device_manifest_local_diverged");
+  });
+
+  it("refuses an updated apply whose target vanishes mid-apply instead of skipping the base proof", async () => {
+    const { repository, seam, writer } = createHarness();
+    const { base, next } = await prepareContentApply(repository);
+    seam.setFileBytes("notes/a.md", bytesOf("base content"));
+    // A local deletion lands while the apply is staging its hidden
+    // sibling: the occupied-target shape check already passed, so only
+    // the mid-apply base proof can still catch the divergence — the
+    // apply must settle as a conflict, never silently create the target.
+    seam.onAction = (method, from) => {
+      const isTempStaging =
+        method === "createFile" && from === buildTempSiblingLocator("notes/a.md", TEMP_TOKEN);
+      if (isTempStaging) {
+        seam.files.delete("notes/a.md");
+      }
+    };
+
+    const error = await writerErrorOf(writer.stageAndReplace(contentInput(base, next)));
+
+    expect(error.stage).toBe("vault_mutation");
+    expect(error.reason).toBe("device_manifest_local_diverged");
+    expect(error.retryable).toBe(false);
+    // The refusal precedes the durable proof and the replace: the row
+    // stays prepared and the vanished target is NOT recreated.
+    expect(repository.readUnfinishedApply()?.state).toBe("prepared");
+    expect(seam.files.has("notes/a.md")).toBe(false);
+    expect(seam.renameLog).toEqual([]);
   });
 });
 
