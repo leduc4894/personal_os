@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from io import StringIO
 from pathlib import Path
 from typing import Final
+from unittest import mock
 
 import httpx
 import pytest
@@ -904,3 +905,114 @@ def test_failed_wdio_maps_malformed_or_unsafe_phase_status_to_generic_code(
         "state": "error",
     }
     assert _CHILD_OUTPUT_SENTINEL not in output.getvalue()
+
+
+def test_bootstrap_only_flag_prepares_journey_without_wdio_tail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--bootstrap-only` ends at policy publication and never starts WDIO."""
+    arguments = live_bootstrap._build_parser().parse_args(
+        ["--project-name", "knowledge-ci-bootstrap-only", "--bootstrap-only"]
+    )
+    assert arguments.bootstrap_only is True
+    password_file = tmp_path / "web-credential-password.key"
+    password_file.write_text(_PASSWORD_SENTINEL, encoding="utf-8")
+    events: list[str] = []
+    wdio_journey = mock.Mock()
+    monkeypatch.setattr(live_bootstrap, "_run_wdio_journey", wdio_journey)
+
+    output = StringIO()
+    exit_code = run_live_acceptance(
+        LiveAcceptanceConfig(
+            repository_root=tmp_path,
+            project_name="knowledge-ci-bootstrap-only",
+            username="duc",
+            workspace_key="duc-knowledge",
+            server_origin="http://127.0.0.1:8000",
+            allowed_origin="https://app.example.test",
+            password_file=password_file,
+            runtime_environment={"CI": "true", "KNOWLEDGE_ENVIRONMENT": "local"},
+            bootstrap_only=True,
+        ),
+        executor=FreshDisposableExecutor(
+            events,
+            {"totp_active": True},
+            is_credential_enrolled=True,
+        ),
+        client_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("active TOTP must not start enrollment")
+        ),
+        output=output,
+    )
+
+    assert exit_code == 0
+    wdio_journey.assert_not_called()
+    assert events == [
+        "stack_ready",
+        "migration_applied",
+        "identity_ready",
+        "credential_status",
+        "policy_key_ready",
+        "totp_preflight_active",
+        "policy_published",
+    ]
+    assert "wdio_started" not in events
+    assert json.loads(output.getvalue()) == {
+        "result_code": "obsidian_live_bootstrap_ready",
+        "state": "complete",
+    }
+    assert _CHILD_OUTPUT_SENTINEL not in output.getvalue()
+    result_path = tmp_path / ".local" / "knowledge-ci-bootstrap-only.obsidian-live-result.json"
+    assert json.loads(result_path.read_text(encoding="utf-8")) == {
+        "result_code": "obsidian_live_bootstrap_ready",
+        "state": "complete",
+        "wdio_phase": None,
+    }
+
+
+def test_default_invocation_still_runs_the_wdio_tail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the flag the helper keeps its WDIO terminal behavior."""
+    arguments = live_bootstrap._build_parser().parse_args(
+        ["--project-name", "knowledge-ci-default-tail"]
+    )
+    assert arguments.bootstrap_only is False
+    password_file = tmp_path / "web-credential-password.key"
+    password_file.write_text(_PASSWORD_SENTINEL, encoding="utf-8")
+    events: list[str] = []
+    wdio_journey = mock.Mock()
+    monkeypatch.setattr(live_bootstrap, "_run_wdio_journey", wdio_journey)
+
+    output = StringIO()
+    exit_code = run_live_acceptance(
+        LiveAcceptanceConfig(
+            repository_root=tmp_path,
+            project_name="knowledge-ci-default-tail",
+            username="duc",
+            workspace_key="duc-knowledge",
+            server_origin="http://127.0.0.1:8000",
+            allowed_origin="https://app.example.test",
+            password_file=password_file,
+            runtime_environment={"CI": "true", "KNOWLEDGE_ENVIRONMENT": "local"},
+        ),
+        executor=FreshDisposableExecutor(
+            events,
+            {"totp_active": True},
+            is_credential_enrolled=True,
+        ),
+        client_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("active TOTP must not start enrollment")
+        ),
+        output=output,
+    )
+
+    assert exit_code == 0
+    wdio_journey.assert_called_once()
+    assert "policy_published" in events
+    assert json.loads(output.getvalue()) == {
+        "result_code": "obsidian_live_acceptance_passed",
+        "state": "complete",
+    }

@@ -170,6 +170,7 @@ class LiveAcceptanceConfig:
     wdio_spec: str = "test/specs/source-lifecycle.e2e.ts"
     policy_key_file_name: str = "policy_signing_b.pem"
     keep_wdio_phase_status: bool = False
+    bootstrap_only: bool = False
 
 
 _EXCEPTION_BOOKKEEPING_FIELDS: Final[frozenset[str]] = frozenset(
@@ -524,6 +525,16 @@ def _execute_live_acceptance(
     )
     policy_time_step = time_step_of(unix_time_seconds=int(time.time()))
     _wait_for_unused_totp_step(policy_time_step)
+    if config.bootstrap_only:
+        # Journey-ready state: stop before the WDIO tail (the manual Desktop
+        # journey owns that part). Drop any stale WDIO phase marker so the
+        # final result cannot inherit a previous session's phase.
+        _remove_wdio_phase_status(_wdio_phase_status_path(config))
+        return
+    _run_wdio_journey(config, executor)
+
+
+def _run_wdio_journey(config: LiveAcceptanceConfig, executor: CommandExecutor) -> None:
     wdio_phase_status = _wdio_phase_status_path(config)
     _remove_wdio_phase_status(wdio_phase_status)
     wdio_environment = dict(_live_child_environment(config))
@@ -606,8 +617,13 @@ def run_live_acceptance(
         _write_final_result(config, "error", "live_acceptance_internal_error")
         _print_status(output, "error", "live_acceptance_internal_error")
         return 1
-    _write_final_result(config, "complete", "obsidian_live_acceptance_passed")
-    _print_status(output, "complete", "obsidian_live_acceptance_passed")
+    result_code = (
+        "obsidian_live_bootstrap_ready"
+        if config.bootstrap_only
+        else "obsidian_live_acceptance_passed"
+    )
+    _write_final_result(config, "complete", result_code)
+    _print_status(output, "complete", result_code)
     return 0
 
 
@@ -644,6 +660,7 @@ def build_live_acceptance_config(
     server_origin: str,
     wdio_spec: str = "test/specs/source-lifecycle.e2e.ts",
     keep_wdio_phase_status: bool = False,
+    bootstrap_only: bool = False,
     environ: Mapping[str, str],
 ) -> LiveAcceptanceConfig:
     """Load non-secret runtime names from the authoritative local launcher."""
@@ -669,6 +686,7 @@ def build_live_acceptance_config(
         allowed_origin=launcher_exports["KNOWLEDGE_AUTH_ALLOWED_ORIGIN"],
         wdio_spec=wdio_spec,
         keep_wdio_phase_status=keep_wdio_phase_status,
+        bootstrap_only=bootstrap_only,
         password_file=secret_root / "web-credential-password.key",
         runtime_environment=runtime_environment,
         policy_key_file_name=launcher_exports["KNOWLEDGE_POLICY_SIGNING_KEY_FILE"],
@@ -693,6 +711,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default="test/specs/source-lifecycle.e2e.ts",
     )
     parser.add_argument("--keep-wdio-phase-status", action="store_true")
+    parser.add_argument(
+        "--bootstrap-only",
+        action="store_true",
+        help="stop after policy publication (journey-ready) without the WDIO run",
+    )
     return parser
 
 
@@ -706,6 +729,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             server_origin=cast(str, arguments.server_origin),
             wdio_spec=cast(str, arguments.wdio_spec),
             keep_wdio_phase_status=bool(arguments.keep_wdio_phase_status),
+            bootstrap_only=bool(arguments.bootstrap_only),
             environ=os.environ,
         )
     except LiveAcceptanceFailure as failure:
