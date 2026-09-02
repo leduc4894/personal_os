@@ -3,9 +3,9 @@
 - **Plan:** `docs/superpowers/plans/2026-09-02-retire-initial-totp-offer.md`
 - **Spec:** `docs/superpowers/specs/2026-09-02-retire-initial-totp-offer-spec.md`
 - **Branch:** `retire-initial-totp-offer` (from `master` @ `7995e9c`)
-- **Final code SHA:** `64dd65d`; docs closure commit `5695126` carries this
-  handoff (a handoff cannot contain its own carrying commit's hash, so the
-  closure SHA is recorded here by this follow-up note)
+- **Final code SHA:** `620696d` (description-only docstring/artifact fix); docs
+  follow-ups `5695126` → `d285c26` → this bookkeeping commit (a handoff cannot
+  contain its own carrying commit's hash; every post-code commit is docs-only)
 - **Status:** COMPLETE — all four plan tasks landed, every automated gate
   PASS at the final tip. The obsolete "initial TOTP offer/dismissal"
   contract is gone end to end: Web Skip UI and client method, the
@@ -18,7 +18,8 @@
 
 | Gate | Result | Evidence |
 |---|---|---|
-| `uv run poe verify` (Task 4, at `64dd65d` + docs edits) | PASS (exit 0) | 14 sub-gates green: ruff format-check/lint, pnpm format:check/lint, mypy strict (223 files), pnpm type-check, import boundaries, architecture contract tests, `api_contract_artifacts.py check` (`api_contract_current`), api-client `generate:check`, pytest `4623 passed, 21 skipped, 550 deselected`, pnpm test (web 21 files / plugin 64 files / api-client 1 file), uv build + pnpm build. Log: `.superpowers/sdd/2026-09-02-retire-initial-totp-offer/verify-log.txt` |
+| `uv run poe verify` (re-run at final tip `620696d`, post final-review fix wave) | PASS (exit 0) | api_contract_current; pytest 4644 selected / 550 deselected (incl. 21 skipped); web 21 files / 161 tests; obsidian-plugin 64 files / 1444 tests; api-client 1 test; mypy strict, architecture boundaries, format/lint, uv+pnpm builds green |
+| `uv run poe verify` (Task 4, at `64dd65d` + docs edits) | PASS (exit 0) | 14 sub-gates green: ruff format-check/lint, pnpm format:check/lint, mypy strict (223 files), pnpm type-check, import boundaries, architecture contract tests, `api_contract_artifacts.py check` (`api_contract_current`), api-client `generate:check`, pytest `4623 passed, 21 skipped, 550 deselected`, pnpm test (web 21 files / plugin 64 files / api-client 1 file), uv build + pnpm build. (session-scratch log, not retained; this table is the durable summary) |
 | Retired-token `rg` consistency gate (Task 4 Step 2) | PASS per controller ruling | `rg -n "dismiss_initial_offer|dismissInitialTotpOffer|totp_prompt_dismissed_at|Skip for now" apps src packages migrations tests docs --glob '!docs/handoff/*'` — every match classified acceptable (Decisions #1); zero matches in canonical docs (`docs/` minus `handoff/`, `superpowers/`) and zero live-contract usage |
 | `uv run python tools/api_contract_artifacts.py check` | PASS | prints `api_contract_current` |
 | `git diff --check` / `git status --short` (Task 4 Step 3, pre-BACKLOG) | PASS / clean | exit 0; only the intended design-doc modification pending |
@@ -52,6 +53,12 @@
    recovery replacement remains mandatory; §15.1 credential table without the
    dismissal timestamp; §16.2 route comment `# action = start`), retired
    BACKLOG row deleted, baseline-suite BACKLOG row added.
+6. `d285c26` — final-review follow-up: handoff pins closure commit `5695126`,
+   branch base corrected to `7995e9c`, Decision #1 controller ratification.
+7. `620696d` — final-review Minor fix: enrollment docstring reworded so it is
+   unambiguous that `start` carries the Base32 secret and no other response
+   surface does; openapi.json/schema.ts descriptions regenerated (no contract
+   change). Scoped re-review: ADDRESSED, no new breakage.
 
 ## Decisions and interpretations
 
@@ -159,6 +166,11 @@
    `20260902_01` is absent from the enumerations). Behavior is pinned by the
    `get_heads()` assertions; the next head migration should either enumerate
    fully or reduce the prose to the assertion.
+5. **`TotpEnrollmentData.enrollment` stays `TotpEnrollmentOfferData | None`**
+   (final-review Minor) — verdict: code stands. Tightening it would change the
+   API contract beyond this plan's subtractive scope; revisit at the next
+   auth-contract revision. (The final review's docstring-ambiguity Minor was
+   NOT deferred — fixed in `620696d`.)
 
 No other findings were deferred; every in-scope finding was fixed in-branch.
 No secrets, tokens, raw content or user data appear in this handoff.
