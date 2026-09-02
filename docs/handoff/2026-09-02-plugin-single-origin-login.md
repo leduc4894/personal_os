@@ -1,14 +1,13 @@
 # Plugin single-origin login — handoff
 
-Branch: `plugin-single-origin-login`. Final code commit: `6b60df0`
-(`docs: standardize plugin public origin`); branch block `f87b1d3` (plugin
-login transport opens the server-minted verification URL, no client-side
-derivation), `742e89c` (API admits native device-grant requests without an
-`Origin` header), `6b60df0` (one-origin tooling/docs), and the in-plan
-tooling fix `f16854b` (`fix: add bootstrap-only mode to live acceptance
-helper`). Closure commits: `348cbae` (first closure pass) and the branch
-tip `docs: record in-plan launcher hardening` (this handoff revision plus
-the BACKLOG row deletions).
+Branch: `plugin-single-origin-login`. Final code commit: `f16854b`
+(`fix: add bootstrap-only mode to live acceptance helper`); feature block
+`f87b1d3` (plugin login transport opens the server-minted verification URL,
+no client-side derivation), `742e89c` (API admits native device-grant
+requests without an `Origin` header) and `6b60df0` (one-origin tooling/docs;
+final feature commit). Closure commits: `348cbae` (first closure pass) and
+the branch tip `docs: record in-plan launcher hardening` (this handoff
+revision plus the BACKLOG row deletions).
 
 Resolved deferred finding (BACKLOG row retired by this round): the 2026-09-01
 device-sync row "Plugin login button derives the browser URL from
@@ -31,6 +30,10 @@ counts, timestamps. No origin, hostname, URL, path, user code, or credential.
   tests passed, web 21 files / 163 tests passed (the documented jsdom
   typescript-test flake did not occur this round). `git diff --check`
   clean; `git status --short` empty before the closure docs edits.
+  Tip re-run evidence (2026-09-02, at commit `650a40f`, after the final
+  code commit `f16854b`): `uv run poe verify` exit 0, "All checks
+  passed!" — python suite 4612 passed / 21 skipped / 550 deselected
+  (1 pre-existing warning). The Step 5 counts above predate that rerun.
 - **Live one-origin proof (Step 2b, against the public origin, sanitized).**
   Native-shape grant creation with NO `Origin` header → HTTP 200,
   `verification_uri_complete` host equals the public origin host: true,
