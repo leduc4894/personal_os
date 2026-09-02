@@ -24,7 +24,15 @@
  *
  * A one-hour expiry or a policy advance discards ONLY the temporary run
  * progress and starts one new checkpoint-bound run inside the same call;
- * every local edit survives untouched. Every closed reconcile failure
+ * every local edit survives untouched. A run whose checkpoint can no
+ * longer fit the local apply lattice while the durable barrier already
+ * carries the closed cursor-gap verdict is provably stale the same way:
+ * it closes through the exact server completion at its persisted
+ * checkpoint — the server's acknowledged cursor is already at or past
+ * it, so no cursor moves — and the same discard-and-re-mint path starts
+ * one fresh checkpoint-bound run whose further-ahead checkpoint can
+ * fit; the canonical completion fence alone still owns the convergence.
+ * Every closed reconcile failure
  * surfaces exactly ONE `reconcile_failure` observation with its exact
  * stage (`start`, `page`, `finalize`, `actions`, `complete`) and closed
  * reason token through the Task 7 diagnostics facade — no `catch` returns
@@ -205,10 +213,18 @@ export interface ManifestReconcilerOptions {
 
 // --- the closed failure plumbing -----------------------------------------------------------------------
 
-/** The closed run-level steps: an outcome, or the request to restart the run checkpoint-bound. */
+/** The closed run-level steps: an outcome, the request to restart the run checkpoint-bound, or the request to close a provably stale checkpoint first. */
 type RunStep =
   | ManifestReconcileOutcome
-  | { readonly kind: "restart-run"; readonly stage: ReconcileFailureStage; readonly reason: DeviceSyncReason };
+  | { readonly kind: "restart-run"; readonly stage: ReconcileFailureStage; readonly reason: DeviceSyncReason }
+  | {
+      readonly kind: "stale-checkpoint";
+      readonly stage: "actions";
+      readonly reason: "device_cursor_gap";
+    };
+
+/** The steps a whole run may return once its action loop converted every stale-checkpoint signal into the close-and-re-mint step. */
+type SettledRunStep = Exclude<RunStep, { kind: "stale-checkpoint" }>;
 
 /** The closed reasons that invalidate the unfinished run itself (spec 7.3, 9.1). */
 const RUN_RESTART_REASONS: ReadonlySet<string> = new Set([
@@ -305,7 +321,7 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
   const actionPageLimit = options.actionPageLimit ?? 100;
 
   /** Report exactly one closed observation, then map onto the run step. */
-  function runFailure(stage: ReconcileFailureStage, error: unknown): RunStep {
+  function runFailure(stage: ReconcileFailureStage, error: unknown): SettledRunStep {
     const failure = closedFailureOf(error);
     diagnostics.reconcileFailure(stage, failure.reason, {
       requestId: failure.requestId,
@@ -320,20 +336,23 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
   }
 
   /** One already-diagnosed closed verdict (the observation preceded this call). */
-  function blocked(stage: ReconcileFailureStage, reason: DeviceSyncReason): RunStep {
+  function blocked(stage: ReconcileFailureStage, reason: DeviceSyncReason): SettledRunStep {
     diagnostics.reconcileFailure(stage, reason);
     return { kind: "blocked", reason };
   }
 
   /** One diagnosed closed invalidation that restarts the run checkpoint-bound. */
-  function restartRun(stage: ReconcileFailureStage, reason: DeviceSyncReason): RunStep {
+  function restartRun(stage: ReconcileFailureStage, reason: DeviceSyncReason): SettledRunStep {
     diagnostics.reconcileFailure(stage, reason);
     return { kind: "restart-run", stage, reason };
   }
 
   /** Collapse one run step onto the public outcome (a restart request outside the run loop is blocked). */
   function asOutcome(step: RunStep): ManifestReconcileOutcome {
-    return step.kind === "restart-run" ? { kind: "blocked", reason: step.reason } : step;
+    if (step.kind === "restart-run" || step.kind === "stale-checkpoint") {
+      return { kind: "blocked", reason: step.reason };
+    }
+    return step;
   }
 
   function wireEntries(entries: readonly ManifestEntry[]): readonly ManifestEntryInput[] {
@@ -481,10 +500,21 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
     }
     const eventSequence = state.appliedSequence + 1;
     if (eventSequence > checkpointSequence) {
-      // The local apply lattice cannot fit below the run checkpoint: the
-      // run stays blocked (the one-hour expiry later starts a fresh,
-      // further-ahead checkpoint that fits).
-      return blocked("actions", "device_cursor_gap");
+      if (state.barrierReason !== "device_cursor_gap") {
+        // The local apply lattice cannot fit below the run checkpoint: the
+        // run stays blocked (the one-hour expiry later starts a fresh,
+        // further-ahead checkpoint that fits).
+        return blocked("actions", "device_cursor_gap");
+      }
+      // The durable barrier already carries the closed cursor-gap verdict
+      // — proven by an earlier cycle's settle block past the gap or by the
+      // cursor-gap reconcile reason — so this frozen checkpoint can never
+      // absorb the lattice, and plain blocking would re-adopt the same
+      // open run forever. The same one observation names the gap; the
+      // step asks the run to close the stale checkpoint and re-mint one
+      // fresh checkpoint-bound run.
+      diagnostics.reconcileFailure("actions", "device_cursor_gap");
+      return { kind: "stale-checkpoint", stage: "actions", reason: "device_cursor_gap" };
     }
 
     let eventId: string;
@@ -606,7 +636,40 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
 
   // --- one checkpoint-bound run -------------------------------------------------------------------
 
-  async function runOne(barrierGeneration: number): Promise<RunStep> {
+  /**
+   * Close one provably stale checkpoint-bound run and request the
+   * checkpoint-bound re-mint. The local run binding and its temporary
+   * progress discard FIRST — a crash before the server close simply
+   * re-binds the still-open server run through the page crash-window
+   * branch on the next attempt — then the exact server completion closes
+   * the run at its persisted checkpoint (the server's acknowledged cursor
+   * is already at or past it, so no cursor moves and no local completion
+   * transition fires), and the repair barrier stays guarding the one
+   * fresh checkpoint-bound run the restart loop starts.
+   */
+  async function closeStaleCheckpoint(
+    manifestRunId: string,
+    checkpointSequence: number,
+    finalDigest: string,
+  ): Promise<SettledRunStep> {
+    try {
+      await journal.discardActiveManifestRun();
+    } catch (error) {
+      return runFailure("actions", error);
+    }
+    let cursorReceipt: DeviceCursorReceipt;
+    try {
+      cursorReceipt = await api.completeManifest({ manifestRunId, finalDigest });
+    } catch (error) {
+      return runFailure("complete", error);
+    }
+    if (cursorReceipt.acknowledgedSequence < checkpointSequence) {
+      return blocked("complete", "device_manifest_state_invalid");
+    }
+    return { kind: "restart-run", stage: "actions", reason: "device_cursor_gap" };
+  }
+
+  async function runOne(barrierGeneration: number): Promise<SettledRunStep> {
     let runReceipt: ManifestRunReceipt;
     try {
       runReceipt = await api.startManifest({ clientObservationGeneration: barrierGeneration });
@@ -805,6 +868,9 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
           terminalActionIndexes,
         );
         if (step !== null) {
+          if (step.kind === "stale-checkpoint") {
+            return closeStaleCheckpoint(manifestRunId, checkpointSequence, finalDigest);
+          }
           return step;
         }
       }

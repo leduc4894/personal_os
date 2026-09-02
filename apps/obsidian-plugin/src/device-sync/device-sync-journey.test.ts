@@ -1311,6 +1311,26 @@ describe("device-sync two-device journeys (production stack)", () => {
     stack.coordinator.request("explicit_repair");
     await flushCycles();
     expect(stack.deviceSyncRepository.readState().barrierGeneration).toBeNull();
+
+    // Convergence and idempotency: after the second repair no run stays
+    // active and the cursors sit equal. One more explicit repair must stay
+    // converged — the barrier never re-raises, no run is left open and
+    // neither cursor regresses. A clean-state explicit repair always runs
+    // one full reconcile that completes exactly one server run (the first
+    // journey pins that shape), so the count grows by that one clean run
+    // and never by a second stale-checkpoint close.
+    const state = stack.deviceSyncRepository.readState();
+    expect(state.activeManifestRunId).toBeNull();
+    expect(state.appliedSequence).toBe(state.acknowledgedSequence);
+    const completions = server.completions.length;
+    stack.coordinator.request("explicit_repair");
+    await flushCycles();
+    const reconvergedState = stack.deviceSyncRepository.readState();
+    expect(reconvergedState.barrierGeneration).toBeNull();
+    expect(reconvergedState.activeManifestRunId).toBeNull();
+    expect(reconvergedState.appliedSequence).toBe(reconvergedState.acknowledgedSequence);
+    expect(reconvergedState.appliedSequence).toBe(state.appliedSequence);
+    expect(server.completions).toHaveLength(completions + 1);
   });
 
   it("restarts exactly one fresh checkpoint-bound run after a policy advance", async () => {
