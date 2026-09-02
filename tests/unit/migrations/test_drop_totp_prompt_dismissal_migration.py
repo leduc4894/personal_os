@@ -27,9 +27,7 @@ from postgresql_source_store.tables import SOURCE_STORE_TABLES
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 ALEMBIC_INI_PATH = REPO_ROOT / "alembic.ini"
-MIGRATION_PATH = (
-    REPO_ROOT / "migrations" / "versions" / "20260902_02_drop_totp_prompt_dismissal.py"
-)
+MIGRATION_PATH = REPO_ROOT / "migrations" / "versions" / "20260902_02_drop_totp_prompt_dismissal.py"
 
 TOTP_PROMPT_DISMISSAL_REVISION: str = "20260902_02"
 SOURCE_CONFLICTS_REVISION: str = "20260902_01"
