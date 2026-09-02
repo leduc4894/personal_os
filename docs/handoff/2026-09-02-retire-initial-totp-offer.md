@@ -2,9 +2,10 @@
 
 - **Plan:** `docs/superpowers/plans/2026-09-02-retire-initial-totp-offer.md`
 - **Spec:** `docs/superpowers/specs/2026-09-02-retire-initial-totp-offer-spec.md`
-- **Branch:** `retire-initial-totp-offer` (from `master` @ `7995e9c^`)
-- **Final code SHA:** `64dd65d` (+ the docs-only closure commit that carries
-  this handoff)
+- **Branch:** `retire-initial-totp-offer` (from `master` @ `7995e9c`)
+- **Final code SHA:** `64dd65d`; docs closure commit `5695126` carries this
+  handoff (a handoff cannot contain its own carrying commit's hash, so the
+  closure SHA is recorded here by this follow-up note)
 - **Status:** COMPLETE — all four plan tasks landed, every automated gate
   PASS at the final tip. The obsolete "initial TOTP offer/dismissal"
   contract is gone end to end: Web Skip UI and client method, the
@@ -88,6 +89,9 @@
      implementation plan (point-in-time record that freezes its normative
      references to a commit). Canonical docs (`docs/` minus `handoff/` and
      `superpowers/`, incl. `docs/operations/`) have ZERO matches — verified.
+     Ratified by the controller on 2026-09-02: this boundary (canonical docs =
+     docs/ minus handoff/ and superpowers/) is the standing convention for
+     future retirement-token consistency gates.
 2. **Task 2 deviation (two files beyond the Step 5 list, both required by the
    regenerated types):** `apps/web/src/testing/api-mock-builders.ts` (stale
    `dismissed_at: null` broke web type-check with TS2353) and
