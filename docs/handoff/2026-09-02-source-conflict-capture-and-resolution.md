@@ -23,9 +23,27 @@
 | Manual Desktop Conflict Inbox journey | **PENDING — operator** | Runbook section ready (`docs/operations/source-conflict-resolution.md`); CI project left UP for the round; no manual gate claimed |
 | Physical Mobile matrix | Not attempted by design | Existing Child 9 backlog rows own it (see BACKLOG mobile-live rows) |
 
-Pre-existing master failures (lifecycle transactions, backup/restore, one
-projection dispatch, query-plans setup) did not surface in any selected
-gate run and were not touched.
+Pre-existing master integration failures did not surface in any selected
+gate run and were not touched. Verified by the controller at the branch
+base `937508b` (spot-check runs on fresh disposable `knowledge-ci-*`
+projects, before any branch commit) with identical failure modes and
+counts, so they are master defects, not branch regressions. Two classes:
+
+1. **Lifecycle policy-expectation drift** —
+   `tests/integration/source_lifecycle/test_lifecycle_transactions.py`
+   (5 failed: `assert 'upsert' == 'delete'` — the store's locked-policy
+   re-evaluation over the seeded allow-all policy overrides the tests'
+   denied decisions) plus one `test_projection_dispatch.py` failure.
+   Owning domain: source-lifecycle integration suites.
+2. **Outdated integration seed helpers** —
+   `tests/integration/source_lifecycle/test_backup_restore.py`
+   (5 failed: seeds `projection_intents` rows without their
+   `sync_events` parents → FK violation) and `test_query_plans.py`
+   (6 setup errors of the same class). Owning domain: lifecycle/backup
+   integration test fixtures.
+
+Both are deferral category (a) — owned by their domains, outside this
+plan's file scope; BACKLOG rows added with milestones.
 
 ## What landed (Task 10; Tasks 1-9 in their task reports)
 
@@ -112,6 +130,8 @@ gate run and were not touched.
 | Candidate GC / Web conflict UI / cursor-gap remediation | Out of scope by plan self-review; no row (owned by their own future plans) |
 | Sibling-orphan cleanup sweep (failed-apply staging siblings) | Out of Task 10's tested behavior; BACKLOG row added (maintenance) |
 | Shared stage/verify/replace core extraction (device-sync writer vs conflict applier) | Refactor-only; BACKLOG row added (maintenance) |
+| Pre-existing master failures: lifecycle policy-expectation drift (`test_lifecycle_transactions` 5 + one `test_projection_dispatch`) | Out of scope category (a) — source-lifecycle domain owns it; verified failing identically at base `937508b`; BACKLOG row added |
+| Pre-existing master failures: outdated seed helpers (`test_backup_restore` 5 + `test_query_plans` 6 setup errors) | Out of scope category (a) — lifecycle/backup integration fixtures own it; verified failing identically at base `937508b`; BACKLOG row added |
 | `knowledge.source_conflicts` absent from the backup manifest's `SNAPSHOT_LOCK_ORDER` (35 tables, v4) | Out of Task 2's file scope (backup domain v4 pinned by its own tests); BACKLOG row with milestone |
 
 ## Next actions
