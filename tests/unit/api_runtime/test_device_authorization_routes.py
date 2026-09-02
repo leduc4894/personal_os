@@ -201,6 +201,31 @@ def test_create_grant_response_carries_the_provisioning_headers(
     assert response.json()["error"] is None
 
 
+def test_create_grant_accepts_a_native_request_without_origin(harness: DeviceRouteHarness) -> None:
+    response = harness.client.post("/api/auth/device-authorizations", json=grant_request_body())
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_create_grant_accepts_the_configured_browser_origin(harness: DeviceRouteHarness) -> None:
+    response = harness.client.post(
+        "/api/auth/device-authorizations", headers={"Origin": ORIGIN}, json=grant_request_body()
+    )
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_create_grant_rejects_a_present_unconfigured_origin(harness: DeviceRouteHarness) -> None:
+    response = harness.client.post(
+        "/api/auth/device-authorizations",
+        headers={"Origin": "https://attacker.example"},
+        json=grant_request_body(),
+    )
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "csrf_validation_failed"
+    assert response.headers["cache-control"] == "no-store"
+
+
 def test_create_grant_requires_the_exact_configured_origin(
     harness: DeviceRouteHarness,
 ) -> None:

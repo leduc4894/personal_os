@@ -167,9 +167,10 @@ class AuthenticatedWebRequest:
 
 @dataclass(frozen=True, slots=True)
 class SessionRouteDependencies:
-    """The four FastAPI dependency callables of the session/password routes."""
+    """The five FastAPI dependency callables of the session/password routes."""
 
     require_allowed_origin: Callable[[Request], Awaitable[None]]
+    require_native_or_allowed_origin: Callable[[Request], Awaitable[None]]
     require_session_request: Callable[[Request], Awaitable[AuthenticatedWebRequest]]
     require_csrf_protected_request: Callable[[Request], Awaitable[AuthenticatedWebRequest]]
     require_csrf_protected_challenge_request: Callable[
@@ -322,6 +323,20 @@ def create_session_route_dependencies(
         if origin != runtime.allowed_origin:
             raise AuthenticationError(ErrorCode.CSRF_VALIDATION_FAILED)
 
+    async def require_native_or_allowed_origin(request: Request) -> None:
+        """Admit one native request: no Origin at all, or the exact allowed one.
+
+        The unauthenticated device-grant creation endpoint is called both by
+        the browser (which always attaches its exact Origin) and by the native
+        plugin runtime, whose requests carry no ``Origin`` header at all. A
+        missing ``Origin`` is therefore a native request on that endpoint
+        only; a present ``Origin`` still goes through the exact-origin guard
+        unchanged, so a browser-shaped caller can never widen the gate.
+        """
+        if request.headers.get("origin") is None:
+            return
+        await require_allowed_origin(request)
+
     async def _resolve_session(
         request: Request,
         *,
@@ -402,6 +417,7 @@ def create_session_route_dependencies(
 
     return SessionRouteDependencies(
         require_allowed_origin=require_allowed_origin,
+        require_native_or_allowed_origin=require_native_or_allowed_origin,
         require_session_request=require_session_request,
         require_csrf_protected_request=require_csrf_protected_request,
         require_csrf_protected_challenge_request=require_csrf_protected_challenge_request,

@@ -5,7 +5,8 @@ created per composed runtime: each closure binds the runtime's
 device-authorization and device-token services, session dependencies and
 cookie contract, so the application factory only registers semantic
 operation ids and response models. The unauthenticated plugin creation
-endpoint keeps the exact-origin gate and throttles per source address; the
+endpoint admits native no-Origin requests while a present Origin must
+still match the allowed one exactly, and throttles per source address; the
 browser lookup and decision endpoints reuse the strict CSRF dependency of
 spec 9.3 verbatim; the poll, refresh and self-revoke endpoints accept
 exactly their dedicated Bearer credential and nothing else. Every
@@ -125,7 +126,7 @@ def create_device_authorization_route_endpoints(
     async def create_grant(
         request: Request,
         grant_request: DeviceGrantRequest,
-        origin_guard: None = Depends(dependencies.require_allowed_origin),
+        origin_guard: None = Depends(dependencies.require_native_or_allowed_origin),
     ) -> JSONResponse:
         """Create one grant and render the one-time provisioning payload."""
         del origin_guard
