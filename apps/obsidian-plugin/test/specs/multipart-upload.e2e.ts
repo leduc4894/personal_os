@@ -308,7 +308,7 @@ const repositoryRootPath: string = path.resolve(
 );
 
 /** The public plugin origin the live tunnel serves (the plugin's control plane). */
-const tunnelHealthUrl = "https://api.ducinvest.com/api/health/ready";
+const tunnelHealthUrl = `${allowedOrigin}/api/health/ready`;
 
 async function isTunnelReachable(): Promise<boolean> {
   try {

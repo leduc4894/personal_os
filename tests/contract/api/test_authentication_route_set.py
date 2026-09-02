@@ -12,6 +12,7 @@ spelling collapses to the safe route-not-found envelope.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Final
 
 import httpx
@@ -19,6 +20,7 @@ import pytest
 from api_runtime.application import create_api_application
 from api_runtime.authentication_composition import compose_offline_web_authentication
 from fastapi import FastAPI
+from fastapi.dependencies.models import Dependant
 
 from personal_os.runtime_configuration.models import RuntimeEnvironment
 
@@ -51,6 +53,15 @@ EXPECTED_ROUTE_METHODS: Final[dict[str, frozenset[str]]] = {
     "/api/admin/devices/{device_id}/revoke": frozenset({"POST"}),
 }
 
+#: The relaxed native-origin gate (spec 11.1) is a structural property of one
+#: endpoint: the dependency callable that admits header-less native requests
+#: may sit in the dependency closure of exactly the device-grant creation
+#: route — and of no other route or verb.
+NATIVE_ORIGIN_GATE_DEPENDENCY_NAME: Final[str] = "require_native_or_allowed_origin"
+NATIVE_ORIGIN_GATE_BINDING: Final[dict[str, frozenset[str]]] = {
+    "/api/auth/device-authorizations": frozenset({"POST"}),
+}
+
 
 class _ReadyProbe:
     """Readiness probe stub: route-set inspection never consults it."""
@@ -67,6 +78,13 @@ def application() -> FastAPI:
     )
 
 
+def _iter_dependency_closure(dependant: Dependant) -> Iterator[Dependant]:
+    """Yield every sub-dependant of one dependant, nested closure included."""
+    for sub_dependant in dependant.dependencies:
+        yield sub_dependant
+        yield from _iter_dependency_closure(sub_dependant)
+
+
 def test_served_route_set_is_exactly_health_openapi_and_spec_16(application: FastAPI) -> None:
     served: dict[str, frozenset[str]] = {}
     for route in application.routes:
@@ -77,6 +95,27 @@ def test_served_route_set_is_exactly_health_openapi_and_spec_16(application: Fas
         assert path not in served, f"duplicate route registration: {path}"
         served[path] = frozenset(methods)
     assert served == EXPECTED_ROUTE_METHODS
+
+
+def test_native_origin_relaxation_is_bound_only_to_device_grant_creation(
+    application: FastAPI,
+) -> None:
+    bound: dict[str, set[str]] = {}
+    for route in application.routes:
+        dependant = getattr(route, "dependant", None)
+        if dependant is None:
+            continue
+        for sub_dependant in _iter_dependency_closure(dependant):
+            dependency_name = getattr(sub_dependant.call, "__name__", None)
+            if dependency_name != NATIVE_ORIGIN_GATE_DEPENDENCY_NAME:
+                continue
+            path = getattr(route, "path", None)
+            methods = getattr(route, "methods", None)
+            assert isinstance(path, str), route
+            assert isinstance(methods, set), path
+            bound.setdefault(path, set()).update(methods)
+    flattened = {path: frozenset(methods) for path, methods in bound.items()}
+    assert flattened == NATIVE_ORIGIN_GATE_BINDING
 
 
 def test_no_route_registers_a_trailing_slash_alias(application: FastAPI) -> None:

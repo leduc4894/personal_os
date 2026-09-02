@@ -226,6 +226,19 @@ def test_create_grant_rejects_a_present_unconfigured_origin(harness: DeviceRoute
     assert response.headers["cache-control"] == "no-store"
 
 
+def test_create_grant_rejects_an_empty_origin(harness: DeviceRouteHarness) -> None:
+    # An empty-but-present Origin header is a present unconfigured origin,
+    # not a native request: the exact-origin guard still closes it.
+    response = harness.client.post(
+        "/api/auth/device-authorizations",
+        headers={"Origin": ""},
+        json=grant_request_body(),
+    )
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "csrf_validation_failed"
+    assert response.headers["cache-control"] == "no-store"
+
+
 def test_create_grant_requires_the_exact_configured_origin(
     harness: DeviceRouteHarness,
 ) -> None:

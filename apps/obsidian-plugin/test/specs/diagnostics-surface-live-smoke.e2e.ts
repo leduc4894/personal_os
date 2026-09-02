@@ -24,7 +24,7 @@ import { runFromE2eRepositoryRoot } from "../support/repository-subprocess";
  */
 const serverOrigin = process.env.E2E_SERVER_ORIGIN ?? "http://127.0.0.1:8000";
 const allowedOrigin = process.env.E2E_ALLOWED_ORIGIN ?? "https://app.ducinvest.com";
-const realPluginOrigin = process.env.E2E_PLUGIN_ORIGIN ?? "https://api.ducinvest.com";
+const realPluginOrigin = process.env.E2E_PLUGIN_ORIGIN ?? "https://app.ducinvest.com";
 const webUsername = process.env.E2E_WEB_USERNAME ?? "duc";
 const passwordFile = process.env.E2E_WEB_PASSWORD_FILE;
 const totpHelper = process.env.E2E_TOTP_HELPER;
