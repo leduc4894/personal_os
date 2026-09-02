@@ -93,7 +93,11 @@ def _resolve_command(
 async def _seed_open_conflict(
     harness: ConflictStoreHarness,
 ) -> tuple[object, UUID, SourceConflict, object]:
-    """Seed one workspace, source v1, an advanced remote and one open conflict."""
+    """Seed one workspace, source v1+v2, and one open stale conflict.
+
+    The module's stack fixture shares one database across the tests, so
+    every seeded content object carries a per-call unique salt.
+    """
 
     workspace = await harness.seed_workspace()
     source_id = uuid4()
@@ -110,7 +114,7 @@ async def _seed_open_conflict(
             source_id,
             base_version_id=first.source_version_id,
             remote_version_id=advanced.source_version_id,
-            candidate_object_id=await harness.seed_content_object("raced-candidate"),
+            candidate_object_id=await harness.seed_content_object(f"raced-{uuid4()}"),
         ),
         context,
     )
@@ -156,7 +160,7 @@ async def test_two_resolvers_racing_for_one_conflict_create_at_most_one_winning_
     harness = conflict_harness
     _workspace, source_id, conflict, _advanced = await _seed_open_conflict(harness)
     context = create_diagnostic_context().context
-    merged_object_id = await harness.seed_content_object("racing-merged-result")
+    merged_object_id = await harness.seed_content_object(f"merged-{uuid4()}")
 
     async def resolve_local():
         return await harness.store.resolve(
@@ -178,7 +182,7 @@ async def test_two_resolvers_racing_for_one_conflict_create_at_most_one_winning_
 
     results = await asyncio.gather(resolve_local(), resolve_merged(), return_exceptions=True)
 
-    assert await harness.published_version_count(source_id) == 2  # v1 + exactly one winner
+    assert await harness.published_version_count(source_id) == 3  # v1 + v2 seed + one winner
     outcomes = [result for result in results if not isinstance(result, BaseException)]
     rejections = [result for result in results if isinstance(result, BaseException)]
     assert len(outcomes) == 1
@@ -230,7 +234,7 @@ async def test_same_identity_resolution_replay_race_returns_the_single_stored_wi
 
     assert first.kind is ConflictResolutionOutcome.RESOLVED
     assert replay == first
-    assert await harness.published_version_count(source_id) == 2  # v1 + one winner
+    assert await harness.published_version_count(source_id) == 3  # v1 + v2 seed + one winner
 
 
 # --- concurrent captures --------------------------------------------------------------------------
@@ -258,7 +262,7 @@ async def test_concurrent_captures_of_distinct_events_each_retain_their_evidence
             source_id,
             base_version_id=first.source_version_id,
             remote_version_id=advanced.source_version_id,
-            candidate_object_id=await harness.seed_content_object(f"raced-candidate-{index}"),
+            candidate_object_id=await harness.seed_content_object(f"raced-{index}-{uuid4()}"),
         )
         for index in range(4)
     ]
@@ -295,7 +299,7 @@ async def test_concurrent_duplicate_capture_delivery_replays_one_frozen_conflict
         source_id,
         base_version_id=first.source_version_id,
         remote_version_id=advanced.source_version_id,
-        candidate_object_id=await harness.seed_content_object("replayed-candidate"),
+        candidate_object_id=await harness.seed_content_object(f"replayed-{uuid4()}"),
     )
 
     results = await asyncio.gather(
@@ -331,7 +335,7 @@ async def test_capture_racing_resolution_settles_both_without_deadlock(
         source_id,
         base_version_id=advanced.source_version_id,
         remote_version_id=advanced.source_version_id,
-        candidate_object_id=await harness.seed_content_object("second-candidate"),
+        candidate_object_id=await harness.seed_content_object(f"second-{uuid4()}"),
     )
 
     resolution_result, captured = await asyncio.gather(
