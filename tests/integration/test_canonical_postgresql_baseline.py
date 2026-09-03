@@ -911,7 +911,9 @@ def _row_counts(conn: psycopg.Connection[Any]) -> list[int]:
     with conn.cursor() as cursor:
         for table in _TABLES_IN_COUNT_ORDER:
             cursor.execute(f"SELECT count(*) FROM knowledge.{table}")
-            counts.append(cursor.fetchone()[0])
+            count_row = cursor.fetchone()
+            assert count_row is not None
+            counts.append(count_row[0])
     return counts
 
 
@@ -2353,7 +2355,9 @@ def test_canonical_postgresql_baseline_upgrade_catalog_and_valid_graph(
             "SELECT current_version_id FROM knowledge.sources WHERE source_id = %s",
             (_SOURCE_ID,),
         )
-        _restored_pointer = _pointer_cursor.fetchone()[0]
+        _pointer_row = _pointer_cursor.fetchone()
+        assert _pointer_row is not None
+        _restored_pointer = _pointer_row[0]
     assert _restored_pointer == _SOURCE_VERSION_ID, (
         "source current-version pointer must remain intact after negative cases"
     )
@@ -2406,7 +2410,11 @@ def _current_revision(conn: psycopg.Connection[Any]) -> str | None:
     """Return the current alembic_version row, or None when absent/empty."""
     if not _relation_exists(conn, "public.alembic_version"):
         return None
-    return _scalar(conn, "SELECT version_num FROM public.alembic_version LIMIT 1")
+    revision: str | None = _scalar(
+        conn,
+        "SELECT version_num FROM public.alembic_version LIMIT 1",
+    )
+    return revision
 
 
 def _knowledge_table_count(conn: psycopg.Connection[Any]) -> int:
