@@ -96,6 +96,15 @@ export const DEVICE_SYNC_RECONCILE_ACCUMULATED_ACTIVE_MS = 6 * 60 * 60 * 1_000;
 /** An active manifest run expires after a suspension of one hour or more. */
 export const DEVICE_SYNC_MANIFEST_EXPIRY_AFTER_SUSPEND_MS = 60 * 60 * 1_000;
 
+/**
+ * How many consecutive repair retries carrying the SAME closed reason the
+ * coordinator arms before surfacing the reason as the blocked repair
+ * (the 2026-09-03 apply-wedge bound): a vault write refusal or the same
+ * wire failure surviving the full backoff chain becomes readable instead
+ * of churning forever.
+ */
+export const DEVICE_SYNC_REPAIR_RETRY_BOUND = 3;
+
 // --- the injected seams --------------------------------------------------------------------------------
 
 /** The two wire operations the coordinator itself drives (the Task 9 client subset). */
@@ -245,6 +254,8 @@ export function createSyncCoordinator(options: SyncCoordinatorOptions): SyncCoor
   let hasFollowUpCycle = false;
   let isRepairRunning = false;
   let blockedRepairReason: DeviceSyncReason | null = null;
+  let consecutiveRepairRetryCount = 0;
+  let consecutiveRepairRetryReason: DeviceSyncReason | null = null;
   let failureAttemptCount = 0;
   let cadenceCanceller: (() => void) | null = null;
   /** The scheduled fire time of the outstanding (or last) cadence tick. */
@@ -478,6 +489,24 @@ export function createSyncCoordinator(options: SyncCoordinatorOptions): SyncCoor
       isRepairRunning = false;
     }
     if (outcome.kind === "retry") {
+      if (consecutiveRepairRetryReason === outcome.reason) {
+        consecutiveRepairRetryCount += 1;
+      } else {
+        consecutiveRepairRetryReason = outcome.reason;
+        consecutiveRepairRetryCount = 1;
+      }
+      if (consecutiveRepairRetryCount >= DEVICE_SYNC_REPAIR_RETRY_BOUND) {
+        // The same closed failure survived the full bounded backoff chain
+        // (the 2026-09-03 apply-wedge finding: a vault write refusal —
+        // a locked target — retried forever with growing cursor lag and
+        // no readable verdict). Surface it as the blocked repair reason:
+        // the churn stops, the state stays readable, and the operator's
+        // explicit repair retries once the underlying condition clears.
+        blockedRepairReason = outcome.reason;
+        consecutiveRepairRetryCount = 0;
+        consecutiveRepairRetryReason = null;
+        return "settled";
+      }
       return "retry";
     }
     if (outcome.kind === "blocked") {
@@ -485,6 +514,8 @@ export function createSyncCoordinator(options: SyncCoordinatorOptions): SyncCoor
       return "settled";
     }
     blockedRepairReason = null;
+    consecutiveRepairRetryCount = 0;
+    consecutiveRepairRetryReason = null;
     return "settled";
   }
 
@@ -618,6 +649,8 @@ export function createSyncCoordinator(options: SyncCoordinatorOptions): SyncCoor
     if (trigger === "explicit_repair") {
       // The one user-owned retry of a blocked repair.
       blockedRepairReason = null;
+      consecutiveRepairRetryCount = 0;
+      consecutiveRepairRetryReason = null;
       hasPendingExplicitRepair = true;
     }
     if (trigger === "periodic_reconcile") {

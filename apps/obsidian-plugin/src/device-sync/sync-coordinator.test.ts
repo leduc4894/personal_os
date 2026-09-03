@@ -162,6 +162,17 @@ class FakeDeviceSyncRepository implements DeviceSyncRepository {
     this.state = { ...this.state, barrierReason: reason };
   }
 
+  async advanceRepairBarrierGeneration(reason: DeviceSyncReason): Promise<number> {
+    const nextGeneration = this.state.observationGeneration + 1;
+    this.state = {
+      ...this.state,
+      observationGeneration: nextGeneration,
+      barrierGeneration: nextGeneration,
+      barrierReason: reason,
+    };
+    return nextGeneration;
+  }
+
   async terminalizeEvent(input: TerminalDeviceEvent): Promise<void> {
     if (this.failTerminalizeWithReason !== null) {
       const reason = this.failTerminalizeWithReason;
@@ -1223,6 +1234,40 @@ describe("SyncCoordinator repair scheduling (task 12)", () => {
     harness.scheduler.advance(1_000);
     await flushMicrotasks();
     expect(harness.reconciler.resumeCount).toBe(2);
+  });
+
+  it("bounds a same-reason retryable repair chain to a readable blocked verdict (2026-09-03 apply-wedge)", async () => {
+    const harness = createHarness();
+    harness.repository.state = {
+      ...harness.repository.state,
+      barrierGeneration: 2,
+      barrierReason: "device_cursor_gap",
+    };
+    harness.reconciler.outcome = { kind: "retry", reason: "device_apply_vault_failed" };
+    harness.coordinator.request("startup");
+    await flushMicrotasks();
+    expect(harness.reconciler.resumeCount).toBe(1);
+    // The backoff chain re-arms twice more; the third consecutive
+    // SAME-reason retry surfaces as the readable blocked verdict instead
+    // of churning forever with no readable state.
+    harness.scheduler.advance(10_000);
+    await flushMicrotasks();
+    expect(harness.reconciler.resumeCount).toBe(2);
+    harness.scheduler.advance(60_000);
+    await flushMicrotasks();
+    expect(harness.reconciler.resumeCount).toBe(3);
+    const status = harness.coordinator.readStatus();
+    expect(status.repairState).toBe("blocked");
+    expect(status.reason).toBe("device_apply_vault_failed");
+    // No further backoff tick re-arms the bounded chain.
+    harness.scheduler.advance(600_000);
+    await flushMicrotasks();
+    expect(harness.reconciler.resumeCount).toBe(3);
+    // The operator's one user-owned explicit repair clears the verdict
+    // and retries.
+    harness.coordinator.request("explicit_repair");
+    await flushMicrotasks();
+    expect(harness.reconciler.reconcileReasons).toEqual(["explicit_repair"]);
   });
 
   it("skips redelivered events the local cursor already settled", async () => {
