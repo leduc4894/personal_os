@@ -369,6 +369,30 @@ export class DeviceSyncRepository implements DeviceSyncRepositoryPort {
   }
 
   /**
+   * Refine the ACTIVE repair barrier's closed reason after the reconciler
+   * diagnosed one itself (the apply lattice outrunning the run checkpoint)
+   * — the same durable verdict the applier's prepare-path gap already
+   * persists, so the resting state stays readable through status and a
+   * later resume's recovery branch can key on it. Refused when no barrier
+   * is active (the verdict is meaningless without one).
+   */
+  async persistRepairBarrierReason(reason: DeviceSyncReason): Promise<void> {
+    await this.#database.runSerializedMutation((session) => {
+      const state = this.#readState(session);
+      if (state.barrierGeneration === null) {
+        throw journalStoreError("journal_mutation_failed");
+      }
+      session.exec(
+        [
+          "update device_sync_state set",
+          `barrier_reason = ${sqlText(reason)}`,
+          "where singleton_key = 1;",
+        ].join(" "),
+      );
+    });
+  }
+
+  /**
    * Record one accepted manifest page receipt (spec 7.3, 12.1): the run
    * and its checkpoint bind with the first accepted page, pages land in
    * exact contiguous order, and a replayed page number must carry the

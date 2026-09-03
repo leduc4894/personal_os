@@ -898,6 +898,17 @@ class ScriptedServer {
     }
     return errorResponse(404, "device_event_unavailable");
   }
+
+  /**
+   * Model the server's run idle-expiry: the device's unfinished run
+   * surpassed its idle deadline with no client activity and left the
+   * per-device unfinished slot FREE (a later start then MINTS a fresh run
+   * instead of resuming). The real server expires quietly after ~15 idle
+   * minutes — the 2026-09-03 live defect's exact freeing moment.
+   */
+  expireOpenRun(): void {
+    this.#run = null;
+  }
 }
 
 function wireFingerprint(fingerprint: FrozenFingerprint): {
@@ -1333,6 +1344,61 @@ describe("device-sync two-device journeys (production stack)", () => {
     // closed divergence: no new conflict/repair action appears for the
     // recreated locator, whose tombstone settled and left the capture.
     expect(server.plannedActions().map((action) => action.action_kind)).toEqual(["conflict"]);
+  });
+
+  it("sheds a stale open-run binding after the server idle-expired it instead of stranding the fresh run", async () => {
+    const server = new ScriptedServer();
+    const stack = buildPluginStack(server);
+    const locatorA = "notes/journey-idle-a.md";
+    const locatorB = "notes/journey-idle-b.md";
+    await server.commitCreate(locatorA, bytesOf("idle a bytes"));
+    await server.commitCreate(locatorB, bytesOf("idle b bytes"));
+    stack.coordinator.request("startup");
+    await flushCycles();
+    // The pull delivered and acknowledged both events: the apply lattice
+    // sits at the checkpoint a later run would freeze at.
+    const converged = stack.deviceSyncRepository.readState();
+    expect(converged.appliedSequence).toBe(2);
+    expect(converged.acknowledgedSequence).toBe(2);
+
+    // The vault drops both files (an ordinary local deletion): the manifest
+    // now covers nothing while canonical still holds both sources, so the
+    // next run plans two canonical-only downloads whose synthetic events
+    // (applied+1 = 3) can never fit the quiet checkpoint (2).
+    stack.vault.deleteFile(locatorA);
+    stack.vault.deleteFile(locatorB);
+
+    stack.coordinator.request("explicit_repair");
+    await flushCycles();
+    // The stuck shape of the 2026-09-03 live defect: the run rests open and
+    // bound under a repair barrier, and the repair lane never auto-retries
+    // it — the pending download's synthetic event can never fit the quiet
+    // checkpoint.
+    const stuck = stack.deviceSyncRepository.readState();
+    expect(stuck.activeManifestRunId).not.toBeNull();
+    expect(stuck.appliedSequence).toBe(2);
+    const completionsWhileStuck = server.completions.length;
+
+    // The server's run idle deadline frees the per-device slot (no client
+    // activity can reach the wedged run). The next explicit repair must
+    // shed the stale local binding and drive the fresh server run to a
+    // closed state — never mint-and-refuse leaving an abandoned run.
+    server.expireOpenRun();
+    stack.coordinator.request("explicit_repair");
+    await flushCycles();
+
+    const repaired = stack.deviceSyncRepository.readState();
+    // The repair converged through the canonical fence: the barrier and
+    // the open-run binding are cleared, the cursors sit equal, and the
+    // fresh server run COMPLETED (never abandoned `collecting`).
+    expect(repaired.barrierGeneration).toBeNull();
+    expect(repaired.activeManifestRunId).toBeNull();
+    expect(repaired.appliedSequence).toBe(repaired.acknowledgedSequence);
+    expect(server.completions.length).toBeGreaterThan(completionsWhileStuck);
+    // The honest cursor-gap verdict stays readable on the trail; the
+    // unreadable start-stage state_invalid flip never appears.
+    expect(stack.trail.rendered()).not.toContain("start · device_manifest_state_invalid");
+    expect(stack.trail.rendered()).toContain("device_cursor_gap");
   });
 
   it("restarts exactly one fresh checkpoint-bound run after a policy advance", async () => {

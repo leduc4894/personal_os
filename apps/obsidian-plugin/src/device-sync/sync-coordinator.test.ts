@@ -158,6 +158,10 @@ class FakeDeviceSyncRepository implements DeviceSyncRepository {
     return { ...this.state };
   }
 
+  async persistRepairBarrierReason(reason: DeviceSyncReason): Promise<void> {
+    this.state = { ...this.state, barrierReason: reason };
+  }
+
   async terminalizeEvent(input: TerminalDeviceEvent): Promise<void> {
     if (this.failTerminalizeWithReason !== null) {
       const reason = this.failTerminalizeWithReason;

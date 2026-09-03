@@ -374,6 +374,7 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
     action: ManifestAction,
     entriesByLocalId: ReadonlyMap<string, ManifestEntry>,
     terminalActionIndexes: Set<number>,
+    isRetryAttempt: boolean,
   ): Promise<RunStep | null> {
     if (terminalActionIndexes.has(action.actionIndex)) {
       // Exact resume of an already-settled action: its durable outcome
@@ -500,6 +501,29 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
     }
     const eventSequence = state.appliedSequence + 1;
     if (eventSequence > checkpointSequence) {
+      // Persist the closed cursor-gap verdict durably — the applier's own
+      // prepare-path gap persists the same reason — so the resting state
+      // stays readable through status and a later resume's recovery branch
+      // can key on it.
+      if (state.barrierReason !== null && state.barrierReason !== "device_cursor_gap") {
+        try {
+          await repository.persistRepairBarrierReason("device_cursor_gap");
+        } catch (error) {
+          return runFailure("actions", error);
+        }
+      }
+      if (isRetryAttempt && checkpointSequence <= state.appliedSequence) {
+        // The quiet misfit (2026-09-03 live defect): even the retry
+        // attempt's own checkpoint cannot fit the lattice — the canonical
+        // timeline is quiet, so no fresh checkpoint could fit either — and
+        // the planned placement's content was already delivered by the
+        // pull lane. Settle the action with the closed cursor-gap verdict
+        // so the run completes through the canonical fence instead of
+        // churning fresh runs forever; the guard keeps the recoverable
+        // shape (a further-ahead checkpoint still fitting) on the
+        // restart path below.
+        return terminal("device_cursor_gap");
+      }
       if (state.barrierReason !== "device_cursor_gap") {
         // The local apply lattice cannot fit below the run checkpoint: the
         // run stays blocked (the one-hour expiry later starts a fresh,
@@ -669,7 +693,10 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
     return { kind: "restart-run", stage: "actions", reason: "device_cursor_gap" };
   }
 
-  async function runOne(barrierGeneration: number): Promise<SettledRunStep> {
+  async function runOne(
+    barrierGeneration: number,
+    isRetryAttempt: boolean,
+  ): Promise<SettledRunStep> {
     let runReceipt: ManifestRunReceipt;
     try {
       runReceipt = await api.startManifest({ clientObservationGeneration: barrierGeneration });
@@ -693,7 +720,19 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
       (boundState.manifestCheckpointSequence !== null &&
         boundState.manifestCheckpointSequence !== checkpointSequence)
     ) {
-      return blocked("start", "device_manifest_state_invalid");
+      // The journal still binds a run the server no longer counts as this
+      // device's unfinished one — its idle deadline expired it while the
+      // local repair lane could not run (the 2026-09-03 live defect) — and
+      // the receipt above names a DIFFERENT authoritative run. Refusing
+      // here would strand the freshly minted server run forever; shed the
+      // stale binding (and its checkpoint) so the loop's second attempt
+      // adopts the server's run instead.
+      try {
+        await journal.discardActiveManifestRun();
+      } catch (error) {
+        return runFailure("start", error);
+      }
+      return { kind: "restart-run", stage: "start", reason: "device_manifest_state_invalid" };
     }
 
     // --- capture and upload the ordered pages, exactly resuming the durable progress.
@@ -866,6 +905,7 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
           action,
           entriesByLocalId,
           terminalActionIndexes,
+          isRetryAttempt,
         );
         if (step !== null) {
           if (step.kind === "stale-checkpoint") {
@@ -908,7 +948,7 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
    */
   async function runCheckpointBoundRuns(barrierGeneration: number): Promise<ManifestReconcileOutcome> {
     for (let runAttempt = 0; runAttempt < 2; runAttempt += 1) {
-      const step = await runOne(barrierGeneration);
+      const step = await runOne(barrierGeneration, runAttempt === 1);
       if (step.kind !== "restart-run") {
         return step;
       }
