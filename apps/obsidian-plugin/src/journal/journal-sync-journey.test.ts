@@ -134,8 +134,11 @@ class SyncServerDouble {
   readonly canonicalSourcesByLocator = new Map<string, FrozenTerminal>();
   readonly canonicalLocatorByDigest = new Map<string, string>();
 
-  /** Optional mid-pass hook fired inside the next preflight handling. */
-  onPreflight: ((body: Record<string, unknown>) => Promise<void> | void) | null = null;
+  /** Optional hook after the next preflight reserves E1's wire operation. */
+  onPreflight: ((input: {
+    readonly body: Record<string, unknown>;
+    readonly operationId: string;
+  }) => Promise<void> | void) | null = null;
 
   advanceCurrentVersion(sourceId: string, nextVersionId: string): void {
     this.currentVersions.set(sourceId, nextVersionId);
@@ -145,11 +148,6 @@ class SyncServerDouble {
     body: Record<string, unknown>,
   ): Promise<{ status: number; bodyText: string }> {
     this.preflightBodies.push(body);
-    const hook = this.onPreflight;
-    if (hook !== null) {
-      this.onPreflight = null;
-      await hook(body);
-    }
     const identity = `${body["event_id"]}:${body["idempotency_key"]}`;
     const frozen = this.identityTerminals.get(identity);
     if (frozen !== undefined) {
@@ -188,6 +186,11 @@ class SyncServerDouble {
       state: "pending",
       terminal: null,
     });
+    const hook = this.onPreflight;
+    if (hook !== null) {
+      this.onPreflight = null;
+      await hook({ body, operationId });
+    }
     return {
       status: 200,
       bodyText: successBody({
@@ -244,26 +247,16 @@ class SyncServerDouble {
     return { status: 200, bodyText: successBody(resultBody(terminal)) };
   }
 
-  /**
-   * The live race's server-side fact: the create has already committed even
-   * though the client is about to discover that its old Vault locator is
-   * gone. The journey inserts this at the preflight/content boundary so the
-   * queue's real `local_file_missing` close cannot erase canonical evidence.
-   */
-  commitCanonicalBeforeLocalMissing(input: {
-    readonly normalizedLocator: string;
-    readonly sha256: string;
-  }): FrozenTerminal {
-    this.#counter += 1;
-    const terminal: FrozenTerminal = {
-      resultKind: "committed",
-      sourceId: countedUuid("1", this.#counter),
-      sourceVersionId: countedUuid("2", this.#counter),
-      contentVersion: 1,
-    };
-    this.canonicalSourcesByLocator.set(input.normalizedLocator, terminal);
-    this.canonicalLocatorByDigest.set(input.sha256, input.normalizedLocator);
-    this.currentVersions.set(terminal.sourceId, terminal.sourceVersionId);
+  /** Commit the already-reserved E1 content operation before its client read loses the locator. */
+  async commitReservedContent(operationId: string, bytes: Uint8Array): Promise<FrozenTerminal> {
+    const response = await this.handleContent(operationId, bytes);
+    if (response.status !== 200) {
+      throw new Error("reserved content commit must succeed");
+    }
+    const terminal = this.operations.get(operationId)?.terminal;
+    if (terminal === null || terminal === undefined) {
+      throw new Error("reserved content commit produced no terminal receipt");
+    }
     return terminal;
   }
 }
@@ -541,15 +534,24 @@ describe("journal sync journeys over the durable stack", () => {
       const createObservation = harness.capture.notifyPathChanged(oldPath);
       await vi.advanceTimersByTimeAsync(300);
       await createObservation;
-      const createEvent = localFileOf(harness, oldPath);
+      const createEvent = eventsOfPath(harness, oldPath).at(-1);
+      if (createEvent === undefined) {
+        throw new Error("E1 must be durable before the watcher move");
+      }
       let moveObservation: Promise<void> | null = null;
       let renameObservation: Promise<void> | null = null;
+      const raceOrder: string[] = [];
+      let resolveCommittedE1!: (terminal: FrozenTerminal) => void;
+      const committedE1Receipt = new Promise<FrozenTerminal>((resolve) => {
+        resolveCommittedE1 = resolve;
+      });
 
-      harness.server.onPreflight = async (body) => {
-        harness.server.commitCanonicalBeforeLocalMissing({
-          normalizedLocator: oldPath,
-          sha256: String(body["sha256"]),
-        });
+      harness.server.onPreflight = async ({ operationId }) => {
+        // This is E1's actual reserved wire operation. Its server-side
+        // content commit lands before the subsequent client read observes
+        // the vanished old locator and terminalizes E1 locally.
+        resolveCommittedE1(await harness.server.commitReservedContent(operationId, bytes));
+        raceOrder.push("server_committed_e1");
         harness.vault.moveFile(oldPath, intermediatePath);
         moveObservation = harness.capture.notifyPathRenamed(
           { path: intermediatePath, parent: { path: "journey-b" } },
@@ -569,6 +571,19 @@ describe("journal sync journeys over the durable stack", () => {
       };
 
       await harness.driver.runPass();
+      const committedE1 = await committedE1Receipt;
+      const closedE1 = harness.repository.readEvent(createEvent.eventId);
+      raceOrder.push("e1_closed_local_file_missing");
+      expect(closedE1?.state).toBe("deferred_lifecycle");
+      expect(closedE1?.safeError).toBe("deferred_lifecycle");
+      expect(harness.repository.readEventAttemptHistory(createEvent.eventId)).toEqual([
+        expect.objectContaining({ outcomeLabel: "deferred_lifecycle" }),
+      ]);
+      expect(
+        harness.server.identityTerminals.get(`${createEvent.eventId}:${createEvent.idempotencyKey}`),
+      ).toEqual(committedE1);
+      expect(harness.server.canonicalSourcesByLocator.get(oldPath)).toEqual(committedE1);
+      expect(raceOrder).toEqual(["server_committed_e1", "e1_closed_local_file_missing"]);
       // The re-armed move finally observes E1's terminal close and applies
       // the current uncommitted-transit heal, removing R1's old mapping.
       await vi.advanceTimersByTimeAsync(300);
@@ -601,8 +616,8 @@ describe("journal sync journeys over the durable stack", () => {
       }).toEqual({
         canonicalAtFinal: true,
         canonicalAtOld: false,
-        finalSourceId: harness.server.canonicalSourcesByLocator.get(oldPath)?.sourceId ?? null,
-        createLocalFileId: finalFile.localFileId,
+        finalSourceId: committedE1.sourceId,
+        createLocalFileId: createEvent.localFileId,
       });
     } finally {
       vi.useRealTimers();
