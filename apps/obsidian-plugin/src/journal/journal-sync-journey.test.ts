@@ -545,6 +545,21 @@ describe("journal sync journeys over the durable stack", () => {
       const committedE1Receipt = new Promise<FrozenTerminal>((resolve) => {
         resolveCommittedE1 = resolve;
       });
+      const markEventTerminal = harness.repository.markEventTerminal.bind(harness.repository);
+      vi.spyOn(harness.repository, "markEventTerminal").mockImplementation(
+        async (eventId, terminalState, safeError) => {
+          if (
+            eventId === createEvent.eventId &&
+            terminalState === "deferred_lifecycle" &&
+            safeError === "deferred_lifecycle"
+          ) {
+            // This seam is inside QueueDriver.#closeTerminal, before its
+            // durable mutation resolves. It is not a post-pass observation.
+            raceOrder.push("e1_terminalizing_local_file_missing");
+          }
+          await markEventTerminal(eventId, terminalState, safeError);
+        },
+      );
 
       harness.server.onPreflight = async ({ operationId }) => {
         // This is E1's actual reserved wire operation. Its server-side
@@ -573,7 +588,6 @@ describe("journal sync journeys over the durable stack", () => {
       await harness.driver.runPass();
       const committedE1 = await committedE1Receipt;
       const closedE1 = harness.repository.readEvent(createEvent.eventId);
-      raceOrder.push("e1_closed_local_file_missing");
       expect(closedE1?.state).toBe("deferred_lifecycle");
       expect(closedE1?.safeError).toBe("deferred_lifecycle");
       expect(harness.repository.readEventAttemptHistory(createEvent.eventId)).toEqual([
@@ -583,7 +597,10 @@ describe("journal sync journeys over the durable stack", () => {
         harness.server.identityTerminals.get(`${createEvent.eventId}:${createEvent.idempotencyKey}`),
       ).toEqual(committedE1);
       expect(harness.server.canonicalSourcesByLocator.get(oldPath)).toEqual(committedE1);
-      expect(raceOrder).toEqual(["server_committed_e1", "e1_closed_local_file_missing"]);
+      expect(raceOrder).toEqual([
+        "server_committed_e1",
+        "e1_terminalizing_local_file_missing",
+      ]);
       // The re-armed move finally observes E1's terminal close and applies
       // the current uncommitted-transit heal, removing R1's old mapping.
       await vi.advanceTimersByTimeAsync(300);
