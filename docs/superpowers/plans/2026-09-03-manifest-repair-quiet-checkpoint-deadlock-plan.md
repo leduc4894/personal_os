@@ -108,6 +108,44 @@ Mechanism is decided by Task 1's verdict; the candidate directions
 - the pending action that can never fit must settle as a durable
   closed verdict rather than resting `applying` forever.
 
+### Design settlement (2026-09-03, session 2 — the closed live story)
+
+Raw-id matching closed the choreography: the stuck journal binds
+**run 1**; the "re-mint" run 2 belonged to the SECOND device (vault
+B); run 1 idled out server-side (~15-min run idle deadline, not the
+1h absolute one) freeing the per-device slot; the single manual
+Repair then MINTED run 3 into the free slot and the client refused it
+at the stale-binding check. The pull lane had already applied+acked
+the two remote events, so run 1's downloads needed sequences above
+its checkpoint forever (quiet canonical). The implementation,
+therefore, is exactly two client changes in
+`apps/obsidian-plugin/src/device-sync/manifest-reconciler.ts`:
+
+- **(A) shed-before-block** at `runOne`'s binding-mismatch
+  (~686-697): the server receipt names a different, authoritative run
+  → `journal.discardActiveManifestRun()` + return
+  `{kind: "restart-run", stage: "start"}`; the loop's second attempt
+  re-starts and the server RESUMES the freshly minted run (same id,
+  no new mint). The checkpoint-mismatch clause sheds the same way. A
+  discard throw maps to `runFailure("start", error)`.
+- **(B) terminal-settle of the never-fitting action, NARROW**
+  (applyAction's cursor-gap edge): terminalize the action with the
+  closed `device_cursor_gap` reason (no mutation) ONLY when the
+  barrier already reads `device_cursor_gap` AND the attempt is the
+  loop's retry AND `checkpointSequence <= appliedSequence` (the quiet
+  misfit — even the current checkpoint cannot fit the lattice). The
+  guard preserves the 2026-09-02 journey, whose retry attempt's fresh
+  checkpoint sits ABOVE the applied lattice and keeps today's
+  closeStaleCheckpoint+restart semantics.
+
+Harness prerequisites (ScriptedServer): `failNextActionsRead` (one
+transient actions-page failure so run 1 stays open+bound while the
+pull lane advances the applied lattice past the frozen checkpoint)
+and `expireOpenRun()` (the server's run idle-expiry freeing the
+slot); mint-when-free already exists in `#serveStart`. Verify the
+resume path's page re-capture divergence comparison before letting
+the RED journey depend on it.
+
 - [ ] Smallest change that turns Task 2's journey green; convergence
   must land through the canonical fence as before (no local cursor
   shortcuts), stay idempotent under repeated repairs, and leave no
