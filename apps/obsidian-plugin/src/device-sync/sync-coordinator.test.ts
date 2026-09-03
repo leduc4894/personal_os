@@ -237,6 +237,10 @@ class FakeDeviceSyncRepository implements DeviceSyncRepository {
     return null;
   }
 
+  readRemoteApply(): RemoteApplyOperation | null {
+    return null;
+  }
+
   async recordEchoMarker(): Promise<void> {
     return undefined;
   }
@@ -304,6 +308,13 @@ class FakeApplier implements RemoteEventApplier {
     if (this.recoveryError !== null) {
       throw this.recoveryError;
     }
+  }
+
+  async settleVaultFailedApply(
+    event: DeviceSyncEvent,
+    reason: DeviceSyncReason,
+  ): Promise<TerminalDeviceEvent> {
+    return { eventSequence: event.eventSequence, outcome: "conflict", reason };
   }
 
   async apply(event: DeviceSyncEvent): Promise<TerminalDeviceEvent> {
@@ -497,6 +508,10 @@ function createHarness(options: {
     },
     applier: {
       recoverUnfinishedApply: () => trackedPhase("recovery", () => applier.recoverUnfinishedApply()),
+      settleVaultFailedApply: (event, reason) =>
+        trackedPhase(`settle:${event.eventSequence}`, () =>
+          applier.settleVaultFailedApply(event, reason),
+        ),
       apply: (event) => trackedPhase(`apply:${event.eventSequence}`, () => applier.apply(event)),
     },
     reconciler: {

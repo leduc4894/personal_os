@@ -445,6 +445,7 @@ export interface DeviceSyncRepository {
   recordServerAcknowledgement(sequence: number): Promise<void>;
   completeRepair(input: CompleteLocalRepair): Promise<void>;
   readUnfinishedApply(): RemoteApplyOperation | null;
+  readRemoteApply(eventSequence: number): RemoteApplyOperation | null;
   recordEchoMarker(input: EchoMarker): Promise<void>;
   readEchoMarker(eventSequence: number): EchoMarker | null;
   matchAndConsumeEcho(input: VaultObservation): Promise<boolean>;

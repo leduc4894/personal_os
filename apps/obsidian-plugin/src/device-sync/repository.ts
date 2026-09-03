@@ -814,6 +814,27 @@ export class DeviceSyncRepository implements DeviceSyncRepositoryPort {
   }
 
   /**
+   * One remote apply operation by its exact event sequence, or null
+   * (read-only). The settle path of a repeatedly refused vault write
+   * addresses the failed event's OWN row this way — the oldest-unfinished
+   * read can name an earlier still-unacknowledged row instead.
+   */
+  readRemoteApply(eventSequence: number): RemoteApplyOperation | null {
+    if (!isPositiveInteger(eventSequence)) {
+      throw journalStoreError("journal_query_failed");
+    }
+    const row = firstRow(
+      this.#database.readAll(
+        [
+          `select ${REMOTE_APPLY_OPERATION_COLUMNS.join(", ")} from remote_apply_operations`,
+          `where event_sequence = ${eventSequence};`,
+        ].join(" "),
+      ),
+    );
+    return row === null ? null : parseRemoteApplyRow(row);
+  }
+
+  /**
    * Record one exact echo marker (spec 8.2) before the Vault mutation.
    * An exact duplicate is a no-op; a conflicting duplicate for one event
    * sequence contradicts the immutable server event and is refused.

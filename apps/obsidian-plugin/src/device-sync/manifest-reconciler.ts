@@ -75,10 +75,15 @@ import type {
   DeviceSyncRepository,
   DeviceSyncState,
   ReconcileFailureStage,
+  TerminalDeviceEvent,
 } from "./contracts";
 import type { ManifestCapture, ManifestEntry, ManifestPageDigestRecord } from "./manifest-capture";
 import { computeManifestFinalDigest } from "./manifest-capture";
-import type { RemoteEventApplier, VerifiedDownloader } from "./remote-event-applier";
+import type {
+  RemoteEventApplier,
+  RemoteEventApplyOptions,
+  VerifiedDownloader,
+} from "./remote-event-applier";
 
 // --- the reconcile contracts (brief task 11) ---------------------------------------------------------
 
@@ -389,6 +394,7 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
     action: ManifestAction,
     entriesByLocalId: ReadonlyMap<string, ManifestEntry>,
     terminalActionIndexes: Set<number>,
+    attemptedActionIndexes: ReadonlySet<number>,
     isRetryAttempt: boolean,
   ): Promise<RunStep | null> {
     if (terminalActionIndexes.has(action.actionIndex)) {
@@ -429,6 +435,40 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
       }
       terminalActionIndexes.add(action.actionIndex);
       return null;
+    };
+
+    /**
+     * Apply one synthetic event with the honest terminal verdict (the
+     * 2026-09-03 apply-wedge deep fix): an event the applier itself
+     * settles as a conflict keeps its closed reason on the action row and
+     * the trail, and a vault write a PRIOR durable pass of this same
+     * action already refused settles instead of failing the whole run —
+     * the other placements stop being hostages of one locked target while
+     * the refused one re-converges through a later repair.
+     */
+    const applySyntheticEvent = async (
+      event: DeviceSyncEvent,
+      options?: RemoteEventApplyOptions,
+    ): Promise<RunStep | null> => {
+      let settled: TerminalDeviceEvent;
+      try {
+        settled = await applier.apply(event, options);
+      } catch (error) {
+        const failure = closedFailureOf(error);
+        if (
+          failure.reason === "device_apply_vault_failed" &&
+          attemptedActionIndexes.has(action.actionIndex)
+        ) {
+          try {
+            settled = await applier.settleVaultFailedApply(event, failure.reason);
+          } catch (settleError) {
+            return runFailure("actions", settleError);
+          }
+        } else {
+          return runFailure("actions", error);
+        }
+      }
+      return terminal(settled.outcome === "conflict" ? settled.reason : null);
     };
 
     if (
@@ -657,20 +697,10 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
       // the applied bytes below: the applier reuses these exact proven
       // bytes instead of downloading the same version a second time whose
       // bytes could diverge from the proof.
-      try {
-        await applier.apply(event, { verifiedDownload: verified });
-      } catch (error) {
-        return runFailure("actions", error);
-      }
-      return terminal(null);
+      return await applySyntheticEvent(event, { verifiedDownload: verified });
     }
 
-    try {
-      await applier.apply(event);
-    } catch (error) {
-      return runFailure("actions", error);
-    }
-    return terminal(null);
+    return await applySyntheticEvent(event);
   }
 
   // --- one checkpoint-bound run -------------------------------------------------------------------
@@ -883,16 +913,27 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
     }
 
     // --- apply every planned action to terminal-safe (spec 12.4).
-    let settledActionIndexes: readonly number[];
+    let actionProgress: readonly ManifestActionProgressRecord[];
     try {
-      settledActionIndexes = journal
-        .readManifestActionProgress()
-        .filter((progress) => progress.outcome === "terminal_safe")
-        .map((progress) => progress.actionIndex);
+      actionProgress = journal.readManifestActionProgress();
     } catch (error) {
       return runFailure("actions", error);
     }
-    const terminalActionIndexes = new Set<number>(settledActionIndexes);
+    const terminalActionIndexes = new Set(
+      actionProgress
+        .filter((progress) => progress.outcome === "terminal_safe")
+        .map((progress) => progress.actionIndex),
+    );
+    // A `received` row at the START of this pass is a PRIOR pass's durable
+    // attempt evidence — this pass records its own `received` receipts
+    // only inside applyAction: the second closed vault refusal of such an
+    // action settles instead of failing the run (the apply-wedge fix's
+    // per-action attempt counting over the existing progress rows).
+    const attemptedActionIndexes = new Set(
+      actionProgress
+        .filter((progress) => progress.outcome === "received")
+        .map((progress) => progress.actionIndex),
+    );
     let afterActionIndex: number | undefined = undefined;
     let hasMoreActions = true;
     while (hasMoreActions) {
@@ -920,6 +961,7 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
           action,
           entriesByLocalId,
           terminalActionIndexes,
+          attemptedActionIndexes,
           isRetryAttempt,
         );
         if (step !== null) {

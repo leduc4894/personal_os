@@ -1325,6 +1325,158 @@ describe("RemoteEventApplier crash-injection matrix", () => {
   });
 });
 
+// --- the settle of repeatedly refused vault writes (the 2026-09-03 apply-wedge deep fix) --------------------
+
+describe("RemoteEventApplier settle of repeatedly refused vault writes", () => {
+  /** Seed one durable created-apply intent at `prepared` with its echo marker. */
+  async function seedPreparedIntent(harness: ApplierHarness): Promise<DeviceSyncEvent> {
+    const event = CREATED_EVENT();
+    await harness.repository.prepareRemoteApply({
+      eventSequence: event.eventSequence,
+      eventId: event.eventId,
+      sourceId: event.sourceId,
+      operation: "created",
+      priorLocator: null,
+      targetLocator: event.resultingLocator ?? "notes/created.md",
+      baseFingerprint: null,
+      finalFingerprint: NEXT_FINGERPRINT,
+      tempToken: event.eventId,
+      rollbackToken: null,
+    });
+    await harness.repository.recordEchoMarker({
+      eventSequence: event.eventSequence,
+      sourceId: event.sourceId,
+      operation: "created",
+      priorLocator: null,
+      targetLocator: event.resultingLocator,
+      finalFingerprint: NEXT_FINGERPRINT,
+    });
+    return event;
+  }
+
+  it("abandons a proven-clean refused intent so the sequence stays reusable and no barrier is minted", async () => {
+    // The live wedge shape: the staged sibling's write was refused, the
+    // durable row rests `prepared`, nothing was mutated.
+    const harness = createApplierHarness();
+    const event = await seedPreparedIntent(harness);
+
+    const verdict = await harness.applier.settleVaultFailedApply(
+      event,
+      "device_apply_vault_failed",
+    );
+
+    expect(verdict).toEqual({
+      eventSequence: event.eventSequence,
+      outcome: "conflict",
+      reason: "device_apply_vault_failed",
+    });
+    // The intent AND its echo marker are gone, the cursor did not burn the
+    // sequence, and no barrier was minted (the settle only runs inside a
+    // bound manifest run, which already is the reconciliation).
+    expect(harness.repository.readRemoteApply(event.eventSequence)).toBeNull();
+    expect(harness.repository.readEchoMarker(event.eventSequence)).toBeNull();
+    expect(harness.repository.readState().appliedSequence).toBe(0);
+    expect(harness.repository.readState().barrierGeneration).toBeNull();
+    expect(harness.diagnostics.applyFailures).toEqual([]);
+    // The freed sequence lets the very same event re-apply cleanly once
+    // the vault accepts the write again.
+    const reapplied = await harness.applier.apply(event);
+    expect(reapplied).toEqual({ eventSequence: event.eventSequence, outcome: "applied", reason: null });
+    expect(harness.repository.readState().appliedSequence).toBe(1);
+  });
+
+  it("closes a resume-refused staged apply with the cursor-advancing conflict verdict", async () => {
+    // The replace-stage refusal shape: the verified temp sibling exists,
+    // the durable row rests `temp_verified`, and the locked target
+    // refuses the recovery's resume rename.
+    const harness = createApplierHarness();
+    const event = await seedPreparedIntent(harness);
+    await harness.repository.transitionRemoteApply({
+      eventSequence: event.eventSequence,
+      state: "temp_verified",
+      tempToken: event.eventId,
+    });
+    harness.vault.setFileBytes(tempLocatorOf("notes/created.md"), NEXT_BYTES);
+    harness.vault.failRenameFor.add("notes/created.md");
+
+    const verdict = await harness.applier.settleVaultFailedApply(
+      event,
+      "device_apply_vault_failed",
+    );
+
+    expect(verdict).toEqual({
+      eventSequence: event.eventSequence,
+      outcome: "conflict",
+      reason: "device_apply_vault_failed",
+    });
+    // The sequence is freed the only legal way for an unprovable row: the
+    // cursor advances over the closed conflict verdict, whose reason the
+    // row keeps readable.
+    expect(harness.repository.readState().appliedSequence).toBe(1);
+    expect(harness.repository.readRemoteApply(event.eventSequence)?.state).toBe("locally_applied");
+    expect(harness.repository.readRemoteApply(event.eventSequence)?.safeErrorCode).toBe(
+      "device_apply_vault_failed",
+    );
+    // The digest-verified staged bytes are preserved, never guessed away.
+    expect(harness.vault.files.get(tempLocatorOf("notes/created.md"))).toEqual(NEXT_BYTES);
+    expect(harness.diagnostics.applyFailures).toContainEqual({
+      stage: "recovery",
+      reason: "device_apply_vault_failed",
+    });
+  });
+
+  it("settles a refusal whose write actually completed as the applied truth", async () => {
+    // The late-success shape: the refusal reported a failure, but the
+    // target already holds the exact final bytes.
+    const harness = createApplierHarness();
+    const event = await seedPreparedIntent(harness);
+    await harness.repository.transitionRemoteApply({
+      eventSequence: event.eventSequence,
+      state: "temp_verified",
+      tempToken: event.eventId,
+    });
+    harness.vault.setFileBytes("notes/created.md", NEXT_BYTES);
+
+    const verdict = await harness.applier.settleVaultFailedApply(
+      event,
+      "device_apply_vault_failed",
+    );
+
+    expect(verdict).toEqual({
+      eventSequence: event.eventSequence,
+      outcome: "applied",
+      reason: null,
+    });
+    expect(harness.repository.readState().appliedSequence).toBe(1);
+    expect(harness.repository.readRemoteApply(event.eventSequence)?.state).toBe("locally_applied");
+    expect(harness.vault.files.get("notes/created.md")).toEqual(NEXT_BYTES);
+  });
+
+  it("never frees a foreign row holding the sequence", async () => {
+    const harness = createApplierHarness();
+    const event = await seedPreparedIntent(harness);
+    // A different event's id on the same sequence: the durable attempt
+    // evidence contradicts this settle's event identity.
+    const foreign = eventOf({
+      eventId: "99999999-9999-4999-8999-999999999999",
+      operation: "created",
+      priorLocator: null,
+      resultingLocator: "notes/created.md",
+      baseFingerprint: null,
+    });
+
+    await expect(
+      harness.applier.settleVaultFailedApply(foreign, "device_apply_vault_failed"),
+    ).rejects.toThrow();
+    expect(harness.repository.readRemoteApply(event.eventSequence)?.state).toBe("prepared");
+    expect(harness.repository.readState().appliedSequence).toBe(0);
+    expect(harness.diagnostics.applyFailures).toContainEqual({
+      stage: "recovery",
+      reason: "device_apply_recovery_ambiguous",
+    });
+  });
+});
+
 // --- the JournalPersistence composition (task 8 carry-forward) ----------------------------------------------
 
 describe("DeviceSyncRepository JournalPersistence composition", () => {

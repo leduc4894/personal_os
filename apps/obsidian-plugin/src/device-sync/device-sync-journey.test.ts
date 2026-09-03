@@ -221,6 +221,34 @@ class InMemoryVault implements VaultMutationSeam {
    * family exactly like a real Vault refusal.
    */
   readonly failWritesAtLocator = new Set<string>();
+  /**
+   * File basenames whose writes always throw — the locked target AND its
+   * dot-prefixed staging siblings (the 2026-09-03 apply-wedge finding's
+   * live shape: the refusal sat at `verify_temp`, the staged hidden
+   * sibling's write, so the durable row rests `prepared` and no mutation
+   * ever ran). A real locked/unwritable file refuses every write shape
+   * the atomic writer attempts for it.
+   */
+  readonly failWritesForBasenames = new Set<string>();
+
+  /** Whether one locator's write is refused: the exact locator or a locked
+   * basename's own hidden sibling (`.<basename>.<suffix>-<token>`). */
+  #isWriteRefused(locator: string): boolean {
+    if (this.failWritesAtLocator.has(locator)) {
+      return true;
+    }
+    if (this.failWritesForBasenames.size === 0) {
+      return false;
+    }
+    const lastSlash = locator.lastIndexOf("/");
+    const baseName = lastSlash === -1 ? locator : locator.slice(lastSlash + 1);
+    for (const refusedBaseName of this.failWritesForBasenames) {
+      if (baseName === refusedBaseName || baseName.startsWith(`.${refusedBaseName}.`)) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   setFileBytes(locator: string, bytes: Uint8Array): void {
     this.#files.set(locator, bytes);
@@ -255,7 +283,7 @@ class InMemoryVault implements VaultMutationSeam {
   }
 
   async createFile(locator: string, bytes: Uint8Array): Promise<void> {
-    if (this.failWritesAtLocator.has(locator)) {
+    if (this.#isWriteRefused(locator)) {
       throw new Error("vault write refused");
     }
     this.writeCount += 1;
@@ -263,7 +291,7 @@ class InMemoryVault implements VaultMutationSeam {
   }
 
   async renameLocator(fromLocator: string, toLocator: string): Promise<void> {
-    if (this.failWritesAtLocator.has(toLocator)) {
+    if (this.#isWriteRefused(toLocator)) {
       throw new Error("vault write refused");
     }
     this.writeCount += 1;
@@ -276,7 +304,7 @@ class InMemoryVault implements VaultMutationSeam {
   }
 
   async trashLocator(locator: string): Promise<void> {
-    if (this.failWritesAtLocator.has(locator)) {
+    if (this.#isWriteRefused(locator)) {
       throw new Error("vault write refused");
     }
     this.writeCount += 1;
@@ -1497,6 +1525,63 @@ describe("device-sync two-device journeys (production stack)", () => {
     expect(state.activeManifestRunId).toBeNull();
     expect(state.appliedSequence).toBe(state.acknowledgedSequence);
     expect(server.completions.length).toBeGreaterThan(0);
+  });
+
+  it("completes a manifest run past a repeatedly refused vault write instead of holding every other placement hostage", async () => {
+    const server = new ScriptedServer();
+    const stack = buildPluginStack(server);
+    const lockedLocator = "notes/journey-locked.md";
+    const hostageLocator = "notes/journey-hostage.md";
+    const lockedBytes = bytesOf("the locked note device A committed");
+    const hostageBytes = bytesOf("the hostage note device A committed");
+    await server.commitCreate(lockedLocator, lockedBytes);
+    await server.commitCreate(hostageLocator, hostageBytes);
+
+    // The locked file refuses every write shape of its atomic apply — the
+    // staged hidden sibling included (the live wedge's `verify_temp`
+    // refusal): the durable row rests `prepared` and no mutation ever ran.
+    stack.vault.failWritesForBasenames.add("journey-locked.md");
+
+    stack.coordinator.request("explicit_repair");
+    await flushCycles();
+    // The first refusal moved the run onto the retry backoff; firing it
+    // runs the SECOND pass of the same bound run — the durable `received`
+    // action progress row is the prior-attempt evidence.
+    stack.scheduler.advance(60_000);
+    await flushCycles();
+
+    // DESIRED: the refused placement settles with its closed reason and
+    // the run COMPLETES — the hostage placement delivers, the locked file
+    // stays absent, the trail keeps the closed vault-failure reason
+    // readable, and the cursors converge through the canonical fence.
+    // TODAY: the cycle-start recovery of the leftover `prepared` row
+    // abandons it and then dies refusing to mint a barrier the active run
+    // already occupies, so the repair never resumes and everything parks.
+    const state = stack.deviceSyncRepository.readState();
+    expect(state.barrierGeneration).toBeNull();
+    expect(state.activeManifestRunId).toBeNull();
+    expect(state.appliedSequence).toBe(state.acknowledgedSequence);
+    expect(stack.vault.fileBytes(hostageLocator)).toEqual(hostageBytes);
+    expect(stack.vault.has(lockedLocator)).toBe(false);
+    expect(stack.trail.rendered()).toContain("device_apply_vault_failed");
+    expect(server.completions.length).toBeGreaterThan(0);
+
+    // The lock clears and the parked placement re-converges through the
+    // next explicit repair. One deferred canonical sequence gives the
+    // fresh run's checkpoint room past the completion-settled cursor — a
+    // perfectly quiet timeline cannot (the sheds-stale-binding journey
+    // pins that standing fence property), so the journey models the
+    // timeline moving ahead by one sequence this device owes nothing for.
+    stack.vault.failWritesForBasenames.delete("journey-locked.md");
+    server.deferSequences(1);
+    stack.coordinator.request("explicit_repair");
+    await flushCycles();
+
+    expect(stack.vault.fileBytes(lockedLocator)).toEqual(lockedBytes);
+    const converged = stack.deviceSyncRepository.readState();
+    expect(converged.barrierGeneration).toBeNull();
+    expect(converged.activeManifestRunId).toBeNull();
+    expect(converged.appliedSequence).toBe(converged.acknowledgedSequence);
   });
 
   it("restarts exactly one fresh checkpoint-bound run after a policy advance", async () => {

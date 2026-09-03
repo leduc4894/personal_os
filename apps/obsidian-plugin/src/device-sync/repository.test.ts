@@ -597,6 +597,20 @@ describe("DeviceSyncRepository remote apply invariants", () => {
     });
   });
 
+  it("reads one remote apply by its exact sequence even under an earlier unfinished row", async () => {
+    // The settle of a repeatedly refused vault write addresses the failed
+    // event's OWN row: an earlier still-unacknowledged row must not shadow
+    // the by-sequence read the way it shadows the oldest-unfinished one.
+    const { repository } = createRepository();
+    await applyEventThroughMachine(repository, 1);
+    await repository.prepareRemoteApply(preparedApplyOf(2, "created"));
+
+    expect(repository.readUnfinishedApply()?.eventSequence).toBe(1);
+    expect(repository.readRemoteApply(2)?.state).toBe("prepared");
+    expect(repository.readRemoteApply(3)).toBeNull();
+    expect(() => repository.readRemoteApply(0)).toThrow();
+  });
+
   it("treats an exact re-prepare as idempotent and refuses a conflicting one", async () => {
     const { repository } = createRepository();
     await repository.prepareRemoteApply(preparedApplyOf(1));

@@ -46,6 +46,21 @@ import type { AtomicVaultWriter, RemoteApplyRecovery } from "./atomic-vault-writ
 
 export interface RemoteEventApplier {
   recoverUnfinishedApply(): Promise<void>;
+  /**
+   * Settle one repeatedly refused apply (the 2026-09-03 apply-wedge deep
+   * fix): the caller PROVED a prior durable attempt of this same event
+   * failed with the same closed vault-failure reason. The settle
+   * reconciles the leftover Vault state through the crash-safe recovery,
+   * then frees the lattice sequence the failed apply holds — a
+   * proven-clean intent is abandoned (the sequence stays reusable), a
+   * refusal the recovery itself meets closes with the cursor-advancing
+   * conflict verdict — so the caller's manifest run continues past the
+   * refused placement with its closed reason surfaced exactly once.
+   */
+  settleVaultFailedApply(
+    event: DeviceSyncEvent,
+    reason: DeviceSyncReason,
+  ): Promise<TerminalDeviceEvent>;
   apply(event: DeviceSyncEvent, options?: RemoteEventApplyOptions): Promise<TerminalDeviceEvent>;
 }
 
@@ -438,6 +453,25 @@ export function createRemoteEventApplier(options: RemoteEventApplierOptions): Re
         // re-converges the event.
         try {
           await repository.abandonRemoteApply(operation.eventSequence);
+        } catch (error) {
+          if (error instanceof DeviceSyncApiError) {
+            throw error;
+          }
+          const mapped = closedStoreReasonOf(error);
+          diagnostics.applyFailure("recovery", mapped);
+          throwMapped(mapped, false);
+        }
+        if (repository.readState().activeManifestRunId !== null) {
+          // A BOUND manifest run already is the manifest reconciliation
+          // the barrier below exists to force — its action re-attempt or
+          // its canonical-only download re-converges the abandoned event —
+          // and the mint is refused under the very run binding that
+          // guarantees it. Abandoning quietly lets the run resume instead
+          // of wedging the cycle-start recovery (the 2026-09-03
+          // apply-lane failure's shape).
+          return;
+        }
+        try {
           const generation = await repository.nextObservationGeneration();
           await repository.startRepairBarrier({
             generation,
@@ -501,5 +535,114 @@ export function createRemoteEventApplier(options: RemoteEventApplierOptions): Re
     }
   }
 
-  return { recoverUnfinishedApply, apply };
+  async function settleVaultFailedApply(
+    event: DeviceSyncEvent,
+    reason: DeviceSyncReason,
+  ): Promise<TerminalDeviceEvent> {
+    const leftover = repository.readRemoteApply(event.eventSequence);
+    if (leftover === null) {
+      // The refusal predated the durable prepare: nothing of this event is
+      // held — the closed verdict stands without a lattice change.
+      return { eventSequence: event.eventSequence, outcome: "conflict", reason };
+    }
+    if (
+      leftover.eventId !== event.eventId ||
+      leftover.state === "locally_applied" ||
+      leftover.state === "server_acknowledged"
+    ) {
+      // A foreign row holding this sequence contradicts the caller's
+      // durable attempt evidence, and an already-terminal row owes no
+      // sequence: never free lattice evidence this settle does not own.
+      diagnostics.applyFailure("recovery", "device_apply_recovery_ambiguous");
+      throwMapped("device_apply_recovery_ambiguous", false);
+    }
+
+    let recovery: RemoteApplyRecovery;
+    try {
+      recovery = await writer.recover(leftover);
+    } catch (error) {
+      if (error instanceof DeviceSyncApiError) {
+        throw error;
+      }
+      if (error instanceof AtomicVaultWriterError) {
+        // The recovery met the same refusal (a `temp_verified` resume the
+        // locked target refuses): the staged bytes are digest-verified,
+        // the first visible mutation never completed, and the sequence
+        // must still free for the run — close it with the
+        // cursor-advancing conflict verdict (the repository's own
+        // contract: a non-applied terminal outcome closes a dangling
+        // pre-mutation row with its closed reason). The placement
+        // re-converges through a later reconciliation once the refusal
+        // clears.
+        diagnostics.applyFailure(error.stage, error.reason);
+        return terminalize(event.eventSequence, "conflict", error.reason, "recovery");
+      }
+      const mapped = closedStoreReasonOf(error);
+      diagnostics.applyFailure("recovery", mapped);
+      throwMapped(mapped, false);
+    }
+
+    if (recovery.kind !== "blocked" && recovery.cleanupFailure !== null) {
+      diagnostics.applyFailure("trash", recovery.cleanupFailure);
+    }
+
+    switch (recovery.kind) {
+      case "clean": {
+        // Proven at the verified pre-mutation expectation: abandon the
+        // intent together with its echo marker — the sequence stays
+        // REUSABLE (the cursor does not burn it), so the run's remaining
+        // placements keep their slots and the refused one re-converges
+        // through a later repair. No barrier is minted: this settle only
+        // runs inside a bound manifest run, which already is the
+        // reconciliation the crash path's barrier exists to force.
+        try {
+          await repository.abandonRemoteApply(event.eventSequence);
+        } catch (error) {
+          if (error instanceof DeviceSyncApiError) {
+            throw error;
+          }
+          const mapped = closedStoreReasonOf(error);
+          diagnostics.applyFailure("recovery", mapped);
+          throwMapped(mapped, false);
+        }
+        return { eventSequence: event.eventSequence, outcome: "conflict", reason };
+      }
+      case "mutated": {
+        // The refused write actually completed (or the recovery just
+        // finished it from the verified staging bytes): the placement
+        // holds — settle it as the applied truth, never a lossy verdict.
+        if (leftover.state !== "vault_mutated") {
+          try {
+            await repository.transitionRemoteApply({
+              eventSequence: event.eventSequence,
+              state: "vault_mutated",
+              rollbackToken: recovery.rollbackToken,
+            });
+          } catch (error) {
+            if (error instanceof DeviceSyncApiError) {
+              throw error;
+            }
+            const mapped = closedStoreReasonOf(error);
+            diagnostics.applyFailure("recovery", mapped);
+            throwMapped(mapped, false);
+          }
+        }
+        const outcome: TerminalDeviceEventOutcome =
+          leftover.operation === "deleted" ? "tombstone_handled" : "applied";
+        return terminalize(event.eventSequence, outcome, null, "recovery");
+      }
+      case "restored": {
+        return terminalize(event.eventSequence, "conflict", recovery.reason, "recovery");
+      }
+      case "blocked": {
+        // Ambiguous preserved bytes: never free the sequence on a guess —
+        // the caller's run blocks with the closed reason readable (the
+        // coordinator's bounded-retry verdict keeps it from churning).
+        diagnostics.applyFailure("recovery", recovery.reason);
+        throwMapped(recovery.reason, false);
+      }
+    }
+  }
+
+  return { recoverUnfinishedApply, settleVaultFailedApply, apply };
 }
