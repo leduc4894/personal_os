@@ -139,8 +139,8 @@ lifecycle row is classified below before any repository method is introduced.
 | --- | --- | --- |
 | Uncommitted-transit heal, no intent | Existing pure-create behavior: delete R1. There is no observed rename ownership to retain. | Terminal identity-less create without an intent is still pruned. |
 | Uncommitted-transit heal, intent present | **REPARENT + CLEAR**, never delete R1. The latest Vault path remains owned by R1; admission may add a successor content event on that row. | Terminal identity-less create followed by heal keeps the same `local_file_id`, moves it to the final path, and leaves no intent. |
-| Content `local_file_missing -> deferred_lifecycle` | With an intent this terminal exit is deferred under the bounded rule in section 6.2: **PRESERVE** through attempt 40, then **REPARENT + CLEAR**, close E1, and transfer the row to reconciliation on attempt 41. Without an intent, preserve the current terminal behavior. | Single-part and multipart cover no-intent close, retry below the limit, restart-persistent count, recovery before the limit, and deterministic reconcile takeover at the limit. |
-| Content rows frozen as `deferred_lifecycle` by a materialized rename/move | **PRESERVE**. These rows are the existing lifecycle guard and are removed only with the lifecycle receipt or an explicit reconcile/disposal path. | Freeze leaves the intent; lifecycle receipt removes the frozen rows and resolves the intent atomically. |
+| Content `local_file_missing -> deferred_lifecycle` | With an intent this terminal exit is deferred under the bounded rule in section 6.2: **PRESERVE** through attempt 40, then **REPARENT + CLEAR**, close E1, and transfer the row to reconciliation on attempt 41. A counter event-ID mismatch instead takes the same reparent/clear/reconcile exit before any cutoff evaluation. Without an intent, preserve the current terminal behavior. | Single-part and multipart cover no-intent close, retry below the limit, restart-persistent count, recovery before the limit, mismatch returns only the conflict reason, and deterministic exhaustion-only reconcile takeover at the limit. |
+| Content rows frozen as `deferred_lifecycle` by a materialized rename/move | **PRESERVE** the intent, but delete any bound missing-file deferral state in the same materialization transaction. The frozen row is the existing lifecycle guard; a retry budget is valid only for an actively retrying content event and must not survive its freeze. Frozen rows are removed only with the lifecycle receipt or an explicit reconcile/disposal path. | Seed a valid bound counter, materialize the lifecycle event, and prove the intent remains while the frozen event has no counter; rollback proves neither freeze nor counter deletion commits, and reopen sees either the intact retry state or no counter, never stale state on a frozen event. |
 | Any terminal content park while stable source identity or another identity-establishing content event exists | **PRESERVE**. The row can still materialize the rename now or after the other event's receipt. One failed content generation must not discard the chain. | Every closed class covers an identityful update and an identity-less row with a pending successor. |
 | Last terminal content park before identity | **REPARENT + CLEAR** and retain the same row plus its terminal audit. There is no remaining event that can provide identity, so keeping the intent would wedge admission; deleting the row would recreate the R2 split. `blocked_conflict` additionally retains/starts its repair barrier. | Every closed class covers an identity-less last event and proves same row, final path, no intent, no R2; conflict also proves the barrier. |
 | Rename/move direct terminal `blocked_conflict` or `integrity_failed` | `LifecycleRepository.resolveIntentAwareLifecycleTerminal` owns the terminalization. With an intent it atomically writes the attempt audit, terminalizes the immutable prefix, clears any bound missing-file deferral state, **REPARENTS + CLEARS** the intent, and marks both the row and journal `reconcile_required`. Neither a rejected canonical move nor an integrity rejection proves the prefix committed, so it must not rebase, clear as success, or retain a resumable prefix/compensation reservation. Without an intent the present terminal behavior remains. | Driver and repository tests cover both verdicts with a direct lifecycle prefix, latest composed target, no retained intent/deferral state, one repair obligation, and one sanitized rejection diagnostic; a rollback-injection test proves no partial terminalization or cleanup. |
@@ -164,10 +164,15 @@ an exit test before landing.
 ### 3.1 Exhaustive terminal content classes
 
 `JournalRepository.resolveIntentAwareContentTerminal` owns the attempt audit,
-event close, and preserve-or-reparent decision in one serialized mutation. It
-closes the event, then checks the owner's durable identity and remaining
+event close, and preserve-or-reparent decision in one serialized mutation. If
+the event has a bound missing-file deferral row, this generic terminal mutation
+deletes that row with the event close, before deciding whether the intent is
+preserved or cleared. It then checks the owner's durable identity and remaining
 pending content events. The two generic rows above apply to every terminal
-class; no queue caller performs a separate intent read or attempt write.
+class; no queue caller performs a separate intent read or attempt write. A
+rollback leaves both the event and its still-valid counter untouched; a
+committed close leaves neither a terminal event nor a later restart with a
+counter that could be mistaken for an active retry.
 
 Born-terminal `blocked_size`/`excluded_policy` capture remains owned by
 `JournalRepository.recordCapture`. Fresh admission cannot have an intent, and
@@ -368,7 +373,7 @@ JournalRepository.resolveIntentAwareLocalFileMissing({
   attemptedAtEpochMs,
   requestCorrelationId,
   nextEligibleRetryEpochMs,
-}) // -> "waiting_for_rename" | "reconcile_takeover" | "closed_deferred_lifecycle"
+}) // -> IntentAwareLocalFileMissingResolution
 
 JournalRepository.resolveIntentAwareContentTerminal({
   eventId,
@@ -377,6 +382,18 @@ JournalRepository.resolveIntentAwareContentTerminal({
   attemptedAtEpochMs,
   requestCorrelationId,
 ) // -> "intent_preserved" | "intent_reparented" | "no_intent"
+```
+
+```ts
+type IntentAwareLocalFileMissingResolution =
+  | { readonly outcome: "waiting_for_rename" }
+  | {
+      readonly outcome: "reconcile_takeover";
+      readonly diagnosticReason:
+        | "pending_rename_intent_conflict"
+        | "pending_rename_intent_exhausted";
+    }
+  | { readonly outcome: "closed_deferred_lifecycle" };
 ```
 
 Names may change only if semantics remain one-for-one and tests name the same
@@ -394,8 +411,10 @@ in that mutation; if that fails, no partial intent change commits.
 `recordPendingRenameLifecycleEvent` re-reads the intent and identity in its
 transaction. It atomically freezes pending content, inserts/replays one
 rename/move event plus operands from the current endpoints, and rebinds the
-row. A unique/idempotent event lookup prevents a restart from materializing a
-second event for the same unresolved prefix. The intent remains present.
+row. It deletes any missing-file deferral row bound to content it freezes in
+that same transaction. A unique/idempotent event lookup prevents a restart
+from materializing a second event for the same unresolved prefix. The intent
+remains present.
 
 Receipt handling, echo consumption, row-specific reconciliation,
 `removeLocalMapping`, and restore phantom cleanup absorb their section 3
@@ -411,6 +430,19 @@ Every lifecycle-driver `blocked_conflict` or `integrity_failed` call instead
 uses `resolveIntentAwareLifecycleTerminal`; direct lifecycle calls to
 `recordEventAttempt` plus `markEventTerminal` are prohibited because they can
 close a prefix while retaining its intent.
+
+`resolveIntentAwareLocalFileMissing` owns the serialized durable decision,
+including attempt audit, counter mutation or deletion, event park/close,
+reparent/clear, and reconciliation flag. It returns its discriminated result
+only after that transaction commits. The queue driver is the sole diagnostics
+owner: after a committed `reconcile_takeover`, it emits exactly one trail entry
+from `diagnosticReason`; no repository method, fallback terminal resolver, or
+caller-side counter inspection may emit or infer either token. The mismatch
+branch is evaluated before any counter increment or cutoff calculation and
+returns only `pending_rename_intent_conflict`. The cutoff branch is reachable
+only for the same event with stored count 40 and returns only
+`pending_rename_intent_exhausted`. Thus a mismatch can never emit exhaustion,
+and an exhausted matching counter can never emit conflict.
 
 ## 6. Capture, queue, admission, and restart behavior
 
@@ -454,8 +486,10 @@ The RED schedule requires an exception to
   1 and inserts `{ event_id: E1, deferred_attempt_count: 1 }`; a row bound to
   E1 increments exactly once. Only the same event may resume its budget. A
   different event ID while the row exists is an invariant failure, not a reset:
-  the mutation takes the row-specific reparent/clear/reconcile exit and emits
-  `pending_rename_intent_conflict`.
+  before reading or changing the count, the mutation takes the row-specific
+  reparent/clear/reconcile exit and returns `reconcile_takeover` with
+  `pending_rename_intent_conflict`. The queue driver emits that token exactly
+  once after the committed result; it must not fall through to exhaustion.
 - Calls 1 through 40 commit the increment and `waiting_retry` together and
   preserve the intent. The state row's maximum stored value is 40. The next
   invocation computes 41 inside the transaction rather than attempting to
@@ -464,8 +498,10 @@ The RED schedule requires an exception to
   deferral state, reparents R1 to `intent.current_path`, clears the intent,
   sets R1 and the device journal to `reconcile_required`, and returns
   `reconcile_takeover`. The caller starts or retains the existing repair
-  barrier and emits `pending_rename_intent_exhausted`. Admission is then
-  governed by reconciliation, not by a leaked path reservation.
+  barrier. Admission is then governed by reconciliation, not by a leaked path
+  reservation. The queue
+  driver emits that token exactly once after the committed result; this
+  matching-event cutoff must not emit the conflict token.
 - The counter is reset only by deleting its row, never by decreasing it. A
   content committed/no-change receipt (including exact replay) for its bound
   E1 deletes the row in the same receipt transaction before preserving/rearming
@@ -605,8 +641,8 @@ Task 3 must add or extend tests at these layers:
 | Layer | Mandatory cases |
 | --- | --- |
 | `sqlite-database.test.ts`, lifecycle schema tests, persistence tests | Fresh v10 DDL includes intent plus deferral state; v9 -> v10 preservation; current/prior generation reopen with an intent and a valid bound counter; invalid counter parent/event/owner fails closed; valid equal-endpoint compensation plus open prefix reopens, while equal endpoints without exactly one prefix reconcile; empty v10 -> v9 -> v10 round-trip; either non-empty intent/deferral downgrade refusal; malformed/torn/foreign image rejection; rebuild yields empty intents/deferral state plus reconcile-first. |
-| `lifecycle-repository.test.ts`, `lifecycle-driver.test.ts` | Create, exact duplicate, `A -> B -> C` composition, unmaterialized return-to-prior cancellation, materialized `A -> B` then `B -> A` compensation `(A, A)`, current-path uniqueness/collision reconciliation, guarded restore owner, atomic lifecycle materialization from latest endpoints, exact replay, final clear, prefix rebase, row reconcile, phantom restore refusal, and all delete/cascade exits. Direct API `blocked_conflict` and `integrity` / `integrity_5xx` on an intent-owned prefix must atomically terminalize, reparent latest target, clear intent/counter, require reconciliation, retain one audit, and emit exactly one rejection token; no-intent parity, compensation rejection, and injected rollback are mandatory. |
-| `repository.test.ts`, `queue-driver.test.ts`, multipart tests | Intent-owned bytes resolve at the current path. Exercise the resolver itself 40 times (not an attempt-row count), prove its dedicated counter reaches 40 while the audit ring remains pruned to 10, reopen, then make the 41st call take atomic reconcile ownership. Cover restart at an intermediate count, recovery receipt clearing/resetting the bound counter, mismatched event containment, counter transaction rollback, and no-intent close. Parameterize every terminal content class in section 3.1 over identity, successor, and last-event shapes and both transports where reachable; prove retryable transport parks preserve. Content commit/no-change/exact replay preserves intent; transaction failure cannot race intent creation or swallow its token. |
+| `lifecycle-repository.test.ts`, `lifecycle-driver.test.ts` | Create, exact duplicate, `A -> B -> C` composition, unmaterialized return-to-prior cancellation, materialized `A -> B` then `B -> A` compensation `(A, A)`, current-path uniqueness/collision reconciliation, guarded restore owner, atomic lifecycle materialization from latest endpoints, exact replay, final clear, prefix rebase, row reconcile, phantom restore refusal, and all delete/cascade exits. Seed a valid content counter, then materialize the lifecycle prefix: the intent persists but the frozen content event and reopened journal have no counter; injected rollback leaves no prefix/freeze and the valid pre-transition counter only. Direct API `blocked_conflict` and `integrity` / `integrity_5xx` on an intent-owned prefix must atomically terminalize, reparent latest target, clear intent/counter, require reconciliation, retain one audit, and emit exactly one rejection token; no-intent parity, compensation rejection, and injected rollback are mandatory. |
+| `repository.test.ts`, `queue-driver.test.ts`, multipart tests | Intent-owned bytes resolve at the current path. Exercise the resolver itself 40 times (not an attempt-row count), prove its dedicated counter reaches 40 while the audit ring remains pruned to 10, reopen, then make the 41st call take atomic reconcile ownership with only `pending_rename_intent_exhausted`; a seeded counter whose call uses another event ID must take reconcile ownership with only `pending_rename_intent_conflict`, without incrementing or evaluating the cutoff. Cover restart at an intermediate count, recovery receipt clearing/resetting the bound counter, counter transaction rollback, and no-intent close. Seed a valid counter before a generic `resolveIntentAwareContentTerminal` close and prove the committed close deletes it while preserving or clearing the intent as the owner shape requires; injected rollback keeps both the non-terminal event and valid counter, and reopen after each outcome never resumes a stale counter for a terminal/frozen event. Parameterize every terminal content class in section 3.1 over identity, successor, and last-event shapes and both transports where reachable; prove retryable transport parks preserve. Content commit/no-change/exact replay preserves intent; transaction failure cannot race intent creation or swallow its token. |
 | `lifecycle-capture.test.ts` | Rapid prior miss resolves through the current endpoint; only one owner/timer exists; re-arm reads `C`, not frozen `B`; restart enumeration including a valid missing-file counter; late composition after prefix materialization; `A -> B` materialized then `B -> A`, restart, exact prefix receipt, one `B -> A` successor, and final clear; rename versus move derived from final endpoints; unmaterialized return-to-prior cancellation; exact final echo and non-matching prefix echo; delete ladder and `restore_pending` guards. |
 | `capture.test.ts`, automatic convergence tests | Rename-tail intermediate admission and final admission are suppressed on the existing tail; snapshot cannot mint R2; after reparent/clear the same row can admit a successor; pure-create transit heal remains unchanged; read failure fails closed with diagnostics. |
 | `journal-sync-journey.test.ts` | Convert the Task 1 RED to green without deleting its schedule assertions: E1 server commit precedes client receipt, `A -> B -> C` crosses settle, R1 survives, exact receipt establishes identity, one final lifecycle operation commits, and canonical/local state converge without `blocked_conflict`. Add restart between composition and receipt. |
