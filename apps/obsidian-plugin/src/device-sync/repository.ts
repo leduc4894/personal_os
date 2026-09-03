@@ -393,6 +393,34 @@ export class DeviceSyncRepository implements DeviceSyncRepositoryPort {
   }
 
   /**
+   * Advance the ACTIVE repair barrier to a fresh observation generation
+   * (the 2026-09-03 restart-asymmetry fix): the next manifest start
+   * carries the new generation, which the server answers by expiring the
+   * device's unfinished run — the sanctioned invalidation of server-side
+   * run evidence the client just contradicted. Returns the new barrier
+   * generation. Refused when no barrier is active.
+   */
+  async advanceRepairBarrierGeneration(reason: DeviceSyncReason): Promise<number> {
+    return this.#database.runSerializedMutation((session) => {
+      const state = this.#readState(session);
+      if (state.barrierGeneration === null) {
+        throw journalStoreError("journal_mutation_failed");
+      }
+      const nextGeneration = state.observationGeneration + 1;
+      session.exec(
+        [
+          "update device_sync_state set",
+          `observation_generation = ${nextGeneration},`,
+          `barrier_generation = ${nextGeneration},`,
+          `barrier_reason = ${sqlText(reason)}`,
+          "where singleton_key = 1;",
+        ].join(" "),
+      );
+      return nextGeneration;
+    });
+  }
+
+  /**
    * Record one accepted manifest page receipt (spec 7.3, 12.1): the run
    * and its checkpoint bind with the first accepted page, pages land in
    * exact contiguous order, and a replayed page number must carry the

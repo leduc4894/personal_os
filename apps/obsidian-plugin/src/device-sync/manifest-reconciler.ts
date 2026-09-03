@@ -230,6 +230,21 @@ type SettledRunStep = Exclude<RunStep, { kind: "stale-checkpoint" }>;
 const RUN_RESTART_REASONS: ReadonlySet<string> = new Set([
   "device_manifest_expired",
   "device_manifest_policy_advanced",
+  "device_manifest_digest_mismatch",
+]);
+
+/**
+ * Restart causes whose SERVER-SIDE run evidence the client just
+ * contradicted (the 2026-09-03 restart-asymmetry finding): restarting
+ * under the SAME observation generation would RESUME the contradicted
+ * run — the server retains the pages the fresh capture diverged from,
+ * so the resumed run can never finalize. These restarts carry a NEW
+ * observation generation, which the server answers by expiring the
+ * stale run and minting a truly fresh one.
+ */
+const RUN_EVIDENCE_INVALIDATION_REASONS: ReadonlySet<string> = new Set([
+  "device_manifest_page_replay_mismatch",
+  "device_manifest_digest_mismatch",
 ]);
 
 /** The placeholder committed time of a synthetic manifest apply event. */
@@ -947,8 +962,9 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
    * starts inside this call; a second invalidation surfaces as blocked.
    */
   async function runCheckpointBoundRuns(barrierGeneration: number): Promise<ManifestReconcileOutcome> {
+    let currentGeneration = barrierGeneration;
     for (let runAttempt = 0; runAttempt < 2; runAttempt += 1) {
-      const step = await runOne(barrierGeneration, runAttempt === 1);
+      const step = await runOne(currentGeneration, runAttempt === 1);
       if (step.kind !== "restart-run") {
         return step;
       }
@@ -964,6 +980,17 @@ export function createManifestReconciler(options: ManifestReconcilerOptions): Ma
         // failure's observation joins it at the same stage, and a restart
         // request outside the run loop collapses onto blocked.
         return asOutcome(runFailure(step.stage, error));
+      }
+      if (RUN_EVIDENCE_INVALIDATION_REASONS.has(step.reason)) {
+        // The restart contradicted the SERVER's retained run evidence
+        // (its pages): restarting under the same generation would resume
+        // that unfinishable run — advance the barrier generation so the
+        // server expires it and the next attempt is truly fresh.
+        try {
+          currentGeneration = await repository.advanceRepairBarrierGeneration(step.reason);
+        } catch (error) {
+          return asOutcome(runFailure(step.stage, error));
+        }
       }
     }
     // Unreachable: the loop returns on its second attempt.

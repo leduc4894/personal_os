@@ -435,6 +435,7 @@ export interface DeviceSyncRepository {
   nextObservationGeneration(): Promise<number>;
   startRepairBarrier(input: RepairBarrierInput): Promise<void>;
   persistRepairBarrierReason(reason: DeviceSyncReason): Promise<void>;
+  advanceRepairBarrierGeneration(reason: DeviceSyncReason): Promise<number>;
   recordManifestPage(input: LocalManifestPageReceipt): Promise<void>;
   recordManifestAction(input: LocalManifestActionProgress): Promise<void>;
   prepareRemoteApply(input: PreparedRemoteApply): Promise<void>;

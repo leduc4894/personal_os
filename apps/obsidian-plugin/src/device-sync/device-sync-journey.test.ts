@@ -53,7 +53,7 @@ import { createDeviceSyncApi } from "./api";
 import type { DeviceSyncHttpResponse, DeviceSyncHttpTransport } from "./api";
 import type { DeviceSyncDiagnostics, DeviceSyncRepository } from "./contracts";
 import { createDeviceSyncDiagnostics } from "./diagnostics";
-import { createManifestCapture } from "./manifest-capture";
+import { computeManifestFinalDigest, createManifestCapture } from "./manifest-capture";
 import {
   createManifestReconciler,
   createManifestReconcilerJournal,
@@ -214,6 +214,13 @@ class RecordingTrail implements SyncDiagnosticsTrail {
 class InMemoryVault implements VaultMutationSeam {
   readonly #files = new Map<string, Uint8Array>();
   writeCount = 0;
+  /**
+   * Locators whose vault writes always throw (a locked/unwritable
+   * target — the 2026-09-03 apply-wedge finding's fault injection): the
+   * writer maps the throw onto the closed `device_apply_vault_failed`
+   * family exactly like a real Vault refusal.
+   */
+  readonly failWritesAtLocator = new Set<string>();
 
   setFileBytes(locator: string, bytes: Uint8Array): void {
     this.#files.set(locator, bytes);
@@ -248,11 +255,17 @@ class InMemoryVault implements VaultMutationSeam {
   }
 
   async createFile(locator: string, bytes: Uint8Array): Promise<void> {
+    if (this.failWritesAtLocator.has(locator)) {
+      throw new Error("vault write refused");
+    }
     this.writeCount += 1;
     this.#files.set(locator, bytes);
   }
 
   async renameLocator(fromLocator: string, toLocator: string): Promise<void> {
+    if (this.failWritesAtLocator.has(toLocator)) {
+      throw new Error("vault write refused");
+    }
     this.writeCount += 1;
     const bytes = this.#files.get(fromLocator);
     if (bytes === undefined) {
@@ -263,6 +276,9 @@ class InMemoryVault implements VaultMutationSeam {
   }
 
   async trashLocator(locator: string): Promise<void> {
+    if (this.failWritesAtLocator.has(locator)) {
+      throw new Error("vault write refused");
+    }
     this.writeCount += 1;
     if (!this.#files.delete(locator)) {
       throw new Error("vault cannot trash an absent file");
@@ -350,6 +366,13 @@ class ScriptedServer {
   loseNextAcknowledgement = false;
   /** Reject the FIRST finalize call with the policy-advance envelope. */
   policyAdvanceOnFirstFinalize = false;
+  /**
+   * Fail every actions page read with a transient 500 while set — the
+   * mid-run wedge moment: the run rests planned and bound until the test
+   * clears the flag (a one-shot failure would let the coordinator's
+   * back-scheduled retry race the test's vault edit).
+   */
+  failActionsRead = false;
   /** Hook awaited inside the first run start — the checkpoint race moment. */
   onFirstStart: (() => Promise<void> | void) | null = null;
   /** Hook invoked before the first action page is served — the edit moment. */
@@ -366,6 +389,7 @@ class ScriptedServer {
     nextPageNumber: number;
     entryCount: number;
     generation: number;
+    pages: { readonly pageNumber: number; readonly entryCount: number; readonly pageDigest: string }[];
     entries: { localEntryId: string; locator: string; fingerprint: FrozenFingerprint }[];
     actions: WireAction[];
   } | null = null;
@@ -582,10 +606,13 @@ class ScriptedServer {
     }
     const finalizeMatch = /^\/api\/sync\/manifests\/([^/]+)\/finalize$/.exec(path);
     if (request.method === "POST" && finalizeMatch !== null) {
-      return this.#serveFinalize();
+      return await this.#serveFinalize(request.body);
     }
     const actionsMatch = /^\/api\/sync\/manifests\/([^/]+)\/actions$/.exec(path);
     if (request.method === "GET" && actionsMatch !== null) {
+      if (this.failActionsRead) {
+        return errorResponse(500, "internal_error");
+      }
       return this.#serveActions(url);
     }
     const completeMatch = /^\/api\/sync\/manifests\/([^/]+)\/complete$/.exec(path);
@@ -647,12 +674,21 @@ class ScriptedServer {
     const generation = this.#pendingStartGeneration;
     this.starts.push(generation);
     const checkpoint = this.#events.length > 0 ? this.#nextSequence - 1 : 0;
+    if (this.#run !== null && this.#run.generation !== generation) {
+      // The real server expires the device's unfinished run when a start
+      // carries a DIFFERENT observation generation (the client minted a
+      // newer barrier and abandoned the run's progress) — the sanctioned
+      // server-side invalidation the 2026-09-03 restart-asymmetry fix
+      // keys on.
+      this.#run = null;
+    }
     if (this.#run === null) {
       this.#run = {
         manifestRunId: uuidOf(`run${this.starts.length}`),
         checkpointSequence: checkpoint,
         nextPageNumber: 0,
         entryCount: 0,
+        pages: [],
         entries: [],
         actions: [],
         generation,
@@ -698,6 +734,7 @@ class ScriptedServer {
         normalized_locator: string;
         fingerprint: { sha256: string; size_bytes: number; media_type: string };
       }[];
+      page_digest?: string;
     };
     this.#run.entries.push(
       ...parsed.entries.map((entry) => ({
@@ -710,6 +747,15 @@ class ScriptedServer {
         } satisfies FrozenFingerprint,
       })),
     );
+    // The real server RETAINS each accepted page's digest and verifies the
+    // finalize digest against them — a resumed run whose fresh capture
+    // contradicts the retained pages can never finalize (the 2026-09-03
+    // restart-asymmetry finding).
+    this.#run.pages.push({
+      pageNumber,
+      entryCount: parsed.entries.length,
+      pageDigest: parsed.page_digest ?? "",
+    });
     this.#run.entryCount += parsed.entries.length;
     this.#run.nextPageNumber += 1;
     return jsonResponse({
@@ -720,13 +766,26 @@ class ScriptedServer {
     });
   }
 
-  #serveFinalize(): DeviceSyncHttpResponse {
+  async #serveFinalize(body: string | ArrayBuffer | undefined): Promise<DeviceSyncHttpResponse> {
     if (this.#run === null) {
       return errorResponse(404, "device_manifest_not_found");
     }
     if (this.policyAdvanceOnFirstFinalize) {
       this.policyAdvanceOnFirstFinalize = false;
       return errorResponse(409, "device_manifest_policy_advanced");
+    }
+    const parsed = JSON.parse(typeof body === "string" ? body : "{}") as {
+      final_digest?: string;
+    };
+    const retainedDigest = await computeManifestFinalDigest(
+      this.#run.pages.map((page) => ({
+        pageNumber: page.pageNumber,
+        entryCount: page.entryCount,
+        pageDigest: page.pageDigest,
+      })),
+    );
+    if (parsed.final_digest !== undefined && parsed.final_digest !== retainedDigest) {
+      return errorResponse(409, "device_manifest_digest_mismatch");
     }
     this.#run.actions = this.#planActions(this.#run.checkpointSequence, this.#run.entries);
     this.#lastActions = this.#run.actions;
@@ -1399,6 +1458,45 @@ describe("device-sync two-device journeys (production stack)", () => {
     // unreadable start-stage state_invalid flip never appears.
     expect(stack.trail.rendered()).not.toContain("start · device_manifest_state_invalid");
     expect(stack.trail.rendered()).toContain("device_cursor_gap");
+  });
+
+  it("invalidates a server run whose retained pages the fresh capture contradicts instead of wedging on digest mismatch", async () => {
+    const server = new ScriptedServer();
+    const stack = buildPluginStack(server);
+    const locator = "notes/journey-asymmetry.md";
+    const originalBytes = bytesOf("asymmetry original bytes");
+    await server.commitCreate(locator, originalBytes);
+    stack.coordinator.request("startup");
+    await flushCycles();
+    expect(stack.vault.fileBytes(locator)).toEqual(originalBytes);
+
+    // A repair run appends its page and finalizes, then its action reads
+    // fail transiently — the run rests planned and bound with the
+    // server's RETAINED page digest.
+    server.failActionsRead = true;
+    stack.coordinator.request("explicit_repair");
+    await flushCycles();
+
+    // The vault's file changes between the run's append and its resume:
+    // the fresh capture now contradicts the retained page.
+    stack.vault.setFileBytes(locator, bytesOf("asymmetry edited bytes"));
+    server.failActionsRead = false;
+
+    stack.coordinator.request("explicit_repair");
+    await flushCycles();
+
+    // DESIRED: the contradicted server run is invalidated (the restart
+    // carries a new observation generation, which the server answers by
+    // expiring the stale run) and a truly fresh run converges — the
+    // edited entry's upload plan lands and the fence clears. TODAY: the
+    // same-generation restart RESUMES the contradicted run, the fresh
+    // capture's finalize rejects (device_manifest_digest_mismatch) and
+    // the repair wedges under a growing barrier.
+    const state = stack.deviceSyncRepository.readState();
+    expect(state.barrierGeneration).toBeNull();
+    expect(state.activeManifestRunId).toBeNull();
+    expect(state.appliedSequence).toBe(state.acknowledgedSequence);
+    expect(server.completions.length).toBeGreaterThan(0);
   });
 
   it("restarts exactly one fresh checkpoint-bound run after a policy advance", async () => {
