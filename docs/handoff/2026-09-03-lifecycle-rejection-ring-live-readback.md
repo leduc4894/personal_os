@@ -126,3 +126,42 @@ exports. The journal fixture copy is the fix plan's first task.
 3. After the fix lands: re-fire this round's Journey B exactly as
    planned, retire the closed-reason row on observed readbacks.
 4. Teardown per §Decisions 4.
+
+## Addendum: the 2026-09-03 re-fire (second block, three NEW findings)
+
+After the fix round (`29f65f5` + `f7a92e5`) landed and all gates passed,
+the L1 re-fire against `knowledge-ci-l1-refire-20260903` surfaced THREE
+new device-sync edges — the first two fixes held exactly where they
+aimed (no journal hard-stop on the untitled burst; the stale-binding
+shed drove vault B's repair past finalize), but ordinary interleaved
+operator usage keeps tripping adjacent edges:
+
+1. **Untitled-transit burst still loses the rename chain (data-level).**
+   The operator's ordinary create-Untitled → drag into folder → rename
+   left the journal HEALTHY (Ready — the capture fix works) but the
+   canonical source stayed at the OLD path (Untitled.md, re-downloaded
+   into BOTH vaults by the manifest-restore semantics) while the
+   renamed path (journey-b/origin.md) parked `blocked_conflict`
+   untracked. Evidence: the 09:48Z export (Ready, 47 clean entries) +
+   the operator's observation.
+2. **Restart asymmetry — the resumed run cannot finish.** Vault B
+   (fresh journal) reconciling while its vault churned hit
+   `reconcile_failure · page · device_manifest_page_replay_mismatch`
+   then `finalize · device_manifest_digest_mismatch`: the restart
+   discarded the CLIENT's page progress but the same-generation start
+   RESUMED the server run whose retained pages contradict the fresh
+   capture — unfinishable. Evidence: 09:54Z export + server rows (run
+   `…c06b4f` 'applying', base_ack 1, checkpoint 5).
+3. **An apply-lane vault failure wedges the repair.** After the repair
+   re-minted (checkpoint 12 — the shed worked) the run rests 'applying'
+   with one pending download whose apply fails REPEATEDLY:
+   `apply_failure · verify_temp · device_apply_vault_failed` (×2) +
+   `recovery · device_cursor_gap`, cursor lag 11, no bounded terminal
+   verdict. Evidence: 10:03Z export + server rows (run `…92ecf09`).
+
+The re-fire is BLOCKED a third time (no L1 readback observed; row
+stays open). The operator directed: fix the findings before further
+testing. Raw server evidence:
+`.local/live-round-evidence/l1-refire-20260903/`; the CI stack stays UP
+until the fix round no longer needs the live wedge (it idles out
+server-side regardless).
