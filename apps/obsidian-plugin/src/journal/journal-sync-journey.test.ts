@@ -18,12 +18,15 @@
 
 import { readFileSync } from "node:fs";
 import initSqlJs from "sql.js";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { sha256Hex } from "../exclusion-policy/canonical-json";
 import type { JournalEvent } from "./contracts";
 import { MAX_PENDING_EVENTS } from "./contracts";
+import { JournalCapture } from "./capture";
 import { deriveFrozenFingerprint } from "./fingerprint";
+import { LifecycleCaptureImpl } from "./lifecycle-capture";
+import { LifecycleDriverImpl } from "./lifecycle-driver";
 import { JournalPersistence } from "./persistence";
 import type { JournalFileStore } from "./persistence";
 import { JournalQueueDriver } from "./queue-driver";
@@ -92,6 +95,7 @@ interface ReservedOperation {
   readonly baseVersionId: string | null;
   readonly sha256: string;
   readonly sizeBytes: number;
+  readonly normalizedLocator: string;
   state: "pending" | "receiving";
   terminal: FrozenTerminal | null;
 }
@@ -122,8 +126,16 @@ class SyncServerDouble {
   interruptBeforePublicationOnce = false;
   #counter = 0;
 
+  /**
+   * Canonical source projections retained by the small-file wire double.
+   * They model the service's content/locator conflict decision without
+   * exposing server bytes to the journal assertions.
+   */
+  readonly canonicalSourcesByLocator = new Map<string, FrozenTerminal>();
+  readonly canonicalLocatorByDigest = new Map<string, string>();
+
   /** Optional mid-pass hook fired inside the next preflight handling. */
-  onPreflight: (() => Promise<void> | void) | null = null;
+  onPreflight: ((body: Record<string, unknown>) => Promise<void> | void) | null = null;
 
   advanceCurrentVersion(sourceId: string, nextVersionId: string): void {
     this.currentVersions.set(sourceId, nextVersionId);
@@ -136,7 +148,7 @@ class SyncServerDouble {
     const hook = this.onPreflight;
     if (hook !== null) {
       this.onPreflight = null;
-      await hook();
+      await hook(body);
     }
     const identity = `${body["event_id"]}:${body["idempotency_key"]}`;
     const frozen = this.identityTerminals.get(identity);
@@ -157,6 +169,12 @@ class SyncServerDouble {
         return { status: 200, bodyText: successBody({ outcome: "conflict" }) };
       }
     }
+    if (body["operation"] === "create") {
+      const priorLocator = this.canonicalLocatorByDigest.get(String(body["sha256"]));
+      if (priorLocator !== undefined && priorLocator !== body["normalized_locator"]) {
+        return { status: 409, bodyText: errorBody("source_locator_conflict") };
+      }
+    }
     this.#counter += 1;
     const operationId = `${String(this.#counter).padStart(10, "0")}AbCdEfGhIjKlMnOpQrStUvWxYz`;
     this.operations.set(operationId, {
@@ -166,6 +184,7 @@ class SyncServerDouble {
       baseVersionId: body["operation"] === "update" ? String(body["base_version_id"]) : null,
       sha256: String(body["sha256"]),
       sizeBytes: Number(body["size_bytes"]),
+      normalizedLocator: String(body["normalized_locator"]),
       state: "pending",
       terminal: null,
     });
@@ -215,12 +234,37 @@ class SyncServerDouble {
     this.currentVersions.set(sourceId, sourceVersionId);
     this.identityTerminals.set(operation.identity, terminal);
     operation.terminal = terminal;
+    this.canonicalSourcesByLocator.set(operation.normalizedLocator, terminal);
+    this.canonicalLocatorByDigest.set(operation.sha256, operation.normalizedLocator);
     this.receivedDigests.push(digest);
     this.publications += 1;
     if (this.dropResponses) {
       throw new Error("response bytes were lost after the server committed");
     }
     return { status: 200, bodyText: successBody(resultBody(terminal)) };
+  }
+
+  /**
+   * The live race's server-side fact: the create has already committed even
+   * though the client is about to discover that its old Vault locator is
+   * gone. The journey inserts this at the preflight/content boundary so the
+   * queue's real `local_file_missing` close cannot erase canonical evidence.
+   */
+  commitCanonicalBeforeLocalMissing(input: {
+    readonly normalizedLocator: string;
+    readonly sha256: string;
+  }): FrozenTerminal {
+    this.#counter += 1;
+    const terminal: FrozenTerminal = {
+      resultKind: "committed",
+      sourceId: countedUuid("1", this.#counter),
+      sourceVersionId: countedUuid("2", this.#counter),
+      contentVersion: 1,
+    };
+    this.canonicalSourcesByLocator.set(input.normalizedLocator, terminal);
+    this.canonicalLocatorByDigest.set(input.sha256, input.normalizedLocator);
+    this.currentVersions.set(terminal.sourceId, terminal.sourceVersionId);
+    return terminal;
   }
 }
 
@@ -260,8 +304,43 @@ interface JourneyHarness {
   readonly driver: JournalQueueDriver;
   readonly server: SyncServerDouble;
   readonly store: InMemoryJournalFileStore;
-  readonly vaultBytes: Map<string, Uint8Array>;
+  readonly vault: WatcherVault;
+  readonly capture: JournalCapture;
   advanceClock: (milliseconds: number) => void;
+}
+
+/** The watcher-visible Vault double shared by capture, lifecycle and queue. */
+class WatcherVault {
+  readonly #files = new Map<string, Uint8Array>();
+
+  setFileBytes(normalizedPath: string, bytes: Uint8Array): void {
+    this.#files.set(normalizedPath, bytes);
+  }
+
+  deleteFile(normalizedPath: string): void {
+    this.#files.delete(normalizedPath);
+  }
+
+  moveFile(priorPath: string, nextPath: string): void {
+    const bytes = this.#files.get(priorPath);
+    if (bytes === undefined) {
+      throw new Error("cannot move an absent watcher file");
+    }
+    this.#files.delete(priorPath);
+    this.#files.set(nextPath, bytes);
+  }
+
+  fileBytes(normalizedPath: string): Uint8Array | null {
+    return this.#files.get(normalizedPath) ?? null;
+  }
+
+  async readRegularFileBytes(normalizedPath: string): Promise<Uint8Array | null> {
+    return this.fileBytes(normalizedPath);
+  }
+
+  async listRegularFilePaths(): Promise<readonly string[]> {
+    return [...this.#files.keys()];
+  }
 }
 
 const EPOCH_BASE_MS = 1_784_000_000_000;
@@ -291,12 +370,67 @@ function bindRepository(persistence: JournalPersistence, shared: { clockMs: numb
 async function createJourneyHarness(): Promise<JourneyHarness> {
   const store = new InMemoryJournalFileStore();
   const server = new SyncServerDouble();
-  const vaultBytes = new Map<string, Uint8Array>();
+  const vault = new WatcherVault();
   const shared = { clockMs: EPOCH_BASE_MS, ids: 0 };
   let correlationCounter = 0;
   const persistence = new JournalPersistence({ fileStore: store, engineModule });
   await persistence.open();
   const repository = bindRepository(persistence, shared);
+  const lifecycle = new LifecycleCaptureImpl({
+    repository,
+    lifecycle: repository.lifecycle,
+    vaultReader: vault,
+    policyRevision: 2,
+  });
+  const capture = new JournalCapture({
+    repository,
+    vaultReader: vault,
+    policyGate: {
+      evaluateForCapture: () => ({
+        decision: { raw: "allowed", enforced: "allowed" },
+        revisionNumber: 2,
+      }),
+    },
+    lifecycleCapture: lifecycle,
+  });
+  const lifecycleDriver = new LifecycleDriverImpl({
+    repository,
+    lifecycle: repository.lifecycle,
+    api: {
+      commit: async (event) => {
+        const operands = event.operands;
+        if (
+          (operands.operation === "rename" || operands.operation === "move") &&
+          operands.expectedLocator !== null &&
+          operands.targetLocator !== null
+        ) {
+          const canonical = server.canonicalSourcesByLocator.get(operands.expectedLocator);
+          if (canonical !== undefined) {
+            server.canonicalSourcesByLocator.delete(operands.expectedLocator);
+            server.canonicalSourcesByLocator.set(operands.targetLocator, canonical);
+            server.canonicalLocatorByDigest.forEach((locator, digest) => {
+              if (locator === operands.expectedLocator) {
+                server.canonicalLocatorByDigest.set(digest, operands.targetLocator as string);
+              }
+            });
+          }
+        }
+        return {
+          committedAt: "2026-09-03T00:00:00Z",
+          eventId: event.event.eventId,
+          eventSequence: 1,
+          resultingLocator: operands.targetLocator,
+          sourceId: operands.sourceId,
+          sourceVersionId: operands.expectedVersionId,
+          state: operands.operation === "delete" ? "deleted" : "active",
+          tombstoneId: null,
+        };
+      },
+    },
+    createCorrelationId: () => `lifecycle-${(correlationCounter += 1)}`,
+    randomJitter: () => 0,
+    nowEpochMs: () => shared.clockMs,
+  });
   const driver = new JournalQueueDriver({
     repository,
     syncApi: createJournalSyncApi({
@@ -316,8 +450,9 @@ async function createJourneyHarness(): Promise<JourneyHarness> {
       getAccessToken: () => "at1.journey-access",
     }),
     fileBytesReader: {
-      readRegularFileBytes: async (normalizedPath) => vaultBytes.get(normalizedPath) ?? null,
+      readRegularFileBytes: (normalizedPath) => vault.readRegularFileBytes(normalizedPath),
     },
+    lifecycleDriver,
     refreshAccessToken: () => Promise.resolve(),
     nowEpochMs: () => shared.clockMs,
     createCorrelationId: () => `corr-${(correlationCounter += 1)}`,
@@ -329,7 +464,8 @@ async function createJourneyHarness(): Promise<JourneyHarness> {
     driver,
     server,
     store,
-    vaultBytes,
+    vault,
+    capture,
     advanceClock: (milliseconds) => {
       shared.clockMs += milliseconds;
     },
@@ -342,7 +478,7 @@ async function captureBytes(
   normalizedPath: string,
   bytes: Uint8Array,
 ): Promise<JournalEvent> {
-  harness.vaultBytes.set(normalizedPath, bytes);
+  harness.vault.setFileBytes(normalizedPath, bytes);
   const capture = await harness.repository.recordCapture({
     normalizedPath,
     fingerprint: await deriveFrozenFingerprint(bytes),
@@ -389,6 +525,90 @@ async function corruptFirstByte(
 // --- the journeys ---------------------------------------------------------------------------
 
 describe("journal sync journeys over the durable stack", () => {
+  it("RED: loses a create-move-rename burst as an old canonical plus an untracked blocked final path", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const harness = await createJourneyHarness();
+      const oldPath = "Untitled.md";
+      const intermediatePath = "journey-b/Untitled.md";
+      const finalPath = "journey-b/origin.md";
+      const bytes = new TextEncoder().encode("untitled transit bytes");
+      harness.vault.setFileBytes(oldPath, bytes);
+
+      // E1 is the real watcher admission. It has entered the queue before
+      // the user moves the file, but the server hook below keeps it in
+      // preflight while BOTH lifecycle observations settle.
+      const createObservation = harness.capture.notifyPathChanged(oldPath);
+      await vi.advanceTimersByTimeAsync(300);
+      await createObservation;
+      const createEvent = localFileOf(harness, oldPath);
+      let moveObservation: Promise<void> | null = null;
+      let renameObservation: Promise<void> | null = null;
+
+      harness.server.onPreflight = async (body) => {
+        harness.server.commitCanonicalBeforeLocalMissing({
+          normalizedLocator: oldPath,
+          sha256: String(body["sha256"]),
+        });
+        harness.vault.moveFile(oldPath, intermediatePath);
+        moveObservation = harness.capture.notifyPathRenamed(
+          { path: intermediatePath, parent: { path: "journey-b" } },
+          oldPath,
+        );
+        // E1 remains preflight while the move's first settle defers.
+        await vi.advanceTimersByTimeAsync(300);
+
+        harness.vault.moveFile(intermediatePath, finalPath);
+        renameObservation = harness.capture.notifyPathRenamed(
+          { path: finalPath, parent: { path: "journey-b" } },
+          intermediatePath,
+        );
+        // The second observation arrives before E1 can close; its prior
+        // misses, then its same-tail admission mints R2 at the final path.
+        await vi.advanceTimersByTimeAsync(300);
+      };
+
+      await harness.driver.runPass();
+      // The re-armed move finally observes E1's terminal close and applies
+      // the current uncommitted-transit heal, removing R1's old mapping.
+      await vi.advanceTimersByTimeAsync(300);
+      await Promise.all([moveObservation, renameObservation]);
+
+      // Today's loss shape is deliberately asserted before the desired
+      // composed outcome: one canonical source is stale at the old locator;
+      // the final locator carries a new, untracked conflict row; the journal
+      // never trips its global health flag.
+      expect(harness.server.canonicalSourcesByLocator.has(oldPath)).toBe(true);
+      expect(harness.server.canonicalSourcesByLocator.has(finalPath)).toBe(false);
+      expect(harness.repository.readLocalFileByPath(oldPath)).toBeNull();
+      const finalFile = localFileOf(harness, finalPath);
+      expect(finalFile.sourceId).toBeNull();
+      expect(eventsOfPath(harness, finalPath).map((event) => event.state)).toEqual([
+        "blocked_conflict",
+      ]);
+      expect(harness.persistence.readJournalMeta().isReconcileRequired).toBe(false);
+
+      // The RED contract for Task 3: the one source that E1 committed must
+      // instead finish tracked at the user's final locator. Keeping this
+      // assertion failing is intentional until durable rename composition
+      // exists; the preceding assertions prove the live loss, not a relaxed
+      // surrogate journey.
+      expect({
+        canonicalAtFinal: harness.server.canonicalSourcesByLocator.has(finalPath),
+        canonicalAtOld: harness.server.canonicalSourcesByLocator.has(oldPath),
+        finalSourceId: finalFile.sourceId,
+        createLocalFileId: createEvent.localFileId,
+      }).toEqual({
+        canonicalAtFinal: true,
+        canonicalAtOld: false,
+        finalSourceId: harness.server.canonicalSourcesByLocator.get(oldPath)?.sourceId ?? null,
+        createLocalFileId: finalFile.localFileId,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("processes offline creates and edits after reconnect through the generations", async () => {
     const harness = await createJourneyHarness();
     const encoder = new TextEncoder();
@@ -499,7 +719,7 @@ describe("journal sync journeys over the durable stack", () => {
     // the watcher records the successor event while the driver holds the
     // first observation's frozen identity.
     harness.server.onPreflight = async () => {
-      harness.vaultBytes.set("notes/changed.md", successorBytes);
+      harness.vault.setFileBytes("notes/changed.md", successorBytes);
       await harness.repository.recordCapture({
         normalizedPath: "notes/changed.md",
         fingerprint: await deriveFrozenFingerprint(successorBytes),
@@ -545,7 +765,7 @@ describe("journal sync journeys over the durable stack", () => {
     await captureBytes(harness, "notes/vanished.md", new TextEncoder().encode("vanishing content"));
     // The file disappears after capture: preflight opens the upload, the
     // byte read finds no regular file, and the event defers to lifecycle.
-    harness.vaultBytes.delete("notes/vanished.md");
+    harness.vault.deleteFile("notes/vanished.md");
 
     const pass = await harness.driver.runPass();
     expect(pass.outcome).toBe("completed");
@@ -669,7 +889,7 @@ describe("journal sync journeys over the durable stack", () => {
     expect(reopened.recoveryState).toBe("empty_journal_rebuilt");
     expect(reopened.isReconcileRequired).toBe(true);
     // The Vault content itself is untouched by the rebuild.
-    expect(harness.vaultBytes.get("notes/lost.md")).toBeDefined();
+    expect(harness.vault.fileBytes("notes/lost.md")).not.toBeNull();
     reopened.close();
   });
 });
