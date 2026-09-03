@@ -158,6 +158,12 @@ export interface LifecycleCaptureOptions {
   readonly policyRevision: number;
   /** Optional settle-delay override; defaults to {@link FILE_SETTLE_DELAY_MS}. */
   readonly settleDelayMs?: number;
+  /**
+   * Bounded re-arm attempts for a settle that lands while the row's create
+   * upload is still in flight (identity not yet landed). Defaults to
+   * {@link SETTLE_DEFERRAL_ATTEMPTS}. Each attempt waits one settle delay.
+   */
+  readonly settleDeferralAttempts?: number;
   /** Closed-token reporter owned by the plugin composition root. */
   readonly failureReporter?: JournalFailureReporter | null;
   /**
@@ -170,6 +176,23 @@ export interface LifecycleCaptureOptions {
 }
 
 // --- helpers -------------------------------------------------------------------------------
+
+/**
+ * The bounded settle-deferral attempt budget: a rename or delete settle that
+ * lands while the row's create upload is still in flight re-arms up to this
+ * many times (each waiting one settle delay) before the fail-closed
+ * reconcile flag. The live defect (2026-09-03): an operator renaming a note
+ * seconds after creating it — the create receipt had not landed yet —
+ * hard-stopped the whole journal instead of waiting out the upload.
+ */
+export const SETTLE_DEFERRAL_ATTEMPTS = 40;
+
+/**
+ * The closed settle outcome meaning "the observation raced a still-in-flight
+ * create; re-arm the settle" — never a journal mutation, never a flag. The
+ * class-internal sentinel never escapes the capture module.
+ */
+const SETTLE_DEFERRED: unique symbol = Symbol("settle-deferred");
 
 function isPositiveInteger(value: number): boolean {
   return Number.isInteger(value) && value > 0;
@@ -223,11 +246,13 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
   readonly #createId: () => string;
   readonly #policyRevision: number;
   readonly #settleDelayMs: number;
+  readonly #settleDeferralAttempts: number;
   readonly #failureReporter: JournalFailureReporter | null;
   readonly #echoSuppressor: EchoSuppressor | null;
 
   readonly #settleTimers = new Map<string, ReturnType<typeof setTimeout>>();
   readonly #settleWaiters = new Map<string, Set<() => void>>();
+  readonly #deleteDeferralTimers = new Map<string, ReturnType<typeof setTimeout>>();
   #isDisposed = false;
 
   constructor(options: LifecycleCaptureOptions) {
@@ -237,6 +262,12 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
     if (options.settleDelayMs !== undefined && !isPositiveInteger(options.settleDelayMs)) {
       throw new TypeError("invalid settle delay");
     }
+    if (
+      options.settleDeferralAttempts !== undefined &&
+      !isPositiveInteger(options.settleDeferralAttempts)
+    ) {
+      throw new TypeError("invalid settle deferral attempts");
+    }
     this.#repository = options.repository;
     this.#lifecycle = options.lifecycle;
     this.#vaultReader =
@@ -245,6 +276,7 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
     this.#createId = options.createId ?? (() => crypto.randomUUID());
     this.#policyRevision = options.policyRevision;
     this.#settleDelayMs = options.settleDelayMs ?? FILE_SETTLE_DELAY_MS;
+    this.#settleDeferralAttempts = options.settleDeferralAttempts ?? SETTLE_DEFERRAL_ATTEMPTS;
     this.#failureReporter = options.failureReporter ?? null;
     this.#echoSuppressor = options.echoSuppressor ?? null;
   }
@@ -281,45 +313,71 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
     const operation = this.#renameOperation(normalizedPrior, normalizedNew);
     const settleKey = `${operation}:${normalizedPrior}->${normalizedNew}`;
     return new Promise<LifecycleRenameResult | null>((resolve, reject) => {
-      const waiters = this.#settleWaiters.get(settleKey) ?? new Set<() => void>();
-      let settled = false;
-      waiters.add(() => {
-        if (settled) {
+      let deferralBudget = this.#settleDeferralAttempts;
+      const armSettleTimer = (): void => {
+        this.#settleTimers.set(
+          settleKey,
+          setTimeout(() => {
+            this.#settleTimers.delete(settleKey);
+            const pending = this.#settleWaiters.get(settleKey);
+            this.#settleWaiters.delete(settleKey);
+            if (pending === undefined) {
+              return;
+            }
+            for (const run of pending) {
+              run();
+            }
+          }, this.#settleDelayMs),
+        );
+      };
+      const settleFailed = (error: unknown): void => {
+        if (isStoreError(error)) {
+          reject(error);
+        } else {
+          reject(journalStoreError("journal_mutation_failed"));
+        }
+      };
+      const attempt = (): void => {
+        if (this.#isDisposed) {
+          resolve(null);
           return;
         }
-        settled = true;
         this.#commitRenameWithRebind(operation, normalizedPrior, normalizedNew).then(
           (result) => {
-            resolve(result);
-          },
-          (error: unknown) => {
-            if (isStoreError(error)) {
-              reject(error);
-            } else {
-              reject(journalStoreError("journal_mutation_failed"));
+            if (result !== SETTLE_DEFERRED) {
+              resolve(result);
+              return;
             }
+            // The observation raced a still-in-flight create (identity not
+            // yet landed): re-arm the settle instead of flagging the whole
+            // journal. The create either lands its receipt (the re-armed
+            // settle then records normally), terminalizes failed (the
+            // uncommitted-transit heal then owns the row) or never settles
+            // (the exhausted budget keeps the fail-closed flag).
+            if (deferralBudget <= 0) {
+              void this.#flagReconcileRequiredOrReport().then(
+                () => resolve(null),
+                settleFailed,
+              );
+              return;
+            }
+            deferralBudget -= 1;
+            const rePending = this.#settleWaiters.get(settleKey) ?? new Set<() => void>();
+            rePending.add(attempt);
+            this.#settleWaiters.set(settleKey, rePending);
+            armSettleTimer();
           },
+          settleFailed,
         );
-      });
+      };
+      const waiters = this.#settleWaiters.get(settleKey) ?? new Set<() => void>();
+      waiters.add(attempt);
       this.#settleWaiters.set(settleKey, waiters);
       const running = this.#settleTimers.get(settleKey);
       if (running !== undefined) {
         clearTimeout(running);
       }
-      this.#settleTimers.set(
-        settleKey,
-        setTimeout(() => {
-          this.#settleTimers.delete(settleKey);
-          const pending = this.#settleWaiters.get(settleKey);
-          this.#settleWaiters.delete(settleKey);
-          if (pending === undefined) {
-            return;
-          }
-          for (const run of pending) {
-            run();
-          }
-        }, this.#settleDelayMs),
-      );
+      armSettleTimer();
     });
   }
 
@@ -359,6 +417,14 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
         // operator deletes carries no canonical evidence — remove the
         // phantom mapping quietly instead of hard-stopping the journal.
         await this.#repository.removeLocalMapping(localFile.localFileId);
+        return null;
+      }
+      if (this.#hasInFlightEvent(localFile.localFileId)) {
+        // The create upload is still in flight (the 2026-09-03 live-defect
+        // window, delete variant): consume the observation and retry it
+        // bounded — the row is neither droppable nor flaggable while the
+        // upload's outcome is pending.
+        this.#scheduleDeleteDeferralRetry(normalizedPath, tombstoneId);
         return null;
       }
       // Fail closed: missing identity — a later pass must reconcile the row.
@@ -635,12 +701,80 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
       clearTimeout(timer);
     }
     this.#settleTimers.clear();
+    for (const timer of this.#deleteDeferralTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.#deleteDeferralTimers.clear();
     for (const [, waiters] of this.#settleWaiters) {
       for (const resolve of waiters) {
         resolve();
       }
     }
     this.#settleWaiters.clear();
+  }
+
+  /**
+   * Retry one delete observation whose row was mid-create-flight, bounded
+   * by {@link LifecycleCaptureOptions.settleDeferralAttempts}: each retry
+   * waits one settle delay and re-runs the whole delete classification
+   * (identity may have landed, the create may have terminalized failed —
+   * the transit heal then owns the row — or the budget exhausts and the
+   * fail-closed reconcile flag keeps its meaning for genuine pathology).
+   */
+  #scheduleDeleteDeferralRetry(normalizedPath: string, tombstoneId?: string): void {
+    const running = this.#deleteDeferralTimers.get(normalizedPath);
+    if (running !== undefined) {
+      // A retry for this path is already pending: the delete watcher
+      // delivered a duplicate of the same observation.
+      return;
+    }
+    const attempts = { remaining: this.#settleDeferralAttempts };
+    const timer = setTimeout(() => {
+      this.#deleteDeferralTimers.delete(normalizedPath);
+      void this.#retryDeferredDelete(normalizedPath, tombstoneId, attempts);
+    }, this.#settleDelayMs);
+    this.#deleteDeferralTimers.set(normalizedPath, timer);
+  }
+
+  async #retryDeferredDelete(
+    normalizedPath: string,
+    tombstoneId: string | undefined,
+    attempts: { remaining: number },
+  ): Promise<void> {
+    if (this.#isDisposed) {
+      return;
+    }
+    const localFile = this.#repository.readLocalFileByPath(normalizedPath);
+    if (localFile === null) {
+      // The row left (a concurrent observation healed or rebound it).
+      return;
+    }
+    if (localFile.sourceId !== null && localFile.baseVersionId !== null) {
+      // Identity landed: run the ordinary delete capture to its end.
+      await this.captureDelete(
+        { path: normalizedPath, parent: null },
+        tombstoneId,
+      ).catch(() => undefined);
+      return;
+    }
+    if (this.#isUncommittedTransitRow(localFile.localFileId)) {
+      await this.#repository.removeLocalMapping(localFile.localFileId).catch(() => undefined);
+      return;
+    }
+    if (!this.#hasInFlightEvent(localFile.localFileId)) {
+      await this.#flagReconcileRequiredOrReport().catch(() => undefined);
+      return;
+    }
+    if (attempts.remaining <= 0) {
+      await this.#flagReconcileRequiredOrReport().catch(() => undefined);
+      return;
+    }
+    attempts.remaining -= 1;
+    const timer = setTimeout(() => {
+      this.#deleteDeferralTimers.delete(normalizedPath);
+      void this.#retryDeferredDelete(normalizedPath, tombstoneId, attempts);
+    }, this.#settleDelayMs);
+    this.#deleteDeferralTimers.set(normalizedPath, timer);
   }
 
   // --- internals ---------------------------------------------------------------------------
@@ -671,6 +805,20 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
     );
   }
 
+  /**
+   * Whether any content event of the row is still in a pending (in-flight)
+   * state — an upload whose outcome, and with it the row's identity, has
+   * not landed yet. The settle-deferral branch of the rename/delete capture
+   * keys on this: the row is neither droppable transit (work is live) nor
+   * flaggable corruption (the outcome is merely pending).
+   */
+  #hasInFlightEvent(localFileId: string): boolean {
+    const pendingStates: ReadonlySet<string> = new Set(JOURNAL_PENDING_EVENT_STATES);
+    return this.#repository
+      .readEventsByLocalFileId(localFileId)
+      .some((event) => pendingStates.has(event.state));
+  }
+
   /** The rename operation token chosen by the parent-directory comparison. */
   #renameOperation(priorPath: string, newPath: string): "rename" | "move" {
     return parentOfPath(priorPath) === parentOfPath(newPath) ? "rename" : "move";
@@ -687,7 +835,7 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
     operation: "rename" | "move",
     priorPath: string,
     newPath: string,
-  ): Promise<LifecycleRenameResult | null> {
+  ): Promise<LifecycleRenameResult | null | typeof SETTLE_DEFERRED> {
     let localFile;
     try {
       localFile = this.#repository.readLocalFileByPath(priorPath);
@@ -712,6 +860,13 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
         // a settle admission of the new path).
         await this.#repository.removeLocalMapping(localFile.localFileId);
         return null;
+      }
+      if (this.#hasInFlightEvent(localFile.localFileId)) {
+        // The row's create upload is still in flight — its identity has
+        // not landed yet, but the upload may still commit server-side, so
+        // the row must never be dropped NOR flagged: defer to the caller's
+        // bounded settle re-arm (the 2026-09-03 live-defect window).
+        return SETTLE_DEFERRED;
       }
       await this.#flagReconcileRequiredOrReport();
       return null;

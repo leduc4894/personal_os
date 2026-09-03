@@ -123,6 +123,7 @@ function createHarness(options?: {
   readonly createId?: () => string;
   readonly nowEpochMs?: () => number;
   readonly settleDelayMs?: number;
+  readonly settleDeferralAttempts?: number;
   readonly withEchoSuppressor?: boolean;
 }): Harness {
   const database = SqliteDatabase.createEmpty(engineModule, {
@@ -166,6 +167,9 @@ function createHarness(options?: {
     failureReporter,
     ...(echoSuppressor !== null ? { echoSuppressor } : {}),
     ...(options?.settleDelayMs !== undefined ? { settleDelayMs: options.settleDelayMs } : {}),
+    ...(options?.settleDeferralAttempts !== undefined
+      ? { settleDeferralAttempts: options.settleDeferralAttempts }
+      : {}),
   });
   return {
     repository,
@@ -384,21 +388,40 @@ describe("LifecycleCapture rename vs move (spec 7.1)", () => {
 
 describe("LifecycleCapture tombstone recording (spec 6.3, 7.1)", () => {
   it("reports a rejected reconcile write and rejects instead of claiming it settled", async () => {
-    const harness = createHarness();
-    const real = await realFingerprintOf("uncommitted delete");
-    await harness.repository.recordCapture({
-      normalizedPath: "notes/reconcile-write.md",
-      fingerprint: real.fingerprint,
-      policyRevisionNumber: harness.policyRevision,
-      admission: "policy_allowed",
-    });
-    vi.spyOn(harness.repository.lifecycle.database, "runSerializedMutation")
-      .mockRejectedValueOnce(new Error("persistence rejected"));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const harness = createHarness({ settleDeferralAttempts: 1 });
+      const real = await realFingerprintOf("uncommitted rename");
+      await harness.repository.recordCapture({
+        normalizedPath: "notes/reconcile-write.md",
+        fingerprint: real.fingerprint,
+        policyRevisionNumber: harness.policyRevision,
+        admission: "policy_allowed",
+      });
+      harness.vault.setFileBytes("notes/reconcile-write-renamed.md", real.bytes);
+      vi.spyOn(harness.repository.lifecycle.database, "runSerializedMutation")
+        .mockRejectedValueOnce(new Error("persistence rejected"));
 
-    await expect(
-      harness.capture.captureDelete(fakeAbstractFile("notes/reconcile-write.md", "notes")),
-    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
-    expect(harness.failureTokens).toEqual(["lifecycle_reconcile_persist_failed"]);
+      const promise = harness.capture.captureRename(
+        fakeFile("notes/reconcile-write-renamed.md", "notes"),
+        "notes/reconcile-write.md",
+      );
+      // Attach the rejection handler before driving the timers so the
+      // budget-exhausting flag write's rejection is never momentarily
+      // unhandled.
+      const rejection = expect(promise).rejects.toMatchObject({
+        reason: "journal_mutation_failed",
+      });
+      // First settle defers (create in flight, budget 1); the re-armed
+      // settle exhausts the budget and attempts the fail-closed flag
+      // write, which the spy rejects exactly once.
+      await vi.advanceTimersByTimeAsync(300);
+      await vi.advanceTimersByTimeAsync(300);
+      await rejection;
+      expect(harness.failureTokens).toEqual(["lifecycle_reconcile_persist_failed"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("records a delete event and marks the local mapping as tombstoned", async () => {
@@ -955,26 +978,147 @@ describe("LifecycleCapture automatic restore via captured path reuse (spec 6.3, 
   });
 });
 
-describe("LifecycleCapture fail-closed on missing identity (spec 6.4)", () => {
-  it("flags reconcile_required when a rename hits a tracked file without source identity", async () => {
-    const harness = createHarness();
-    // Seed a tracked file with no source identity (never committed).
-    await harness.repository.recordCapture({
-      normalizedPath: "notes/uncommitted.md",
-      fingerprint: await deriveFrozenFingerprint(bytesOf("uncommitted")),
+describe("LifecycleCapture settle deferral vs an in-flight create (2026-09-03 live defect)", () => {
+  // The live shape: the operator renames (or deletes) a note while its
+  // create upload is still in flight — the row has no source identity yet
+  // but a live pending event. Flagging the GLOBAL reconcile_required for
+  // that race hard-stopped the whole journal on the real stack. The settle
+  // must instead defer (bounded), never dropping the row, and follow the
+  // create's outcome: identity lands → record; terminal failure → the
+  // uncommitted-transit heal; never settles → the fail-closed flag.
+  async function seedInFlightCreate(
+    harness: Harness,
+    path: string,
+  ): Promise<JournalEvent> {
+    const capture = await harness.repository.recordCapture({
+      normalizedPath: path,
+      fingerprint: await deriveFrozenFingerprint(bytesOf("in-flight bytes")),
       policyRevisionNumber: harness.policyRevision,
       admission: "policy_allowed",
     });
-    const meta = harness.database.readJournalMeta();
-    expect(meta.isReconcileRequired).toBe(false);
+    if (capture.outcome === "capture_refused") {
+      throw new Error("expected a recorded in-flight capture");
+    }
+    return capture.event;
+  }
 
-    const result = await harness.capture.captureRename(
-      fakeFile("notes/uncommitted-renamed.md", "notes"),
-      "notes/uncommitted.md",
-    );
+  it("defers the rename settle while the create is in flight and records once identity lands", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const harness = createHarness();
+      const event = await seedInFlightCreate(harness, "notes/inflight.md");
+      const real = await realFingerprintOf("in-flight renamed bytes");
+      harness.vault.setFileBytes("notes/inflight-renamed.md", real.bytes);
 
-    expect(result).toBeNull();
-    expect(harness.database.readJournalMeta().isReconcileRequired).toBe(true);
+      const promise = harness.capture.captureRename(
+        fakeFile("notes/inflight-renamed.md", "notes"),
+        "notes/inflight.md",
+      );
+      // The first settle fires while the create is still in flight.
+      await vi.advanceTimersByTimeAsync(300);
+      expect(harness.database.readJournalMeta().isReconcileRequired).toBe(false);
+      // The row is never dropped: it still owns the prior path.
+      expect(harness.repository.readLocalFileByPath("notes/inflight.md")).not.toBeNull();
+
+      // The create's committed receipt lands; the re-armed settle records.
+      await harness.repository.recordCommittedReceipt({
+        eventId: event.eventId,
+        sourceId: "11111111-1111-7111-8111-111111111111",
+        baseVersionId: "22222222-2222-7222-8222-222222222222",
+      });
+      await vi.advanceTimersByTimeAsync(300);
+      const result = await promise;
+      expect(result?.operation).toBe("rename");
+      expect(
+        harness.repository.readLocalFileByPath("notes/inflight-renamed.md"),
+      ).not.toBeNull();
+      expect(harness.database.readJournalMeta().isReconcileRequired).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("quietly heals the transit mapping when the raced create terminalizes failed", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const harness = createHarness();
+      const event = await seedInFlightCreate(harness, "notes/inflight-failed.md");
+      const real = await realFingerprintOf("failed-create renamed bytes");
+      harness.vault.setFileBytes("notes/inflight-failed-renamed.md", real.bytes);
+
+      const promise = harness.capture.captureRename(
+        fakeFile("notes/inflight-failed-renamed.md", "notes"),
+        "notes/inflight-failed.md",
+      );
+      await vi.advanceTimersByTimeAsync(300);
+      await harness.repository.markEventTerminal(
+        event.eventId,
+        "blocked_conflict",
+        "blocked_conflict",
+      );
+      await vi.advanceTimersByTimeAsync(300);
+
+      expect(await promise).toBeNull();
+      expect(
+        harness.repository.readLocalFileByPath("notes/inflight-failed.md"),
+      ).toBeNull();
+      expect(harness.database.readJournalMeta().isReconcileRequired).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the fail-closed reconcile rule only after the deferral bound", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const harness = createHarness({ settleDeferralAttempts: 2 });
+      await seedInFlightCreate(harness, "notes/inflight-stuck.md");
+      const real = await realFingerprintOf("stuck-create renamed bytes");
+      harness.vault.setFileBytes("notes/inflight-stuck-renamed.md", real.bytes);
+
+      const promise = harness.capture.captureRename(
+        fakeFile("notes/inflight-stuck-renamed.md", "notes"),
+        "notes/inflight-stuck.md",
+      );
+      // Two deferred settles, then the bound: the flag lands.
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await promise).toBeNull();
+      expect(harness.repository.readLocalFileByPath("notes/inflight-stuck.md")).not.toBeNull();
+      expect(harness.database.readJournalMeta().isReconcileRequired).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("defers a delete whose row is mid-create-flight instead of flagging, then records once identity lands", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const harness = createHarness();
+      const event = await seedInFlightCreate(harness, "notes/inflight-delete.md");
+
+      const result = await harness.capture.captureDelete(
+        fakeAbstractFile("notes/inflight-delete.md", "notes"),
+      );
+      expect(result).toBeNull();
+      expect(harness.database.readJournalMeta().isReconcileRequired).toBe(false);
+      expect(
+        harness.repository.readLocalFileByPath("notes/inflight-delete.md"),
+      ).not.toBeNull();
+
+      await harness.repository.recordCommittedReceipt({
+        eventId: event.eventId,
+        sourceId: "11111111-1111-7111-8111-111111111111",
+        baseVersionId: "22222222-2222-7222-8222-222222222222",
+      });
+      await vi.advanceTimersByTimeAsync(300);
+      const file = requireLocalFile(
+        harness.repository.readLocalFileByPath("notes/inflight-delete.md"),
+      );
+      expect(lifecycleStateOf(harness.database, file.localFileId)).toBe("tombstoned");
+      expect(harness.database.readJournalMeta().isReconcileRequired).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -1036,27 +1180,6 @@ describe("LifecycleCapture uncommitted-transit rebind (untitled-transit race hea
       harness.database.readAll("select count(*) from journal_events;")[0]?.values[0]?.[0],
     ).toBe(0);
     expect(harness.database.readJournalMeta().isReconcileRequired).toBe(false);
-  });
-
-  it("keeps the fail-closed reconcile rule when the phantom still has live in-flight work", async () => {
-    const harness = createHarness();
-    // A queued (never-terminal, never-committed) create: the upload may
-    // still commit server-side, so the row must never be silently dropped.
-    await harness.repository.recordCapture({
-      normalizedPath: "notes/inflight.md",
-      fingerprint: await deriveFrozenFingerprint(bytesOf("inflight bytes")),
-      policyRevisionNumber: harness.policyRevision,
-      admission: "policy_allowed",
-    });
-
-    const result = await harness.capture.captureRename(
-      fakeFile("notes/inflight-renamed.md", "notes"),
-      "notes/inflight.md",
-    );
-
-    expect(result).toBeNull();
-    expect(harness.repository.readLocalFileByPath("notes/inflight.md")).not.toBeNull();
-    expect(harness.database.readJournalMeta().isReconcileRequired).toBe(true);
   });
 });
 
