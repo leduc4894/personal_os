@@ -52,7 +52,7 @@ _DATABASE_HOST: str = "127.0.0.1"
 _SSL_MODE: str = "disable"
 _APPLICATION_PASSWORD_FILENAME: str = "postgres_application_password"
 _ALEMBIC_APPLICATION_NAME: str = "knowledge-baseline-test"
-_HEAD_REVISION: str = "20260818_01"
+_HEAD_REVISION: str = "20260902_02"
 _PHASE1_REVISION: str = "20260813_01"
 
 _PHASE1_TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
@@ -95,18 +95,45 @@ _POLICY_TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
 
 _SMALL_FILE_TABLES_IN_COUNT_ORDER: tuple[str, ...] = ("small_file_upload_operations",)
 
+_SOURCE_LOCATOR_TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
+    "source_locators",
+    "source_tombstones",
+)
+
+_DEVICE_SYNC_TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
+    "device_cursors",
+    "manifest_runs",
+    "manifest_pages",
+    "manifest_entry_resolutions",
+    "manifest_actions",
+)
+
+_MULTIPART_UPLOAD_TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
+    "multipart_uploads",
+    "multipart_parts",
+)
+
+_SOURCE_CONFLICT_TABLES_IN_COUNT_ORDER: tuple[str, ...] = ("source_conflicts",)
+
 _TABLES_IN_COUNT_ORDER: tuple[str, ...] = (
     *_PHASE1_TABLES_IN_COUNT_ORDER,
     *_AUTHENTICATION_TABLES_IN_COUNT_ORDER,
     *_POLICY_TABLES_IN_COUNT_ORDER,
     *_SMALL_FILE_TABLES_IN_COUNT_ORDER,
+    *_SOURCE_LOCATOR_TABLES_IN_COUNT_ORDER,
+    *_DEVICE_SYNC_TABLES_IN_COUNT_ORDER,
+    *_MULTIPART_UPLOAD_TABLES_IN_COUNT_ORDER,
+    *_SOURCE_CONFLICT_TABLES_IN_COUNT_ORDER,
 )
+assert len(_TABLES_IN_COUNT_ORDER) == 40
 
 #: Row counts of one valid seeded graph in ``_TABLES_IN_COUNT_ORDER``: the
 #: seeded baseline rows (one workspace inserted after the upgrade), zero
-#: authentication, policy and small-file operation rows — the graph inserts
-#: its workspace directly rather than through the identity bootstrap, so the
-#: policy migration's per-workspace seeding (which ran on the empty database
+#: rows everywhere else — authentication, policy, small-file operations,
+#: source-locator lifecycle, device-sync reconciliation/manifests, multipart
+#: uploads and source conflicts — because the graph inserts its workspace
+#: directly rather than through the identity bootstrap, so the policy
+#: migration's per-workspace seeding (which ran on the empty database
 #: during the upgrade) created no rows for it.
 _VALID_GRAPH_ROW_COUNTS: list[int] = [
     1,
@@ -118,6 +145,16 @@ _VALID_GRAPH_ROW_COUNTS: list[int] = [
     1,
     2,
     1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
     0,
     0,
     0,
@@ -192,6 +229,20 @@ _EXPECTED_INDEXES: frozenset[str] = frozenset(
         "ix_policy_reconciliation_intents__pending_dispatch",
         "uq_projection_intents__policy_transition",
         "ix_small_file_upload_operations__nonterminal_expiry",
+        "ix_source_locators__workspace_source_history",
+        "uq_source_locators_active_workspace_path",
+        "uq_source_locators_active_source",
+        "uq_source_tombstones_open_source",
+        "ix_manifest_runs__workspace_device",
+        "uq_manifest_runs_unfinished_device",
+        "ix_multipart_uploads__workspace_state",
+        "ix_multipart_uploads__expiry_sweep",
+        "ix_multipart_uploads__cleanup_claim",
+        "ix_sync_events__workspace_event_sequence",
+        "ix_source_tombstones__restore_event_id",
+        "ix_source_conflicts__workspace_open_listing",
+        "ix_source_conflicts__source_history",
+        "uq_source_conflicts__resolution_event",
     }
 )
 _CONSTRAINT_NAME_PATTERN = re.compile(r"^(?:pk|fk|uq|ck)_[a-z0-9_]+$")
@@ -591,6 +642,23 @@ def _names(conn: psycopg.Connection[Any], sql: str) -> frozenset[str]:
     return frozenset(row[0] for row in _rows(conn, sql))
 
 
+def _constraint_definition(conn: psycopg.Connection[Any], constraint_name: str) -> str:
+    """Return the pretty-printed catalog definition of one named constraint.
+
+    Uses the same normalization (``pg_get_constraintdef(oid, true)``) as the
+    constraint section of the catalog fingerprint, so the exact-match
+    assertions below pin the identical representation the fingerprint hashes.
+    """
+    definitions = _rows(
+        conn,
+        "SELECT pg_get_constraintdef(con.oid, true) FROM pg_constraint con "
+        "JOIN pg_namespace n ON n.oid = con.connamespace "
+        f"WHERE n.nspname = 'knowledge' AND con.conname = '{constraint_name}'",
+    )
+    assert len(definitions) == 1, f"expected exactly one constraint named {constraint_name}"
+    return str(definitions[0][0])
+
+
 def _assert_exact_object_set(conn: psycopg.Connection[Any]) -> None:
     tables = _names(conn, "SELECT tablename FROM pg_tables WHERE schemaname = 'knowledge'")
     assert tables == _EXPECTED_TABLES, f"unexpected tables: {tables ^ _EXPECTED_TABLES}"
@@ -621,6 +689,12 @@ def _assert_exact_object_set(conn: psycopg.Connection[Any]) -> None:
         assert _CONSTRAINT_NAME_PATTERN.match(name), f"constraint name breaks grammar: {name}"
     for table in _EXPECTED_TABLES:
         assert f"pk_{table}" in constraint_names, f"missing primary key for {table}"
+
+    # The retired initial-TOTP-offer dismissal timestamp is gone: the
+    # credentials timestamp invariant is the reduced 20260902_02 clause.
+    assert _constraint_definition(conn, "ck_user_credentials__timestamps") == (
+        "CHECK (updated_at >= created_at AND password_changed_at >= created_at)"
+    ), "ck_user_credentials__timestamps must be the reduced post-20260902_02 clause"
 
     index_names = _names(conn, "SELECT indexname FROM pg_indexes WHERE schemaname = 'knowledge'")
     for name in index_names:
@@ -1940,15 +2014,29 @@ def _assert_event_and_intent_invariants(conn: psycopg.Connection[Any]) -> None:
     )
 
     # Intent whose event belongs to another source. The fresh setup event lives
-    # under the committed source, but the intent claims the second source.
+    # under the committed source, but the intent claims the second source. The
+    # intent names the second source's own version because the strengthened
+    # source-event shape check (20260820_01: every source_event intent carries
+    # its version) would otherwise reject the row before the composite
+    # event/source foreign key can prove the containment invariant.
     _assert_intent_rejected(
         conn,
         source_id=_SETUP_SOURCE_ID,
-        source_version_id=None,
+        source_version_id=_SETUP_SOURCE_VERSION_ID,
         operation="delete",
         expected_sqlstate=_FOREIGN_KEY_VIOLATION,
         extra_setup=[
             (_INSERT_SETUP_SOURCE_PENDING_SQL, (_SETUP_SOURCE_ID, _WORKSPACE_ID)),
+            (
+                _INSERT_SETUP_SOURCE_VERSION_SQL,
+                (
+                    _SETUP_SOURCE_VERSION_ID,
+                    _WORKSPACE_ID,
+                    _SETUP_SOURCE_ID,
+                    _CONTENT_OBJECT_ID,
+                    _USER_ID,
+                ),
+            ),
         ],
     )
 
@@ -2513,8 +2601,8 @@ def test_two_first_upgrade_processes_leave_exactly_one_head(
 
     # Final state: exactly one head, exact catalog, no duplicate objects.
     assert _current_revision(conn) == _HEAD_REVISION
-    assert _knowledge_table_count(conn) == 30, (
-        "two first-upgrade attempts must leave exactly thirty tables, no duplicates"
+    assert _knowledge_table_count(conn) == 40, (
+        "two first-upgrade attempts must leave exactly forty tables, no duplicates"
     )
     _assert_exact_object_set(conn)
 
