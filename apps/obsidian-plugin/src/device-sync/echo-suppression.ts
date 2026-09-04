@@ -17,7 +17,7 @@
  */
 
 import type { FrozenFingerprint } from "../journal/contracts";
-import type { SqliteQueryResult } from "../journal/sqlite-database";
+import type { SqliteMutationSession, SqliteQueryResult } from "../journal/sqlite-database";
 import type {
   DeviceEventOperation,
   DeviceSyncRepository,
@@ -58,6 +58,11 @@ export interface EchoSuppressor {
   consumeContentObservation(observation: WatcherContentObservation): Promise<boolean>;
   /** Offer one rename/move observation; true means it was our own apply's echo. */
   consumeRenameObservation(observation: WatcherRenameObservation): Promise<boolean>;
+  /** Same rename/move match, but using the caller's transaction session. */
+  consumeRenameObservationInSession(
+    session: SqliteMutationSession,
+    observation: WatcherRenameObservation,
+  ): boolean;
   /** Offer one delete observation; true means it was our own apply's echo. */
   consumeDeleteObservation(observation: WatcherDeleteObservation): Promise<boolean>;
 }
@@ -78,16 +83,19 @@ const CONTENT_MARKER_OPERATIONS: ReadonlySet<string> = new Set(["created", "upda
 const RENAME_MARKER_OPERATIONS: ReadonlySet<string> = new Set(["renamed", "moved"]);
 
 /**
- * Build the exact echo suppressor. The locator-based watcher lookups
- * read the candidate markers read-only and then consume through
- * {@link DeviceSyncRepository.matchAndConsumeEcho}, so the exact match
- * and the delete land in one serialized mutation.
+ * Build the exact echo suppressor. Ordinary watcher lookups consume
+ * through {@link DeviceSyncRepository.matchAndConsumeEcho}; rename
+ * callers may also pass their owner transaction so exact marker consume
+ * and row reparent share one rollback boundary.
  */
 export function createEchoSuppressor(options: EchoSuppressorOptions): EchoSuppressor {
   const { repository, database } = options;
 
-  function readMarkersByLocator(locator: string): EchoMarker[] {
-    const rows: readonly SqliteQueryResult[] = database.readAll(
+  function readMarkersByLocator(
+    read: (sql: string) => readonly SqliteQueryResult[],
+    locator: string,
+  ): EchoMarker[] {
+    const rows: readonly SqliteQueryResult[] = read(
       [
         `select ${ECHO_MARKER_COLUMNS.join(", ")} from echo_markers`,
         `where prior_locator = ${sqlText(locator)} or target_locator = ${sqlText(locator)}`,
@@ -113,15 +121,45 @@ export function createEchoSuppressor(options: EchoSuppressorOptions): EchoSuppre
     return false;
   }
 
+  function consumeRenameObservationInSession(
+    session: SqliteMutationSession,
+    observation: WatcherRenameObservation,
+  ): boolean {
+    const candidates = readMarkersByLocator(
+      (sql) => session.readRows(sql),
+      observation.priorLocator,
+    ).filter(
+      (marker) =>
+        RENAME_MARKER_OPERATIONS.has(marker.operation) &&
+        marker.targetLocator === observation.targetLocator,
+    );
+    for (const marker of candidates) {
+      const candidateObservation: VaultObservation = {
+        eventSequence: marker.eventSequence,
+        sourceId: observation.sourceId,
+        operation: marker.operation as DeviceEventOperation,
+        priorLocator: marker.priorLocator,
+        targetLocator: marker.targetLocator,
+        fingerprint: observation.fingerprint,
+      };
+      if (isExactEchoMatch(marker, candidateObservation)) {
+        session.exec(`delete from echo_markers where event_sequence = ${marker.eventSequence};`);
+        return true;
+      }
+    }
+    return false;
+  }
+
   return {
     async matchAndConsume(observation: VaultObservation): Promise<boolean> {
       return repository.matchAndConsumeEcho(observation);
     },
 
     async consumeContentObservation(observation: WatcherContentObservation): Promise<boolean> {
-      const candidates = readMarkersByLocator(observation.normalizedLocator).filter((marker) =>
-        CONTENT_MARKER_OPERATIONS.has(marker.operation),
-      );
+      const candidates = readMarkersByLocator(
+        (sql) => database.readAll(sql),
+        observation.normalizedLocator,
+      ).filter((marker) => CONTENT_MARKER_OPERATIONS.has(marker.operation));
       return consumeFirstExact(candidates, (marker) => ({
         eventSequence: marker.eventSequence,
         sourceId: observation.sourceId,
@@ -133,25 +171,18 @@ export function createEchoSuppressor(options: EchoSuppressorOptions): EchoSuppre
     },
 
     async consumeRenameObservation(observation: WatcherRenameObservation): Promise<boolean> {
-      const candidates = readMarkersByLocator(observation.priorLocator).filter(
-        (marker) =>
-          RENAME_MARKER_OPERATIONS.has(marker.operation) &&
-          marker.targetLocator === observation.targetLocator,
+      return database.runSerializedMutation((session) =>
+        consumeRenameObservationInSession(session, observation),
       );
-      return consumeFirstExact(candidates, (marker) => ({
-        eventSequence: marker.eventSequence,
-        sourceId: observation.sourceId,
-        operation: marker.operation as DeviceEventOperation,
-        priorLocator: marker.priorLocator,
-        targetLocator: marker.targetLocator,
-        fingerprint: observation.fingerprint,
-      }));
     },
 
+    consumeRenameObservationInSession,
+
     async consumeDeleteObservation(observation: WatcherDeleteObservation): Promise<boolean> {
-      const candidates = readMarkersByLocator(observation.priorLocator).filter(
-        (marker) => marker.operation === "deleted",
-      );
+      const candidates = readMarkersByLocator(
+        (sql) => database.readAll(sql),
+        observation.priorLocator,
+      ).filter((marker) => marker.operation === "deleted");
       return consumeFirstExact(candidates, (marker) => ({
         eventSequence: marker.eventSequence,
         sourceId: observation.sourceId,
@@ -162,4 +193,40 @@ export function createEchoSuppressor(options: EchoSuppressorOptions): EchoSuppre
       }));
     },
   };
+}
+
+function isSameFingerprint(
+  left: FrozenFingerprint | null,
+  right: FrozenFingerprint | null,
+): boolean {
+  if (left === null || right === null) {
+    return left === right;
+  }
+  return (
+    left.sha256 === right.sha256 &&
+    left.sizeBytes === right.sizeBytes &&
+    left.mediaType === right.mediaType
+  );
+}
+
+function isExactEchoMatch(marker: EchoMarker, observation: VaultObservation): boolean {
+  if (observation.sourceId === null || observation.sourceId !== marker.sourceId) {
+    return false;
+  }
+  if (observation.operation === null || observation.operation !== marker.operation) {
+    return false;
+  }
+  if (marker.priorLocator !== null && observation.priorLocator !== marker.priorLocator) {
+    return false;
+  }
+  if (marker.targetLocator !== null && observation.targetLocator !== marker.targetLocator) {
+    return false;
+  }
+  if (
+    marker.finalFingerprint !== null &&
+    !isSameFingerprint(observation.fingerprint, marker.finalFingerprint)
+  ) {
+    return false;
+  }
+  return true;
 }

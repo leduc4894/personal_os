@@ -131,6 +131,7 @@ export interface LifecycleCapture {
   captureRename(
     file: VaultRenameTarget,
     priorPath: string,
+    context?: LifecycleRenameCaptureContext,
   ): Promise<LifecycleRenameResult | null>;
   captureDelete(
     file: VaultTargetFile,
@@ -140,6 +141,11 @@ export interface LifecycleCapture {
     localFileId: string,
     targetPath: string,
   ): Promise<LifecycleRestoreResult>;
+}
+
+/** Synchronous owner handoff for the caller's delayed rename-tail admission. */
+export interface LifecycleRenameCaptureContext {
+  readonly onOwnerResolved?: ((localFileId: string) => void) | undefined;
 }
 
 // --- options -------------------------------------------------------------------------------
@@ -264,6 +270,15 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
     }>
   >();
   readonly #pendingRenameDeferralBudget = new Map<string, number>();
+  readonly #ownerBoundRenamePredecessors = new Map<
+    string,
+    {
+      readonly localFileId: string;
+      readonly ownedRowPath: string;
+      readonly observationToken: symbol;
+    }
+  >();
+  readonly #pendingRenameMutationTails = new Map<string, Promise<void>>();
   readonly #deleteDeferralTimers = new Map<string, ReturnType<typeof setTimeout>>();
   #isDisposed = false;
 
@@ -313,6 +328,7 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
   captureRename(
     file: VaultRenameTarget,
     priorPath: string,
+    context?: LifecycleRenameCaptureContext,
   ): Promise<LifecycleRenameResult | null> {
     if (this.#isDisposed) {
       return Promise.resolve(null);
@@ -333,6 +349,9 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
         return Promise.reject(journalStoreError("journal_mutation_failed"));
       }
       return Promise.reject(journalStoreError("journal_mutation_failed"));
+    }
+    if (intentOwner !== null) {
+      context?.onOwnerResolved?.(intentOwner.localFile.localFileId);
     }
     if (
       intentOwner !== null &&
@@ -433,15 +452,23 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
       return {
         localFile: direct,
         hasPendingIntent:
-          this.#lifecycle.readPendingRenameIntentForLocalFile(direct.localFileId) !== null,
+          this.#readPendingRenameIntentForLocalFileOrReport(direct.localFileId) !== null,
       };
     }
-    const intent = this.#lifecycle.readPendingRenameIntentByCurrentPath(normalizedPrior);
-    if (intent === null) {
+    const intent = this.#readPendingRenameIntentByCurrentPathOrReport(normalizedPrior);
+    if (intent !== null) {
+      const owner = this.#repository.readLocalFileByLocalFileId(intent.localFileId);
+      if (owner === null) {
+        return null;
+      }
+      return { localFile: owner, hasPendingIntent: true };
+    }
+    const predecessor = this.#ownerBoundRenamePredecessors.get(normalizedPrior);
+    if (predecessor === undefined) {
       return null;
     }
-    const owner = this.#repository.readLocalFileByLocalFileId(intent.localFileId);
-    if (owner === null) {
+    const owner = this.#repository.readLocalFileByLocalFileId(predecessor.localFileId);
+    if (owner === null || owner.normalizedPath !== predecessor.ownedRowPath) {
       return null;
     }
     return { localFile: owner, hasPendingIntent: true };
@@ -456,12 +483,27 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
     if (this.#readLifecycleState(localFileId) === "restore_pending") {
       return null;
     }
-    try {
+    const owner = this.#repository.readLocalFileByLocalFileId(localFileId);
+    if (owner === null) {
+      return null;
+    }
+    const observationToken = Symbol("owner-bound-rename-observation");
+    this.#ownerBoundRenamePredecessors.set(observedCurrentPath, {
+      localFileId,
+      ownedRowPath: owner.normalizedPath,
+      observationToken,
+    });
+    const previousMutation = this.#pendingRenameMutationTails.get(localFileId);
+    const mutation = (previousMutation ?? Promise.resolve()).then(async () => {
       await this.#lifecycle.recordOrComposePendingRenameIntent({
         localFileId,
         observedPriorPath,
         observedCurrentPath,
       });
+    });
+    this.#pendingRenameMutationTails.set(localFileId, mutation);
+    try {
+      await mutation;
     } catch (error) {
       if (error instanceof PendingRenameIntentConflictError) {
         this.#failureReporter?.reportJournalFailure("pending_rename_intent_conflict");
@@ -472,6 +514,14 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
         throw error;
       }
       throw journalStoreError("journal_mutation_failed");
+    } finally {
+      if (this.#pendingRenameMutationTails.get(localFileId) === mutation) {
+        this.#pendingRenameMutationTails.delete(localFileId);
+      }
+      const predecessor = this.#ownerBoundRenamePredecessors.get(observedCurrentPath);
+      if (predecessor?.observationToken === observationToken) {
+        this.#ownerBoundRenamePredecessors.delete(observedCurrentPath);
+      }
     }
     return this.#schedulePendingRenameMaterialization(localFileId);
   }
@@ -524,7 +574,14 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
       return;
     }
     try {
-      const intent = this.#lifecycle.readPendingRenameIntentForLocalFile(localFileId);
+      let intent;
+      try {
+        intent = this.#lifecycle.readPendingRenameIntentForLocalFile(localFileId);
+      } catch (error) {
+        this.#reportPendingRenameIntentReadFailure();
+        rejectAll(isStoreError(error) ? error : journalStoreError("journal_query_failed"));
+        return;
+      }
       if (intent === null) {
         resolveAll(null);
         return;
@@ -570,14 +627,18 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
       }
       const targetFingerprint = await deriveFrozenFingerprint(targetBytes);
       if (this.#echoSuppressor !== null) {
-        const consumed = await this.#echoSuppressor.consumeRenameObservation({
+        const observation = {
           priorLocator: intent.priorPath,
           targetLocator: intent.currentPath,
           sourceId: localFile.sourceId,
           fingerprint: targetFingerprint,
-        });
+        };
+        const echoSuppressor = this.#echoSuppressor;
+        const consumed = await this.#lifecycle.consumePendingRenameEchoAndReparent(
+          localFileId,
+          (session) => echoSuppressor.consumeRenameObservationInSession(session, observation),
+        );
         if (consumed) {
-          await this.#lifecycle.reparentAndClearPendingRenameIntent(localFileId);
           resolveAll(null);
           return;
         }
@@ -612,6 +673,28 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
       }
       rejectAll(isStoreError(error) ? error : journalStoreError("journal_mutation_failed"));
     }
+  }
+
+  #readPendingRenameIntentForLocalFileOrReport(localFileId: string) {
+    try {
+      return this.#lifecycle.readPendingRenameIntentForLocalFile(localFileId);
+    } catch (error) {
+      this.#reportPendingRenameIntentReadFailure();
+      throw error;
+    }
+  }
+
+  #readPendingRenameIntentByCurrentPathOrReport(normalizedPath: string) {
+    try {
+      return this.#lifecycle.readPendingRenameIntentByCurrentPath(normalizedPath);
+    } catch (error) {
+      this.#reportPendingRenameIntentReadFailure();
+      throw error;
+    }
+  }
+
+  #reportPendingRenameIntentReadFailure(): void {
+    this.#failureReporter?.reportJournalFailure("pending_rename_intent_read_failed");
   }
 
   /**
@@ -979,6 +1062,14 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
     }
   }
 
+  /** Re-arm one rebased successor after its immutable prefix receipt commits. */
+  rearmPendingRenameIntent(localFileId: string): void {
+    if (this.#isDisposed || !isUuid(localFileId)) {
+      return;
+    }
+    void this.#schedulePendingRenameMaterialization(localFileId).catch(() => undefined);
+  }
+
   /** Settle all queued rename observations and stop accepting new ones. */
   dispose(): void {
     this.#isDisposed = true;
@@ -1007,6 +1098,8 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
     }
     this.#pendingRenameWaiters.clear();
     this.#pendingRenameDeferralBudget.clear();
+    this.#ownerBoundRenamePredecessors.clear();
+    this.#pendingRenameMutationTails.clear();
   }
 
   /**

@@ -34,10 +34,12 @@ import {
   type LifecycleEventOperands,
 } from "./lifecycle-contracts";
 import { deriveFrozenFingerprint } from "./fingerprint";
-import { JOURNAL_SCHEMA_VERSION, SqliteDatabase } from "./sqlite-database";
+import { JOURNAL_SCHEMA_VERSION, journalStoreError, SqliteDatabase } from "./sqlite-database";
 import type { SqliteEngineModule } from "./sqlite-database";
 import type { JournalFailureReporter } from "./diagnostic-reporter";
 import type { SyncDiagnosticClosedToken } from "./sync-diagnostics-trail";
+import { LifecycleDriverImpl, type LifecycleApi } from "./lifecycle-driver";
+import type { LifecycleResult } from "./lifecycle-api";
 
 let engineModule: SqliteEngineModule;
 
@@ -1000,6 +1002,120 @@ describe("LifecycleCapture settle deferral vs an in-flight create (2026-09-03 li
     return capture.event;
   }
 
+  it("reports a pending-rename read token once when rename ingress cannot read owner intent state", async () => {
+    const harness = createHarness();
+    const real = await realFingerprintOf("rename ingress read failure");
+    await captureAndCommit(harness, "notes/read-ingress-a.md", real.fingerprint);
+    harness.lifecycle.readPendingRenameIntentForLocalFile = () => {
+      throw journalStoreError("journal_query_failed");
+    };
+
+    await expect(
+      harness.capture.captureRename(
+        fakeFile("notes/read-ingress-b.md", "notes"),
+        "notes/read-ingress-a.md",
+      ),
+    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+
+    expect(harness.failureTokens).toEqual(["pending_rename_intent_read_failed"]);
+  });
+
+  it("reports a pending-rename read token once when a re-arm cannot read its intent", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const harness = createHarness();
+      harness.lifecycle.readPendingRenameIntentForLocalFile = () => {
+        throw journalStoreError("journal_query_failed");
+      };
+
+      harness.capture.rearmPendingRenameIntent("11111111-1111-4111-8111-111111111111");
+      await vi.advanceTimersByTimeAsync(300);
+
+      expect(harness.failureTokens).toEqual(["pending_rename_intent_read_failed"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("binds a B -> C predecessor before the A -> B intent commit can await 300 ms", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const harness = createHarness();
+      const createEvent = await seedInFlightCreate(harness, "notes/race-a.md");
+      const finalBytes = bytesOf("owner-bound race final bytes");
+      harness.vault.setFileBytes("notes/race-c.md", finalBytes);
+
+      const runSerializedMutation = harness.database.runSerializedMutation.bind(harness.database);
+      let releaseFirstIntent!: () => void;
+      let markFirstIntentStarted!: () => void;
+      const firstIntentStarted = new Promise<void>((resolve) => {
+        markFirstIntentStarted = resolve;
+      });
+      const firstIntentGate = new Promise<void>((resolve) => {
+        releaseFirstIntent = resolve;
+      });
+      vi.spyOn(harness.database, "runSerializedMutation").mockImplementationOnce(
+        async (operation) => {
+          markFirstIntentStarted();
+          await firstIntentGate;
+          return runSerializedMutation(operation);
+        },
+      );
+
+      const firstObservation = harness.capture.captureRename(
+        fakeFile("notes/race-b.md", "notes"),
+        "notes/race-a.md",
+      );
+      await firstIntentStarted;
+
+      // The linked callback arrives while the first durable writer is still
+      // gated and before either 250 ms settle timer can fire. Ownership must
+      // come from the synchronously installed A -> B predecessor seam.
+      const secondObservation = harness.capture.captureRename(
+        fakeFile("notes/race-c.md", "notes"),
+        "notes/race-b.md",
+      );
+      expect(
+        harness.lifecycle.readPendingRenameIntentForLocalFile(createEvent.localFileId),
+      ).toBeNull();
+
+      releaseFirstIntent();
+      await Promise.resolve();
+      await Promise.resolve();
+      await harness.database.runSerializedMutation(() => undefined);
+      await Promise.resolve();
+      await harness.database.runSerializedMutation(() => undefined);
+
+      expect(
+        harness.lifecycle.readPendingRenameIntentForLocalFile(createEvent.localFileId),
+      ).toEqual({
+        localFileId: createEvent.localFileId,
+        priorPath: "notes/race-a.md",
+        currentPath: "notes/race-c.md",
+      });
+
+      await harness.repository.recordCommittedReceipt({
+        eventId: createEvent.eventId,
+        sourceId: "11111111-1111-7111-8111-111111111111",
+        baseVersionId: "22222222-2222-7222-8222-222222222222",
+      });
+      await vi.advanceTimersByTimeAsync(300);
+      const results = await Promise.all([firstObservation, secondObservation]);
+      expect(results.every((result) => result?.localFileId === createEvent.localFileId)).toBe(true);
+      expect(harness.repository.readLocalFileByPath("notes/race-b.md")).toBeNull();
+      expect(harness.repository.readLocalFileByPath("notes/race-c.md")?.localFileId).toBe(
+        createEvent.localFileId,
+      );
+      expect(
+        harness.repository
+          .readEventsByLocalFileId(createEvent.localFileId)
+          .filter((event) => event.operation === "rename" || event.operation === "move"),
+      ).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("defers the rename settle while the create is in flight and records once identity lands", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
@@ -1163,6 +1279,128 @@ describe("LifecycleCapture settle deferral vs an in-flight create (2026-09-03 li
       vi.useRealTimers();
     }
   });
+});
+
+describe("LifecycleCapture receipt-driven rename successor re-arm", () => {
+  for (const scenario of [
+    { name: "composed target", finalPath: "notes/receipt-c.md" },
+    { name: "return-to-prior compensation", finalPath: "notes/receipt-a.md" },
+  ] as const) {
+    it(`materializes one ${scenario.name} successor after restart and exact prefix replay`, async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const harness = createHarness();
+        const real = await realFingerprintOf(`receipt successor ${scenario.name}`);
+        await captureAndCommit(harness, "notes/receipt-a.md", real.fingerprint);
+        const owner = requireLocalFile(
+          harness.repository.readLocalFileByPath("notes/receipt-a.md"),
+        );
+        harness.vault.setFileBytes("notes/receipt-b.md", real.bytes);
+        harness.vault.setFileBytes(scenario.finalPath, real.bytes);
+
+        await harness.lifecycle.recordOrComposePendingRenameIntent({
+          localFileId: owner.localFileId,
+          observedPriorPath: "notes/receipt-a.md",
+          observedCurrentPath: "notes/receipt-b.md",
+        });
+        const prefix = await harness.lifecycle.recordPendingRenameLifecycleEvent(
+          owner.localFileId,
+          real.fingerprint,
+        );
+        if (prefix === null) {
+          throw new Error("expected an immutable A -> B prefix");
+        }
+
+        const laterObservation = harness.capture.captureRename(
+          fakeFile(scenario.finalPath, "notes"),
+          "notes/receipt-b.md",
+        );
+        // This timer fires before the prefix receipt. It may only replay the
+        // immutable A -> B row; it must not consume the one future re-arm.
+        await vi.advanceTimersByTimeAsync(300);
+        await laterObservation;
+        expect(
+          harness.repository
+            .readEventsByLocalFileId(owner.localFileId)
+            .filter((event) => event.operation === "rename" || event.operation === "move"),
+        ).toHaveLength(1);
+
+        harness.capture.dispose();
+        const restartedCapture = new LifecycleCaptureImpl({
+          repository: harness.repository,
+          lifecycle: harness.lifecycle,
+          vaultReader: harness.vault,
+          policyRevision: harness.policyRevision,
+          failureReporter: {
+            reportJournalFailure(token): void {
+              harness.failureTokens.push(token);
+            },
+          },
+        });
+        await restartedCapture.resumePendingRenameIntents();
+        // Restart's timer also observes the still-open prefix before the
+        // exact replay receipt and therefore finishes without a successor.
+        await vi.advanceTimersByTimeAsync(300);
+
+        const rearmedOwners: string[] = [];
+        const api: LifecycleApi = {
+          async commit(event): Promise<LifecycleResult> {
+            return {
+              committedAt: "2026-09-04T00:00:00Z",
+              eventId: event.event.eventId,
+              eventSequence: 1,
+              resultingLocator: event.operands.targetLocator,
+              sourceId: event.operands.sourceId,
+              sourceVersionId: event.operands.expectedVersionId,
+              state: "active",
+              tombstoneId: null,
+            };
+          },
+        };
+        const driver = new LifecycleDriverImpl({
+          repository: harness.repository,
+          lifecycle: harness.lifecycle,
+          api,
+          nowEpochMs: () => 1_788_000_000_000,
+          createCorrelationId: () => "receipt-successor-replay",
+          onPendingRenameIntentReady: (localFileId: string) => {
+            rearmedOwners.push(localFileId);
+            restartedCapture.rearmPendingRenameIntent(localFileId);
+          },
+        });
+
+        await expect(driver.runOne(new AbortController().signal)).resolves.toBe("committed");
+        expect(rearmedOwners).toEqual([owner.localFileId]);
+        await vi.advanceTimersByTimeAsync(300);
+
+        const lifecycleEvents = harness.repository
+          .readEventsByLocalFileId(owner.localFileId)
+          .filter((event) => event.operation === "rename" || event.operation === "move");
+        expect(lifecycleEvents).toHaveLength(2);
+        const successor = lifecycleEvents[1];
+        expect(harness.lifecycle.readLifecycleOperands(successor?.eventId ?? "")).toMatchObject({
+          expectedLocator: "notes/receipt-b.md",
+          targetLocator: scenario.finalPath,
+        });
+
+        await expect(driver.runOne(new AbortController().signal)).resolves.toBe("committed");
+        expect(
+          harness.lifecycle.readPendingRenameIntentForLocalFile(owner.localFileId),
+        ).toBeNull();
+        expect(harness.repository.readLocalFileByPath(scenario.finalPath)?.localFileId).toBe(
+          owner.localFileId,
+        );
+        expect(
+          harness.repository
+            .readEventsByLocalFileId(owner.localFileId)
+            .filter((event) => event.operation === "rename" || event.operation === "move"),
+        ).toHaveLength(2);
+        restartedCapture.dispose();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  }
 });
 
 describe("LifecycleCapture uncommitted-transit rebind (untitled-transit race heal)", () => {
@@ -1473,6 +1711,167 @@ describe("LifecycleCapture exact rename echo suppression", () => {
     expect(eventCount(harness.database)).toBe(eventsBefore + 1);
     expect(harness.repository.deviceSync.readEchoMarker(ECHO_EVENT_SEQUENCE)).not.toBeNull();
     void fileBefore;
+  });
+
+  it("consumes an exact composed intent echo and clears the owner reservation", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const harness = createHarness({ withEchoSuppressor: true });
+      const real = await realFingerprintOf("composed rename echo content");
+      await captureAndCommit(harness, "notes/echo-intent-a.md", real.fingerprint);
+      const owner = requireLocalFile(
+        harness.repository.readLocalFileByPath("notes/echo-intent-a.md"),
+      );
+      harness.vault.setFileBytes("notes/echo-intent-c.md", real.bytes);
+      await harness.lifecycle.recordOrComposePendingRenameIntent({
+        localFileId: owner.localFileId,
+        observedPriorPath: "notes/echo-intent-a.md",
+        observedCurrentPath: "notes/echo-intent-b.md",
+      });
+      await harness.repository.deviceSync.recordEchoMarker({
+        eventSequence: ECHO_EVENT_SEQUENCE,
+        sourceId: ECHO_SOURCE_ID,
+        operation: "renamed",
+        priorLocator: "notes/echo-intent-a.md",
+        targetLocator: "notes/echo-intent-c.md",
+        finalFingerprint: real.fingerprint,
+      });
+      const eventsBefore = eventCount(harness.database);
+
+      const settled = harness.capture.captureRename(
+        fakeFile("notes/echo-intent-c.md", "notes"),
+        "notes/echo-intent-b.md",
+      );
+      await vi.advanceTimersByTimeAsync(300);
+      await expect(settled).resolves.toBeNull();
+
+      expect(eventCount(harness.database)).toBe(eventsBefore);
+      expect(harness.repository.deviceSync.readEchoMarker(ECHO_EVENT_SEQUENCE)).toBeNull();
+      expect(harness.lifecycle.readPendingRenameIntentForLocalFile(owner.localFileId)).toBeNull();
+      expect(
+        harness.repository.readLocalFileByPath("notes/echo-intent-c.md")?.localFileId,
+      ).toBe(owner.localFileId);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not consume a prefix-only echo marker for a later composed target", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const harness = createHarness({ withEchoSuppressor: true });
+      const real = await realFingerprintOf("prefix echo content");
+      await captureAndCommit(harness, "notes/prefix-echo-a.md", real.fingerprint);
+      const owner = requireLocalFile(
+        harness.repository.readLocalFileByPath("notes/prefix-echo-a.md"),
+      );
+      harness.vault.setFileBytes("notes/prefix-echo-c.md", real.bytes);
+      await harness.lifecycle.recordOrComposePendingRenameIntent({
+        localFileId: owner.localFileId,
+        observedPriorPath: "notes/prefix-echo-a.md",
+        observedCurrentPath: "notes/prefix-echo-b.md",
+      });
+      await harness.repository.deviceSync.recordEchoMarker({
+        eventSequence: ECHO_EVENT_SEQUENCE,
+        sourceId: ECHO_SOURCE_ID,
+        operation: "renamed",
+        priorLocator: "notes/prefix-echo-a.md",
+        targetLocator: "notes/prefix-echo-b.md",
+        finalFingerprint: real.fingerprint,
+      });
+      const eventsBefore = eventCount(harness.database);
+
+      const settled = harness.capture.captureRename(
+        fakeFile("notes/prefix-echo-c.md", "notes"),
+        "notes/prefix-echo-b.md",
+      );
+      await vi.advanceTimersByTimeAsync(300);
+      const result = await settled;
+
+      expect(result?.operation).toBe("rename");
+      expect(eventCount(harness.database)).toBe(eventsBefore + 1);
+      expect(harness.repository.deviceSync.readEchoMarker(ECHO_EVENT_SEQUENCE)).not.toBeNull();
+      expect(harness.lifecycle.readPendingRenameIntentForLocalFile(owner.localFileId)).toEqual({
+        localFileId: owner.localFileId,
+        priorPath: "notes/prefix-echo-a.md",
+        currentPath: "notes/prefix-echo-c.md",
+      });
+      const lifecycleEvent = harness.repository
+        .readEventsByLocalFileId(owner.localFileId)
+        .find((event) => event.operation === "rename");
+      expect(harness.lifecycle.readLifecycleOperands(lifecycleEvent?.eventId ?? "")).toMatchObject(
+        {
+          expectedLocator: "notes/prefix-echo-a.md",
+          targetLocator: "notes/prefix-echo-c.md",
+        },
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps an exact composed echo marker when the owner reparent cannot commit", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const harness = createHarness({ withEchoSuppressor: true });
+      const real = await realFingerprintOf("atomic echo rollback content");
+      await captureAndCommit(harness, "notes/echo-rollback-a.md", real.fingerprint);
+      const owner = requireLocalFile(
+        harness.repository.readLocalFileByPath("notes/echo-rollback-a.md"),
+      );
+      harness.vault.setFileBytes("notes/echo-rollback-c.md", real.bytes);
+      await harness.lifecycle.recordOrComposePendingRenameIntent({
+        localFileId: owner.localFileId,
+        observedPriorPath: "notes/echo-rollback-a.md",
+        observedCurrentPath: "notes/echo-rollback-b.md",
+      });
+      await harness.repository.deviceSync.recordEchoMarker({
+        eventSequence: ECHO_EVENT_SEQUENCE,
+        sourceId: ECHO_SOURCE_ID,
+        operation: "renamed",
+        priorLocator: "notes/echo-rollback-a.md",
+        targetLocator: "notes/echo-rollback-c.md",
+        finalFingerprint: real.fingerprint,
+      });
+
+      const settled = harness.capture.captureRename(
+        fakeFile("notes/echo-rollback-c.md", "notes"),
+        "notes/echo-rollback-b.md",
+      );
+      await harness.database.runSerializedMutation(() => undefined);
+      expect(harness.lifecycle.readPendingRenameIntentForLocalFile(owner.localFileId)).toEqual({
+        localFileId: owner.localFileId,
+        priorPath: "notes/echo-rollback-a.md",
+        currentPath: "notes/echo-rollback-c.md",
+      });
+      const occupant = await harness.repository.recordCapture({
+        normalizedPath: "notes/echo-rollback-c.md",
+        fingerprint: await deriveFrozenFingerprint(bytesOf("collision bytes")),
+        policyRevisionNumber: 1,
+        admission: "policy_allowed",
+      });
+      if (occupant.outcome === "capture_refused") {
+        throw new Error("expected collision occupant capture");
+      }
+
+      await vi.advanceTimersByTimeAsync(300);
+      await expect(settled).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+
+      expect(harness.repository.deviceSync.readEchoMarker(ECHO_EVENT_SEQUENCE)).not.toBeNull();
+      expect(harness.lifecycle.readPendingRenameIntentForLocalFile(owner.localFileId)).toEqual({
+        localFileId: owner.localFileId,
+        priorPath: "notes/echo-rollback-a.md",
+        currentPath: "notes/echo-rollback-c.md",
+      });
+      expect(
+        harness.repository.readLocalFileByPath("notes/echo-rollback-a.md")?.localFileId,
+      ).toBe(owner.localFileId);
+      expect(
+        harness.repository.readLocalFileByPath("notes/echo-rollback-c.md")?.localFileId,
+      ).toBe(occupant.localFile.localFileId);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

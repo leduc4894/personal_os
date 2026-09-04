@@ -153,6 +153,8 @@ export interface LifecycleDriverOptions {
    * breaking the dispatch lane.
    */
   readonly diagnosticTrail?: SyncDiagnosticsTrail | undefined;
+  /** Wake capture after a committed prefix atomically rebases a later target. */
+  readonly onPendingRenameIntentReady?: ((localFileId: string) => void) | undefined;
 }
 
 // --- the driver --------------------------------------------------------------------------
@@ -171,6 +173,7 @@ export class LifecycleDriverImpl implements LifecycleDriver {
   readonly #randomJitter: () => number;
   readonly #nowEpochMs: () => number;
   readonly #diagnosticTrail: SyncDiagnosticsTrail | null;
+  readonly #onPendingRenameIntentReady: ((localFileId: string) => void) | null;
   readonly #disposeController: AbortController;
   #isDisposed = false;
 
@@ -182,6 +185,7 @@ export class LifecycleDriverImpl implements LifecycleDriver {
     this.#randomJitter = options.randomJitter ?? (() => Math.random());
     this.#nowEpochMs = options.nowEpochMs ?? (() => Date.now());
     this.#diagnosticTrail = options.diagnosticTrail ?? null;
+    this.#onPendingRenameIntentReady = options.onPendingRenameIntentReady ?? null;
     this.#disposeController = new AbortController();
   }
 
@@ -262,7 +266,13 @@ export class LifecycleDriverImpl implements LifecycleDriver {
       requestCorrelationId: correlationId,
     });
     const serverReceipt = result.tombstoneId === null ? null : { tombstoneId: result.tombstoneId };
-    await this.#lifecycle.recordLifecycleCommittedReceipt(frozen.event.eventId, serverReceipt);
+    const receipt = await this.#lifecycle.recordLifecycleCommittedReceipt(
+      frozen.event.eventId,
+      serverReceipt,
+    );
+    if (receipt.pendingRenameIntentLocalFileId !== null) {
+      this.#onPendingRenameIntentReady?.(receipt.pendingRenameIntentLocalFileId);
+    }
     // A committed restore successor consumes the retained tombstone so
     // the file returns to the active content surface (spec 7.1 fix
     // round 1 C2).

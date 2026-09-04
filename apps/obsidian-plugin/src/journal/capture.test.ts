@@ -28,7 +28,11 @@ import type {
   LifecycleRestoreResult,
 } from "./lifecycle-capture";
 import { JournalRepository } from "./repository";
-import { JOURNAL_SCHEMA_VERSION, SqliteDatabase } from "./sqlite-database";
+import {
+  JOURNAL_SCHEMA_VERSION,
+  journalStoreError,
+  SqliteDatabase,
+} from "./sqlite-database";
 import type { SqliteEngineModule } from "./sqlite-database";
 import type { JournalFailureReporter } from "./diagnostic-reporter";
 import type { SyncDiagnosticClosedToken } from "./sync-diagnostics-trail";
@@ -206,6 +210,7 @@ interface FakeLifecycleState {
   readonly deleteCalls: { readonly path: string }[];
   readonly renameCalls: { readonly file: { readonly path: string }; readonly priorPath: string }[];
   readonly reconcileCalls: readonly string[];
+  renameOwnerLocalFileId: string | null;
 }
 
 /**
@@ -220,12 +225,20 @@ function createFakeLifecycleCapture(options?: {
     deleteCalls: [],
     renameCalls: [],
     reconcileCalls: [],
+    renameOwnerLocalFileId: null,
   };
   const reconcileCalls = state.reconcileCalls as string[];
   const fake: FakeLifecycleCapture = {
     reconcileCalls,
-    captureRename: async (file, priorPath) => {
+    captureRename: async (
+      file,
+      priorPath,
+      context?: { readonly onOwnerResolved?: (localFileId: string) => void },
+    ) => {
       state.renameCalls.push({ file: { path: file.path }, priorPath });
+      if (state.renameOwnerLocalFileId !== null) {
+        context?.onOwnerResolved?.(state.renameOwnerLocalFileId);
+      }
       const result: LifecycleRenameResult | null = null;
       return result;
     },
@@ -583,6 +596,39 @@ describe("JournalCapture lifecycle guard (spec 7.1, child 5)", () => {
     expect(harness.repository.readLocalFileByPath("notes/unknown.md")).toBeNull();
     expect(harness.repository.countPendingEvents()).toBe(0);
   });
+
+  it("suppresses a delayed rename-tail admission for a reused intermediate owned by an evolved intent", async () => {
+    const harness = createHarness();
+    const ownerCapture = await harness.repository.recordCapture({
+      normalizedPath: "notes/owner-a.md",
+      fingerprint: await deriveFrozenFingerprint(bytesOf("owner bytes")),
+      policyRevisionNumber: 1,
+      admission: "policy_allowed",
+    });
+    if (ownerCapture.outcome === "capture_refused") {
+      throw new Error("expected owner capture");
+    }
+    await harness.repository.lifecycle.recordOrComposePendingRenameIntent({
+      localFileId: ownerCapture.localFile.localFileId,
+      observedPriorPath: "notes/owner-a.md",
+      observedCurrentPath: "notes/owner-c.md",
+    });
+    harness.lifecycleState.renameOwnerLocalFileId = ownerCapture.localFile.localFileId;
+    harness.vault.setFileBytes("notes/owner-b.md", bytesOf("reused intermediate bytes"));
+
+    await harness.capture.notifyPathRenamed(
+      { path: "notes/owner-b.md", parent: { path: "notes" } },
+      "notes/owner-a.md",
+    );
+
+    expect(harness.repository.readLocalFileByPath("notes/owner-b.md")).toBeNull();
+    expect(
+      harness.repository.readLocalFileByPath("notes/owner-a.md")?.localFileId,
+    ).toBe(ownerCapture.localFile.localFileId);
+    expect(
+      harness.database.readAll("select count(*) from local_files;")[0]?.values[0]?.[0],
+    ).toBe(1);
+  });
 });
 
 describe("JournalCapture automatic restore fail-closed (spec 7.1, child 5 fix round 1 C2)", () => {
@@ -638,7 +684,12 @@ describe("JournalCapture automatic restore fail-closed (spec 7.1, child 5 fix ro
       database,
       vault,
       gate,
-      lifecycleState: { deleteCalls: [], renameCalls: [], reconcileCalls: [] },
+      lifecycleState: {
+        deleteCalls: [],
+        renameCalls: [],
+        reconcileCalls: [],
+        renameOwnerLocalFileId: null,
+      },
       failureTokens: [],
     };
   }
@@ -1173,6 +1224,24 @@ describe("JournalCapture repair admission and action rechecks (task 11, spec 12.
     const trackedFile = harness.repository.readLocalFileByPath("notes/upload.md");
     const events = harness.repository.readEventsByLocalFileId(trackedFile?.localFileId ?? "");
     expect(events.filter((event) => event.state === "queued")).toHaveLength(1);
+  });
+
+  it("reports one pending-rename read token when repair admission cannot read reservations", async () => {
+    const harness = createHarness();
+    harness.vault.setFileBytes("notes/admission-read.md", bytesOf("new bytes"));
+    vi.spyOn(
+      harness.repository.lifecycle,
+      "readPendingRenameIntentByCurrentPath",
+    ).mockImplementationOnce(() => {
+      throw journalStoreError("journal_query_failed");
+    });
+
+    await expect(
+      harness.capture.admitForRepair("notes/admission-read.md"),
+    ).rejects.toMatchObject({ reason: "journal_query_failed" });
+
+    expect(harness.failureTokens).toEqual(["pending_rename_intent_read_failed"]);
+    expect(harness.repository.readLocalFileByPath("notes/admission-read.md")).toBeNull();
   });
 
   it("reauthorizes the existing pending event instead of recording a second one", async () => {

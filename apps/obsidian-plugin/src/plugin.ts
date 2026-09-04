@@ -945,6 +945,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       const lifecycleDriver = new LifecycleDriverImpl({
         repository,
         lifecycle: repository.lifecycle,
+        diagnosticTrail,
+        onPendingRenameIntentReady: (localFileId) => {
+          lifecycleCapture.rearmPendingRenameIntent(localFileId);
+        },
         api: createRequestUrlLifecycleApi({
           // Resolved afresh per commit so a server-origin edit in settings
           // applies without a plugin reload (the sync API's resolveOrigin
@@ -957,7 +961,6 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
           transport: createRequestUrlTransport((request) => requestUrl(request)),
           resolveAccessToken: () => session.accessCredential,
         }),
-        diagnosticTrail,
       });
       const queueDriver = new JournalQueueDriver({
         repository,

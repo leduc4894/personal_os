@@ -361,8 +361,13 @@ export class JournalCapture {
     if (this.#isDisposed) {
       return;
     }
+    let resolvedLifecycleOwnerLocalFileId: string | null = null;
     try {
-      await this.#lifecycleCapture.captureRename(file, priorPath);
+      await this.#lifecycleCapture.captureRename(file, priorPath, {
+        onOwnerResolved(localFileId): void {
+          resolvedLifecycleOwnerLocalFileId = localFileId;
+        },
+      });
     } catch (error) {
       if (!isStoreError(error)) {
         throw journalStoreError("journal_mutation_failed");
@@ -382,7 +387,13 @@ export class JournalCapture {
     }
     await new Promise<void>((resolve) => {
       this.#admissionTail = this.#admissionTail
-        .then(() => this.#admitNormalizedPath(normalizedNewPath))
+        .then(() =>
+          this.#admitNormalizedPath(
+            normalizedNewPath,
+            undefined,
+            resolvedLifecycleOwnerLocalFileId,
+          ),
+        )
         .then(
           () => undefined,
           () => {
@@ -603,6 +614,7 @@ export class JournalCapture {
   async #admitNormalizedPath(
     normalizedPath: string,
     signal?: AbortSignal,
+    resolvedLifecycleOwnerLocalFileId: string | null = null,
   ): Promise<JournalCaptureResult | null> {
     if (this.#isSnapshotStopped(signal)) {
       return null;
@@ -611,6 +623,14 @@ export class JournalCapture {
       return null;
     }
     try {
+      if (
+        resolvedLifecycleOwnerLocalFileId !== null &&
+        this.#repository.lifecycle.readPendingRenameIntentForLocalFile(
+          resolvedLifecycleOwnerLocalFileId,
+        ) !== null
+      ) {
+        return null;
+      }
       // An intent's current endpoint may not yet be the local_files path
       // (the immutable lifecycle prefix has not materialized), so this
       // durable reservation must be checked before a fresh row can exist.

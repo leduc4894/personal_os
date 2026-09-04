@@ -346,6 +346,96 @@ describe("LifecycleRepository durable pending rename intents", () => {
     database.close();
   });
 
+  it("clears a bound missing-file counter in the generic lifecycle freeze transaction", async () => {
+    const { database, repository, lifecycle } = createOpenedJournal();
+    await captureAndCommit(repository, "notes/freeze-a.md", fingerprintOf("12a"));
+    const owner = requireLocalFile(repository.readLocalFileByPath("notes/freeze-a.md"));
+    const update = await repository.recordCapture({
+      normalizedPath: "notes/freeze-a.md",
+      fingerprint: fingerprintOf("12b"),
+      policyRevisionNumber: 1,
+      admission: "policy_allowed",
+    });
+    if (update.outcome === "capture_refused") {
+      throw new Error("expected update capture");
+    }
+    await lifecycle.recordOrComposePendingRenameIntent({
+      localFileId: owner.localFileId,
+      observedPriorPath: "notes/freeze-a.md",
+      observedCurrentPath: "notes/freeze-b.md",
+    });
+    await repository.resolveIntentAwareLocalFileMissing({
+      eventId: update.event.eventId,
+      attemptedAtEpochMs: 1_784_000_000_500,
+      requestCorrelationId: "generic-freeze-counter",
+      nextEligibleRetryEpochMs: 1_784_000_000_750,
+    });
+
+    await lifecycle.recordLifecycleEventWithFreeze({
+      operands: operandsFor("delete", {
+        expectedLocator: "notes/freeze-a.md",
+        tombstoneId: "31313131-3131-4131-8131-313131313131",
+      }),
+      localFile: owner,
+      tombstoneId: "31313131-3131-4131-8131-313131313131",
+    });
+
+    expect(repository.readEvent(update.event.eventId)?.state).toBe("deferred_lifecycle");
+    expect(
+      database.readAll(
+        "select count(*) from pending_rename_intent_missing_file_deferrals;",
+      )[0]?.values[0]?.[0],
+    ).toBe(0);
+    expect(lifecycle.readPendingRenameIntentForLocalFile(owner.localFileId)).not.toBeNull();
+    database.close();
+  });
+
+  it("rolls back a generic lifecycle freeze together with its counter cleanup", async () => {
+    const { database, repository, lifecycle } = createOpenedJournal();
+    await captureAndCommit(repository, "notes/freeze-rollback-a.md", fingerprintOf("12c"));
+    const owner = requireLocalFile(repository.readLocalFileByPath("notes/freeze-rollback-a.md"));
+    const update = await repository.recordCapture({
+      normalizedPath: "notes/freeze-rollback-a.md",
+      fingerprint: fingerprintOf("12d"),
+      policyRevisionNumber: 1,
+      admission: "policy_allowed",
+    });
+    if (update.outcome === "capture_refused") {
+      throw new Error("expected update capture");
+    }
+    await lifecycle.recordOrComposePendingRenameIntent({
+      localFileId: owner.localFileId,
+      observedPriorPath: "notes/freeze-rollback-a.md",
+      observedCurrentPath: "notes/freeze-rollback-b.md",
+    });
+    await repository.resolveIntentAwareLocalFileMissing({
+      eventId: update.event.eventId,
+      attemptedAtEpochMs: 1_784_000_000_600,
+      requestCorrelationId: "generic-freeze-rollback",
+      nextEligibleRetryEpochMs: 1_784_000_000_850,
+    });
+
+    await expect(
+      lifecycle.recordLifecycleEventWithFreeze({
+        operands: operandsFor("delete", {
+          expectedLocator: "notes/freeze-rollback-a.md",
+          tombstoneId: "32323232-3232-4232-8232-323232323232",
+        }),
+        localFile: owner,
+        tombstoneId: "32323232-3232-4232-8232-323232323232",
+        forceFailureAfterExec: true,
+      }),
+    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+    expect(repository.readEvent(update.event.eventId)?.state).toBe("waiting_retry");
+    expect(
+      database.readAll(
+        "select deferred_attempt_count from pending_rename_intent_missing_file_deferrals;",
+      )[0]?.values[0]?.[0],
+    ).toBe(1);
+    expect(lifecycle.readPendingRenameIntentForLocalFile(owner.localFileId)).not.toBeNull();
+    database.close();
+  });
+
   it("keeps equal endpoints as compensation pending only while one immutable prefix is open", async () => {
     const { database, repository, lifecycle } = createOpenedJournal();
     await captureAndCommit(repository, "notes/a.md", fingerprintOf("15"));
@@ -405,6 +495,40 @@ describe("LifecycleRepository durable pending rename intents", () => {
       expect(database.readJournalMeta().isReconcileRequired).toBe(true);
       database.close();
     }
+  });
+
+  it("allows a vacated prior endpoint as a legal path-swap target", async () => {
+    const { database, repository, lifecycle } = createOpenedJournal();
+    await captureAndCommit(repository, "notes/swap-a.md", fingerprintOf("1a"));
+    await captureAndCommit(repository, "notes/swap-b.md", fingerprintOf("1b"));
+    const firstOwner = requireLocalFile(repository.readLocalFileByPath("notes/swap-a.md"));
+    const secondOwner = requireLocalFile(repository.readLocalFileByPath("notes/swap-b.md"));
+
+    await lifecycle.recordOrComposePendingRenameIntent({
+      localFileId: firstOwner.localFileId,
+      observedPriorPath: "notes/swap-a.md",
+      observedCurrentPath: "notes/swap-temp.md",
+    });
+    await lifecycle.recordPendingRenameLifecycleEvent(
+      firstOwner.localFileId,
+      fingerprintOf("1c"),
+    );
+    expect(repository.readLocalFileByPath("notes/swap-a.md")).toBeNull();
+
+    await expect(
+      lifecycle.recordOrComposePendingRenameIntent({
+        localFileId: secondOwner.localFileId,
+        observedPriorPath: "notes/swap-b.md",
+        observedCurrentPath: "notes/swap-a.md",
+      }),
+    ).resolves.toBe("created");
+    expect(lifecycle.readPendingRenameIntentForLocalFile(secondOwner.localFileId)).toEqual({
+      localFileId: secondOwner.localFileId,
+      priorPath: "notes/swap-b.md",
+      currentPath: "notes/swap-a.md",
+    });
+    expect(database.readJournalMeta().isReconcileRequired).toBe(false);
+    database.close();
   });
 
   it("refuses restore-pending owners and intent-owned phantom restore targets", async () => {
@@ -474,6 +598,26 @@ describe("LifecycleRepository durable pending rename intents", () => {
       observedPriorPath: "notes/b.md",
       observedCurrentPath: "archive/c.md",
     });
+    const stalledUpdate = await repository.recordCapture({
+      normalizedPath: "notes/b.md",
+      fingerprint: fingerprintOf("22b"),
+      policyRevisionNumber: 1,
+      admission: "policy_allowed",
+    });
+    if (stalledUpdate.outcome === "capture_refused") {
+      throw new Error("expected stalled update capture");
+    }
+    await repository.resolveIntentAwareLocalFileMissing({
+      eventId: stalledUpdate.event.eventId,
+      attemptedAtEpochMs: 1_784_000_001_250,
+      requestCorrelationId: "lifecycle-terminal-counter",
+      nextEligibleRetryEpochMs: 1_784_000_001_500,
+    });
+    expect(
+      database.readAll(
+        "select deferred_attempt_count from pending_rename_intent_missing_file_deferrals;",
+      )[0]?.values[0]?.[0],
+    ).toBe(1);
 
     await expect(
       lifecycle.resolveIntentAwareLifecycleTerminal({
@@ -491,6 +635,11 @@ describe("LifecycleRepository durable pending rename intents", () => {
       normalizedPath: "archive/c.md",
     });
     expect(lifecycle.readPendingRenameIntentForLocalFile(owner.localFileId)).toBeNull();
+    expect(
+      database.readAll(
+        "select count(*) from pending_rename_intent_missing_file_deferrals;",
+      )[0]?.values[0]?.[0],
+    ).toBe(0);
     expect(database.readJournalMeta().isReconcileRequired).toBe(true);
     expect(repository.readEventAttemptHistory(prefix.eventId)).toEqual([
       expect.objectContaining({ outcomeLabel: "blocked_conflict" }),
@@ -765,6 +914,64 @@ describe("LifecycleRepository ordered predecessor dependencies and replay", () =
 });
 
 describe("LifecycleRepository deferral release on rename/move commit (fix round 2 D7)", () => {
+  it("clears any remaining intent and bound counter when a delete receipt tombstones the owner", async () => {
+    const { database, repository, lifecycle } = createOpenedJournal();
+    await captureAndCommit(repository, "notes/delete-receipt.md", fingerprintOf("d6"));
+    const owner = requireLocalFile(repository.readLocalFileByPath("notes/delete-receipt.md"));
+    const pending = await repository.recordCapture({
+      normalizedPath: "notes/delete-receipt.md",
+      fingerprint: fingerprintOf("d7"),
+      policyRevisionNumber: 1,
+      admission: "policy_allowed",
+    });
+    if (pending.outcome === "capture_refused") {
+      throw new Error("expected a recorded capture");
+    }
+    await lifecycle.recordOrComposePendingRenameIntent({
+      localFileId: owner.localFileId,
+      observedPriorPath: "notes/delete-receipt.md",
+      observedCurrentPath: "archive/delete-receipt.md",
+    });
+    await repository.resolveIntentAwareLocalFileMissing({
+      eventId: pending.event.eventId,
+      attemptedAtEpochMs: 1_784_000_002_000,
+      requestCorrelationId: "delete-receipt-counter",
+      nextEligibleRetryEpochMs: 1_784_000_002_250,
+    });
+    const deleteEvent = await lifecycle.recordLifecycleEvent(
+      operandsFor("delete", {
+        expectedLocator: "notes/delete-receipt.md",
+        tombstoneId: "99999999-9999-4999-8999-999999999999",
+      }),
+      {
+        localFile: owner,
+        tombstoneId: "99999999-9999-4999-8999-999999999999",
+      },
+    );
+    expect(lifecycle.readPendingRenameIntentForLocalFile(owner.localFileId)).not.toBeNull();
+    expect(
+      database.readAll(
+        "select deferred_attempt_count from pending_rename_intent_missing_file_deferrals;",
+      )[0]?.values[0]?.[0],
+    ).toBe(1);
+
+    await lifecycle.recordLifecycleCommittedReceipt(deleteEvent.eventId);
+
+    expect(repository.readEvent(deleteEvent.eventId)?.state).toBe("committed");
+    expect(
+      database.readAll(
+        `select lifecycle_state from local_files where local_file_id = '${owner.localFileId}';`,
+      )[0]?.values[0]?.[0],
+    ).toBe("tombstoned");
+    expect(lifecycle.readPendingRenameIntentForLocalFile(owner.localFileId)).toBeNull();
+    expect(
+      database.readAll(
+        "select count(*) from pending_rename_intent_missing_file_deferrals;",
+      )[0]?.values[0]?.[0],
+    ).toBe(0);
+    database.close();
+  });
+
   it("releases the durable lifecycle-deferral marker in the rename commit transaction", async () => {
     const { repository, lifecycle } = createOpenedJournal();
     await captureAndCommit(repository, "notes/deferred-note.md", fingerprintOf("b1"));

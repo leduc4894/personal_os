@@ -53,7 +53,11 @@ import type {
 } from "./multipart-upload";
 import { isUuid } from "./repository";
 import type { JournalRepository } from "./repository";
-import { JournalStoreError, type JournalStoreErrorReason } from "./sqlite-database";
+import {
+  JournalStoreError,
+  journalStoreError,
+  type JournalStoreErrorReason,
+} from "./sqlite-database";
 import type {
   JournalPreflightOutcome,
   JournalSyncApi,
@@ -1248,9 +1252,21 @@ export class JournalQueueDriver {
     event: JournalEvent,
     localFile: LocalFile,
   ): Promise<Uint8Array | null> {
-    const intent = this.#repository.lifecycle.readPendingRenameIntentForLocalFile(
-      event.localFileId,
-    );
+    let intent;
+    try {
+      intent = this.#repository.lifecycle.readPendingRenameIntentForLocalFile(
+        event.localFileId,
+      );
+    } catch (error) {
+      void this.#diagnosticTrail?.append({
+        kind: "journal_failure",
+        tokens: ["pending_rename_intent_read_failed"],
+      });
+      if (error instanceof JournalStoreError) {
+        throw error;
+      }
+      throw journalStoreError("journal_query_failed");
+    }
     return this.#fileBytesReader.readRegularFileBytes(intent?.currentPath ?? localFile.normalizedPath);
   }
 

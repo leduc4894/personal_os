@@ -150,6 +150,11 @@ export interface LifecycleServerReceipt {
   readonly tombstoneId: string | null;
 }
 
+/** A committed prefix may leave one rebased durable rename successor owed. */
+export interface LifecycleCommittedReceiptResolution {
+  readonly pendingRenameIntentLocalFileId: string | null;
+}
+
 export interface LifecycleRepositoryOptions {
   readonly database: LifecycleRepositoryDatabase;
   /** Identity mint; defaults to the platform `crypto.randomUUID`. */
@@ -633,8 +638,7 @@ export class LifecycleRepository {
         session.readRows(
           [
             "select local_file_id from pending_rename_intents",
-            `where (current_path = ${sqlText(input.observedCurrentPath)}`,
-            `or prior_path = ${sqlText(input.observedCurrentPath)})`,
+            `where current_path = ${sqlText(input.observedCurrentPath)}`,
             `and local_file_id <> ${sqlText(input.localFileId)} limit 1;`,
           ].join(" "),
         ),
@@ -904,41 +908,28 @@ export class LifecycleRepository {
       throw journalStoreError("journal_mutation_failed");
     }
     await this.#database.runSerializedMutation((session) => {
-      const row = firstRow(
-        session.readRows(
-          [
-            "select lf.normalized_path, pri.current_path from local_files lf",
-            "left join pending_rename_intents pri on pri.local_file_id = lf.local_file_id",
-            `where lf.local_file_id = ${sqlText(localFileId)};`,
-          ].join(" "),
-        ),
-      );
-      if (row === null) {
-        throw journalStoreError("journal_mutation_failed");
+      this.#reparentAndClearPendingRenameIntentInSession(session, localFileId);
+    });
+  }
+
+  /**
+   * Consume an exact echo marker and release its pending rename reservation
+   * in the same writer. If the owner reparent cannot commit, the marker
+   * deletion rolls back with it.
+   */
+  async consumePendingRenameEchoAndReparent(
+    localFileId: string,
+    consumeEchoInSession: (session: SqliteMutationSession) => boolean,
+  ): Promise<boolean> {
+    if (!isUuid(localFileId)) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    return this.#database.runSerializedMutation((session) => {
+      if (!consumeEchoInSession(session)) {
+        return false;
       }
-      const [rowPath, currentPath] = row;
-      if (
-        typeof rowPath !== "string" ||
-        (currentPath !== null && typeof currentPath !== "string")
-      ) {
-        throw journalStoreError("journal_image_invalid");
-      }
-      const finalPath = currentPath ?? rowPath;
-      session.exec(
-        `delete from pending_rename_intent_missing_file_deferrals where local_file_id = ${sqlText(localFileId)};`,
-      );
-      session.exec(
-        `delete from pending_rename_intents where local_file_id = ${sqlText(localFileId)};`,
-      );
-      session.exec(
-        [
-          "update local_files set",
-          `normalized_path = ${sqlText(finalPath)},`,
-          "lifecycle_state = 'active',",
-          "open_tombstone_id = null",
-          `where local_file_id = ${sqlText(localFileId)};`,
-        ].join(" "),
-      );
+      this.#reparentAndClearPendingRenameIntentInSession(session, localFileId);
+      return true;
     });
   }
 
@@ -1089,6 +1080,9 @@ export class LifecycleRepository {
       this.#freezePendingForLocalFileInSession(
         session,
         input.localFile.localFileId,
+      );
+      session.exec(
+        `delete from pending_rename_intent_missing_file_deferrals where local_file_id = ${sqlText(input.localFile.localFileId)};`,
       );
       return this.#recordLifecycleEventInSession(session, {
         operands: input.operands,
@@ -1449,7 +1443,7 @@ export class LifecycleRepository {
   async recordLifecycleCommittedReceipt(
     eventId: string,
     serverReceipt: LifecycleServerReceipt | null = null,
-  ): Promise<void> {
+  ): Promise<LifecycleCommittedReceiptResolution> {
     if (!isUuid(eventId)) {
       throw journalStoreError("journal_mutation_failed");
     }
@@ -1459,7 +1453,7 @@ export class LifecycleRepository {
         throw journalStoreError("journal_mutation_failed");
       }
     }
-    await this.#database.runSerializedMutation((session) => {
+    return this.#database.runSerializedMutation((session) => {
       const event = firstRow(
         session.readRows(
           [
@@ -1489,6 +1483,7 @@ export class LifecycleRepository {
       ) {
         throw journalStoreError("journal_mutation_failed");
       }
+      let pendingRenameIntentLocalFileId: string | null = null;
       session.exec(
         [
           "update journal_events set state = 'committed',",
@@ -1579,12 +1574,19 @@ export class LifecycleRepository {
                   `where local_file_id = ${sqlText(localFileId)};`,
                 ].join(" "),
               );
+              pendingRenameIntentLocalFileId = localFileId;
             }
           }
           break;
         case "delete":
           // Tombstone row stays; the durable local_files row is
           // pruned by the capture path on tombstone commit.
+          session.exec(
+            `delete from pending_rename_intent_missing_file_deferrals where local_file_id = ${sqlText(localFileId)};`,
+          );
+          session.exec(
+            `delete from pending_rename_intents where local_file_id = ${sqlText(localFileId)};`,
+          );
           session.exec(
             [
               "update local_files set",
@@ -1615,6 +1617,7 @@ export class LifecycleRepository {
           );
           break;
       }
+      return { pendingRenameIntentLocalFileId };
     });
   }
 
@@ -1984,6 +1987,47 @@ export class LifecycleRepository {
     if (!meta.isReconcileRequired) {
       session.writeJournalMeta({ ...meta, isReconcileRequired: true });
     }
+  }
+
+  #reparentAndClearPendingRenameIntentInSession(
+    session: SqliteMutationSession,
+    localFileId: string,
+  ): void {
+    const row = firstRow(
+      session.readRows(
+        [
+          "select lf.normalized_path, pri.current_path from local_files lf",
+          "left join pending_rename_intents pri on pri.local_file_id = lf.local_file_id",
+          `where lf.local_file_id = ${sqlText(localFileId)};`,
+        ].join(" "),
+      ),
+    );
+    if (row === null) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    const [rowPath, currentPath] = row;
+    if (
+      typeof rowPath !== "string" ||
+      (currentPath !== null && typeof currentPath !== "string")
+    ) {
+      throw journalStoreError("journal_image_invalid");
+    }
+    const finalPath = currentPath ?? rowPath;
+    session.exec(
+      `delete from pending_rename_intent_missing_file_deferrals where local_file_id = ${sqlText(localFileId)};`,
+    );
+    session.exec(
+      `delete from pending_rename_intents where local_file_id = ${sqlText(localFileId)};`,
+    );
+    session.exec(
+      [
+        "update local_files set",
+        `normalized_path = ${sqlText(finalPath)},`,
+        "lifecycle_state = 'active',",
+        "open_tombstone_id = null",
+        `where local_file_id = ${sqlText(localFileId)};`,
+      ].join(" "),
+    );
   }
 
   #recordLifecycleAttemptInSession(

@@ -1551,6 +1551,31 @@ describe("queue driver diagnostics trail wiring (sync error tracing task 1)", ()
     expect(harness.diagnosticTrail.entries[1]?.tokens).toEqual(["completed"]);
   });
 
+  it("records one pending-rename read token when queue byte selection cannot read intents", async () => {
+    const harness = createHarness();
+    await captureBytes(harness, "notes/intent-read-failed.md", new TextEncoder().encode("intent read"));
+    harness.installTransport({
+      preflight: async () => ({ status: 200, bodyText: SINGLE_PART_BODY }),
+      content: async () => {
+        throw new Error("content upload must not start after intent read failure");
+      },
+    });
+    harness.repository.lifecycle.readPendingRenameIntentForLocalFile = () => {
+      throw journalStoreError("journal_query_failed");
+    };
+
+    const summary = await runPass(harness.driver);
+
+    expect(summary.outcome).toBe("retry_scheduled");
+    const journalFailures = harness.diagnosticTrail.entries.filter(
+      (entry) => entry.kind === "journal_failure",
+    );
+    expect(journalFailures.map((entry) => entry.tokens)).toEqual([
+      ["pending_rename_intent_read_failed"],
+    ]);
+    expect(harness.diagnosticTrail.entries.at(-1)?.tokens[0]).toBe("retry_scheduled");
+  });
+
   it("carries the envelope request id on a wire failure the server envelope answered", async () => {
     const harness = createHarness();
     await captureBytes(harness, "notes/api-403-trail.md", new TextEncoder().encode("denied"));
