@@ -485,7 +485,13 @@ export class JournalPersistence {
     const { manifest, isManifestPresent } = await this.#readManifestState();
     const recovered = await this.#recoverVerifiedDatabase(manifest);
     if (recovered !== null) {
-      const { database, verifiedGeneration, recoveryState, shouldPublishRecoveredImage } = recovered;
+      const {
+        database,
+        verifiedGeneration,
+        recoveryState,
+        shouldPublishRecoveredImage,
+        wasPendingRenameStateRepaired,
+      } = recovered;
       this.#isReconcileRequired ||= database.readJournalMeta().isReconcileRequired;
       await this.#refreshRecoveredMeta(database, verifiedGeneration, recoveryState);
       this.#database = database;
@@ -511,6 +517,12 @@ export class JournalPersistence {
           this.close();
           throw error;
         }
+      }
+      if (wasPendingRenameStateRepaired) {
+        void this.#diagnosticTrail?.append({
+          kind: "journal_failure",
+          tokens: ["pending_rename_intent_conflict"],
+        });
       }
       return;
     }
@@ -628,6 +640,7 @@ export class JournalPersistence {
     verifiedGeneration: VerifiedJournalGeneration;
     recoveryState: JournalRecoveryState;
     shouldPublishRecoveredImage: boolean;
+    wasPendingRenameStateRepaired: boolean;
   } | null> {
     const candidates: readonly (VerifiedJournalGeneration & {
       readonly recoveryState: JournalRecoveryState;
@@ -647,6 +660,7 @@ export class JournalPersistence {
           verifiedGeneration: candidate,
           recoveryState: candidate.recoveryState,
           shouldPublishRecoveredImage: opened.shouldPublishRecoveredImage,
+          wasPendingRenameStateRepaired: opened.wasPendingRenameStateRepaired,
         };
       }
     }
@@ -667,7 +681,11 @@ export class JournalPersistence {
    */
   async #openVerifiedGeneration(
     candidate: VerifiedJournalGeneration,
-  ): Promise<{ readonly database: SqliteDatabase; readonly shouldPublishRecoveredImage: boolean } | null> {
+  ): Promise<{
+    readonly database: SqliteDatabase;
+    readonly shouldPublishRecoveredImage: boolean;
+    readonly wasPendingRenameStateRepaired: boolean;
+  } | null> {
     let migrationWasAttempted = false;
     try {
       const fileName = generationFileName(candidate.generationNumber);
@@ -733,6 +751,7 @@ export class JournalPersistence {
       return {
         database,
         shouldPublishRecoveredImage: migrationWasAttempted || pendingRenameStateWasRepaired,
+        wasPendingRenameStateRepaired: pendingRenameStateWasRepaired,
       };
     } catch (error) {
       if (migrationWasAttempted) {

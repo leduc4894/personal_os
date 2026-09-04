@@ -17,6 +17,7 @@ import initSqlJs from "sql.js";
 import { beforeAll, describe, expect, it, vi} from "vitest";
 
 import type { FrozenFingerprint, JournalEvent, LocalFile } from "./contracts";
+import { MULTIPART_PART_SIZE_BYTES } from "./contracts";
 import { JournalRepository } from "./repository";
 import { JOURNAL_SCHEMA_VERSION, SqliteDatabase } from "./sqlite-database";
 import type { SqliteEngineModule } from "./sqlite-database";
@@ -1269,7 +1270,9 @@ describe("LifecycleRepository explicit-restore target reservation", () => {
     database.close();
   });
 
-  it("releases a queued phantom create at the target inside the reservation transaction", async () => {
+  it.each(["queued", "waiting_retry"] as const)(
+    "releases a %s phantom create and its multipart progress inside the reservation transaction",
+    async (phantomState) => {
     const { database, repository, lifecycle } = createOpenedJournal();
     const { localFileId } = await seedTombstonedFile(
       repository,
@@ -1286,6 +1289,23 @@ describe("LifecycleRepository explicit-restore target reservation", () => {
       throw new Error("expected a recorded phantom capture");
     }
     const phantomFileId = phantomCapture.localFile.localFileId;
+    await repository.saveMultipartProgress({
+      eventId: phantomCapture.event.eventId,
+      sessionId: "bXVsdGlwYXJ0LXBoYW50b20tc2Vzc2lvbi0wMTIzNDU2Nzg5MA",
+      partSizeBytes: MULTIPART_PART_SIZE_BYTES,
+      partCount: 2,
+      expiresAtEpochMs: 1_784_086_400_000,
+      completedPartNumbers: [],
+      sessionState: "created",
+      safeReason: null,
+    });
+    if (phantomState === "waiting_retry") {
+      await repository.markEventWaitingRetry(
+        phantomCapture.event.eventId,
+        "server_error",
+        1_784_000_001_000,
+      );
+    }
 
     const result = await lifecycle.reserveRestoreTarget(localFileId, "notes/staged.md");
 
@@ -1307,6 +1327,9 @@ describe("LifecycleRepository explicit-restore target reservation", () => {
       ),
     );
     expect(phantomEvents[0]?.values[0]?.[0]).toBe(0);
+    expect(
+      database.readAll("select count(*) from multipart_upload_progress;")[0]?.values[0]?.[0],
+    ).toBe(0);
     const reservedRow = database.readAll(
       "select normalized_path, lifecycle_state, restore_prior_path from local_files where local_file_id = $id".replace(
         "$id",
@@ -1319,7 +1342,8 @@ describe("LifecycleRepository explicit-restore target reservation", () => {
       "notes/restore-me.md",
     ]);
     database.close();
-  });
+    },
+  );
 
   it("refuses a target whose phantom create upload is already in flight", async () => {
     const { database, repository, lifecycle } = createOpenedJournal();

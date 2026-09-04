@@ -6733,6 +6733,9 @@ var LifecycleRepository = class {
           `delete from journal_attempts where event_id in (select event_id from journal_events where local_file_id = ${sqlText(occupantId)});`
         );
         session.exec(
+          `delete from multipart_upload_progress where event_id in (select event_id from journal_events where local_file_id = ${sqlText(occupantId)});`
+        );
+        session.exec(
           `delete from lifecycle_event_operands where event_id in (select event_id from journal_events where local_file_id = ${sqlText(occupantId)});`
         );
         session.exec(
@@ -11935,6 +11938,12 @@ function createJournalSyncApi(options) {
 // src/journal/multipart-upload.ts
 var MULTIPART_DESKTOP_PART_CONCURRENCY = 3;
 var MULTIPART_MOBILE_PART_CONCURRENCY = 2;
+var PendingRenameIntentReadError = class extends Error {
+  constructor() {
+    super("pending rename intent read failed");
+    this.name = "PendingRenameIntentReadError";
+  }
+};
 function multipartPartConcurrency(platform) {
   return platform === "mobile" ? MULTIPART_MOBILE_PART_CONCURRENCY : MULTIPART_DESKTOP_PART_CONCURRENCY;
 }
@@ -12033,6 +12042,9 @@ var MultipartUploadRunner = class {
     try {
       return await this.#run(event, platform, context, stageRef);
     } catch (error) {
+      if (error instanceof PendingRenameIntentReadError) {
+        throw error;
+      }
       if (error instanceof SyncApiError && error.wireErrorCode !== null && SESSION_GONE_WIRE_CODES.has(error.wireErrorCode)) {
         await this.#repository.clearMultipartProgress(event.eventId).catch(
           (clearError) => {
@@ -12347,7 +12359,12 @@ var MultipartUploadRunner = class {
    * `changed` and never lets its bytes enter the session.
    */
   async #checkFrozenFile(event, localFile) {
-    const intent = this.#repository.readPendingRenameIntentForLocalFile(event.localFileId);
+    let intent;
+    try {
+      intent = this.#repository.readPendingRenameIntentForLocalFile(event.localFileId);
+    } catch {
+      throw new PendingRenameIntentReadError();
+    }
     const bytes = await this.#fileBytesReader.readRegularFileBytes(
       intent?.currentPath ?? localFile.normalizedPath
     );
@@ -14545,6 +14562,13 @@ var JournalQueueDriver = class {
       if (this.#isStopped) {
         return "end_stopped";
       }
+      if (error instanceof PendingRenameIntentReadError) {
+        void this.#diagnosticTrail?.append({
+          kind: "journal_failure",
+          tokens: ["pending_rename_intent_read_failed"]
+        });
+        throw error;
+      }
       let failure = error;
       const resumeOperationId = this.#claimedResumeOperationId(event, error);
       if (resumeOperationId !== null) {
@@ -14596,6 +14620,9 @@ var JournalQueueDriver = class {
     try {
       outcome = await issue();
     } catch (error) {
+      if (error instanceof PendingRenameIntentReadError) {
+        throw error;
+      }
       const kind = syncFailureKind(error);
       if (kind !== "access_expired" || refreshBudget.hasRefreshed) {
         if (this.#isStopped) {
@@ -14620,6 +14647,9 @@ var JournalQueueDriver = class {
       try {
         outcome = await issue();
       } catch (retryError) {
+        if (retryError instanceof PendingRenameIntentReadError) {
+          throw retryError;
+        }
         if (this.#isStopped) {
           return "end_stopped";
         }
@@ -14873,15 +14903,8 @@ var JournalQueueDriver = class {
       intent = this.#repository.lifecycle.readPendingRenameIntentForLocalFile(
         event.localFileId
       );
-    } catch (error) {
-      void this.#diagnosticTrail?.append({
-        kind: "journal_failure",
-        tokens: ["pending_rename_intent_read_failed"]
-      });
-      if (error instanceof JournalStoreError) {
-        throw error;
-      }
-      throw journalStoreError("journal_query_failed");
+    } catch {
+      throw new PendingRenameIntentReadError();
     }
     return this.#fileBytesReader.readRegularFileBytes(intent?.currentPath ?? localFile.normalizedPath);
   }
@@ -16241,7 +16264,13 @@ var JournalPersistence = class _JournalPersistence {
     const { manifest, isManifestPresent } = await this.#readManifestState();
     const recovered = await this.#recoverVerifiedDatabase(manifest);
     if (recovered !== null) {
-      const { database, verifiedGeneration, recoveryState, shouldPublishRecoveredImage } = recovered;
+      const {
+        database,
+        verifiedGeneration,
+        recoveryState,
+        shouldPublishRecoveredImage,
+        wasPendingRenameStateRepaired
+      } = recovered;
       this.#isReconcileRequired ||= database.readJournalMeta().isReconcileRequired;
       await this.#refreshRecoveredMeta(database, verifiedGeneration, recoveryState);
       this.#database = database;
@@ -16255,6 +16284,12 @@ var JournalPersistence = class _JournalPersistence {
           this.close();
           throw error;
         }
+      }
+      if (wasPendingRenameStateRepaired) {
+        void this.#diagnosticTrail?.append({
+          kind: "journal_failure",
+          tokens: ["pending_rename_intent_conflict"]
+        });
       }
       return;
     }
@@ -16364,7 +16399,8 @@ var JournalPersistence = class _JournalPersistence {
           database: opened.database,
           verifiedGeneration: candidate,
           recoveryState: candidate.recoveryState,
-          shouldPublishRecoveredImage: opened.shouldPublishRecoveredImage
+          shouldPublishRecoveredImage: opened.shouldPublishRecoveredImage,
+          wasPendingRenameStateRepaired: opened.wasPendingRenameStateRepaired
         };
       }
     }
@@ -16436,7 +16472,8 @@ var JournalPersistence = class _JournalPersistence {
       const pendingRenameStateWasRepaired = await _JournalPersistence.#repairInvalidPendingRenameState(database);
       return {
         database,
-        shouldPublishRecoveredImage: migrationWasAttempted || pendingRenameStateWasRepaired
+        shouldPublishRecoveredImage: migrationWasAttempted || pendingRenameStateWasRepaired,
+        wasPendingRenameStateRepaired: pendingRenameStateWasRepaired
       };
     } catch (error) {
       if (migrationWasAttempted) {

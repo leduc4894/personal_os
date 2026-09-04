@@ -1240,6 +1240,9 @@ export class LifecycleRepository {
           `delete from journal_attempts where event_id in (select event_id from journal_events where local_file_id = ${sqlText(occupantId)});`,
         );
         session.exec(
+          `delete from multipart_upload_progress where event_id in (select event_id from journal_events where local_file_id = ${sqlText(occupantId)});`,
+        );
+        session.exec(
           `delete from lifecycle_event_operands where event_id in (select event_id from journal_events where local_file_id = ${sqlText(occupantId)});`,
         );
         session.exec(

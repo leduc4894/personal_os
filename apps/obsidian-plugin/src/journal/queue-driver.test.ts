@@ -1551,9 +1551,13 @@ describe("queue driver diagnostics trail wiring (sync error tracing task 1)", ()
     expect(harness.diagnosticTrail.entries[1]?.tokens).toEqual(["completed"]);
   });
 
-  it("records one pending-rename read token when queue byte selection cannot read intents", async () => {
+  it("fails closed with one pending-rename read token when single-part byte selection cannot read intents", async () => {
     const harness = createHarness();
-    await captureBytes(harness, "notes/intent-read-failed.md", new TextEncoder().encode("intent read"));
+    const event = await captureBytes(
+      harness,
+      "notes/intent-read-failed.md",
+      new TextEncoder().encode("intent read"),
+    );
     harness.installTransport({
       preflight: async () => ({ status: 200, bodyText: SINGLE_PART_BODY }),
       content: async () => {
@@ -1566,14 +1570,26 @@ describe("queue driver diagnostics trail wiring (sync error tracing task 1)", ()
 
     const summary = await runPass(harness.driver);
 
-    expect(summary.outcome).toBe("retry_scheduled");
-    const journalFailures = harness.diagnosticTrail.entries.filter(
-      (entry) => entry.kind === "journal_failure",
-    );
-    expect(journalFailures.map((entry) => entry.tokens)).toEqual([
-      ["pending_rename_intent_read_failed"],
+    expect(summary).toEqual({ outcome: "completed", processedEventCount: 0 });
+    expect(harness.repository.readEvent(event.eventId)).toMatchObject({
+      state: "uploading",
+      safeError: null,
+    });
+    expect(harness.diagnosticTrail.entries).toEqual([
+      {
+        kind: "journal_failure",
+        atEpochMs: 0,
+        tokens: ["pending_rename_intent_read_failed"],
+      },
+      {
+        kind: "pass_outcome",
+        atEpochMs: 0,
+        tokens: [
+          "completed",
+          { requestId: "66666666-6666-4666-8666-666666666666" },
+        ],
+      },
     ]);
-    expect(harness.diagnosticTrail.entries.at(-1)?.tokens[0]).toBe("retry_scheduled");
   });
 
   it("carries the envelope request id on a wire failure the server envelope answered", async () => {
@@ -2976,6 +2992,50 @@ describe("queue driver multipart dispatch (child 7 spec 4.3)", () => {
     expect(script.partPutNumbers).toHaveLength(4);
     expect(script.partPutNumbers.slice().sort((a, b) => a - b)).toEqual([1, 1, 2, 3]);
     expect(harness.repository.readEvent(event.eventId)?.state).toBe("committed");
+  });
+
+  it("fails closed with one pending-rename read diagnostic when multipart byte selection cannot read intents", async () => {
+    const harness = createHarness();
+    const event = await captureBytes(
+      harness,
+      "notes/huge-intent-read-failed.bin",
+      multipartFileBytes(3),
+    );
+    const script = createMultipartScript(3);
+    harness.installTransport({
+      preflight: async () => ({
+        status: 200,
+        bodyText: successBody({ outcome: "multipart_upload" }),
+      }),
+      multipart: (request) => script.route(request),
+    });
+    harness.repository.readPendingRenameIntentForLocalFile = () => {
+      throw journalStoreError("journal_query_failed");
+    };
+
+    const summary = await runPass(harness.driver);
+
+    expect(summary).toEqual({ outcome: "completed", processedEventCount: 0 });
+    expect(harness.repository.readEvent(event.eventId)).toMatchObject({
+      state: "preflight",
+      safeError: null,
+    });
+    expect(harness.diagnosticTrail.entries).toEqual([
+      {
+        kind: "journal_failure",
+        atEpochMs: 0,
+        tokens: ["pending_rename_intent_read_failed"],
+      },
+      {
+        kind: "pass_outcome",
+        atEpochMs: 0,
+        tokens: [
+          "completed",
+          { requestId: "66666666-6666-4666-8666-666666666666" },
+        ],
+      },
+    ]);
+    expect(script.partPutNumbers).toEqual([]);
   });
 
   it("defaults the multipart platform class to the conservative mobile cap", async () => {

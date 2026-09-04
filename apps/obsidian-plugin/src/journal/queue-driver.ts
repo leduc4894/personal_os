@@ -45,7 +45,7 @@ import {
 } from "./contracts";
 import { deriveFrozenFingerprint } from "./fingerprint";
 import type { LifecycleDriver, LifecycleRunOutcome } from "./lifecycle-driver";
-import { MultipartUploadRunner } from "./multipart-upload";
+import { MultipartUploadRunner, PendingRenameIntentReadError } from "./multipart-upload";
 import type {
   MultipartUploadPlatform,
   MultipartUploadRunContext,
@@ -55,7 +55,6 @@ import { isUuid } from "./repository";
 import type { JournalRepository } from "./repository";
 import {
   JournalStoreError,
-  journalStoreError,
   type JournalStoreErrorReason,
 } from "./sqlite-database";
 import type {
@@ -843,6 +842,13 @@ export class JournalQueueDriver {
       if (this.#isStopped) {
         return "end_stopped";
       }
+      if (error instanceof PendingRenameIntentReadError) {
+        void this.#diagnosticTrail?.append({
+          kind: "journal_failure",
+          tokens: ["pending_rename_intent_read_failed"],
+        });
+        throw error;
+      }
       let failure = error;
       const resumeOperationId = this.#claimedResumeOperationId(event, error);
       if (resumeOperationId !== null) {
@@ -914,6 +920,9 @@ export class JournalQueueDriver {
     try {
       outcome = await issue();
     } catch (error) {
+      if (error instanceof PendingRenameIntentReadError) {
+        throw error;
+      }
       const kind = syncFailureKind(error);
       if (kind !== "access_expired" || refreshBudget.hasRefreshed) {
         if (this.#isStopped) {
@@ -938,6 +947,9 @@ export class JournalQueueDriver {
       try {
         outcome = await issue();
       } catch (retryError) {
+        if (retryError instanceof PendingRenameIntentReadError) {
+          throw retryError;
+        }
         if (this.#isStopped) {
           return "end_stopped";
         }
@@ -1257,15 +1269,8 @@ export class JournalQueueDriver {
       intent = this.#repository.lifecycle.readPendingRenameIntentForLocalFile(
         event.localFileId,
       );
-    } catch (error) {
-      void this.#diagnosticTrail?.append({
-        kind: "journal_failure",
-        tokens: ["pending_rename_intent_read_failed"],
-      });
-      if (error instanceof JournalStoreError) {
-        throw error;
-      }
-      throw journalStoreError("journal_query_failed");
+    } catch {
+      throw new PendingRenameIntentReadError();
     }
     return this.#fileBytesReader.readRegularFileBytes(intent?.currentPath ?? localFile.normalizedPath);
   }

@@ -956,12 +956,14 @@ function seedOpenRenamePrefixSql(
 describe("JournalPersistence v9 to v10 pending-rename migration", () => {
   it("migrates a verified v9 generation, preserves predecessor rows, and publishes v10", async () => {
     const store = new InMemoryJournalFileStore();
+    const diagnosticTrail = new RecordingDiagnosticsTrail();
     await writeVerifiedOlderStore(store, {
       schemaVersion: 9,
       isReconcileRequired: false,
     });
 
-    const journal = await openedPersistence(store);
+    const journal = new JournalPersistence({ fileStore: store, engineModule, diagnosticTrail });
+    await journal.open();
     try {
       expect(journal.verifiedGenerationNumber).toBe(2);
       expect(journal.readJournalMeta().schemaVersion).toBe(10);
@@ -979,6 +981,7 @@ describe("JournalPersistence v9 to v10 pending-rename migration", () => {
       const manifest = await readManifest(store);
       expect(manifest.current).toMatchObject({ generationNumber: 2, schemaVersion: 10 });
       expect(manifest.prior).toMatchObject({ generationNumber: 1, schemaVersion: 9 });
+      expect(diagnosticTrail.entries).toEqual([]);
     } finally {
       journal.close();
     }
@@ -1064,6 +1067,57 @@ describe("JournalPersistence v10 pending-rename open invariants", () => {
     } finally {
       journal.close();
     }
+  });
+
+  it.each([
+    {
+      name: "ownerless intent",
+      seedSql: [
+        [
+          "insert into pending_rename_intents (local_file_id, prior_path, current_path)",
+          "values ('99999999-9999-4999-8999-999999999999',",
+          "'notes/prior.md', 'notes/current.md');",
+        ].join(" "),
+      ],
+    },
+    {
+      name: "ownerless deferral",
+      seedSql: [
+        seedContentEventSql(
+          "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "99999999-9999-4999-8999-999999999999",
+          "waiting_retry",
+        ),
+        [
+          "insert into pending_rename_intent_missing_file_deferrals",
+          "(local_file_id, event_id, deferred_attempt_count)",
+          "values ('99999999-9999-4999-8999-999999999999',",
+          "'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 3);",
+        ].join(" "),
+      ],
+    },
+  ])("emits one sanitized conflict diagnostic when startup repairs an $name", async ({ seedSql }) => {
+    const store = new InMemoryJournalFileStore();
+    const diagnosticTrail = new RecordingDiagnosticsTrail();
+    await writeVerifiedCurrentStore(store, seedSql);
+
+    const journal = new JournalPersistence({ fileStore: store, engineModule, diagnosticTrail });
+    await journal.open();
+    expect(journal.isReconcileRequired).toBe(true);
+    expect(diagnosticTrail.entries).toEqual([
+      {
+        kind: "journal_failure",
+        atEpochMs: 0,
+        tokens: ["pending_rename_intent_conflict"],
+      },
+    ]);
+    journal.close();
+
+    const reopened = new JournalPersistence({ fileStore: store, engineModule, diagnosticTrail });
+    await reopened.open();
+    expect(reopened.isReconcileRequired).toBe(true);
+    expect(diagnosticTrail.entries).toHaveLength(1);
+    reopened.close();
   });
 
   it.each([

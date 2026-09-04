@@ -73,6 +73,18 @@ export const MULTIPART_DESKTOP_PART_CONCURRENCY = 3;
 /** Mobile part-PUT concurrency: at most two parts (child 7 spec 4). */
 export const MULTIPART_MOBILE_PART_CONCURRENCY = 2;
 
+/**
+ * Sanitized control-flow error for an unreadable durable rename endpoint.
+ * The queue owns its one closed diagnostic and fail-closed pass boundary;
+ * the multipart runner must not reclassify it as a transport failure.
+ */
+export class PendingRenameIntentReadError extends Error {
+  constructor() {
+    super("pending rename intent read failed");
+    this.name = "PendingRenameIntentReadError";
+  }
+}
+
 /** The closed part-PUT permit count of one platform class. */
 export function multipartPartConcurrency(platform: MultipartUploadPlatform): number {
   return platform === "mobile"
@@ -292,6 +304,9 @@ export class MultipartUploadRunner {
     try {
       return await this.#run(event, platform, context, stageRef);
     } catch (error) {
+      if (error instanceof PendingRenameIntentReadError) {
+        throw error;
+      }
       // A session-gone registry verdict (spec 8) means the persisted
       // session is dead: clear its safe progress so the queue's retry
       // re-preflights the same frozen event instead of resuming a session
@@ -713,7 +728,12 @@ export class MultipartUploadRunner {
     event: JournalEvent,
     localFile: LocalFile,
   ): Promise<FrozenFileCheck> {
-    const intent = this.#repository.readPendingRenameIntentForLocalFile(event.localFileId);
+    let intent;
+    try {
+      intent = this.#repository.readPendingRenameIntentForLocalFile(event.localFileId);
+    } catch {
+      throw new PendingRenameIntentReadError();
+    }
     const bytes = await this.#fileBytesReader.readRegularFileBytes(
       intent?.currentPath ?? localFile.normalizedPath,
     );
