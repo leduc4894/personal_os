@@ -17,7 +17,7 @@ import type {
   VaultAdapterSurface,
 } from "./persistence";
 import type { SqliteEngineModule } from "./sqlite-database";
-import { JOURNAL_SCHEMA_VERSION } from "./sqlite-database";
+import { JOURNAL_SCHEMA_VERSION, SqliteDatabase } from "./sqlite-database";
 import type {
   SyncDiagnosticsTrail,
   SyncDiagnosticsTrailAppendInput,
@@ -847,6 +847,112 @@ async function writeVerifiedOlderStore(
   }
 }
 
+async function writeVerifiedCurrentStore(
+  store: InMemoryJournalFileStore,
+  seedSql: readonly string[],
+): Promise<void> {
+  const database = SqliteDatabase.createEmpty(engineModule, {
+    schemaVersion: JOURNAL_SCHEMA_VERSION,
+    dirtyGeneration: 1,
+    lastVerifiedGeneration: 1,
+    isReconcileRequired: false,
+    recoveryState: "verified_generation_loaded",
+  });
+  let image: Uint8Array;
+  try {
+    for (const statement of seedSql) {
+      database.readAll(statement);
+    }
+    image = database.exportImage();
+  } finally {
+    database.close();
+  }
+  const sha256 = await sha256Hex(image);
+  await store.writeBinary(
+    JOURNAL_MANIFEST_FILE_NAME,
+    new TextEncoder().encode(JSON.stringify({
+      contract: "obsidian_journal_manifest/v1",
+      current: {
+        generationNumber: 1,
+        sizeBytes: image.byteLength,
+        sha256,
+        schemaVersion: JOURNAL_SCHEMA_VERSION,
+      },
+      prior: null,
+    })).buffer as ArrayBuffer,
+  );
+  await store.writeBinary(generationFileName(1), toArrayBuffer(image));
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
+function seedLocalFileSql(
+  localFileId: string,
+  normalizedPath: string,
+  options?: {
+    readonly sourceId?: string | null;
+    readonly baseVersionId?: string | null;
+    readonly lifecycleState?: string;
+  },
+): string {
+  const sourceId = options?.sourceId ?? "22222222-2222-4222-8222-222222222222";
+  const baseVersionId = options?.baseVersionId ?? "33333333-3333-4333-8333-333333333333";
+  const lifecycleState = options?.lifecycleState ?? "active";
+  return [
+    "insert into local_files (local_file_id, normalized_path, source_id,",
+    "observed_sha256, observed_size_bytes, observed_media_type, base_version_id,",
+    "policy_revision, lifecycle_state, last_committed_sha256,",
+    "last_committed_size_bytes, last_committed_media_type) values",
+    `('${localFileId}', '${normalizedPath}', ${sourceId === null ? "null" : `'${sourceId}'`},`,
+    `'${"a".repeat(64)}', 12, 'text/markdown',`,
+    `${baseVersionId === null ? "null" : `'${baseVersionId}'`}, 1, '${lifecycleState}',`,
+    `'${"a".repeat(64)}', 12, 'text/markdown');`,
+  ].join(" ");
+}
+
+function seedContentEventSql(
+  eventId: string,
+  localFileId: string,
+  state: string,
+): string {
+  const safeError = state === "waiting_retry" ? "deferred_lifecycle" : state;
+  return [
+    "insert into journal_events (event_id, local_file_id, idempotency_key, operation,",
+    "sha256, size_bytes, media_type, state, is_fingerprint_frozen, attempt_count,",
+    "next_eligible_retry_epoch_ms, safe_error, operation_id, created_at_epoch_ms) values",
+    `('${eventId}', '${localFileId}', '${eventId}-key', 'create',`,
+    `'${"b".repeat(64)}', 12, 'text/markdown', '${state}', 1, 1,`,
+    `1784000000250, '${safeError}', null, 1784000000000);`,
+  ].join(" ");
+}
+
+function seedOpenRenamePrefixSql(
+  eventId: string,
+  localFileId: string,
+  expectedLocator: string,
+  targetLocator: string,
+): readonly string[] {
+  return [
+    [
+      "insert into journal_events (event_id, local_file_id, idempotency_key, operation,",
+      "sha256, size_bytes, media_type, state, is_fingerprint_frozen, attempt_count,",
+      "next_eligible_retry_epoch_ms, safe_error, operation_id, created_at_epoch_ms) values",
+      `('${eventId}', '${localFileId}', '${eventId}-key', 'rename',`,
+      `'${"0".repeat(64)}', 0, 'application/x-personal-os-lifecycle', 'queued', 1, 0,`,
+      "null, null, null, 1784000000001);",
+    ].join(" "),
+    [
+      "insert into lifecycle_event_operands (event_id, source_id, expected_version_id,",
+      "expected_locator, target_locator, tombstone_id, policy_revision, predecessor_event_id)",
+      `values ('${eventId}', '22222222-2222-4222-8222-222222222222',`,
+      "'33333333-3333-4333-8333-333333333333',",
+      `'${expectedLocator}', '${targetLocator}', null, 1, null);`,
+    ].join(" "),
+  ];
+}
+
 describe("JournalPersistence v9 to v10 pending-rename migration", () => {
   it("migrates a verified v9 generation, preserves predecessor rows, and publishes v10", async () => {
     const store = new InMemoryJournalFileStore();
@@ -898,6 +1004,289 @@ describe("JournalPersistence v9 to v10 pending-rename migration", () => {
       }
     } finally {
       journal.close();
+    }
+  });
+});
+
+describe("JournalPersistence v10 pending-rename open invariants", () => {
+  const ownerId = "11111111-1111-4111-8111-111111111111";
+  const otherOwnerId = "44444444-4444-4444-8444-444444444444";
+  const contentEventId = "55555555-5555-4555-8555-555555555555";
+  const otherEventId = "66666666-6666-4666-8666-666666666666";
+  const prefixEventId = "77777777-7777-4777-8777-777777777777";
+  const secondPrefixEventId = "88888888-8888-4888-8888-888888888888";
+
+  async function expectOwnerReconciled(store: InMemoryJournalFileStore): Promise<void> {
+    const journal = await openedPersistence(store);
+    try {
+      expect(journal.isReconcileRequired).toBe(true);
+      expect(
+        journal.readAll(
+          `select normalized_path, lifecycle_state from local_files where local_file_id = '${ownerId}';`,
+        )[0]?.values[0],
+      ).toEqual(["notes/current.md", "reconcile_required"]);
+      expect(
+        journal.readAll("select count(*) from pending_rename_intents;")[0]?.values[0]?.[0],
+      ).toBe(0);
+      expect(
+        journal.readAll(
+          "select count(*) from pending_rename_intent_missing_file_deferrals;",
+        )[0]?.values[0]?.[0],
+      ).toBe(0);
+      const manifest = await readManifest(store);
+      expect(manifest.current).toMatchObject({ generationNumber: 2, schemaVersion: 10 });
+      expect(manifest.prior).toMatchObject({ generationNumber: 1, schemaVersion: 10 });
+    } finally {
+      journal.close();
+    }
+  }
+
+  it("clears an ownerless pending rename intent before exposing a v10 journal", async () => {
+    const store = new InMemoryJournalFileStore();
+    await writeVerifiedCurrentStore(store, [
+      [
+        "insert into pending_rename_intents (local_file_id, prior_path, current_path)",
+        "values ('99999999-9999-4999-8999-999999999999',",
+        "'notes/prior.md', 'notes/current.md');",
+      ].join(" "),
+    ]);
+
+    const journal = await openedPersistence(store);
+    try {
+      expect(journal.isReconcileRequired).toBe(true);
+      expect(
+        journal.readAll("select count(*) from pending_rename_intents;")[0]?.values[0]?.[0],
+      ).toBe(0);
+      expect(journal.readAll("select count(*) from local_files;")[0]?.values[0]?.[0]).toBe(0);
+      const manifest = await readManifest(store);
+      expect(manifest.current).toMatchObject({ generationNumber: 2, schemaVersion: 10 });
+      expect(manifest.prior).toMatchObject({ generationNumber: 1, schemaVersion: 10 });
+    } finally {
+      journal.close();
+    }
+  });
+
+  it.each([
+    {
+      name: "terminal counter event",
+      seedSql: [
+        seedLocalFileSql(ownerId, "notes/prior.md"),
+        [
+          "insert into pending_rename_intents (local_file_id, prior_path, current_path)",
+          `values ('${ownerId}', 'notes/prior.md', 'notes/current.md');`,
+        ].join(" "),
+        seedContentEventSql(contentEventId, ownerId, "blocked_conflict"),
+        [
+          "insert into pending_rename_intent_missing_file_deferrals",
+          "(local_file_id, event_id, deferred_attempt_count)",
+          `values ('${ownerId}', '${contentEventId}', 3);`,
+        ].join(" "),
+      ],
+    },
+    {
+      name: "wrong owner counter event",
+      seedSql: [
+        seedLocalFileSql(ownerId, "notes/prior.md"),
+        seedLocalFileSql(otherOwnerId, "notes/other.md"),
+        [
+          "insert into pending_rename_intents (local_file_id, prior_path, current_path)",
+          `values ('${ownerId}', 'notes/prior.md', 'notes/current.md');`,
+        ].join(" "),
+        seedContentEventSql(otherEventId, otherOwnerId, "waiting_retry"),
+        [
+          "insert into pending_rename_intent_missing_file_deferrals",
+          "(local_file_id, event_id, deferred_attempt_count)",
+          `values ('${ownerId}', '${otherEventId}', 3);`,
+        ].join(" "),
+      ],
+    },
+    {
+      name: "counter outside the durable retry range",
+      seedSql: [
+        "pragma ignore_check_constraints = on;",
+        seedLocalFileSql(ownerId, "notes/prior.md"),
+        [
+          "insert into pending_rename_intents (local_file_id, prior_path, current_path)",
+          `values ('${ownerId}', 'notes/prior.md', 'notes/current.md');`,
+        ].join(" "),
+        seedContentEventSql(contentEventId, ownerId, "waiting_retry"),
+        [
+          "insert into pending_rename_intent_missing_file_deferrals",
+          "(local_file_id, event_id, deferred_attempt_count)",
+          `values ('${ownerId}', '${contentEventId}', 41);`,
+        ].join(" "),
+      ],
+    },
+  ])("fails closed before restart can reuse a $name", async ({ seedSql }) => {
+    const store = new InMemoryJournalFileStore();
+    await writeVerifiedCurrentStore(store, seedSql);
+    await expectOwnerReconciled(store);
+  });
+
+  it("fails closed on an intent whose endpoints do not match the owner or a materialized prefix", async () => {
+    const store = new InMemoryJournalFileStore();
+    await writeVerifiedCurrentStore(store, [
+      seedLocalFileSql(ownerId, "notes/unrelated.md"),
+      [
+        "insert into pending_rename_intents (local_file_id, prior_path, current_path)",
+        `values ('${ownerId}', 'notes/prior.md', 'notes/current.md');`,
+      ].join(" "),
+    ]);
+
+    await expectOwnerReconciled(store);
+  });
+
+  it("fails closed when an intent owner is not in a rename-capable lifecycle state", async () => {
+    const store = new InMemoryJournalFileStore();
+    await writeVerifiedCurrentStore(store, [
+      seedLocalFileSql(ownerId, "notes/prior.md", { lifecycleState: "tombstoned" }),
+      [
+        "insert into pending_rename_intents (local_file_id, prior_path, current_path)",
+        `values ('${ownerId}', 'notes/prior.md', 'notes/current.md');`,
+      ].join(" "),
+    ]);
+
+    await expectOwnerReconciled(store);
+  });
+
+  it("marks the known owner reconcile-required when a counter has no intent parent", async () => {
+    const store = new InMemoryJournalFileStore();
+    await writeVerifiedCurrentStore(store, [
+      seedLocalFileSql(ownerId, "notes/prior.md"),
+      seedContentEventSql(contentEventId, ownerId, "waiting_retry"),
+      [
+        "insert into pending_rename_intent_missing_file_deferrals",
+        "(local_file_id, event_id, deferred_attempt_count)",
+        `values ('${ownerId}', '${contentEventId}', 3);`,
+      ].join(" "),
+    ]);
+
+    const journal = await openedPersistence(store);
+    try {
+      expect(journal.isReconcileRequired).toBe(true);
+      expect(
+        journal.readAll(
+          `select normalized_path, lifecycle_state from local_files where local_file_id = '${ownerId}';`,
+        )[0]?.values[0],
+      ).toEqual(["notes/prior.md", "reconcile_required"]);
+      expect(
+        journal.readAll("select count(*) from pending_rename_intents;")[0]?.values[0]?.[0],
+      ).toBe(0);
+      expect(
+        journal.readAll(
+          "select count(*) from pending_rename_intent_missing_file_deferrals;",
+        )[0]?.values[0]?.[0],
+      ).toBe(0);
+    } finally {
+      journal.close();
+    }
+  });
+
+  it.each([
+    {
+      name: "equal endpoints without an open prefix",
+      seedSql: [
+        seedLocalFileSql(ownerId, "notes/current.md"),
+        [
+          "insert into pending_rename_intents (local_file_id, prior_path, current_path)",
+          `values ('${ownerId}', 'notes/current.md', 'notes/current.md');`,
+        ].join(" "),
+      ],
+    },
+    {
+      name: "multiple open prefixes",
+      seedSql: [
+        seedLocalFileSql(ownerId, "notes/prefix-target.md", { lifecycleState: "rename_pending" }),
+        [
+          "insert into pending_rename_intents (local_file_id, prior_path, current_path)",
+          `values ('${ownerId}', 'notes/prior.md', 'notes/current.md');`,
+        ].join(" "),
+        ...seedOpenRenamePrefixSql(prefixEventId, ownerId, "notes/prior.md", "notes/prefix-target.md"),
+        ...seedOpenRenamePrefixSql(secondPrefixEventId, ownerId, "notes/prior.md", "notes/other-target.md"),
+      ],
+    },
+  ])("fails closed on invalid prefix phase state: $name", async ({ seedSql }) => {
+    const store = new InMemoryJournalFileStore();
+    await writeVerifiedCurrentStore(store, seedSql);
+    await expectOwnerReconciled(store);
+  });
+
+  it("keeps a valid compensation-pending intent with exactly one open prefix restartable", async () => {
+    const store = new InMemoryJournalFileStore();
+    await writeVerifiedCurrentStore(store, [
+      seedLocalFileSql(ownerId, "notes/prefix-target.md", { lifecycleState: "rename_pending" }),
+      [
+        "insert into pending_rename_intents (local_file_id, prior_path, current_path)",
+        `values ('${ownerId}', 'notes/prior.md', 'notes/prior.md');`,
+      ].join(" "),
+      ...seedOpenRenamePrefixSql(prefixEventId, ownerId, "notes/prior.md", "notes/prefix-target.md"),
+    ]);
+
+    const journal = await openedPersistence(store);
+    try {
+      expect(journal.isReconcileRequired).toBe(false);
+      expect(
+        journal.readAll(
+          "select local_file_id, prior_path, current_path from pending_rename_intents;",
+        )[0]?.values[0],
+      ).toEqual([ownerId, "notes/prior.md", "notes/prior.md"]);
+      expect(
+        journal.readAll(
+          "select count(*) from pending_rename_intent_missing_file_deferrals;",
+        )[0]?.values[0]?.[0],
+      ).toBe(0);
+      const manifest = await readManifest(store);
+      expect(manifest.current).toMatchObject({ generationNumber: 1, schemaVersion: 10 });
+      expect(manifest.prior).toBeNull();
+    } finally {
+      journal.close();
+    }
+  });
+
+  it("keeps a valid bound missing-file counter restartable without publishing a repair", async () => {
+    const store = new InMemoryJournalFileStore();
+    await writeVerifiedCurrentStore(store, [
+      seedLocalFileSql(ownerId, "notes/prior.md"),
+      [
+        "insert into pending_rename_intents (local_file_id, prior_path, current_path)",
+        `values ('${ownerId}', 'notes/prior.md', 'notes/current.md');`,
+      ].join(" "),
+      seedContentEventSql(contentEventId, ownerId, "waiting_retry"),
+      [
+        "insert into pending_rename_intent_missing_file_deferrals",
+        "(local_file_id, event_id, deferred_attempt_count)",
+        `values ('${ownerId}', '${contentEventId}', 3);`,
+      ].join(" "),
+    ]);
+
+    const journal = await openedPersistence(store);
+    try {
+      expect(journal.isReconcileRequired).toBe(false);
+      expect(
+        journal.readAll(
+          "select local_file_id, event_id, deferred_attempt_count from pending_rename_intent_missing_file_deferrals;",
+        )[0]?.values[0],
+      ).toEqual([ownerId, contentEventId, 3]);
+      const manifest = await readManifest(store);
+      expect(manifest.current).toMatchObject({ generationNumber: 1, schemaVersion: 10 });
+      expect(manifest.prior).toBeNull();
+    } finally {
+      journal.close();
+    }
+
+    const restarted = await openedPersistence(store);
+    try {
+      expect(restarted.isReconcileRequired).toBe(false);
+      expect(
+        restarted.readAll(
+          "select local_file_id, event_id, deferred_attempt_count from pending_rename_intent_missing_file_deferrals;",
+        )[0]?.values[0],
+      ).toEqual([ownerId, contentEventId, 3]);
+      const manifest = await readManifest(store);
+      expect(manifest.current).toMatchObject({ generationNumber: 1, schemaVersion: 10 });
+      expect(manifest.prior).toBeNull();
+    } finally {
+      restarted.close();
     }
   });
 });

@@ -118,6 +118,7 @@ import type {
 } from "./device-sync/atomic-vault-writer";
 import { createDeviceSyncApi } from "./device-sync/api";
 import { createDeviceSyncDiagnostics } from "./device-sync/diagnostics";
+import { createEchoSuppressor } from "./device-sync/echo-suppression";
 import { createManifestCapture } from "./device-sync/manifest-capture";
 import {
   createManifestReconciler,
@@ -912,14 +913,20 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         },
       };
       const createJournalId = createUuidv7Factory();
+      const deviceSyncRepository = new DeviceSyncRepository({ database: journalDatabase });
       const repository = new JournalRepository({
         database: journalDatabase,
         createId: createJournalId,
+        createDeviceSyncRepository: () => deviceSyncRepository,
         // Spec 12.4: completing a device repair must clear the persistence
         // sticky reconcile flag through this callback, or every later
         // generation commit re-clobbers the durable clear and re-arms the
         // reconcile loop (the 2026-09-01 live-round wedge).
         onDeviceSyncRepairComplete: () => persistence.markReconcileComplete(),
+      });
+      const echoSuppressor = createEchoSuppressor({
+        repository: repository.deviceSync,
+        database: journalDatabase,
       });
       const vaultReader = this.#createCaptureVaultReader();
       const lifecycleVaultReader = this.#createLifecycleVaultReader(vaultReader);
@@ -930,6 +937,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         createId: createJournalId,
         policyRevision: 1,
         failureReporter: journalFailureReporter,
+        echoSuppressor,
       });
       // Durable pending rename chains are re-armed before any startup
       // snapshot admission can observe their current endpoint as a fresh
@@ -941,6 +949,7 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         policyGate: policySession,
         lifecycleCapture,
         failureReporter: journalFailureReporter,
+        echoSuppressor,
       });
       const lifecycleDriver = new LifecycleDriverImpl({
         repository,
@@ -1032,7 +1041,6 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
       // the diagnostics trail are ready; every behavior lives in the
       // tested ./device-sync modules, this block only binds real adapters.
       const deviceSyncDiagnostics = createDeviceSyncDiagnostics(diagnosticTrail);
-      const deviceSyncRepository = new DeviceSyncRepository({ database: journalDatabase });
       const deviceSyncApi = createDeviceSyncApi({
         transport: createObsidianDeviceSyncHttpTransport(),
         resolveOrigin: () =>

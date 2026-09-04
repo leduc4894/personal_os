@@ -71,6 +71,12 @@ export const JOURNAL_MANIFEST_CONTRACT = "obsidian_journal_manifest/v1";
 export const MAX_BUFFERED_RECOVERY_PATHS = 1_000;
 
 const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/;
+const PENDING_RENAME_OPEN_EVENT_STATES_SQL = "'queued', 'preflight', 'uploading', 'waiting_retry'";
+const PENDING_RENAME_UNMATERIALIZED_OWNER_STATE = "active";
+
+function sqlText(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
 
 // --- verified generation records (spec 6.2) ------------------------------------------------
 
@@ -479,7 +485,7 @@ export class JournalPersistence {
     const { manifest, isManifestPresent } = await this.#readManifestState();
     const recovered = await this.#recoverVerifiedDatabase(manifest);
     if (recovered !== null) {
-      const { database, verifiedGeneration, recoveryState, wasMigrated } = recovered;
+      const { database, verifiedGeneration, recoveryState, shouldPublishRecoveredImage } = recovered;
       this.#isReconcileRequired ||= database.readJournalMeta().isReconcileRequired;
       await this.#refreshRecoveredMeta(database, verifiedGeneration, recoveryState);
       this.#database = database;
@@ -492,7 +498,7 @@ export class JournalPersistence {
         manifest !== null && isSameVerifiedGeneration(manifest.current, verifiedGeneration)
           ? manifest.prior
           : null;
-      if (wasMigrated) {
+      if (shouldPublishRecoveredImage) {
         // A verified migration-source generation was migrated in memory
         // (task 8, task 9): publish the migrated current-schema image as
         // the next verified generation BEFORE the journal is exposed, so
@@ -621,7 +627,7 @@ export class JournalPersistence {
     database: SqliteDatabase;
     verifiedGeneration: VerifiedJournalGeneration;
     recoveryState: JournalRecoveryState;
-    wasMigrated: boolean;
+    shouldPublishRecoveredImage: boolean;
   } | null> {
     const candidates: readonly (VerifiedJournalGeneration & {
       readonly recoveryState: JournalRecoveryState;
@@ -640,7 +646,7 @@ export class JournalPersistence {
           database: opened.database,
           verifiedGeneration: candidate,
           recoveryState: candidate.recoveryState,
-          wasMigrated: opened.wasMigrated,
+          shouldPublishRecoveredImage: opened.shouldPublishRecoveredImage,
         };
       }
     }
@@ -661,7 +667,7 @@ export class JournalPersistence {
    */
   async #openVerifiedGeneration(
     candidate: VerifiedJournalGeneration,
-  ): Promise<{ readonly database: SqliteDatabase; readonly wasMigrated: boolean } | null> {
+  ): Promise<{ readonly database: SqliteDatabase; readonly shouldPublishRecoveredImage: boolean } | null> {
     let migrationWasAttempted = false;
     try {
       const fileName = generationFileName(candidate.generationNumber);
@@ -722,7 +728,12 @@ export class JournalPersistence {
         database.close();
         return null;
       }
-      return { database, wasMigrated: migrationWasAttempted };
+      const pendingRenameStateWasRepaired =
+        await JournalPersistence.#repairInvalidPendingRenameState(database);
+      return {
+        database,
+        shouldPublishRecoveredImage: migrationWasAttempted || pendingRenameStateWasRepaired,
+      };
     } catch (error) {
       if (migrationWasAttempted) {
         this.#recordSchemaMigrationFailure(error);
@@ -772,6 +783,291 @@ export class JournalPersistence {
     } catch {
       return false;
     }
+  }
+
+  static async #repairInvalidPendingRenameState(database: SqliteDatabase): Promise<boolean> {
+    return await database.runSerializedMutation((session) => {
+      let didRepair = false;
+      const markReconcileRequired = (): void => {
+        didRepair = true;
+        const meta = session.readJournalMeta();
+        if (!meta.isReconcileRequired) {
+          session.writeJournalMeta({ ...meta, isReconcileRequired: true });
+        }
+      };
+      const clearIntentOnly = (localFileId: string): void => {
+        session.exec(
+          `delete from pending_rename_intent_missing_file_deferrals where local_file_id = ${sqlText(localFileId)};`,
+        );
+        session.exec(
+          `delete from pending_rename_intents where local_file_id = ${sqlText(localFileId)};`,
+        );
+        markReconcileRequired();
+      };
+      const reconcileOwner = (localFileId: string, currentPath: string): void => {
+        session.exec(
+          `delete from pending_rename_intent_missing_file_deferrals where local_file_id = ${sqlText(localFileId)};`,
+        );
+        session.exec(
+          `delete from pending_rename_intents where local_file_id = ${sqlText(localFileId)};`,
+        );
+        const occupant = JournalPersistence.#firstRow(
+          session,
+          [
+            "select local_file_id from local_files",
+            `where normalized_path = ${sqlText(currentPath)}`,
+            `and local_file_id <> ${sqlText(localFileId)} limit 1;`,
+          ].join(" "),
+        );
+        const pathWrite =
+          occupant === null && JournalPersistence.#isPendingRenamePath(currentPath)
+            ? `normalized_path = ${sqlText(currentPath)},`
+            : "";
+        session.exec(
+          [
+            "update local_files set",
+            pathWrite,
+            "lifecycle_state = 'reconcile_required',",
+            "open_tombstone_id = null",
+            `where local_file_id = ${sqlText(localFileId)};`,
+          ].join(" "),
+        );
+        markReconcileRequired();
+      };
+      const reconcileOwnerWithoutIntent = (localFileId: string): void => {
+        session.exec(
+          `delete from pending_rename_intent_missing_file_deferrals where local_file_id = ${sqlText(localFileId)};`,
+        );
+        session.exec(
+          [
+            "update local_files set",
+            "lifecycle_state = 'reconcile_required',",
+            "open_tombstone_id = null",
+            `where local_file_id = ${sqlText(localFileId)};`,
+          ].join(" "),
+        );
+        markReconcileRequired();
+      };
+      const reconcileInvalidPendingRenameDeferral = (localFileId: string): void => {
+        const intent = JournalPersistence.#firstRow(
+          session,
+          [
+            "select current_path from pending_rename_intents",
+            `where local_file_id = ${sqlText(localFileId)};`,
+          ].join(" "),
+        );
+        const owner = JournalPersistence.#firstRow(
+          session,
+          [
+            "select local_file_id from local_files",
+            `where local_file_id = ${sqlText(localFileId)};`,
+          ].join(" "),
+        );
+        if (
+          owner !== null &&
+          intent !== null &&
+          JournalPersistence.#isPendingRenamePath(intent[0])
+        ) {
+          reconcileOwner(localFileId, intent[0]);
+          return;
+        }
+        if (intent !== null) {
+          clearIntentOnly(localFileId);
+        }
+        if (owner !== null) {
+          reconcileOwnerWithoutIntent(localFileId);
+          return;
+        }
+        markReconcileRequired();
+      };
+
+      const intentRows = JournalPersistence.#rows(
+        session,
+        "select local_file_id, prior_path, current_path from pending_rename_intents order by rowid asc;",
+      );
+      for (const row of intentRows) {
+        const [localFileId, priorPath, currentPath] = row;
+        if (
+          typeof localFileId !== "string" ||
+          !JournalPersistence.#isPendingRenamePath(priorPath) ||
+          !JournalPersistence.#isPendingRenamePath(currentPath)
+        ) {
+          if (typeof localFileId === "string") {
+            clearIntentOnly(localFileId);
+          } else {
+            markReconcileRequired();
+          }
+          continue;
+        }
+        const owner = JournalPersistence.#firstRow(
+          session,
+          [
+            "select normalized_path, lifecycle_state from local_files",
+            `where local_file_id = ${sqlText(localFileId)};`,
+          ].join(" "),
+        );
+        if (owner === null) {
+          clearIntentOnly(localFileId);
+          continue;
+        }
+        const [ownerPath, lifecycleState] = owner;
+        if (
+          typeof ownerPath !== "string" ||
+          typeof lifecycleState !== "string" ||
+          !JournalPersistence.#isPendingRenameIntentRestartValid(session, {
+            localFileId,
+            priorPath,
+            currentPath,
+            ownerPath,
+            lifecycleState,
+          })
+        ) {
+          reconcileOwner(localFileId, currentPath);
+        }
+      }
+
+      const deferralRows = JournalPersistence.#rows(
+        session,
+        [
+          "select local_file_id, event_id, deferred_attempt_count",
+          "from pending_rename_intent_missing_file_deferrals order by rowid asc;",
+        ].join(" "),
+      );
+      for (const row of deferralRows) {
+        const [localFileId, eventId, deferredAttemptCount] = row;
+        if (
+          typeof localFileId !== "string" ||
+          typeof eventId !== "string" ||
+          typeof deferredAttemptCount !== "number" ||
+          !Number.isInteger(deferredAttemptCount) ||
+          deferredAttemptCount < 1 ||
+          deferredAttemptCount > 40
+        ) {
+          if (typeof localFileId === "string") {
+            reconcileInvalidPendingRenameDeferral(localFileId);
+          } else {
+            markReconcileRequired();
+          }
+          continue;
+        }
+        const intent = JournalPersistence.#firstRow(
+          session,
+          [
+            "select current_path from pending_rename_intents",
+            `where local_file_id = ${sqlText(localFileId)};`,
+          ].join(" "),
+        );
+        if (intent === null || !JournalPersistence.#isPendingRenamePath(intent[0])) {
+          reconcileInvalidPendingRenameDeferral(localFileId);
+          continue;
+        }
+        if (!JournalPersistence.#isPendingRenameDeferralRestartValid(session, localFileId, eventId)) {
+          reconcileInvalidPendingRenameDeferral(localFileId);
+        }
+      }
+      return didRepair;
+    });
+  }
+
+  static #isPendingRenamePath(value: unknown): value is string {
+    return (
+      typeof value === "string" &&
+      value.length > 0 &&
+      !value.startsWith("/") &&
+      !value.includes("\\") &&
+      !value.split("/").some((segment) => segment.length === 0 || segment === "." || segment === "..")
+    );
+  }
+
+  static #isPendingRenameIntentRestartValid(
+    session: SqliteMutationSession,
+    intent: {
+      readonly localFileId: string;
+      readonly priorPath: string;
+      readonly currentPath: string;
+      readonly ownerPath: string;
+      readonly lifecycleState: string;
+    },
+  ): boolean {
+    if (intent.lifecycleState === "restore_pending" || intent.lifecycleState === "reconcile_required") {
+      return false;
+    }
+    const occupant = JournalPersistence.#firstRow(
+      session,
+      [
+        "select local_file_id from local_files",
+        `where normalized_path = ${sqlText(intent.currentPath)}`,
+        `and local_file_id <> ${sqlText(intent.localFileId)} limit 1;`,
+      ].join(" "),
+    );
+    if (occupant !== null) {
+      return false;
+    }
+    const prefixes = JournalPersistence.#rows(
+      session,
+      [
+        "select je.operation, leo.expected_locator, leo.target_locator",
+        "from journal_events je",
+        "join lifecycle_event_operands leo on leo.event_id = je.event_id",
+        `where je.local_file_id = ${sqlText(intent.localFileId)}`,
+        "and je.operation in ('rename', 'move')",
+        `and je.state in (${PENDING_RENAME_OPEN_EVENT_STATES_SQL})`,
+        "order by je.created_at_epoch_ms asc, je.event_id asc;",
+      ].join(" "),
+    );
+    if (prefixes.length === 0) {
+      return (
+        intent.priorPath !== intent.currentPath &&
+        intent.ownerPath === intent.priorPath &&
+        intent.lifecycleState === PENDING_RENAME_UNMATERIALIZED_OWNER_STATE
+      );
+    }
+    if (prefixes.length !== 1) {
+      return false;
+    }
+    const [operation, expectedLocator, targetLocator] = prefixes[0] ?? [];
+    return (
+      (operation === "rename" || operation === "move") &&
+      expectedLocator === intent.priorPath &&
+      JournalPersistence.#isPendingRenamePath(targetLocator) &&
+      intent.ownerPath === targetLocator &&
+      intent.lifecycleState === `${operation}_pending`
+    );
+  }
+
+  static #isPendingRenameDeferralRestartValid(
+    session: SqliteMutationSession,
+    localFileId: string,
+    eventId: string,
+  ): boolean {
+    const event = JournalPersistence.#firstRow(
+      session,
+      [
+        "select local_file_id, operation, state, safe_error from journal_events",
+        `where event_id = ${sqlText(eventId)};`,
+      ].join(" "),
+    );
+    if (event === null) {
+      return false;
+    }
+    const [eventLocalFileId, operation, state, safeError] = event;
+    return (
+      eventLocalFileId === localFileId &&
+      (operation === "create" || operation === "update") &&
+      state === "waiting_retry" &&
+      safeError === "deferred_lifecycle"
+    );
+  }
+
+  static #rows(
+    session: SqliteMutationSession,
+    sql: string,
+  ): readonly (readonly unknown[])[] {
+    return session.readRows(sql)[0]?.values ?? [];
+  }
+
+  static #firstRow(session: SqliteMutationSession, sql: string): readonly unknown[] | null {
+    return JournalPersistence.#rows(session, sql)[0] ?? null;
   }
 
   /** Record the recovery outcome in the working copy without re-publishing. */

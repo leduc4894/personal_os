@@ -1,6 +1,47 @@
 import { readFileSync } from "node:fs";
+import { TFile } from "obsidian";
 import * as ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
+
+import { deriveFrozenFingerprint } from "./journal/fingerprint";
+import type { JournalRepository } from "./journal/repository";
+import type { LifecycleCaptureImpl, LifecycleCaptureOptions } from "./journal/lifecycle-capture";
+import type { JournalCaptureOptions } from "./journal/capture";
+
+const compositionProbe = vi.hoisted(() => ({
+  lifecycleInstances: [] as unknown[],
+  lifecycleOptions: [] as unknown[],
+  captureOptions: [] as unknown[],
+}));
+
+vi.mock("./journal/lifecycle-capture", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./journal/lifecycle-capture")>();
+  class ProbedLifecycleCaptureImpl extends actual.LifecycleCaptureImpl {
+    constructor(options: LifecycleCaptureOptions) {
+      super(options);
+      compositionProbe.lifecycleInstances.push(this);
+      compositionProbe.lifecycleOptions.push(options);
+    }
+  }
+  return {
+    ...actual,
+    LifecycleCaptureImpl: ProbedLifecycleCaptureImpl,
+  };
+});
+
+vi.mock("./journal/capture", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./journal/capture")>();
+  class ProbedJournalCapture extends actual.JournalCapture {
+    constructor(options: JournalCaptureOptions) {
+      super(options);
+      compositionProbe.captureOptions.push(options);
+    }
+  }
+  return {
+    ...actual,
+    JournalCapture: ProbedJournalCapture,
+  };
+});
 
 // The runtime onload harness needs the whole Obsidian adapter surface the
 // composition root pulls in; the static contract suite below reads only
@@ -252,6 +293,9 @@ vi.mock("obsidian", () => {
 const pluginPath = new URL("./plugin.ts", import.meta.url);
 const pluginSource = readFileSync(pluginPath, "utf8");
 const sourceFile = ts.createSourceFile("plugin.ts", pluginSource, ts.ScriptTarget.Latest, true);
+const SQL_WASM_BINARY = readFileSync(
+  new URL("../node_modules/sql.js/dist/sql-wasm.wasm", import.meta.url),
+);
 
 // The plugin class imports the Obsidian runtime module, so this suite pins its
 // source contract statically: the closed composition surface (spec 19), the
@@ -282,6 +326,14 @@ function extractObsidianImportNames(source: string): string[] {
     }
   }
   return names;
+}
+
+function bytesOf(text: string): Uint8Array {
+  return new TextEncoder().encode(text);
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
 describe("Obsidian plugin composition root", () => {
@@ -1528,12 +1580,32 @@ describe("Obsidian plugin composition root", () => {
  * read fails closed, so the journal startup records its closed
  * startup-failure tokens and onload still completes.
  */
-function createFakeObsidianApp(): { readonly app: unknown } {
+function createMockTFile(path: string): TFile {
+  const parentPath = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+  return Object.assign(Object.create(TFile.prototype), {
+    path,
+    parent: parentPath.length > 0 ? { path: parentPath } : null,
+  }) as TFile;
+}
+
+function createFakeObsidianApp(options?: {
+  readonly engineWasmBinary?: ArrayBuffer;
+}): {
+  readonly app: unknown;
+  setVaultFile(path: string, bytes: Uint8Array): void;
+} {
   const files = new Map<string, ArrayBuffer>();
+  const vaultFiles = new Map<string, ArrayBuffer>();
   const adapter = {
     exists: async (path: string): Promise<boolean> => files.has(path),
     readBinary: async (path: string): Promise<ArrayBuffer> => {
-      void path;
+      if (options?.engineWasmBinary !== undefined && path.endsWith("/sql-wasm.wasm")) {
+        return options.engineWasmBinary.slice(0);
+      }
+      const data = files.get(path);
+      if (data !== undefined) {
+        return data.slice(0);
+      }
       throw new Error("engine binary unavailable in the onload contract harness");
     },
     writeBinary: async (path: string, data: ArrayBuffer): Promise<void> => {
@@ -1549,8 +1621,8 @@ function createFakeObsidianApp(): { readonly app: unknown } {
     mkdir: async (path: string): Promise<void> => {
       void path;
     },
-    list: async (): Promise<{ readonly files: readonly string[] }> => ({
-      files: [...files.keys()],
+    list: async (path: string): Promise<{ readonly files: readonly string[] }> => ({
+      files: [...files.keys()].filter((fileName) => fileName.startsWith(`${path}/`)),
     }),
   };
   const secrets = new Map<string, string>();
@@ -1564,18 +1636,21 @@ function createFakeObsidianApp(): { readonly app: unknown } {
     vault: {
       configDir: ".obsidian",
       adapter,
-      getFiles: (): readonly unknown[] => [],
+      getFiles: (): readonly TFile[] =>
+        [...vaultFiles.keys()].sort().map((path) => createMockTFile(path)),
       getAbstractFileByPath: (path: string): unknown => {
-        void path;
-        return null;
+        return vaultFiles.has(path) ? createMockTFile(path) : null;
       },
       createBinary: async (path: string, data: ArrayBuffer): Promise<void> => {
         void path;
         void data;
       },
-      readBinary: async (path: string): Promise<ArrayBuffer> => {
-        void path;
-        throw new Error("vault read unexpected in the onload contract harness");
+      readBinary: async (file: TFile): Promise<ArrayBuffer> => {
+        const data = vaultFiles.get(file.path);
+        if (data === undefined) {
+          throw new Error("vault read unexpected in the onload contract harness");
+        }
+        return data.slice(0);
       },
       rename: async (): Promise<void> => {
         // noop
@@ -1592,7 +1667,12 @@ function createFakeObsidianApp(): { readonly app: unknown } {
       },
     },
   };
-  return { app };
+  return {
+    app,
+    setVaultFile(path, bytes): void {
+      vaultFiles.set(path, toArrayBuffer(bytes));
+    },
+  };
 }
 
 /** The mocked Obsidian Plugin's registration surface the harness reads. */
@@ -1637,6 +1717,88 @@ describe("Obsidian plugin onload contract (conflict inbox task 9)", () => {
         "retry-connection",
         "open-conflict-inbox",
       ]);
+    },
+    20_000,
+  );
+});
+
+describe("Obsidian plugin journal composition runtime seams", () => {
+  it(
+    "wires the production echo suppressor into composed pending-rename materialization",
+    async () => {
+      compositionProbe.lifecycleInstances.length = 0;
+      compositionProbe.lifecycleOptions.length = 0;
+      compositionProbe.captureOptions.length = 0;
+      const { default: KnowledgeWorkspacePlugin } = await import("./plugin");
+      const fake = createFakeObsidianApp({
+        engineWasmBinary: toArrayBuffer(SQL_WASM_BINARY),
+      });
+      const plugin = new KnowledgeWorkspacePlugin(fake.app as never, {
+        id: "knowledge-workspace",
+        version: "0.0.0",
+      } as never);
+      await plugin.onload();
+      const lifecycle = compositionProbe.lifecycleInstances[0] as LifecycleCaptureImpl | undefined;
+      const lifecycleOptions = compositionProbe.lifecycleOptions[0] as
+        | (LifecycleCaptureOptions & { readonly repository: JournalRepository })
+        | undefined;
+      const captureOptions = compositionProbe.captureOptions[0] as JournalCaptureOptions | undefined;
+      expect(lifecycle).toBeDefined();
+      expect(lifecycleOptions?.echoSuppressor).toBeDefined();
+      expect(captureOptions?.echoSuppressor).toBe(lifecycleOptions?.echoSuppressor);
+      const repository = lifecycleOptions?.repository;
+      if (repository === undefined || lifecycle === undefined) {
+        throw new Error("journal composition did not start");
+      }
+
+      const sourceId = "11111111-1111-7111-8111-111111111111";
+      const versionId = "22222222-2222-7222-8222-222222222222";
+      const finalBytes = bytesOf("composed remote echo through plugin composition");
+      const finalFingerprint = await deriveFrozenFingerprint(finalBytes);
+      fake.setVaultFile("notes/final.md", finalBytes);
+      const capture = await repository.recordCapture({
+        normalizedPath: "notes/original.md",
+        fingerprint: finalFingerprint,
+        policyRevisionNumber: 1,
+        admission: "policy_allowed",
+      });
+      if (capture.outcome === "capture_refused") {
+        throw new Error("expected journal capture to be admitted");
+      }
+      await repository.recordCommittedReceipt({
+        eventId: capture.event.eventId,
+        sourceId,
+        baseVersionId: versionId,
+      });
+      const owner = repository.readLocalFileByPath("notes/original.md");
+      if (owner === null) {
+        throw new Error("expected local owner");
+      }
+      await repository.lifecycle.recordOrComposePendingRenameIntent({
+        localFileId: owner.localFileId,
+        observedPriorPath: "notes/original.md",
+        observedCurrentPath: "notes/intermediate.md",
+      });
+      await repository.deviceSync.recordEchoMarker({
+        eventSequence: 1,
+        sourceId,
+        operation: "renamed",
+        priorLocator: "notes/original.md",
+        targetLocator: "notes/final.md",
+        finalFingerprint,
+      });
+
+      const result = lifecycle.captureRename(
+        { path: "notes/final.md", parent: { path: "notes" } },
+        "notes/intermediate.md",
+      );
+      await expect(result).resolves.toBeNull();
+
+      expect(repository.deviceSync.readEchoMarker(1)).toBeNull();
+      expect(repository.lifecycle.readPendingRenameIntentForLocalFile(owner.localFileId)).toBeNull();
+      expect(repository.readLocalFileByPath("notes/final.md")?.localFileId).toBe(owner.localFileId);
+      expect(repository.countPendingEvents()).toBe(0);
+      plugin.onunload();
     },
     20_000,
   );

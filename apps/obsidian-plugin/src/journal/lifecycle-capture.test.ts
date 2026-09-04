@@ -1838,6 +1838,13 @@ describe("LifecycleCapture exact rename echo suppression", () => {
         fakeFile("notes/echo-rollback-c.md", "notes"),
         "notes/echo-rollback-b.md",
       );
+      // This intentionally rejected timer-owned capture must be observed
+      // before advancing fake time, or a parallel coverage run can register
+      // the expected rejection as unhandled before the assertion attaches.
+      const settledOutcome = settled.then(
+        () => ({ kind: "resolved" as const }),
+        (error: unknown) => ({ kind: "rejected" as const, error }),
+      );
       await harness.database.runSerializedMutation(() => undefined);
       expect(harness.lifecycle.readPendingRenameIntentForLocalFile(owner.localFileId)).toEqual({
         localFileId: owner.localFileId,
@@ -1855,7 +1862,11 @@ describe("LifecycleCapture exact rename echo suppression", () => {
       }
 
       await vi.advanceTimersByTimeAsync(300);
-      await expect(settled).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+      const outcome = await settledOutcome;
+      expect(outcome.kind).toBe("rejected");
+      if (outcome.kind === "rejected") {
+        expect(outcome.error).toMatchObject({ reason: "journal_mutation_failed" });
+      }
 
       expect(harness.repository.deviceSync.readEchoMarker(ECHO_EVENT_SEQUENCE)).not.toBeNull();
       expect(harness.lifecycle.readPendingRenameIntentForLocalFile(owner.localFileId)).toEqual({
