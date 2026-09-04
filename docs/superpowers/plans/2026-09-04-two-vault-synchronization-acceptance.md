@@ -19,6 +19,28 @@
 
 ---
 
+## Approved task decomposition
+
+This section supersedes the earlier four-workstream draft below. Each task has
+its own RED/PASS/commit cycle; the detailed file and command instructions in
+the following sections apply to the matching task.
+
+1. **Actor isolation and oracle:** separate A/B device, journal and Vault state; redacted convergence assertions.
+2. **Create/update propagation:** TV-01–TV-02.
+3. **Lifecycle propagation:** TV-03–TV-07 (rename, move, delete, restore, create-delete-before-pull).
+4. **Ordering and offline replay:** TV-08–TV-13.
+5. **Content conflicts:** TV-14–TV-17 (Markdown, binary, edit/delete, delete/edit).
+6. **Lifecycle conflicts and stale resolution:** TV-18–TV-20.
+7. **Crash, suspension and cursor repair:** TV-21–TV-25.
+8. **Bounded bulk and burst:** TV-26–TV-30 plus capacity/size refusal.
+9. **Guarded acceptance and operations:** bootstrap allowlist, closed phase tokens, runbook, canonical docs, operator evidence, handoff.
+
+No task is accepted solely because a later task passes. A defect found in any
+task first receives a focused regression test, then the smallest repair, then
+the owning two-Vault case is rerun.
+
+---
+
 ### Task 1: Build isolated actors and redacted convergence oracle
 
 **Files:**
