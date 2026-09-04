@@ -878,6 +878,9 @@ export class JournalPersistence {
           reconcileOwnerWithoutIntent(localFileId);
           return;
         }
+        session.exec(
+          `delete from pending_rename_intent_missing_file_deferrals where local_file_id = ${sqlText(localFileId)};`,
+        );
         markReconcileRequired();
       };
 

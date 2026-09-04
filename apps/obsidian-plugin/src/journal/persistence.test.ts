@@ -1182,6 +1182,54 @@ describe("JournalPersistence v10 pending-rename open invariants", () => {
     }
   });
 
+  it("deletes an orphaned counter with no intent parent or local owner before reopen", async () => {
+    const orphanLocalFileId = "99999999-9999-4999-8999-999999999999";
+    const orphanEventId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const store = new InMemoryJournalFileStore();
+    await writeVerifiedCurrentStore(store, [
+      seedContentEventSql(orphanEventId, orphanLocalFileId, "waiting_retry"),
+      [
+        "insert into pending_rename_intent_missing_file_deferrals",
+        "(local_file_id, event_id, deferred_attempt_count)",
+        `values ('${orphanLocalFileId}', '${orphanEventId}', 3);`,
+      ].join(" "),
+    ]);
+
+    const journal = await openedPersistence(store);
+    try {
+      expect(journal.isReconcileRequired).toBe(true);
+      expect(journal.readJournalMeta().isReconcileRequired).toBe(true);
+      expect(
+        journal.readAll(
+          "select count(*) from pending_rename_intent_missing_file_deferrals;",
+        )[0]?.values[0]?.[0],
+      ).toBe(0);
+      expect(journal.readAll("select count(*) from pending_rename_intents;")[0]?.values[0]?.[0])
+        .toBe(0);
+      expect(journal.readAll("select count(*) from local_files;")[0]?.values[0]?.[0]).toBe(0);
+      const manifest = await readManifest(store);
+      expect(manifest.current).toMatchObject({ generationNumber: 2, schemaVersion: 10 });
+      expect(manifest.prior).toMatchObject({ generationNumber: 1, schemaVersion: 10 });
+    } finally {
+      journal.close();
+    }
+
+    const reopened = await openedPersistence(store);
+    try {
+      expect(reopened.isReconcileRequired).toBe(true);
+      expect(
+        reopened.readAll(
+          "select count(*) from pending_rename_intent_missing_file_deferrals;",
+        )[0]?.values[0]?.[0],
+      ).toBe(0);
+      const manifest = await readManifest(store);
+      expect(manifest.current).toMatchObject({ generationNumber: 2, schemaVersion: 10 });
+      expect(manifest.prior).toMatchObject({ generationNumber: 1, schemaVersion: 10 });
+    } finally {
+      reopened.close();
+    }
+  });
+
   it.each([
     {
       name: "equal endpoints without an open prefix",
