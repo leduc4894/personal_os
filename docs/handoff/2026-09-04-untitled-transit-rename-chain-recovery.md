@@ -6,12 +6,19 @@
 release packaging. The manual two-vault L1 operator re-fire is not claimed by
 this handoff.
 
-**Final implementation commit before closure:**
+**Initial implementation commit before closure:**
 `10db8f1013a636a7ae7fd369cd7463226550d8a6`
 (`fix(obsidian-plugin): remove orphaned rename deferral counters`).
 
 **Closure/package/backlog-retirement commit:**
 `dab579d98f4ad56fec6ec7e71302a7924d65a21c`.
+
+**Final-review code and package fix commit:**
+`10865b6780ea114da45626590a3de45e061e0ef8`
+(`fix(obsidian-plugin): close rename recovery edge cases`).
+
+**Handoff metadata follow-up:** `HEAD` (this commit, directly following the
+final-review code fix above).
 
 **Plan:**
 [`2026-09-03-untitled-transit-rename-chain-recovery-plan.md`](../superpowers/plans/2026-09-03-untitled-transit-rename-chain-recovery-plan.md)
@@ -62,6 +69,23 @@ failure. The final authoritative gate is green, so no deferred row was added.
 
 The existing Vite CommonJS/ESM notice and Starlette `httpx` deprecation notice
 remain warnings only; all owning commands exited 0.
+
+### Final-review repair addendum
+
+The final-review wave closed three additional scope-owned exits. Multipart
+pending-intent read failures now match the single-part fail-closed boundary:
+the event remains nonterminal without a generic `server_error` retry stamp and
+exactly one `pending_rename_intent_read_failed` entry is readable. Startup
+repair of an invalid pending-rename intent or deferral publishes the repaired
+generation and emits exactly one `pending_rename_intent_conflict`; valid
+migration and clean reopen emit none. Explicit restore removes multipart
+progress with queued or waiting-retry phantom events in the same transaction.
+
+Fresh final-review evidence at `10865b6`: the focused slice passed 4 files / 183
+tests; the full plugin gate passed 65 files / 1,528 tests (82.60% statements,
+79.25% branches, 85.16% functions, 82.71% lines); plugin type-check, lint,
+build, staged diff check, and commit patch check all exited 0. No new deferred
+item was created, and the unrelated working-tree BACKLOG edit was excluded.
 
 ## Interpreted design rulings
 
