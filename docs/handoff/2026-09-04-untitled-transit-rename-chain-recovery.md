@@ -10,6 +10,9 @@ this handoff.
 `10db8f1013a636a7ae7fd369cd7463226550d8a6`
 (`fix(obsidian-plugin): remove orphaned rename deferral counters`).
 
+**Closure/package/backlog-retirement commit:**
+`dab579d98f4ad56fec6ec7e71302a7924d65a21c`.
+
 **Plan:**
 [`2026-09-03-untitled-transit-rename-chain-recovery-plan.md`](../superpowers/plans/2026-09-03-untitled-transit-rename-chain-recovery-plan.md)
 
