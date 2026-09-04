@@ -610,6 +610,22 @@ export class JournalCapture {
     if (this.#isLifecycleDeferredPath(normalizedPath)) {
       return null;
     }
+    try {
+      // An intent's current endpoint may not yet be the local_files path
+      // (the immutable lifecycle prefix has not materialized), so this
+      // durable reservation must be checked before a fresh row can exist.
+      if (
+        this.#repository.lifecycle.readPendingRenameIntentByCurrentPath(normalizedPath) !== null
+      ) {
+        return null;
+      }
+    } catch (error) {
+      this.#failureReporter?.reportJournalFailure("pending_rename_intent_read_failed");
+      if (isStoreError(error)) {
+        throw error;
+      }
+      throw journalStoreError("journal_query_failed");
+    }
     const trackedFile = this.#repository.readLocalFileByPath(normalizedPath);
     // Automatic restore: only attempted when the local mapping is
     // already tombstoned. The lifecycle capture verifies the bytes
@@ -723,11 +739,15 @@ export class JournalCapture {
       // receipt (fix round 2 D7), releasing the path for re-admission; a
       // terminally-failed rename keeps the marker fail-closed (child 6
       // owns repair).
-      await this.#repository.markEventTerminal(
-        event.eventId,
-        "deferred_lifecycle",
-        "deferred_lifecycle",
-      );
+      const resolution = await this.#repository.resolveIntentAwareLocalFileMissing({
+        eventId: event.eventId,
+        attemptedAtEpochMs: Date.now(),
+        requestCorrelationId: crypto.randomUUID(),
+        nextEligibleRetryEpochMs: Date.now() + FILE_SETTLE_DELAY_MS,
+      });
+      if (resolution.outcome === "reconcile_takeover") {
+        this.#failureReporter?.reportJournalFailure(resolution.diagnosticReason);
+      }
     }
   }
 

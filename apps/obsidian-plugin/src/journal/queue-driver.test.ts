@@ -526,6 +526,33 @@ describe("queue driver selection and the happy path (spec 8, 10)", () => {
 // --- terminal outcomes and receipts ----------------------------------------------------------------
 
 describe("queue driver outcome mapping (spec 10.1 table, 12)", () => {
+  it("reparents and clears an intent-owned final content row on a terminal exclusion", async () => {
+    const harness = createHarness();
+    const bytes = new TextEncoder().encode("intent-owned exclusion");
+    const event = await captureBytes(harness, "notes/exclusion-origin.md", bytes);
+    await harness.repository.lifecycle.recordOrComposePendingRenameIntent({
+      localFileId: event.localFileId,
+      observedPriorPath: "notes/exclusion-origin.md",
+      observedCurrentPath: "archive/exclusion-final.md",
+    });
+    harness.vaultBytes.delete("notes/exclusion-origin.md");
+    harness.vaultBytes.set("archive/exclusion-final.md", bytes);
+    harness.installTransport({
+      preflight: async () => ({ status: 200, bodyText: successBody({ outcome: "excluded" }) }),
+    });
+
+    await runPass(harness.driver);
+
+    expect(harness.repository.readEvent(event.eventId)?.state).toBe("excluded_policy");
+    expect(harness.repository.readLocalFileByPath("notes/exclusion-origin.md")).toBeNull();
+    expect(harness.repository.readLocalFileByPath("archive/exclusion-final.md")?.localFileId).toBe(
+      event.localFileId,
+    );
+    expect(
+      harness.repository.lifecycle.readPendingRenameIntentForLocalFile(event.localFileId),
+    ).toBeNull();
+  });
+
   it("closes an excluded preflight as excluded_policy without any upload", async () => {
     const harness = createHarness();
     const event = await captureBytes(harness, "notes/denied.md", new TextEncoder().encode("denied"));
@@ -866,6 +893,36 @@ describe("queue driver client re-fingerprint before send (spec 7.2, 10.2)", () =
     await runPass(harness.driver);
     expect(harness.repository.readEvent(event.eventId)?.state).toBe("deferred_lifecycle");
     expect(scripted.contentRequests).toHaveLength(0);
+  });
+
+  it("keeps E1 preflight at its original locator while streaming bytes from its pending rename target", async () => {
+    const harness = createHarness();
+    const originalBytes = new TextEncoder().encode("rename origin bytes");
+    const finalBytes = originalBytes;
+    const event = await captureBytes(harness, "notes/untitled.md", originalBytes);
+    await harness.repository.lifecycle.recordOrComposePendingRenameIntent({
+      localFileId: event.localFileId,
+      observedPriorPath: "notes/untitled.md",
+      observedCurrentPath: "archive/origin.md",
+    });
+    harness.vaultBytes.delete("notes/untitled.md");
+    harness.vaultBytes.set("archive/origin.md", finalBytes);
+
+    const scripted = harness.installTransport({
+      preflight: async (body) => {
+        expect(body.normalized_locator).toBe("notes/untitled.md");
+        return { status: 200, bodyText: SINGLE_PART_BODY };
+      },
+      content: async (bytes) => {
+        expect(bytes).toEqual(finalBytes);
+        return { status: 200, bodyText: COMMITTED_RECEIPT };
+      },
+    });
+
+    await runPass(harness.driver);
+
+    expect(scripted.contentBytes).toEqual([finalBytes]);
+    expect(harness.repository.readEvent(event.eventId)?.state).toBe("committed");
   });
 });
 

@@ -202,6 +202,303 @@ describe("LifecycleRepository closed vocabulary", () => {
   });
 });
 
+describe("LifecycleRepository durable pending rename intents", () => {
+  it("creates one owner intent, treats an exact replay as unchanged, and composes A -> B -> C", async () => {
+    const { database, repository, lifecycle } = createOpenedJournal();
+    const capture = await repository.recordCapture({
+      normalizedPath: "notes/a.md",
+      fingerprint: fingerprintOf("10"),
+      policyRevisionNumber: 1,
+      admission: "policy_allowed",
+    });
+    if (capture.outcome === "capture_refused") {
+      throw new Error("capture must be admitted");
+    }
+
+    await expect(
+      lifecycle.recordOrComposePendingRenameIntent({
+        localFileId: capture.localFile.localFileId,
+        observedPriorPath: "notes/a.md",
+        observedCurrentPath: "notes/b.md",
+      }),
+    ).resolves.toBe("created");
+    await expect(
+      lifecycle.recordOrComposePendingRenameIntent({
+        localFileId: capture.localFile.localFileId,
+        observedPriorPath: "notes/a.md",
+        observedCurrentPath: "notes/b.md",
+      }),
+    ).resolves.toBe("unchanged");
+    await expect(
+      lifecycle.recordOrComposePendingRenameIntent({
+        localFileId: capture.localFile.localFileId,
+        observedPriorPath: "notes/b.md",
+        observedCurrentPath: "notes/c.md",
+      }),
+    ).resolves.toBe("composed");
+
+    expect(
+      lifecycle.readPendingRenameIntentForLocalFile(capture.localFile.localFileId),
+    ).toEqual({
+      localFileId: capture.localFile.localFileId,
+      priorPath: "notes/a.md",
+      currentPath: "notes/c.md",
+    });
+    expect(lifecycle.readPendingRenameIntentByCurrentPath("notes/c.md")).toEqual(
+      lifecycle.readPendingRenameIntentForLocalFile(capture.localFile.localFileId),
+    );
+    expect(lifecycle.readPendingRenameIntentOwningEndpoint("notes/a.md")?.localFileId).toBe(
+      capture.localFile.localFileId,
+    );
+    expect(lifecycle.readPendingRenameIntents()).toHaveLength(1);
+    database.close();
+  });
+
+  it("cancels an unmaterialized return to the prior endpoint without persisting equal endpoints", async () => {
+    const { database, repository, lifecycle } = createOpenedJournal();
+    const capture = await repository.recordCapture({
+      normalizedPath: "notes/a.md",
+      fingerprint: fingerprintOf("11"),
+      policyRevisionNumber: 1,
+      admission: "policy_allowed",
+    });
+    if (capture.outcome === "capture_refused") {
+      throw new Error("capture must be admitted");
+    }
+    await lifecycle.recordOrComposePendingRenameIntent({
+      localFileId: capture.localFile.localFileId,
+      observedPriorPath: "notes/a.md",
+      observedCurrentPath: "notes/b.md",
+    });
+
+    await expect(
+      lifecycle.recordOrComposePendingRenameIntent({
+        localFileId: capture.localFile.localFileId,
+        observedPriorPath: "notes/b.md",
+        observedCurrentPath: "notes/a.md",
+      }),
+    ).resolves.toBe("cancelled");
+    expect(
+      lifecycle.readPendingRenameIntentForLocalFile(capture.localFile.localFileId),
+    ).toBeNull();
+    expect(repository.readLocalFileByLocalFileId(capture.localFile.localFileId)?.normalizedPath).toBe(
+      "notes/a.md",
+    );
+    database.close();
+  });
+
+  it("materializes the latest endpoints atomically, freezes content, and rebases a later target on prefix receipt", async () => {
+    const { database, repository, lifecycle } = createOpenedJournal();
+    await captureAndCommit(repository, "notes/a.md", fingerprintOf("12"));
+    const localFile = requireLocalFile(repository.readLocalFileByPath("notes/a.md"));
+    const successorCapture = await repository.recordCapture({
+      normalizedPath: "notes/a.md",
+      fingerprint: fingerprintOf("13"),
+      policyRevisionNumber: 1,
+      admission: "policy_allowed",
+    });
+    if (successorCapture.outcome === "capture_refused") {
+      throw new Error("capture must be admitted");
+    }
+    await lifecycle.recordOrComposePendingRenameIntent({
+      localFileId: localFile.localFileId,
+      observedPriorPath: "notes/a.md",
+      observedCurrentPath: "notes/b.md",
+    });
+
+    const prefix = await lifecycle.recordPendingRenameLifecycleEvent(
+      localFile.localFileId,
+      fingerprintOf("14"),
+    );
+    expect(prefix).not.toBeNull();
+    expect(prefix?.eventId).toMatch(UUID_PATTERN);
+    expect(prefix?.event.operation).toBe("rename");
+    expect(lifecycle.readLifecycleOperands(prefix?.eventId ?? "")?.expectedLocator).toBe(
+      "notes/a.md",
+    );
+    expect(lifecycle.readLifecycleOperands(prefix?.eventId ?? "")?.targetLocator).toBe(
+      "notes/b.md",
+    );
+    expect(repository.readEvent(successorCapture.event.eventId)?.state).toBe(
+      "deferred_lifecycle",
+    );
+    expect(repository.readLocalFileByLocalFileId(localFile.localFileId)?.normalizedPath).toBe(
+      "notes/b.md",
+    );
+    expect(lifecycle.readPendingRenameIntentForLocalFile(localFile.localFileId)).toMatchObject({
+      priorPath: "notes/a.md",
+      currentPath: "notes/b.md",
+    });
+
+    await expect(
+      lifecycle.recordOrComposePendingRenameIntent({
+        localFileId: localFile.localFileId,
+        observedPriorPath: "notes/b.md",
+        observedCurrentPath: "archive/c.md",
+      }),
+    ).resolves.toBe("composed");
+    await lifecycle.recordLifecycleCommittedReceipt(prefix?.eventId ?? "");
+    expect(lifecycle.readPendingRenameIntentForLocalFile(localFile.localFileId)).toEqual({
+      localFileId: localFile.localFileId,
+      priorPath: "notes/b.md",
+      currentPath: "archive/c.md",
+    });
+    database.close();
+  });
+
+  it("keeps equal endpoints as compensation pending only while one immutable prefix is open", async () => {
+    const { database, repository, lifecycle } = createOpenedJournal();
+    await captureAndCommit(repository, "notes/a.md", fingerprintOf("15"));
+    const localFile = requireLocalFile(repository.readLocalFileByPath("notes/a.md"));
+    await lifecycle.recordOrComposePendingRenameIntent({
+      localFileId: localFile.localFileId,
+      observedPriorPath: "notes/a.md",
+      observedCurrentPath: "notes/b.md",
+    });
+    await lifecycle.recordPendingRenameLifecycleEvent(localFile.localFileId, fingerprintOf("16"));
+
+    await expect(
+      lifecycle.recordOrComposePendingRenameIntent({
+        localFileId: localFile.localFileId,
+        observedPriorPath: "notes/b.md",
+        observedCurrentPath: "notes/a.md",
+      }),
+    ).resolves.toBe("compensation_pending");
+    expect(lifecycle.readPendingRenameIntentForLocalFile(localFile.localFileId)).toEqual({
+      localFileId: localFile.localFileId,
+      priorPath: "notes/a.md",
+      currentPath: "notes/a.md",
+    });
+    database.close();
+  });
+
+  it("sends a target collision or incompatible chain to row reconciliation without stealing the endpoint", async () => {
+    for (const variant of ["collision", "incompatible"] as const) {
+      const { database, repository, lifecycle } = createOpenedJournal();
+      await captureAndCommit(repository, "notes/a.md", fingerprintOf("17"));
+      const owner = requireLocalFile(repository.readLocalFileByPath("notes/a.md"));
+      if (variant === "collision") {
+        await captureAndCommit(repository, "notes/occupied.md", fingerprintOf("18"));
+      }
+      await lifecycle.recordOrComposePendingRenameIntent({
+        localFileId: owner.localFileId,
+        observedPriorPath: "notes/a.md",
+        observedCurrentPath: "notes/b.md",
+      });
+
+      await expect(
+        lifecycle.recordOrComposePendingRenameIntent({
+          localFileId: owner.localFileId,
+          observedPriorPath: variant === "collision" ? "notes/b.md" : "notes/unlinked.md",
+          observedCurrentPath: variant === "collision" ? "notes/occupied.md" : "notes/c.md",
+        }),
+      ).rejects.toMatchObject({ reason: "pending_rename_intent_conflict" });
+      expect(lifecycle.readPendingRenameIntentForLocalFile(owner.localFileId)).toBeNull();
+      expect(repository.readLocalFileByLocalFileId(owner.localFileId)).toMatchObject({
+        normalizedPath: "notes/b.md",
+      });
+      expect(
+        database.readAll(
+          `select lifecycle_state from local_files where local_file_id = '${owner.localFileId}';`,
+        )[0]?.values[0]?.[0],
+      ).toBe("reconcile_required");
+      expect(database.readJournalMeta().isReconcileRequired).toBe(true);
+      database.close();
+    }
+  });
+
+  it("refuses restore-pending owners and intent-owned phantom restore targets", async () => {
+    const { database, repository, lifecycle } = createOpenedJournal();
+    const ownerCapture = await repository.recordCapture({
+      normalizedPath: "notes/owner.md",
+      fingerprint: fingerprintOf("19"),
+      policyRevisionNumber: 1,
+      admission: "policy_allowed",
+    });
+    if (ownerCapture.outcome === "capture_refused") {
+      throw new Error("capture must be admitted");
+    }
+    database.readAll(
+      `update local_files set lifecycle_state = 'restore_pending' where local_file_id = '${ownerCapture.localFile.localFileId}';`,
+    );
+    await expect(
+      lifecycle.recordOrComposePendingRenameIntent({
+        localFileId: ownerCapture.localFile.localFileId,
+        observedPriorPath: "notes/owner.md",
+        observedCurrentPath: "notes/new.md",
+      }),
+    ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+
+    database.readAll(
+      `update local_files set lifecycle_state = 'active' where local_file_id = '${ownerCapture.localFile.localFileId}';`,
+    );
+    await lifecycle.recordOrComposePendingRenameIntent({
+      localFileId: ownerCapture.localFile.localFileId,
+      observedPriorPath: "notes/owner.md",
+      observedCurrentPath: "notes/reserved.md",
+    });
+    const restored = await captureAndCommit(repository, "notes/tombstone.md", fingerprintOf("20"));
+    const restoreOwner = requireLocalFile(repository.readLocalFileByLocalFileId(restored.localFileId));
+    await lifecycle.recordLifecycleEvent(
+      operandsFor("delete", { expectedLocator: "notes/tombstone.md" }),
+      {
+        localFile: restoreOwner,
+        tombstoneId: "33333333-3333-4333-8333-333333333333",
+      },
+    );
+    expect(await lifecycle.reserveRestoreTarget(restoreOwner.localFileId, "notes/reserved.md")).toEqual({
+      outcome: "refused",
+      reason: "restore_target_busy",
+    });
+    expect(
+      lifecycle.readPendingRenameIntentForLocalFile(ownerCapture.localFile.localFileId),
+    ).not.toBeNull();
+    database.close();
+  });
+
+  it("atomically terminalizes an intent-owned lifecycle prefix into reconciliation at its latest local endpoint", async () => {
+    const { database, repository, lifecycle } = createOpenedJournal();
+    await captureAndCommit(repository, "notes/a.md", fingerprintOf("21"));
+    const owner = requireLocalFile(repository.readLocalFileByPath("notes/a.md"));
+    await lifecycle.recordOrComposePendingRenameIntent({
+      localFileId: owner.localFileId,
+      observedPriorPath: "notes/a.md",
+      observedCurrentPath: "notes/b.md",
+    });
+    const prefix = await lifecycle.recordPendingRenameLifecycleEvent(owner.localFileId, fingerprintOf("22"));
+    if (prefix === null) {
+      throw new Error("expected a materialized lifecycle prefix");
+    }
+    await lifecycle.recordOrComposePendingRenameIntent({
+      localFileId: owner.localFileId,
+      observedPriorPath: "notes/b.md",
+      observedCurrentPath: "archive/c.md",
+    });
+
+    await expect(
+      lifecycle.resolveIntentAwareLifecycleTerminal({
+        eventId: prefix.eventId,
+        terminalState: "blocked_conflict",
+        attemptedAtEpochMs: 1_784_000_001_000,
+        requestCorrelationId: "lifecycle-terminal-1",
+      }),
+    ).resolves.toBe("intent_reconciled");
+    expect(repository.readEvent(prefix.eventId)).toMatchObject({
+      state: "blocked_conflict",
+      safeError: "blocked_conflict",
+    });
+    expect(repository.readLocalFileByLocalFileId(owner.localFileId)).toMatchObject({
+      normalizedPath: "archive/c.md",
+    });
+    expect(lifecycle.readPendingRenameIntentForLocalFile(owner.localFileId)).toBeNull();
+    expect(database.readJournalMeta().isReconcileRequired).toBe(true);
+    expect(repository.readEventAttemptHistory(prefix.eventId)).toEqual([
+      expect.objectContaining({ outcomeLabel: "blocked_conflict" }),
+    ]);
+    database.close();
+  });
+});
+
 describe("LifecycleRepository rename + move event insertion in one transaction", () => {
   it("records a rename event and rebinds normalized_path + lifecycle_state atomically", async () => {
     const { database, repository, lifecycle } = createOpenedJournal();

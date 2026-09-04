@@ -615,6 +615,49 @@ describe("lifecycle driver bounded jittered retry (spec 8, 12)", () => {
 // --- non-retryable conflict / integrity -------------------------------------------------
 
 describe("lifecycle driver non-retryable conflict and integrity (spec 12)", () => {
+  it("hands an intent-owned rejected prefix to reconciliation and raises one barrier", async () => {
+    const harness = createHarness();
+    const owner = await harness.seedTrackedFile("notes/intent-reject-a.md");
+    await harness.lifecycle.recordOrComposePendingRenameIntent({
+      localFileId: owner.localFileId,
+      observedPriorPath: "notes/intent-reject-a.md",
+      observedCurrentPath: "notes/intent-reject-b.md",
+    });
+    const prefix = await harness.lifecycle.recordPendingRenameLifecycleEvent(
+      owner.localFileId,
+      fingerprintOf("ab"),
+    );
+    if (prefix === null) {
+      throw new Error("expected intent prefix");
+    }
+    await harness.lifecycle.recordOrComposePendingRenameIntent({
+      localFileId: owner.localFileId,
+      observedPriorPath: "notes/intent-reject-b.md",
+      observedCurrentPath: "archive/intent-reject-c.md",
+    });
+    harness.api.install(async () => {
+      throw new LifecycleApiError("conflict");
+    });
+
+    expect(await harness.driver.runOne(activeSignal())).toBe("blocked");
+
+    expect(harness.repository.readEvent(prefix.eventId)?.state).toBe("blocked_conflict");
+    expect(harness.repository.readLocalFileByPath("archive/intent-reject-c.md")?.localFileId).toBe(
+      owner.localFileId,
+    );
+    expect(
+      harness.lifecycle.readPendingRenameIntentForLocalFile(owner.localFileId),
+    ).toBeNull();
+    expect(harness.database.readJournalMeta().isReconcileRequired).toBe(true);
+    expect(harness.repository.deviceSync.readState().barrierGeneration).not.toBeNull();
+    expect(harness.diagnosticTrail.entries).toEqual([
+      expect.objectContaining({
+        kind: "journal_failure",
+        tokens: ["pending_rename_intent_lifecycle_rejected"],
+      }),
+    ]);
+  });
+
   it("closes a conflict as blocked_conflict and never retries", async () => {
     const harness = createHarness();
     await harness.seedTrackedFile("notes/conflict.md");

@@ -18,6 +18,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import {
   JOURNAL_SCHEMA_VERSION,
   SqliteDatabase,
+  migrateConflictRepairJournalToPendingRenameIntentSchema,
   migrateDeviceSyncJournalToMultipartProgressSchema,
   migrateMultipartProgressJournalToConflictRepairSchema,
   migrateRestoreReservationJournalToDeviceSyncSchema,
@@ -61,11 +62,14 @@ const DEVICE_SYNC_V7_TABLES = [
  * (task 9), so the result opens through `openFromImage`.
  */
 function migrateV6ImageToCurrentSchema(v6Image: Uint8Array): Uint8Array {
-  return migrateMultipartProgressJournalToConflictRepairSchema(
+  return migrateConflictRepairJournalToPendingRenameIntentSchema(
     engineModule,
-    migrateDeviceSyncJournalToMultipartProgressSchema(
+    migrateMultipartProgressJournalToConflictRepairSchema(
       engineModule,
-      migrateRestoreReservationJournalToDeviceSyncSchema(engineModule, v6Image),
+      migrateDeviceSyncJournalToMultipartProgressSchema(
+        engineModule,
+        migrateRestoreReservationJournalToDeviceSyncSchema(engineModule, v6Image),
+      ),
     ),
   );
 }
@@ -92,6 +96,9 @@ function createSeededV6Image(options: { isReconcileRequired: boolean }): Uint8Ar
   try {
     engine.exec("begin immediate;");
     engine.exec("drop table multipart_upload_progress;");
+    engine.exec("drop table pending_rename_intent_missing_file_deferrals;");
+    engine.exec("drop index pending_rename_intents_current_path_uq;");
+    engine.exec("drop table pending_rename_intents;");
     for (const table of DEVICE_SYNC_V7_TABLES) {
       engine.exec(`drop table ${table};`);
     }

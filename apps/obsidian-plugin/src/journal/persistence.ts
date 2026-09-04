@@ -28,6 +28,7 @@
 import { sha256Hex } from "../exclusion-policy/canonical-json";
 import type { JournalMeta, JournalRecoveryState } from "./contracts";
 import {
+  CONFLICT_REPAIR_SCHEMA_VERSION,
   DEVICE_SYNC_SCHEMA_VERSION,
   JOURNAL_SCHEMA_VERSION,
   JournalStoreError,
@@ -36,6 +37,7 @@ import {
   type JournalStoreErrorReason,
   journalStoreError,
   SqliteDatabase,
+  migrateConflictRepairJournalToPendingRenameIntentSchema,
   migrateDeviceSyncJournalToMultipartProgressSchema,
   migrateMultipartProgressJournalToConflictRepairSchema,
   migrateRestoreReservationJournalToDeviceSyncSchema,
@@ -196,7 +198,8 @@ function parseVerifiedGeneration(value: unknown): VerifiedJournalGeneration | nu
     schemaVersion !== JOURNAL_SCHEMA_VERSION &&
     schemaVersion !== RESTORE_RESERVATION_SCHEMA_VERSION &&
     schemaVersion !== DEVICE_SYNC_SCHEMA_VERSION &&
-    schemaVersion !== MULTIPART_PROGRESS_SCHEMA_VERSION
+    schemaVersion !== MULTIPART_PROGRESS_SCHEMA_VERSION &&
+    schemaVersion !== CONFLICT_REPAIR_SCHEMA_VERSION
   ) {
     return null;
   }
@@ -237,7 +240,8 @@ function isKnownJournalMigrationSource(schemaVersion: number): boolean {
   return (
     schemaVersion === RESTORE_RESERVATION_SCHEMA_VERSION ||
     schemaVersion === DEVICE_SYNC_SCHEMA_VERSION ||
-    schemaVersion === MULTIPART_PROGRESS_SCHEMA_VERSION
+    schemaVersion === MULTIPART_PROGRESS_SCHEMA_VERSION ||
+    schemaVersion === CONFLICT_REPAIR_SCHEMA_VERSION
   );
 }
 
@@ -579,6 +583,8 @@ export class JournalPersistence {
     "echo_markers",
     "multipart_upload_progress",
     "conflict_local_repairs",
+    "pending_rename_intents",
+    "pending_rename_intent_missing_file_deferrals",
   ] as const;
 
   /**
@@ -688,7 +694,10 @@ export class JournalPersistence {
             migratedImage,
           );
         }
-        if (candidate.schemaVersion !== MULTIPART_PROGRESS_SCHEMA_VERSION) {
+        if (
+          candidate.schemaVersion === RESTORE_RESERVATION_SCHEMA_VERSION ||
+          candidate.schemaVersion === DEVICE_SYNC_SCHEMA_VERSION
+        ) {
           // A v6 image just advanced to v7; a v7 image starts here. A v8
           // source already carries the multipart progress table and skips
           // straight to the conflict-repair step below.
@@ -697,7 +706,13 @@ export class JournalPersistence {
             migratedImage,
           );
         }
-        migratedImage = migrateMultipartProgressJournalToConflictRepairSchema(
+        if (candidate.schemaVersion !== CONFLICT_REPAIR_SCHEMA_VERSION) {
+          migratedImage = migrateMultipartProgressJournalToConflictRepairSchema(
+            this.#engineModule,
+            migratedImage,
+          );
+        }
+        migratedImage = migrateConflictRepairJournalToPendingRenameIntentSchema(
           this.#engineModule,
           migratedImage,
         );

@@ -39,7 +39,10 @@ import {
   type LifecycleJournalOperation,
   type RestoreReservationResult,
 } from "./lifecycle-contracts";
-import type { LifecycleRepository } from "./lifecycle-repository";
+import {
+  PendingRenameIntentConflictError,
+  type LifecycleRepository,
+} from "./lifecycle-repository";
 import type { JournalRepository } from "./repository";
 import { deriveFrozenFingerprint } from "./fingerprint";
 import type { JournalFailureReporter } from "./diagnostic-reporter";
@@ -252,6 +255,15 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
 
   readonly #settleTimers = new Map<string, ReturnType<typeof setTimeout>>();
   readonly #settleWaiters = new Map<string, Set<() => void>>();
+  readonly #pendingRenameTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  readonly #pendingRenameWaiters = new Map<
+    string,
+    Set<{
+      readonly resolve: (result: LifecycleRenameResult | null) => void;
+      readonly reject: (error: unknown) => void;
+    }>
+  >();
+  readonly #pendingRenameDeferralBudget = new Map<string, number>();
   readonly #deleteDeferralTimers = new Map<string, ReturnType<typeof setTimeout>>();
   #isDisposed = false;
 
@@ -309,6 +321,31 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
     const normalizedNew = this.#normalizePathOrNull(file.path);
     if (normalizedPrior === null || normalizedNew === null) {
       return Promise.resolve(null);
+    }
+    let intentOwner: {
+      readonly localFile: import("./contracts").LocalFile;
+      readonly hasPendingIntent: boolean;
+    } | null;
+    try {
+      intentOwner = this.#resolvePendingRenameOwner(normalizedPrior);
+    } catch (error) {
+      if (isStoreError(error)) {
+        return Promise.reject(journalStoreError("journal_mutation_failed"));
+      }
+      return Promise.reject(journalStoreError("journal_mutation_failed"));
+    }
+    if (
+      intentOwner !== null &&
+      (intentOwner.hasPendingIntent ||
+        (intentOwner.localFile.sourceId === null &&
+          intentOwner.localFile.baseVersionId === null &&
+          this.#hasInFlightEvent(intentOwner.localFile.localFileId)))
+    ) {
+      return this.#capturePendingRenameObservation(
+        intentOwner.localFile.localFileId,
+        normalizedPrior,
+        normalizedNew,
+      );
     }
     const operation = this.#renameOperation(normalizedPrior, normalizedNew);
     const settleKey = `${operation}:${normalizedPrior}->${normalizedNew}`;
@@ -382,6 +419,202 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
   }
 
   /**
+   * Resolve a watcher edge only through its durable owner proof: the local
+   * row at the observed prior endpoint, or the one intent whose current
+   * endpoint equals that prior. A bare path miss never manufactures an
+   * owner, which preserves the provenance boundary for rapid A -> B -> C.
+   */
+  #resolvePendingRenameOwner(normalizedPrior: string): {
+    readonly localFile: import("./contracts").LocalFile;
+    readonly hasPendingIntent: boolean;
+  } | null {
+    const direct = this.#repository.readLocalFileByPath(normalizedPrior);
+    if (direct !== null) {
+      return {
+        localFile: direct,
+        hasPendingIntent:
+          this.#lifecycle.readPendingRenameIntentForLocalFile(direct.localFileId) !== null,
+      };
+    }
+    const intent = this.#lifecycle.readPendingRenameIntentByCurrentPath(normalizedPrior);
+    if (intent === null) {
+      return null;
+    }
+    const owner = this.#repository.readLocalFileByLocalFileId(intent.localFileId);
+    if (owner === null) {
+      return null;
+    }
+    return { localFile: owner, hasPendingIntent: true };
+  }
+
+  /** Persist the owned edge before any settle delay, then coalesce by owner. */
+  async #capturePendingRenameObservation(
+    localFileId: string,
+    observedPriorPath: string,
+    observedCurrentPath: string,
+  ): Promise<LifecycleRenameResult | null> {
+    if (this.#readLifecycleState(localFileId) === "restore_pending") {
+      return null;
+    }
+    try {
+      await this.#lifecycle.recordOrComposePendingRenameIntent({
+        localFileId,
+        observedPriorPath,
+        observedCurrentPath,
+      });
+    } catch (error) {
+      if (error instanceof PendingRenameIntentConflictError) {
+        this.#failureReporter?.reportJournalFailure("pending_rename_intent_conflict");
+        return null;
+      }
+      this.#failureReporter?.reportJournalFailure("pending_rename_intent_persist_failed");
+      if (isStoreError(error)) {
+        throw error;
+      }
+      throw journalStoreError("journal_mutation_failed");
+    }
+    return this.#schedulePendingRenameMaterialization(localFileId);
+  }
+
+  /** Arm one owner-scoped timer; each new linked observation resets it. */
+  #schedulePendingRenameMaterialization(
+    localFileId: string,
+  ): Promise<LifecycleRenameResult | null> {
+    return new Promise<LifecycleRenameResult | null>((resolve, reject) => {
+      const waiters = this.#pendingRenameWaiters.get(localFileId) ?? new Set();
+      waiters.add({ resolve, reject });
+      this.#pendingRenameWaiters.set(localFileId, waiters);
+      const previousTimer = this.#pendingRenameTimers.get(localFileId);
+      if (previousTimer !== undefined) {
+        clearTimeout(previousTimer);
+      }
+      if (!this.#pendingRenameDeferralBudget.has(localFileId)) {
+        this.#pendingRenameDeferralBudget.set(localFileId, this.#settleDeferralAttempts);
+      }
+      this.#pendingRenameTimers.set(
+        localFileId,
+        setTimeout(() => {
+          this.#pendingRenameTimers.delete(localFileId);
+          void this.#settlePendingRenameIntent(localFileId);
+        }, this.#settleDelayMs),
+      );
+    });
+  }
+
+  /** Re-read current endpoints and materialize at most one immutable prefix. */
+  async #settlePendingRenameIntent(localFileId: string): Promise<void> {
+    const resolveAll = (result: LifecycleRenameResult | null): void => {
+      const waiters = this.#pendingRenameWaiters.get(localFileId);
+      this.#pendingRenameWaiters.delete(localFileId);
+      this.#pendingRenameDeferralBudget.delete(localFileId);
+      for (const waiter of waiters ?? []) {
+        waiter.resolve(result);
+      }
+    };
+    const rejectAll = (error: unknown): void => {
+      const waiters = this.#pendingRenameWaiters.get(localFileId);
+      this.#pendingRenameWaiters.delete(localFileId);
+      this.#pendingRenameDeferralBudget.delete(localFileId);
+      for (const waiter of waiters ?? []) {
+        waiter.reject(error);
+      }
+    };
+    if (this.#isDisposed) {
+      resolveAll(null);
+      return;
+    }
+    try {
+      const intent = this.#lifecycle.readPendingRenameIntentForLocalFile(localFileId);
+      if (intent === null) {
+        resolveAll(null);
+        return;
+      }
+      const localFile = this.#repository.readLocalFileByLocalFileId(localFileId);
+      if (localFile === null || this.#readLifecycleState(localFileId) === "restore_pending") {
+        resolveAll(null);
+        return;
+      }
+      if (localFile.sourceId === null || localFile.baseVersionId === null) {
+        if (this.#hasInFlightEvent(localFileId)) {
+          const remainingBudget = this.#pendingRenameDeferralBudget.get(localFileId) ?? 0;
+          if (remainingBudget <= 0) {
+            await this.#flagReconcileRequiredOrReport();
+            resolveAll(null);
+            return;
+          }
+          this.#pendingRenameDeferralBudget.set(localFileId, remainingBudget - 1);
+          this.#pendingRenameTimers.set(
+            localFileId,
+            setTimeout(() => {
+              this.#pendingRenameTimers.delete(localFileId);
+              void this.#settlePendingRenameIntent(localFileId);
+            }, this.#settleDelayMs),
+          );
+          return;
+        }
+        if (this.#isUncommittedTransitRow(localFileId)) {
+          await this.#lifecycle.reparentAndClearPendingRenameIntent(localFileId);
+          resolveAll(null);
+          return;
+        }
+        await this.#flagReconcileRequiredOrReport();
+        resolveAll(null);
+        return;
+      }
+      const targetBytes = await this.#vaultReader.readRegularFileBytes(intent.currentPath);
+      if (targetBytes === null) {
+        // A queue-owned content event may still exact-replay its receipt; do
+        // not terminalize it or discard the owner reservation from a timer.
+        resolveAll(null);
+        return;
+      }
+      const targetFingerprint = await deriveFrozenFingerprint(targetBytes);
+      if (this.#echoSuppressor !== null) {
+        const consumed = await this.#echoSuppressor.consumeRenameObservation({
+          priorLocator: intent.priorPath,
+          targetLocator: intent.currentPath,
+          sourceId: localFile.sourceId,
+          fingerprint: targetFingerprint,
+        });
+        if (consumed) {
+          await this.#lifecycle.reparentAndClearPendingRenameIntent(localFileId);
+          resolveAll(null);
+          return;
+        }
+      }
+      const prefix = await this.#lifecycle.recordPendingRenameLifecycleEvent(
+        localFileId,
+        targetFingerprint,
+      );
+      if (prefix === null) {
+        resolveAll(null);
+        return;
+      }
+      const operands = this.#lifecycle.readLifecycleOperands(prefix.eventId);
+      if (operands === null || (operands.operation !== "rename" && operands.operation !== "move")) {
+        await this.#flagReconcileRequiredOrReport();
+        resolveAll(null);
+        return;
+      }
+      resolveAll({
+        operation: operands.operation,
+        localFileId,
+        eventId: prefix.eventId,
+        predecessorEventId: null,
+        capturedFingerprintSha256: targetFingerprint.sha256,
+        capturedFingerprintSizeBytes: targetFingerprint.sizeBytes,
+      });
+    } catch (error) {
+      if (error instanceof PendingRenameIntentConflictError) {
+        this.#failureReporter?.reportJournalFailure("pending_rename_intent_conflict");
+      } else {
+        this.#failureReporter?.reportJournalFailure("pending_rename_intent_persist_failed");
+      }
+      rejectAll(isStoreError(error) ? error : journalStoreError("journal_mutation_failed"));
+    }
+  }
+
+  /**
    * Observe one Vault delete notification. An untracked path is a
    * quiet no-op (no lifecycle event minted); a tracked path freezes
    * any pending content work, persists a delete lifecycle event in the
@@ -401,7 +634,33 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
     if (normalizedPath === null) {
       return null;
     }
-    const localFile = this.#repository.readLocalFileByPath(normalizedPath);
+    let localFile = this.#repository.readLocalFileByPath(normalizedPath);
+    // A pending rename owns both its prior and current durable endpoints,
+    // while the local row remains at the prior path until the lifecycle
+    // prefix is materialized.  A delete watcher can therefore legitimately
+    // arrive at the current endpoint before that rebind.  Keep the
+    // observation in the existing bounded delete ladder and let a later
+    // retry re-read the owner after the prefix receipt.
+    if (localFile === null) {
+      const pendingIntent = this.#lifecycle.readPendingRenameIntentOwningEndpoint(
+        normalizedPath,
+      );
+      if (pendingIntent !== null) {
+        localFile = this.#repository.readLocalFileByLocalFileId(pendingIntent.localFileId);
+        if (localFile !== null) {
+          this.#scheduleDeleteDeferralRetry(normalizedPath, tombstoneId);
+        }
+        return null;
+      }
+    } else {
+      const pendingIntent = this.#lifecycle.readPendingRenameIntentOwningEndpoint(normalizedPath);
+      if (pendingIntent !== null && pendingIntent.localFileId === localFile.localFileId) {
+      // The row still sits at an intent-owned prior endpoint.  Resolve the
+      // rename prefix first so the delete operands use the committed target.
+      this.#scheduleDeleteDeferralRetry(normalizedPath, tombstoneId);
+      return null;
+      }
+    }
     if (localFile === null) {
       return null;
     }
@@ -694,6 +953,32 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
     return true;
   }
 
+  /**
+   * Re-arm every durable chain after journal recovery before automatic
+   * snapshot admission or outbound dispatch. Enumeration failure is surfaced
+   * as a closed read token and propagates so composition can fail closed.
+   */
+  async resumePendingRenameIntents(): Promise<void> {
+    let intents;
+    try {
+      intents = this.#lifecycle.readPendingRenameIntents();
+    } catch (error) {
+      this.#failureReporter?.reportJournalFailure("pending_rename_intent_read_failed");
+      if (isStoreError(error)) {
+        throw error;
+      }
+      throw journalStoreError("journal_query_failed");
+    }
+    for (const intent of intents) {
+      void this.#schedulePendingRenameMaterialization(intent.localFileId).catch((error: unknown) => {
+        if (isStoreError(error)) {
+          return;
+        }
+        this.#failureReporter?.reportJournalFailure("pending_rename_intent_persist_failed");
+      });
+    }
+  }
+
   /** Settle all queued rename observations and stop accepting new ones. */
   dispose(): void {
     this.#isDisposed = true;
@@ -711,6 +996,17 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
       }
     }
     this.#settleWaiters.clear();
+    for (const timer of this.#pendingRenameTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.#pendingRenameTimers.clear();
+    for (const [, waiters] of this.#pendingRenameWaiters) {
+      for (const waiter of waiters) {
+        waiter.resolve(null);
+      }
+    }
+    this.#pendingRenameWaiters.clear();
+    this.#pendingRenameDeferralBudget.clear();
   }
 
   /**
@@ -744,7 +1040,32 @@ export class LifecycleCaptureImpl implements LifecycleCapture {
     if (this.#isDisposed) {
       return;
     }
-    const localFile = this.#repository.readLocalFileByPath(normalizedPath);
+    let localFile = this.#repository.readLocalFileByPath(normalizedPath);
+    const pendingIntent = this.#lifecycle.readPendingRenameIntentOwningEndpoint(normalizedPath);
+    if (
+      pendingIntent !== null &&
+      (localFile === null || pendingIntent.localFileId === localFile.localFileId)
+    ) {
+      // The intent still reserves this endpoint.  The prefix may not yet
+      // have been materialized, or its receipt may not yet have rebound and
+      // cleared the intent; either way, recording a delete now would use the
+      // wrong locator.  Retry through the same bounded ladder.
+      localFile = this.#repository.readLocalFileByLocalFileId(pendingIntent.localFileId);
+      if (localFile === null) {
+        return;
+      }
+      if (attempts.remaining <= 0) {
+        await this.#flagReconcileRequiredOrReport().catch(() => undefined);
+        return;
+      }
+      attempts.remaining -= 1;
+      const timer = setTimeout(() => {
+        this.#deleteDeferralTimers.delete(normalizedPath);
+        void this.#retryDeferredDelete(normalizedPath, tombstoneId, attempts);
+      }, this.#settleDelayMs);
+      this.#deleteDeferralTimers.set(normalizedPath, timer);
+      return;
+    }
     if (localFile === null) {
       // The row left (a concurrent observation healed or rebound it).
       return;

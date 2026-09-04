@@ -931,6 +931,10 @@ export default class KnowledgeWorkspacePlugin extends Plugin {
         policyRevision: 1,
         failureReporter: journalFailureReporter,
       });
+      // Durable pending rename chains are re-armed before any startup
+      // snapshot admission can observe their current endpoint as a fresh
+      // file. This performs no network request; it only restores timers.
+      await lifecycleCapture.resumePendingRenameIntents();
       const capture = new JournalCapture({
         repository,
         vaultReader,

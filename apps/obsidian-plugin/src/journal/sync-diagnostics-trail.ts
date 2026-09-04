@@ -296,6 +296,11 @@ export const SYNC_COMPOSITION_READ_FAILURE_TOKENS = [
   "automatic_snapshot_admission_failed",
   "lifecycle_reconcile_persist_failed",
   "restore_reservation_persist_failed",
+  "pending_rename_intent_read_failed",
+  "pending_rename_intent_persist_failed",
+  "pending_rename_intent_conflict",
+  "pending_rename_intent_exhausted",
+  "pending_rename_intent_lifecycle_rejected",
 ] as const;
 
 export type SyncCompositionReadFailureToken =

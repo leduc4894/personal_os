@@ -412,13 +412,11 @@ describe("LifecycleCapture tombstone recording (spec 6.3, 7.1)", () => {
       const rejection = expect(promise).rejects.toMatchObject({
         reason: "journal_mutation_failed",
       });
-      // First settle defers (create in flight, budget 1); the re-armed
-      // settle exhausts the budget and attempts the fail-closed flag
-      // write, which the spy rejects exactly once.
-      await vi.advanceTimersByTimeAsync(300);
-      await vi.advanceTimersByTimeAsync(300);
+      // The owner-proven chain persists before the first settle, so a
+      // rejected writer fails at watcher ingress rather than silently
+      // scheduling an unowned re-arm.
       await rejection;
-      expect(harness.failureTokens).toEqual(["lifecycle_reconcile_persist_failed"]);
+      expect(harness.failureTokens).toEqual(["pending_rename_intent_persist_failed"]);
     } finally {
       vi.useRealTimers();
     }
@@ -1062,6 +1060,9 @@ describe("LifecycleCapture settle deferral vs an in-flight create (2026-09-03 li
       expect(
         harness.repository.readLocalFileByPath("notes/inflight-failed.md"),
       ).toBeNull();
+      expect(
+        harness.repository.readLocalFileByPath("notes/inflight-failed-renamed.md")?.localFileId,
+      ).toBe(event.localFileId);
       expect(harness.database.readJournalMeta().isReconcileRequired).toBe(false);
     } finally {
       vi.useRealTimers();
@@ -1116,6 +1117,48 @@ describe("LifecycleCapture settle deferral vs an in-flight create (2026-09-03 li
       );
       expect(lifecycleStateOf(harness.database, file.localFileId)).toBe("tombstoned");
       expect(harness.database.readJournalMeta().isReconcileRequired).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("defers a delete at a pending rename endpoint until the prefix receipt rebinds its owner", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const harness = createHarness();
+      const fingerprint = await deriveFrozenFingerprint(bytesOf("pending rename delete"));
+      await captureAndCommit(harness, "notes/delete-intent-a.md", fingerprint);
+      const owner = requireLocalFile(
+        harness.repository.readLocalFileByPath("notes/delete-intent-a.md"),
+      );
+      await harness.lifecycle.recordOrComposePendingRenameIntent({
+        localFileId: owner.localFileId,
+        observedPriorPath: "notes/delete-intent-a.md",
+        observedCurrentPath: "archive/delete-intent-c.md",
+      });
+
+      await expect(
+        harness.capture.captureDelete(fakeAbstractFile("archive/delete-intent-c.md", "archive")),
+      ).resolves.toBeNull();
+
+      const prefix = await harness.lifecycle.recordPendingRenameLifecycleEvent(
+        owner.localFileId,
+        fingerprint,
+      );
+      if (prefix === null) {
+        throw new Error("expected pending rename lifecycle prefix");
+      }
+      await harness.lifecycle.recordLifecycleCommittedReceipt(prefix.eventId);
+      await vi.advanceTimersByTimeAsync(300);
+
+      const deleteEvent = harness.repository
+        .readEventsByLocalFileId(owner.localFileId)
+        .find((event) => event.operation === "delete");
+      expect(deleteEvent?.state).toBe("queued");
+      expect(harness.lifecycle.readLifecycleOperands(deleteEvent?.eventId ?? "")).toMatchObject({
+        expectedLocator: "archive/delete-intent-c.md",
+      });
+      expect(harness.lifecycle.readPendingRenameIntentForLocalFile(owner.localFileId)).toBeNull();
     } finally {
       vi.useRealTimers();
     }

@@ -128,7 +128,10 @@ The closed token vocabularies are exactly the existing sync vocabularies:
   `queue_drain_failed`, `snapshot_drain_failed`,
   `settled_admission_failed`, `automatic_snapshot_admission_failed`,
   `lifecycle_reconcile_persist_failed`,
-  `restore_reservation_persist_failed`. Their safe meanings and emission
+  `restore_reservation_persist_failed`,
+  `pending_rename_intent_read_failed`, `pending_rename_intent_persist_failed`,
+  `pending_rename_intent_conflict`, `pending_rename_intent_exhausted`,
+  `pending_rename_intent_lifecycle_rejected`. Their safe meanings and emission
   bounds are fixed below.
 
 ### Journal orchestration failure tokens
@@ -151,6 +154,11 @@ the existing append-failure counter.
 | `automatic_snapshot_admission_failed` | One or more automatic-snapshot admissions rejected; affected files remain counted as skipped. | At most one token per automatic snapshot scan. |
 | `lifecycle_reconcile_persist_failed` | Persisting the lifecycle `reconcile_required` marker failed; the lifecycle result stays fail-closed. | One token for each failed reconcile-marker persistence attempt. |
 | `restore_reservation_persist_failed` | Persisting an explicit-restore target reservation failed; the restore command refused closed and the tombstone stays open. | One token for each failed reservation persistence attempt. |
+| `pending_rename_intent_read_failed` | Reading a durable pending rename intent failed, so admission, dispatch, or startup resume failed closed. | One token for each swallowed read boundary. |
+| `pending_rename_intent_persist_failed` | Persisting a pending rename observation or re-arm failed; the prior verified generation remains authoritative. | One token for each swallowed persistence boundary. |
+| `pending_rename_intent_conflict` | An incompatible rename chain, endpoint collision, or corrupt guarded state transferred the owner to reconciliation. | One token for each committed conflict boundary. |
+| `pending_rename_intent_exhausted` | The bounded intent-owned missing-file window ended and locator ownership transferred to reconciliation. | One token for each committed exhaustion boundary. |
+| `pending_rename_intent_lifecycle_rejected` | A canonical rejection of an intent-owned rename/move prefix transferred its locator to reconciliation. | One token for each committed lifecycle rejection. |
 
 The one opaque value that may ride along is the server envelope's
 `request_id` (a UUID), rendered as `request_id=<uuid>`. It is the

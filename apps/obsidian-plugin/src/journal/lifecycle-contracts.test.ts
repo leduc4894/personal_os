@@ -168,8 +168,8 @@ describe("schema migration from Child 4 to Child 5", () => {
   it("keeps LIFECYCLE_SCHEMA_VERSION pinned to the current journal schema version", async () => {
     const { LIFECYCLE_SCHEMA_VERSION } = await import("./lifecycle-contracts");
     expect(LIFECYCLE_SCHEMA_VERSION).toBe(JOURNAL_SCHEMA_VERSION);
-    expect(LIFECYCLE_SCHEMA_VERSION).toBe(9);
-    expect(JOURNAL_SCHEMA_VERSION).toBe(9);
+    expect(LIFECYCLE_SCHEMA_VERSION).toBe(10);
+    expect(JOURNAL_SCHEMA_VERSION).toBe(10);
   });
 
   it("migrates a Child 4 journal through every schema step to the current version without losing any prior row", async () => {
@@ -183,6 +183,7 @@ describe("schema migration from Child 4 to Child 5", () => {
     );
     const {
       migrateDeviceSyncJournalToMultipartProgressSchema,
+      migrateConflictRepairJournalToPendingRenameIntentSchema,
       migrateMultipartProgressJournalToConflictRepairSchema,
       migrateRestoreReservationJournalToDeviceSyncSchema,
     } = await import(
@@ -279,8 +280,12 @@ describe("schema migration from Child 4 to Child 5", () => {
       engineModule,
       v8Image,
     );
+    const v10Image = migrateConflictRepairJournalToPendingRenameIntentSchema(
+      engineModule,
+      v9Image,
+    );
 
-    const reopened = SqliteDatabase.openFromImage(engineModule, v9Image);
+    const reopened = SqliteDatabase.openFromImage(engineModule, v10Image);
     const meta = reopened.readJournalMeta() satisfies JournalMeta;
     expect(meta.schemaVersion).toBe(JOURNAL_SCHEMA_VERSION);
     expect(meta.dirtyGeneration).toBe(4);

@@ -122,6 +122,9 @@ export interface MultipartUploadRepositoryPort {
   saveMultipartProgress(record: MultipartProgressRecord): Promise<void>;
   clearMultipartProgress(eventId: string): Promise<void>;
   readLocalFileByLocalFileId(localFileId: string): LocalFile | null;
+  readPendingRenameIntentForLocalFile(localFileId: string): {
+    readonly currentPath: string;
+  } | null;
 }
 
 /**
@@ -710,7 +713,10 @@ export class MultipartUploadRunner {
     event: JournalEvent,
     localFile: LocalFile,
   ): Promise<FrozenFileCheck> {
-    const bytes = await this.#fileBytesReader.readRegularFileBytes(localFile.normalizedPath);
+    const intent = this.#repository.readPendingRenameIntentForLocalFile(event.localFileId);
+    const bytes = await this.#fileBytesReader.readRegularFileBytes(
+      intent?.currentPath ?? localFile.normalizedPath,
+    );
     if (bytes === null) {
       return { kind: "missing" };
     }

@@ -113,8 +113,15 @@ import type { JournalMeta, JournalRecoveryState } from "./contracts";
  * operand, reservation, cursor, barrier, manifest progress, remote
  * apply, echo marker and multipart progress — survives unchanged and
  * the new table starts empty.
+ *
+ * Version 10 (pending rename-chain recovery) adds two owner-bound tables:
+ * `pending_rename_intents` stores the next canonical prior endpoint and
+ * latest observed Vault endpoint for one local row, while
+ * `pending_rename_intent_missing_file_deferrals` stores the separately
+ * bounded, event-bound missing-file replay budget. The v9 -> v10 migration
+ * is lossless and both tables start empty.
  */
-export const JOURNAL_SCHEMA_VERSION = 9;
+export const JOURNAL_SCHEMA_VERSION = 10;
 
 // --- closed failure reasons ---------------------------------------------------------------
 
@@ -500,6 +507,31 @@ create table if not exists conflict_local_repairs (
 );
 `;
 
+// --- pending rename intent schema (untitled-transit rename-chain recovery) ----------------------
+
+/** One durable, owner-proven rename chain per tracked local row. */
+const PENDING_RENAME_INTENTS_DDL = `
+create table if not exists pending_rename_intents (
+  local_file_id text primary key
+    references local_files (local_file_id) on delete cascade,
+  prior_path text not null check (length(prior_path) > 0),
+  current_path text not null check (length(current_path) > 0)
+);
+create unique index if not exists pending_rename_intents_current_path_uq
+  on pending_rename_intents (current_path);
+`;
+
+/** The event-bound accepted parks 1..40 for an intent-owned missing file. */
+const PENDING_RENAME_INTENT_MISSING_FILE_DEFERRALS_DDL = `
+create table if not exists pending_rename_intent_missing_file_deferrals (
+  local_file_id text primary key
+    references pending_rename_intents (local_file_id) on delete cascade,
+  event_id text not null unique references journal_events (event_id),
+  deferred_attempt_count integer not null
+    check (deferred_attempt_count between 1 and 40)
+);
+`;
+
 const JOURNAL_SCHEMA_DDL = [
   JOURNAL_META_DDL,
   LOCAL_FILES_DDL,
@@ -513,6 +545,8 @@ const JOURNAL_SCHEMA_DDL = [
   ECHO_MARKERS_DDL,
   MULTIPART_UPLOAD_PROGRESS_DDL,
   CONFLICT_LOCAL_REPAIRS_DDL,
+  PENDING_RENAME_INTENTS_DDL,
+  PENDING_RENAME_INTENT_MISSING_FILE_DEFERRALS_DDL,
 ].join("");
 
 /**
@@ -561,6 +595,9 @@ export const DEVICE_SYNC_SCHEMA_VERSION = 7;
  * function pins this constant as the source version it accepts.
  */
 export const MULTIPART_PROGRESS_SCHEMA_VERSION = 8;
+
+/** The v9 conflict-repair schema accepted by the v9 -> v10 migration. */
+export const CONFLICT_REPAIR_SCHEMA_VERSION = 9;
 
 // --- closed failure reasons ---------------------------------------------------------------
 
@@ -1162,6 +1199,147 @@ export function migrateMultipartProgressJournalToConflictRepairSchema(
     // sql.js surfaces lazy open failures ("file is not a database") at the
     // first statement, not at construction: those bytes are not a journal
     // image. Closed store reasons pass through untouched.
+    throw error instanceof JournalStoreError ? error : journalStoreError("journal_image_invalid");
+  } finally {
+    engine.close();
+  }
+}
+
+// --- the v9 -> v10 pending rename intent schema migration ---------------------------------------
+
+const PENDING_RENAME_INTENT_MIGRATION_DDL = [
+  PENDING_RENAME_INTENTS_DDL,
+  PENDING_RENAME_INTENT_MISSING_FILE_DEFERRALS_DDL,
+  "update journal_meta set schema_version = 10 where singleton_key = 1;",
+  "pragma user_version = 10;",
+].join("");
+
+/** Whether a candidate v9 image contains the complete conflict-repair surface. */
+function conflictRepairJournalImageLooksValid(engine: SqliteDatabaseEngine): boolean {
+  try {
+    const metaRows = engine.exec(
+      "select schema_version from journal_meta where singleton_key = 1;",
+    );
+    if (metaRows[0]?.values[0]?.[0] !== CONFLICT_REPAIR_SCHEMA_VERSION) {
+      return false;
+    }
+    const tables = engine.exec(
+      "select name from sqlite_master where type = 'table' order by name;",
+    );
+    const tableNames = new Set((tables[0]?.values ?? []).map((row) => String(row[0])));
+    const required = [
+      "conflict_local_repairs",
+      "device_sync_state",
+      "echo_markers",
+      "journal_attempts",
+      "journal_events",
+      "journal_meta",
+      "lifecycle_event_operands",
+      "local_files",
+      "manifest_action_progress",
+      "manifest_page_progress",
+      "multipart_upload_progress",
+      "remote_apply_operations",
+    ];
+    return required.every((name) => tableNames.has(name));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Losslessly migrate one complete v9 conflict-repair image to schema v10.
+ * The input bytes are never mutated; both pending-rename tables begin empty
+ * and both schema-version stamps change last in the same transaction.
+ */
+export function migrateConflictRepairJournalToPendingRenameIntentSchema(
+  engineModule: SqliteEngineModule,
+  image: ArrayLike<number>,
+): Uint8Array {
+  let engine: SqliteDatabaseEngine;
+  try {
+    engine = new engineModule.Database(image);
+  } catch {
+    throw journalStoreError("journal_image_invalid");
+  }
+  try {
+    if (readUserVersionOf(engine) !== CONFLICT_REPAIR_SCHEMA_VERSION) {
+      throw journalStoreError("journal_schema_unsupported");
+    }
+    if (!conflictRepairJournalImageLooksValid(engine)) {
+      throw journalStoreError("journal_image_invalid");
+    }
+    engine.exec("begin immediate;");
+    try {
+      engine.exec(PENDING_RENAME_INTENT_MIGRATION_DDL);
+      engine.exec("commit;");
+    } catch (error) {
+      try {
+        engine.exec("rollback;");
+      } catch {
+        // The closed mutation failure below is authoritative.
+      }
+      throw error instanceof JournalStoreError
+        ? error
+        : journalStoreError("journal_mutation_failed");
+    }
+    return engine.export();
+  } catch (error) {
+    throw error instanceof JournalStoreError ? error : journalStoreError("journal_image_invalid");
+  } finally {
+    engine.close();
+  }
+}
+
+/**
+ * Guarded test-only v10 -> v9 downgrade. Production loading is forward-only;
+ * this helper exists solely to prove the empty downgrade/upgrade contract.
+ * Either pending-rename table being non-empty refuses before any mutation.
+ */
+export function downgradePendingRenameIntentJournalToConflictRepairSchemaForTest(
+  engineModule: SqliteEngineModule,
+  image: ArrayLike<number>,
+): Uint8Array {
+  let engine: SqliteDatabaseEngine;
+  try {
+    engine = new engineModule.Database(image);
+  } catch {
+    throw journalStoreError("journal_image_invalid");
+  }
+  try {
+    if (readUserVersionOf(engine) !== JOURNAL_SCHEMA_VERSION) {
+      throw journalStoreError("journal_schema_unsupported");
+    }
+    const intentCount = engine.exec("select count(*) from pending_rename_intents;")[0]
+      ?.values[0]?.[0];
+    const deferralCount = engine.exec(
+      "select count(*) from pending_rename_intent_missing_file_deferrals;",
+    )[0]?.values[0]?.[0];
+    if (intentCount !== 0 || deferralCount !== 0) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    engine.exec("begin immediate;");
+    try {
+      engine.exec("drop table pending_rename_intent_missing_file_deferrals;");
+      engine.exec("drop index pending_rename_intents_current_path_uq;");
+      engine.exec("drop table pending_rename_intents;");
+      engine.exec(
+        `update journal_meta set schema_version = ${CONFLICT_REPAIR_SCHEMA_VERSION} where singleton_key = 1;`,
+      );
+      engine.exec(`pragma user_version = ${CONFLICT_REPAIR_SCHEMA_VERSION};`);
+      engine.exec("commit;");
+    } catch (error) {
+      try {
+        engine.exec("rollback;");
+      } catch {
+        // The closed mutation failure below is authoritative.
+      }
+      throw error instanceof JournalStoreError
+        ? error
+        : journalStoreError("journal_mutation_failed");
+    }
+    return engine.export();
+  } catch (error) {
     throw error instanceof JournalStoreError ? error : journalStoreError("journal_image_invalid");
   } finally {
     engine.close();

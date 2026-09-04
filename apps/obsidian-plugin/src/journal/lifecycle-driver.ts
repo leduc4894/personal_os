@@ -368,17 +368,41 @@ export class LifecycleDriverImpl implements LifecycleDriver {
     terminalState: "blocked_conflict" | "integrity_failed",
     correlationId: string,
   ): Promise<void> {
-    const event = this.#repository.readEvent(eventId);
-    if (event === null) {
-      return;
+    let resolution: "no_intent" | "intent_reconciled";
+    try {
+      resolution = await this.#lifecycle.resolveIntentAwareLifecycleTerminal({
+        eventId,
+        terminalState,
+        attemptedAtEpochMs: this.#nowEpochMs(),
+        requestCorrelationId: correlationId,
+      });
+    } catch (error) {
+      void this.#diagnosticTrail?.append({
+        kind: "journal_failure",
+        tokens: ["lifecycle_reconcile_persist_failed"],
+      });
+      throw error;
     }
-    await this.#repository.recordEventAttempt({
-      eventId,
-      attemptedAtEpochMs: this.#nowEpochMs(),
-      outcomeLabel: terminalState,
-      requestCorrelationId: correlationId,
-    });
-    await this.#repository.markEventTerminal(eventId, terminalState, terminalState);
+    if (resolution === "intent_reconciled") {
+      void this.#diagnosticTrail?.append({
+        kind: "journal_failure",
+        tokens: ["pending_rename_intent_lifecycle_rejected"],
+      });
+      await this.#startRepairBarrier();
+    }
+  }
+
+  /** Start or retain repair after the lifecycle resolver transfers locator ownership. */
+  async #startRepairBarrier(): Promise<void> {
+    try {
+      const generation = await this.#repository.deviceSync.nextObservationGeneration();
+      await this.#repository.deviceSync.startRepairBarrier({
+        generation,
+        reason: "device_manifest_target_occupied",
+      });
+    } catch {
+      // An already-active barrier already carries the required repair obligation.
+    }
   }
 
   async #scheduleRetry(

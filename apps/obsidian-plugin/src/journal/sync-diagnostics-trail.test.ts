@@ -781,6 +781,11 @@ describe("sync diagnostics trail startup_failure entries (closed-reason surfacin
       "automatic_snapshot_admission_failed",
       "lifecycle_reconcile_persist_failed",
       "restore_reservation_persist_failed",
+      "pending_rename_intent_read_failed",
+      "pending_rename_intent_persist_failed",
+      "pending_rename_intent_conflict",
+      "pending_rename_intent_exhausted",
+      "pending_rename_intent_lifecycle_rejected",
     ]);
   });
 

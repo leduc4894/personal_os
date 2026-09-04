@@ -38,7 +38,11 @@
  */
 
 import type { JournalEvent, JournalEventState, JournalSafeErrorLabel, LocalFile } from "./contracts";
-import { JOURNAL_SAFE_ERROR_LABELS, MAX_FILE_SIZE_BYTES } from "./contracts";
+import {
+  FILE_SETTLE_DELAY_MS,
+  JOURNAL_SAFE_ERROR_LABELS,
+  MAX_FILE_SIZE_BYTES,
+} from "./contracts";
 import { deriveFrozenFingerprint } from "./fingerprint";
 import type { LifecycleDriver, LifecycleRunOutcome } from "./lifecycle-driver";
 import { MultipartUploadRunner } from "./multipart-upload";
@@ -812,18 +816,10 @@ export class JournalQueueDriver {
             correlationId,
           );
         case "committed_replay":
-          await this.#repository.recordCommittedReceipt({
-            eventId: event.eventId,
-            sourceId: outcome.receipt.sourceId,
-            baseVersionId: outcome.receipt.sourceVersionId,
-          });
+          await this.#persistCommittedReceipt(event.eventId, outcome.receipt);
           return "continue";
         case "no_change":
-          await this.#repository.recordNoChangeReceipt({
-            eventId: event.eventId,
-            sourceId: outcome.receipt.sourceId,
-            baseVersionId: outcome.receipt.sourceVersionId,
-          });
+          await this.#persistNoChangeReceipt(event.eventId, outcome.receipt);
           return "continue";
         case "single_part_upload":
           return await this.#streamContent(event, outcome.operationId, passDeadlineEpochMs, refreshBudget, correlationId);
@@ -953,11 +949,7 @@ export class JournalQueueDriver {
         await this.#persistCommittedReceipt(event.eventId, outcome.receipt);
         return "continue";
       case "no_change":
-        await this.#repository.recordNoChangeReceipt({
-          eventId: event.eventId,
-          sourceId: outcome.receipt.sourceId,
-          baseVersionId: outcome.receipt.sourceVersionId,
-        });
+        await this.#persistNoChangeReceipt(event.eventId, outcome.receipt);
         return "continue";
       case "local_content_changed":
         // The frozen file changed under the open session (child 7 spec
@@ -973,8 +965,7 @@ export class JournalQueueDriver {
         );
         return "continue";
       case "local_file_missing":
-        await this.#closeTerminal(event.eventId, "deferred_lifecycle", "deferred_lifecycle", correlationId);
-        return "continue";
+        return this.#handleIntentAwareLocalFileMissing(event.eventId, correlationId);
       case "pass_deadline_reached":
         return "end_deadline_boundary";
     }
@@ -1060,7 +1051,7 @@ export class JournalQueueDriver {
     if (localFile === null) {
       return;
     }
-    const contentBytes = await this.#fileBytesReader.readRegularFileBytes(localFile.normalizedPath);
+    const contentBytes = await this.#readIntentAwareContentBytes(event, localFile);
     if (contentBytes === null) {
       return;
     }
@@ -1101,13 +1092,11 @@ export class JournalQueueDriver {
 
     const localFile = this.#repository.readLocalFileByLocalFileId(event.localFileId);
     if (localFile === null) {
-      await this.#closeTerminal(event.eventId, "deferred_lifecycle", "deferred_lifecycle", correlationId);
-      return "continue";
+      return this.#handleIntentAwareLocalFileMissing(event.eventId, correlationId);
     }
-    const contentBytes = await this.#fileBytesReader.readRegularFileBytes(localFile.normalizedPath);
+    const contentBytes = await this.#readIntentAwareContentBytes(event, localFile);
     if (contentBytes === null) {
-      await this.#closeTerminal(event.eventId, "deferred_lifecycle", "deferred_lifecycle", correlationId);
-      return "continue";
+      return this.#handleIntentAwareLocalFileMissing(event.eventId, correlationId);
     }
     if (contentBytes.byteLength > MAX_FILE_SIZE_BYTES) {
       await this.#closeTerminal(event.eventId, "blocked_size", "blocked_size", correlationId);
@@ -1249,6 +1238,22 @@ export class JournalQueueDriver {
     return localFile;
   }
 
+  /**
+   * Read bytes from the latest durable rename endpoint when this content
+   * event's owner has an unresolved chain. Preflight intentionally keeps
+   * using the local row's prior locator, preserving its frozen operation
+   * identity; only the local byte read follows the user's latest move.
+   */
+  async #readIntentAwareContentBytes(
+    event: JournalEvent,
+    localFile: LocalFile,
+  ): Promise<Uint8Array | null> {
+    const intent = this.#repository.lifecycle.readPendingRenameIntentForLocalFile(
+      event.localFileId,
+    );
+    return this.#fileBytesReader.readRegularFileBytes(intent?.currentPath ?? localFile.normalizedPath);
+  }
+
   #isPastDeadline(passDeadlineEpochMs: number): boolean {
     return this.#nowEpochMs() >= passDeadlineEpochMs;
   }
@@ -1290,20 +1295,8 @@ export class JournalQueueDriver {
         // terminally so the queue moves on instead of retrying a verdict
         // that can never succeed.
         await this.#closeTerminal(eventId, "blocked_conflict", "blocked_conflict", correlationId);
-        // Barrier parity with the inbound apply lanes: the same conflict on
-        // the inbound path freezes observation and requires reconciliation,
-        // so the outbound lane must not keep uploading into a claim it
-        // cannot see.
-        try {
-          const generation = await this.#repository.deviceSync.nextObservationGeneration();
-          await this.#repository.deviceSync.startRepairBarrier({
-            generation,
-            reason: "device_manifest_target_occupied",
-          });
-        } catch {
-          // A barrier or active manifest run already exists: a repair is
-          // already owed — nothing to raise.
-        }
+        // #closeTerminal starts the single repair barrier for every terminal
+        // conflict, including preflight and captured-candidate paths.
         return "continue";
       }
       case "integrity_failed":
@@ -1331,6 +1324,49 @@ export class JournalQueueDriver {
         await this.#scheduleRetry(eventId, safeError, correlationId);
         return "end_retry_scheduled";
       }
+    }
+  }
+
+  /**
+   * Route a vanished current endpoint through the one serialized intent-aware
+   * resolver. The resolver owns audit/counter/event mutations; this driver
+   * owns exactly one post-commit diagnostic and repair-barrier request.
+   */
+  async #handleIntentAwareLocalFileMissing(
+    eventId: string,
+    correlationId: string,
+  ): Promise<PassContinuation> {
+    const resolution = await this.#repository.resolveIntentAwareLocalFileMissing({
+      eventId,
+      attemptedAtEpochMs: this.#nowEpochMs(),
+      requestCorrelationId: correlationId,
+      nextEligibleRetryEpochMs: this.#nowEpochMs() + FILE_SETTLE_DELAY_MS,
+    });
+    switch (resolution.outcome) {
+      case "waiting_for_rename":
+        return "end_retry_scheduled";
+      case "closed_deferred_lifecycle":
+        return "continue";
+      case "reconcile_takeover":
+        void this.#diagnosticTrail?.append({
+          kind: "journal_failure",
+          tokens: [resolution.diagnosticReason],
+        });
+        await this.#startRepairBarrier();
+        return "continue";
+    }
+  }
+
+  /** Start or retain the existing device repair barrier after a terminal ownership handoff. */
+  async #startRepairBarrier(): Promise<void> {
+    try {
+      const generation = await this.#repository.deviceSync.nextObservationGeneration();
+      await this.#repository.deviceSync.startRepairBarrier({
+        generation,
+        reason: "device_manifest_target_occupied",
+      });
+    } catch {
+      // A barrier or active manifest run already exists: a repair is already owed.
     }
   }
 
@@ -1437,13 +1473,20 @@ export class JournalQueueDriver {
     safeError: JournalSafeErrorLabel,
     correlationId: string,
   ): Promise<void> {
-    await this.#repository.recordEventAttempt({
+    await this.#repository.resolveIntentAwareContentTerminal({
       eventId,
+      terminalState,
+      safeError,
       attemptedAtEpochMs: this.#nowEpochMs(),
-      outcomeLabel: safeError,
       requestCorrelationId: correlationId,
     });
-    await this.#repository.markEventTerminal(eventId, terminalState, safeError);
+    if (terminalState === "blocked_conflict") {
+      // A terminal outbound conflict means manifest reconciliation owns the
+      // locator truth. This remains mandatory whether the owner resolver
+      // preserved an identity-bearing chain or reparents its final
+      // identity-less content event.
+      await this.#startRepairBarrier();
+    }
   }
 
   async #persistCommittedReceipt(
@@ -1455,5 +1498,30 @@ export class JournalQueueDriver {
       sourceId: receipt.sourceId,
       baseVersionId: receipt.sourceVersionId,
     });
+    await this.#materializePendingRenameAfterContentReceipt(eventId);
+  }
+
+  async #persistNoChangeReceipt(
+    eventId: string,
+    receipt: SmallFileTerminalReceipt,
+  ): Promise<void> {
+    await this.#repository.recordNoChangeReceipt({
+      eventId,
+      sourceId: receipt.sourceId,
+      baseVersionId: receipt.sourceVersionId,
+    });
+    await this.#materializePendingRenameAfterContentReceipt(eventId);
+  }
+
+  /** Materialize the current durable rename endpoints only after identity receipt lands. */
+  async #materializePendingRenameAfterContentReceipt(eventId: string): Promise<void> {
+    const event = this.#repository.readEvent(eventId);
+    if (event === null || (event.operation !== "create" && event.operation !== "update")) {
+      return;
+    }
+    await this.#repository.lifecycle.recordPendingRenameLifecycleEvent(
+      event.localFileId,
+      event.fingerprint,
+    );
   }
 }

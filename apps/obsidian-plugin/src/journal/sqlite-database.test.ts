@@ -4,12 +4,15 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import type { JournalMeta } from "./contracts";
 import {
+  CONFLICT_REPAIR_SCHEMA_VERSION,
   DEVICE_SYNC_SCHEMA_VERSION,
   JOURNAL_SCHEMA_VERSION,
   JournalStoreError,
   SqliteDatabase,
+  downgradePendingRenameIntentJournalToConflictRepairSchemaForTest,
   migrateDeviceSyncJournalToMultipartProgressSchema,
   migrateMultipartProgressJournalToConflictRepairSchema,
+  migrateConflictRepairJournalToPendingRenameIntentSchema,
 } from "./sqlite-database";
 import type { SqliteEngineModule } from "./sqlite-database";
 
@@ -255,6 +258,204 @@ describe("SqliteDatabase device-sync schema v7 (task 8, spec 8)", () => {
   });
 });
 
+// --- pending rename intent schema v10 -----------------------------------------------------------
+
+describe("SqliteDatabase pending rename intent schema v10", () => {
+  it("creates the intent, current-endpoint index, and bounded deferral table on a fresh journal", () => {
+    const database = SqliteDatabase.createEmpty(engineModule, createJournalMeta());
+    try {
+      expect(database.readSchemaVersion()).toBe(10);
+      const tables = database.readAll(
+        "select name from sqlite_master where type = 'table' order by name;",
+      );
+      const tableNames = (tables[0]?.values ?? []).map((row) => String(row[0]));
+      expect(tableNames).toContain("pending_rename_intents");
+      expect(tableNames).toContain("pending_rename_intent_missing_file_deferrals");
+
+      const intentColumns = (
+        database.readAll("pragma table_info(pending_rename_intents);")[0]?.values ?? []
+      ).map((row) => String(row[1]));
+      expect(intentColumns).toEqual(["local_file_id", "prior_path", "current_path"]);
+
+      const deferralColumns = (
+        database.readAll(
+          "pragma table_info(pending_rename_intent_missing_file_deferrals);",
+        )[0]?.values ?? []
+      ).map((row) => String(row[1]));
+      expect(deferralColumns).toEqual([
+        "local_file_id",
+        "event_id",
+        "deferred_attempt_count",
+      ]);
+
+      const indexes = database.readAll(
+        "select name from sqlite_master where type = 'index' order by name;",
+      );
+      expect((indexes[0]?.values ?? []).map((row) => String(row[0]))).toContain(
+        "pending_rename_intents_current_path_uq",
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  function createSeededV9Image(): Uint8Array {
+    const database = SqliteDatabase.createEmpty(engineModule, createJournalMeta());
+    const currentImage = database.exportImage();
+    database.close();
+    const engine = new engineModule.Database(currentImage);
+    try {
+      engine.exec("begin immediate;");
+      engine.exec("drop table pending_rename_intent_missing_file_deferrals;");
+      engine.exec("drop index pending_rename_intents_current_path_uq;");
+      engine.exec("drop table pending_rename_intents;");
+      engine.exec(
+        `update journal_meta set schema_version = ${CONFLICT_REPAIR_SCHEMA_VERSION} where singleton_key = 1;`,
+      );
+      engine.exec(`pragma user_version = ${CONFLICT_REPAIR_SCHEMA_VERSION};`);
+      engine.exec(
+        [
+          "insert into local_files (local_file_id, normalized_path, source_id,",
+          "observed_sha256, observed_size_bytes, observed_media_type, base_version_id,",
+          "policy_revision) values ('12121212-1212-4121-8121-121212121212',",
+          "'notes/preserved.md', null,",
+          `'${"a".repeat(64)}', 9, 'text/markdown', null, 7);`,
+        ].join(" "),
+      );
+      engine.exec("commit;");
+      return engine.export();
+    } finally {
+      engine.close();
+    }
+  }
+
+  it("migrates v9 to v10 without changing any predecessor row", () => {
+    const migratedImage = migrateConflictRepairJournalToPendingRenameIntentSchema(
+      engineModule,
+      createSeededV9Image(),
+    );
+    const database = SqliteDatabase.openFromImage(engineModule, migratedImage);
+    try {
+      expect(database.readSchemaVersion()).toBe(10);
+      expect(
+        database.readAll(
+          "select normalized_path, observed_sha256, observed_size_bytes, policy_revision from local_files;",
+        )[0]?.values[0],
+      ).toEqual(["notes/preserved.md", "a".repeat(64), 9, 7]);
+      expect(
+        database.readAll("select count(*) from pending_rename_intents;")[0]?.values[0]?.[0],
+      ).toBe(0);
+      expect(
+        database.readAll(
+          "select count(*) from pending_rename_intent_missing_file_deferrals;",
+        )[0]?.values[0]?.[0],
+      ).toBe(0);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rejects a torn or already-current predecessor without mutating the input image", () => {
+    const sourceImage = createSeededV9Image();
+    const tornEngine = new engineModule.Database(sourceImage);
+    tornEngine.exec("drop table conflict_local_repairs;");
+    const tornImage = tornEngine.export();
+    tornEngine.close();
+
+    expect(() =>
+      migrateConflictRepairJournalToPendingRenameIntentSchema(engineModule, tornImage),
+    ).toThrowError(expect.objectContaining({ reason: "journal_image_invalid" }));
+
+    const migrated = migrateConflictRepairJournalToPendingRenameIntentSchema(
+      engineModule,
+      sourceImage,
+    );
+    expect(() =>
+      migrateConflictRepairJournalToPendingRenameIntentSchema(engineModule, migrated),
+    ).toThrowError(expect.objectContaining({ reason: "journal_schema_unsupported" }));
+    const sourceProbe = new engineModule.Database(sourceImage);
+    expect(sourceProbe.exec("pragma user_version;")[0]?.values[0]?.[0]).toBe(9);
+    sourceProbe.close();
+  });
+
+  it("round-trips an empty v10 image through the guarded v9 test downgrade", () => {
+    const database = SqliteDatabase.createEmpty(engineModule, createJournalMeta());
+    const v10Image = database.exportImage();
+    database.close();
+
+    const v9Image = downgradePendingRenameIntentJournalToConflictRepairSchemaForTest(
+      engineModule,
+      v10Image,
+    );
+    const v9Probe = new engineModule.Database(v9Image);
+    expect(v9Probe.exec("pragma user_version;")[0]?.values[0]?.[0]).toBe(9);
+    expect(
+      v9Probe.exec(
+        "select name from sqlite_master where name like 'pending_rename_intent%';",
+      )[0]?.values ?? [],
+    ).toHaveLength(0);
+    v9Probe.close();
+
+    const reopened = SqliteDatabase.openFromImage(
+      engineModule,
+      migrateConflictRepairJournalToPendingRenameIntentSchema(engineModule, v9Image),
+    );
+    expect(reopened.readSchemaVersion()).toBe(10);
+    reopened.close();
+  });
+
+  it("refuses a v10 downgrade when either pending-rename table is non-empty", () => {
+    const makeImage = (includeDeferral: boolean): Uint8Array => {
+      const database = SqliteDatabase.createEmpty(engineModule, createJournalMeta());
+      database.readAll(
+        [
+          "insert into local_files (local_file_id, normalized_path, source_id,",
+          "observed_sha256, observed_size_bytes, observed_media_type, base_version_id,",
+          "policy_revision) values ('12121212-1212-4121-8121-121212121212',",
+          "'notes/prior.md', null,",
+          `'${"b".repeat(64)}', 9, 'text/markdown', null, 7);`,
+        ].join(" "),
+      );
+      database.readAll(
+        "insert into pending_rename_intents (local_file_id, prior_path, current_path) values ('12121212-1212-4121-8121-121212121212', 'notes/prior.md', 'notes/current.md');",
+      );
+      if (includeDeferral) {
+        database.readAll(
+          [
+            "insert into journal_events (event_id, local_file_id, idempotency_key, operation,",
+            "sha256, size_bytes, media_type, state, is_fingerprint_frozen, attempt_count,",
+            "safe_error, created_at_epoch_ms) values",
+            "('56565656-5656-4565-8565-565656565656',",
+            "'12121212-1212-4121-8121-121212121212',",
+            "'67676767-6767-4676-8676-676767676767', 'create',",
+            `'${"b".repeat(64)}', 9, 'text/markdown', 'waiting_retry', 1, 1,`,
+            "'deferred_lifecycle', 1784000000000);",
+          ].join(" "),
+        );
+        database.readAll(
+          "insert into pending_rename_intent_missing_file_deferrals (local_file_id, event_id, deferred_attempt_count) values ('12121212-1212-4121-8121-121212121212', '56565656-5656-4565-8565-565656565656', 1);",
+        );
+      }
+      const image = database.exportImage();
+      database.close();
+      return image;
+    };
+
+    for (const includeDeferral of [false, true]) {
+      const image = makeImage(includeDeferral);
+      expect(() =>
+        downgradePendingRenameIntentJournalToConflictRepairSchemaForTest(
+          engineModule,
+          image,
+        ),
+      ).toThrowError(expect.objectContaining({ reason: "journal_mutation_failed" }));
+      const probe = new engineModule.Database(image);
+      expect(probe.exec("pragma user_version;")[0]?.values[0]?.[0]).toBe(10);
+      probe.close();
+    }
+  });
+});
+
 // --- conflict local repair schema v9 (task 7, Child 8 spec 5.2.6/6) -------------------------------
 
 describe("SqliteDatabase conflict local repair schema v9 (task 7, Child 8 spec 6)", () => {
@@ -347,12 +548,12 @@ describe("conflict local repair schema migration (v8 to v9)", () => {
       engineModule,
       createSeededV8Image(),
     );
-    const database = SqliteDatabase.openFromImage(engineModule, v9Image);
+    const database = new engineModule.Database(v9Image);
     try {
-      expect(database.readSchemaVersion()).toBe(9);
+      expect(database.exec("pragma user_version;")[0]?.values[0]?.[0]).toBe(9);
       // Seed one valid repair fact: sql.js answers a SELECT on an empty
       // table with no result set at all, so the column probe needs a row.
-      database.readAll(
+      database.exec(
         [
           "insert into conflict_local_repairs (conflict_id, resolution_event_id,",
           "target_action, safe_reason, attempt_count, next_eligible_retry_epoch_ms,",
@@ -361,7 +562,7 @@ describe("conflict local repair schema migration (v8 to v9)", () => {
           "'resolution_committed', 0, null, 1784000000000, 1784000000000);",
         ].join(" "),
       );
-      expect(database.readAll("select * from conflict_local_repairs;")[0]?.columns).not.toContain(
+      expect(database.exec("select * from conflict_local_repairs;")[0]?.columns).not.toContain(
         "bytes",
       );
     } finally {
@@ -374,10 +575,10 @@ describe("conflict local repair schema migration (v8 to v9)", () => {
       engineModule,
       createSeededV8Image(),
     );
-    const database = SqliteDatabase.openFromImage(engineModule, v9Image);
+    const database = new engineModule.Database(v9Image);
     try {
       const columns = (
-        database.readAll("pragma table_info(conflict_local_repairs);")[0]?.values ?? []
+        database.exec("pragma table_info(conflict_local_repairs);")[0]?.values ?? []
       ).map((row) => String(row[1]));
       expect(columns).toEqual([
         "conflict_id",
@@ -403,29 +604,26 @@ describe("conflict local repair schema migration (v8 to v9)", () => {
       engineModule,
       createSeededV8Image(),
     );
-    const database = SqliteDatabase.openFromImage(engineModule, v9Image);
+    const database = new engineModule.Database(v9Image);
     try {
-      expect(database.readSchemaVersion()).toBe(9);
-      expect(database.readJournalMeta()).toEqual(
-        createJournalMeta({
-          schemaVersion: 9,
-          dirtyGeneration: 6,
-          lastVerifiedGeneration: 6,
-          recoveryState: "verified_generation_loaded",
-        }),
-      );
+      expect(database.exec("pragma user_version;")[0]?.values[0]?.[0]).toBe(9);
+      expect(
+        database.exec(
+          "select schema_version, dirty_generation, last_verified_generation, is_reconcile_required, recovery_state from journal_meta where singleton_key = 1;",
+        )[0]?.values[0],
+      ).toEqual([9, 6, 6, 0, "verified_generation_loaded"]);
 
-      const localFileRow = database.readAll(
+      const localFileRow = database.exec(
         ["select normalized_path, observed_sha256, observed_size_bytes, lifecycle_state", "from local_files", `where local_file_id = '${LOCAL_FILE_ID}';`].join(" "),
       )[0]?.values[0];
       expect(localFileRow).toEqual(["notes/asset.bin", "b".repeat(64), 1024, "active"]);
 
-      const eventRow = database.readAll(
+      const eventRow = database.exec(
         ["select operation, state, attempt_count from journal_events", `where event_id = '${EVENT_ID}';`].join(" "),
       )[0]?.values[0];
       expect(eventRow).toEqual(["update", "committed", 2]);
 
-      const progressRow = database.readAll(
+      const progressRow = database.exec(
         ["select session_id, session_state from multipart_upload_progress", `where event_id = '${EVENT_ID}';`].join(" "),
       )[0]?.values[0];
       expect(progressRow).toEqual([SESSION_ID, "committed"]);
@@ -439,9 +637,9 @@ describe("conflict local repair schema migration (v8 to v9)", () => {
       engineModule,
       createSeededV8Image(),
     );
-    const database = SqliteDatabase.openFromImage(engineModule, v9Image);
+    const database = new engineModule.Database(v9Image);
     try {
-      const repairRowCount = database.readAll(
+      const repairRowCount = database.exec(
         "select count(*) from conflict_local_repairs;",
       )[0]?.values[0]?.[0];
       expect(repairRowCount).toBe(0);
@@ -466,8 +664,12 @@ describe("conflict local repair schema migration (v8 to v9)", () => {
 
   it("rejects an already-v9 image as a migration source", () => {
     const database = SqliteDatabase.createEmpty(engineModule, createJournalMeta());
-    const v9Image = database.exportImage();
+    const v10Image = database.exportImage();
     database.close();
+    const v9Image = downgradePendingRenameIntentJournalToConflictRepairSchemaForTest(
+      engineModule,
+      v10Image,
+    );
 
     expect(() =>
       migrateMultipartProgressJournalToConflictRepairSchema(engineModule, v9Image),

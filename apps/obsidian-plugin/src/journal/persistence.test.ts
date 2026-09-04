@@ -781,7 +781,7 @@ const V6_SEEDED_LOCAL_FILE_SQL = [
 async function writeVerifiedOlderStore(
   store: InMemoryJournalFileStore,
   options: {
-    readonly schemaVersion: 6 | 7 | 8;
+    readonly schemaVersion: 6 | 7 | 8 | 9;
     readonly isReconcileRequired: boolean;
     readonly isMigrationBroken?: boolean;
   },
@@ -793,8 +793,13 @@ async function writeVerifiedOlderStore(
   const engine = new engineModule.Database(currentImage);
   try {
     engine.exec("begin immediate;");
-    engine.exec("drop table conflict_local_repairs;");
-    if (options.schemaVersion !== 8) {
+    engine.exec("drop table pending_rename_intent_missing_file_deferrals;");
+    engine.exec("drop index pending_rename_intents_current_path_uq;");
+    engine.exec("drop table pending_rename_intents;");
+    if (options.schemaVersion !== 9) {
+      engine.exec("drop table conflict_local_repairs;");
+    }
+    if (options.schemaVersion !== 8 && options.schemaVersion !== 9) {
       // Only a pre-v8 lineage lacks the multipart progress table.
       engine.exec("drop table multipart_upload_progress;");
     }
@@ -841,6 +846,61 @@ async function writeVerifiedOlderStore(
     engine.close();
   }
 }
+
+describe("JournalPersistence v9 to v10 pending-rename migration", () => {
+  it("migrates a verified v9 generation, preserves predecessor rows, and publishes v10", async () => {
+    const store = new InMemoryJournalFileStore();
+    await writeVerifiedOlderStore(store, {
+      schemaVersion: 9,
+      isReconcileRequired: false,
+    });
+
+    const journal = await openedPersistence(store);
+    try {
+      expect(journal.verifiedGenerationNumber).toBe(2);
+      expect(journal.readJournalMeta().schemaVersion).toBe(10);
+      expect(
+        journal.readAll("select normalized_path from local_files;")[0]?.values[0]?.[0],
+      ).toBe("notes/kept.md");
+      expect(
+        journal.readAll("select count(*) from pending_rename_intents;")[0]?.values[0]?.[0],
+      ).toBe(0);
+      expect(
+        journal.readAll(
+          "select count(*) from pending_rename_intent_missing_file_deferrals;",
+        )[0]?.values[0]?.[0],
+      ).toBe(0);
+      const manifest = await readManifest(store);
+      expect(manifest.current).toMatchObject({ generationNumber: 2, schemaVersion: 10 });
+      expect(manifest.prior).toMatchObject({ generationNumber: 1, schemaVersion: 9 });
+    } finally {
+      journal.close();
+    }
+  });
+
+  it("rebuilds reconcile-first with no owner, intent, or deferral rows", async () => {
+    const store = new InMemoryJournalFileStore();
+    await store.writeBinary(
+      JOURNAL_MANIFEST_FILE_NAME,
+      new TextEncoder().encode("invalid manifest").buffer as ArrayBuffer,
+    );
+
+    const journal = await openedPersistence(store);
+    try {
+      expect(journal.recoveryState).toBe("empty_journal_rebuilt");
+      expect(journal.isReconcileRequired).toBe(true);
+      for (const table of [
+        "local_files",
+        "pending_rename_intents",
+        "pending_rename_intent_missing_file_deferrals",
+      ]) {
+        expect(journal.readAll(`select count(*) from ${table};`)[0]?.values[0]?.[0]).toBe(0);
+      }
+    } finally {
+      journal.close();
+    }
+  });
+});
 
 /**
  * Turn a freshly opened store into a verified v6 store: the generation-1

@@ -299,6 +299,7 @@ interface JourneyHarness {
   readonly store: InMemoryJournalFileStore;
   readonly vault: WatcherVault;
   readonly capture: JournalCapture;
+  restartLifecycleCapture(): Promise<void>;
   advanceClock: (milliseconds: number) => void;
 }
 
@@ -369,12 +370,14 @@ async function createJourneyHarness(): Promise<JourneyHarness> {
   const persistence = new JournalPersistence({ fileStore: store, engineModule });
   await persistence.open();
   const repository = bindRepository(persistence, shared);
-  const lifecycle = new LifecycleCaptureImpl({
-    repository,
-    lifecycle: repository.lifecycle,
-    vaultReader: vault,
-    policyRevision: 2,
-  });
+  const createLifecycleCapture = () =>
+    new LifecycleCaptureImpl({
+      repository,
+      lifecycle: repository.lifecycle,
+      vaultReader: vault,
+      policyRevision: 2,
+    });
+  let lifecycle = createLifecycleCapture();
   const capture = new JournalCapture({
     repository,
     vaultReader: vault,
@@ -459,6 +462,11 @@ async function createJourneyHarness(): Promise<JourneyHarness> {
     store,
     vault,
     capture,
+    restartLifecycleCapture: async () => {
+      lifecycle.dispose();
+      lifecycle = createLifecycleCapture();
+      await lifecycle.resumePendingRenameIntents();
+    },
     advanceClock: (milliseconds) => {
       shared.clockMs += milliseconds;
     },
@@ -518,7 +526,7 @@ async function corruptFirstByte(
 // --- the journeys ---------------------------------------------------------------------------
 
 describe("journal sync journeys over the durable stack", () => {
-  it("RED: loses a create-move-rename burst as an old canonical plus an untracked blocked final path", async () => {
+  it("converges a create-move-rename burst through one durable pending rename chain", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       const harness = await createJourneyHarness();
@@ -541,32 +549,29 @@ describe("journal sync journeys over the durable stack", () => {
       let moveObservation: Promise<void> | null = null;
       let renameObservation: Promise<void> | null = null;
       const raceOrder: string[] = [];
+      let canonicalE1WasAtOriginalLocator = false;
       let resolveCommittedE1!: (terminal: FrozenTerminal) => void;
       const committedE1Receipt = new Promise<FrozenTerminal>((resolve) => {
         resolveCommittedE1 = resolve;
       });
-      const markEventTerminal = harness.repository.markEventTerminal.bind(harness.repository);
-      vi.spyOn(harness.repository, "markEventTerminal").mockImplementation(
-        async (eventId, terminalState, safeError) => {
-          if (
-            eventId === createEvent.eventId &&
-            terminalState === "deferred_lifecycle" &&
-            safeError === "deferred_lifecycle"
-          ) {
-            // This seam is inside QueueDriver.#closeTerminal, before its
-            // durable mutation resolves. It is not a post-pass observation.
-            raceOrder.push("e1_terminalizing_local_file_missing");
-          }
-          await markEventTerminal(eventId, terminalState, safeError);
-        },
-      );
+      const recordCommittedReceipt = harness.repository.recordCommittedReceipt.bind(harness.repository);
+      vi.spyOn(harness.repository, "recordCommittedReceipt").mockImplementation(async (input) => {
+        if (input.eventId === createEvent.eventId) {
+          // This is the durable client-receipt seam, not a post-pass
+          // observation. The server's exact E1 commit must already exist.
+          raceOrder.push("e1_receipting_after_server_commit");
+        }
+        await recordCommittedReceipt(input);
+      });
 
       harness.server.onPreflight = async ({ operationId }) => {
         // This is E1's actual reserved wire operation. Its server-side
-        // content commit lands before the subsequent client read observes
-        // the vanished old locator and terminalizes E1 locally.
+        // content commit lands before the subsequent client read follows the
+        // durable rename chain to the final locator and records E1's receipt.
         resolveCommittedE1(await harness.server.commitReservedContent(operationId, bytes));
         raceOrder.push("server_committed_e1");
+        canonicalE1WasAtOriginalLocator =
+          harness.server.canonicalSourcesByLocator.get(oldPath) !== undefined;
         harness.vault.moveFile(oldPath, intermediatePath);
         moveObservation = harness.capture.notifyPathRenamed(
           { path: intermediatePath, parent: { path: "journey-b" } },
@@ -580,51 +585,49 @@ describe("journal sync journeys over the durable stack", () => {
           { path: finalPath, parent: { path: "journey-b" } },
           intermediatePath,
         );
-        // The second observation arrives before E1 can close; its prior
-        // misses, then its same-tail admission mints R2 at the final path.
+        // The second observation arrives before E1 can receive its receipt.
+        // Its prior resolves through the durable intent's current endpoint.
+        await vi.advanceTimersByTimeAsync(300);
+
+        // Simulate the lifecycle component restarting after the composed
+        // A -> B -> C observation but before E1 can persist its exact
+        // receipt. The replacement enumerates durable intent state rather
+        // than inheriting an in-memory endpoint or timer.
+        await harness.restartLifecycleCapture();
         await vi.advanceTimersByTimeAsync(300);
       };
 
       await harness.driver.runPass();
       const committedE1 = await committedE1Receipt;
-      const closedE1 = harness.repository.readEvent(createEvent.eventId);
-      expect(closedE1?.state).toBe("deferred_lifecycle");
-      expect(closedE1?.safeError).toBe("deferred_lifecycle");
-      expect(harness.repository.readEventAttemptHistory(createEvent.eventId)).toEqual([
-        expect.objectContaining({ outcomeLabel: "deferred_lifecycle" }),
-      ]);
+      const receivedE1 = harness.repository.readEvent(createEvent.eventId);
+      expect(receivedE1?.state).toBe("committed");
+      expect(receivedE1?.safeError).toBeNull();
+      expect(harness.repository.readEventAttemptHistory(createEvent.eventId)).toEqual([]);
       expect(
         harness.server.identityTerminals.get(`${createEvent.eventId}:${createEvent.idempotencyKey}`),
       ).toEqual(committedE1);
-      expect(harness.server.canonicalSourcesByLocator.get(oldPath)).toEqual(committedE1);
+      expect(canonicalE1WasAtOriginalLocator).toBe(true);
       expect(raceOrder).toEqual([
         "server_committed_e1",
-        "e1_terminalizing_local_file_missing",
+        "e1_receipting_after_server_commit",
       ]);
-      // The re-armed move finally observes E1's terminal close and applies
-      // the current uncommitted-transit heal, removing R1's old mapping.
+      // The re-armed owner sees the durable E1 receipt, materializes the
+      // immutable A -> C lifecycle prefix, then the next queue pass commits
+      // that prefix against the canonical E1 source.
       await vi.advanceTimersByTimeAsync(300);
       await Promise.all([moveObservation, renameObservation]);
+      await harness.driver.runPass();
 
-      // Today's loss shape is deliberately asserted before the desired
-      // composed outcome: one canonical source is stale at the old locator;
-      // the final locator carries a new, untracked conflict row; the journal
-      // never trips its global health flag.
-      expect(harness.server.canonicalSourcesByLocator.has(oldPath)).toBe(true);
-      expect(harness.server.canonicalSourcesByLocator.has(finalPath)).toBe(false);
+      expect(harness.server.canonicalSourcesByLocator.has(oldPath)).toBe(false);
+      expect(harness.server.canonicalSourcesByLocator.has(finalPath)).toBe(true);
       expect(harness.repository.readLocalFileByPath(oldPath)).toBeNull();
       const finalFile = localFileOf(harness, finalPath);
-      expect(finalFile.sourceId).toBeNull();
+      expect(finalFile.sourceId).toBe(committedE1.sourceId);
       expect(eventsOfPath(harness, finalPath).map((event) => event.state)).toEqual([
-        "blocked_conflict",
+        "committed",
+        "committed",
       ]);
       expect(harness.persistence.readJournalMeta().isReconcileRequired).toBe(false);
-
-      // The RED contract for Task 3: the one source that E1 committed must
-      // instead finish tracked at the user's final locator. Keeping this
-      // assertion failing is intentional until durable rename composition
-      // exists; the preceding assertions prove the live loss, not a relaxed
-      // surrogate journey.
       expect({
         canonicalAtFinal: harness.server.canonicalSourcesByLocator.has(finalPath),
         canonicalAtOld: harness.server.canonicalSourcesByLocator.has(oldPath),

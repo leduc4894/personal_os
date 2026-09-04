@@ -155,6 +155,26 @@ export interface JournalAttemptInput {
   readonly requestCorrelationId: string;
 }
 
+/** The separately bounded retry budget for an intent-owned vanished file. */
+export const PENDING_RENAME_MISSING_FILE_MAX_DEFERRALS = 40;
+
+/** The committed outcome of the intent-aware missing-file transaction. */
+export type IntentAwareLocalFileMissingResolution =
+  | { readonly outcome: "waiting_for_rename" }
+  | {
+      readonly outcome: "reconcile_takeover";
+      readonly diagnosticReason:
+        | "pending_rename_intent_conflict"
+        | "pending_rename_intent_exhausted";
+    }
+  | { readonly outcome: "closed_deferred_lifecycle" };
+
+/** The generic content-terminal owner decision committed with its audit. */
+export type IntentAwareContentTerminalResolution =
+  | "intent_preserved"
+  | "intent_reparented"
+  | "no_intent";
+
 /**
  * One redacted histogram row of the status projection (spec 11): a closed
  * event state, the closed safe error label its rows carry (null for none)
@@ -756,6 +776,15 @@ export class JournalRepository {
     return this.#lifecycle;
   }
 
+  /** The current byte-read endpoint of this content owner's durable rename chain. */
+  readPendingRenameIntentForLocalFile(localFileId: string): {
+    readonly localFileId: string;
+    readonly priorPath: string;
+    readonly currentPath: string;
+  } | null {
+    return this.#lifecycle.readPendingRenameIntentForLocalFile(localFileId);
+  }
+
   /**
    * The device-sync reconciliation repository (task 8) wired against the
    * same writer: cursor, barrier, manifest progress, remote apply and
@@ -1122,6 +1151,201 @@ export class JournalRepository {
       session.exec(
         `delete from multipart_upload_progress where event_id = ${sqlText(eventId)};`,
       );
+      session.exec(
+        `delete from pending_rename_intent_missing_file_deferrals where event_id = ${sqlText(eventId)};`,
+      );
+    });
+  }
+
+  /**
+   * Atomically park or close a content event whose current rename endpoint
+   * disappeared. A durable intent keeps the identity-establishing event
+   * retryable through forty accepted parks; the next matching call transfers
+   * locator ownership to reconciliation. A counter bound to another event is
+   * an invariant failure and takes that same reconciliation exit before any
+   * increment or cutoff evaluation.
+   */
+  async resolveIntentAwareLocalFileMissing(input: {
+    readonly eventId: string;
+    readonly attemptedAtEpochMs: number;
+    readonly requestCorrelationId: string;
+    readonly nextEligibleRetryEpochMs: number;
+  }): Promise<IntentAwareLocalFileMissingResolution> {
+    this.#validateIntentAwareAttemptInput(input, "deferred_lifecycle");
+    return this.#database.runSerializedMutation((session) => {
+      const event = this.#requireEventRow((sql) => session.readRows(sql), input.eventId);
+      this.#requireNonTerminalEvent(event);
+      this.#requireContentEvent(event);
+      this.#recordAttemptInSession(session, {
+        eventId: input.eventId,
+        attemptedAtEpochMs: input.attemptedAtEpochMs,
+        outcomeLabel: "deferred_lifecycle",
+        requestCorrelationId: input.requestCorrelationId,
+      });
+
+      const intent = this.#readPendingRenameIntentInSession(session, event.localFileId);
+      if (intent === null) {
+        this.#closeContentEventInSession(
+          session,
+          event,
+          "deferred_lifecycle",
+          "deferred_lifecycle",
+        );
+        return { outcome: "closed_deferred_lifecycle" } as const;
+      }
+
+      const deferral = firstRow(
+        session.readRows(
+          [
+            "select event_id, deferred_attempt_count",
+            "from pending_rename_intent_missing_file_deferrals",
+            `where local_file_id = ${sqlText(event.localFileId)};`,
+          ].join(" "),
+        ),
+      );
+      if (deferral !== null) {
+        const [storedEventId, storedCount] = deferral;
+        if (
+          typeof storedEventId !== "string" ||
+          !isUuid(storedEventId) ||
+          typeof storedCount !== "number" ||
+          !Number.isInteger(storedCount) ||
+          storedCount < 1 ||
+          storedCount > PENDING_RENAME_MISSING_FILE_MAX_DEFERRALS
+        ) {
+          throw journalStoreError("journal_image_invalid");
+        }
+        if (storedEventId !== input.eventId) {
+          this.#closeContentEventInSession(
+            session,
+            event,
+            "deferred_lifecycle",
+            "deferred_lifecycle",
+          );
+          this.#reparentAndClearPendingRenameIntentInSession(session, event.localFileId, intent.currentPath, true);
+          return {
+            outcome: "reconcile_takeover",
+            diagnosticReason: "pending_rename_intent_conflict",
+          } as const;
+        }
+        if (storedCount === PENDING_RENAME_MISSING_FILE_MAX_DEFERRALS) {
+          this.#closeContentEventInSession(
+            session,
+            event,
+            "deferred_lifecycle",
+            "deferred_lifecycle",
+          );
+          this.#reparentAndClearPendingRenameIntentInSession(session, event.localFileId, intent.currentPath, true);
+          return {
+            outcome: "reconcile_takeover",
+            diagnosticReason: "pending_rename_intent_exhausted",
+          } as const;
+        }
+        session.exec(
+          [
+            "update pending_rename_intent_missing_file_deferrals set",
+            `deferred_attempt_count = ${storedCount + 1}`,
+            `where local_file_id = ${sqlText(event.localFileId)};`,
+          ].join(" "),
+        );
+      } else {
+        session.exec(
+          [
+            "insert into pending_rename_intent_missing_file_deferrals",
+            "(local_file_id, event_id, deferred_attempt_count) values (",
+            `${sqlText(event.localFileId)}, ${sqlText(event.eventId)}, 1);`,
+          ].join(" "),
+        );
+      }
+      session.exec(
+        [
+          "update journal_events set state = 'waiting_retry',",
+          "attempt_count = attempt_count + 1,",
+          `next_eligible_retry_epoch_ms = ${input.nextEligibleRetryEpochMs},`,
+          "safe_error = 'deferred_lifecycle'",
+          `where event_id = ${sqlText(event.eventId)};`,
+        ].join(" "),
+      );
+      return { outcome: "waiting_for_rename" } as const;
+    });
+  }
+
+  /**
+   * Close one content event through the owner-aware terminal exit. The
+   * attempt audit, terminal row, multipart/progress cleanup and intent
+   * decision share one serialized mutation; queue callers must not compose
+   * these writes themselves.
+   */
+  async resolveIntentAwareContentTerminal(input: {
+    readonly eventId: string;
+    readonly terminalState: JournalNonRetryEventState;
+    readonly safeError: JournalSafeErrorLabel;
+    readonly attemptedAtEpochMs: number;
+    readonly requestCorrelationId: string;
+  }): Promise<IntentAwareContentTerminalResolution> {
+    if (!isClosedToken(input.terminalState, JOURNAL_NON_RETRY_EVENT_STATES)) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    this.#validateIntentAwareAttemptInput(input, input.safeError);
+    return this.#database.runSerializedMutation((session) => {
+      const event = this.#requireEventRow((sql) => session.readRows(sql), input.eventId);
+      this.#requireNonTerminalEvent(event);
+      this.#requireContentEvent(event);
+      this.#recordAttemptInSession(session, {
+        eventId: input.eventId,
+        attemptedAtEpochMs: input.attemptedAtEpochMs,
+        outcomeLabel: input.safeError,
+        requestCorrelationId: input.requestCorrelationId,
+      });
+      this.#closeContentEventInSession(session, event, input.terminalState, input.safeError);
+
+      const intent = this.#readPendingRenameIntentInSession(session, event.localFileId);
+      if (intent === null) {
+        return "no_intent" as const;
+      }
+      const owner = firstRow(
+        session.readRows(
+          [
+            "select source_id, base_version_id from local_files",
+            `where local_file_id = ${sqlText(event.localFileId)};`,
+          ].join(" "),
+        ),
+      );
+      if (owner === null) {
+        throw journalStoreError("journal_image_invalid");
+      }
+      const [sourceId, baseVersionId] = owner;
+      if (
+        (sourceId !== null && typeof sourceId !== "string") ||
+        (baseVersionId !== null && typeof baseVersionId !== "string")
+      ) {
+        throw journalStoreError("journal_image_invalid");
+      }
+      const pendingSuccessor = firstRow(
+        session.readRows(
+          [
+            "select 1 from journal_events",
+            `where local_file_id = ${sqlText(event.localFileId)}`,
+            `and event_id <> ${sqlText(event.eventId)}`,
+            "and operation in ('create', 'update')",
+            "and state in ('queued', 'preflight', 'uploading', 'waiting_retry')",
+            "limit 1;",
+          ].join(" "),
+        ),
+      );
+      if (
+        (typeof sourceId === "string" && typeof baseVersionId === "string") ||
+        pendingSuccessor !== null
+      ) {
+        return "intent_preserved" as const;
+      }
+      this.#reparentAndClearPendingRenameIntentInSession(
+        session,
+        event.localFileId,
+        intent.currentPath,
+        false,
+      );
+      return "intent_reparented" as const;
     });
   }
 
@@ -1175,6 +1399,9 @@ export class JournalRepository {
           "and operation in ('create', 'update'));",
         ].join(" "),
       );
+      session.exec(
+        `delete from pending_rename_intent_missing_file_deferrals where local_file_id = ${sqlText(localFileId)};`,
+      );
     });
   }
 
@@ -1198,6 +1425,12 @@ export class JournalRepository {
       if (existing === null) {
         return;
       }
+      session.exec(
+        `delete from pending_rename_intent_missing_file_deferrals where local_file_id = ${sqlText(localFileId)};`,
+      );
+      session.exec(
+        `delete from pending_rename_intents where local_file_id = ${sqlText(localFileId)};`,
+      );
       session.exec(
         `delete from journal_attempts where event_id in (select event_id from journal_events where local_file_id = ${sqlText(localFileId)});`,
       );
@@ -1256,6 +1489,9 @@ export class JournalRepository {
         `delete from multipart_upload_progress where event_id = ${sqlText(input.eventId)};`,
       );
       session.exec(
+        `delete from pending_rename_intent_missing_file_deferrals where event_id = ${sqlText(input.eventId)};`,
+      );
+      session.exec(
         [
           "update local_files set",
           `source_id = ${sqlText(input.sourceId)},`,
@@ -1302,6 +1538,9 @@ export class JournalRepository {
       );
       session.exec(
         `delete from multipart_upload_progress where event_id = ${sqlText(input.eventId)};`,
+      );
+      session.exec(
+        `delete from pending_rename_intent_missing_file_deferrals where event_id = ${sqlText(input.eventId)};`,
       );
       session.exec(
         [
@@ -1842,6 +2081,142 @@ export class JournalRepository {
   }
 
   // --- internals ------------------------------------------------------------------------------------
+
+  #validateIntentAwareAttemptInput(
+    input: {
+      readonly eventId: string;
+      readonly attemptedAtEpochMs: number;
+      readonly requestCorrelationId: string;
+      readonly nextEligibleRetryEpochMs?: number;
+    },
+    outcomeLabel: JournalSafeErrorLabel,
+  ): void {
+    if (
+      !isUuid(input.eventId) ||
+      !isNonNegativeInteger(input.attemptedAtEpochMs) ||
+      !isClosedToken(outcomeLabel, JOURNAL_SAFE_ERROR_LABELS) ||
+      typeof input.requestCorrelationId !== "string" ||
+      input.requestCorrelationId.length === 0 ||
+      input.requestCorrelationId.length > MAX_REQUEST_CORRELATION_ID_LENGTH ||
+      (input.nextEligibleRetryEpochMs !== undefined &&
+        !isNonNegativeInteger(input.nextEligibleRetryEpochMs))
+    ) {
+      throw journalStoreError("journal_mutation_failed");
+    }
+    for (const character of input.requestCorrelationId) {
+      const codeUnit = character.charCodeAt(0);
+      if (codeUnit < 0x20 || codeUnit > 0x7e) {
+        throw journalStoreError("journal_mutation_failed");
+      }
+    }
+  }
+
+  #recordAttemptInSession(
+    session: SqliteMutationSession,
+    input: JournalAttemptInput,
+  ): void {
+    session.exec(
+      [
+        "insert into journal_attempts (event_id, attempted_at_epoch_ms, outcome_label,",
+        "request_correlation_id) values (",
+        `${sqlText(input.eventId)}, ${input.attemptedAtEpochMs},`,
+        `${sqlText(input.outcomeLabel)}, ${sqlText(input.requestCorrelationId)});`,
+      ].join(" "),
+    );
+    session.exec(
+      [
+        "delete from journal_attempts where event_id = ",
+        `${sqlText(input.eventId)} and attempt_ordinal not in (`,
+        "select attempt_ordinal from journal_attempts",
+        `where event_id = ${sqlText(input.eventId)}`,
+        `order by attempt_ordinal desc limit ${MAX_EVENT_ATTEMPT_HISTORY});`,
+      ].join(" "),
+    );
+  }
+
+  #requireContentEvent(event: StoredJournalEvent): void {
+    if (event.operation !== "create" && event.operation !== "update") {
+      throw journalStoreError("journal_mutation_failed");
+    }
+  }
+
+  #closeContentEventInSession(
+    session: SqliteMutationSession,
+    event: StoredJournalEvent,
+    terminalState: JournalNonRetryEventState,
+    safeError: JournalSafeErrorLabel,
+  ): void {
+    session.exec(
+      [
+        "update journal_events set",
+        `state = ${sqlText(terminalState)},`,
+        "next_eligible_retry_epoch_ms = null,",
+        `safe_error = ${sqlText(safeError)},`,
+        "is_fingerprint_frozen = 1",
+        `where event_id = ${sqlText(event.eventId)};`,
+      ].join(" "),
+    );
+    session.exec(
+      `delete from multipart_upload_progress where event_id = ${sqlText(event.eventId)};`,
+    );
+    session.exec(
+      `delete from pending_rename_intent_missing_file_deferrals where event_id = ${sqlText(event.eventId)};`,
+    );
+  }
+
+  #readPendingRenameIntentInSession(
+    session: SqliteMutationSession,
+    localFileId: string,
+  ): { readonly priorPath: string; readonly currentPath: string } | null {
+    const row = firstRow(
+      session.readRows(
+        [
+          "select prior_path, current_path from pending_rename_intents",
+          `where local_file_id = ${sqlText(localFileId)};`,
+        ].join(" "),
+      ),
+    );
+    if (row === null) {
+      return null;
+    }
+    const [priorPath, currentPath] = row;
+    if (
+      typeof priorPath !== "string" ||
+      priorPath.length === 0 ||
+      typeof currentPath !== "string" ||
+      currentPath.length === 0
+    ) {
+      throw journalStoreError("journal_image_invalid");
+    }
+    return { priorPath, currentPath };
+  }
+
+  #reparentAndClearPendingRenameIntentInSession(
+    session: SqliteMutationSession,
+    localFileId: string,
+    currentPath: string,
+    requiresReconciliation: boolean,
+  ): void {
+    session.exec(
+      `delete from pending_rename_intent_missing_file_deferrals where local_file_id = ${sqlText(localFileId)};`,
+    );
+    session.exec(
+      `delete from pending_rename_intents where local_file_id = ${sqlText(localFileId)};`,
+    );
+    session.exec(
+      [
+        "update local_files set",
+        `normalized_path = ${sqlText(currentPath)},`,
+        ...(requiresReconciliation
+          ? ["lifecycle_state = 'reconcile_required',", "open_tombstone_id = null"]
+          : ["lifecycle_state = 'active',", "open_tombstone_id = null"]),
+        `where local_file_id = ${sqlText(localFileId)};`,
+      ].join(" "),
+    );
+    if (requiresReconciliation) {
+      this.#persistReconcileRequired(session);
+    }
+  }
 
   #readLocalFileRow(
     read: (sql: string) => readonly SqliteQueryResult[],

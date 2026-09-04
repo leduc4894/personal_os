@@ -23,6 +23,7 @@ import type { JournalRepositoryDatabase } from "./repository";
 import {
   JOURNAL_SCHEMA_VERSION,
   SqliteDatabase,
+  migrateConflictRepairJournalToPendingRenameIntentSchema,
   migrateDeviceSyncJournalToMultipartProgressSchema,
   migrateMultipartProgressJournalToConflictRepairSchema,
 } from "./sqlite-database";
@@ -483,6 +484,135 @@ describe("JournalRepository terminal-state retention (spec 6.4, 7.2)", () => {
         "server_error",
       ),
     ).rejects.toMatchObject({ reason: "journal_mutation_failed" });
+  });
+});
+
+describe("JournalRepository intent-aware local-file-missing resolution", () => {
+  it("parks an intent-owned content event without consuming its source identity or rename reservation", async () => {
+    const { repository, database } = createOpenedJournal();
+    const { event } = await captureAllowed(
+      repository,
+      "notes/untitled.md",
+      fingerprintOf("de"),
+    );
+    await repository.lifecycle.recordOrComposePendingRenameIntent({
+      localFileId: event.localFileId,
+      observedPriorPath: "notes/untitled.md",
+      observedCurrentPath: "archive/origin.md",
+    });
+
+    await expect(
+      repository.resolveIntentAwareLocalFileMissing({
+        eventId: event.eventId,
+        attemptedAtEpochMs: 1_784_000_001_000,
+        requestCorrelationId: "intent-missing-1",
+        nextEligibleRetryEpochMs: 1_784_000_001_250,
+      }),
+    ).resolves.toEqual({ outcome: "waiting_for_rename" });
+
+    expect(repository.readEvent(event.eventId)).toMatchObject({
+      state: "waiting_retry",
+      safeError: "deferred_lifecycle",
+    });
+    expect(
+      repository.lifecycle.readPendingRenameIntentForLocalFile(event.localFileId),
+    ).toMatchObject({ currentPath: "archive/origin.md" });
+    expect(
+      database.readAll(
+        "select deferred_attempt_count from pending_rename_intent_missing_file_deferrals;",
+      )[0]?.values[0]?.[0],
+    ).toBe(1);
+  });
+
+  it("takes reconciliation ownership only on the 41st matching missing-file resolution", async () => {
+    const { repository, database } = createOpenedJournal();
+    const { event } = await captureAllowed(repository, "notes/a.md", fingerprintOf("df"));
+    await repository.lifecycle.recordOrComposePendingRenameIntent({
+      localFileId: event.localFileId,
+      observedPriorPath: "notes/a.md",
+      observedCurrentPath: "archive/c.md",
+    });
+
+    for (let attempt = 1; attempt <= 40; attempt += 1) {
+      await expect(
+        repository.resolveIntentAwareLocalFileMissing({
+          eventId: event.eventId,
+          attemptedAtEpochMs: 1_784_000_010_000 + attempt,
+          requestCorrelationId: `intent-attempt-${attempt}`,
+          nextEligibleRetryEpochMs: 1_784_000_020_000 + attempt,
+        }),
+      ).resolves.toEqual({ outcome: "waiting_for_rename" });
+    }
+    expect(
+      database.readAll(
+        "select deferred_attempt_count from pending_rename_intent_missing_file_deferrals;",
+      )[0]?.values[0]?.[0],
+    ).toBe(40);
+
+    await expect(
+      repository.resolveIntentAwareLocalFileMissing({
+        eventId: event.eventId,
+        attemptedAtEpochMs: 1_784_000_010_041,
+        requestCorrelationId: "intent-attempt-41",
+        nextEligibleRetryEpochMs: 1_784_000_020_041,
+      }),
+    ).resolves.toEqual({
+      outcome: "reconcile_takeover",
+      diagnosticReason: "pending_rename_intent_exhausted",
+    });
+    expect(repository.readEvent(event.eventId)).toMatchObject({
+      state: "deferred_lifecycle",
+      safeError: "deferred_lifecycle",
+    });
+    expect(repository.readLocalFileByLocalFileId(event.localFileId)).toMatchObject({
+      normalizedPath: "archive/c.md",
+    });
+    expect(repository.lifecycle.readPendingRenameIntentForLocalFile(event.localFileId)).toBeNull();
+    expect(
+      database.readAll(
+        "select count(*) from pending_rename_intent_missing_file_deferrals;",
+      )[0]?.values[0]?.[0],
+    ).toBe(0);
+    expect(database.readJournalMeta().isReconcileRequired).toBe(true);
+  });
+
+  it("takes the conflict exit before counter increment when another content event claims its retry budget", async () => {
+    const { repository, database } = createOpenedJournal();
+    const { event: first } = await captureAllowed(repository, "notes/a.md", fingerprintOf("e1"));
+    await repository.markEventPreflightStarted(first.eventId);
+    const { event: second } = await captureAllowed(repository, "notes/a.md", fingerprintOf("e2"));
+    await repository.lifecycle.recordOrComposePendingRenameIntent({
+      localFileId: first.localFileId,
+      observedPriorPath: "notes/a.md",
+      observedCurrentPath: "archive/c.md",
+    });
+    await repository.resolveIntentAwareLocalFileMissing({
+      eventId: first.eventId,
+      attemptedAtEpochMs: 1_784_000_030_000,
+      requestCorrelationId: "intent-first",
+      nextEligibleRetryEpochMs: 1_784_000_030_250,
+    });
+
+    await expect(
+      repository.resolveIntentAwareLocalFileMissing({
+        eventId: second.eventId,
+        attemptedAtEpochMs: 1_784_000_030_001,
+        requestCorrelationId: "intent-second",
+        nextEligibleRetryEpochMs: 1_784_000_030_251,
+      }),
+    ).resolves.toEqual({
+      outcome: "reconcile_takeover",
+      diagnosticReason: "pending_rename_intent_conflict",
+    });
+    expect(repository.lifecycle.readPendingRenameIntentForLocalFile(first.localFileId)).toBeNull();
+    expect(repository.readLocalFileByLocalFileId(first.localFileId)).toMatchObject({
+      normalizedPath: "archive/c.md",
+    });
+    expect(
+      database.readAll(
+        "select count(*) from pending_rename_intent_missing_file_deferrals;",
+      )[0]?.values[0]?.[0],
+    ).toBe(0);
   });
 });
 
@@ -1370,9 +1500,12 @@ describe("JournalRepository multipart progress persistence (task 9, spec 4.1)", 
     }
     const database = SqliteDatabase.openFromImage(
       engineModule,
-      migrateMultipartProgressJournalToConflictRepairSchema(
+      migrateConflictRepairJournalToPendingRenameIntentSchema(
         engineModule,
-        migrateDeviceSyncJournalToMultipartProgressSchema(engineModule, v7Image),
+        migrateMultipartProgressJournalToConflictRepairSchema(
+          engineModule,
+          migrateDeviceSyncJournalToMultipartProgressSchema(engineModule, v7Image),
+        ),
       ),
     );
     const repository = new JournalRepository({
